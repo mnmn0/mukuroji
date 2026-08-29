@@ -10,6 +10,7 @@ import type {
   AiAssistanceActor,
   AiAssistanceAuthorizationState,
   AiAssistanceGenerationBudgetReservation,
+  AiAssistancePolicyAuditInput,
   AiAssistancePrivateMemberIdentifiers,
   AiAssistanceStore,
   AiModelGenerationInput,
@@ -105,6 +106,10 @@ type HarnessConfiguration = {
   advanceBeforeProviderMs?: number
   /** Changes the policy revision while source context is being resolved. */
   changePolicyBeforeProvider?: boolean
+  /** Revokes source authorization after the generation record is persisted. */
+  revokeAuthorizationAfterPersistence?: boolean
+  /** Captures policy transitions sent to the optional audit boundary. */
+  policyAuditRecords?: AiAssistancePolicyAuditInput[]
 }
 
 /** Creates a service harness with deterministic fake ports. */
@@ -275,6 +280,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     async createGeneration(record) {
       if (generationPersistenceError !== undefined) throw generationPersistenceError
       storedGeneration = record
+      if (configuration.revokeAuthorizationAfterPersistence) {
+        authorizationState = { current: false, reason: 'permission-changed' }
+      }
       return record
     },
     async getGeneration() {
@@ -340,6 +348,15 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     defaultPolicy: createPolicy(),
     deploymentAllowedModelIds: ['model-1'],
     promptVersion: 'ai-assistance-v1',
+    ...(configuration.policyAuditRecords === undefined
+      ? {}
+      : {
+          policyAudit: {
+            async record(input: AiAssistancePolicyAuditInput) {
+              configuration.policyAuditRecords?.push(input)
+            },
+          },
+        }),
     ...(configuration.generationDeadlineMs === undefined
       ? {}
       : { generationDeadlineMs: configuration.generationDeadlineMs }),
@@ -1126,6 +1143,38 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('measures the end-to-end deadline from the request boundary', async () => {
+    const harness = createHarness({
+      generationDeadlineMs: 2_500,
+      providerTimeoutMs: 1_000,
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-boundary-deadline',
+      Date.parse(NOW) - 2_000,
+    )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+    expect(harness.gatewayInputs).toHaveLength(0)
+  })
+
+  test('projects the persisted generation through a final authorization check', async () => {
+    const harness = createHarness({ revokeAuthorizationAfterPersistence: true })
+
+    const generation = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-final-projection',
+    )
+
+    expect(generation.content).toEqual({
+      availability: 'withheld',
+      reasonCode: 'permission-changed',
+    })
+  })
+
   test('rejects a deployment-disallowed requested model before source retrieval', async () => {
     const harness = createHarness()
     const request = { ...createSummaryRequest(), modelId: 'model-2' }
@@ -1450,6 +1499,34 @@ describe('createAiAssistanceService', () => {
       code: 'AiAssistanceAuthorizationChanged',
     })
     expect(harness.policyPutCalls()).toBe(0)
+  })
+
+  test('audits a successfully persisted policy transition', async () => {
+    const policyAuditRecords: AiAssistancePolicyAuditInput[] = []
+    const harness = createHarness({ policyAuditRecords })
+
+    const policy = await harness.service.updatePolicy(createActor(), {
+      enabled: true,
+      allowedModelIds: ['model-1'],
+      defaultModelId: 'model-1',
+      enabledTasks: ['summary'],
+      retentionDays: 30,
+      expectedRevision: 0,
+    }, {
+      isCurrent: async () => true,
+    })
+
+    expect(policyAuditRecords).toHaveLength(1)
+    expect(policyAuditRecords[0]).toMatchObject({
+      workspaceId: 'workspace-1',
+      actorId: 'operator-1',
+      previousPolicy: expect.objectContaining({ revision: 0 }),
+      nextPolicy: expect.objectContaining({
+        revision: 1,
+        enabledTasks: ['summary'],
+      }),
+    })
+    expect(policy.revision).toBe(1)
   })
 
   test('treats the same decision outcome as replay despite a stale expected revision', async () => {

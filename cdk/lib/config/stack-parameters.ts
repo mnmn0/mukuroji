@@ -411,7 +411,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         assert: cdk.Fn.conditionEquals(
           aiBedrockModelArn.valueAsString,
           cdk.Fn.sub(
-            `arn:\${AWS::Partition}:bedrock:\${AWS::Region}::inference-profile/${defaultAiBedrockModelId}`,
+            `arn:\${AWS::Partition}:bedrock:\${AWS::Region}:\${AWS::AccountId}:inference-profile/${defaultAiBedrockModelId}`,
           ),
         ),
         assertDescription:

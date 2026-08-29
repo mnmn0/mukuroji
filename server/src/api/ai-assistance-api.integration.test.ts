@@ -1674,13 +1674,21 @@ describe('AI assistance API composition', () => {
         return {
           issue,
           comments: [],
-          activity: [{
-            id: 'activity-1',
-            type: 'updated',
-            actorUserId: 'demo@example.com',
-            summary: 'Schedule reviewed.',
-            createdAt: NOW,
-          }],
+          // The production Work Item adapter returns newest-first for this
+          // request. Keep the fixture ordered the same way to guard the
+          // resolver's latest-activity selection.
+          activity: Array.from({ length: 40 }, (_, index) => {
+            const age = index
+            return {
+              id: `activity-${age + 1}`,
+              type: 'updated',
+              actorUserId: 'demo@example.com',
+              summary: age === 0 ? 'Newest activity.' : `Older activity ${age}.`,
+              createdAt: new Date(
+                Date.parse(NOW) - age * 60_000,
+              ).toISOString(),
+            }
+          }),
         }
       },
     })
@@ -1741,6 +1749,8 @@ describe('AI assistance API composition', () => {
         async generate(actor, request, authorization) {
           const resolved = await authorization.resolveContext({ actor, request })
           expect(resolved.promptContext).toContain('Initial comment')
+          expect(resolved.promptContext).toContain('Newest activity.')
+          expect(resolved.promptContext).not.toContain('Older activity 20.')
           for (const endpoint of resolved.allowedValues.workItemEndpoints) {
             expect(resolved.promptContext).toContain(endpoint.teamId)
             expect(resolved.promptContext).toContain(endpoint.workItemId)

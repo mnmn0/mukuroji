@@ -193,7 +193,7 @@ const customFieldFilterSchema = z.object({
 })
 
 const workspaceSearchFiltersSchema = z.object({
-  keyword: z.string().trim().min(1).max(2_000).optional(),
+  keyword: z.string().trim().min(1).max(256).optional(),
   entityTypes: z.array(z.enum([
     'work-item',
     'project',
@@ -377,16 +377,23 @@ const citationSchema = z.object({
   capturedRevision: revisionSchema,
 }).strict()
 
-const usageSchema = z.object({
+const usageBaseSchema = z.object({
   inputTokens: z.number().finite().int().min(0).optional(),
   outputTokens: z.number().finite().int().min(0).optional(),
   latencyMs: z.number().finite().int().min(0),
-  costUsd: z.number().min(0).finite().optional(),
-  costUnavailableReason: z.enum([
-    'provider-not-reported',
-    'pricing-not-configured',
-  ]).optional(),
 }).strict()
+
+const usageSchema = z.union([
+  usageBaseSchema.extend({
+    costUsd: z.number().min(0).finite(),
+  }).strict(),
+  usageBaseSchema.extend({
+    costUnavailableReason: z.enum([
+      'provider-not-reported',
+      'pricing-not-configured',
+    ]),
+  }).strict(),
+])
 
 const generationSchema = z.object({
   schemaVersion: z.literal(AI_ASSISTANCE_SCHEMA_VERSION),

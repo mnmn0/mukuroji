@@ -6,6 +6,12 @@ import {
   type AiAssistancePolicy,
   type AiAssistancePreference,
 } from '@mukuroji/contracts'
+import {
+  calculateAuditExpiresAt,
+  createAuditEvent,
+  createMutationAuditContext,
+} from '../../../audit'
+import type { AuditEventV1 } from '../../../audit'
 import type {
   AiAssistanceGenerationAttemptAuditEnvelope,
   FailAiAssistanceGenerationReservationInput,
@@ -49,7 +55,7 @@ function createReservation(
 }
 
 /** Creates a deterministic SDK harness that captures document commands. */
-function createHarness(responses: unknown[]) {
+function createHarness(responses: unknown[], auditTableName?: string) {
   const lowLevelClient = new DynamoDBClient({
     region: 'us-east-1',
     credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
@@ -78,10 +84,39 @@ function createHarness(responses: unknown[]) {
     return response ?? {}
   })
   return {
-    store: new DynamoDbAiAssistanceStore(documentClient, 'WorkspaceSearchTable'),
+    store: new DynamoDbAiAssistanceStore(
+      documentClient,
+      'WorkspaceSearchTable',
+      auditTableName,
+    ),
     commands,
     restore: () => sendSpy.mockRestore(),
   }
+}
+
+/** Creates a policy transition event suitable for the atomic policy-write test. */
+function createPolicyAuditEvent(): AuditEventV1 {
+  const occurredAt = '2026-08-25T00:01:00.000Z'
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'member-1@example.com', kind: 'user' },
+    idempotencyKey: 'ai-assistance-policy:workspace-1:1',
+    request: {
+      method: 'PUT',
+      path: '/api/ai-assistance/policy',
+      body: { expectedRevision: 0, revision: 1 },
+    },
+    source: { kind: 'api', method: 'PUT', route: '/api/ai-assistance/policy' },
+    occurredAt,
+  })
+  return createAuditEvent({
+    context,
+    eventType: 'ai-assistance.policy.updated',
+    entity: { type: 'workspace', id: 'workspace-1' },
+    before: { revision: 0 },
+    after: { revision: 1 },
+    expiresAt: calculateAuditExpiresAt(occurredAt, 30),
+  })
 }
 
 /** Creates the modeled DynamoDB error returned by a failed condition. */
@@ -908,6 +943,64 @@ describe('DynamoDbAiAssistanceStore', () => {
     try {
       await expect(harness.store.putPolicy('workspace-1', desired, 0))
         .resolves.toEqual(current)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('writes policy, membership fence, and audit event in one transaction', async () => {
+    const desired = createPolicy('2026-08-25T00:00:02.000Z')
+    const harness = createHarness([{}], 'AuditTable')
+    try {
+      await expect(harness.store.putPolicyWithAudit(
+        'workspace-1',
+        'member-1@example.com',
+        desired,
+        0,
+        {
+          workspaceMemberVersion: 4,
+          workspaceRole: 'admin',
+        },
+        createPolicyAuditEvent(),
+      )).resolves.toEqual(desired)
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      expect(Array.isArray(transactionItems)).toBeTrue()
+      if (!Array.isArray(transactionItems)) {
+        throw new TypeError('Expected transaction items.')
+      }
+      expect(transactionItems).toHaveLength(3)
+      expect(readRecord(readRecord(transactionItems[0]).Put).TableName)
+        .toBe('WorkspaceSearchTable')
+      expect(readRecord(readRecord(transactionItems[1]).ConditionCheck).TableName)
+        .toBe('mukuroji-workspace-access-local')
+      expect(readRecord(readRecord(transactionItems[2]).Put).TableName)
+        .toBe('AuditTable')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a transaction membership fence failure to an authorization conflict', async () => {
+    const desired = createPolicy('2026-08-25T00:00:02.000Z')
+    const harness = createHarness([
+      transactionCancellation([undefined, 'ConditionalCheckFailed', undefined]),
+    ], 'AuditTable')
+    try {
+      await expect(harness.store.putPolicyWithAudit(
+        'workspace-1',
+        'member-1@example.com',
+        desired,
+        0,
+        {
+          workspaceMemberVersion: 4,
+          workspaceRole: 'admin',
+        },
+        createPolicyAuditEvent(),
+      )).rejects.toMatchObject({
+        category: 'authorization',
+        code: 'AiAssistanceAuthorizationChanged',
+      })
+      expect(harness.commands).toHaveLength(1)
     } finally {
       harness.restore()
     }

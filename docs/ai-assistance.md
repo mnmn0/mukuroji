@@ -77,6 +77,13 @@ Policy更新時のtable scan、TTL rewrite、同期delete、backup purgeは行�
 過去時点へ復元するとその時点のpolicy rowも復元されます。復元tableは公開前に現在policyを再適用し、AI read gateを
 有効にしたまま期限超過rowを検査・必要に応じてpurgeします。PITRやTTLを物理消去の即時保証として扱いません。
 
+Policy mutation は fresh manager authorization、active-member/version fence、必要な Enterprise CONTROL revision、
+revision-fenced policy CAS を含む DynamoDB transaction で、既存の Workspace Audit table へ
+`ai-assistance.policy.updated` event と同時に append されます。event には workspace policy の before/after、actor、
+request fingerprint、revision、retention-derived TTL だけを保存し、prompt、source、model output、credential は保存
+しません。transaction response が失われた場合も policy revision と deterministic event ID を強整合で再確認し、同じ
+request の再送で安全に replay できます。
+
 ### Prompt privacy and member aliases
 
 Source resolverはworkflowごとにdirectory projectionを最小化します。Summaryにはdirectoryを付けず、Planningは

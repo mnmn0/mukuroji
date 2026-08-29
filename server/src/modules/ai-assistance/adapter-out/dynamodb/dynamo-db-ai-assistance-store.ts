@@ -20,6 +20,7 @@ import type {
   AiAssistanceStore,
   AiAssistanceGenerationAttemptAuditEnvelope,
   AiAssistanceGenerationReservation,
+  AiAssistancePolicyAuthorizationFence,
   CompleteAiAssistanceGenerationReservationInput,
   FailAiAssistanceGenerationReservationInput,
   FinalizeAiAssistanceGenerationAttemptInput,
@@ -28,6 +29,10 @@ import type {
   StoredAiAssistanceFeedback,
   StoredAiAssistanceGeneration,
 } from '../../application/ports/ai-assistance-ports'
+import {
+  createAuditTransactPut,
+  type AuditEventV1,
+} from '../../../audit'
 import {
   parseAiAssistanceGeneration,
   parseAiAssistancePolicy,
@@ -88,16 +93,23 @@ const aiAssistanceErrorCodeSchema = z.enum([
   'InvalidAiAssistanceRecord',
 ])
 
-const aiAssistanceUsageSchema = z.object({
+const aiAssistanceUsageBaseSchema = z.object({
   inputTokens: z.number().int().min(0).optional(),
   outputTokens: z.number().int().min(0).optional(),
   latencyMs: z.number().int().min(0),
-  costUsd: z.number().min(0).finite().optional(),
-  costUnavailableReason: z.enum([
-    'provider-not-reported',
-    'pricing-not-configured',
-  ]).optional(),
 }).strict()
+
+const aiAssistanceUsageSchema = z.union([
+  aiAssistanceUsageBaseSchema.extend({
+    costUsd: z.number().min(0).finite(),
+  }).strict(),
+  aiAssistanceUsageBaseSchema.extend({
+    costUnavailableReason: z.enum([
+      'provider-not-reported',
+      'pricing-not-configured',
+    ]),
+  }).strict(),
+])
 
 const generationAttemptAuditCitationSchema = z.object({
   id: z.string().trim().min(1).max(256),
@@ -300,14 +312,29 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
 
   /** WorkspaceSearchTable physical name supplied by composition. */
   readonly #tableName: string
+  /** Existing immutable Audit table used by policy mutation transactions. */
+  readonly #auditTableName?: string
+  /** Workspace Access table containing the actor membership condition row. */
+  readonly #workspaceAccessTableName: string
+  /** Enterprise Identity table containing the optional CONTROL revision row. */
+  readonly #enterpriseIdentityTableName?: string
 
   /**
    * Creates a WorkspaceSearchTable-backed AI assistance store.
    *
    * @param documentClient - Configured DynamoDB document client.
    * @param tableName - Existing WorkspaceSearchTable name.
+   * @param auditTableName - Existing immutable Audit table name for policy transactions.
+   * @param workspaceAccessTableName - Workspace Access table name for commit-time member checks.
+   * @param enterpriseIdentityTableName - Optional Enterprise Identity table name for control checks.
    */
-  constructor(documentClient: DynamoDBDocumentClient, tableName: string) {
+  constructor(
+    documentClient: DynamoDBDocumentClient,
+    tableName: string,
+    auditTableName?: string,
+    workspaceAccessTableName = 'mukuroji-workspace-access-local',
+    enterpriseIdentityTableName?: string,
+  ) {
     if (!tableName.trim()) {
       throw new AiAssistanceError(
         'validation',
@@ -315,8 +342,32 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         'AI assistance table name is required.',
       )
     }
+    if (auditTableName !== undefined && !auditTableName.trim()) {
+      throw new AiAssistanceError(
+        'validation',
+        'InvalidAiAssistanceRequest',
+        'AI assistance audit table name is invalid.',
+      )
+    }
+    if (!workspaceAccessTableName.trim()) {
+      throw new AiAssistanceError(
+        'validation',
+        'InvalidAiAssistanceRequest',
+        'AI assistance Workspace Access table name is invalid.',
+      )
+    }
+    if (enterpriseIdentityTableName !== undefined && !enterpriseIdentityTableName.trim()) {
+      throw new AiAssistanceError(
+        'validation',
+        'InvalidAiAssistanceRequest',
+        'AI assistance Enterprise Identity table name is invalid.',
+      )
+    }
     this.#documentClient = documentClient
     this.#tableName = tableName
+    this.#auditTableName = auditTableName?.trim()
+    this.#workspaceAccessTableName = workspaceAccessTableName.trim()
+    this.#enterpriseIdentityTableName = enterpriseIdentityTableName?.trim()
   }
 
   /** Atomically reserves a member and input-bound generation idempotency key. */
@@ -762,6 +813,107 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       const current = await this.getPolicy(workspaceId)
       if (current && isPolicyReplay(current, policy, expectedRevision)) return current
       throw error
+    }
+  }
+
+  /**
+   * Writes a Workspace policy and its immutable audit event in one DynamoDB transaction.
+   *
+   * @param workspaceId - Workspace partition owning the policy.
+   * @param memberId - Freshly authenticated manager member identifier.
+   * @param policy - Validated next policy snapshot.
+   * @param expectedRevision - Revision required by the policy CAS.
+   * @param authorizationFence - Membership and Enterprise conditions checked at commit time.
+   * @param auditEvent - Redacted immutable event written with the policy.
+   * @returns The policy accepted by the transaction or an identical replay.
+   */
+  async putPolicyWithAudit(
+    workspaceId: string,
+    memberId: string,
+    policy: AiAssistancePolicy,
+    expectedRevision: number,
+    authorizationFence: AiAssistancePolicyAuthorizationFence,
+    auditEvent: AuditEventV1,
+  ): Promise<AiAssistancePolicy> {
+    const auditTableName = this.#auditTableName
+    if (auditTableName === undefined) {
+      throw new AiAssistanceError(
+        'upstream',
+        'AiAssistancePersistenceError',
+        'AI assistance policy audit storage is not configured.',
+      )
+    }
+    validatePolicyAuthorizationFence(authorizationFence)
+    const policyItem = {
+      workspaceId,
+      recordKey: POLICY_RECORD_KEY,
+      recordType: 'ai-assistance-policy',
+      policy,
+    }
+    const policyPut = {
+      Put: {
+        TableName: this.#tableName,
+        Item: policyItem,
+        ConditionExpression: expectedRevision === 0
+          ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
+          : '#policy.#revision = :expectedRevision',
+        ...(expectedRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: {
+                '#policy': 'policy',
+                '#revision': 'revision',
+              },
+              ExpressionAttributeValues: {
+                ':expectedRevision': expectedRevision,
+              },
+            }),
+      },
+    }
+    try {
+      await this.#documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          policyPut,
+          createWorkspaceMemberAuthorizationCondition(
+            this.#workspaceAccessTableName,
+            workspaceId,
+            memberId,
+            authorizationFence,
+          ),
+          ...(authorizationFence.enterpriseControlRevision === undefined
+            ? []
+            : [createEnterpriseControlAuthorizationCondition(
+                this.#enterpriseIdentityTableName,
+                workspaceId,
+                authorizationFence.enterpriseControlRevision,
+              )]),
+          createAuditTransactPut(auditTableName, auditEvent),
+        ],
+      }))
+      return policy
+    } catch (error) {
+      const enterpriseConditionIndex = authorizationFence.enterpriseControlRevision === undefined
+        ? undefined
+        : 2
+      if (
+        isTransactionConditionalFailureAt(error, 1) ||
+        (enterpriseConditionIndex !== undefined &&
+          isTransactionConditionalFailureAt(error, enterpriseConditionIndex))
+      ) {
+        throw new AiAssistanceError(
+          'authorization',
+          'AiAssistanceAuthorizationChanged',
+          'AI assistance policy authorization is no longer current.',
+        )
+      }
+      const mappedError = mapDynamoWriteError(error)
+      try {
+        const current = await this.getPolicy(workspaceId)
+        if (current && isPolicyReplay(current, policy, expectedRevision)) return current
+      } catch {
+        // Preserve the original transaction error when reconciliation is unavailable.
+      }
+      throw mappedError
     }
   }
 
@@ -1381,6 +1533,102 @@ function mapDynamoWriteError(error: unknown): AiAssistanceError {
     'AI assistance persistence failed.',
     { cause: error },
   )
+}
+
+/** Validates the server-owned policy authorization values before building conditions. */
+function validatePolicyAuthorizationFence(
+  fence: AiAssistancePolicyAuthorizationFence,
+): void {
+  if (
+    !Number.isSafeInteger(fence.workspaceMemberVersion) ||
+    fence.workspaceMemberVersion < 0 ||
+    !fence.workspaceRole.trim() ||
+    (fence.enterpriseControlRevision !== undefined && (
+      !Number.isSafeInteger(fence.enterpriseControlRevision) ||
+      fence.enterpriseControlRevision < 0
+    ))
+  ) {
+    throw new AiAssistanceError(
+      'authorization',
+      'AiAssistanceAuthorizationChanged',
+      'AI assistance policy authorization is no longer current.',
+    )
+  }
+}
+
+/** Builds the active Workspace member condition used by a policy CAS transaction. */
+function createWorkspaceMemberAuthorizationCondition(
+  tableName: string,
+  workspaceId: string,
+  memberId: string,
+  fence: AiAssistancePolicyAuthorizationFence,
+): AiAssistanceBudgetTransactionItem {
+  const normalizedMemberId = memberId.trim().toLowerCase()
+  if (!normalizedMemberId || !normalizedMemberId.includes('@')) {
+    throw new AiAssistanceError(
+      'authorization',
+      'AiAssistanceAuthorizationChanged',
+      'AI assistance policy authorization is no longer current.',
+    )
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { workspaceId, recordKey: `MEMBER#${normalizedMemberId}` },
+      ConditionExpression:
+        '#entryType = :memberEntryType AND #status = :active AND ' +
+        '#memberKey = :memberKey AND #role = :role AND #version = :version',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#status': 'status',
+        '#memberKey': 'memberKey',
+        '#role': 'role',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':memberEntryType': 'workspace-member',
+        ':active': 'active',
+        ':memberKey': normalizedMemberId,
+        ':role': fence.workspaceRole,
+        ':version': fence.workspaceMemberVersion,
+      },
+    },
+  }
+}
+
+/** Builds the optional Enterprise CONTROL revision condition for a policy CAS. */
+function createEnterpriseControlAuthorizationCondition(
+  tableName: string | undefined,
+  workspaceId: string,
+  controlRevision: number,
+): AiAssistanceBudgetTransactionItem {
+  if (tableName === undefined) {
+    throw new AiAssistanceError(
+      'authorization',
+      'AiAssistanceAuthorizationChanged',
+      'AI assistance Enterprise authorization is no longer current.',
+    )
+  }
+  const names: Record<string, string> = {
+    '#entryType': 'entryType',
+    '#controlRevision': 'controlRevision',
+  }
+  const conditionExpression = controlRevision === 0
+    ? '(attribute_not_exists(#scopeKey) OR (#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision))'
+    : '#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision'
+  if (controlRevision === 0) names['#scopeKey'] = 'scopeKey'
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { scopeKey: `WORKSPACE#${workspaceId}`, recordKey: 'CONTROL' },
+      ConditionExpression: conditionExpression,
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: {
+        ':controlEntryType': 'enterprise-identity-control',
+        ':expectedControlRevision': controlRevision,
+      },
+    },
+  }
 }
 
 /** Returns whether DynamoDB rejected a conditional compare-and-swap. */

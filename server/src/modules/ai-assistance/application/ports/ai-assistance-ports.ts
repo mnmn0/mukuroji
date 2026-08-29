@@ -88,6 +88,16 @@ export type AiAssistanceAuthorizationState =
       reason: 'permission-changed' | 'source-changed'
   }
 
+/** Commit-time authorization values checked inside the policy CAS transaction. */
+export type AiAssistancePolicyAuthorizationFence = {
+  /** Active Workspace member version observed during fresh authentication. */
+  workspaceMemberVersion: number
+  /** Workspace role observed during fresh authentication. */
+  workspaceRole: string
+  /** Enterprise CONTROL revision when custom permissions participate in authorization. */
+  enterpriseControlRevision?: number
+}
+
 /** Rechecks current Workspace management authorization at the policy write boundary. */
 export type AiAssistancePolicyAuthorization = {
   /**
@@ -96,6 +106,50 @@ export type AiAssistancePolicyAuthorization = {
    * @returns Whether the actor may still update the Workspace AI policy.
    */
   isCurrent(): Promise<boolean>
+  /**
+   * Returns the fresh membership and Enterprise revision fence for an atomic policy write.
+   *
+   * @returns Commit-time authorization values, or undefined when management access is lost.
+   */
+  getCommitFence?(): Promise<AiAssistancePolicyAuthorizationFence | undefined>
+}
+
+/** Immutable policy transition supplied to the Workspace audit boundary. */
+export type AiAssistancePolicyAuditInput = {
+  /** Workspace whose AI governance policy changed. */
+  workspaceId: string
+  /** Member who performed the policy mutation. */
+  actorId: string
+  /** Policy observed before the revision-fenced write. */
+  previousPolicy: AiAssistancePolicy
+  /** Policy accepted by the revision-fenced write. */
+  nextPolicy: AiAssistancePolicy
+}
+
+/** Append-only audit boundary for successful AI policy mutations. */
+export type AiAssistancePolicyAudit = {
+  /**
+   * Persists one immutable policy transition.
+   *
+   * @param input - Actor, Workspace, and before/after policy snapshots.
+   * @returns A promise that resolves after the audit event is durable.
+   */
+  record(input: AiAssistancePolicyAuditInput): Promise<void>
+  /**
+   * Persists the policy and audit event through one adapter-owned transaction when available.
+   *
+   * @param input - Actor, Workspace, and before/after policy snapshots.
+   * @param expectedRevision - Policy revision supplied by the operator.
+   * @param authorizationFence - Fresh membership and Enterprise values for commit conditions.
+   * @param write - Fallback revision-fenced policy write for non-transactional adapters.
+   * @returns The policy accepted by the persistence boundary.
+   */
+  persist?(
+    input: AiAssistancePolicyAuditInput,
+    expectedRevision: number,
+    authorizationFence: AiAssistancePolicyAuthorizationFence,
+    write: () => Promise<AiAssistancePolicy>,
+  ): Promise<AiAssistancePolicy>
 }
 
 /** Input supplied to the server-owned source authorization resolver. */
@@ -427,6 +481,8 @@ export type AiAssistanceServiceOptions = {
   deploymentAllowedModelIds: readonly string[]
   /** Prompt template version retained in every generation. */
   promptVersion: string
+  /** Optional append-only audit boundary for successful policy transitions. */
+  policyAudit?: AiAssistancePolicyAudit
   /** Maximum permission-safe source context length. */
   maxPromptContextCharacters?: number
   /** Maximum provider output tokens. */
@@ -470,12 +526,22 @@ export interface AiAssistanceService {
     actor: AiAssistanceActor,
     request: UpdateAiAssistancePreferenceRequest,
   ): Promise<AiAssistancePreference>
-  /** Generates, validates, reauthorizes, and persists one draft. */
+  /**
+   * Generates, validates, reauthorizes, and persists one draft.
+   *
+   * @param actor - Authenticated Workspace member requesting the draft.
+   * @param request - Strictly validated generation request.
+   * @param authorization - Source resolver and current-authorization callbacks.
+   * @param idempotencyKey - Client key bound to the generation fingerprint.
+   * @param requestStartedAtMs - Optional HTTP request-boundary epoch timestamp.
+   * @returns The generated draft, projected through the final authorization check.
+   */
   generate(
     actor: AiAssistanceActor,
     request: GenerateAiAssistanceRequest,
     authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKey: string,
+    requestStartedAtMs?: number,
   ): Promise<AiAssistanceGeneration>
   /** Reads a generation and withholds content when current access changed. */
   getGeneration(

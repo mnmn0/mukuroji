@@ -430,6 +430,7 @@ import {
   type AiAssistanceActor,
   type AiAssistanceAllowedValues,
   type AiAssistanceAuthorizationState,
+  type AiAssistancePolicyAuthorizationFence,
   type AiAssistancePolicyAuthorization,
   type AiAssistanceService,
   type AiAssistanceTextAlias,
@@ -1184,12 +1185,13 @@ const aiAssistanceService: AiAssistanceService = {
     requireAppDependencies().aiAssistance.aiAssistanceService.getPreference(actor),
   updatePreference: (actor, request) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.updatePreference(actor, request),
-  generate: (actor, request, authorization, idempotencyKey) =>
+  generate: (actor, request, authorization, idempotencyKey, requestStartedAtMs) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.generate(
       actor,
       request,
       authorization,
       idempotencyKey,
+      requestStartedAtMs,
     ),
   getGeneration: (actor, generationId, authorization) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.getGeneration(
@@ -5962,6 +5964,7 @@ routeApp.route('/', createAiAssistanceRouter<WorkspacePrincipal>({
   authenticate: async (accessToken, context) =>
     await authenticateWorkspacePrincipal(accessToken, undefined, context),
   toActor: createAiAssistanceActor,
+  getPolicyAuthorizationFence: createAiAssistancePolicyAuthorizationFence,
   resolveContext: resolveAiAssistanceContext,
   isAuthorizationCurrent: isAiAssistanceAuthorizationCurrent,
   readJson,
@@ -19963,6 +19966,31 @@ function createAiAssistanceActor(
 }
 
 /**
+ * Projects fresh Workspace authorization state into the policy transaction fence.
+ *
+ * @param principal - Principal freshly authenticated at the policy write boundary.
+ * @param actor - Application actor bound to that principal.
+ * @returns Membership and Enterprise revisions checked by the DynamoDB policy transaction.
+ */
+function createAiAssistancePolicyAuthorizationFence(
+  principal: WorkspacePrincipal,
+  actor: AiAssistanceActor,
+): AiAssistancePolicyAuthorizationFence | undefined {
+  if (
+    principal.directoryId !== actor.workspaceId ||
+    principal.userKey !== actor.memberId ||
+    !actor.canManagePolicy
+  ) return undefined
+  return {
+    workspaceMemberVersion: principal.workspaceMember.version,
+    workspaceRole: principal.workspaceRole,
+    ...(principal.enterpriseIdentityControlRevision === undefined
+      ? {}
+      : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
+  }
+}
+
+/**
  * Resolves all source text through current application authorization boundaries.
  *
  * @param principal - Current authenticated Workspace principal.
@@ -20696,7 +20724,7 @@ async function resolveAiWorkItemSource(
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, eventLimit: 40 },
+    { consistentIssueRead: true, eventLimit: 40, newestEventsFirst: true },
   )
   if (detail.issue.teamId !== source.teamId || detail.issue.id !== source.workItemId) {
     throw new AiAssistanceError(
@@ -20789,8 +20817,10 @@ async function resolveAiWorkItemSource(
   ]
     .sort(compareMigrationAwareComments)
     .slice(-AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
+  // The detail adapter returns this page newest-first for the AI source read;
+  // take the head of that page so the prompt contains the latest activity.
   const promptActivity = detail.activity
-    .slice(-AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
+    .slice(0, AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
   const current = await loadAuthorizedTeamIssue(
     principal,
     source.teamId,

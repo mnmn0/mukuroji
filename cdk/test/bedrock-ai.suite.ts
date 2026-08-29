@@ -151,7 +151,7 @@ test('AI assistance parameters pin one exact model and validate the JP default',
             { Ref: 'AiBedrockModelArn' },
             {
               'Fn::Sub':
-                'arn:${AWS::Partition}:bedrock:${AWS::Region}::inference-profile/jp.anthropic.claude-sonnet-4-6',
+                'arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/jp.anthropic.claude-sonnet-4-6',
             },
           ],
         },

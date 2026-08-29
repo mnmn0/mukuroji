@@ -242,6 +242,26 @@ describe('createMastraBedrockAiModelGateway', () => {
     }
   })
 
+  test('rejects a Search keyword longer than the canonical route limit', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'search',
+            interpretation: 'Long keyword.',
+            filters: { keyword: 'x'.repeat(257) },
+            caveats: [],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
   test('classifies an aborted provider run as a stable timeout', async () => {
     const gateway = createMastraBedrockAiModelGateway({
       runStructuredGeneration: (input) => new Promise((_resolve, reject) => {

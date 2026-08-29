@@ -6,6 +6,7 @@ import type {
   AiAssistanceAuthorizationState,
   AiAssistanceService,
   AiAssistancePolicyAuthorization,
+  AiAssistancePolicyAuthorizationFence,
   CheckAiAssistanceAuthorizationInput,
   ResolveAiAssistanceContextInput,
   ResolvedAiAssistanceContext,
@@ -32,6 +33,15 @@ export type AiAssistanceRouterDependencies<Principal> = {
     principal: Principal,
     context: Context,
   ): AiAssistanceActor | Promise<AiAssistanceActor>
+  /** Resolves the commit-time policy authorization fence for a fresh principal. */
+  getPolicyAuthorizationFence?(
+    principal: Principal,
+    actor: AiAssistanceActor,
+    context: Context,
+  ):
+    | AiAssistancePolicyAuthorizationFence
+    | Promise<AiAssistancePolicyAuthorizationFence | undefined>
+    | undefined
   /** Resolves current permission-filtered model context. */
   resolveContext(
     principal: Principal,
@@ -108,6 +118,7 @@ export function createAiAssistanceRouter<Principal>(
   })
 
   router.post('/api/ai-assistance/generations', async (context) => {
+    const requestStartedAtMs = Date.now()
     try {
       const { actor, authorization } = await authenticateRequest(context, dependencies)
       const request = parseGenerateAiAssistanceRequest(
@@ -121,6 +132,7 @@ export function createAiAssistanceRouter<Principal>(
         request,
         authorization,
         idempotencyKey,
+        requestStartedAtMs,
       )
       return context.json(generation, 201)
     } catch (error) {
@@ -238,6 +250,31 @@ async function authenticateRequest<Principal>(
             currentActor.canManagePolicy
         } catch {
           return false
+        }
+      },
+      getCommitFence: async () => {
+        const currentAccessToken = dependencies.readBearerAccessToken(context)
+        if (currentAccessToken === undefined || currentAccessToken !== accessToken) {
+          return undefined
+        }
+        try {
+          const currentPrincipal = await dependencies.authenticate(
+            currentAccessToken,
+            context,
+          )
+          const currentActor = await dependencies.toActor(currentPrincipal, context)
+          if (
+            currentActor.workspaceId !== actor.workspaceId ||
+            currentActor.memberId !== actor.memberId ||
+            !currentActor.canManagePolicy
+          ) return undefined
+          return await dependencies.getPolicyAuthorizationFence?.(
+            currentPrincipal,
+            currentActor,
+            context,
+          )
+        } catch {
+          return undefined
         }
       },
     },

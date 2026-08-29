@@ -43,6 +43,9 @@ import type {
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
   AiAssistancePolicyAuthorization,
+  AiAssistancePolicyAuthorizationFence,
+  AiAssistancePolicyAudit,
+  AiAssistancePolicyAuditInput,
   AiAssistancePrivateMemberIdentifiers,
   AiModelGenerationResult,
   AiAssistanceService,
@@ -179,6 +182,7 @@ export function createAiAssistanceService(
       )
     }
     const request = parseUpdateAiAssistancePolicyRequest(input)
+    const previousPolicy = await getPolicy(actor)
     const policy: AiAssistancePolicy = {
       schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
       enabled: request.enabled,
@@ -197,7 +201,41 @@ export function createAiAssistanceService(
         'AI assistance policy authorization changed. Reload and try again.',
       )
     }
-    return await options.store.putPolicy(actor.workspaceId, policy, request.expectedRevision)
+    const auditInput: AiAssistancePolicyAuditInput = {
+      workspaceId: actor.workspaceId,
+      actorId: actor.memberId,
+      previousPolicy,
+      nextPolicy: policy,
+    }
+    const writePolicy = () => options.store.putPolicy(
+      actor.workspaceId,
+      policy,
+      request.expectedRevision,
+    )
+    let storedPolicy: AiAssistancePolicy
+    if (options.policyAudit?.persist) {
+      const authorizationFence = await authorization.getCommitFence?.()
+      if (authorizationFence === undefined) {
+        throw new AiAssistanceError(
+          'authorization',
+          'AiAssistanceAuthorizationChanged',
+          'AI assistance policy authorization changed. Reload and try again.',
+        )
+      }
+      storedPolicy = await persistPolicyWithAudit(
+        options.policyAudit,
+        auditInput,
+        request.expectedRevision,
+        authorizationFence,
+        writePolicy,
+      )
+    } else {
+      storedPolicy = await writePolicy()
+      if (options.policyAudit) {
+        await recordPolicyAudit(options.policyAudit, auditInput)
+      }
+    }
+    return storedPolicy
   }
 
   /** Reads the explicit or default-enabled current-member preference. */
@@ -237,6 +275,7 @@ export function createAiAssistanceService(
     input: GenerateAiAssistanceRequest,
     authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKeyValue: string,
+    requestStartedAtMs?: number,
   ): Promise<AiAssistanceGeneration> {
     const request = parseGenerateAiAssistanceRequest(input)
     const [policy, preference] = await Promise.all([
@@ -246,6 +285,10 @@ export function createAiAssistanceService(
     requireGenerationEnabled(policy, preference, request.task)
     const modelId = selectModelId(request.modelId, policy, deploymentAllowedModelIds)
     const createdAt = now()
+    const generationRequestStartedAtMs = normalizeGenerationRequestStartedAtMs(
+      requestStartedAtMs,
+      createdAt.getTime(),
+    )
     const generationId = createId()
     const expiresAt = new Date(
       createdAt.getTime() + policy.retentionDays * RETENTION_DAY_MS,
@@ -417,7 +460,7 @@ export function createAiAssistanceService(
       const providerStartedAt = now()
       const elapsedBeforeProviderMs = Math.max(
         0,
-        providerStartedAt.getTime() - createdAt.getTime(),
+        providerStartedAt.getTime() - generationRequestStartedAtMs,
       )
       const remainingProviderTimeoutMs = Math.min(
         providerTimeoutMs,
@@ -527,7 +570,13 @@ export function createAiAssistanceService(
           ? {}
           : { providerTraceId: modelResult.providerTraceId }),
       })
-      return stored.generation
+      return await projectStoredGeneration(
+        actor,
+        stored,
+        await getPolicy(actor),
+        authorization,
+        now,
+      )
     } catch (error) {
       const safeError = toSafeAttemptError(error)
       if (!generationPersisted) {
@@ -624,7 +673,13 @@ export function createAiAssistanceService(
       request,
       now().toISOString(),
     )
-    return applyEffectiveRetention(decided.generation, policy)
+    return await projectStoredGeneration(
+      actor,
+      decided,
+      await getPolicy(actor),
+      authorization,
+      now,
+    )
   }
 
   /** Appends owner-scoped bounded feedback without exposing source content. */
@@ -748,6 +803,97 @@ function createGenerationBudgetReservation(
     memberGenerationLimit: configuration.memberGenerationLimitPerMinute,
     workspaceTokenLimit: configuration.workspaceTokenLimitPerMinute,
     memberTokenLimit: configuration.memberTokenLimitPerMinute,
+  }
+}
+
+/**
+ * Normalizes the trusted HTTP request timestamp used by the end-to-end deadline.
+ *
+ * A malformed or future timestamp must not extend the deadline beyond the first
+ * application clock sample. The fallback keeps direct application callers
+ * backward-compatible while HTTP callers include authentication and parsing time.
+ *
+ * @param requestStartedAtMs - Optional request-boundary epoch milliseconds.
+ * @param createdAtMs - First service clock sample for this generation.
+ * @returns Epoch milliseconds from which the generation deadline is measured.
+ */
+function normalizeGenerationRequestStartedAtMs(
+  requestStartedAtMs: number | undefined,
+  createdAtMs: number,
+): number {
+  if (
+    requestStartedAtMs === undefined ||
+    !Number.isSafeInteger(requestStartedAtMs) ||
+    requestStartedAtMs > createdAtMs
+  ) {
+    return createdAtMs
+  }
+  return requestStartedAtMs
+}
+
+/**
+ * Records a successful policy transition without exposing audit implementation errors.
+ *
+ * @param policyAudit - Append-only audit boundary supplied by composition.
+ * @param input - Actor and before/after policy snapshots.
+ * @returns A promise that resolves after the transition is audited.
+ * @throws A safe persistence error when the audit writer cannot commit the event.
+ */
+async function recordPolicyAudit(
+  policyAudit: AiAssistancePolicyAudit,
+  input: AiAssistancePolicyAuditInput,
+): Promise<void> {
+  try {
+    await policyAudit.record(input)
+  } catch (error) {
+    if (error instanceof AiAssistanceError) throw error
+    throw new AiAssistanceError(
+      'upstream',
+      'AiAssistancePersistenceError',
+      'AI assistance policy audit could not be persisted.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Runs the adapter-owned atomic policy/audit boundary and maps unexpected failures safely.
+ *
+ * @param policyAudit - Policy audit boundary supplied by composition.
+ * @param input - Actor and before/after policy snapshots.
+ * @param expectedRevision - Policy revision supplied by the operator.
+ * @param authorizationFence - Fresh membership and Enterprise values for commit conditions.
+ * @param write - Revision-fenced policy write used by adapters without atomic support.
+ * @returns The policy accepted by the persistence boundary.
+ * @throws A stable persistence error when the boundary fails unexpectedly.
+ */
+async function persistPolicyWithAudit(
+  policyAudit: AiAssistancePolicyAudit,
+  input: AiAssistancePolicyAuditInput,
+  expectedRevision: number,
+  authorizationFence: AiAssistancePolicyAuthorizationFence,
+  write: () => Promise<AiAssistancePolicy>,
+): Promise<AiAssistancePolicy> {
+  try {
+    if (policyAudit.persist === undefined) {
+      const storedPolicy = await write()
+      await recordPolicyAudit(policyAudit, input)
+      return storedPolicy
+    }
+    return await policyAudit.persist(
+      input,
+      expectedRevision,
+      authorizationFence,
+      write,
+    )
+  } catch (error) {
+    if (error instanceof AiAssistanceError) throw error
+    throw new AiAssistanceError(
+      'upstream',
+      'AiAssistancePersistenceError',
+      'AI assistance policy transition could not be persisted.',
+      { cause: error },
+    )
   }
 }
 
