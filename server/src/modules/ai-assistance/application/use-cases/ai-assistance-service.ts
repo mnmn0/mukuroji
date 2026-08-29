@@ -1296,7 +1296,7 @@ type PrivateIdentifierAliases = {
   canonicalMemberIdByAlias: ReadonlyMap<string, string>
   /** Exact text replacements applied before generic email redaction. */
   textAliases: readonly AiAssistanceTextAlias[]
-  /** Unambiguous member labels restored only after current authorization succeeds. */
+  /** Allowed member labels restored, or redacted, only after current authorization succeeds. */
   disclosureTextAliases: readonly AiAssistanceTextAlias[]
 }
 
@@ -1325,10 +1325,21 @@ function createPrivateIdentifierAliases(
     }
   }
   const privateTextAliases = createAiAssistancePrivateTextAliases(privateMembers)
+  const disclosureAllowedMemberIds = new Set([
+    ...allowed.assigneeUserIds,
+    ...allowed.creatorUserIds,
+    ...(allowed.triageRoutingTuples ?? []).flatMap((tuple) =>
+      tuple.assigneeUserIds
+    ),
+  ])
   const disclosureByAlias = new Map<string, string>()
   for (const member of privateMembers) {
     const alias = aliasByCanonicalMemberId.get(member.memberId)
     if (alias === undefined || disclosureByAlias.has(alias)) continue
+    if (!disclosureAllowedMemberIds.has(member.memberId)) {
+      disclosureByAlias.set(alias, '[REDACTED_PERSON]')
+      continue
+    }
     const identifier = member.identifiers
       .map((value) => value.trim())
       .find((value) => aliasesByPrivateIdentifier.get(value)?.size === 1)

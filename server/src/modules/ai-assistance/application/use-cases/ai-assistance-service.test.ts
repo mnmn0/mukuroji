@@ -758,6 +758,43 @@ describe('createAiAssistanceService', () => {
     expect(JSON.stringify(generation)).toContain('[REDACTED_PERSON]')
   })
 
+  test('does not disclose a private member outside the resolved allowlists', async () => {
+    const hiddenAlias = 'U_test_hidden_0003'
+    const harness = createHarness({
+      promptContext: 'Hidden Person owns the visible source.',
+      privateMemberIdentifiers: [
+        {
+          memberId: 'assignee@example.com',
+          providerAlias: ASSIGNEE_PROVIDER_ALIAS,
+          identifiers: ['Assignee'],
+        },
+        {
+          memberId: 'hidden@example.com',
+          providerAlias: hiddenAlias,
+          identifiers: ['Hidden Person'],
+        },
+        {
+          memberId: 'creator@example.com',
+          providerAlias: CREATOR_PROVIDER_ALIAS,
+          identifiers: [],
+        },
+      ],
+    })
+    harness.setOutputText(`${hiddenAlias} should review the result.`)
+
+    const generation = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-hidden-member-disclosure',
+    )
+
+    const serializedGeneration = JSON.stringify(generation)
+    expect(serializedGeneration).not.toContain('Hidden Person')
+    expect(serializedGeneration).not.toContain(hiddenAlias)
+    expect(serializedGeneration).toContain('[REDACTED_PERSON]')
+  })
+
   test('rejects duplicate or malformed resolver member aliases before provider use', async () => {
     for (const [idempotencyKey, privateMemberIdentifiers] of [
       [
