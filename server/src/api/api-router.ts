@@ -54,6 +54,8 @@ import {
   type CuratedContextItem,
   type CuratedContextQuote,
   type CuratedContextSource,
+  type DocumentComment,
+  type DocumentDetail,
   type DocumentRelationTarget,
   type RequestFormDraft,
   type RequestFormField,
@@ -20970,19 +20972,30 @@ async function resolveAiDocumentSource(
   if (documentAuthorizationRevision === undefined) {
     throw aiAssistanceAuthorizationChangedError()
   }
-  const [document, commentPage] = await Promise.all([
-    workItemDependencies.documents.get({
-      workspaceId: principal.directoryId,
-      documentId: source.documentId,
-      access: state.searchContext.documentAccess,
-    }),
-    workItemDependencies.documents.listComments({
-      workspaceId: principal.directoryId,
-      documentId: source.documentId,
-      access: state.searchContext.documentAccess,
-      limit: 40,
-    }),
-  ])
+  const [initialDocument, initialCommentPage] =
+    await readAiDocumentSnapshot(principal, source.documentId, state.searchContext.documentAccess)
+  if (initialDocument.id !== source.documentId) {
+    throw new AiAssistanceError(
+      'not-found',
+      'AiAssistanceGenerationNotFound',
+      'The selected AI source was not found.',
+    )
+  }
+  if (!await isWorkspaceSearchAuthorizationCurrent(
+    principal.directoryId,
+    state.searchContext.planningRevision,
+    documentAuthorizationRevision,
+    state.searchContext.documentAccess,
+  )) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  requireAiAssistanceSourceRevision(initialDocument.revision, source.expectedRevision)
+
+  // The initial read establishes identity and access; use a second, consistent
+  // read immediately before constructing the prompt so edits made during the
+  // first read cannot reach the provider as stale document content.
+  const [document, commentPage] =
+    await readAiDocumentSnapshot(principal, source.documentId, state.searchContext.documentAccess)
   if (document.id !== source.documentId) {
     throw new AiAssistanceError(
       'not-found',
@@ -20999,6 +21012,19 @@ async function resolveAiDocumentSource(
     throw aiAssistanceAuthorizationChangedError()
   }
   requireAiAssistanceSourceRevision(document.revision, source.expectedRevision)
+  if (
+    createAiDocumentContentFingerprint(initialDocument) !==
+      createAiDocumentContentFingerprint(document) ||
+    createAiDocumentCommentWindowFingerprint(
+      initialCommentPage.comments,
+      initialCommentPage.nextCursor,
+    ) !== createAiDocumentCommentWindowFingerprint(
+      commentPage.comments,
+      commentPage.nextCursor,
+    )
+  ) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
   const body = createDocumentWorkspaceSearchBody(document)
   const promptComments = commentPage.comments
     .slice(0, AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
@@ -21054,6 +21080,80 @@ async function resolveAiDocumentSource(
     workItemEndpoints: [],
     workflowStatusIds: [],
   }
+}
+
+/**
+ * Reads a Document and its bounded comment window through the canonical access port.
+ *
+ * @param principal - Authenticated Workspace principal requesting the source.
+ * @param documentId - Document identity selected by the caller.
+ * @param access - Permission-filtered Document access context.
+ * @returns A consistent Document/comment snapshot used for AI prompt construction.
+ */
+async function readAiDocumentSnapshot(
+  principal: WorkspacePrincipal,
+  documentId: string,
+  access: DocumentAccessContext,
+) {
+  return await Promise.all([
+    workItemDependencies.documents.get({
+      workspaceId: principal.directoryId,
+      documentId,
+      access,
+    }),
+    workItemDependencies.documents.listComments({
+      workspaceId: principal.directoryId,
+      documentId,
+      access,
+      limit: 40,
+    }),
+  ])
+}
+
+/**
+ * Creates a content-only fingerprint for a Document snapshot.
+ *
+ * @param document - Permission-filtered Document snapshot.
+ * @returns Stable fingerprint for fields disclosed to the AI provider.
+ */
+function createAiDocumentContentFingerprint(document: DocumentDetail): string {
+  return JSON.stringify({
+    id: document.id,
+    kind: document.kind,
+    scope: document.scope,
+    title: document.title,
+    body: createDocumentWorkspaceSearchBody(document),
+    revision: document.revision,
+    updatedAt: document.updatedAt,
+    relationIds: document.relations.map((relation) => relation.id),
+  })
+}
+
+/**
+ * Creates a fingerprint for the bounded Document comment window.
+ *
+ * @param comments - Permission-filtered comments returned by the current page.
+ * @param nextCursor - Opaque cursor indicating another page exists.
+ * @returns Stable fingerprint for comment content and disclosure metadata.
+ */
+function createAiDocumentCommentWindowFingerprint(
+  comments: readonly DocumentComment[],
+  nextCursor: string | undefined,
+): string {
+  return JSON.stringify({
+    nextCursor: nextCursor ?? null,
+    comments: comments.map((comment) => ({
+      id: comment.id,
+      documentId: comment.documentId,
+      parentCommentId: comment.parentCommentId ?? null,
+      body: comment.body,
+      resolved: comment.resolved,
+      resolvedByUserId: comment.resolvedByUserId ?? null,
+      resolvedAt: comment.resolvedAt ?? null,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+    })),
+  })
 }
 
 /** Resolves one current-scope Project or Initiative Planning target. */

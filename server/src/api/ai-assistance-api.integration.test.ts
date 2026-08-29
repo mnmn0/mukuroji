@@ -1521,7 +1521,8 @@ describe('AI assistance API composition', () => {
 
     expect(response.status).toBe(201)
     expect(maximumConcurrentDocumentReads).toBe(4)
-    expect(startedDocumentIds).toEqual(documentIds)
+    expect(startedDocumentIds).toHaveLength(documentIds.length * 2)
+    expect([...new Set(startedDocumentIds)]).toEqual(documentIds)
     expect(citationIds).toEqual(documentIds.map((_, index) => `source-${index + 1}`))
     expect(citationLabels).toEqual(documentIds.map((_, index) => `Document ${index + 1}`))
     expect(promptContext).not.toContain('"directory"')
@@ -1532,6 +1533,125 @@ describe('AI assistance API composition', () => {
       expect(currentPromptIndex).toBeGreaterThan(previousPromptIndex)
       previousPromptIndex = currentPromptIndex
     }
+  })
+
+  test('rejects a Document source that changes during the final content read', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const initialDocument = createDocument()
+    const updatedDocument: ReturnType<typeof createDocument> = {
+      ...initialDocument,
+      revision: initialDocument.revision + 1,
+      updatedAt: '2026-08-25T00:01:00.000Z',
+      blocks: [{
+        id: 'paragraph-1',
+        type: 'paragraph',
+        text: 'Edited document body must not reach the provider.',
+      }],
+    }
+    let documentReads = 0
+    let providerCalls = 0
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 4
+        },
+        async get() {
+          documentReads += 1
+          return documentReads === 1 ? initialDocument : updatedDocument
+        },
+        async listComments() {
+          return { comments: [] }
+        },
+      }),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          await authorization.resolveContext({ actor, request })
+          providerCalls += 1
+          throw new Error('Stale Document source unexpectedly reached the provider.')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: createAiHeaders(),
+      body: JSON.stringify({
+        task: 'summary',
+        locale: 'ja',
+        sources: [{
+          type: 'document',
+          documentId: initialDocument.id,
+          expectedRevision: initialDocument.revision,
+        }],
+      }),
+    })
+
+    expect(response.status).toBe(409)
+    expect(documentReads).toBe(2)
+    expect(providerCalls).toBe(0)
+    const responseText = await response.text()
+    expect(responseText).not.toContain('Edited document body')
+  })
+
+  test('rejects a Document source when its comment window changes during the final read', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const document = createDocument()
+    const initialComment = createDocumentComment(NOW, 'Initial comment body.')
+    const updatedComment = createDocumentComment(
+      '2026-08-25T00:01:00.000Z',
+      'Edited comment body must not reach the provider.',
+    )
+    let commentReads = 0
+    let providerCalls = 0
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 4
+        },
+        async get() {
+          return document
+        },
+        async listComments() {
+          commentReads += 1
+          return { comments: [commentReads === 1 ? initialComment : updatedComment] }
+        },
+      }),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          await authorization.resolveContext({ actor, request })
+          providerCalls += 1
+          throw new Error('Stale Document comment unexpectedly reached the provider.')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: createAiHeaders(),
+      body: JSON.stringify({
+        task: 'summary',
+        locale: 'ja',
+        sources: [{
+          type: 'document',
+          documentId: document.id,
+          expectedRevision: document.revision,
+        }],
+      }),
+    })
+
+    expect(response.status).toBe(403)
+    expect(commentReads).toBe(2)
+    expect(providerCalls).toBe(0)
+    const responseText = await response.text()
+    expect(responseText).not.toContain('Edited comment body')
   })
 
   test('rejects metadata-only Triage content before the provider boundary', async () => {
