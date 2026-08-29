@@ -13,10 +13,40 @@ import type { PlanningProjectRoleScope } from '../../planning/model/permissions'
  *
  * @param accessToken - Project member API の access token です。
  * @param projects - 取得対象の Project 一覧です。
- * @param teamId - Optional Team scope used to qualify duplicate Project IDs.
  * @returns Project 情報付き member、失敗した Project ID、取得 error です。
  */
 export async function loadWorkspaceProjectMembers(
+  accessToken: string,
+  projects: readonly ProjectDirectoryProject[],
+) {
+  return loadProjectMembersForScope(accessToken, projects)
+}
+
+/**
+ * Loads Project members through Team-qualified Project scopes.
+ *
+ * @param accessToken - Bearer token for the Project member API.
+ * @param teamId - Team that owns every requested Project.
+ * @param projects - Projects currently visible in that Team directory.
+ * @returns Project members, failed Project IDs, and request errors.
+ */
+export async function loadTeamProjectMembers(
+  accessToken: string,
+  teamId: string,
+  projects: readonly ProjectDirectoryProject[],
+) {
+  return loadProjectMembersForScope(accessToken, projects, teamId)
+}
+
+/**
+ * Loads Project members for either an unqualified or Team-qualified scope.
+ *
+ * @param accessToken - Bearer token for the Project member API.
+ * @param projects - Projects to load.
+ * @param teamId - Optional Team scope used to qualify duplicate Project IDs.
+ * @returns Project members, failed Project IDs, and request errors.
+ */
+async function loadProjectMembersForScope(
   accessToken: string,
   projects: readonly ProjectDirectoryProject[],
   teamId?: string,

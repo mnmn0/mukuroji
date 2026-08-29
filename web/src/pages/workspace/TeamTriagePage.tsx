@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { isActiveProjectAssignmentCandidate } from '../../projects/api/members'
-import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
+import { useTeamProjectMembers } from '../../projects/queries/useProjectMembers'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TriageApiError } from '../../triage/api'
 import { useTriageMutations } from '../../triage/mutations/useTriageMutations'
@@ -66,7 +66,7 @@ export function TeamTriagePage() {
     workspace.canLoadWorkspaceData && Boolean(activeTeam) && routeState.view === 'queue',
   )
   const selectedEntry = detail.data ? createTriageEntryView(detail.data) : undefined
-  const projectMembers = useWorkspaceProjectMembers(
+  const projectMembers = useTeamProjectMembers(
     workspace.accessToken,
     activeTeam?.id,
     teamProjects,

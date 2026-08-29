@@ -364,12 +364,15 @@ export function TriageEntryDetail({
                       draft.projectId?.value ?? entry.projectId ?? view.routingCandidate?.projectId,
                       eligibleAssigneeIdsByProject,
                     )
+                  const hasInvalidAssignee = draft.assigneeUserId !== undefined &&
+                    !hasSupportedAssignee
                   const hasSupportedProject =
                     draft.projectId !== undefined &&
                     !hasInvalidProject &&
                     (entry.capabilities.canAssign || entry.capabilities.canAcceptCreate)
                   return !hasInvalidProject &&
                     !hasUnsupportedAssignee &&
+                    !hasInvalidAssignee &&
                     (hasSupportedAssignee || hasSupportedProject)
                 }}
                 // AI requests must be allowed to start; only domain mutations
