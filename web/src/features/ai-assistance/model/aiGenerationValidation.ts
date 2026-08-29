@@ -927,7 +927,13 @@ function isBoundedNonEmptyTrimmedString(
     !hasUnsafeControlCharacter(value)
 }
 
-/** Validates an optional bounded string without changing its representation. */
+/**
+ * Validates an optional bounded string without changing its representation.
+ *
+ * @param value - Unknown value to validate.
+ * @param maximumLength - Inclusive UTF-16 length limit for the value.
+ * @returns Whether the value is undefined or a bounded string without unsafe control characters.
+ */
 function isOptionalBoundedString(value: unknown, maximumLength: number): value is string | undefined {
   return value === undefined || (
     typeof value === 'string' &&
@@ -936,7 +942,12 @@ function isOptionalBoundedString(value: unknown, maximumLength: number): value i
   )
 }
 
-/** Rejects control characters that downstream persisted text boundaries cannot accept. */
+/**
+ * Rejects control characters that downstream persisted text boundaries cannot accept.
+ *
+ * @param value - Text to inspect for unsafe control characters.
+ * @returns Whether the text contains a disallowed C0 or DEL character.
+ */
 function hasUnsafeControlCharacter(value: string): boolean {
   return [...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0

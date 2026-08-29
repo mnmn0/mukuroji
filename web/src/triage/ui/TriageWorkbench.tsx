@@ -339,13 +339,25 @@ export function TriageWorkbench({
   )
 }
 
-/** Renders one accessible workbench surface tab. */
-function ViewTab({ active, disabled = false, label, onClick }: {
+/** Props for one accessible workbench surface tab. */
+type ViewTabProps = {
+  /** Whether this tab is currently selected. */
   active: boolean
+  /** Whether this tab is temporarily unavailable. */
   disabled?: boolean
+  /** Visible and accessible tab label. */
   label: string
+  /** Activates the tab's route transition. */
   onClick: () => void
-}) {
+}
+
+/**
+ * Renders one accessible workbench surface tab.
+ *
+ * @param props - Selection, disabled state, label, and activation callback.
+ * @returns A semantic tab button for the Team triage workbench.
+ */
+function ViewTab({ active, disabled = false, label, onClick }: ViewTabProps) {
   return (
     <button
       aria-selected={active}

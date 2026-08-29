@@ -361,7 +361,7 @@ export function TriageEntryDetail({
                     entry.capabilities.canAssign &&
                     isEligibleAssigneeForTriage(
                       draft.assigneeUserId.value,
-                      draft.projectId?.value ?? entry.projectId ?? view.routingCandidate?.projectId,
+                      draft.projectId?.value ?? (projectId || undefined),
                       eligibleAssigneeIdsByProject,
                     )
                   const hasInvalidAssignee = draft.assigneeUserId !== undefined &&
