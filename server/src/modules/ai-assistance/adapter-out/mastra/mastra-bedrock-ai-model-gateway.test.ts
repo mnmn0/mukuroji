@@ -301,10 +301,6 @@ describe('createMastraBedrockAiModelGateway', () => {
       { fieldId: 'field-1', operator: 'contains', value: '   ' },
       { fieldId: 'field-1', operator: 'is-empty', value: true },
       { fieldId: 'field-1', operator: 'equals', value: '   ' },
-      { fieldId: 'field-1', operator: 'equals', value: 10 },
-      { fieldId: 'field-1', operator: 'not-equals', value: false },
-      { fieldId: 'field-1', operator: 'equals', value: ['one'] },
-      { fieldId: 'field-1', operator: 'not-equals', value: null },
     ]
     for (const filter of invalidFilters) {
       const gateway = createMastraBedrockAiModelGateway({
@@ -323,6 +319,33 @@ describe('createMastraBedrockAiModelGateway', () => {
 
       await expect(gateway.generate(createInput())).rejects.toMatchObject({
         code: 'InvalidAiAssistanceOutput',
+      })
+    }
+  })
+
+  test('accepts typed Search equality values for downstream field validation', async () => {
+    for (const filter of [
+      { fieldId: 'field-1', operator: 'equals', value: 10 },
+      { fieldId: 'field-1', operator: 'not-equals', value: false },
+      { fieldId: 'field-1', operator: 'equals', value: ['one'] },
+      { fieldId: 'field-1', operator: 'not-equals', value: null },
+    ]) {
+      const gateway = createMastraBedrockAiModelGateway({
+        runStructuredGeneration: async () => ({
+          object: {
+            draft: {
+              kind: 'search',
+              interpretation: 'A typed custom-field filter.',
+              filters: { customFields: [filter] },
+              caveats: [],
+            },
+            uncertainty: { level: 'low', reason: 'Clear.' },
+          },
+        }),
+      })
+
+      await expect(gateway.generate(createInput())).resolves.toMatchObject({
+        draft: { kind: 'search', filters: { customFields: [filter] } },
       })
     }
   })
@@ -446,6 +469,36 @@ describe('createMastraBedrockAiModelGateway', () => {
               decisionSummary: '',
               helpNeeded: '',
               nextAction: '   ',
+              confidence: 'high',
+              citationIds: ['S1'],
+            },
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('rejects lone UTF-16 surrogates in Planning status text', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'planning',
+            subtasks: [],
+            dependencies: [],
+            statusUpdate: {
+              health: 'on-track',
+              risk: 'none',
+              summary: '\ud800',
+              riskSummary: '',
+              decisionSummary: '',
+              helpNeeded: '',
+              nextAction: 'Schedule the rehearsal.',
               confidence: 'high',
               citationIds: ['S1'],
             },

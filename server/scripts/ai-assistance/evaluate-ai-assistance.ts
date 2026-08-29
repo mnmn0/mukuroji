@@ -14,6 +14,7 @@ import {
   redactAiAssistanceText,
   redactAiAssistanceUncertainty,
   redactGenerateAiAssistanceRequest,
+  validateAiAssistanceDraftForApplication,
   type AiAssistanceAllowedValues,
   type AiModelGenerationResult,
   type MastraStructuredGenerationInput,
@@ -206,6 +207,19 @@ async function evaluateCase(
   }
 
   if (parsed.draft.kind !== evaluationCase.modelInput.task) failures.push('task-mismatch')
+
+  try {
+    validateAiAssistanceDraftForApplication(
+      parsed.draft,
+      evaluationCase.modelInput.request,
+      {
+        citations: evaluationCase.modelInput.citations,
+        allowedValues: evaluationCase.modelInput.allowedValues,
+      },
+    )
+  } catch {
+    failures.push('application-validation-failed')
+  }
 
   const claims = collectClaims(parsed.draft)
   const authorizedCitationIds = new Set(

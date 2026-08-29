@@ -1220,6 +1220,51 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('revalidates a draft after private identifier disclosure expands its text', async () => {
+    const longDisplayName = 'A'.repeat(500)
+    const harness = createHarness({
+      privateMemberIdentifiers: [
+        {
+          memberId: 'assignee@example.com',
+          providerAlias: ASSIGNEE_PROVIDER_ALIAS,
+          identifiers: [longDisplayName],
+        },
+        {
+          memberId: 'creator@example.com',
+          providerAlias: CREATOR_PROVIDER_ALIAS,
+          identifiers: [],
+        },
+      ],
+      outputDraft: {
+        kind: 'planning',
+        title: {
+          value: ASSIGNEE_PROVIDER_ALIAS,
+          reason: 'Use the visible source.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        },
+        subtasks: [],
+        dependencies: [],
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createPlanningRequest('work-item'),
+      harness.authorization,
+      'request-privacy-expanded-title',
+    )).rejects.toMatchObject({
+      category: 'upstream',
+      code: 'InvalidAiAssistanceOutput',
+    })
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCode: 'InvalidAiAssistanceOutput',
+    })])
+  })
+
   test('rechecks source authorization before invoking the provider', async () => {
     const harness = createHarness()
     harness.setAuthorizationState({ current: false, reason: 'permission-changed' })

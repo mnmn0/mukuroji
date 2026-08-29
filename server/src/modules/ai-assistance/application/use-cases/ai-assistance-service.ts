@@ -542,7 +542,11 @@ export function createAiAssistanceService(
           citation,
           privateIdentifierAliases.disclosureTextAliases,
         ))
-      validateDraftReferences(safeDraft, context, request)
+      const safeOutput = parseAiAssistanceModelOutput({
+        draft: safeDraft,
+        uncertainty: safeUncertainty,
+      })
+      validateAiAssistanceDraftForApplication(safeOutput.draft, request, context)
 
       const generation: AiAssistanceGeneration = {
         schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
@@ -551,9 +555,9 @@ export function createAiAssistanceService(
         revision: 1,
         content: {
           availability: 'available',
-          draft: safeDraft,
+          draft: safeOutput.draft,
           citations: disclosureCitations,
-          uncertainty: safeUncertainty,
+          uncertainty: safeOutput.uncertainty,
         },
         details: {
           provider: 'bedrock',
@@ -1200,10 +1204,28 @@ function validateDraftForRequest(
   }
 }
 
+/**
+ * Validates a parsed AI draft against task, citation, and server-owned allowlist rules.
+ *
+ * @param draft - Strictly parsed draft after privacy transformations.
+ * @param request - Generation request that determines source-specific rules.
+ * @param context - Current permission-safe citations and identifier allowlists.
+ * @returns Nothing when the draft is safe for application use.
+ * @throws AiAssistanceError When a task, citation, or allowlist invariant is violated.
+ */
+export function validateAiAssistanceDraftForApplication(
+  draft: AiAssistanceDraft,
+  request: GenerateAiAssistanceRequest,
+  context: Pick<ResolvedAiAssistanceContext, 'citations' | 'allowedValues'>,
+): void {
+  validateDraftForRequest(draft, request)
+  validateDraftReferences(draft, context, request)
+}
+
 /** Validates every citation and resource identifier emitted by the model. */
 function validateDraftReferences(
   draft: AiAssistanceDraft,
-  context: ResolvedAiAssistanceContext,
+  context: Pick<ResolvedAiAssistanceContext, 'citations' | 'allowedValues'>,
   request: GenerateAiAssistanceRequest,
 ): void {
   const citationIds = new Set(context.citations.map((citation) => citation.id))

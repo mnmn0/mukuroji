@@ -150,6 +150,103 @@ describe('evaluateAiAssistanceOffline', () => {
     expect(report.cases[0]?.metrics).toBeUndefined()
   })
 
+  test('applies production task validation to recorded Planning outputs', async () => {
+    const inputCase = requireInputCase(3)
+    const output = requireRecordedOutput(3)
+    const invalidOutput: AiAssistanceOfflineRecordedOutput = {
+      ...output,
+      modelOutput: {
+        draft: {
+          kind: 'planning',
+          subtasks: [],
+          dependencies: [],
+          statusUpdate: {
+            health: 'on-track',
+            risk: 'none',
+            summary: 'The source remains on track.',
+            riskSummary: '',
+            decisionSummary: '',
+            helpNeeded: '',
+            nextAction: 'Schedule the next review.',
+            confidence: 'high',
+            citationIds: ['W1'],
+          },
+        },
+        uncertainty: { level: 'low', reason: 'The source is clear.' },
+      },
+    }
+    const relaxedInputCase: AiAssistanceOfflineInputCase = {
+      ...inputCase,
+      minimumClaimCount: 0,
+      requiredTextFragments: [],
+      forbiddenSubstrings: [],
+    }
+
+    const report = await evaluateAiAssistanceOffline(
+      createSingleCaseBaseline(relaxedInputCase, invalidOutput),
+    )
+
+    expect(report.passed).toBe(false)
+    expect(report.cases[0]?.failures).toContain('application-validation-failed')
+  })
+
+  test('applies production triage routing validation to recorded outputs', async () => {
+    const inputCase = requireInputCase(0)
+    const output = requireRecordedOutput(0)
+    const invalidOutput: AiAssistanceOfflineRecordedOutput = {
+      ...output,
+      modelOutput: {
+        draft: {
+          kind: 'triage',
+          title: {
+            value: 'Investigate checkout timeout',
+            reason: 'The intake describes repeated checkout timeouts.',
+            confidence: 'high',
+            citationIds: ['R1'],
+          },
+          teamId: {
+            value: 'team-payments',
+            reason: 'The route is visible.',
+            confidence: 'high',
+            citationIds: ['R1'],
+          },
+          projectId: {
+            value: 'project-checkout',
+            reason: 'The project is visible.',
+            confidence: 'high',
+            citationIds: ['R1'],
+          },
+          customFields: [],
+        },
+        uncertainty: { level: 'low', reason: 'The source is clear.' },
+      },
+    }
+    const invalidInputCase: AiAssistanceOfflineInputCase = {
+      ...inputCase,
+      modelInput: {
+        ...inputCase.modelInput,
+        allowedValues: {
+          ...inputCase.modelInput.allowedValues,
+          triageRoutingTuples: [{
+            teamId: 'team-payments',
+            projectId: 'project-other',
+            assigneeUserIds: ['member-payments-oncall'],
+          }],
+        },
+      },
+      minimumClaimCount: 0,
+      requiredTextFragments: [],
+      forbiddenSubstrings: [],
+    }
+
+    const report = await evaluateAiAssistanceOffline(
+      createSingleCaseBaseline(invalidInputCase, invalidOutput),
+    )
+
+    expect(report.passed).toBe(false)
+    expect(report.cases[0]?.failures).toContain('application-validation-failed')
+  })
+
   test('fails closed without disclosing unsafe recorded output content', async () => {
     const inputCase = requireInputCase(1)
     const output = requireRecordedOutput(1)

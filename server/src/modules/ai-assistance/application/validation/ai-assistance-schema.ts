@@ -18,6 +18,14 @@ import { AiAssistanceError } from '../../errors'
 const identifierSchema = z.string().trim().min(1).max(256)
 const boundedTextSchema = z.string().trim().min(1).max(2_000)
 const titleTextSchema = z.string().trim().min(1).max(256)
+const planningStatusTextSchema = z.string().trim().max(2_000).refine(
+  isWellFormedUnicode,
+  { message: 'Planning status text must be well-formed Unicode.' },
+)
+const requiredPlanningStatusTextSchema = z.string().trim().min(1).max(2_000).refine(
+  isWellFormedUnicode,
+  { message: 'Planning status text must be well-formed Unicode.' },
+)
 /** Maximum URL-encoded query size accepted by the existing Search GET route. */
 const searchFilterGetQueryMaximumBytes = 6_144
 const confidenceSchema = z.enum(['high', 'medium', 'low'])
@@ -237,14 +245,14 @@ const customFieldFilterSchema = z.object({
   }
   if (
     (filter.operator === 'equals' || filter.operator === 'not-equals') &&
-    (typeof filter.value !== 'string' ||
-      filter.value.trim().length === 0 ||
-      filter.value !== filter.value.trim())
+    typeof filter.value === 'string' &&
+      (filter.value.trim().length === 0 ||
+        filter.value !== filter.value.trim())
   ) {
     context.addIssue({
       code: 'custom',
       path: ['value'],
-      message: 'Equality custom field operators require a non-empty trimmed string.',
+      message: 'String equality custom field operators require a non-empty trimmed string.',
     })
   }
 })
@@ -337,11 +345,11 @@ const planningDependenciesSchema = z.array(planningDependencySchema).max(100)
 const planningStatusUpdateSchema = z.object({
   health: z.enum(['unknown', 'on-track', 'at-risk', 'off-track']),
   risk: z.enum(['none', 'low', 'medium', 'high', 'critical']),
-  summary: boundedTextSchema,
-  riskSummary: z.string().trim().max(2_000),
-  decisionSummary: z.string().trim().max(2_000),
-  helpNeeded: z.string().trim().max(2_000),
-  nextAction: z.string().trim().min(1).max(2_000),
+  summary: requiredPlanningStatusTextSchema,
+  riskSummary: planningStatusTextSchema,
+  decisionSummary: planningStatusTextSchema,
+  helpNeeded: planningStatusTextSchema,
+  nextAction: requiredPlanningStatusTextSchema,
   confidence: confidenceSchema,
   citationIds: z.array(identifierSchema).min(1).max(20),
 }).strict()
@@ -443,6 +451,30 @@ function isValidCalendarDate(value: string): boolean {
   ]
   const maximumDay = daysByMonth[month - 1]
   return maximumDay !== undefined && day <= maximumDay
+}
+
+/**
+ * Rejects lone UTF-16 surrogates before persistence or browser encoding.
+ *
+ * @param value - Candidate normalized text.
+ * @returns Whether every surrogate is paired as a valid UTF-16 code point.
+ */
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = value.charCodeAt(index + 1)
+      if (
+        index + 1 >= value.length ||
+        nextCodeUnit < 0xdc00 ||
+        nextCodeUnit > 0xdfff
+      ) return false
+      index += 1
+      continue
+    }
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) return false
+  }
+  return true
 }
 
 /**
