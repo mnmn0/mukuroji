@@ -83,6 +83,7 @@ import {
   createPlanningAccessSnapshot,
   filterManageablePlanningScopeTeams,
 } from '../../planning/model/permissions'
+import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import {
   PlanningScreen,
 } from '../../planning/ui/PlanningScreen'
@@ -101,6 +102,7 @@ import {
   type PlanningViewId,
 } from '../../shared/routing/paths'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
+import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
@@ -112,6 +114,7 @@ export function PlanningPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
+  const { isAiAssistanceTaskEnabled } = useWorkspaceRouteContext()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -282,12 +285,19 @@ export function PlanningPage() {
     navigate,
   ])
 
+  /** Controls whether a Planning mutation must reject after reporting its route error. */
+  type PlanningMutationOptions = {
+    /** Re-throws a handled failure so a local draft can remain available to the caller. */
+    rethrowOnFailure?: boolean
+  }
+
   /** Runs one Planning mutation and updates the authoritative bounded snapshot on success. */
   const runMutation = async (
     key: string,
     payload: unknown,
     request: (context: MutationRequestContext) => ReturnType<typeof archivePlanningEntity>,
     afterSuccess?: () => Promise<unknown>,
+    options?: PlanningMutationOptions,
   ) => {
     if (!accessToken) {
       return
@@ -315,6 +325,7 @@ export function PlanningPage() {
           clearAuthSession()
         }
         navigate(sessionErrorAction.redirectTo, { replace: true })
+        if (options?.rethrowOnFailure) throw error
         return
       }
 
@@ -323,6 +334,7 @@ export function PlanningPage() {
       if (messageKey === 'planning.conflict') {
         await mutatePlanning()
       }
+      if (options?.rethrowOnFailure) throw error
     }
   }
 
@@ -532,6 +544,23 @@ export function PlanningPage() {
         <PlanningScreen
           accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
+          aiAssistance={(isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled) && accessToken
+            ? {
+                accessToken,
+                locale,
+                onAuthenticatedApiError: (error) => {
+                  const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+                    undefined,
+                    [error],
+                    currentPath,
+                  )
+                  if (sessionErrorAction?.redirectTo) {
+                    if (sessionErrorAction.clearSession) clearAuthSession()
+                    navigate(sessionErrorAction.redirectTo, { replace: true })
+                  }
+                },
+              }
+            : undefined}
           errorMessage={mutationErrorMessage ?? loadErrorMessage}
           initialSelectedEntityId={selectedEntityId}
           initialSelectedUpdateTarget={selectedUpdateTarget}
@@ -791,6 +820,7 @@ export function PlanningPage() {
                     context,
                   ).then((result) => result.planning),
                   () => updateHistory.mutate(),
+                  { rethrowOnFailure: true },
                 )
               }
             : undefined}

@@ -17,6 +17,8 @@ export type TriageBulkToolbarProps = {
   readonly entries: readonly TriageEntryView[]
   /** Whether a bulk operation is running. */
   readonly isPending?: boolean
+  /** Whether a detail-scoped AI operation is still awaiting its response. */
+  readonly isAiOperationPending?: boolean
   /** Safe mutation error message. */
   readonly errorMessage?: string
   /** Latest per-entry bulk results. */
@@ -41,6 +43,7 @@ export function TriageBulkToolbar({
   allowedActions,
   entries,
   errorMessage,
+  isAiOperationPending = false,
   isPending = false,
   onApply,
   onClear,
@@ -50,12 +53,19 @@ export function TriageBulkToolbar({
   const [mode, setMode] = useState<TriageBulkActionMode>()
   const [localError, setLocalError] = useState(false)
   const exceedsBulkLimit = entries.length > TRIAGE_BULK_ACTION_LIMIT
+  const actionIsPending = isPending || isAiOperationPending
 
   if (entries.length === 0) return null
 
+  /**
+   * Validates and submits the selected bounded bulk action.
+   *
+   * @param event - Submit event for the confirmation form.
+   * @returns A promise that settles after the bulk mutation completes or fails.
+   */
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!mode || isPending) return
+    if (!mode || actionIsPending) return
     if (exceedsBulkLimit) {
       setLocalError(true)
       return
@@ -86,7 +96,7 @@ export function TriageBulkToolbar({
         </strong>
         {allowedActions.includes('assign') ? (
           <BulkModeButton
-            disabled={isPending || exceedsBulkLimit}
+            disabled={actionIsPending || exceedsBulkLimit}
             label={t('triage.bulk.assign')}
             mode="assign"
             onSelect={setMode}
@@ -94,7 +104,7 @@ export function TriageBulkToolbar({
         ) : null}
         {allowedActions.includes('snooze') ? (
           <BulkModeButton
-            disabled={isPending || exceedsBulkLimit}
+            disabled={actionIsPending || exceedsBulkLimit}
             label={t('triage.bulk.snooze')}
             mode="snooze"
             onSelect={setMode}
@@ -102,7 +112,7 @@ export function TriageBulkToolbar({
         ) : null}
         {allowedActions.includes('decline') ? (
           <BulkModeButton
-            disabled={isPending || exceedsBulkLimit}
+            disabled={actionIsPending || exceedsBulkLimit}
             label={t('triage.bulk.decline')}
             mode="decline"
             onSelect={setMode}
@@ -110,7 +120,7 @@ export function TriageBulkToolbar({
         ) : null}
         <button
           className="ml-auto min-h-10 px-3 text-sm font-semibold text-[var(--workbench-muted)]"
-          disabled={isPending}
+          disabled={actionIsPending}
           onClick={onClear}
           type="button"
         >
@@ -146,11 +156,11 @@ export function TriageBulkToolbar({
             </label>
           )}
           <div className="flex justify-end gap-2">
-            <button className="workbench-button-secondary min-h-10 px-4" disabled={isPending} onClick={() => setMode(undefined)} type="button">
+            <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={() => setMode(undefined)} type="button">
               {t('triage.action.cancel')}
             </button>
-            <button className="workbench-button-primary min-h-10 px-4" disabled={isPending} type="submit">
-              {isPending ? t('triage.bulk.pending') : t('triage.bulk.submit')}
+            <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">
+              {actionIsPending ? t('triage.bulk.pending') : t('triage.bulk.submit')}
             </button>
           </div>
         </form>

@@ -5,6 +5,7 @@ import type { CuratedContextSourceKind } from '@mukuroji/contracts'
  */
 export const issueCollaborationTabs = [
   'conversation',
+  'brief',
   'decisions',
   'activity',
   'sources',

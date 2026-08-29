@@ -8,6 +8,7 @@ export const collaborationMessages = {
   'collaboration.tabs.decisions': '判断',
   'collaboration.tabs.activity': '活動',
   'collaboration.tabs.sources': '情報源',
+  'collaboration.tabs.brief': 'Brief',
   'collaboration.threadCount': '{count} スレッド',
   'collaboration.readOnly': 'この Work Item でコメントを変更する権限がありません。',
   'collaboration.presence.viewing': '{count} 人が表示中',

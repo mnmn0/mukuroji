@@ -5,6 +5,9 @@ import type {
   WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
+import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
+import { createTaskDetailAiAssistanceRenderer } from '../src/features/ai-assistance/ui/TaskDetailAiAssistance'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
 import type { TeamIssueDetail } from '../src/issues/api'
@@ -820,6 +823,43 @@ describe('independent task views', () => {
     expect(errorHtml).toContain('Lambda returned 500.')
     expect(errorHtml).toContain('disabled="" type="submit"')
     expect(emptyHtml).toContain(t('tasks.detail.empty'))
+  })
+
+  test('mounts the complete Work Item planning review in the editable detail form', () => {
+    const aiAssistanceController: AiAssistanceController = {
+      cancelGeneration: () => undefined,
+      decide: async () => undefined,
+      generate: async () => aiPlanningGenerationFixture,
+      generation: aiPlanningGenerationFixture,
+      isDecisionPending: false,
+      isFeedbackPending: false,
+      isGenerating: false,
+      reset: () => undefined,
+      sendFeedback: async () => undefined,
+    }
+    const html = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        detail={taskViewStorySelectedIssueDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        onUpdateIssue={async () => undefined}
+        planningSnapshot={taskViewStoryPlanningSnapshot}
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        renderAiAssistance={createTaskDetailAiAssistanceRenderer(aiAssistanceController)}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('data-testid="ai-work-item-planning-assistant"')
+    expect(html).toContain('Complete launch accessibility review')
+    expect(html).toContain('Verify keyboard navigation findings')
+    expect(html).toContain('対応する項目をフォームで使用')
   })
 
   test('ignores a matching detail body when the list snapshot has a newer revision', () => {

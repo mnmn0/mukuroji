@@ -1,16 +1,20 @@
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent,
 } from 'react'
 import type {
   DocumentCommentAnchor,
   DocumentMention,
   DocumentRelation,
 } from '@mukuroji/contracts'
-import type { MessageKey } from '../../shared/i18n/i18n'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
+import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import {
   createGoalDocumentsPath,
   createProjectSearchPath,
@@ -24,25 +28,28 @@ import type {
 } from '../api'
 import { extractDocumentMentions } from '../model/comments'
 import {
+  documentContextTabs,
+  resolveDocumentContextTabTarget,
+  type DocumentContextTab,
+} from '../model/contextTabs'
+import {
   focusFirstModalElement,
   trapModalFocus,
 } from './modalFocus'
 import { createDocumentOperationId } from '../model/document'
 import { createCanonicalWorkItemId } from '../model/relations'
 
-/**
- * 右 context drawer で選択できる tab です。
- */
-export type DocumentContextTab =
-  | 'comments'
-  | 'backlinks'
-  | 'versions'
-  | 'activity'
+/** A tab rendered by the Document context panel. */
+export type { DocumentContextTab } from '../model/contextTabs'
 
 /**
  * DocumentContextPanel の props です。
  */
 export type DocumentContextPanelProps = {
+  /** Active Workspace member token; omission removes the AI Brief source and tab. */
+  aiAssistanceAccessToken?: string
+  /** Session key that keeps the Brief mounted while a polled revision is pending. */
+  aiAssistantSessionKey?: string
   /**
    * Panel 対象の Document です。
    */
@@ -87,10 +94,18 @@ export type DocumentContextPanelProps = {
    * Panel data を読み込み中かどうかです。
    */
   isLoading?: boolean
+  /** Keeps the Brief assistant mounted while the drawer is temporarily closed. */
+  isOpen?: boolean
   /**
    * Mobile drawer として focus を閉じ込めるかどうかです。
    */
   modal?: boolean
+  /** Locale sent to Bedrock and used for AI generation metadata. */
+  locale?: Locale
+  /** Reports authenticated AI failures to the owning document session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports Brief generation, decision, and feedback operations to the document screen. */
+  onOperationPendingChange?: (pending: boolean) => void
   /**
    * 表示文言を解決する翻訳関数です。
    */
@@ -146,18 +161,13 @@ export type DocumentContextPanelProps = {
   onDeleteRelation?: (relationId: string) => Promise<void>
 }
 
-const contextTabs = [
-  'comments',
-  'backlinks',
-  'versions',
-  'activity',
-] as const satisfies readonly DocumentContextTab[]
-
 /**
  * Comment、Backlink、Version、Activity を一つにまとめる右 drawer です。
  */
 export function DocumentContextPanel({
   activeTab,
+  aiAssistanceAccessToken,
+  aiAssistantSessionKey,
   backlinks,
   comments,
   defaultAnchorId,
@@ -167,10 +177,14 @@ export function DocumentContextPanel({
   hasMoreComments = false,
   hasMoreVersions = false,
   isLoading = false,
+  isOpen = true,
+  locale = 'en',
   modal = true,
   onClose,
   onCreateComment,
   onDeleteRelation,
+  onAuthenticatedApiError,
+  onOperationPendingChange,
   onNavigate,
   onLoadMoreBacklinks,
   onLoadMoreComments,
@@ -183,11 +197,18 @@ export function DocumentContextPanel({
   versions,
 }: DocumentContextPanelProps) {
   const panelRef = useRef<HTMLElement>(null)
+  const panelIdPrefix = useId()
   const focusedCommentKeyRef =
     useRef<string | undefined>(undefined)
+  const visibleContextTabs = aiAssistanceAccessToken
+    ? [...documentContextTabs]
+    : documentContextTabs.filter((tab) => tab !== 'brief')
+  const resolvedActiveTab = activeTab === 'brief' && !aiAssistanceAccessToken
+    ? 'comments'
+    : activeTab
 
   useEffect(() => {
-    if (!modal) {
+    if (!modal || !isOpen) {
       return
     }
     const previousFocusedElement =
@@ -196,11 +217,11 @@ export function DocumentContextPanel({
         : undefined
     focusFirstModalElement(panelRef.current)
     return () => previousFocusedElement?.focus()
-  }, [modal])
+  }, [isOpen, modal])
 
   useEffect(() => {
     if (
-      activeTab !== 'comments' ||
+      resolvedActiveTab !== 'comments' ||
       !focusedCommentId ||
       isLoading
     ) {
@@ -229,12 +250,36 @@ export function DocumentContextPanel({
 
     return () => window.cancelAnimationFrame(frameId)
   }, [
-    activeTab,
+    resolvedActiveTab,
     comments,
     document.id,
     focusedCommentId,
     isLoading,
   ])
+
+  /**
+   * Applies roving tab selection and focus for the visible permission-filtered tabs.
+   *
+   * @param event - Keyboard event raised by the focused context tab.
+   * @param tab - Context tab that currently owns focus.
+   */
+  function handleTabKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    tab: DocumentContextTab,
+  ) {
+    const target = resolveDocumentContextTabTarget(
+      tab,
+      event.key,
+      visibleContextTabs,
+    )
+    if (!target) return
+
+    event.preventDefault()
+    onTabChange(target)
+    globalThis.document
+      .getElementById(createDocumentContextTabId(panelIdPrefix, target))
+      ?.focus()
+  }
 
   return (
     <aside
@@ -252,14 +297,15 @@ export function DocumentContextPanel({
       }}
       ref={panelRef}
       role="dialog"
+      hidden={!isOpen}
     >
       <div className="flex h-14 flex-none items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4">
         <strong className="text-sm text-[var(--workbench-text)]">
-          {t(`documents.context.${activeTab}`)}
+          {t(`documents.context.${resolvedActiveTab}`)}
         </strong>
         <button
           aria-label={t('documents.context.close')}
-          className="grid h-9 w-9 place-items-center rounded-md text-lg text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]"
+          className="grid h-[44px] w-[44px] place-items-center rounded-md text-lg text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]"
           onClick={onClose}
           type="button"
         >
@@ -268,33 +314,47 @@ export function DocumentContextPanel({
       </div>
       <div
         aria-label={t('documents.context.tabs')}
-        className="grid flex-none grid-cols-4 border-b border-[var(--workbench-border)] p-1.5"
+        className={`grid flex-none border-b border-[var(--workbench-border)] p-1.5 ${
+          aiAssistanceAccessToken ? 'grid-cols-5' : 'grid-cols-4'
+        }`}
         role="tablist"
       >
-        {contextTabs.map((tab) => (
+        {visibleContextTabs.map((tab) => (
           <button
-            aria-selected={activeTab === tab}
-            className={`relative min-h-10 rounded-md px-1 text-[11px] font-semibold ${
-              activeTab === tab
+            aria-controls={createDocumentContextPanelId(panelIdPrefix)}
+            aria-selected={resolvedActiveTab === tab}
+            className={`relative min-h-[44px] rounded-md px-1 text-[11px] font-semibold ${
+              resolvedActiveTab === tab
                 ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
                 : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
             }`}
+            id={createDocumentContextTabId(panelIdPrefix, tab)}
             key={tab}
             onClick={() => onTabChange(tab)}
+            onKeyDown={(event) => handleTabKeyDown(event, tab)}
             role="tab"
+            tabIndex={resolvedActiveTab === tab ? 0 : -1}
             type="button"
           >
             {t(`documents.context.${tab}`)}
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      <div
+        aria-labelledby={createDocumentContextTabId(
+          panelIdPrefix,
+          resolvedActiveTab,
+        )}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        id={createDocumentContextPanelId(panelIdPrefix)}
+        role="tabpanel"
+      >
         {isLoading ? (
           <p className="px-5 py-10 text-center text-sm font-medium text-[var(--workbench-muted)]">
             {t('documents.context.loading')}
           </p>
         ) : null}
-        {!isLoading && activeTab === 'comments' ? (
+        {!isLoading && resolvedActiveTab === 'comments' ? (
           <CommentsPanel
             comments={comments}
             defaultAnchorId={defaultAnchorId}
@@ -308,7 +368,31 @@ export function DocumentContextPanel({
             onResolveComment={onResolveComment}
           />
         ) : null}
-        {!isLoading && activeTab === 'backlinks' ? (
+        {aiAssistanceAccessToken ? (
+          <div
+            aria-hidden={resolvedActiveTab !== 'brief'}
+            className={resolvedActiveTab === 'brief' && !isLoading ? 'p-4' : 'hidden'}
+          >
+            <AiSummaryAssistant
+              accessToken={aiAssistanceAccessToken}
+              key={aiAssistantSessionKey ?? createAiAssistantSessionKey({
+                documentId: document.id,
+                expectedRevision: document.revision,
+                type: 'document',
+              })}
+              locale={locale}
+              onAuthenticatedApiError={onAuthenticatedApiError}
+              onOperationPendingChange={onOperationPendingChange}
+              sources={[{
+                documentId: document.id,
+                expectedRevision: document.revision,
+                type: 'document',
+              }]}
+              t={t}
+            />
+          </div>
+        ) : null}
+        {!isLoading && resolvedActiveTab === 'backlinks' ? (
           <BacklinksPanel
             backlinks={backlinks}
             hasMore={hasMoreBacklinks}
@@ -320,7 +404,7 @@ export function DocumentContextPanel({
             onUpsertRelation={onUpsertRelation}
           />
         ) : null}
-        {!isLoading && activeTab === 'versions' ? (
+        {!isLoading && resolvedActiveTab === 'versions' ? (
           <VersionsPanel
             currentRevision={document.revision}
             hasMore={hasMoreVersions}
@@ -330,12 +414,36 @@ export function DocumentContextPanel({
             versions={versions}
           />
         ) : null}
-        {!isLoading && activeTab === 'activity' ? (
+        {!isLoading && resolvedActiveTab === 'activity' ? (
           <ActivityPanel comments={comments} t={t} versions={versions} />
         ) : null}
       </div>
     </aside>
   )
+}
+
+/**
+ * Creates a stable DOM ID for one Document context tab.
+ *
+ * @param prefix - React-generated drawer instance prefix.
+ * @param tab - Context tab represented by the button.
+ * @returns DOM ID referenced by the active tabpanel.
+ */
+function createDocumentContextTabId(
+  prefix: string,
+  tab: DocumentContextTab,
+): string {
+  return `${prefix}-document-context-tab-${tab}`
+}
+
+/**
+ * Creates a stable DOM ID for the Document context tabpanel.
+ *
+ * @param prefix - React-generated drawer instance prefix.
+ * @returns DOM ID referenced by the controlling tab.
+ */
+function createDocumentContextPanelId(prefix: string): string {
+  return `${prefix}-document-context-tabpanel`
 }
 
 function CommentsPanel({

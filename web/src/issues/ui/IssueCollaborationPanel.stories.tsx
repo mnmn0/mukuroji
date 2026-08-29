@@ -1,10 +1,13 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type {
+  AiWorkItemSource,
   CreateCuratedContextItemRequest,
   CuratedContextItem,
   UpdateCuratedContextItemRequest,
 } from '@mukuroji/contracts'
 import { expect, fn, userEvent, within } from 'storybook/test'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
 import {
   acceptedResolutionHistoryFixtures,
   collaborationWorkspaceMemberFixtures,
@@ -13,6 +16,15 @@ import {
 } from '../fixtures'
 import { IssueCollaborationPanel } from './IssueCollaborationPanel'
 import { fileArtifactsControllerFixture, imageFileFixture } from '../../files/fixtures'
+import { createTranslator } from '../../shared/i18n/i18n'
+
+const aiBriefSource = {
+  expectedRevision: 7,
+  teamId: 'core-team',
+  type: 'work-item',
+  workItemId: 'launch-review',
+} satisfies AiWorkItemSource
+const aiBriefT = createTranslator('ja')
 
 const meta = {
   title: 'Application/Issues/Collaboration Panel',
@@ -86,6 +98,27 @@ export const Default: Story = {
     )
     await userEvent.keyboard('{End}')
     await expect(canvas.getByRole('tab', { name: /情報源/ })).toHaveFocus()
+  },
+}
+
+/** Explicit, revision-fenced Work Item Brief generation entry point. */
+export const AiBrief: Story = {
+  args: {
+    aiAssistance: {
+      renderBrief: (onAdopt) => (
+        <AiSummaryAssistant
+          accessToken="storybook-access-token"
+          adoptLabel={aiBriefT('ai.summary.adoptContext')}
+          key={createAiAssistantSessionKey(aiBriefSource)}
+          locale="ja"
+          onAdopt={onAdopt}
+          sources={[aiBriefSource]}
+          t={aiBriefT}
+        />
+      ),
+      sessionKey: createAiAssistantSessionKey(aiBriefSource),
+    },
+    defaultTab: 'brief',
   },
 }
 

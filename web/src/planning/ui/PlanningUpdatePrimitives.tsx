@@ -1,10 +1,20 @@
 import type {
+  AiPlanningStatusUpdateDraft,
+  AiPlanningTargetSource,
   PlanningCadence,
   PlanningHealth,
   PlanningRisk,
   PlanningUpdateEvidence,
 } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import {
+  AiPlanningStatusUpdateAssistant,
+  type AiPlanningStatusUpdateAdoptionContext,
+} from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
+import { createTranslator, type Locale } from '../../shared/i18n/i18n'
+import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
+import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
   readPlanningUpdateEvidence,
@@ -251,6 +261,8 @@ export function PlanningLatestUpdateSummary({
 
 /** Props for the Project-or-Initiative update detail pane. */
 export type PlanningUpdateDetailPaneProps = {
+  /** Optional explicit AI generation access for the selected revision-fenced target. */
+  aiAssistance?: PlanningStatusUpdateAiAssistance
   /** Selected Project or Initiative display metadata. */
   summary: PlanningUpdateTargetSummaryView
   /** Cadence, delivery state, and immutable history for the selected target. */
@@ -286,6 +298,7 @@ export type PlanningUpdateDetailPaneProps = {
  * @returns A responsive detail pane with schedule, composer, and immutable ledger.
  */
 export function PlanningUpdateDetailPane({
+  aiAssistance,
   collaboration,
   evidenceCandidates,
   hasMoreHistory = false,
@@ -387,6 +400,7 @@ export function PlanningUpdateDetailPane({
           updateView={updateView}
         />
         <PlanningStatusUpdateComposer
+          aiAssistance={aiAssistance}
           evidenceCandidates={evidenceCandidates}
           health={summary.health}
           labels={labels}
@@ -631,6 +645,8 @@ export function PlanningUpdateCadenceEditor({
 
 /** Props for the structured manual update composer. */
 export type PlanningStatusUpdateComposerProps = {
+  /** Optional explicit AI generation access for the selected Planning target. */
+  aiAssistance?: PlanningStatusUpdateAiAssistance
   /** Current progress captured by the server when the update is published. */
   progress: number
   /** Current health used as the select default. */
@@ -641,8 +657,92 @@ export type PlanningStatusUpdateComposerProps = {
   evidenceCandidates?: PlanningUpdateEvidenceCandidates
   /** Evidence type shown initially by focused stories and form tests. */
   initialEvidenceType?: PlanningUpdateEvidence['type'] | 'none'
+  /** Optional initial local draft used by focused stories and prefilled workflows. */
+  initialDraft?: AiPlanningStatusUpdateDraft
   /** Publishes a manual canonical update when the viewer has permission. */
   onPublish?: (draft: PlanningStatusUpdateDraft) => void | Promise<void>
+}
+
+/** Authentication and revision-fenced source for a Planning status update draft. */
+export type PlanningStatusUpdateAiAssistance = {
+  /** Active Workspace member bearer token. */
+  accessToken: string
+  /** Reports authenticated AI failures to the owning Planning route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
+  /** Disables canonical publishing while an AI operation is being persisted. */
+  isAiOperationPending?: boolean
+  /** Reports AI generation, decision, and feedback activity to the owning Planning route. */
+  onOperationPendingChange?: (pending: boolean) => void
+  /** Locale sent to Bedrock and used for draft presentation. */
+  locale: Locale
+  /** Planning target resolved and re-authorized by the server. */
+  source: AiPlanningTargetSource
+}
+
+/** Local form seed replaced only after an approved AI draft adoption. */
+type PlanningStatusUpdateFormSeed = {
+  /** Status update copied into uncontrolled form defaults. */
+  draft?: AiPlanningStatusUpdateDraft
+  /** Monotonic key that remounts the form even when consecutive drafts are equal. */
+  revision: number
+}
+
+/** A same-origin HTTPS citation seeded into the typed evidence control after AI adoption. */
+type AiPlanningEvidenceSeed = {
+  /** Generation identifier retained for the visible audit note. */
+  generationId: string
+  /** Citation label copied into the evidence form. */
+  label: string
+  /** Credential-free HTTPS citation destination. */
+  url: string
+}
+
+/** An approved draft staged for one exact source session. */
+type PendingAiPlanningDraft = {
+  /** Approved status update awaiting explicit replacement confirmation. */
+  draft: AiPlanningStatusUpdateDraft
+  /** Source identity and revision that produced the approved draft. */
+  sessionKey: string
+  /** Permission-safe generation context used to preserve evidence on replacement. */
+  context?: AiPlanningStatusUpdateAdoptionContext
+}
+
+/**
+ * Converts the first safe, same-origin AI citation into typed Planning evidence.
+ *
+ * Application-relative citations with query strings are intentionally skipped:
+ * the existing Planning evidence contract accepts only credential-free HTTPS
+ * permalinks, so an operator must choose a canonical evidence candidate when no
+ * citation can be represented without changing its destination.
+ *
+ * @param context - Approved generation context returned by the AI assistant.
+ * @returns A bounded evidence seed or undefined when no safe HTTPS citation exists.
+ */
+function createAiPlanningEvidenceSeed(
+  context: AiPlanningStatusUpdateAdoptionContext,
+): AiPlanningEvidenceSeed | undefined {
+  if (typeof window === 'undefined' || window.location.protocol !== 'https:') return undefined
+  for (const citation of context.citations) {
+    if (!isSafeApplicationPath(citation.href)) continue
+    try {
+      const parsed = new URL(citation.href, window.location.origin)
+      if (
+        parsed.protocol !== 'https:' ||
+        parsed.username ||
+        parsed.password ||
+        parsed.search ||
+        !parsed.pathname.startsWith('/')
+      ) continue
+      return {
+        generationId: context.generationId,
+        label: citation.label,
+        url: parsed.toString(),
+      }
+    } catch {
+      // The shared AI boundary already rejects unsafe paths; skip defensively.
+    }
+  }
+  return undefined
 }
 
 /**
@@ -652,8 +752,10 @@ export type PlanningStatusUpdateComposerProps = {
  * @returns A permission-aware structured composer.
  */
 export function PlanningStatusUpdateComposer({
+  aiAssistance,
   evidenceCandidates = { planningEntities: [], workItems: [] },
   health,
+  initialDraft,
   initialEvidenceType = 'none',
   labels,
   onPublish,
@@ -664,6 +766,94 @@ export function PlanningStatusUpdateComposer({
   )
   const [formError, setFormError] = useState<string | undefined>()
   const [isPublishing, setIsPublishing] = useState(false)
+  const isPublishingRef = useRef(false)
+  const isFormDirtyRef = useRef(false)
+  const [isFormDirty, setIsFormDirty] = useState(false)
+  const [pendingAiDraft, setPendingAiDraft] =
+    useState<PendingAiPlanningDraft>()
+  const stagedAiDraftDuringPublishRef = useRef(false)
+  const [aiEvidenceSeed, setAiEvidenceSeed] = useState<AiPlanningEvidenceSeed>()
+  const [aiGenerationReference, setAiGenerationReference] = useState<string>()
+  const [formSeed, setFormSeed] = useState<PlanningStatusUpdateFormSeed>({
+    draft: initialDraft,
+    revision: 0,
+  })
+  const formDisabled =
+    !onPublish ||
+    isPublishing ||
+    aiAssistance?.isAiOperationPending === true
+  const aiT = aiAssistance ? createTranslator(aiAssistance.locale) : undefined
+  const aiAssistantSessionKey = aiAssistance
+    ? createAiAssistantSessionKey(aiAssistance.source)
+    : undefined
+  const activeAiAssistantSessionKeyRef = useRef(aiAssistantSessionKey)
+
+  // Keep the adoption fence current before passive effects can observe a new source.
+  useLayoutEffect(() => {
+    activeAiAssistantSessionKeyRef.current = aiAssistantSessionKey
+  }, [aiAssistantSessionKey])
+
+  /**
+   * Replaces the local form only after adoption is safe or explicitly confirmed.
+   *
+   * @param draft - Approved, currently authorized AI status update draft.
+   * @param context - Optional approved generation evidence retained for the form.
+   * @returns Nothing; updates local form seed and evidence state.
+   */
+  function applyAiDraft(
+    draft: AiPlanningStatusUpdateDraft,
+    context?: AiPlanningStatusUpdateAdoptionContext,
+  ) {
+    if (isPublishing || isPublishingRef.current) return
+    const evidenceSeed = context ? createAiPlanningEvidenceSeed(context) : undefined
+    const shouldSeedEvidence = evidenceType === 'none' && evidenceSeed !== undefined
+    setAiEvidenceSeed(shouldSeedEvidence ? evidenceSeed : undefined)
+    setAiGenerationReference(context?.generationId)
+    if (shouldSeedEvidence) setEvidenceType('link')
+    setFormError(undefined)
+    isFormDirtyRef.current = false
+    setIsFormDirty(false)
+    setPendingAiDraft(undefined)
+    setFormSeed((current) => ({
+      draft,
+      revision: current.revision + 1,
+    }))
+  }
+
+  /**
+   * Applies a clean-form adoption or stages it behind manual-edit confirmation.
+   *
+   * @param draft - Approved, currently authorized AI status update draft.
+   * @param sessionKey - Source identity and revision captured by the mounted assistant.
+   * @param replacementConfirmed - Whether manual edits may be replaced immediately.
+   * @param context - Optional approved generation evidence retained for the form.
+   * @returns Nothing; either applies the draft or stages it for confirmation.
+   */
+  function adoptAiDraft(
+    draft: AiPlanningStatusUpdateDraft,
+    sessionKey: string,
+    replacementConfirmed = false,
+    context?: AiPlanningStatusUpdateAdoptionContext,
+  ) {
+    if (activeAiAssistantSessionKeyRef.current !== sessionKey) return
+    if (isPublishing || isPublishingRef.current) {
+      stagedAiDraftDuringPublishRef.current = true
+      setPendingAiDraft({ draft, sessionKey, context })
+      return
+    }
+    if (replacementConfirmed) {
+      applyAiDraft(draft, context)
+      return
+    }
+    routeAiPlanningDraftAdoption(draft, isFormDirtyRef.current, {
+      apply: (nextDraft) => applyAiDraft(nextDraft, context),
+      confirm: (nextDraft) => setPendingAiDraft({
+        draft: nextDraft,
+        sessionKey,
+        context,
+      }),
+    })
+  }
 
   return (
     <section className="workbench-panel p-5" data-testid="planning-update-composer">
@@ -673,16 +863,74 @@ export function PlanningStatusUpdateComposer({
       <p className="mt-1 text-sm font-medium text-[var(--workbench-muted)]">
         {labels.composerDescription}
       </p>
+      {aiAssistance && aiT && aiAssistantSessionKey ? (
+        <div className="mt-4">
+          <AiPlanningStatusUpdateAssistant
+            accessToken={aiAssistance.accessToken}
+            disabled={isPublishing}
+            key={aiAssistantSessionKey}
+            locale={aiAssistance.locale}
+            onAuthenticatedApiError={aiAssistance.onAuthenticatedApiError}
+            onOperationPendingChange={aiAssistance.onOperationPendingChange}
+            onAdopt={(draft, replacementConfirmed, context) => adoptAiDraft(
+              draft,
+              aiAssistantSessionKey,
+              replacementConfirmed,
+              context,
+            )}
+            requireAdoptionConfirmation={isFormDirty}
+            source={aiAssistance.source}
+            t={aiT}
+          />
+        </div>
+      ) : null}
+      {pendingAiDraft &&
+      pendingAiDraft.sessionKey === aiAssistantSessionKey &&
+      aiT ? (
+        <div
+          className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950"
+          role="alert"
+        >
+          <p className="text-sm font-semibold">
+            {aiT('ai.planning.replaceDraftTitle')}
+          </p>
+          <p className="mt-1 text-xs font-medium leading-5">
+            {aiT('ai.planning.replaceDraftDescription')}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="workbench-button-secondary min-h-[44px] px-4"
+              onClick={() => setPendingAiDraft(undefined)}
+              type="button"
+            >
+              {aiT('ai.planning.keepManualDraft')}
+            </button>
+            <button
+              className="workbench-button-primary min-h-[44px] px-4"
+              disabled={isPublishing || aiAssistance?.isAiOperationPending === true}
+              onClick={() => applyAiDraft(pendingAiDraft.draft, pendingAiDraft.context)}
+              type="button"
+            >
+              {aiT('ai.planning.replaceManualDraft')}
+            </button>
+          </div>
+        </div>
+      ) : null}
       <p className="mt-3 text-xs font-semibold text-[var(--workbench-muted)]">
         {labels.composerRequiredHint}
       </p>
       <form
         className="mt-4 grid gap-3"
+        key={`planning-status-update-form-${formSeed.revision}`}
         noValidate
+        onChange={() => {
+          isFormDirtyRef.current = true
+          setIsFormDirty(true)
+        }}
         onSubmit={(event) => {
           event.preventDefault()
           setFormError(undefined)
-          if (!onPublish || isPublishing) return
+          if (!onPublish || isPublishing || isPublishingRef.current) return
           const data = new FormData(event.currentTarget)
           const selectedHealth = readHealth(data.get('health'))
           const selectedRisk = readRisk(data.get('risk'))
@@ -699,6 +947,10 @@ export function PlanningStatusUpdateComposer({
             setFormError(labels.formInvalid)
             return
           }
+          if (aiGenerationReference !== undefined && evidence.length === 0) {
+            setFormError(aiT?.('ai.planning.evidenceRequired') ?? labels.formInvalid)
+            return
+          }
           const draft = {
             decisionSummary: readOptionalText(data.get('decisionSummary')) ?? '',
             evidence,
@@ -709,13 +961,29 @@ export function PlanningStatusUpdateComposer({
             riskSummary: readOptionalText(data.get('riskSummary')) ?? '',
             summary,
           }
+          const wasAiSeeded = aiGenerationReference !== undefined
+          isPublishingRef.current = true
           setIsPublishing(true)
           void (async () => {
             try {
               await onPublish(draft)
+              isFormDirtyRef.current = false
+              setIsFormDirty(false)
+              setAiEvidenceSeed(undefined)
+              setAiGenerationReference(undefined)
+              if (!stagedAiDraftDuringPublishRef.current) setPendingAiDraft(undefined)
+              if (wasAiSeeded) {
+                setEvidenceType('none')
+                setFormSeed((current) => ({
+                  draft: undefined,
+                  revision: current.revision + 1,
+                }))
+              }
             } catch {
               // The page-level mutation handler owns the user-visible error state.
             } finally {
+              stagedAiDraftDuringPublishRef.current = false
+              isPublishingRef.current = false
               setIsPublishing(false)
             }
           })()
@@ -726,8 +994,8 @@ export function PlanningStatusUpdateComposer({
             {labels.health}
             <select
               className="workbench-input h-10 px-3"
-              defaultValue={health}
-              disabled={!onPublish}
+              defaultValue={formSeed.draft?.health ?? health}
+              disabled={formDisabled}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
               name="health"
@@ -741,8 +1009,8 @@ export function PlanningStatusUpdateComposer({
             {labels.risk}
             <select
               className="workbench-input h-10 px-3"
-              defaultValue="none"
-              disabled={!onPublish}
+              defaultValue={formSeed.draft?.risk ?? 'none'}
+              disabled={formDisabled}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
               name="risk"
@@ -765,7 +1033,8 @@ export function PlanningStatusUpdateComposer({
           {labels.summary}
           <textarea
             className="workbench-input min-h-24 p-3"
-            disabled={!onPublish}
+            defaultValue={formSeed.draft?.summary}
+            disabled={formDisabled}
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
             name="summary"
@@ -775,15 +1044,15 @@ export function PlanningStatusUpdateComposer({
         <div className="grid grid-cols-2 gap-3 max-[620px]:grid-cols-1">
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.riskSummary}
-            <textarea className="workbench-input min-h-20 p-3" disabled={!onPublish} name="riskSummary" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.riskSummary} disabled={formDisabled} name="riskSummary" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.decisionSummary}
-            <textarea className="workbench-input min-h-20 p-3" disabled={!onPublish} name="decisionSummary" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.decisionSummary} disabled={formDisabled} name="decisionSummary" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.helpNeeded}
-            <textarea className="workbench-input min-h-20 p-3" disabled={!onPublish} name="helpNeeded" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.helpNeeded} disabled={formDisabled} name="helpNeeded" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.nextAction}
@@ -791,7 +1060,8 @@ export function PlanningStatusUpdateComposer({
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
             className="workbench-input min-h-20 p-3"
-            disabled={!onPublish}
+            defaultValue={formSeed.draft?.nextAction}
+            disabled={formDisabled}
             name="nextAction"
             required
           />
@@ -801,11 +1071,18 @@ export function PlanningStatusUpdateComposer({
           <legend className="text-sm font-semibold text-[var(--workbench-text)]">
             {labels.evidence}
           </legend>
+          {aiGenerationReference && aiT ? (
+            <p className="border-l-2 border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-950">
+              {aiEvidenceSeed
+                ? `${aiT('ai.planning.evidenceRetained')} (${aiGenerationReference})`
+                : aiT('ai.planning.evidenceRequired')}
+            </p>
+          ) : null}
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.evidenceType}
             <select
               className="workbench-input h-10 px-3"
-              disabled={!onPublish}
+              disabled={formDisabled}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
               name="evidenceType"
@@ -827,7 +1104,7 @@ export function PlanningStatusUpdateComposer({
             <select
               aria-label={labels.evidenceWorkItemPlaceholder}
               className="workbench-input h-10 px-3"
-              disabled={!onPublish}
+              disabled={formDisabled}
               name="evidenceWorkItem"
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
@@ -843,7 +1120,7 @@ export function PlanningStatusUpdateComposer({
             <select
               aria-label={labels.evidencePlanningEntityPlaceholder}
               className="workbench-input h-10 px-3"
-              disabled={!onPublish}
+              disabled={formDisabled}
               name="evidencePlanningEntity"
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
@@ -860,7 +1137,7 @@ export function PlanningStatusUpdateComposer({
               <input
                 aria-label={labels.evidenceFileIdPlaceholder}
                 className="workbench-input h-10 px-3"
-                disabled={!onPublish}
+                disabled={formDisabled}
                 name="evidenceFileId"
                 placeholder={labels.evidenceFileIdPlaceholder}
                 required
@@ -870,6 +1147,7 @@ export function PlanningStatusUpdateComposer({
                 labels={labels}
                 name="evidenceFileUrl"
                 onPublish={onPublish}
+                disabled={formDisabled}
               />
             </div>
           ) : null}
@@ -878,7 +1156,8 @@ export function PlanningStatusUpdateComposer({
               <input
                 aria-label={labels.evidenceLabelPlaceholder}
                 className="workbench-input h-10 px-3"
-                disabled={!onPublish}
+                defaultValue={aiEvidenceSeed?.label}
+                disabled={formDisabled}
                 name="evidenceLabel"
                 placeholder={labels.evidenceLabelPlaceholder}
               />
@@ -887,6 +1166,8 @@ export function PlanningStatusUpdateComposer({
                 labels={labels}
                 name="evidenceUrl"
                 onPublish={onPublish}
+                disabled={formDisabled}
+                defaultValue={aiEvidenceSeed?.url}
               />
             </div>
           ) : null}
@@ -901,8 +1182,8 @@ export function PlanningStatusUpdateComposer({
           </p>
         ) : null}
         <button
-          className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
-          disabled={!onPublish || isPublishing}
+          className="workbench-button-primary min-h-[44px] px-4 disabled:opacity-50"
+          disabled={formDisabled}
           aria-busy={isPublishing}
           type="submit"
         >
@@ -913,6 +1194,22 @@ export function PlanningStatusUpdateComposer({
   )
 }
 
+/** Props for one required HTTPS permalink field used by the typed evidence form. */
+type PlanningEvidenceUrlInputProps = {
+  /** Optional safe URL copied from an approved generation citation. */
+  defaultValue?: string
+  /** Whether the field is temporarily frozen while a publish is pending. */
+  disabled?: boolean
+  /** Whether the current field value failed validation. */
+  hasError?: boolean
+  /** Localized placeholder shown to the operator. */
+  labels: Pick<PlanningUpdateLabels, 'evidenceUrlPlaceholder'>
+  /** Form field name submitted with the manual update. */
+  name: string
+  /** Publish callback whose presence determines editability. */
+  onPublish: PlanningStatusUpdateComposerProps['onPublish']
+}
+
 /**
  * Renders one required HTTPS permalink field for typed evidence.
  *
@@ -920,21 +1217,19 @@ export function PlanningStatusUpdateComposer({
  * @returns A URL input constrained to credential-free HTTPS permalinks.
  */
 function PlanningEvidenceUrlInput({
+  defaultValue,
+  disabled = false,
   hasError = false,
   labels,
   name,
   onPublish,
-}: {
-  hasError?: boolean
-  labels: Pick<PlanningUpdateLabels, 'evidenceUrlPlaceholder'>
-  name: string
-  onPublish: PlanningStatusUpdateComposerProps['onPublish']
-}) {
+}: PlanningEvidenceUrlInputProps) {
   return (
     <input
       aria-label={labels.evidenceUrlPlaceholder}
       className="workbench-input h-10 px-3"
-      disabled={!onPublish}
+      defaultValue={defaultValue}
+      disabled={!onPublish || disabled}
       aria-describedby={hasError ? 'planning-update-composer-error' : undefined}
       aria-invalid={hasError}
       name={name}

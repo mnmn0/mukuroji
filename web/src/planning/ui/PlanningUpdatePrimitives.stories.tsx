@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { createPlanningUpdateWorkItemEvidenceValue } from '../model/statusUpdateView'
 import { PlanningStatusUpdateComposer } from './PlanningUpdatePrimitives'
 import { createPlanningLabels } from './labels'
+import { aiPlanningGenerationFixture } from '../../features/ai-assistance/fixtures'
 
 const evidenceCandidates = {
   planningEntities: [{
@@ -59,4 +60,29 @@ export const FileEvidence: Story = {
 /** Generic external evidence link and optional label. */
 export const LinkEvidence: Story = {
   args: { initialEvidenceType: 'link' },
+}
+
+/** Existing form prefilled from an approved AI status update without publishing it. */
+export const AiDraftPrefill: Story = {
+  args: {
+    initialDraft: aiPlanningGenerationFixture.content.availability === 'available' &&
+      aiPlanningGenerationFixture.content.draft.kind === 'planning'
+      ? aiPlanningGenerationFixture.content.draft.statusUpdate
+      : undefined,
+  },
+}
+
+/** Explicit Planning generation entry point before any provider request is made. */
+export const AiGenerationIdle: Story = {
+  args: {
+    aiAssistance: {
+      accessToken: 'storybook-access-token',
+      locale: 'en',
+      source: {
+        expectedRevision: 12,
+        target: { projectId: 'launch-readiness', teamId: 'core-team', type: 'project' },
+        type: 'planning-target',
+      },
+    },
+  },
 }

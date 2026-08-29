@@ -4,6 +4,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
   canManageWorkspaceStructure,
@@ -24,6 +25,7 @@ import {
   type ProjectDirectoryTeam,
 } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
+import { useWorkspaceAccess } from '../workspace/queries/useWorkspaceAccess'
 import {
   type RequestsView,
 } from '../shared/routing/paths'
@@ -54,7 +56,12 @@ import {
   updateRequestFormInput,
   type RequestFormDraftModel,
 } from './model/requestForm'
+import type {
+  RequestRoutingAssigneeDirectory,
+  RequestRoutingProjectDirectory,
+} from './model/requestTriageRouting'
 import { RequestQueue } from './ui/RequestQueue'
+import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyForms: RequestForm[] = []
@@ -67,6 +74,7 @@ const apiSWRConfig = {
  * Request intake queue と form builder を認証済み Workspace shell 内に描画します。
  */
 export function RequestIntakePage() {
+  const workspaceContext = useOptionalWorkspaceRouteContext()
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -97,7 +105,33 @@ export function RequestIntakePage() {
     enabled: Boolean(user && !currentUserError),
     locale,
   })
+  const projectDirectory = useMemo<RequestRoutingProjectDirectory>(
+    () => new Map(teams.map((team) => [
+      team.id,
+      new Set(team.projects.map((project) => project.id)),
+    ])),
+    [teams],
+  )
   const canManageForms = canManageWorkspaceStructure(user)
+  // Request-level conversion capability is the source-of-truth gate for this assistant.
+  // Policy-management permission must not hide it from operators who can convert a request.
+  const canUseAiAssistance = Boolean(
+    (workspaceContext?.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled) &&
+      accessToken && user && !currentUserError,
+  )
+  const {
+    data: workspaceAccess,
+    error: workspaceAccessError,
+  } = useWorkspaceAccess(accessToken, canUseAiAssistance)
+  const activeAssigneeDirectory = useMemo<RequestRoutingAssigneeDirectory | undefined>(() => {
+    if (!workspaceAccess) return undefined
+    return new Set(
+      workspaceAccess.members
+        .filter((member) => member.status === 'active' && member.role !== 'guest')
+        .map((member) => member.memberKey.trim().toLowerCase())
+        .filter((memberKey) => memberKey.length > 0),
+    )
+  }, [workspaceAccess])
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
     : 'queue'
@@ -162,6 +196,7 @@ export function RequestIntakePage() {
       projectDirectoryError,
       queueError,
       formsError,
+      workspaceAccessError,
       detailError,
       selectedFormError,
       authenticatedApiError,
@@ -300,11 +335,14 @@ export function RequestIntakePage() {
 
             {activeView === 'queue' ? (
               <RequestQueue
+                accessToken={accessToken}
+                canUseAiAssistance={canUseAiAssistance}
                 errorMessage={actionErrorMessage ?? (queueError instanceof Error ? queueError.message : detailError instanceof Error ? detailError.message : undefined)}
                 isLoading={isQueueLoading}
                 hasMore={Boolean(nextQueueCursor)}
                 isLoadingMore={isLoadingMore}
                 locale={locale}
+                onAuthenticatedApiError={handleAuthenticatedApiError}
                 selectedSubmission={selectedSubmission
                   ? normalizeRequestSubmission(selectedSubmission)
                   : submissions.find((submission) => submission.id === selectedSubmissionId)}
@@ -313,6 +351,8 @@ export function RequestIntakePage() {
                 onLoadMore={() => void setQueuePageCount(queuePageCount + 1)}
                 onOpenAttachment={handleOpenAttachment}
                 onSelectSubmission={selectSubmission}
+                assigneeDirectory={activeAssigneeDirectory}
+                projectDirectory={projectDirectory}
               />
             ) : (
               <div className="grid grid-cols-[280px_minmax(0,1fr)] gap-5 max-[920px]:grid-cols-1">

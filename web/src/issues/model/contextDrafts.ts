@@ -24,6 +24,22 @@ export type IssueContextDraft = {
 }
 
 /**
+ * Checks the synchronous adoption fence for a feature-owned Brief assistant.
+ *
+ * @param activeSessionKey - Current source-and-revision key in the panel.
+ * @param expectedSessionKey - Key captured by the assistant that raised the event.
+ * @param currentDraft - Whether an existing human-owned draft occupies the editor.
+ * @returns Whether the adoption may open a new local draft.
+ */
+export function isAiSummaryAdoptionCurrent(
+  activeSessionKey: string | undefined,
+  expectedSessionKey: string | undefined,
+  currentDraft: IssueContextDraft | undefined,
+): boolean {
+  return activeSessionKey === expectedSessionKey && currentDraft === undefined
+}
+
+/**
  * Checks the latest capability snapshot before a context editor submits.
  *
  * Evidence-backed creates require replacement permission only after the curator selects

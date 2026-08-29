@@ -16,6 +16,7 @@ import { securityMessages } from './security'
 import { projectsMessages } from './projects'
 import { capacityPlanningMessages } from './capacity-planning'
 import { triageMessages } from './triage'
+import { aiAssistanceMessages } from './ai-assistance'
 
 /**
  * Complete Japanese message dictionary assembled from domain modules.
@@ -39,6 +40,7 @@ export const jaMessages = {
   ...projectsMessages,
   ...capacityPlanningMessages,
   ...triageMessages,
+  ...aiAssistanceMessages,
 } as const
 
 /**

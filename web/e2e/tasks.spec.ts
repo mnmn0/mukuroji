@@ -4989,6 +4989,9 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { exact: true, name: '優先度' }).click()
     await page.getByRole('menuitemradio', { name: 'すべての優先度' }).click()
+    // Wait for the URL-owned task-view override to round-trip before applying
+    // the next filter; otherwise the next click can race the previous update.
+    await expect(page.getByTestId('task-row-seo-research')).toBeVisible()
     await page.getByRole('button', { name: '期限', exact: true }).click()
     await page.getByRole('menuitemradio', { name: '期限切れ' }).click()
 
@@ -6097,7 +6100,8 @@ test.describe('authenticated task page', () => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
-    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
+    const sidebar = page.locator('aside[aria-label="メインサイドバー"]')
+    await expect(sidebar.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
 
     await page.getByRole('button', { name: 'コアチーム', exact: true }).click()
     await page.getByRole('button', { name: 'デザインチーム', exact: true }).click()
@@ -6133,7 +6137,12 @@ test.describe('authenticated task page', () => {
   }) => {
     await page.goto('/dashboard')
 
-    const sharedLaunchButtons = page.getByRole('button', { name: '共通ローンチ', exact: true })
+    // The dashboard portfolio now exposes the same project labels as links to
+    // Planning updates. Scope this assertion to the sidebar shortcuts so the
+    // test continues to exercise the team-qualified navigation target.
+    const sharedLaunchButtons = page
+      .locator('aside[aria-label="メインサイドバー"]')
+      .getByRole('button', { name: '共通ローンチ', exact: true })
 
     await expect(sharedLaunchButtons).toHaveCount(2)
     await sharedLaunchButtons.nth(1).click()
@@ -7137,6 +7146,7 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const panel = page.getByTestId('issue-collaboration-panel')
     const conversationTab = panel.getByRole('tab', { name: /会話/ })
+    const briefTab = panel.getByRole('tab', { name: /Brief/ })
     const decisionsTab = panel.getByRole('tab', { name: /判断/ })
     const sourcesTab = panel.getByRole('tab', { name: /情報源/ })
     const collaborationTablist = panel.getByRole('tablist', {
@@ -7162,6 +7172,10 @@ test.describe('authenticated task page', () => {
     )
     await conversationTab.focus()
     await page.keyboard.press('ArrowRight')
+    if (await briefTab.count()) {
+      await expect(briefTab).toBeFocused()
+      await page.keyboard.press('ArrowRight')
+    }
     await expect(decisionsTab).toBeFocused()
     await expect(decisionsTab).toHaveAttribute('aria-selected', 'true')
     await expect(panel.getByText('モバイルでは操作を固定フッターへ置く')).toBeVisible()

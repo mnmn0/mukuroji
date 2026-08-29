@@ -28,6 +28,8 @@ export type TriageQueueProps = {
   readonly isLoadingMore?: boolean
   /** Whether another cursor page exists. */
   readonly hasMore?: boolean
+  /** Whether an AI operation is pending and source changes must be fenced. */
+  readonly isAiOperationPending?: boolean
   /** Safe localized load error. */
   readonly errorMessage?: string
   /** Current locale used for dates. */
@@ -110,6 +112,7 @@ export function TriageQueue({
   errorMessage,
   filters,
   hasMore = false,
+  isAiOperationPending = false,
   isLoading = false,
   isLoadingMore = false,
   locale,
@@ -134,6 +137,7 @@ export function TriageQueue({
     event: KeyboardEvent<HTMLButtonElement>,
     index: number,
   ) => {
+    if (isAiOperationPending) return
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
     const nextIndex = resolveTriageNavigationIndex(index, event.key, entries.length)
     if (nextIndex === undefined) return
@@ -165,7 +169,7 @@ export function TriageQueue({
               aria-label={t('triage.bulk.selectVisible')}
               checked={allVisibleSelected}
               className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
-              disabled={selectableEntries.length === 0}
+              disabled={isAiOperationPending || selectableEntries.length === 0}
               onChange={(event) => {
                 const ids = event.target.checked
                   ? selectableEntries
@@ -192,6 +196,7 @@ export function TriageQueue({
             {t('triage.filter.search')}
             <input
               className="workbench-input min-h-10 px-3 text-sm"
+              disabled={isAiOperationPending}
               onChange={(event) => onFiltersChange({
                 ...filters,
                 query: event.target.value || undefined,
@@ -204,6 +209,7 @@ export function TriageQueue({
           <div className="grid grid-cols-2 gap-2">
             <FilterSelect
               label={t('triage.filter.state')}
+              disabled={isAiOperationPending}
               value={filters.state ?? ''}
               onChange={(value) => onFiltersChange({
                 ...filters,
@@ -217,6 +223,7 @@ export function TriageQueue({
             </FilterSelect>
             <FilterSelect
               label={t('triage.filter.source')}
+              disabled={isAiOperationPending}
               value={filters.source ?? ''}
               onChange={(value) => onFiltersChange({
                 ...filters,
@@ -230,6 +237,7 @@ export function TriageQueue({
             </FilterSelect>
             <FilterSelect
               label={t('triage.filter.owner')}
+              disabled={isAiOperationPending}
               value={filters.owner ?? 'all'}
               onChange={(value) => onFiltersChange({
                 ...filters,
@@ -242,6 +250,7 @@ export function TriageQueue({
             </FilterSelect>
             <FilterSelect
               label={t('triage.filter.sla')}
+              disabled={isAiOperationPending}
               value={filters.sla ?? ''}
               onChange={(value) => onFiltersChange({
                 ...filters,
@@ -263,7 +272,7 @@ export function TriageQueue({
         <div className="grid justify-items-start gap-3 p-5" role="alert">
           <p className="text-sm font-semibold text-red-700">{errorMessage}</p>
           {onRetry ? (
-            <button className="workbench-button-secondary min-h-10 px-4" onClick={onRetry} type="button">
+            <button className="workbench-button-secondary min-h-10 px-4" disabled={isAiOperationPending} onClick={onRetry} type="button">
               {t('triage.queue.retry')}
             </button>
           ) : null}
@@ -279,6 +288,7 @@ export function TriageQueue({
             {hasActiveFilters(filters) ? (
               <button
                 className="mt-3 min-h-10 px-3 text-sm font-semibold text-[var(--workbench-primary)]"
+                disabled={isAiOperationPending}
                 onClick={() => onFiltersChange({ owner: 'all' })}
                 type="button"
               >
@@ -306,7 +316,7 @@ export function TriageQueue({
                     <input
                       checked={selectedIdSet.has(entry.id)}
                       className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
-                      disabled={!isBulkSelectable ||
+                      disabled={isAiOperationPending || !isBulkSelectable ||
                         (!selectedIdSet.has(entry.id) && selectedIdSet.size >= TRIAGE_BULK_ACTION_LIMIT)}
                       onChange={(event) => onEntrySelectionChange(entry.id, event.target.checked)}
                       type="checkbox"
@@ -318,6 +328,7 @@ export function TriageQueue({
                     className="min-w-0 flex-1 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)] focus-visible:ring-offset-2"
                     data-testid={`triage-entry-${entry.id}`}
                     data-triage-entry-id={entry.id}
+                    disabled={isAiOperationPending}
                     onClick={() => onSelectEntry(entry.id)}
                     onKeyDown={(event) => handleRowKeyDown(event, index)}
                     ref={(element) => {
@@ -401,8 +412,10 @@ function QueueMetric({ alert = false, label, value }: {
 }
 
 /** Renders one labeled queue filter control. */
-function FilterSelect({ children, label, onChange, value }: {
+function FilterSelect({ children, disabled = false, label, onChange, value }: {
   children: React.ReactNode
+  /** Whether the filter is temporarily unavailable while AI is pending. */
+  disabled?: boolean
   label: string
   onChange: (value: string) => void
   value: string
@@ -412,6 +425,7 @@ function FilterSelect({ children, label, onChange, value }: {
       {label}
       <select
         className="workbench-input min-h-10 min-w-0 px-2 text-sm"
+        disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
         value={value}
       >

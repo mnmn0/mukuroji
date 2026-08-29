@@ -329,19 +329,30 @@ export type AiAssistanceUncertainty = {
   reason: string
 }
 
-/** Token, latency, and cost metadata retained for audit and evaluation. */
-export type AiAssistanceUsage = {
+/** Shared token and latency metadata retained for audit and evaluation. */
+type AiAssistanceUsageBase = {
   /** Prompt tokens reported by the provider. */
   inputTokens?: number
   /** Completion tokens reported by the provider. */
   outputTokens?: number
   /** End-to-end provider latency in milliseconds. */
   latencyMs: number
-  /** Provider-reported or deployment-calculated cost in USD. */
-  costUsd?: number
-  /** Reason a trustworthy cost amount was unavailable. */
-  costUnavailableReason?: 'provider-not-reported' | 'pricing-not-configured'
 }
+
+/** Token, latency, and cost metadata retained for audit and evaluation. */
+export type AiAssistanceUsage =
+  | (AiAssistanceUsageBase & {
+      /** Provider-reported or deployment-calculated cost in USD. */
+      costUsd: number
+      /** Cost-unavailable reason is omitted when a cost is available. */
+      costUnavailableReason?: never
+  })
+  | (AiAssistanceUsageBase & {
+      /** Reason a trustworthy cost amount was unavailable. */
+      costUnavailableReason: 'provider-not-reported' | 'pricing-not-configured'
+      /** Cost is omitted when a trustworthy amount is unavailable. */
+      costUsd?: never
+  })
 
 /** Technical generation details available in the audit disclosure. */
 export type AiAssistanceGenerationDetails = {

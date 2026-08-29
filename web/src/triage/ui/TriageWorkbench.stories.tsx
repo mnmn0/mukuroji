@@ -1,5 +1,12 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import type {
+  AiAssistanceGeneration,
+  GenerateAiAssistanceRequest,
+} from '@mukuroji/contracts'
+import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import { aiTriageGenerationFixture } from '../../features/ai-assistance/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
   triageConfigurationFixture,
@@ -9,11 +16,15 @@ import {
   countTriageEntryViews,
   createTriageEntryView,
 } from '../model/triageView'
-import { TriageWorkbench } from './TriageWorkbench'
+import { TriageWorkbench, type TriageWorkbenchProps } from './TriageWorkbench'
 
 const entryViews = triageEntryFixtures.map((entry) =>
   createTriageEntryView(entry, new Date('2026-08-09T01:30:00.000Z'))
 )
+const eligibleAssigneeIdsByProject = new Map([
+  ['launch-readiness', new Set(['member-ada'])],
+  ['launch-support', new Set(['member-ada'])],
+])
 const onAction = fn(async () => triageEntryFixtures[0] ?? Promise.reject(new Error('Missing fixture')))
 const onBulkAction = fn(async () => [])
 const onSaveConfiguration = fn(async () => triageConfigurationFixture)
@@ -51,7 +62,10 @@ const meta = {
     selectedEntry: entryViews[0],
     selectedEntryIds: [],
     t: createTranslator('en'),
+    teamId: 'core-team',
     teamName: 'Core team',
+    visibleProjectIds: ['launch-readiness', 'launch-support'],
+    eligibleAssigneeIdsByProject,
   },
 } satisfies Meta<typeof TriageWorkbench>
 
@@ -144,4 +158,135 @@ export const MobileDetail: Story = {
   parameters: {
     viewport: { defaultViewport: 'mobile1' },
   },
+}
+
+const onAiTriageAction = fn(async () => triageEntryFixtures[0] ?? Promise.reject(new Error('Missing fixture')))
+const onTeamTriageAiGenerate = fn(async (input: GenerateAiAssistanceRequest) => {
+  void input
+  return aiTriageGenerationFixture
+})
+
+/** Full-visibility flow where AI adoption only prefills the existing Assign form. */
+export const AiDraftAdoption: Story = {
+  args: {
+    accessToken: 'storybook-access-token',
+    onAction: onAiTriageAction,
+  },
+  render: (args) => <AiTriageWorkbenchStory {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onAiTriageAction.mockClear()
+    onTeamTriageAiGenerate.mockClear()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Generate draft' }))
+    await expect(onTeamTriageAiGenerate).toHaveBeenCalledWith({
+      locale: 'en',
+      source: {
+        expectedRevision: 3,
+        teamId: 'core-team',
+        triageEntryId: 'triage-chat-1',
+        type: 'triage-entry',
+      },
+      task: 'triage',
+    })
+    await expect(canvas.getByText('Unblock customer Workspace provisioning')).toBeVisible()
+    await expect(onAiTriageAction).not.toHaveBeenCalled()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in Accept / Assign form' }))
+    await expect(canvas.getByRole('textbox', { name: 'Owner user ID' })).toHaveValue('member-ada')
+    await expect(canvas.getByRole('textbox', { name: 'Project ID' })).toHaveValue('launch-readiness')
+    await expect(onAiTriageAction).not.toHaveBeenCalled()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Review and apply' }))
+    await expect(onAiTriageAction).toHaveBeenCalledWith(
+      'triage-chat-1',
+      expect.objectContaining({
+        action: 'assign',
+        expectedRevision: 3,
+        ownerUserId: 'member-ada',
+        projectId: 'launch-readiness',
+      }),
+    )
+  },
+}
+
+/** Confirms a dirty routing field before recording the AI approval decision. */
+export const AiDraftRoutingReplacementConfirmation: Story = {
+  args: {
+    accessToken: 'storybook-access-token',
+    onAction: onAiTriageAction,
+  },
+  render: (args) => <AiTriageWorkbenchStory {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Change routing' }))
+    await userEvent.clear(canvas.getByRole('textbox', { name: 'Owner user ID' }))
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Owner user ID' }), 'member-manual')
+    await userEvent.click(canvas.getByRole('button', { name: 'Generate draft' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in Accept / Assign form' }))
+
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Keep or replace your manual edits?')
+    await userEvent.click(canvas.getByRole('button', { name: 'Keep manual edits' }))
+    await expect(canvas.getByRole('textbox', { name: 'Owner user ID' })).toHaveValue('member-manual')
+    await expect(canvas.getByRole('button', { name: 'Use in Accept / Assign form' })).toBeVisible()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in Accept / Assign form' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Replace with AI draft' }))
+    await expect(canvas.getByRole('textbox', { name: 'Owner user ID' })).toHaveValue('member-ada')
+  },
+}
+
+/** Phone-width full-visibility detail with the flat AI evidence rail. */
+export const AiDraftMobileDetail: Story = {
+  args: {
+    accessToken: 'storybook-access-token',
+    explicitEntryId: 'triage-chat-1',
+    onAction: onAiTriageAction,
+  },
+  parameters: {
+    viewport: { defaultViewport: 'mobile1' },
+  },
+  render: (args) => <AiTriageWorkbenchStory {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'Generate draft' }))
+    await expect(canvas.getByText('Unblock customer Workspace provisioning')).toBeVisible()
+  },
+}
+
+/**
+ * Supplies a stateful deterministic AI controller for Storybook without issuing Bedrock requests.
+ *
+ * @param props - Triage workbench story props passed to the rendered surface.
+ * @returns A triage workbench wired to the in-memory generation controller.
+ */
+function AiTriageWorkbenchStory(props: TriageWorkbenchProps) {
+  const [generation, setGeneration] = useState<AiAssistanceGeneration>()
+  const controller: AiAssistanceController = {
+    cancelGeneration: () => undefined,
+    decide: async (outcome) => {
+      if (!generation) return undefined
+      const decidedGeneration: AiAssistanceGeneration = {
+        ...generation,
+        decision: { decidedAt: '2026-08-25T01:16:00.000Z', outcome },
+        revision: generation.revision + 1,
+      }
+      setGeneration(decidedGeneration)
+      return decidedGeneration
+    },
+    generate: async (input) => {
+      const generated = await onTeamTriageAiGenerate(input)
+      setGeneration(generated)
+      return generated
+    },
+    generation,
+    isDecisionPending: false,
+    isFeedbackPending: false,
+    isGenerating: false,
+    reset: () => setGeneration(undefined),
+    sendFeedback: async () => undefined,
+  }
+
+  return <TriageWorkbench {...props} aiAssistanceController={controller} />
 }

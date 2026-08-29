@@ -3,6 +3,7 @@ import { getProjectMembers } from '../api/members'
 import { getProjectUsers } from '../api/users'
 import {
   loadActiveProjectMembers,
+  loadTeamProjectMembers,
   loadPlanningProjectRoles,
   loadWorkspaceProjectMembers,
 } from './projectMembers'
@@ -125,6 +126,39 @@ export function useWorkspaceProjectMembers(
   const query = useSWR(
     key,
     ([, token]) => loadWorkspaceProjectMembers(token, projects),
+    projectMemberQueryConfig,
+  )
+
+  return { ...query, key }
+}
+
+/**
+ * Loads Project members through the exact Team-qualified scope used by triage adoption checks.
+ *
+ * @param accessToken - Bearer token for the Project member API.
+ * @param teamId - Team identifier that qualifies duplicate Project IDs.
+ * @param projects - Projects currently visible in the Team directory.
+ * @param enabled - Whether the query is enabled.
+ * @returns Team-qualified Project member query state.
+ */
+export function useTeamProjectMembers(
+  accessToken: string | undefined,
+  teamId: string | undefined,
+  projects: readonly ProjectDirectoryProject[],
+  enabled = true,
+) {
+  const key = accessToken && teamId && enabled && projects.length > 0
+    ? [
+        'team-qualified-project-members',
+        accessToken,
+        teamId,
+        projects.map((project) => project.id).join('\0'),
+      ] as const
+    : null
+
+  const query = useSWR(
+    key,
+    ([, token, currentTeamId]) => loadTeamProjectMembers(token, currentTeamId, projects),
     projectMemberQueryConfig,
   )
 

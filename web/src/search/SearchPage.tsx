@@ -9,11 +9,13 @@ import {
   type SearchViewLayout,
   type SearchViewLayoutMode,
   type UpdateSavedWorkspaceViewInput,
+  type WorkspaceSearchDateField,
   type WorkspaceSearchFilters,
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
@@ -60,8 +62,15 @@ import {
   updateSearchRouteState,
   type SearchRouteState,
 } from './model/queryState'
+import { applyApprovedAiSearchToRouteStateIfCurrent } from './model/aiSearchApplication'
 import { SearchResultCollection } from './ui/SearchResultCollection'
+import {
+  NaturalLanguageSearchComposer,
+  type NaturalLanguageSearchComposerProps,
+} from './ui/NaturalLanguageSearchComposer'
+import { SearchCountReport } from './ui/SearchCountReport'
 import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
+import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 
 /**
  * Saved view作成フォームの入力stateです。
@@ -104,9 +113,12 @@ const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 
 /**
- * Permission-aware Workspace search、saved view、cursor paginationを提供する画面です。
+ * Renders permission-aware Workspace search, saved views, and cursor pagination.
+ *
+ * @returns The Search route surface with optional AI-assisted review controls.
  */
 export function SearchPage() {
+  const workspaceContext = useOptionalWorkspaceRouteContext()
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -114,6 +126,7 @@ export function SearchPage() {
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [results, setResults] = useState<WorkspaceSearchResult[]>([])
+  const [completedRouteSignature, setCompletedRouteSignature] = useState<string | undefined>()
   const [nextCursor, setNextCursor] = useState<string | undefined>()
   const [isSearchLoading, setIsSearchLoading] = useState(false)
   const [nextPageLoadingSignature, setNextPageLoadingSignature] = useState<string | undefined>()
@@ -129,6 +142,8 @@ export function SearchPage() {
   })
   const [deleteConfirmationViewId, setDeleteConfirmationViewId] = useState<string | undefined>()
   const activeRouteSignatureRef = useRef('')
+  const [isAiOperationPending, setIsAiOperationPending] = useState(false)
+  const isAiOperationPendingRef = useRef(false)
   const nextPageAbortControllerRef = useRef<AbortController | undefined>(undefined)
   const t = useMemo(() => createTranslator(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
@@ -207,7 +222,7 @@ export function SearchPage() {
     ? t('search.error')
     : searchErrorMessage
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeRouteSignatureRef.current = routeSignature
     nextPageAbortControllerRef.current?.abort()
     nextPageAbortControllerRef.current = undefined
@@ -258,12 +273,14 @@ export function SearchPage() {
         .then((response) => {
           setResults(response.results)
           setNextCursor(response.nextCursor)
+          setCompletedRouteSignature(routeSignature)
         })
         .catch((error: unknown) => {
           if (!abortController.signal.aborted) {
             setAuthenticatedApiError(() => error)
             setResults([])
             setNextCursor(undefined)
+            setCompletedRouteSignature(undefined)
             setSearchErrorMessage(error instanceof Error ? error.message : t('search.error'))
           }
         })
@@ -310,10 +327,12 @@ export function SearchPage() {
   }, [savedViews, searchParams, setSearchParams])
 
   const commitRouteState = (nextState: SearchRouteState) => {
+    if (isAiOperationPendingRef.current) return
     setSearchParams(serializeSearchRouteState(nextState), { replace: true })
   }
 
   const updateFilters = (patch: Record<string, unknown>) => {
+    if (isAiOperationPendingRef.current) return
     commitRouteState(updateSearchRouteState(routeState, {
       filters: {
         ...asRecord(routeState.filters),
@@ -323,6 +342,7 @@ export function SearchPage() {
   }
 
   const updateLayout = (patch: Record<string, unknown>) => {
+    if (isAiOperationPendingRef.current) return
     commitRouteState(updateSearchRouteState(routeState, {
       layout: {
         ...asRecord(routeState.layout),
@@ -371,6 +391,7 @@ export function SearchPage() {
 
   const saveCurrentView = async () => {
     if (
+      isAiOperationPendingRef.current ||
       !accessToken ||
       !savedViewDraft.name.trim() ||
       (savedViewDraft.visibility === 'team' && !savedViewDraft.teamId)
@@ -411,7 +432,7 @@ export function SearchPage() {
   }
 
   const patchSavedView = async (view: SavedWorkspaceView, patch: Record<string, unknown>) => {
-    if (!accessToken) {
+    if (isAiOperationPendingRef.current || !accessToken) {
       return
     }
 
@@ -436,7 +457,7 @@ export function SearchPage() {
   }
 
   const removeSavedView = async (view: SavedWorkspaceView) => {
-    if (!accessToken) {
+    if (isAiOperationPendingRef.current || !accessToken) {
       return
     }
 
@@ -460,12 +481,25 @@ export function SearchPage() {
   }
 
   const selectSavedView = (view: SavedWorkspaceView) => {
+    if (isAiOperationPendingRef.current) return
     commitRouteState({
       filters: view.filters,
       layout: view.layout,
       migrationWarnings: formatSavedViewMigrationWarnings(view),
       savedViewId: view.id,
     })
+  }
+
+  /** Keeps Search route controls fenced while an AI operation is pending. */
+  const reportAiOperationPending = (pending: boolean) => {
+    isAiOperationPendingRef.current = pending
+    setIsAiOperationPending(pending)
+  }
+
+  /** Navigates to a Search result only when no AI operation is in flight. */
+  const navigateToSearchResult = (path: string) => {
+    if (isAiOperationPendingRef.current) return
+    navigate(path)
   }
 
   return (
@@ -515,6 +549,7 @@ export function SearchPage() {
                 draft={savedViewDraft}
                 errorMessage={savedViewErrorMessage ?? (savedViewsError ? t('search.error') : undefined)}
                 isFormOpen={isSavedViewFormOpen}
+                isAiOperationPending={isAiOperationPending}
                 selectedViewId={routeState.savedViewId}
                 t={t}
                 teams={teams}
@@ -539,11 +574,21 @@ export function SearchPage() {
 
               <div className="grid min-w-0 content-start gap-4">
                 <SearchToolbar
-                  key={getSearchDateField(routeState.filters)}
-                  routeState={routeState}
-                  selectedSavedView={selectedSavedView}
-                  statusOptions={statusOptions}
-                  t={t}
+                  accessToken={accessToken}
+                  aiAssistanceEnabled={workspaceContext?.isAiAssistanceTaskEnabled?.('search') ?? aiAssistanceUiEnabled}
+                  locale={locale}
+                  onAuthenticatedApiError={setAuthenticatedApiError}
+                  isAiOperationPending={isAiOperationPending}
+                  onAiOperationPendingChange={reportAiOperationPending}
+                  onAiFiltersApply={(application, expectedRouteSignature) => {
+                    const nextRouteState = applyApprovedAiSearchToRouteStateIfCurrent(
+                      routeState,
+                      expectedRouteSignature,
+                      activeRouteSignatureRef.current,
+                      application,
+                    )
+                    if (nextRouteState) commitRouteState(nextRouteState)
+                  }}
                   onFiltersChange={updateFilters}
                   onLayoutChange={updateLayout}
                   onUpdateSelectedView={selectedSavedView?.canEdit
@@ -552,6 +597,11 @@ export function SearchPage() {
                         layout: routeState.layout,
                       })
                     : undefined}
+                  routeSignature={routeSignature}
+                  routeState={routeState}
+                  selectedSavedView={selectedSavedView}
+                  statusOptions={statusOptions}
+                  t={t}
                 />
                 {migrationWarnings.map((warning) => (
                   <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800" key={warning} role="status">
@@ -575,13 +625,25 @@ export function SearchPage() {
                       : `${t('search.error')} ${visibleSearchErrorMessage}`}
                   </p>
                 ) : null}
+                {routeState.reportMetric === 'count' &&
+                completedRouteSignature === routeSignature &&
+                !isSearchLoading &&
+                !visibleSearchErrorMessage ? (
+                  <SearchCountReport
+                    groupBy={getSearchGroup(routeState.layout) || undefined}
+                    hasMore={Boolean(nextCursor)}
+                    results={results}
+                    t={t}
+                  />
+                ) : null}
                 {isSearchLoading ? (
                   <SearchLoadingState t={t} />
                 ) : results.length > 0 ? (
                   <SearchResultCollection
+                    isAiOperationPending={isAiOperationPending}
                     layout={routeState.layout}
                     locale={locale}
-                    onNavigate={navigate}
+                    onNavigate={navigateToSearchResult}
                     results={results}
                     statusLabels={statusLabels}
                   />
@@ -609,31 +671,133 @@ export function SearchPage() {
   )
 }
 
+/** Props for the canonical Search controls and optional AI-assisted mode. */
+type SearchToolbarProps = {
+  /** Whether the deployment and Workspace policy expose AI Search. */
+  aiAssistanceEnabled?: boolean
+  /** Whether Search route controls are fenced during an AI operation. */
+  isAiOperationPending?: boolean
+  /** Active Workspace member bearer token. */
+  accessToken?: string
+  /** Reports authenticated API failures to the route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
+  /** Locale used for labels and generated metadata. */
+  locale: Locale
+  /** Applies an approved AI Search draft after route freshness validation. */
+  onAiFiltersApply: NaturalLanguageSearchComposerProps['onApply']
+  /** Reports AI operation state so Search can fence route mutations. */
+  onAiOperationPendingChange?: (pending: boolean) => void
+  /** Applies a patch to the canonical Search filters. */
+  onFiltersChange: (patch: Record<string, unknown>) => void
+  /** Applies a patch to the canonical Search layout. */
+  onLayoutChange: (patch: Record<string, unknown>) => void
+  /** Refreshes the selected saved view after a successful edit. */
+  onUpdateSelectedView?: () => void
+  /** Current canonical Search route state. */
+  routeState: SearchRouteState
+  /** Stable signature used to fence an AI generation against route changes. */
+  routeSignature: string
+  /** Selected saved view, when one is active. */
+  selectedSavedView?: SavedWorkspaceView
+  /** Server-authorized workflow status options. */
+  statusOptions: readonly SearchStatusOption[]
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the canonical Search controls and the optional AI-assisted mode.
+ *
+ * @param props - Route state, permissions, callbacks, and localized labels.
+ * @returns Search toolbar controls with optional natural-language review.
+ */
 function SearchToolbar({
+  aiAssistanceEnabled = true,
+  accessToken,
+  isAiOperationPending = false,
+  locale,
+  onAuthenticatedApiError,
+  onAiFiltersApply,
+  onAiOperationPendingChange,
   onFiltersChange,
   onLayoutChange,
   onUpdateSelectedView,
   routeState,
+  routeSignature,
   selectedSavedView,
   statusOptions,
   t,
-}: {
-  onFiltersChange: (patch: Record<string, unknown>) => void
-  onLayoutChange: (patch: Record<string, unknown>) => void
-  onUpdateSelectedView?: () => void
-  routeState: SearchRouteState
-  selectedSavedView?: SavedWorkspaceView
-  statusOptions: readonly SearchStatusOption[]
-  t: (key: MessageKey) => string
-}) {
+}: SearchToolbarProps) {
   const entityTypes = getSearchEntityTypes(routeState.filters)
   const statuses = getSearchStatuses(routeState.filters)
   const columns = getSearchColumns(routeState.layout)
   const routeDateField = getSearchDateField(routeState.filters)
-  const [dateField, setDateField] = useState(routeDateField)
+  const [dateFieldOverride, setDateFieldOverride] = useState<{
+    routeSignature: string
+    value: WorkspaceSearchDateField
+  }>()
+  const [inputMode, setInputMode] = useState<'keyword' | 'plain-language'>('keyword')
+  const dateField = dateFieldOverride?.routeSignature === routeSignature
+    ? dateFieldOverride.value
+    : routeDateField
 
   return (
     <section className="workbench-toolbar grid gap-4 p-4" data-testid="search-toolbar">
+      {aiAssistanceEnabled ? <div
+        aria-label={t('ai.search.mode')}
+        className="flex w-fit max-w-full gap-1 rounded-lg border border-[var(--workbench-border-strong)] bg-white p-1"
+        role="group"
+      >
+        <button
+          aria-pressed={inputMode === 'keyword'}
+          className={`min-h-[44px] rounded-md px-4 text-app-caption font-semibold transition ${
+            inputMode === 'keyword'
+              ? 'bg-[var(--workbench-primary)] text-white'
+              : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+          }`}
+          disabled={isAiOperationPending}
+          onClick={() => setInputMode('keyword')}
+          type="button"
+        >
+          {t('ai.search.mode.keyword')}
+        </button>
+        <button
+          aria-pressed={inputMode === 'plain-language'}
+          className={`min-h-[44px] rounded-md px-4 text-app-caption font-semibold transition ${
+            inputMode === 'plain-language'
+              ? 'bg-[var(--workbench-primary)] text-white'
+              : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+          }`}
+          disabled={isAiOperationPending}
+          onClick={() => setInputMode('plain-language')}
+          type="button"
+        >
+          {t('ai.search.mode.plainLanguage')}
+        </button>
+      </div> : null}
+
+      {aiAssistanceEnabled ? (
+        <div
+          aria-hidden={inputMode !== 'plain-language'}
+          className={inputMode === 'plain-language' ? undefined : 'hidden'}
+        >
+          <NaturalLanguageSearchComposer
+            accessToken={accessToken}
+            locale={locale}
+            onAuthenticatedApiError={onAuthenticatedApiError}
+            onApply={onAiFiltersApply}
+            onOperationPendingChange={onAiOperationPendingChange}
+            routeSignature={routeSignature}
+            t={t}
+          />
+        </div>
+      ) : null}
+
+      <div
+        aria-hidden={aiAssistanceEnabled && inputMode === 'plain-language'}
+        className={aiAssistanceEnabled && inputMode === 'plain-language' ? 'hidden' : undefined}
+      >
+        <fieldset className="contents" disabled={isAiOperationPending}>
       <div className="flex min-w-0 flex-wrap items-center gap-3">
         <label className="relative min-w-[260px] flex-1">
           <span className="sr-only">{t('search.input.label')}</span>
@@ -695,9 +859,13 @@ function SearchToolbar({
               <select
                 className="workbench-input min-h-10 px-3 normal-case tracking-normal"
                 onChange={(event) => {
-                  const nextDateField = event.target.value as typeof dateField
+                  const nextDateField: WorkspaceSearchDateField = event.target.value === 'createdAt'
+                    ? 'createdAt'
+                    : event.target.value === 'dueDate'
+                      ? 'dueDate'
+                      : 'updatedAt'
                   const currentDate = asRecord(asRecord(routeState.filters).date)
-                  setDateField(nextDateField)
+                  setDateFieldOverride({ routeSignature, value: nextDateField })
                   if (currentDate.from || currentDate.to) {
                     onFiltersChange({ date: { ...currentDate, field: nextDateField } })
                   }
@@ -791,6 +959,8 @@ function SearchToolbar({
           />
         ))}
       </div>
+        </fieldset>
+      </div>
     </section>
   )
 }
@@ -801,6 +971,7 @@ function SavedViewsPanel({
   deleteConfirmationViewId,
   draft,
   errorMessage,
+  isAiOperationPending,
   isFormOpen,
   onClone,
   onDelete,
@@ -820,6 +991,7 @@ function SavedViewsPanel({
   deleteConfirmationViewId?: string
   draft: SavedViewDraft
   errorMessage?: string
+  isAiOperationPending?: boolean
   isFormOpen: boolean
   onClone: (view: SavedWorkspaceView) => void
   onDelete: (view: SavedWorkspaceView) => Promise<void>
@@ -842,6 +1014,7 @@ function SavedViewsPanel({
 
   return (
     <aside className="grid content-start gap-4">
+      <fieldset className="contents" disabled={isAiOperationPending}>
       <section className="workbench-panel overflow-hidden">
         <header className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
           <h2 className="text-sm font-semibold text-[var(--workbench-text)]">{t('search.saved.title')}</h2>
@@ -944,6 +1117,7 @@ function SavedViewsPanel({
       ) : errorMessage ? (
         <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700" role="alert">{errorMessage}</p>
       ) : null}
+      </fieldset>
     </aside>
   )
 }

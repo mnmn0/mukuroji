@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
+import { AiSummaryAssistant } from '../src/features/ai-assistance/ui/AiSummaryAssistant'
+import { createAiAssistantSessionKey } from '../src/features/ai-assistance/model/assistantSessionKey'
+import {
+  IssueCollaborationPanel,
+} from '../src/issues/ui/IssueCollaborationPanel'
 import { IssueActivityTab } from '../src/issues/ui/IssueActivityTab'
 import { mergeIssueComments } from '../src/issues/mutations/useIssueCollaboration'
 import type { TeamIssueComment } from '../src/issues/api'
@@ -11,8 +15,156 @@ import {
   issueCollaborationControllerFixture,
 } from '../src/issues/fixtures'
 import { fileArtifactsControllerFixture, imageFileFixture } from '../src/files/fixtures'
+import { aiSummaryGenerationFixture } from '../src/features/ai-assistance/fixtures'
+import type { AiSummaryDraft, AiWorkItemSource } from '@mukuroji/contracts'
+import { formatAiSummaryContextBody } from '../src/issues/model/aiSummaryContextBody'
+import { isAiSummaryAdoptionCurrent } from '../src/issues/model/contextDrafts'
+import { createTranslator } from '../src/shared/i18n/i18n'
+
+const aiBriefSource = {
+  expectedRevision: 7,
+  teamId: 'core-team',
+  type: 'work-item',
+  workItemId: 'launch-review',
+} satisfies AiWorkItemSource
 
 describe('IssueCollaborationPanel', () => {
+  /** Verifies Brief adoption rejects stale sessions and occupied editors. */
+  test('rejects stale or occupied AI Brief adoption', () => {
+    expect(isAiSummaryAdoptionCurrent('new-session', 'old-session', undefined)).toBe(false)
+    expect(isAiSummaryAdoptionCurrent('same-session', 'same-session', { body: 'draft', kind: 'context', title: '' })).toBe(false)
+    expect(isAiSummaryAdoptionCurrent('same-session', 'same-session', undefined)).toBe(true)
+  })
+
+  /** Verifies generated summary prose is escaped before entering a Markdown draft. */
+  test('escapes generated summary prose before opening a Markdown context draft', () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+    const draft: AiSummaryDraft = {
+      ...content.draft,
+      overview: {
+        ...content.draft.overview,
+        text: '[trusted label](https://attacker.example) #heading',
+      },
+    }
+
+    const body = formatAiSummaryContextBody(draft, content.citations, (key) => key)
+
+    expect(body).toContain('\\[trusted label\\]\\(https://attacker\\.example\\) \\#heading')
+    expect(body).not.toContain('[trusted label](https://attacker.example)')
+  })
+
+  /** Keeps an escaped, citation-rich summary within the curated context editor limit. */
+  test('bounds the complete formatted summary before opening a context draft', () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+    const oversizedDraft: AiSummaryDraft = {
+      ...content.draft,
+      overview: {
+        ...content.draft.overview,
+        text: '*'.repeat(19_999),
+      },
+    }
+
+    const body = formatAiSummaryContextBody(
+      oversizedDraft,
+      content.citations,
+      createTranslator('en'),
+    )
+
+    expect(body.length).toBeLessThanOrEqual(20_000)
+    expect(body).toContain('Launch readiness notes')
+    expect(body).toContain('Some claims were omitted')
+    expect(body).not.toContain('*'.repeat(1_000))
+  })
+
+  /** Skips an evidence pair that cannot fit while retaining later summary claims. */
+  test('continues after an evidence line that exceeds the editor limit', () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+    const longCitations = Array.from({ length: 20 }, (_, index) => ({
+      ...content.citations[0],
+      href: `/${'h'.repeat(2_000)}`,
+      id: `long-citation-${index}`,
+      label: 'L'.repeat(500),
+    }))
+    const oversizedDraft: AiSummaryDraft = {
+      ...content.draft,
+      overview: {
+        ...content.draft.overview,
+        citationIds: longCitations.map((citation) => citation.id),
+      },
+    }
+
+    const body = formatAiSummaryContextBody(
+      oversizedDraft,
+      [...longCitations, ...content.citations],
+      createTranslator('en'),
+    )
+
+    expect(body.length).toBeGreaterThan(0)
+    expect(body).toContain('Launch readiness notes')
+    expect(body).toContain('Confirm the keyboard review before Thursday\\.')
+    expect(body).toContain('Some claims were omitted')
+  })
+
+  /** Verifies the Brief tab stays hidden when no authenticated AI source is available. */
+  test('omits the Brief tab when no authenticated AI source is supplied', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={issueCollaborationControllerFixture}
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).not.toContain('>Brief<')
+    expect(html).not.toContain('Generate brief')
+  })
+
+  /** Verifies an unauthorized brief renders only the explicit Generate action. */
+  test('shows only an explicit Generate action before an authorized Work Item brief exists', () => {
+    const protectedBody = 'DENIED_SOURCE_BODY_MUST_NOT_ENTER_BRIEF_MARKUP'
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        aiAssistance={{
+          renderBrief: (onAdopt) => (
+            <AiSummaryAssistant
+              accessToken="test-access-token"
+              key={createAiAssistantSessionKey(aiBriefSource)}
+              locale="en"
+              onAdopt={onAdopt}
+              sources={[aiBriefSource]}
+              t={createTranslator('en')}
+            />
+          ),
+          sessionKey: createAiAssistantSessionKey(aiBriefSource),
+        }}
+        controller={{
+          ...issueCollaborationControllerFixture,
+          comments: issueCollaborationControllerFixture.comments.map((comment) => ({
+            ...comment,
+            bodyMarkdown: protectedBody,
+          })),
+        }}
+        defaultTab="brief"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('>Brief<')
+    expect(html).toContain('Generate brief')
+    expect(html).not.toContain(protectedBody)
+    expect(html).not.toContain('AI draft')
+  })
+
   test('localizes curated context activity event families', () => {
     const html = renderToStaticMarkup(
       <IssueActivityTab

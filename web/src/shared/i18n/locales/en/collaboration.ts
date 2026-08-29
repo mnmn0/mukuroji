@@ -8,6 +8,7 @@ export const collaborationMessages = {
   'collaboration.tabs.decisions': 'Decisions',
   'collaboration.tabs.activity': 'Activity',
   'collaboration.tabs.sources': 'Sources',
+  'collaboration.tabs.brief': 'Brief',
   'collaboration.threadCount': '{count} threads',
   'collaboration.readOnly': 'You do not have permission to change comments on this work item.',
   'collaboration.presence.viewing': '{count} viewing',

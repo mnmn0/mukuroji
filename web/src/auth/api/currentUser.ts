@@ -29,6 +29,8 @@ export type CurrentUser = {
    * Workspace membership の利用状態です。
    */
   workspaceMemberStatus: WorkspaceMemberStatus
+  /** Whether the server resolved the current user as an AI policy manager. */
+  canManageAiAssistance?: boolean
 }
 
 /**
