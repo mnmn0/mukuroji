@@ -898,6 +898,7 @@ function createProductionAiAssistanceService(
 /**
  * Creates the production AI assistance dependency bundle lazily.
  *
+ * @param auditEvents - Optional audit event client used for policy-transition persistence.
  * @returns AI assistance dependencies that defer provider configuration until use.
  */
 export function createProductionAiAssistanceDependencies(
