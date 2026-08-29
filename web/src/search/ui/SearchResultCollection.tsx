@@ -8,29 +8,19 @@ import {
   sortWorkspaceSearchResults,
 } from '../model/sortResults'
 
-/**
- * SearchResultCollectionへ渡すpropsです。
- */
+/** Props for the permission-aware Search result collection. */
 export type SearchResultCollectionProps = {
-  /**
-   * APIから取得したpermission-aware search resultです。
-   */
+  /** Permission-aware results returned by the Search API. */
   results: WorkspaceSearchResult[]
-  /**
-   * 表示mode、sort、group、columnsを含むlayoutです。
-   */
+  /** Result mode, sorting, grouping, and visible columns. */
   layout: SearchViewLayout
-  /**
-   * 表示localeです。
-   */
+  /** Locale used for labels and dates. */
   locale: Locale
-  /**
-   * Search resultを開くcallbackです。
-   */
+  /** Opens one result path after route-level guards pass. */
   onNavigate: (path: string) => void
-  /**
-   * Workflow status ID ごとの configuration 由来の表示名です。
-   */
+  /** Whether result navigation is fenced during an AI operation. */
+  isAiOperationPending?: boolean
+  /** Configuration-derived display names for workflow status IDs. */
   statusLabels?: Readonly<Record<string, string>>
 }
 
@@ -68,9 +58,13 @@ function formatSearchSubtitle(
 }
 
 /**
- * Search resultをtable、board、calendar、timelineの選択modeで描画します。
+ * Renders Search results in the selected table, board, calendar, or timeline mode.
+ *
+ * @param props - Permission-safe result data, layout, and route callbacks.
+ * @returns The selected Search result presentation.
  */
 export function SearchResultCollection({
+  isAiOperationPending = false,
   layout,
   locale,
   onNavigate,
@@ -87,23 +81,30 @@ export function SearchResultCollection({
   )
 
   if (mode === 'board') {
-    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'calendar') {
-    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'timeline') {
-    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
-  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
 }
 
+/**
+ * Renders Search results in a table and fences result navigation during AI operations.
+ *
+ * @param props - Formatting callbacks, layout metadata, and permission-safe results.
+ * @returns A table view of the current Search results.
+ */
 function SearchTable({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   layout,
   locale,
   onNavigate,
@@ -112,6 +113,8 @@ function SearchTable({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -142,7 +145,7 @@ function SearchTable({
                     <button
                       className="w-full px-5 py-4 text-left transition hover:bg-[var(--workbench-surface-muted)] focus-visible:bg-[var(--workbench-surface-muted)] disabled:cursor-default"
                       data-testid={`search-result-${result.entityType}-${result.id}`}
-                      disabled={!path}
+                      disabled={isAiOperationPending || !path}
                       onClick={() => path && onNavigate(path)}
                       type="button"
                     >
@@ -171,9 +174,16 @@ function SearchTable({
   )
 }
 
+/**
+ * Renders grouped Search results as board cards with an AI-operation navigation fence.
+ *
+ * @param props - Formatting callbacks, grouping layout, and permission-safe results.
+ * @returns A board view of the current Search results.
+ */
 function SearchBoard({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   layout,
   locale,
   onNavigate,
@@ -182,6 +192,8 @@ function SearchBoard({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -210,7 +222,7 @@ function SearchBoard({
           </header>
           <div className="grid gap-2 p-3">
             {group.results.map((result) => (
-              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -219,9 +231,16 @@ function SearchBoard({
   )
 }
 
+/**
+ * Renders date-grouped Search results as calendar cards with an AI-operation navigation fence.
+ *
+ * @param props - Formatting callbacks, locale, and permission-safe results.
+ * @returns A calendar view of the current Search results.
+ */
 function SearchCalendar({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   locale,
   onNavigate,
   results,
@@ -229,6 +248,8 @@ function SearchCalendar({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -248,7 +269,7 @@ function SearchCalendar({
           </h2>
           <div className="mt-3 grid gap-2">
             {group.results.map((result) => (
-              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -257,9 +278,16 @@ function SearchCalendar({
   )
 }
 
+/**
+ * Renders Search results along a timeline and fences navigation during AI operations.
+ *
+ * @param props - Formatting callbacks, locale, and permission-safe results.
+ * @returns A timeline view of the current Search results.
+ */
 function SearchTimeline({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   locale,
   onNavigate,
   results,
@@ -267,6 +295,8 @@ function SearchTimeline({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -281,7 +311,7 @@ function SearchTimeline({
           return (
             <button
               className="grid w-full grid-cols-[120px_16px_minmax(0,1fr)_auto] items-center gap-4 px-5 py-4 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:cursor-default max-[680px]:grid-cols-[16px_minmax(0,1fr)]"
-              disabled={!path}
+              disabled={isAiOperationPending || !path}
               key={createResultKey(result)}
               onClick={() => path && onNavigate(path)}
               type="button"
@@ -314,10 +344,17 @@ function SearchTimeline({
   )
 }
 
+/**
+ * Renders one Search result card whose navigation is disabled during AI operations.
+ *
+ * @param props - Result data, formatting callbacks, and navigation state.
+ * @returns A button-like Search result card.
+ */
 function SearchResultCard({
   compact = false,
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   locale,
   onNavigate,
   result,
@@ -326,6 +363,8 @@ function SearchResultCard({
   compact?: boolean
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   locale: Locale
   onNavigate: (path: string) => void
   result: WorkspaceSearchResult
@@ -336,7 +375,7 @@ function SearchResultCard({
   return (
     <button
       className={`rounded-lg border border-[var(--workbench-border)] bg-white text-left transition hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)] disabled:cursor-default ${compact ? 'p-3' : 'p-4'}`}
-      disabled={!path}
+      disabled={isAiOperationPending || !path}
       onClick={() => path && onNavigate(path)}
       type="button"
     >

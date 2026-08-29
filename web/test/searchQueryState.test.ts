@@ -14,6 +14,7 @@ import {
   getSearchStatuses,
   parseSearchRouteState,
   serializeSearchRouteState,
+  updateSearchRouteState,
 } from '../src/search/model/queryState'
 
 describe('Workspace search URL state', () => {
@@ -30,7 +31,7 @@ describe('Workspace search URL state', () => {
 
   test('keyword, filters, layout, sort, group, and columns round-trip canonically', () => {
     const source = new URLSearchParams(
-      'q=launch&type=comment&type=work-item&status=ready-for-qa&assignee=demo%40example.com&creator=owner%40example.com&team=core-team&project=shared-launch&dateField=dueDate&dateFrom=2026-07-01&dateTo=2026-07-31&relation=blocks%3A42&customField=%7B%22fieldId%22%3A%22risk%22%2C%22operator%22%3A%22equals%22%2C%22value%22%3A%22high%22%7D&layout=board&sort=updatedAt%3Adesc&sort=title%3Aasc&sort=custom%3Arisk%3Aasc&group=status&columns=title%2Cstatus%2Cassignee&view=review-view&v=1',
+      'q=launch&type=comment&type=work-item&status=ready-for-qa&assignee=demo%40example.com&creator=owner%40example.com&team=core-team&project=shared-launch&dateField=dueDate&dateFrom=2026-07-01&dateTo=2026-07-31&relation=blocks%3A42&customField=%7B%22fieldId%22%3A%22risk%22%2C%22operator%22%3A%22equals%22%2C%22value%22%3A%22high%22%7D&layout=board&sort=updatedAt%3Adesc&sort=title%3Aasc&sort=custom%3Arisk%3Aasc&group=status&columns=title%2Cstatus%2Cassignee&report=count&view=review-view&v=1',
     )
     const parsed = parseSearchRouteState(source)
 
@@ -46,12 +47,14 @@ describe('Workspace search URL state', () => {
     expect(getSearchGroup(parsed.layout)).toBe('status')
     expect(getSearchColumns(parsed.layout)).toEqual(['title', 'status', 'assignee'])
     expect(parsed.savedViewId).toBe('review-view')
+    expect(parsed.reportMetric).toBe('count')
 
     const canonical = serializeSearchRouteState(parsed)
     const reparsed = parseSearchRouteState(canonical)
 
     expect(reparsed.filters).toEqual(parsed.filters)
     expect(reparsed.layout).toEqual(parsed.layout)
+    expect(reparsed.reportMetric).toBe('count')
     expect(canonical.getAll('sort')).toEqual(['updatedAt:desc', 'title:asc', 'custom:risk:asc'])
     expect(canonical.getAll('type')).toEqual(['comment', 'work-item'])
   })
@@ -125,6 +128,33 @@ describe('Workspace search URL state', () => {
       { fieldId: 'risk', operator: 'is-empty' },
     ])
     expect(restored.migrationWarnings).toEqual([])
+  })
+
+  /** Ensures ordinary filter and layout edits invalidate an earlier approved report. */
+  test('ordinary filter and layout edits clear an earlier approved report', () => {
+    const state = parseSearchRouteState(new URLSearchParams('report=count&v=1'))
+
+    const afterFilterEdit = updateSearchRouteState(state, {
+      filters: { ...state.filters, keyword: 'changed' },
+    })
+    const afterLayoutEdit = updateSearchRouteState(state, {
+      layout: { ...state.layout, mode: 'board' },
+    })
+
+    expect(afterFilterEdit.reportMetric).toBeUndefined()
+    expect(afterLayoutEdit.reportMetric).toBeUndefined()
+  })
+
+  /** Ensures an explicitly reviewed report remains available for AI application. */
+  test('explicitly supplied report state survives an approved AI application', () => {
+    const state = parseSearchRouteState(new URLSearchParams('report=count&v=1'))
+
+    const next = updateSearchRouteState(state, {
+      filters: { ...state.filters, keyword: 'approved' },
+      reportMetric: 'count',
+    })
+
+    expect(next.reportMetric).toBe('count')
   })
 })
 

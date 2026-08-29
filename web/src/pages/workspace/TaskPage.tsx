@@ -122,6 +122,8 @@ import {
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
+import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
+import { taskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -195,6 +197,7 @@ export function TaskPage() {
   const params = useParams()
   const {
     hasQuickAccessLoadError,
+    isAiAssistanceTaskEnabled,
     isProjectQuickAccess,
     isQuickAccessLoading,
     isQuickAccessSaving,
@@ -1394,12 +1397,21 @@ export function TaskPage() {
     />
   )
 
+  const aiSummaryAssistanceEnabled = isAiAssistanceTaskEnabled?.('summary') ?? false
+  const aiPlanningAssistanceEnabled = isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled
+
   return (
     <TaskScreen
       key={projectId}
+      aiAssistanceEnabled={aiPlanningAssistanceEnabled}
+      aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
+      renderAiAssistance={taskDetailAiAssistanceRenderer}
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
+      onAuthenticatedApiError={(error) => {
+        redirectEnterpriseSessionError(error)
+      }}
       activeTaskViewId={taskViewController.activeSavedView?.id}
       isLoading={isLoading}
       isProjectQuickAccess={interactionTeamId

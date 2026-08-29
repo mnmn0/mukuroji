@@ -1,4 +1,6 @@
 import type {
+  AiPlanningDraft,
+  AiWorkItemSource,
   PlanningSnapshot,
   WorkItemDependencyEndpoint,
   WorkItemConfiguration,
@@ -8,7 +10,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useId, useState } from 'react'
+import { useId, useRef, useState, type ReactNode } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
@@ -21,7 +23,10 @@ import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
-import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
+import {
+  IssueCollaborationPanel,
+  type IssueSummaryAiAssistance,
+} from '../../issues/ui/IssueCollaborationPanel'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -60,8 +65,65 @@ import {
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 
+/** Context passed from the Work Item container to the feature-owned AI renderer. */
+export type TaskDetailAiAssistanceRenderContext = {
+  /** Active Workspace member bearer token. */
+  accessToken?: string
+  /** Whether the Planning workflow is enabled for this route. */
+  aiAssistanceEnabled: boolean
+  /** Whether the Summary workflow is enabled for this route. */
+  aiSummaryAssistanceEnabled: boolean
+  /** Whether a Work Item mutation is currently in flight. */
+  isMutationPending: boolean
+  /** Locale used by the assistants. */
+  locale: Locale
+  /** Reports authenticated AI failures to the route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
+  /** Copies an approved Planning draft into the local Work Item editor. */
+  onPlanningAdopt?: (draft: AiPlanningDraft) => void | Promise<void>
+  /** Reports Planning operation state to the local Work Item save guard. */
+  onPlanningOperationPendingChange?: (pending: boolean) => void
+  /** Determines whether a Planning draft contains an editable supported field. */
+  canAdoptPlanningDraft?: (draft: AiPlanningDraft) => boolean
+  /** Rechecks local edits after the asynchronous Planning approval. */
+  shouldConfirmPlanningAdoption?: (draft: AiPlanningDraft) => boolean
+  /** Resolves a visible workflow status label. */
+  resolveStatusLabel?: (statusId: string) => string
+  /** Resolves a visible Team-qualified Work Item label. */
+  resolveWorkItemLabel?: (endpoint: WorkItemDependencyEndpoint) => string
+  /** Whether Planning adoption must confirm replacing local edits. */
+  requirePlanningAdoptionConfirmation?: boolean
+  /** Reports Summary operation state to the local Work Item save guard. */
+  onSummaryOperationPendingChange?: (pending: boolean) => void
+  /** Revision-fenced Work Item source shared by both workflows. */
+  source: AiWorkItemSource
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
+}
+
+/** AI slots returned by a feature-owned Work Item renderer. */
+export type TaskDetailAiAssistanceSlots = {
+  /** Planning assistant rendered above the Work Item fields. */
+  planning?: ReactNode
+  /** Summary assistant supplied to the collaboration panel. */
+  summary?: IssueSummaryAiAssistance
+}
+
+/** Builds feature-owned AI UI for the selected Work Item detail pane. */
+export type TaskDetailAiAssistanceRenderer = (
+  context: TaskDetailAiAssistanceRenderContext,
+) => TaskDetailAiAssistanceSlots
+
 /** Props accepted by the selected task detail pane. */
 export type TaskDetailPaneProps = {
+  /** Optional feature-owned AI renderer supplied by the route container. */
+  renderAiAssistance?: TaskDetailAiAssistanceRenderer
+  /** Whether the dependent AI API deployment has enabled the route-level controls. */
+  aiAssistanceEnabled?: boolean
+  /** Whether the Summary workflow is enabled for the current Workspace member. */
+  aiSummaryAssistanceEnabled?: boolean
+  /** Reports authenticated AI failures to the owning task route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Whether the current Workspace member may read Team Triage source links. */
@@ -106,6 +168,8 @@ export type TaskDetailPaneProps = {
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Closes the detail pane while keeping the list selection and scroll position. */
   onClose?: () => void
+  /** Reports combined Work Item AI operation state to the owning task screen. */
+  onAiOperationPendingChange?: (pending: boolean) => void
   /** Cancels an accepted Schedule action when explicit save detects no schedule change. */
   onScheduleNoChange?: (teamId: string, issueId: string) => void
   /** Saves editable fields on the selected Work Item. */
@@ -133,6 +197,24 @@ export type TaskDetailPaneProps = {
   workspaceMembers: WorkspaceMember[]
 }
 
+/** Local Work Item editor defaults copied from one approved Planning draft. */
+type WorkItemAiFormSeed = {
+  /** Approved draft used only as uncontrolled form defaults. */
+  draft?: AiPlanningDraft
+  /** Exact Work Item identity and source revision represented by this seed. */
+  identity: string
+  /** Monotonic key used to remount the supported editor fields. */
+  revision: number
+}
+
+/** Dirty state scoped to one exact Work Item editor revision. */
+type WorkItemEditorDirtyState = {
+  /** Whether an operator changed a local editable field. */
+  dirty: boolean
+  /** Exact Work Item identity and source revision represented by the dirty flag. */
+  identity: string
+}
+
 /**
  * Renders the selected Work Item form, files, relations, documents, and collaboration.
  *
@@ -141,6 +223,8 @@ export type TaskDetailPaneProps = {
  */
 export function TaskDetailPane({
   accessToken,
+  aiAssistanceEnabled = true,
+  aiSummaryAssistanceEnabled = false,
   assigneeOptions,
   canAccessTriage = false,
   artifacts,
@@ -158,7 +242,9 @@ export function TaskDetailPane({
   locale,
   planningSnapshot,
   onAddRelation,
+  onAuthenticatedApiError,
   onCreateScheduleDependency,
+  onAiOperationPendingChange,
   onClose,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -168,13 +254,35 @@ export function TaskDetailPane({
   projects,
   relationCandidates,
   relationCandidatesErrorMessage,
+  renderAiAssistance,
   t,
   task,
   workspaceMembers,
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const [isIssueSaving, setIsIssueSaving] = useState(false)
+  const isIssueSavingRef = useRef(false)
+  const [isAiPlanningOperationPending, setIsAiPlanningOperationPending] = useState(false)
+  const isAiPlanningOperationPendingRef = useRef(false)
+  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
+  const isAiSummaryOperationPendingRef = useRef(false)
+  const isWorkItemMutationPending = isIssueSaving ||
+    isAiPlanningOperationPending ||
+    isAiSummaryOperationPending
+  const [aiFormSeed, setAiFormSeed] = useState<WorkItemAiFormSeed>({
+    identity: '',
+    revision: 0,
+  })
+  const [editorDirtyState, setEditorDirtyState] = useState<WorkItemEditorDirtyState>({
+    dirty: false,
+    identity: '',
+  })
+  const editorDirtyStateRef = useRef<WorkItemEditorDirtyState>({
+    dirty: false,
+    identity: '',
+  })
   const documentContextPromotion = useDocumentContextPromotion(
-    Boolean(collaboration?.context.capabilities.canCreate),
+    Boolean(collaboration?.context.capabilities.canCreate && !isAiSummaryOperationPending),
     `${task?.teamId ?? ''}:${task?.id ?? ''}`,
     collaborationRoute?.onCollaborationTabChange,
   )
@@ -270,6 +378,142 @@ export function TaskDetailPane({
   const reverseTriageSources = triageSourcesPages
     ?.flatMap((page) => page.entries)
     .filter((entry) => entry.id !== sourceTriageEntryId) ?? []
+  const editorIdentity = `${task.teamId}:${task.id}:${issue?.revision ?? task.revision}`
+  const activeAiFormSeed = aiFormSeed.identity === editorIdentity ? aiFormSeed : undefined
+  const activeAiDraft = activeAiFormSeed?.draft
+  const seededTitle = activeAiDraft?.title?.value ?? title
+  const seededDescription = activeAiDraft?.description?.value ?? issue?.description ?? ''
+  const seededPriority = activeAiDraft?.priority?.value ?? issue?.priority ?? task.priority
+  // Planned effort belongs to the standalone schedule mutation. Keep the AI estimate
+  // in the review rail, but do not copy it into a separate form that can outlive the
+  // approved generation's Work Item revision.
+  const seededPlannedEffortMinutes = schedule.plannedEffortMinutes
+  const seededWorkflowStatusId = activeAiDraft?.status && workflowStatuses.some(
+    (status) => status.id === activeAiDraft.status?.value,
+  )
+    ? activeAiDraft.status.value
+    : currentWorkflowStatusId
+  const hasApplicableAiWorkflowStatus = Boolean(
+    activeAiDraft?.status && seededWorkflowStatusId === activeAiDraft.status.value,
+  )
+  const isEditorDirty = editorDirtyState.identity === editorIdentity && editorDirtyState.dirty
+  const aiSummarySource = {
+    expectedRevision: issue?.revision ?? task.revision,
+    teamId: task.teamId,
+    type: 'work-item',
+    workItemId: task.id,
+  } satisfies AiWorkItemSource
+  const handleAiPlanningAdopt = (draft: AiPlanningDraft) => {
+    applyAiPlanningDraft(draft)
+  }
+  const handleAiPlanningOperationPendingChange = (pending: boolean) => {
+    reportAiPlanningOperationPending(pending)
+  }
+  const handleAiSummaryOperationPendingChange = (pending: boolean) => {
+    reportAiSummaryOperationPending(pending)
+  }
+  const confirmAiPlanningAdoption = () =>
+    shouldConfirmAiPlanningAdoption()
+  // The renderer only constructs inert React elements; the supplied callbacks
+  // are invoked later by user events inside the feature-owned assistants.
+  // eslint-disable-next-line react-hooks/refs
+  const aiAssistanceSlots = renderAiAssistance?.({
+    accessToken,
+    aiAssistanceEnabled,
+    aiSummaryAssistanceEnabled,
+    canAdoptPlanningDraft: (draft) => {
+      const hasSupportedField = Boolean(
+        draft.title || draft.description || draft.priority || draft.status,
+      )
+      const hasAvailableStatus = draft.status === undefined || workflowStatuses.some(
+        (status) => status.id === draft.status?.value,
+      )
+      return hasSupportedField && hasAvailableStatus
+    },
+    isMutationPending: isWorkItemMutationPending,
+    locale,
+    onAuthenticatedApiError,
+    onPlanningAdopt: isReadOnly ? undefined : handleAiPlanningAdopt,
+    onPlanningOperationPendingChange: handleAiPlanningOperationPendingChange,
+    onSummaryOperationPendingChange: handleAiSummaryOperationPendingChange,
+    requirePlanningAdoptionConfirmation: isEditorDirty,
+    resolveStatusLabel: (statusId) =>
+      workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId,
+    resolveWorkItemLabel: (endpoint) => planningSnapshot?.workItems.find(
+      (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
+    )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`,
+    shouldConfirmPlanningAdoption: confirmAiPlanningAdoption,
+    source: aiSummarySource,
+    t,
+  })
+  const collaborationAiAssistance = aiSummaryAssistanceEnabled
+    ? aiAssistanceSlots?.summary
+    : undefined
+
+  /** Copies supported approved fields into a fresh local form seed without saving them. */
+  function applyAiPlanningDraft(draft: AiPlanningDraft) {
+    if (isIssueSavingRef.current || isAiSummaryOperationPendingRef.current) return
+    const nextDirtyState = { dirty: true, identity: editorIdentity }
+    editorDirtyStateRef.current = nextDirtyState
+    setEditorDirtyState(nextDirtyState)
+    setAiFormSeed((current) => ({
+      draft,
+      identity: editorIdentity,
+      revision: current.revision + 1,
+    }))
+  }
+
+  /** Persists one Work Item update while exposing its pending state to AI review controls. */
+  async function submitIssueUpdate(input: UpdateTeamIssueInput) {
+    if (
+      isReadOnly ||
+      !task ||
+      !task.teamId ||
+      !onUpdateIssue ||
+      isIssueSavingRef.current ||
+      isAiPlanningOperationPendingRef.current ||
+      isAiSummaryOperationPendingRef.current
+    ) return
+    const currentTask = task
+    isIssueSavingRef.current = true
+    setIsIssueSaving(true)
+    try {
+      await onUpdateIssue(currentTask.teamId, currentTask.id, input)
+    } catch {
+      // The owning route supplies the user-visible mutation error.
+    } finally {
+      isIssueSavingRef.current = false
+      setIsIssueSaving(false)
+    }
+  }
+
+  /** Keeps canonical Work Item save controls disabled while AI planning is pending. */
+  function reportAiPlanningOperationPending(pending: boolean) {
+    isAiPlanningOperationPendingRef.current = pending
+    setIsAiPlanningOperationPending(pending)
+    reportCombinedAiOperationPending()
+  }
+
+  /** Keeps the task route fenced while the Summary assistant is in flight. */
+  function reportAiSummaryOperationPending(pending: boolean) {
+    isAiSummaryOperationPendingRef.current = pending
+    setIsAiSummaryOperationPending(pending)
+    reportCombinedAiOperationPending()
+  }
+
+  /** Reports whether any assistant owned by this Work Item is still in flight. */
+  function reportCombinedAiOperationPending() {
+    onAiOperationPendingChange?.(
+      isAiPlanningOperationPendingRef.current ||
+        isAiSummaryOperationPendingRef.current,
+    )
+  }
+
+  /** Rechecks whether the current Work Item editor contains supported manual edits. */
+  function shouldConfirmAiPlanningAdoption() {
+    return editorDirtyStateRef.current.identity === editorIdentity &&
+      editorDirtyStateRef.current.dirty
+  }
 
   return (
     <aside
@@ -279,10 +523,21 @@ export function TaskDetailPane({
       <form
         className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
         key={`${task.teamId}:${task.id}:${issue?.revision ?? 'loading'}`}
+        onChange={() => {
+          const nextDirtyState = { dirty: true, identity: editorIdentity }
+          editorDirtyStateRef.current = nextDirtyState
+          setEditorDirtyState(nextDirtyState)
+        }}
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (isReadOnly || !task.teamId) {
+          if (
+            isReadOnly ||
+            !task.teamId ||
+            isIssueSavingRef.current ||
+            isAiPlanningOperationPendingRef.current ||
+            isAiSummaryOperationPendingRef.current
+          ) {
             return
           }
 
@@ -325,7 +580,7 @@ export function TaskDetailPane({
             nextIssueInput.assigneeUserId = selectedAssigneeUserId
           }
 
-          void onUpdateIssue?.(task.teamId, task.id, nextIssueInput).catch(() => undefined)
+          void submitIssueUpdate(nextIssueInput)
         }}
       >
         <div className="flex items-start justify-between gap-3">
@@ -341,7 +596,9 @@ export function TaskDetailPane({
               <a
                 className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
                 data-testid="task-detail-triage-source"
-                href={createTeamTriagePath(task.teamId, sourceTriageEntryId)}
+                href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, sourceTriageEntryId)}
+                aria-disabled={isWorkItemMutationPending || undefined}
+                tabIndex={isWorkItemMutationPending ? -1 : undefined}
               >
                 {t('tasks.detail.openTriageSource')}
               </a>
@@ -359,7 +616,9 @@ export function TaskDetailPane({
                     <li key={entry.id}>
                       <a
                         className="text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
-                        href={createTeamTriagePath(task.teamId, entry.id)}
+                        href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, entry.id)}
+                        aria-disabled={isWorkItemMutationPending || undefined}
+                        tabIndex={isWorkItemMutationPending ? -1 : undefined}
                       >
                         {entry.sourcePreview.title || t(resolveTriageSourceMessageKey(entry.source.kind))}
                       </a>
@@ -398,7 +657,9 @@ export function TaskDetailPane({
                     <li className="text-xs leading-5 text-[var(--workbench-muted)]" key={snapshot.triageEntryId}>
                       <a
                         className="font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
-                        href={createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
+                        href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
+                        aria-disabled={isWorkItemMutationPending || undefined}
+                        tabIndex={isWorkItemMutationPending ? -1 : undefined}
                       >
                         {t(resolveTriageSourceMessageKey(snapshot.sourceKind))}
                       </a>
@@ -425,6 +686,7 @@ export function TaskDetailPane({
                 aria-label={t('tasks.detail.close')}
                 className="rounded px-2 py-1 text-lg leading-none text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-text)]"
                 data-testid="task-detail-close"
+                disabled={isWorkItemMutationPending}
                 onClick={onClose}
                 type="button"
               >
@@ -433,12 +695,17 @@ export function TaskDetailPane({
             ) : null}
           </div>
         </div>
-        <fieldset className="contents" disabled={isReadOnly}>
+        {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
+        <fieldset
+          className="contents"
+          disabled={isReadOnly || isWorkItemMutationPending}
+        >
           <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
             <input
               className="workbench-input w-full min-w-0 px-3 py-2 text-base font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-              defaultValue={title}
+              defaultValue={seededTitle}
+              key={`title:${editorIdentity}:${activeAiDraft?.title ? activeAiFormSeed?.revision ?? 0 : 0}`}
               name="title"
               required
             />
@@ -447,7 +714,8 @@ export function TaskDetailPane({
             {t('tasks.detail.description')}
             <textarea
               className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-              defaultValue={issue?.description ?? ''}
+              defaultValue={seededDescription}
+              key={`description:${editorIdentity}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
               name="description"
             />
           </label>
@@ -488,7 +756,8 @@ export function TaskDetailPane({
               {t('tasks.column.status')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={currentWorkflowStatusId}
+                defaultValue={seededWorkflowStatusId}
+                key={`status:${editorIdentity}:${hasApplicableAiWorkflowStatus ? activeAiFormSeed?.revision ?? 0 : 0}`}
                 name="workflowStatusId"
               >
                 {workflowStatuses.map((status) => (
@@ -500,7 +769,8 @@ export function TaskDetailPane({
               {t('tasks.column.priority')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={issue?.priority ?? task.priority}
+                defaultValue={seededPriority}
+                key={`priority:${editorIdentity}:${activeAiDraft?.priority ? activeAiFormSeed?.revision ?? 0 : 0}`}
                 name="priority"
               >
                 {taskPriorities.map((priority) => (
@@ -562,8 +832,9 @@ export function TaskDetailPane({
               {t('tasks.schedule.effortMinutes')}
               <input
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={schedule.plannedEffortMinutes}
+                defaultValue={seededPlannedEffortMinutes}
                 form={scheduleFormId}
+                key={`effort:${editorIdentity}`}
                 min="0"
                 name="scheduleEffortMinutes"
                 type="number"
@@ -581,8 +852,8 @@ export function TaskDetailPane({
               </p>
             ) : null}
             <button
-              className="workbench-button-secondary h-9 px-3 disabled:border-slate-300 disabled:bg-slate-300"
-              disabled={isReadOnly}
+              className="workbench-button-secondary min-h-[44px] px-3 disabled:border-slate-300 disabled:bg-slate-300"
+              disabled={isReadOnly || isWorkItemMutationPending}
               form={scheduleFormId}
               type="submit"
             >
@@ -603,8 +874,8 @@ export function TaskDetailPane({
           ) : null}
         </fieldset>
         <button
-          className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isReadOnly}
+          className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"
+          disabled={isReadOnly || isWorkItemMutationPending}
           type="submit"
         >
           {t('issues.detail.save')}
@@ -622,7 +893,12 @@ export function TaskDetailPane({
         id={scheduleFormId}
         onSubmit={(event) => {
           event.preventDefault()
-          if (isReadOnly || !task.teamId) return
+          if (
+            isReadOnly ||
+            !task.teamId ||
+            isIssueSavingRef.current ||
+            isAiPlanningOperationPendingRef.current
+          ) return
           const nextSchedule = createDetailSchedule(new FormData(event.currentTarget), schedule)
           if (!nextSchedule) {
             setFieldErrors((current) => ({
@@ -636,11 +912,7 @@ export function TaskDetailPane({
             onScheduleNoChange?.(task.teamId, task.id)
             return
           }
-          void onUpdateIssue?.(
-            task.teamId,
-            task.id,
-            { schedule: nextSchedule },
-          ).catch(() => undefined)
+          void submitIssueUpdate({ schedule: nextSchedule })
         }}
       />
       {artifacts ? (
@@ -665,12 +937,14 @@ export function TaskDetailPane({
           isLoading={isRelationCandidatesLoading || (isLoading && !issue)}
           locale={locale}
           onAddRelation={onAddRelation
+            && !isWorkItemMutationPending
             ? (input) => onAddRelation(task.id, input)
             : undefined}
           onDeleteRelation={onDeleteRelation
+            && !isWorkItemMutationPending
             ? (relation) => onDeleteRelation(task.id, relation)
             : undefined}
-          readOnly={isReadOnly || (!onAddRelation && !onDeleteRelation)}
+          readOnly={isReadOnly || isWorkItemMutationPending || (!onAddRelation && !onDeleteRelation)}
           relations={relations}
         />
       </div>
@@ -678,9 +952,9 @@ export function TaskDetailPane({
         <WorkItemDependencyPanel
           canManageEndpoint={canManageScheduleDependencyEndpoint}
           currentEndpoint={{ teamId: task.teamId, workItemId: task.id }}
-          onCreate={onCreateScheduleDependency}
-          onDelete={onDeleteScheduleDependency}
-          onUpdate={onUpdateScheduleDependency}
+          onCreate={isWorkItemMutationPending ? undefined : onCreateScheduleDependency}
+          onDelete={isWorkItemMutationPending ? undefined : onDeleteScheduleDependency}
+          onUpdate={isWorkItemMutationPending ? undefined : onUpdateScheduleDependency}
           snapshot={planningSnapshot}
           t={t}
         />
@@ -694,6 +968,7 @@ export function TaskDetailPane({
       />
       {collaboration ? (
         <IssueCollaborationPanel
+          aiAssistance={collaborationAiAssistance}
           route={collaborationRoute}
           artifacts={artifacts}
           contextDraft={documentContextPromotion.documentContextDraft}
@@ -704,6 +979,7 @@ export function TaskDetailPane({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
+          onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}

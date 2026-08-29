@@ -1,5 +1,6 @@
 import {
   PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  type AiAssistanceTask,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
 } from '@mukuroji/contracts'
@@ -31,6 +32,14 @@ import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/s
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
+import {
+  aiAssistanceUiEnabled,
+  isAiAssistanceTaskEnabled as isSavedAiAssistanceTaskEnabled,
+} from '../../features/ai-assistance/model/aiAssistanceRollout'
+import {
+  useAiAssistancePolicy,
+  useAiAssistancePreference,
+} from '../../features/ai-assistance/queries/useAiAssistanceSettings'
 import type {
   NotificationPreferencesSessionErrorReporter,
 } from '../../notifications/queries/useNotificationPreferences'
@@ -89,6 +98,8 @@ export type WorkspaceRouteContextValue = {
   accessToken?: string
   /** The locale selected for workspace content and controls. */
   locale: Locale
+  /** Stable Workspace identity from the authenticated Cognito membership. */
+  workspaceId?: string
   /** The selected application font-size preference. */
   fontSizePreference: FontSizePreference
   /** The best available display label for the current user. */
@@ -117,6 +128,10 @@ export type WorkspaceRouteContextValue = {
   inboxCount: number
   /** Whether the current user may create or archive workspace structure. */
   canManageWorkspaceConfiguration: boolean
+  /** Whether the current user may manage Workspace AI assistance policy. */
+  canManageAiAssistance: boolean
+  /** Returns whether one AI workflow is currently enabled by rollout and saved settings. */
+  isAiAssistanceTaskEnabled?: (task: AiAssistanceTask) => boolean
   /** Whether the current user may perform team-scoped content mutations. */
   canMutateTeamConfiguration: boolean
   /** Whether route-specific workspace queries may load authenticated data. */
@@ -263,9 +278,11 @@ export function WorkspaceRouteProvider() {
     [user],
   )
   const userKey = (user?.attributes.email ?? user?.username)?.trim().toLowerCase() || undefined
+  const workspaceId = user?.attributes['custom:workspace_id']?.trim() || undefined
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
   const canLoadWorkspaceData = Boolean(user && !currentUserError)
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
+  const canManageAiAssistance = user?.canManageAiAssistance ?? canManageWorkspaceConfiguration
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
   const hasQuickAccessLoadError = Boolean(quickAccessError)
   const quickAccessProjects = useMemo(
@@ -307,6 +324,39 @@ export function WorkspaceRouteProvider() {
     }
   }, [currentPath])
 
+  const aiSettingsQueryEnabled = aiAssistanceUiEnabled && canLoadWorkspaceData
+  const aiPreferenceQuery = useAiAssistancePreference(
+    accessToken,
+    aiSettingsQueryEnabled,
+    guardEnterpriseSession,
+    userKey,
+    workspaceId,
+  )
+  const aiPolicyQuery = useAiAssistancePolicy(
+    accessToken,
+    aiSettingsQueryEnabled && canManageAiAssistance,
+    guardEnterpriseSession,
+    userKey,
+    workspaceId,
+  )
+  /** Resolves the effective client-side gate for one AI workflow. */
+  const isAiAssistanceTaskEnabled = useCallback((task: AiAssistanceTask) => {
+    return isSavedAiAssistanceTaskEnabled(task, {
+      authenticated: canLoadWorkspaceData,
+      canManagePolicy: canManageAiAssistance,
+      policy: aiPolicyQuery.data,
+      preferenceEnabled: aiPreferenceQuery.error ? undefined : aiPreferenceQuery.data?.enabled,
+      rolloutEnabled: aiSettingsQueryEnabled,
+    })
+  }, [
+    aiPolicyQuery.data,
+    aiPreferenceQuery.data?.enabled,
+    aiPreferenceQuery.error,
+    aiSettingsQueryEnabled,
+    canLoadWorkspaceData,
+    canManageAiAssistance,
+  ])
+
   /** Combines common and route errors before applying enterprise session precedence. */
   const resolveSessionErrors = useCallback((
     routeSessionErrors: readonly unknown[] = emptySessionErrors,
@@ -316,6 +366,8 @@ export function WorkspaceRouteProvider() {
       projectDirectoryError,
       notificationUnreadCountError,
       quickAccessError,
+      aiPreferenceQuery.error,
+      aiPolicyQuery.error,
       ...listAuthenticatedApiErrors(authenticatedApiErrorReports),
       ...routeSessionErrors,
     ],
@@ -324,6 +376,8 @@ export function WorkspaceRouteProvider() {
     authenticatedApiErrorReports,
     currentPath,
     currentUserError,
+    aiPolicyQuery.error,
+    aiPreferenceQuery.error,
     notificationUnreadCountError,
     projectDirectoryError,
     quickAccessError,
@@ -684,6 +738,8 @@ export function WorkspaceRouteProvider() {
   const contextValue = useMemo<WorkspaceRouteContextValue>(() => ({
     accessToken,
     canLoadWorkspaceData,
+    canManageAiAssistance,
+    isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
     commonErrorKey,
@@ -734,9 +790,12 @@ export function WorkspaceRouteProvider() {
     userInitial,
     userLabel,
     userKey,
+    workspaceId,
   }), [
     accessToken,
     canLoadWorkspaceData,
+    canManageAiAssistance,
+    isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
     commonErrorKey,
@@ -779,6 +838,7 @@ export function WorkspaceRouteProvider() {
     userInitial,
     userLabel,
     userKey,
+    workspaceId,
   ])
 
   if (!session) {
@@ -803,6 +863,20 @@ export function useWorkspaceRouteContext() {
   }
 
   return context
+}
+
+/**
+ * Reads the shared workspace context when a route is mounted below the shell.
+ *
+ * Standalone Storybook pages may intentionally omit the provider; those pages
+ * can retain their local rollout fallback while production routes use the
+ * persisted AI settings gate from the provider.
+ *
+ * @returns Shared workspace context, or undefined outside the provider.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function useOptionalWorkspaceRouteContext() {
+  return useOutletContext<WorkspaceRouteContextValue | undefined>()
 }
 
 /**

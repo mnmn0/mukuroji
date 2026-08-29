@@ -98,6 +98,20 @@ describe('SearchResultCollection', () => {
     expect(html).not.toContain('>ready-for-qa<')
   })
 
+  test('disables result navigation while an AI operation is pending', () => {
+    const html = renderToStaticMarkup(
+      <SearchResultCollection
+        isAiOperationPending
+        layout={tableLayout}
+        locale="en"
+        onNavigate={() => undefined}
+        results={[createResult('pending-review')]}
+      />,
+    )
+
+    expect(html).toContain('disabled=""')
+  })
+
   test('localizes context-item kind subtitles when no body is available', () => {
     const html = renderToStaticMarkup(
       <SearchResultCollection

@@ -1,4 +1,5 @@
 export * from './analytics'
+export * from './ai-assistance'
 export * from './api-runtime-configuration'
 export * from './automation'
 export * from './capacity-planning'

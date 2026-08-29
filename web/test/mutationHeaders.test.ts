@@ -195,3 +195,38 @@ test('shares one in-flight request for concurrent calls to the same logical muta
   expect(await Promise.all([firstResult, secondResult])).toEqual(['created', 'created'])
   expect(requestCount).toBe(1)
 })
+
+test('reuses one AI generation header context after cancel without retaining raw input', async () => {
+  const context: MutationRequestContext = {
+    correlationId: 'ai-correlation-1',
+    idempotencyKey: 'ai-request-1',
+  }
+  const runner = createMutationRequestRunner(() => context)
+  const accessToken = 'SECRET_AI_ACCESS_TOKEN'
+  const query = 'SECRET_PLAIN_LANGUAGE_QUERY'
+  const fingerprint = await createMutationFingerprint(
+    accessToken,
+    JSON.stringify({ locale: 'en', query, task: 'search' }),
+  )
+  const observedHeaders: ReturnType<typeof createMutationHeaders>[] = []
+
+  expect(fingerprint).toMatch(/^[a-f0-9]{64}$/)
+  expect(fingerprint).not.toContain(accessToken)
+  expect(fingerprint).not.toContain(query)
+
+  await expect(runner.run(
+    'ai-assistance:generate',
+    fingerprint,
+    async (requestContext) => {
+      observedHeaders.push(createMutationHeaders(requestContext))
+      throw new DOMException('Cancelled by operator', 'AbortError')
+    },
+  )).rejects.toMatchObject({ name: 'AbortError' })
+
+  await runner.run('ai-assistance:generate', fingerprint, async (requestContext) => {
+    observedHeaders.push(createMutationHeaders(requestContext))
+  })
+
+  expect(observedHeaders).toHaveLength(2)
+  expect(observedHeaders[1]).toEqual(observedHeaders[0])
+})

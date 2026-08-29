@@ -19,7 +19,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { MessageKey } from '../../shared/i18n/i18n'
+import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
@@ -57,6 +57,7 @@ import {
   PlanningUpdateDetailPane,
   PlanningUpdateFreshnessBadge,
   type PlanningUpdateLabels,
+  type PlanningStatusUpdateAiAssistance,
 } from './PlanningUpdatePrimitives'
 
 /**
@@ -257,6 +258,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
  * PlanningScreen の入力です。
  */
 export type PlanningScreenProps = {
+  /** Optional AI generation access; target identity and revision are derived from the visible snapshot. */
+  aiAssistance?: PlanningScreenAiAssistance
   /** 現在表示している Planning view です。 */
   activeView: PlanningViewId
   /** 画面で使う locale 済み文言です。 */
@@ -392,6 +395,16 @@ export type PlanningScreenProps = {
   onOpenMilestone?: (milestoneId: string) => void
 }
 
+/** Authentication and locale used to derive a selected target's AI source. */
+export type PlanningScreenAiAssistance = {
+  /** Active Workspace member bearer token. */
+  accessToken: string
+  /** Reports authenticated AI failures to the owning Planning route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
+  /** Locale sent to Bedrock and used for draft presentation. */
+  locale: Locale
+}
+
 const timelineEntityTypes = new Set<PlanningEntityType>([
   'cycle',
   'milestone',
@@ -406,6 +419,7 @@ const planningViews: readonly PlanningViewId[] = ['timeline', 'roadmap', 'portfo
 export function PlanningScreen({
   accessErrorMessage,
   activeView,
+  aiAssistance,
   canCreateInScope,
   canLinkEntity,
   canManageUpdateCadence,
@@ -457,7 +471,15 @@ export function PlanningScreen({
   )
   const [selectedEntityId, setSelectedEntityId] = useState(initialSelectedEntityId)
   const [selectedUpdateTarget, setSelectedUpdateTarget] = useState(initialSelectedUpdateTarget)
+  const [isAiOperationPending, setIsAiOperationPending] = useState(false)
+  const isAiOperationPendingRef = useRef(false)
   const pendingViewFocus = useRef<PlanningViewId | undefined>(undefined)
+
+  /** Keeps Planning target controls fenced while an AI operation is pending. */
+  const reportAiOperationPending = (pending: boolean) => {
+    isAiOperationPendingRef.current = pending
+    setIsAiOperationPending(pending)
+  }
   const selectedEntity = activeEntities.find((entity) => entity.id === selectedEntityId) ??
     activeEntities.find((entity) => entity.type === 'goal') ?? activeEntities[0]
   const resolvedSelectedUpdateTarget = selectedUpdateTarget ??
@@ -486,9 +508,28 @@ export function PlanningScreen({
   const selectedUpdateEvidenceCandidates = snapshot && resolvedSelectedUpdateTarget
     ? createPlanningUpdateEvidenceCandidates(snapshot, resolvedSelectedUpdateTarget)
     : undefined
+  const canPublishSelectedUpdate = resolvedSelectedUpdateTarget
+    ? canPublishUpdate?.(resolvedSelectedUpdateTarget) ?? true
+    : false
+  const selectedAiAssistance: PlanningStatusUpdateAiAssistance | undefined =
+    aiAssistance && snapshot && resolvedSelectedUpdateTarget && onPublishUpdate && canPublishSelectedUpdate
+      ? {
+          accessToken: aiAssistance.accessToken,
+          onAuthenticatedApiError: aiAssistance.onAuthenticatedApiError,
+          isAiOperationPending,
+          onOperationPendingChange: reportAiOperationPending,
+          locale: aiAssistance.locale,
+          source: {
+            expectedRevision: snapshot.revision,
+            target: resolvedSelectedUpdateTarget,
+            type: 'planning-target',
+          },
+        }
+      : undefined
 
   /** Selects a planning row and forwards its Project or Initiative update target. */
   const handleSelectEntity = (entityId: string) => {
+    if (isAiOperationPendingRef.current) return
     const entity = activeEntities.find((candidate) => candidate.id === entityId)
     const target = entity ? resolvePlanningEntityUpdateTarget(entity) : undefined
     setSelectedEntityId(entityId)
@@ -607,6 +648,7 @@ export function PlanningScreen({
                   canManageEntity={canManageEntity}
                   canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
                   labels={labels}
+                  isAiOperationPending={isAiOperationPending}
                   selectedEntity={selectedEntity}
                   snapshot={snapshot}
                   updateTargetDetails={updateTargetDetails}
@@ -632,6 +674,7 @@ export function PlanningScreen({
                   canManageEntity={canManageEntity}
                   canUpdateWorkItemLink={canUpdateWorkItemLink}
                   labels={labels}
+                  isAiOperationPending={isAiOperationPending}
                   selectedEntity={selectedEntity}
                   snapshot={snapshot}
                   onArchiveEntity={onArchiveEntity}
@@ -646,6 +689,7 @@ export function PlanningScreen({
               {activeEntities.length > 0 && activeView === 'portfolio' ? (
                 <PortfolioView
                   labels={labels}
+                  isAiOperationPending={isAiOperationPending}
                   onSelectEntity={handleSelectEntity}
                   snapshot={snapshot}
                   updateTargetDetails={updateTargetDetails}
@@ -662,6 +706,7 @@ export function PlanningScreen({
             </div>
             {selectedUpdateSummary && selectedUpdateView && resolvedSelectedUpdateTarget ? (
               <PlanningUpdateDetailPane
+                aiAssistance={selectedAiAssistance}
                 evidenceCandidates={selectedUpdateEvidenceCandidates}
                 key={createPlanningUpdateTargetKey(resolvedSelectedUpdateTarget)}
                 labels={labels}
@@ -673,7 +718,7 @@ export function PlanningScreen({
                 isHistoryLoading={isUpdateHistoryLoading}
                 isLoadingMoreHistory={isLoadingMoreUpdateHistory}
                 onLoadMoreHistory={onLoadMoreUpdateHistory}
-                onPublish={onPublishUpdate && (canPublishUpdate?.(resolvedSelectedUpdateTarget) ?? true)
+                onPublish={onPublishUpdate && canPublishSelectedUpdate
                   ? (draft) => onPublishUpdate(resolvedSelectedUpdateTarget, draft)
                   : undefined}
                 onSaveCadence={onSaveUpdateCadence && (canManageUpdateCadence?.(resolvedSelectedUpdateTarget) ?? true)
@@ -692,6 +737,7 @@ export function PlanningScreen({
 function TimelineView({
   canManageEntity,
   canManageWorkItemDependencyEndpoint,
+  isAiOperationPending = false,
   labels,
   onArchiveEntity,
   onChangeMilestoneDate,
@@ -713,6 +759,8 @@ function TimelineView({
 }: {
   canManageEntity?: PlanningScreenProps['canManageEntity']
   canManageWorkItemDependencyEndpoint?: PlanningScreenProps['canManageWorkItemDependencyEndpoint']
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onChangeMilestoneDate?: PlanningScreenProps['onChangeMilestoneDate']
@@ -778,7 +826,7 @@ function TimelineView({
                     key={entity.id}
                   >
                     <td className="w-full px-5 py-4">
-                      <button className="min-w-0 max-w-full text-left" type="button" onClick={() => onSelectEntity(entity.id)}>
+                      <button className="min-w-0 max-w-full text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={isAiOperationPending} type="button" onClick={() => onSelectEntity(entity.id)}>
                         <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{entity.title}</span>
                         <span className="mt-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
                           {labels.entityTypes[entity.type]}
@@ -1101,6 +1149,7 @@ function RoadmapView({
   canLinkEntity,
   canManageEntity,
   canUpdateWorkItemLink,
+  isAiOperationPending = false,
   labels,
   onArchiveEntity,
   onDeleteWorkItemLink,
@@ -1115,6 +1164,8 @@ function RoadmapView({
   canLinkEntity?: PlanningScreenProps['canLinkEntity']
   canManageEntity?: PlanningScreenProps['canManageEntity']
   canUpdateWorkItemLink?: PlanningScreenProps['canUpdateWorkItemLink']
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onDeleteWorkItemLink?: PlanningScreenProps['onDeleteWorkItemLink']
@@ -1150,6 +1201,7 @@ function RoadmapView({
               key={entity.id}
               labels={labels}
               selectedEntityId={selectedEntity?.id}
+              isAiOperationPending={isAiOperationPending}
               onSelectEntity={onSelectEntity}
             />
           ))}
@@ -1164,6 +1216,7 @@ function RoadmapView({
               return (
                 <button
                   className="rounded-lg border border-[var(--workbench-border)] bg-white p-3 text-left hover:border-[var(--workbench-primary)]"
+                  disabled={isAiOperationPending}
                   key={`${workItem.teamId}:${workItem.id}`}
                   type="button"
                   onClick={() => onOpenWorkItem?.(workItem)}
@@ -1216,6 +1269,7 @@ function RoadmapNode({
   childrenByParent,
   depth,
   entity,
+  isAiOperationPending = false,
   labels,
   onSelectEntity,
   selectedEntityId,
@@ -1223,6 +1277,8 @@ function RoadmapNode({
   childrenByParent: Map<string, PlanningEntity[]>
   depth: number
   entity: PlanningEntity
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onSelectEntity: (entityId: string) => void
   selectedEntityId?: string
@@ -1233,6 +1289,7 @@ function RoadmapNode({
         aria-current={selectedEntityId === entity.id ? 'true' : undefined}
         className={`grid w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(72px,auto)] items-center gap-2 rounded-lg border p-3 text-left min-[640px]:grid-cols-[minmax(0,1fr)_100px_110px] min-[640px]:gap-3 ${selectedEntityId === entity.id ? 'border-[#6fbfb4] bg-[#e5f7f4]' : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf]'}`}
         data-testid={`roadmap-entity-${entity.id}`}
+        disabled={isAiOperationPending}
         style={{
           paddingLeft: `clamp(12px, calc(12px + ${depth * 2.5}vw), ${12 + depth * 20}px)`,
         }}
@@ -1266,6 +1323,7 @@ function RoadmapNode({
             entity={child}
             key={child.id}
             labels={labels}
+            isAiOperationPending={isAiOperationPending}
             selectedEntityId={selectedEntityId}
             onSelectEntity={onSelectEntity}
           />
@@ -1625,11 +1683,14 @@ function WorkItemLinkEditor({
 }
 
 function PortfolioView({
+  isAiOperationPending = false,
   labels,
   onSelectEntity,
   snapshot,
   updateTargetDetails,
 }: {
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onSelectEntity: (entityId: string) => void
   snapshot: PlanningSnapshot
@@ -1662,7 +1723,7 @@ function PortfolioView({
               return (
                 <tr className="border-b border-[var(--workbench-border)] bg-white" data-testid={`portfolio-entity-${entity.id}`} key={entity.id}>
                   <td className="w-full px-5 py-4">
-                    <button className="min-w-0 max-w-full text-left" onClick={() => onSelectEntity(entity.id)} type="button">
+                    <button className="min-w-0 max-w-full text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={isAiOperationPending} onClick={() => onSelectEntity(entity.id)} type="button">
                       <span className="block truncate text-sm font-semibold">{entity.title}</span>
                       <span className="mt-1 block text-xs text-[var(--workbench-muted)]">{labels.entityTypes[entity.type]}</span>
                     </button>

@@ -1,3 +1,4 @@
+import type { AiTriageDraft } from '@mukuroji/contracts'
 import {
   useRef,
   useState,
@@ -5,6 +6,8 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageDraftComposer'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { ShieldIcon } from '../../shared/ui/icons'
@@ -22,6 +25,24 @@ import { TriageSourceIcon } from './TriageSourceIcon'
 
 /** Props accepted by the permission-aware triage entry detail pane. */
 export type TriageEntryDetailProps = {
+  /** Active Workspace member bearer token used only for explicit AI generation. */
+  readonly accessToken?: string
+  /** Whether the dependent AI API deployment has enabled the route-level controls. */
+  readonly aiAssistanceEnabled?: boolean
+  /** Optional AI controller override for isolated interaction stories. */
+  readonly aiAssistanceController?: AiAssistanceController
+  /** Reports authenticated AI failures to the owning Team route session guard. */
+  readonly onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports AI request state so the owning queue can fence source changes. */
+  readonly onOperationPendingChange?: (pending: boolean) => void
+  /** Whether an AI generation, decision, or feedback request is in flight. */
+  readonly isAiOperationPending?: boolean
+  /** Team route identifier used to scope the AI source reference. */
+  readonly teamId: string
+  /** Project IDs currently visible to the viewer in this Team directory. */
+  readonly visibleProjectIds?: readonly string[]
+  /** Active non-guest members keyed by their current Team-qualified Project. */
+  readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
   /** Selected permission-safe entry view. */
   readonly view?: TriageEntryView
   /** Current locale used for dates. */
@@ -56,6 +77,14 @@ const stateLabelKeys: Record<TriageEntryState, MessageKey> = {
   snoozed: 'triage.state.snoozed',
 }
 
+/** Tracks local routing edits that require confirmation before AI adoption. */
+type TriageRoutingDirtyState = {
+  /** Whether the owner field contains a local edit. */
+  owner: boolean
+  /** Whether the Project field contains a local edit. */
+  project: boolean
+}
+
 /**
  * Renders source context, traceability, routing, activity, and safe action forms.
  *
@@ -65,22 +94,46 @@ const stateLabelKeys: Record<TriageEntryState, MessageKey> = {
  * @returns Responsive entry detail pane.
  */
 export function TriageEntryDetail({
+  accessToken,
+  aiAssistanceEnabled = true,
+  aiAssistanceController,
   errorMessage,
+  isAiOperationPending = false,
   isLoading = false,
   isPending = false,
   locale,
+  onAuthenticatedApiError,
   onAction,
   onActionComplete,
   onBack,
+  onOperationPendingChange,
   onRetry,
   t,
+  teamId,
+  eligibleAssigneeIdsByProject,
+  visibleProjectIds = [],
   view,
 }: TriageEntryDetailProps) {
   const [actionMode, setActionMode] = useState<TriageActionMode>()
   const [acceptMode, setAcceptMode] = useState<'create' | 'link'>('create')
   const [actionError, setActionError] = useState(false)
   const [actionAnnouncement, setActionAnnouncement] = useState('')
+  const [ownerUserId, setOwnerUserId] = useState(view?.entry.ownerUserId ?? '')
+  const [projectId, setProjectId] = useState(
+    view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '',
+  )
+  const [, setRoutingDirty] = useState<TriageRoutingDirtyState>({
+    owner: false,
+    project: false,
+  })
+  const routingDirtyRef = useRef<TriageRoutingDirtyState>({
+    owner: false,
+    project: false,
+  })
   const actionTrigger = useRef<HTMLButtonElement | null>(null)
+  const [isActionMutationPending, setIsActionMutationPending] = useState(false)
+  const isActionMutationPendingRef = useRef(false)
+  const actionIsPending = isPending || isActionMutationPending || isAiOperationPending
 
   const closeAction = () => {
     setActionMode(undefined)
@@ -91,9 +144,15 @@ export function TriageEntryDetail({
     mode: TriageActionMode,
     trigger?: HTMLButtonElement,
   ) => {
+    if (actionIsPending) return
     actionTrigger.current = trigger ?? null
     setActionError(false)
     setActionAnnouncement('')
+    setOwnerUserId(view?.entry.ownerUserId ?? '')
+    setProjectId(view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '')
+    const cleanState = { owner: false, project: false }
+    routingDirtyRef.current = cleanState
+    setRoutingDirty(cleanState)
     setActionMode(mode)
   }
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -103,7 +162,7 @@ export function TriageEntryDetail({
       closeAction()
       return
     }
-    if (event.altKey || event.ctrlKey || event.metaKey) return
+    if (event.altKey || event.ctrlKey || event.metaKey || actionIsPending) return
     const shortcut = resolveTriageActionShortcut(
       event.key,
       event.target,
@@ -156,9 +215,45 @@ export function TriageEntryDetail({
       )
     : undefined
 
+  /** Returns whether this AI draft would replace a locally edited routing field. */
+  const shouldConfirmTriageAdoption = (draft: AiTriageDraft) => (
+    (draft.assigneeUserId !== undefined && routingDirtyRef.current.owner) ||
+    (draft.projectId !== undefined && routingDirtyRef.current.project)
+  )
+
+  /** Copies only owner and Project fields supported by the existing triage action contracts. */
+  const adoptTriageDraft = (draft: AiTriageDraft, replacementConfirmed = false) => {
+    if (actionIsPending || isActionMutationPendingRef.current) return
+    if (shouldConfirmTriageAdoption(draft) && !replacementConfirmed) return
+    setActionError(false)
+    setActionAnnouncement('')
+    if (draft.assigneeUserId !== undefined) {
+      setOwnerUserId(draft.assigneeUserId.value)
+      const nextDirtyState = { ...routingDirtyRef.current, owner: false }
+      routingDirtyRef.current = nextDirtyState
+      setRoutingDirty(nextDirtyState)
+    }
+    if (draft.projectId !== undefined) {
+      setProjectId(draft.projectId.value)
+      const nextDirtyState = { ...routingDirtyRef.current, project: false }
+      routingDirtyRef.current = nextDirtyState
+      setRoutingDirty(nextDirtyState)
+    }
+    if (draft.assigneeUserId && entry.capabilities.canAssign) {
+      setActionMode('assign')
+      return
+    }
+    if (entry.capabilities.canAcceptCreate) {
+      setAcceptMode('create')
+      setActionMode('accept')
+      return
+    }
+    if (entry.capabilities.canAssign) setActionMode('assign')
+  }
+
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!actionMode || !onAction || isPending) return
+    if (!actionMode || !onAction || actionIsPending || isActionMutationPendingRef.current) return
     const formData = new FormData(event.currentTarget)
     const input = createActionInput(entry, actionMode, acceptMode, formData)
     if (!input) {
@@ -166,6 +261,8 @@ export function TriageEntryDetail({
       return
     }
     setActionError(false)
+    isActionMutationPendingRef.current = true
+    setIsActionMutationPending(true)
     try {
       await onAction(entry.id, input)
       setActionMode(undefined)
@@ -174,6 +271,9 @@ export function TriageEntryDetail({
       else actionTrigger.current?.focus()
     } catch {
       setActionError(true)
+    } finally {
+      isActionMutationPendingRef.current = false
+      setIsActionMutationPending(false)
     }
   }
 
@@ -186,8 +286,9 @@ export function TriageEntryDetail({
     >
       <div className="sticky top-0 z-10 border-b border-[var(--workbench-border)] bg-white px-5 py-4 max-[860px]:px-4">
         <button
-          className="mb-3 hidden min-h-10 items-center gap-2 text-sm font-semibold text-[var(--workbench-primary)] max-[860px]:inline-flex"
+          className="mb-3 hidden min-h-10 items-center gap-2 text-sm font-semibold text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:opacity-50 max-[860px]:inline-flex"
           onClick={onBack}
+          disabled={actionIsPending}
           type="button"
         >
           ← {t('triage.detail.back')}
@@ -224,20 +325,71 @@ export function TriageEntryDetail({
         <PermissionNotice entry={entry} locale={locale} t={t} />
 
         {entry.permission.visibility === 'full' ? (
-          <DetailSection title={t('triage.detail.sourcePreview')}>
-            <p className="whitespace-pre-wrap break-words text-sm font-medium leading-6 text-[var(--workbench-text)]">
-              {view.body || t('triage.detail.sourceBodyEmpty')}
-            </p>
-            {entry.sourcePreview.sanitized || entry.sourcePreview.truncated ? (
-              <p className="mt-3 text-xs font-semibold text-amber-700">
-                {entry.sourcePreview.sanitized && entry.sourcePreview.truncated
-                  ? t('triage.detail.sanitizedAndTruncated')
-                  : entry.sourcePreview.sanitized
-                    ? t('triage.detail.sanitized')
-                    : t('triage.detail.truncated')}
+          <>
+            <DetailSection title={t('triage.detail.sourcePreview')}>
+              <p className="whitespace-pre-wrap break-words text-sm font-medium leading-6 text-[var(--workbench-text)]">
+                {view.body || t('triage.detail.sourceBodyEmpty')}
               </p>
+              {entry.sourcePreview.sanitized || entry.sourcePreview.truncated ? (
+                <p className="mt-3 text-xs font-semibold text-amber-700">
+                  {entry.sourcePreview.sanitized && entry.sourcePreview.truncated
+                    ? t('triage.detail.sanitizedAndTruncated')
+                    : entry.sourcePreview.sanitized
+                      ? t('triage.detail.sanitized')
+                      : t('triage.detail.truncated')}
+                </p>
+              ) : null}
+            </DetailSection>
+            {aiAssistanceEnabled && (accessToken || aiAssistanceController) && (
+              entry.capabilities.canAcceptCreate || entry.capabilities.canAssign
+            ) ? (
+              <AiTriageDraftComposer
+                accessToken={accessToken}
+                adoptLabel={t('ai.triage.adoptTeam')}
+                controller={aiAssistanceController}
+                locale={locale}
+                onAuthenticatedApiError={onAuthenticatedApiError}
+                onAdoptDraft={adoptTriageDraft}
+                onOperationPendingChange={onOperationPendingChange}
+                canAdoptDraft={(draft) => {
+                  const hasInvalidProject = draft.projectId !== undefined &&
+                    !visibleProjectIds.includes(draft.projectId.value)
+                  const hasUnsupportedAssignee =
+                    draft.assigneeUserId !== undefined && !entry.capabilities.canAssign
+                  const hasSupportedAssignee =
+                    draft.assigneeUserId !== undefined &&
+                    entry.capabilities.canAssign &&
+                    isEligibleAssigneeForTriage(
+                      draft.assigneeUserId.value,
+                      draft.projectId?.value ?? (projectId || undefined),
+                      eligibleAssigneeIdsByProject,
+                    )
+                  const hasInvalidAssignee = draft.assigneeUserId !== undefined &&
+                    !hasSupportedAssignee
+                  const hasSupportedProject =
+                    draft.projectId !== undefined &&
+                    !hasInvalidProject &&
+                    (entry.capabilities.canAssign || entry.capabilities.canAcceptCreate)
+                  return !hasInvalidProject &&
+                    !hasUnsupportedAssignee &&
+                    !hasInvalidAssignee &&
+                    (hasSupportedAssignee || hasSupportedProject)
+                }}
+                // AI requests must be allowed to start; only domain mutations
+                // disable the composer itself. The combined action state still
+                // fences every external triage control above and below.
+                isMutationPending={isPending || isActionMutationPending}
+                shouldConfirmAdoption={shouldConfirmTriageAdoption}
+                source={{
+                  expectedRevision: entry.revision,
+                  teamId,
+                  triageEntryId: entry.id,
+                  type: 'triage-entry',
+                }}
+                t={t}
+              />
             ) : null}
-          </DetailSection>
+          </>
         ) : null}
 
         <DetailSection title={t('triage.detail.trace')}>
@@ -351,22 +503,22 @@ export function TriageEntryDetail({
         <div className="border-t border-[var(--workbench-border)] pt-5">
           <div className="flex flex-wrap gap-2" aria-label={t('triage.action.aria')}>
             {entry.capabilities.canAssign ? (
-              <ActionButton label={t('triage.action.assign')} onActivate={activateAction} mode="assign" />
+              <ActionButton disabled={actionIsPending} label={t('triage.action.assign')} onActivate={activateAction} mode="assign" />
             ) : null}
             {(entry.capabilities.canAcceptCreate || entry.capabilities.canAcceptLink) ? (
-              <ActionButton shortcut="A" label={t('triage.action.accept')} primary onActivate={activateAction} mode="accept" />
+              <ActionButton disabled={actionIsPending} shortcut="A" label={t('triage.action.accept')} primary onActivate={activateAction} mode="accept" />
             ) : null}
             {entry.capabilities.canMarkDuplicate ? (
-              <ActionButton shortcut="D" label={t('triage.action.duplicate')} onActivate={activateAction} mode="duplicate" />
+              <ActionButton disabled={actionIsPending} shortcut="D" label={t('triage.action.duplicate')} onActivate={activateAction} mode="duplicate" />
             ) : null}
             {entry.capabilities.canRequestInformation && entry.capabilities.canReply ? (
-              <ActionButton shortcut="I" label={t('triage.action.requestInformation')} onActivate={activateAction} mode="request-information" />
+              <ActionButton disabled={actionIsPending} shortcut="I" label={t('triage.action.requestInformation')} onActivate={activateAction} mode="request-information" />
             ) : null}
             {entry.capabilities.canSnooze ? (
-              <ActionButton shortcut="S" label={t('triage.action.snooze')} onActivate={activateAction} mode="snooze" />
+              <ActionButton disabled={actionIsPending} shortcut="S" label={t('triage.action.snooze')} onActivate={activateAction} mode="snooze" />
             ) : null}
             {entry.capabilities.canDecline ? (
-              <ActionButton shortcut="X" label={t('triage.action.decline')} onActivate={activateAction} mode="decline" />
+              <ActionButton disabled={actionIsPending} shortcut="X" label={t('triage.action.decline')} onActivate={activateAction} mode="decline" />
             ) : null}
           </div>
           {!hasAnyAction(entry) ? (
@@ -390,18 +542,30 @@ export function TriageEntryDetail({
                   <input
                     autoFocus
                     className="workbench-input min-h-10 px-3"
-                    defaultValue={entry.ownerUserId ?? ''}
                     name="ownerUserId"
+                    onChange={(event) => {
+                      setOwnerUserId(event.target.value)
+                      const nextDirtyState = { ...routingDirtyRef.current, owner: true }
+                      routingDirtyRef.current = nextDirtyState
+                      setRoutingDirty(nextDirtyState)
+                    }}
                     placeholder={t('triage.action.ownerOptional')}
+                    value={ownerUserId}
                   />
                 </label>
                 <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('triage.action.projectId')}
                   <input
                     className="workbench-input min-h-10 px-3"
-                    defaultValue={entry.projectId ?? view.routingCandidate?.projectId ?? ''}
                     name="projectId"
+                    onChange={(event) => {
+                      setProjectId(event.target.value)
+                      const nextDirtyState = { ...routingDirtyRef.current, project: true }
+                      routingDirtyRef.current = nextDirtyState
+                      setRoutingDirty(nextDirtyState)
+                    }}
                     placeholder={t('triage.action.projectOptional')}
+                    value={projectId}
                   />
                 </label>
               </>
@@ -435,9 +599,15 @@ export function TriageEntryDetail({
                     <input
                       autoFocus
                       className="workbench-input min-h-10 px-3"
-                      defaultValue={entry.projectId ?? view.routingCandidate?.projectId ?? ''}
                       name="projectId"
+                      onChange={(event) => {
+                        setProjectId(event.target.value)
+                        const nextDirtyState = { ...routingDirtyRef.current, project: true }
+                        routingDirtyRef.current = nextDirtyState
+                        setRoutingDirty(nextDirtyState)
+                      }}
                       placeholder={t('triage.action.projectOptional')}
+                      value={projectId}
                     />
                   </label>
                 ) : (
@@ -472,11 +642,11 @@ export function TriageEntryDetail({
               </label>
             )}
             <div className="flex justify-end gap-2">
-              <button className="workbench-button-secondary min-h-10 px-4" disabled={isPending} onClick={closeAction} type="button">
+              <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={closeAction} type="button">
                 {t('triage.action.cancel')}
               </button>
-              <button className="workbench-button-primary min-h-10 px-4" disabled={isPending} type="submit">
-                {isPending ? t('triage.action.pending') : t('triage.action.submit')}
+              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">
+                {actionIsPending ? t('triage.action.pending') : t('triage.action.submit')}
               </button>
             </div>
           </form>
@@ -533,6 +703,36 @@ function DetailTerm({ label, value }: { label: string; value: string }) {
   )
 }
 
+/**
+ * Checks an AI-proposed owner against the current active member directory.
+ *
+ * A Project-qualified lookup is preferred whenever the entry has a destination
+ * Project. When no destination exists, an active member in any visible Team
+ * Project is accepted; an absent directory fails closed.
+ *
+ * @param assigneeUserId - Proposed Workspace member identifier.
+ * @param projectId - Proposed or current destination Project identifier.
+ * @param eligibleAssigneeIdsByProject - Current active member keys by Project.
+ * @returns Whether the owner is eligible for the destination.
+ */
+function isEligibleAssigneeForTriage(
+  assigneeUserId: string,
+  projectId: string | undefined,
+  eligibleAssigneeIdsByProject: ReadonlyMap<string, ReadonlySet<string>> | undefined,
+): boolean {
+  if (!eligibleAssigneeIdsByProject) return false
+  const normalizedAssignee = assigneeUserId.trim().toLowerCase()
+  if (!normalizedAssignee) return false
+  if (projectId) {
+    const eligibleMembers = eligibleAssigneeIdsByProject.get(projectId.trim().toLowerCase())
+    return eligibleMembers?.has(normalizedAssignee) ?? false
+  }
+  for (const eligibleMembers of eligibleAssigneeIdsByProject.values()) {
+    if (eligibleMembers.has(normalizedAssignee)) return true
+  }
+  return false
+}
+
 /** Renders one retained source-context count. */
 function ContextCount({ label, value }: { label: string; value: number }) {
   return (
@@ -544,7 +744,8 @@ function ContextCount({ label, value }: { label: string; value: number }) {
 }
 
 /** Opens one explicit action form and shows its keyboard shortcut. */
-function ActionButton({ label, mode, onActivate, primary = false, shortcut }: {
+function ActionButton({ disabled = false, label, mode, onActivate, primary = false, shortcut }: {
+  disabled?: boolean
   label: string
   mode: TriageActionMode
   onActivate: (mode: TriageActionMode, trigger?: HTMLButtonElement) => void
@@ -553,7 +754,8 @@ function ActionButton({ label, mode, onActivate, primary = false, shortcut }: {
 }) {
   return (
     <button
-      className={`${primary ? 'workbench-button-primary' : 'workbench-button-secondary'} min-h-10 px-4`}
+      className={`${primary ? 'workbench-button-primary' : 'workbench-button-secondary'} min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={disabled}
       onClick={(event) => onActivate(mode, event.currentTarget)}
       type="button"
     >

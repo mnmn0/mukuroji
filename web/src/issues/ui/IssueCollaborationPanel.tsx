@@ -1,5 +1,19 @@
-import { useId, useMemo, useState, type KeyboardEvent } from 'react'
-import type { CuratedContextSource } from '@mukuroji/contracts'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react'
+import type {
+  AiAssistanceCitation,
+  AiSummaryDraft,
+  CuratedContextSource,
+} from '@mukuroji/contracts'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { WatchIcon } from '../../shared/ui/icons'
@@ -14,6 +28,7 @@ import {
 } from '../model/collaborationTabs'
 import {
   createActivityContextSource,
+  isAiSummaryAdoptionCurrent,
   type IssueContextDraft,
 } from '../model/contextDrafts'
 import {
@@ -21,15 +36,63 @@ import {
   resolveIssueSourceFocus,
   type IssueSourceTarget,
 } from '../model/contextSources'
+import { formatAiSummaryContextBody } from '../model/aiSummaryContextBody'
 import { IssueActivityTab } from './IssueActivityTab'
 import { IssueConversationTab } from './IssueConversationTab'
 import { IssueDecisionsTab } from './IssueDecisionsTab'
 import { IssueSourcesTab } from './IssueSourcesTab'
 
 /**
+ * Feature-owned Brief slot for an optional Work Item collaboration tab.
+ *
+ * The slot is supplied only after the parent route has resolved the current
+ * viewer's permission-safe context and keeps feature composition outside this
+ * domain panel.
+ */
+export type IssueSummaryAiAssistance = {
+  /** Stable source-and-revision key owned by the feature composition boundary. */
+  sessionKey: string
+  /**
+   * Renders the feature-owned Brief assistant and receives a local draft callback.
+   * Passing an undefined callback hides adoption when the existing editor cannot create.
+   */
+  renderBrief: (
+    onAdopt: ((draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void) | undefined,
+    onOperationPendingChange: IssueSummaryAiOperationPendingChange | undefined,
+  ) => ReactNode
+}
+
+/** Reports an AI operation state together with the Brief session that started it. */
+export type IssueSummaryAiOperationPendingChange = (
+  sessionKey: string,
+  pending: boolean,
+) => void
+
+/** Tracks one mounted Brief session's in-flight operation state. */
+type AiSummaryOperationPendingState = {
+  /** Brief source-and-revision key that owns the operation. */
+  sessionKey: string
+  /** Whether that session currently has a generation, decision, or feedback request. */
+  pending: boolean
+}
+
+/** Exposes the session-aware operation guard used by adjacent promotion flows. */
+type AiSummaryOperationPendingController = {
+  /** Whether the currently rendered Brief session has an active operation. */
+  isPending: boolean
+  /** Receives operation transitions from a keyed Brief assistant. */
+  report: IssueSummaryAiOperationPendingChange
+}
+
+/**
  * Props for the Work Item collaboration panel.
+ *
+ * The panel owns presentation and local draft promotion while existing
+ * collaboration controllers remain the only mutation boundary.
  */
 export type IssueCollaborationPanelProps = {
+  /** Optional AI summary access; omission removes the Brief tab and its source from markup. */
+  aiAssistance?: IssueSummaryAiAssistance
   /** Locale used for all collaboration messages. */
   locale: Locale
   /** Workspace members used for mentions, actors, and presence. */
@@ -54,6 +117,8 @@ export type IssueCollaborationPanelProps = {
   contextDraft?: IssueContextDraft
   /** Called after an externally supplied source draft is opened. */
   onContextDraftConsumed?: () => void
+  /** Receives whether the mounted Brief assistant is performing an AI operation. */
+  onAiSummaryOperationPendingChange?: (pending: boolean) => void
   /** Optional outer layout class name. */
   className?: string
 }
@@ -61,10 +126,14 @@ export type IssueCollaborationPanelProps = {
 /**
  * Renders one detail-pane collaboration workspace with accessible section tabs.
  *
+ * @remarks The optional Brief tab is permission-gated and its Add as draft
+ * action opens the existing Decisions editor without writing a ledger entry.
+ *
  * @param props - Collaboration data, locale, deep-link targets, and actions.
  * @returns The collaboration panel.
  */
 export function IssueCollaborationPanel({
+  aiAssistance,
   artifacts,
   className = '',
   contextDraft: externalContextDraft,
@@ -76,6 +145,7 @@ export function IssueCollaborationPanel({
   locale,
   members,
   onContextDraftConsumed,
+  onAiSummaryOperationPendingChange,
   readOnlyMessage,
   route,
 }: IssueCollaborationPanelProps) {
@@ -87,9 +157,30 @@ export function IssueCollaborationPanel({
   const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
-  const selectedTab = contextDraft && !hasOverriddenDraftTab
+  const aiAssistantSessionKey = aiAssistance?.sessionKey
+  const visibleTabs = aiAssistance
+    ? [...issueCollaborationTabs]
+    : issueCollaborationTabs.filter((tab) => tab !== 'brief')
+  const requestedTab = contextDraft && !hasOverriddenDraftTab
     ? 'decisions'
     : route?.collaborationTab ?? uncontrolledTab
+  const selectedTab = requestedTab === 'brief' && !aiAssistance
+    ? 'conversation'
+    : requestedTab
+
+  const {
+    isPending: isAiSummaryOperationPending,
+    report: handleAiSummaryOperationPendingChange,
+  } = useAiSummaryOperationPendingController(
+    aiAssistantSessionKey,
+    onAiSummaryOperationPendingChange,
+  )
+
+  const handleAiSummaryAdopt = useAiSummaryAdoptionHandler(
+    aiAssistantSessionKey,
+    contextDraft,
+    openAiSummaryDraft,
+  )
   const uniquePresence = useMemo(
     () =>
       Array.from(
@@ -107,6 +198,7 @@ export function IssueCollaborationPanel({
   ).length
   const tabCounts: Record<IssueCollaborationTab, number> = {
     activity: controller.activity.length,
+    brief: 0,
     conversation: threadCount,
     decisions: controller.context.items.length,
     sources: createIssueSourceEntries(controller.context.items).length,
@@ -126,7 +218,8 @@ export function IssueCollaborationPanel({
    * @param source - Comment or activity evidence captured by the caller.
    */
   function promoteSource(source: CuratedContextSource) {
-    setPromotedContextDraft({ body: '', kind: 'context', source, title: '' })
+    const nextDraft = { body: '', kind: 'context', source, title: '' } satisfies IssueContextDraft
+    setPromotedContextDraft(nextDraft)
     setHasOverriddenDraftTab(false)
     if (route?.collaborationTab === undefined) {
       setUncontrolledTab('decisions')
@@ -201,6 +294,25 @@ export function IssueCollaborationPanel({
     )
   }
 
+  /** Opens an approved AI summary in the existing human-owned context editor. */
+  function openAiSummaryDraft(
+    draft: AiSummaryDraft,
+    citations: readonly AiAssistanceCitation[],
+  ) {
+    const nextDraft = {
+      body: formatAiSummaryContextBody(draft, citations, t),
+      kind: 'context',
+      title: t('ai.summary.contextDraftTitle'),
+    } satisfies IssueContextDraft
+    setPromotedContextDraft(nextDraft)
+    setHasOverriddenDraftTab(false)
+    if (route?.collaborationTab === undefined) {
+      setUncontrolledTab('decisions')
+    } else {
+      route.onCollaborationTabChange?.('decisions')
+    }
+  }
+
   /**
    * Selects a tab in controlled or uncontrolled mode.
    *
@@ -225,7 +337,7 @@ export function IssueCollaborationPanel({
     const target = resolveIssueCollaborationTabTarget(
       tab,
       event.key,
-      issueCollaborationTabs,
+      visibleTabs,
     )
     if (!target) return
 
@@ -320,7 +432,7 @@ export function IssueCollaborationPanel({
           className="flex min-w-0 gap-0 overflow-x-auto"
           role="tablist"
         >
-          {issueCollaborationTabs.map((tab) => (
+          {visibleTabs.map((tab) => (
             <button
               aria-controls={createCollaborationPanelId(panelIdPrefix)}
               aria-selected={selectedTab === tab}
@@ -338,9 +450,11 @@ export function IssueCollaborationPanel({
               type="button"
             >
               {t(`collaboration.tabs.${tab}`)}
-              <span className="text-[0.65rem] text-[var(--workbench-muted-soft)]">
-                {tabCounts[tab]}
-              </span>
+              {tab === 'brief' ? null : (
+                <span className="text-[0.65rem] text-[var(--workbench-muted-soft)]">
+                  {tabCounts[tab]}
+                </span>
+              )}
               {selectedTab === tab ? (
                 <span
                   aria-hidden="true"
@@ -371,7 +485,7 @@ export function IssueCollaborationPanel({
             locale={locale}
             members={members}
             onPromoteComment={
-              controller.context.capabilities.canCreate
+              controller.context.capabilities.canCreate && !isAiSummaryOperationPending
                 ? promoteCommentSource
                 : undefined
             }
@@ -414,11 +528,24 @@ export function IssueCollaborationPanel({
             locale={locale}
             members={members}
             onPromoteActivity={
-              controller.context.capabilities.canCreate
+              controller.context.capabilities.canCreate && !isAiSummaryOperationPending
                 ? promoteActivitySource
                 : undefined
             }
           />
+        ) : null}
+        {aiAssistance && aiAssistantSessionKey ? (
+          <div
+            aria-hidden={selectedTab !== 'brief'}
+            className={selectedTab === 'brief' ? 'px-5 py-5' : 'hidden'}
+          >
+            {aiAssistance.renderBrief(
+              controller.context.capabilities.canCreate && !contextDraft
+                ? handleAiSummaryAdopt
+                : undefined,
+              handleAiSummaryOperationPendingChange,
+            )}
+          </div>
         ) : null}
         {selectedTab === 'decisions' ? (
           <IssueDecisionsTab
@@ -462,6 +589,67 @@ export function IssueCollaborationPanel({
       </div>
     </section>
   )
+}
+
+/**
+ * Keeps a Brief adoption callback current across source and editor transitions.
+ *
+ * @param expectedSessionKey - Session key captured by the rendered Brief assistant.
+ * @param currentDraft - Human-owned draft currently open in the panel.
+ * @param openDraft - Domain-owned callback for opening the existing editor.
+ * @returns A guarded local adoption callback for the feature-owned Brief slot.
+ */
+function useAiSummaryAdoptionHandler(
+  expectedSessionKey: string | undefined,
+  currentDraft: IssueContextDraft | undefined,
+  openDraft: (draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void,
+): (draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void {
+  const sessionRef = useRef(expectedSessionKey)
+  const contextDraftRef = useRef(currentDraft)
+  useLayoutEffect(() => {
+    sessionRef.current = expectedSessionKey
+  }, [expectedSessionKey])
+  useLayoutEffect(() => {
+    contextDraftRef.current = currentDraft
+  }, [currentDraft])
+  return useCallback((draft, citations) => {
+    if (!isAiSummaryAdoptionCurrent(
+      sessionRef.current,
+      expectedSessionKey,
+      contextDraftRef.current,
+    )) return
+    openDraft(draft, citations)
+  }, [expectedSessionKey, openDraft])
+}
+
+/**
+ * Keeps the collaboration promotion guard scoped to the currently mounted Brief session.
+ *
+ * @param sessionKey - Current source-and-revision key, if AI Brief is available.
+ * @param onChange - Parent callback that gates adjacent context promotion.
+ * @returns A session-aware pending state and reporter.
+ */
+function useAiSummaryOperationPendingController(
+  sessionKey: string | undefined,
+  onChange: ((pending: boolean) => void) | undefined,
+): AiSummaryOperationPendingController {
+  const [pendingState, setPendingState] = useState<AiSummaryOperationPendingState>()
+  const sessionKeyRef = useRef(sessionKey)
+  useLayoutEffect(() => {
+    sessionKeyRef.current = sessionKey
+  }, [sessionKey])
+  const report = useCallback((reportedSessionKey: string, pending: boolean) => {
+    // A stale keyed assistant can settle after the source revision changes.
+    if (reportedSessionKey !== sessionKeyRef.current) return
+    setPendingState({ pending, sessionKey: reportedSessionKey })
+  }, [])
+  const isPending = pendingState !== undefined &&
+    pendingState.sessionKey === sessionKey &&
+    pendingState.pending
+  useEffect(() => {
+    onChange?.(isPending)
+  }, [isPending, onChange])
+  return { isPending, report }
 }
 
 /**
