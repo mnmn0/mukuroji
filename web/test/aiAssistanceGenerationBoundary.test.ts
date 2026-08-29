@@ -3,6 +3,7 @@ import { parseAiAssistanceGenerationResponse } from '../src/features/ai-assistan
 import {
   aiPlanningGenerationFixture,
   aiSearchGenerationFixture,
+  aiSummaryGenerationFixture,
 } from '../src/features/ai-assistance/fixtures'
 
 describe('AI assistance generation response boundary', () => {
@@ -85,6 +86,32 @@ describe('AI assistance generation response boundary', () => {
       ...incoherent,
       expiresAt: new Date(now - 120_000).toISOString(),
     }, 'search')).toThrow(
+      'AI assistance API returned an invalid response.',
+    )
+  })
+
+  /** Rejects control characters that the downstream collaboration boundary cannot persist. */
+  test('rejects unsafe control characters in Summary claims', () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+
+    const response = {
+      ...aiSummaryGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          overview: {
+            ...content.draft.overview,
+            text: 'Visible claim\u0000with an unsafe character',
+          },
+        },
+      },
+    }
+
+    expect(() => parseAiAssistanceGenerationResponse(response, 'summary')).toThrow(
       'AI assistance API returned an invalid response.',
     )
   })

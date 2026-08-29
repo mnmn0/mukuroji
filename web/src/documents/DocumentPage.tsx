@@ -1574,6 +1574,14 @@ export function DocumentScreen({
     [],
   )
 
+  /** Refuses route transitions while a Document Brief operation is in flight. */
+  const savePendingChangesForNavigation = useCallback(async () => {
+    if (isAiOperationPendingRef.current) {
+      return false
+    }
+    return ensureDraftSaved()
+  }, [ensureDraftSaved])
+
   const createDocumentAction =
     data.canCreateDocuments && actions.createDocument
       ? async (
@@ -1599,15 +1607,17 @@ export function DocumentScreen({
     }
     const guard: DocumentDraftSaveGuard = {
       hasUnsavedChanges: () =>
+        isAiOperationPendingRef.current ||
         hasUnsavedChangesRef.current ||
         draftGuardRef.current?.hasUnsavedChanges() === true,
-      savePendingChanges: ensureDraftSaved,
+      savePendingChanges: savePendingChangesForNavigation,
     }
     onNavigationGuardChange(guard)
     return () => onNavigationGuardChange(undefined)
   }, [
     ensureDraftSaved,
     onNavigationGuardChange,
+    savePendingChangesForNavigation,
   ])
 
   const openTreeDrawer = () => {

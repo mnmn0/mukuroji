@@ -912,7 +912,8 @@ function isBoundedString(value: unknown, maximumLength: number): value is string
   return typeof value === 'string' &&
     value.length > 0 &&
     value.length <= maximumLength &&
-    value === value.trim()
+    value === value.trim() &&
+    !hasUnsafeControlCharacter(value)
 }
 
 /** Validates a bounded prose value whose trimmed representation is non-empty. */
@@ -922,15 +923,29 @@ function isBoundedNonEmptyTrimmedString(
 ): value is string {
   return typeof value === 'string' &&
     value.length <= maximumLength &&
-    value.trim().length > 0
+    value.trim().length > 0 &&
+    !hasUnsafeControlCharacter(value)
 }
 
 /** Validates an optional bounded string without changing its representation. */
 function isOptionalBoundedString(value: unknown, maximumLength: number): value is string | undefined {
   return value === undefined || (
     typeof value === 'string' &&
-    value.length <= maximumLength
+    value.length <= maximumLength &&
+    !hasUnsafeControlCharacter(value)
   )
+}
+
+/** Rejects control characters that downstream persisted text boundaries cannot accept. */
+function hasUnsafeControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint === 127 || (
+      codePoint < 32 &&
+      codePoint !== 9 &&
+      codePoint !== 10
+    )
+  })
 }
 
 /** Validates a finite number. */
