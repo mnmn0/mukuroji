@@ -12,6 +12,7 @@ import type {
   AiAssistanceGenerationBudgetReservation,
   AiAssistancePolicyAuditInput,
   AiAssistancePrivateMemberIdentifiers,
+  AiAssistanceTriageRoutingTuple,
   AiAssistanceStore,
   AiModelGenerationInput,
   FailAiAssistanceGenerationReservationInput,
@@ -66,6 +67,32 @@ function createSummaryRequest(focus?: string): GenerateAiAssistanceRequest {
   }
 }
 
+/** Creates one planning request for either a Work Item or Planning target source. */
+function createPlanningRequest(
+  sourceType: 'work-item' | 'planning-target',
+): GenerateAiAssistanceRequest {
+  return sourceType === 'work-item'
+    ? {
+        task: 'planning',
+        locale: 'en',
+        source: {
+          type: 'work-item',
+          teamId: 'team-1',
+          workItemId: 'work-item-1',
+          expectedRevision: 2,
+        },
+      }
+    : {
+        task: 'planning',
+        locale: 'en',
+        source: {
+          type: 'planning-target',
+          target: { type: 'project', teamId: 'team-1', projectId: 'project-1' },
+          expectedRevision: 2,
+        },
+      }
+}
+
 /** Asserts the durable start receipt contains only the model-visible redacted evidence. */
 function expectSafeSummaryAttemptAudit(
   attempt: StartAiAssistanceGenerationAttemptInput | undefined,
@@ -96,6 +123,14 @@ type HarnessConfiguration = {
   promptContext?: string
   /** Private member labels made available only to the service alias boundary. */
   privateMemberIdentifiers?: readonly AiAssistancePrivateMemberIdentifiers[]
+  /** Optional compatible triage routes used to exercise tuple validation. */
+  triageRoutingTuples?: readonly AiAssistanceTriageRoutingTuple[]
+  /** Optional assignee allowlist override for routing compatibility tests. */
+  assigneeUserIds?: readonly string[]
+  /** Optional Team allowlist override for routing compatibility tests. */
+  teamIds?: readonly string[]
+  /** Optional Project allowlist override for routing compatibility tests. */
+  projectIds?: readonly string[]
   /** Optional strict model draft used to exercise task-specific output validation. */
   outputDraft?: AiAssistanceDraft
   /** Optional end-to-end deadline used to exercise remaining-time enforcement. */
@@ -397,14 +432,17 @@ function createHarness(configuration: HarnessConfiguration = {}) {
             identifiers: [],
           }],
         allowedValues: {
-          assigneeUserIds: ['assignee@example.com'],
+          assigneeUserIds: configuration.assigneeUserIds ?? ['assignee@example.com'],
           creatorUserIds: ['creator@example.com'],
-          teamIds: ['team-1'],
-          projectIds: ['project-1'],
+          teamIds: configuration.teamIds ?? ['team-1'],
+          projectIds: configuration.projectIds ?? ['project-1'],
           customFieldIds: ['field-1'],
           relationIds: ['relation-1'],
           statuses: ['workflow-status-1'],
           workItemEndpoints: [{ teamId: 'team-1', workItemId: 'work-item-1' }],
+          ...(configuration.triageRoutingTuples === undefined
+            ? {}
+            : { triageRoutingTuples: configuration.triageRoutingTuples }),
         },
       }
     },
@@ -1034,6 +1072,74 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('rejects Work Item planning fields for a Planning target source', async () => {
+    const harness = createHarness({
+      outputDraft: {
+        kind: 'planning',
+        subtasks: [{
+          id: 'subtask-1',
+          title: 'Review migration validation',
+          priority: 'high',
+          reason: 'The work item is independently reviewable.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        }],
+        dependencies: [],
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createPlanningRequest('planning-target'),
+      harness.authorization,
+      'request-planning-target-work-item-fields',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'InvalidAiAssistanceOutput',
+    })
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCode: 'InvalidAiAssistanceOutput',
+    })])
+  })
+
+  test('rejects a Planning status update for a Work Item source', async () => {
+    const harness = createHarness({
+      outputDraft: {
+        kind: 'planning',
+        subtasks: [],
+        dependencies: [],
+        statusUpdate: {
+          health: 'at-risk',
+          risk: 'medium',
+          summary: 'The migration needs another rehearsal.',
+          riskSummary: 'Rollback coverage is incomplete.',
+          decisionSummary: 'Keep the staged launch.',
+          helpNeeded: 'Request an additional reviewer.',
+          nextAction: 'Schedule the rehearsal.',
+          confidence: 'medium',
+          citationIds: ['S1'],
+        },
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createPlanningRequest('work-item'),
+      harness.authorization,
+      'request-work-item-status-update',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'InvalidAiAssistanceOutput',
+    })
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCode: 'InvalidAiAssistanceOutput',
+    })])
+  })
+
   test('rechecks source authorization before invoking the provider', async () => {
     const harness = createHarness()
     harness.setAuthorizationState({ current: false, reason: 'permission-changed' })
@@ -1257,6 +1363,70 @@ describe('createAiAssistanceService', () => {
     ))
       .rejects.toMatchObject({ code: 'AiAssistanceOutputNotAllowed' })
     expect(gatewayInputs).toHaveLength(1)
+  })
+
+  test('rejects a triage routing tuple that mixes independently allowed values', async () => {
+    const harness = createHarness({
+      assigneeUserIds: ['assignee@example.com'],
+      teamIds: ['team-a', 'team-b'],
+      projectIds: ['project-a', 'project-b'],
+      triageRoutingTuples: [{
+        teamId: 'team-a',
+        projectId: 'project-a',
+        assigneeUserIds: ['assignee@example.com'],
+      }, {
+        teamId: 'team-b',
+        projectId: 'project-b',
+        assigneeUserIds: ['assignee@example.com'],
+      }],
+      outputDraft: {
+        kind: 'triage',
+        teamId: {
+          value: 'team-a',
+          reason: 'The destination is owned by Team A.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        },
+        projectId: {
+          value: 'project-b',
+          reason: 'The destination is Project B.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        },
+        assigneeUserId: {
+          value: 'assignee@example.com',
+          reason: 'The active owner can handle the route.',
+          confidence: 'medium',
+          citationIds: ['S1'],
+        },
+        customFields: [],
+      },
+    })
+    const request: GenerateAiAssistanceRequest = {
+      task: 'triage',
+      locale: 'ja',
+      source: {
+        type: 'triage-entry',
+        teamId: 'team-1',
+        triageEntryId: 'triage-1',
+        expectedRevision: 1,
+      },
+    }
+
+    await expect(harness.service.generate(
+      createActor(),
+      request,
+      harness.authorization,
+      'request-incompatible-routing',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'AiAssistanceOutputNotAllowed',
+    })
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCode: 'AiAssistanceOutputNotAllowed',
+    })])
   })
 
   test('rejects an excluded sensitive custom field without auditing its model value', async () => {

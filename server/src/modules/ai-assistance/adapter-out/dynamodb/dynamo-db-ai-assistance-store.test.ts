@@ -638,6 +638,57 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('retries terminal attempt finalization after an ambiguous transport error', async () => {
+    const pendingReceipt = createPendingReceipt(
+      'generation-2',
+      Date.parse('2026-08-25T00:01:30.000Z'),
+    )
+    const startedReceipt = {
+      ...pendingReceipt,
+      attempt: {
+        task: 'summary',
+        modelId: 'model-1',
+        promptVersion: 'ai-assistance-v1',
+        traceId: 'trace-1',
+        startedAt: '2026-08-25T00:01:01.000Z',
+        audit: createAttemptAudit(),
+        status: 'started',
+      },
+    }
+    const harness = createHarness([
+      { Item: pendingReceipt },
+      {},
+      new Error('connection closed after terminal UpdateItem started'),
+      { Item: startedReceipt },
+      {},
+    ])
+    try {
+      await harness.store.startGenerationAttempt(createAttemptStart())
+      await expect(harness.store.finalizeGenerationAttempt({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+        generationId: 'generation-2',
+        outcome: 'failed',
+        endedAt: '2026-08-25T00:01:13.000Z',
+        latencyMs: 12_000,
+        usageUnavailableReason: 'provider-did-not-report',
+        failureCategory: 'timeout',
+        failureCode: 'AiAssistanceProviderTimeout',
+      })).resolves.toBeUndefined()
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'UpdateCommand',
+        'UpdateCommand',
+        'GetCommand',
+        'UpdateCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('durably and idempotently finalizes a pre-provider failure receipt', async () => {
     const failure = {
       workspaceId: 'workspace-1',

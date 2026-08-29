@@ -5,6 +5,9 @@ const restoreDrillApproverRoleArnSuffix =
   'iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$';
 const defaultAiBedrockModelId = 'jp.anthropic.claude-sonnet-4-6';
 const bedrockResourceNamePattern = '[A-Za-z0-9._:-]+';
+/** Positive decimal price range accepted by both CloudFormation and the runtime. */
+const aiBedrockTokenPricePattern =
+  '^(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?))$';
 
 /**
  * Resolves a literal stack partition when CDK has a concrete deployment identity.
@@ -330,9 +333,9 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
       type: 'String',
       minLength: 1,
       maxLength: 32,
-      allowedPattern: '^(?:0\\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\\.[0-9]+)?)$',
+      allowedPattern: aiBedrockTokenPricePattern,
       constraintDescription:
-        'AiBedrockInputPricePerMillionTokensUsd must be a positive decimal number.',
+        'AiBedrockInputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
       description:
         'Deployment-reviewed Bedrock standard input-token price in USD per one million tokens for AiBedrockModelId.',
     },
@@ -344,9 +347,9 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
       type: 'String',
       minLength: 1,
       maxLength: 32,
-      allowedPattern: '^(?:0\\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\\.[0-9]+)?)$',
+      allowedPattern: aiBedrockTokenPricePattern,
       constraintDescription:
-        'AiBedrockOutputPricePerMillionTokensUsd must be a positive decimal number.',
+        'AiBedrockOutputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
       description:
         'Deployment-reviewed Bedrock standard output-token price in USD per one million tokens for AiBedrockModelId.',
     },

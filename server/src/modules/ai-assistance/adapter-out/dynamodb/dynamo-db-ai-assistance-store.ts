@@ -684,37 +684,69 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       expressionAttributeValues[':failureCategory'] = input.failureCategory
       expressionAttributeValues[':failureCode'] = input.failureCode
     }
+    const updateInput = {
+      TableName: this.#tableName,
+      Key: { workspaceId: input.workspaceId, recordKey },
+      UpdateExpression: `SET ${updateParts.join(', ')}`,
+      ConditionExpression:
+        '#memberId = :memberId AND #inputFingerprint = :inputFingerprint AND ' +
+        '#generationId = :generationId AND #status = :pending AND ' +
+        '#attempt.#attemptStatus = :started',
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues,
+    }
     try {
-      await this.#documentClient.send(new UpdateCommand({
-        TableName: this.#tableName,
-        Key: { workspaceId: input.workspaceId, recordKey },
-        UpdateExpression: `SET ${updateParts.join(', ')}`,
-        ConditionExpression:
-          '#memberId = :memberId AND #inputFingerprint = :inputFingerprint AND ' +
-          '#generationId = :generationId AND #status = :pending AND ' +
-          '#attempt.#attemptStatus = :started',
-        ExpressionAttributeNames: expressionAttributeNames,
-        ExpressionAttributeValues: expressionAttributeValues,
-      }))
+      await this.#documentClient.send(new UpdateCommand(updateInput))
     } catch (error) {
-      if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
-      const response = await this.#documentClient.send(new GetCommand({
-        TableName: this.#tableName,
-        Key: { workspaceId: input.workspaceId, recordKey },
-        ConsistentRead: true,
-      }))
-      const parsed = idempotencyItemSchema.safeParse(response.Item)
-      if (
-        parsed.success &&
-        receiptIdentityMatches(parsed.data, input, recordKey) &&
-        parsed.data.status === receiptStatus &&
-        parsed.data.attempt?.status === input.outcome &&
-        (input.outcome === 'succeeded' || (
-          parsed.data.failureCategory === input.failureCategory &&
-          parsed.data.failureCode === input.failureCode
-        ))
-      ) return
-      throw idempotencyConflictError()
+      let response: GetCommandOutput
+      try {
+        response = await this.#documentClient.send(new GetCommand({
+          TableName: this.#tableName,
+          Key: { workspaceId: input.workspaceId, recordKey },
+          ConsistentRead: true,
+        }))
+      } catch {
+        throw mapDynamoWriteError(error)
+      }
+      if (isFinalizedAttemptReceipt(response.Item, input, recordKey, receiptStatus)) {
+        return
+      }
+      if (isConditionalCheckFailed(error)) {
+        throw idempotencyConflictError()
+      }
+      if (!isPendingAttemptReceipt(response.Item, input, recordKey)) {
+        throw mapDynamoWriteError(error)
+      }
+
+      // A transport failure can occur after DynamoDB committed the update but
+      // before the client received its response. If the strong read still sees
+      // the started receipt, retry the exact terminal CAS once and reconcile the
+      // result instead of leaving a provider-paid attempt pending until TTL.
+      try {
+        await this.#documentClient.send(new UpdateCommand(updateInput))
+        return
+      } catch (retryError) {
+        let retryResponse: GetCommandOutput
+        try {
+          retryResponse = await this.#documentClient.send(new GetCommand({
+            TableName: this.#tableName,
+            Key: { workspaceId: input.workspaceId, recordKey },
+            ConsistentRead: true,
+          }))
+        } catch {
+          throw mapDynamoWriteError(retryError)
+        }
+        if (isFinalizedAttemptReceipt(
+          retryResponse.Item,
+          input,
+          recordKey,
+          receiptStatus,
+        )) return
+        if (isConditionalCheckFailed(retryError)) {
+          throw idempotencyConflictError()
+        }
+        throw mapDynamoWriteError(retryError)
+      }
     }
   }
 
@@ -1431,6 +1463,37 @@ function generationAttemptStartMatches(
     parsed.data.traceId === expected.traceId &&
     parsed.data.startedAt === expected.startedAt &&
     equalJsonValues(parsed.data.audit, expected.audit)
+}
+
+/** Returns whether a receipt is the exact terminal outcome being finalized. */
+function isFinalizedAttemptReceipt(
+  value: unknown,
+  input: FinalizeAiAssistanceGenerationAttemptInput,
+  recordKey: string,
+  receiptStatus: 'completed' | 'failed',
+): boolean {
+  const parsed = idempotencyItemSchema.safeParse(value)
+  return parsed.success &&
+    receiptIdentityMatches(parsed.data, input, recordKey) &&
+    parsed.data.status === receiptStatus &&
+    parsed.data.attempt?.status === input.outcome &&
+    (input.outcome === 'succeeded' || (
+      parsed.data.failureCategory === input.failureCategory &&
+      parsed.data.failureCode === input.failureCode
+    ))
+}
+
+/** Returns whether a receipt can safely receive the terminal CAS retry. */
+function isPendingAttemptReceipt(
+  value: unknown,
+  input: FinalizeAiAssistanceGenerationAttemptInput,
+  recordKey: string,
+): boolean {
+  const parsed = idempotencyItemSchema.safeParse(value)
+  return parsed.success &&
+    receiptIdentityMatches(parsed.data, input, recordKey) &&
+    parsed.data.status === 'pending' &&
+    parsed.data.attempt?.status === 'started'
 }
 
 /** Returns whether two JSON-compatible values contain the same fields and values. */

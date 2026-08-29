@@ -50,6 +50,7 @@ export type {
   AiAssistancePolicyAudit,
   AiAssistancePolicyAuditInput,
   AiAssistancePrivateMemberIdentifiers,
+  AiAssistanceTriageRoutingTuple,
   AiAssistanceService,
   AiAssistanceServiceOptions,
   AiAssistanceStore,

@@ -47,6 +47,7 @@ import type {
   AiAssistancePolicyAudit,
   AiAssistancePolicyAuditInput,
   AiAssistancePrivateMemberIdentifiers,
+  AiAssistanceTriageRoutingTuple,
   AiModelGenerationResult,
   AiAssistanceService,
   AiAssistanceServiceOptions,
@@ -502,7 +503,7 @@ export function createAiAssistanceService(
         output.uncertainty,
         privateIdentifierAliases.textAliases,
       )
-      validateDraftForTask(aliasedDraft, request.task)
+      validateDraftForRequest(aliasedDraft, request)
       validateDraftReferences(aliasedDraft, {
         ...context,
         allowedValues: privateIdentifierAliases.modelAllowedValues,
@@ -1079,7 +1080,10 @@ function validateAllowedMemberIdentifiers(
   const privateMemberIds = new Set(members.map((member) => member.memberId))
   if (
     allowed.assigneeUserIds.some((value) => !privateMemberIds.has(value)) ||
-    allowed.creatorUserIds.some((value) => !privateMemberIds.has(value))
+    allowed.creatorUserIds.some((value) => !privateMemberIds.has(value)) ||
+    allowed.triageRoutingTuples?.some((tuple) =>
+      tuple.assigneeUserIds.some((value) => !privateMemberIds.has(value))
+    )
   ) {
     throw new AiAssistanceError(
       'validation',
@@ -1133,14 +1137,43 @@ function utf8SerializedByteLength(value: unknown): number {
   return Buffer.byteLength(serialized, 'utf8')
 }
 
-/** Requires the model draft discriminator to match the requested task. */
-function validateDraftForTask(draft: AiAssistanceDraft, task: AiAssistanceTask): void {
-  const expectedKind = task === 'search' ? 'search' : task
+/** Requires the model draft discriminator to match the requested task and source shape. */
+function validateDraftForRequest(
+  draft: AiAssistanceDraft,
+  request: GenerateAiAssistanceRequest,
+): void {
+  const expectedKind = request.task === 'search' ? 'search' : request.task
   if (draft.kind !== expectedKind) {
     throw new AiAssistanceError(
       'validation',
       'InvalidAiAssistanceOutput',
       'The model returned a draft for a different task.',
+    )
+  }
+  if (request.task !== 'planning' || draft.kind !== 'planning') return
+
+  const hasWorkItemDraft = draft.title !== undefined ||
+    draft.description !== undefined ||
+    draft.priority !== undefined ||
+    draft.status !== undefined ||
+    draft.plannedEffortMinutes !== undefined ||
+    draft.subtasks.length > 0 ||
+    draft.dependencies.length > 0
+  if (request.source.type === 'planning-target') {
+    if (draft.statusUpdate === undefined || hasWorkItemDraft) {
+      throw new AiAssistanceError(
+        'validation',
+        'InvalidAiAssistanceOutput',
+        'The model returned Work Item planning fields for a Planning target.',
+      )
+    }
+    return
+  }
+  if (draft.statusUpdate !== undefined) {
+    throw new AiAssistanceError(
+      'validation',
+      'InvalidAiAssistanceOutput',
+      'The model returned a Planning status update for a Work Item source.',
     )
   }
 }
@@ -1206,6 +1239,7 @@ function validateDraftAllowedValues(
     requireAllowedOptional(draft.assigneeUserId?.value, allowed.assigneeUserIds, 'assignee')
     requireAllowedOptional(draft.teamId?.value, allowed.teamIds, 'Team')
     requireAllowedOptional(draft.projectId?.value, allowed.projectIds, 'Project')
+    validateTriageRoutingTuple(draft, allowed.triageRoutingTuples)
     for (const field of draft.customFields) {
       requireAllowed(field.fieldId, allowed.customFieldIds, 'custom field')
     }
@@ -1230,6 +1264,28 @@ function validateDraftAllowedValues(
       requireAllowedEndpoint(dependency.successor, allowed.workItemEndpoints)
     }
   }
+}
+
+/** Requires a triage draft's Team, Project, and assignee to share one allowed route. */
+function validateTriageRoutingTuple(
+  draft: Extract<AiAssistanceDraft, { kind: 'triage' }>,
+  tuples: readonly AiAssistanceTriageRoutingTuple[] | undefined,
+): void {
+  if (tuples === undefined) return
+  const teamId = draft.teamId?.value
+  const projectId = draft.projectId?.value
+  const assigneeUserId = draft.assigneeUserId?.value
+  if (teamId === undefined && projectId === undefined && assigneeUserId === undefined) return
+  if (tuples.some((tuple) =>
+    (teamId === undefined || tuple.teamId === teamId) &&
+    (projectId === undefined || tuple.projectId === projectId) &&
+    (assigneeUserId === undefined || tuple.assigneeUserIds.includes(assigneeUserId))
+  )) return
+  throw new AiAssistanceError(
+    'validation',
+    'AiAssistanceOutputNotAllowed',
+    'The model returned an incompatible triage routing combination.',
+  )
 }
 
 /** Private member identifier aliases used only for one provider request. */
@@ -1289,6 +1345,15 @@ function createPrivateIdentifierAliases(
         aliasByCanonicalMemberId.get(value) ?? value),
       creatorUserIds: allowed.creatorUserIds.map((value) =>
         aliasByCanonicalMemberId.get(value) ?? value),
+      ...(allowed.triageRoutingTuples === undefined
+        ? {}
+        : {
+            triageRoutingTuples: allowed.triageRoutingTuples.map((tuple) => ({
+              ...tuple,
+              assigneeUserIds: tuple.assigneeUserIds.map((value) =>
+                aliasByCanonicalMemberId.get(value) ?? value),
+            })),
+          }),
     },
     canonicalMemberIdByAlias: new Map(memberEntries),
     textAliases: privateTextAliases,
@@ -1352,7 +1417,20 @@ function validateUniqueAllowedValues(allowed: AiAssistanceAllowedValues): void {
     allowed.statuses,
     allowed.workItemEndpoints.map(createEndpointKey),
   ]
-  if (lists.some((values) => new Set(values).size !== values.length)) {
+  const routingTuples = allowed.triageRoutingTuples
+  const hasDuplicateRoutingTuple = routingTuples !== undefined &&
+    new Set(routingTuples.map((tuple) => JSON.stringify([
+      tuple.teamId,
+      tuple.projectId ?? null,
+      [...tuple.assigneeUserIds].sort(),
+    ]))).size !== routingTuples.length
+  if (lists.some((values) => new Set(values).size !== values.length) ||
+      hasDuplicateRoutingTuple ||
+      routingTuples?.some((tuple) =>
+        !tuple.teamId.trim() ||
+        (tuple.projectId !== undefined && !tuple.projectId.trim()) ||
+        new Set(tuple.assigneeUserIds).size !== tuple.assigneeUserIds.length
+      )) {
     throw new AiAssistanceError(
       'validation',
       'InvalidAiAssistanceRequest',

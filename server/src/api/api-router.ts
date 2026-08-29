@@ -432,6 +432,7 @@ import {
   type AiAssistanceActor,
   type AiAssistanceAllowedValues,
   type AiAssistanceAuthorizationState,
+  type AiAssistanceTriageRoutingTuple,
   type AiAssistancePolicyAuthorizationFence,
   type AiAssistancePolicyAuthorization,
   type AiAssistanceService,
@@ -20051,6 +20052,7 @@ async function resolveAiAssistanceContext(
         )
       : state.allowedValues.statuses,
     workItemEndpoints,
+    triageRoutingTuples: state.allowedValues.triageRoutingTuples,
   }
   const promptContext = serializeBoundedAiPromptContext({
     task: input.request.task,
@@ -20096,6 +20098,11 @@ async function resolveAiAssistanceContext(
     workItemEndpoints: filterAiWorkItemEndpointsVisibleInPrompt(
       promptContext,
       candidateAllowedValues.workItemEndpoints,
+    ),
+    triageRoutingTuples: filterAiTriageRoutingTuplesVisibleInPrompt(
+      promptContext,
+      candidateAllowedValues.triageRoutingTuples ?? [],
+      state.privacyAliases,
     ),
   }
   if (!await isWorkspaceSearchAuthorizationCurrent(
@@ -20191,6 +20198,7 @@ async function createAiAssistanceResolverState(
     .map((member) => ({
       id: member.memberKey,
       displayName: member.name?.trim() || undefined,
+      role: member.role,
       version: member.version,
       updatedAt: member.updatedAt,
     }))
@@ -20231,6 +20239,22 @@ async function createAiAssistanceResolverState(
     privateMemberIdentifiers,
   )
   const memberIds = visibleMembers.map((member) => member.id)
+  const eligibleMemberIds = visibleMembers
+    .filter((member) => member.role !== 'guest')
+    .map((member) => member.id)
+  const triageRoutingTuples: AiAssistanceTriageRoutingTuple[] = visibleTeams.flatMap((team) => [
+    {
+      teamId: team.id,
+      assigneeUserIds: eligibleMemberIds,
+    },
+    ...team.projects
+      .filter((project) => projectIds.includes(project.id))
+      .map((project) => ({
+        teamId: team.id,
+        projectId: project.id,
+        assigneeUserIds: eligibleMemberIds,
+      })),
+  ]).slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
   const statuses = uniqueAiAllowedValues(
     configurations.flatMap(({ resolved }) =>
       resolved.configuration.workflow.statuses.map((status) => status.id)
@@ -20271,6 +20295,7 @@ async function createAiAssistanceResolverState(
     relationIds: [],
     statuses,
     workItemEndpoints: [],
+    triageRoutingTuples,
   }
   const directoryPrompt = task === 'summary'
     ? undefined
@@ -21625,6 +21650,28 @@ function filterAiWorkItemEndpointsVisibleInPrompt(
     serializedPrompt.includes(JSON.stringify(endpoint.teamId)) &&
     serializedPrompt.includes(JSON.stringify(endpoint.workItemId))
   )
+}
+
+/** Keeps only triage routing tuples whose Team, Project, and assignee values survived prompt bounds. */
+function filterAiTriageRoutingTuplesVisibleInPrompt(
+  prompt: string,
+  tuples: readonly AiAssistanceTriageRoutingTuple[],
+  aliases: readonly AiAssistanceTextAlias[] = [],
+): AiAssistanceTriageRoutingTuple[] {
+  return tuples.flatMap((tuple) => {
+    const teamVisible = prompt.includes(JSON.stringify(tuple.teamId))
+    const projectVisible = tuple.projectId === undefined ||
+      prompt.includes(JSON.stringify(tuple.projectId))
+    if (!teamVisible || !projectVisible) return []
+    const assigneeUserIds = filterAiAllowedValuesVisibleInPrompt(
+      prompt,
+      tuple.assigneeUserIds,
+      aliases,
+    )
+    return assigneeUserIds.length === 0 && tuple.assigneeUserIds.length > 0
+      ? []
+      : [{ ...tuple, assigneeUserIds }]
+  })
 }
 
 /**

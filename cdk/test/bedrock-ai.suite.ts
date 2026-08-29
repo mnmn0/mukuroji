@@ -60,9 +60,9 @@ test('AI assistance parameters pin one exact model and validate the JP default',
   });
   expect(parameters.AiBedrockInputPricePerMillionTokensUsd).toEqual({
     AllowedPattern:
-      '^(?:0\\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\\.[0-9]+)?)$',
+      '^(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?))$',
     ConstraintDescription:
-      'AiBedrockInputPricePerMillionTokensUsd must be a positive decimal number.',
+      'AiBedrockInputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
     Description:
       'Deployment-reviewed Bedrock standard input-token price in USD per one million tokens for AiBedrockModelId.',
     MaxLength: 32,
@@ -71,9 +71,9 @@ test('AI assistance parameters pin one exact model and validate the JP default',
   });
   expect(parameters.AiBedrockOutputPricePerMillionTokensUsd).toEqual({
     AllowedPattern:
-      '^(?:0\\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\\.[0-9]+)?)$',
+      '^(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?))$',
     ConstraintDescription:
-      'AiBedrockOutputPricePerMillionTokensUsd must be a positive decimal number.',
+      'AiBedrockOutputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
     Description:
       'Deployment-reviewed Bedrock standard output-token price in USD per one million tokens for AiBedrockModelId.',
     MaxLength: 32,

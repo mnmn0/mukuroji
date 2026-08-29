@@ -31,6 +31,16 @@ export type AiAssistanceActor = {
   canManagePolicy: boolean
 }
 
+/** One permission-filtered Team, Project, and assignee routing combination. */
+export type AiAssistanceTriageRoutingTuple = {
+  /** Team that owns the proposed triage destination. */
+  teamId: string
+  /** Optional Team-qualified Project in the proposed destination. */
+  projectId?: string
+  /** Active non-guest members eligible for the destination. */
+  assigneeUserIds: readonly string[]
+}
+
 /** Current server-resolved identifiers that structured model output may reference. */
 export type AiAssistanceAllowedValues = {
   /** Workspace member identifiers visible to the current operator. */
@@ -49,6 +59,8 @@ export type AiAssistanceAllowedValues = {
   statuses: readonly string[]
   /** Work Item endpoints visible to the current operator. */
   workItemEndpoints: readonly WorkItemDependencyEndpoint[]
+  /** Compatible triage routing combinations used to validate tuple semantics. */
+  triageRoutingTuples?: readonly AiAssistanceTriageRoutingTuple[]
 }
 
 /** Private member identifiers used only to build one provider-local alias table. */
