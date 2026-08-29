@@ -430,7 +430,7 @@ export function TaskDetailPane({
       )
       return hasSupportedField && hasAvailableStatus
     },
-    isMutationPending: isIssueSaving,
+    isMutationPending: isWorkItemMutationPending,
     locale,
     onAuthenticatedApiError,
     onPlanningAdopt: isReadOnly ? undefined : handleAiPlanningAdopt,

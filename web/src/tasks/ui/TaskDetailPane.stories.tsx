@@ -1,14 +1,18 @@
+import type { AiPlanningDraft } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
-import { aiPlanningGenerationFixture } from '../../features/ai-assistance/fixtures'
-import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
-import { createTaskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui/TaskDetailAiAssistance'
 import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
-import { TaskDetailPane, type TaskDetailPaneProps } from './TaskDetailPane'
+import {
+  TaskDetailPane,
+  type TaskDetailAiAssistanceRenderContext,
+  type TaskDetailAiAssistanceRenderer,
+  type TaskDetailPaneProps,
+} from './TaskDetailPane'
 import {
   taskViewStoryProjectMembers,
   taskViewStoryPlanningSnapshot,
@@ -50,40 +54,147 @@ function createUpdateIssueSpy() {
   })
 }
 
-/** Creates a ready reviewed Planning controller without issuing network requests. */
-function createPlanningController(): AiAssistanceController {
-  return {
-    cancelGeneration: () => undefined,
-    decide: fn(async (outcome) => ({
-      ...aiPlanningGenerationFixture,
-      decision: {
-        decidedAt: '2026-08-25T03:00:00.000Z',
-        outcome,
-      },
-      revision: aiPlanningGenerationFixture.revision + 1,
-    })),
-    generate: async () => aiPlanningGenerationFixture,
-    generation: aiPlanningGenerationFixture,
-    isDecisionPending: false,
-    isFeedbackPending: false,
-    isGenerating: false,
-    reset: () => undefined,
-    sendFeedback: async () => undefined,
+/** Local Planning draft used to exercise the neutral Task detail renderer slot. */
+const storyAiPlanningDraft = {
+  kind: 'planning',
+  title: {
+    value: 'Complete launch accessibility review',
+    reason: 'The remaining launch gate needs a final accessibility review.',
+    confidence: 'high',
+    citationIds: [],
+  },
+  priority: {
+    value: 'high',
+    reason: 'The review blocks the staged launch window.',
+    confidence: 'medium',
+    citationIds: [],
+  },
+  status: {
+    value: 'review',
+    reason: 'The final review is active.',
+    confidence: 'medium',
+    citationIds: [],
+  },
+  plannedEffortMinutes: {
+    value: 240,
+    reason: 'The review is expected to take two hours.',
+    confidence: 'low',
+    citationIds: [],
+  },
+  subtasks: [],
+  dependencies: [],
+} satisfies AiPlanningDraft
+
+/** Props for the local planning slot fixture used by Task detail stories. */
+type StoryPlanningAssistantProps = {
+  /** Neutral renderer context supplied by the Task detail pane. */
+  context: TaskDetailAiAssistanceRenderContext
+}
+
+/**
+ * Renders a local planning-slot fixture without coupling Task UI stories to AI feature internals.
+ *
+ * @param props - Neutral Task detail renderer context.
+ * @returns A review-only planning fixture with the same adoption boundary as the feature.
+ */
+function StoryPlanningAssistant({ context }: StoryPlanningAssistantProps) {
+  const [isConfirmationVisible, setConfirmationVisible] = useState(false)
+  const canAdopt = context.aiAssistanceEnabled && !context.isMutationPending &&
+    (context.canAdoptPlanningDraft?.(storyAiPlanningDraft) ?? true)
+
+  /** Opens the replacement confirmation or stages the local fixture draft. */
+  const adopt = () => {
+    if (!canAdopt) return
+    if (
+      context.requirePlanningAdoptionConfirmation ||
+      context.shouldConfirmPlanningAdoption?.(storyAiPlanningDraft)
+    ) {
+      setConfirmationVisible(true)
+      return
+    }
+    context.onPlanningAdopt?.(storyAiPlanningDraft)
   }
+
+  if (!context.aiAssistanceEnabled) return null
+
+  return (
+    <section className="grid gap-3 border-y border-[var(--workbench-border)] py-4" data-testid="story-ai-planning">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-[var(--workbench-text)]">
+            {context.t('ai.planning.workItem.title')}
+          </h3>
+          <p className="text-xs font-medium text-[var(--workbench-muted)]">
+            {context.t('ai.planning.workItem.description')}
+          </p>
+        </div>
+        <button
+          className="workbench-button-secondary min-h-[44px] px-4"
+          disabled={!canAdopt}
+          onClick={adopt}
+          type="button"
+        >
+          {context.t('ai.planning.workItem.adopt')}
+        </button>
+      </div>
+      <p className="text-sm font-medium text-[var(--workbench-muted)]">
+        {context.t('ai.planning.field.effort')}: {context.t('ai.planning.effort.minutes').replace(
+          '{minutes}',
+          String(storyAiPlanningDraft.plannedEffortMinutes?.value ?? 0),
+        )}
+      </p>
+      {isConfirmationVisible ? (
+        <div className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3" role="alert">
+          <p className="text-sm font-semibold">{context.t('ai.planning.replaceDraftTitle')}</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="workbench-button-secondary min-h-[44px] px-4"
+              onClick={() => setConfirmationVisible(false)}
+              type="button"
+            >
+              {context.t('ai.planning.keepManualDraft')}
+            </button>
+            <button
+              className="workbench-button-primary min-h-[44px] px-4"
+              onClick={() => {
+                setConfirmationVisible(false)
+                context.onPlanningAdopt?.(storyAiPlanningDraft)
+              }}
+              type="button"
+            >
+              {context.t('ai.planning.replaceManualDraft')}
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+/**
+ * Creates the local neutral renderer supplied to Task detail stories.
+ *
+ * @param enabled - Whether this story should render its planning fixture.
+ * @returns A renderer that keeps the Task story independent from AI feature internals.
+ */
+function createStoryAiAssistanceRenderer(enabled: boolean): TaskDetailAiAssistanceRenderer {
+  return (context) => ({
+    planning: enabled ? <StoryPlanningAssistant context={context} /> : undefined,
+  })
 }
 
 /** Storybook metadata for the independent selected-task detail pane. */
 type TaskDetailPaneStoryArgs = TaskDetailPaneProps & {
-  /** Optional controller override used by the story's feature renderer. */
-  aiAssistanceController?: AiAssistanceController
+  /** Whether this story should mount the local neutral AI planning slot fixture. */
+  showAiAssistance?: boolean
 }
 
 const meta = {
   title: 'Application/Projects/Task Views/Detail Pane',
-  render: ({ aiAssistanceController, ...args }) => (
+  render: ({ showAiAssistance = false, ...args }) => (
     <TaskDetailPane
       {...args}
-      renderAiAssistance={createTaskDetailAiAssistanceRenderer(aiAssistanceController)}
+      renderAiAssistance={createStoryAiAssistanceRenderer(showAiAssistance)}
     />
   ),
   parameters: {
@@ -163,8 +274,8 @@ export const Default: Story = {
 /** Evidence-first Work Item plan with fields, effort, child work, and dependencies. */
 export const AiWorkPlan: Story = {
   args: {
-    aiAssistanceController: createPlanningController(),
     onUpdateIssue: createUpdateIssueSpy(),
+    showAiAssistance: true,
   },
   play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement)
@@ -183,7 +294,6 @@ export const AiWorkPlan: Story = {
       .toHaveValue(null)
     await expect(canvas.getByText('予定工数 · レビュー専用')).toBeVisible()
     await expect(args.onUpdateIssue).not.toHaveBeenCalled()
-    await expect(args.aiAssistanceController?.decide).toHaveBeenCalledTimes(1)
 
     const customerImpactInput = canvas.getByRole('textbox', {
       name: 'Customer impact',
@@ -207,8 +317,8 @@ export const AiWorkPlan: Story = {
 /** Manual supported-field edits are confirmed before the audited approval decision. */
 export const AiWorkPlanWithManualEdits: Story = {
   args: {
-    aiAssistanceController: createPlanningController(),
     onUpdateIssue: createUpdateIssueSpy(),
+    showAiAssistance: true,
   },
   play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement)
@@ -221,19 +331,16 @@ export const AiWorkPlanWithManualEdits: Story = {
     }))
 
     await expect(canvas.getByText('手動の編集を保持しますか？')).toBeVisible()
-    await expect(args.aiAssistanceController?.decide).not.toHaveBeenCalled()
     await expect(args.onUpdateIssue).not.toHaveBeenCalled()
 
     await userEvent.click(canvas.getByRole('button', { name: '手動の編集を保持' }))
     await expect(titleInput).toHaveValue('Keep this manual title')
-    await expect(args.aiAssistanceController?.decide).not.toHaveBeenCalled()
 
     await userEvent.click(canvas.getByRole('button', {
       name: '対応する項目をフォームで使用',
     }))
     await userEvent.click(canvas.getByRole('button', { name: 'AI draft で置き換え' }))
 
-    await expect(args.aiAssistanceController?.decide).toHaveBeenCalledTimes(1)
     await expect(canvas.getByRole('textbox', { name: 'Issue' }))
       .toHaveValue('Complete launch accessibility review')
     await expect(args.onUpdateIssue).not.toHaveBeenCalled()

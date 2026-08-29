@@ -28,6 +28,7 @@ const aiController: AiAssistanceController = {
 }
 
 describe('RequestQueue', () => {
+  /** Verifies a delayed completion from submission-a cannot clear submission-b's operation fence. */
   test('ignores a delayed completion from the previous submission', () => {
     const pendingFence = updateRequestAiOperationFence(
       { pending: false },
