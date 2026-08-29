@@ -8,33 +8,19 @@ import {
   sortWorkspaceSearchResults,
 } from '../model/sortResults'
 
-/**
- * SearchResultCollectionへ渡すpropsです。
- */
+/** Props for the permission-aware Search result collection. */
 export type SearchResultCollectionProps = {
-  /**
-   * APIから取得したpermission-aware search resultです。
-   */
+  /** Permission-aware results returned by the Search API. */
   results: WorkspaceSearchResult[]
-  /**
-   * 表示mode、sort、group、columnsを含むlayoutです。
-   */
+  /** Result mode, sorting, grouping, and visible columns. */
   layout: SearchViewLayout
-  /**
-   * 表示localeです。
-   */
+  /** Locale used for labels and dates. */
   locale: Locale
-  /**
-   * Search resultを開くcallbackです。
-   */
+  /** Opens one result path after route-level guards pass. */
   onNavigate: (path: string) => void
-  /**
-   * AIの生成・承認・フィードバック操作中かどうかです。
-   */
+  /** Whether result navigation is fenced during an AI operation. */
   isAiOperationPending?: boolean
-  /**
-   * Workflow status ID ごとの configuration 由来の表示名です。
-   */
+  /** Configuration-derived display names for workflow status IDs. */
   statusLabels?: Readonly<Record<string, string>>
 }
 
@@ -72,7 +58,10 @@ function formatSearchSubtitle(
 }
 
 /**
- * Search resultをtable、board、calendar、timelineの選択modeで描画します。
+ * Renders Search results in the selected table, board, calendar, or timeline mode.
+ *
+ * @param props - Permission-safe result data, layout, and route callbacks.
+ * @returns The selected Search result presentation.
  */
 export function SearchResultCollection({
   isAiOperationPending = false,
@@ -106,6 +95,12 @@ export function SearchResultCollection({
   return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
 }
 
+/**
+ * Renders Search results in a table and fences result navigation during AI operations.
+ *
+ * @param props - Formatting callbacks, layout metadata, and permission-safe results.
+ * @returns A table view of the current Search results.
+ */
 function SearchTable({
   formatStatus,
   formatSubtitle,
@@ -179,6 +174,12 @@ function SearchTable({
   )
 }
 
+/**
+ * Renders grouped Search results as board cards with an AI-operation navigation fence.
+ *
+ * @param props - Formatting callbacks, grouping layout, and permission-safe results.
+ * @returns A board view of the current Search results.
+ */
 function SearchBoard({
   formatStatus,
   formatSubtitle,
@@ -230,6 +231,12 @@ function SearchBoard({
   )
 }
 
+/**
+ * Renders date-grouped Search results as calendar cards with an AI-operation navigation fence.
+ *
+ * @param props - Formatting callbacks, locale, and permission-safe results.
+ * @returns A calendar view of the current Search results.
+ */
 function SearchCalendar({
   formatStatus,
   formatSubtitle,
@@ -271,6 +278,12 @@ function SearchCalendar({
   )
 }
 
+/**
+ * Renders Search results along a timeline and fences navigation during AI operations.
+ *
+ * @param props - Formatting callbacks, locale, and permission-safe results.
+ * @returns A timeline view of the current Search results.
+ */
 function SearchTimeline({
   formatStatus,
   formatSubtitle,
@@ -331,6 +344,12 @@ function SearchTimeline({
   )
 }
 
+/**
+ * Renders one Search result card whose navigation is disabled during AI operations.
+ *
+ * @param props - Result data, formatting callbacks, and navigation state.
+ * @returns A button-like Search result card.
+ */
 function SearchResultCard({
   compact = false,
   formatStatus,

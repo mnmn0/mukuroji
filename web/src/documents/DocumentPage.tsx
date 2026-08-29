@@ -2161,6 +2161,15 @@ type DocumentWorkspaceProps = {
   ) => Promise<DocumentRecord>
 }
 
+/**
+ * Coordinates document editing, queued operations, and the context drawer.
+ *
+ * Editing and destructive actions are disabled while a document-scoped AI operation is pending,
+ * while local drafts and revision guards remain owned by this workspace surface.
+ *
+ * @param props - Selected document, persistence callbacks, navigation hooks, and AI state.
+ * @returns The editable document workspace.
+ */
 function DocumentWorkspace({
   isAiOperationPending = false,
   onActiveAnchorChange,

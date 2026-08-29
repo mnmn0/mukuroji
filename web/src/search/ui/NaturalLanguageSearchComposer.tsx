@@ -247,6 +247,7 @@ export function NaturalLanguageSearchComposerView({
           generation={generation}
           isDecisionPending={isDecisionPending}
           isFeedbackPending={isFeedbackPending}
+          isGenerating={isGenerating}
           key={generation.id}
           locale={locale}
           onApply={onApply}
@@ -286,6 +287,8 @@ type SearchDraftReviewProps = {
   isDecisionPending: boolean
   /** Whether feedback is in flight. */
   isFeedbackPending: boolean
+  /** Whether a replacement natural-language generation is in flight. */
+  isGenerating: boolean
   /** Locale used for generation metadata. */
   locale: Locale
   /** Applies reviewed filters and an optional report intent to Search route state. */
@@ -333,6 +336,7 @@ function SearchDraftReview({
   generation,
   isDecisionPending,
   isFeedbackPending,
+  isGenerating,
   locale,
   onApply,
   onDecide,
@@ -358,7 +362,7 @@ function SearchDraftReview({
     reviewedRouteSignature,
     currentRouteSignature,
   )
-  const canAdopt = isRouteCurrent && isGenerationQueryCurrent && !hasInvalidFilterSet && !hasUnapprovedFilterEdits
+  const canAdopt = !isGenerating && isRouteCurrent && isGenerationQueryCurrent && !hasInvalidFilterSet && !hasUnapprovedFilterEdits
 
   /** Records approval first, then applies the exact reviewed local filters. */
   const adoptFilters = async () => {

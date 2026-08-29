@@ -57,6 +57,12 @@ export function TriageBulkToolbar({
 
   if (entries.length === 0) return null
 
+  /**
+   * Validates and submits the selected bounded bulk action.
+   *
+   * @param event - Submit event for the confirmation form.
+   * @returns A promise that settles after the bulk mutation completes or fails.
+   */
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!mode || actionIsPending) return

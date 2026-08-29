@@ -41,7 +41,12 @@ export function parseAiAssistanceGenerationResponse(
   )
 }
 
-/** Checks that a generation response contains only fields in the public contract. */
+/**
+ * Checks that a generation response contains only fields in the public contract.
+ *
+ * @param generation - Candidate generation returned by the API.
+ * @returns Whether every nested field is explicitly allowed and validated.
+ */
 function hasKnownGenerationFields(generation: AiAssistanceGeneration): boolean {
   return hasOnlyKnownKeys(generation, [
     'schemaVersion',
@@ -59,7 +64,12 @@ function hasKnownGenerationFields(generation: AiAssistanceGeneration): boolean {
     (generation.decision === undefined || hasKnownDecisionFields(generation.decision))
 }
 
-/** Checks the known shape of available or withheld generation content. */
+/**
+ * Checks the known shape of available or withheld generation content.
+ *
+ * @param content - Candidate generation content.
+ * @returns Whether the availability branch and all nested values are known.
+ */
 function hasKnownContentFields(content: AiAssistanceContent): boolean {
   if (content.availability === 'withheld') {
     return hasOnlyKnownKeys(content, ['availability', 'reasonCode'])
@@ -71,7 +81,12 @@ function hasKnownContentFields(content: AiAssistanceContent): boolean {
     hasKnownUncertaintyFields(content.uncertainty)
 }
 
-/** Checks the known shape of one workflow-specific draft. */
+/**
+ * Checks the known shape of one workflow-specific draft.
+ *
+ * @param draft - Candidate task-specific draft.
+ * @returns Whether the draft kind and all of its nested fields are known.
+ */
 function hasKnownDraftFields(draft: AiAssistanceDraft): boolean {
   switch (draft.kind) {
     case 'triage':
@@ -134,22 +149,42 @@ function hasKnownDraftFields(draft: AiAssistanceDraft): boolean {
   }
 }
 
-/** Checks the shared fields of an optional suggested value. */
+/**
+ * Checks the shared fields of an optional suggested value.
+ *
+ * @param value - Optional candidate suggestion.
+ * @returns Whether the value is absent or has only validated suggestion fields.
+ */
 function hasKnownOptionalSuggestedValue(value: AiSuggestedValue<unknown> | undefined): boolean {
   return value === undefined || hasKnownSuggestedValueFields(value)
 }
 
-/** Checks the known fields of one evidence-backed suggested value. */
+/**
+ * Checks the known fields of one evidence-backed suggested value.
+ *
+ * @param value - Candidate suggested value.
+ * @returns Whether the suggestion contains only the public fields.
+ */
 function hasKnownSuggestedValueFields(value: AiSuggestedValue<unknown>): boolean {
   return hasOnlyKnownKeys(value, ['value', 'reason', 'confidence', 'citationIds'])
 }
 
-/** Checks the known fields of one grounded summary item. */
+/**
+ * Checks the known fields of one grounded summary item.
+ *
+ * @param item - Candidate summary item.
+ * @returns Whether the item contains only the public fields.
+ */
 function hasKnownBriefItemFields(item: AiBriefItem): boolean {
   return hasOnlyKnownKeys(item, ['id', 'text', 'confidence', 'citationIds'])
 }
 
-/** Checks the known fields of one permission-safe citation. */
+/**
+ * Checks the known fields of one permission-safe citation.
+ *
+ * @param citation - Candidate permission-safe citation.
+ * @returns Whether the citation contains only the public fields.
+ */
 function hasKnownCitationFields(citation: AiAssistanceCitation): boolean {
   return hasOnlyKnownKeys(citation, [
     'id',
@@ -161,18 +196,33 @@ function hasKnownCitationFields(citation: AiAssistanceCitation): boolean {
   ])
 }
 
-/** Checks the known fields of the generation uncertainty disclosure. */
+/**
+ * Checks the known fields of the generation uncertainty disclosure.
+ *
+ * @param uncertainty - Candidate uncertainty disclosure.
+ * @returns Whether the disclosure contains only the public fields.
+ */
 function hasKnownUncertaintyFields(uncertainty: AiAssistanceUncertainty): boolean {
   return hasOnlyKnownKeys(uncertainty, ['level', 'reason'])
 }
 
-/** Checks the known fields of technical provider usage metadata. */
+/**
+ * Checks the known fields of technical provider usage metadata.
+ *
+ * @param details - Candidate generation provider metadata.
+ * @returns Whether metadata and nested usage contain only public fields.
+ */
 function hasKnownGenerationDetailsFields(details: AiAssistanceGenerationDetails): boolean {
   return hasOnlyKnownKeys(details, ['provider', 'modelId', 'promptVersion', 'traceId', 'usage']) &&
     hasKnownUsageFields(details.usage)
 }
 
-/** Checks the known fields of provider usage metadata. */
+/**
+ * Checks the known fields of provider usage metadata.
+ *
+ * @param usage - Candidate token, latency, and cost metadata.
+ * @returns Whether usage contains only the public fields.
+ */
 function hasKnownUsageFields(usage: AiAssistanceUsage): boolean {
   return hasOnlyKnownKeys(usage, [
     'inputTokens',
@@ -183,12 +233,22 @@ function hasKnownUsageFields(usage: AiAssistanceUsage): boolean {
   ])
 }
 
-/** Checks the known fields of a recorded human decision. */
+/**
+ * Checks the known fields of a recorded human decision.
+ *
+ * @param decision - Candidate decision metadata.
+ * @returns Whether the decision contains only the public fields.
+ */
 function hasKnownDecisionFields(decision: AiAssistanceDecision): boolean {
   return hasOnlyKnownKeys(decision, ['outcome', 'decidedAt'])
 }
 
-/** Checks the known fields of a Planning child-item proposal. */
+/**
+ * Checks the known fields of a Planning child-item proposal.
+ *
+ * @param subtask - Candidate child-item proposal.
+ * @returns Whether the subtask contains only the public fields.
+ */
 function hasKnownPlanningSubtaskFields(subtask: AiPlanningSubtaskDraft): boolean {
   return hasOnlyKnownKeys(subtask, [
     'id',
@@ -202,7 +262,12 @@ function hasKnownPlanningSubtaskFields(subtask: AiPlanningSubtaskDraft): boolean
   ])
 }
 
-/** Checks the known fields of a Planning dependency proposal. */
+/**
+ * Checks the known fields of a Planning dependency proposal.
+ *
+ * @param dependency - Candidate dependency proposal.
+ * @returns Whether the dependency and both endpoints contain only public fields.
+ */
 function hasKnownPlanningDependencyFields(dependency: AiPlanningDependencyDraft): boolean {
   return hasOnlyKnownKeys(dependency, [
     'id',
@@ -218,7 +283,12 @@ function hasKnownPlanningDependencyFields(dependency: AiPlanningDependencyDraft)
     hasOnlyKnownKeys(dependency.successor, ['teamId', 'workItemId'])
 }
 
-/** Checks the known fields of a structured Planning status update. */
+/**
+ * Checks the known fields of a structured Planning status update.
+ *
+ * @param update - Candidate status update proposal.
+ * @returns Whether the update contains only the public fields.
+ */
 function hasKnownPlanningStatusUpdateFields(update: AiPlanningStatusUpdateDraft): boolean {
   return hasOnlyKnownKeys(update, [
     'health',
@@ -233,7 +303,12 @@ function hasKnownPlanningStatusUpdateFields(update: AiPlanningStatusUpdateDraft)
   ])
 }
 
-/** Checks the known fields of a Search filter set and its nested rows. */
+/**
+ * Checks the known fields of a Search filter set and its nested rows.
+ *
+ * @param filters - Candidate Search filters.
+ * @returns Whether filters and all nested rows contain only public fields.
+ */
 function hasKnownSearchFilterFields(filters: WorkspaceSearchFilters): boolean {
   return hasOnlyKnownKeys(filters, [
     'keyword',
@@ -251,12 +326,23 @@ function hasKnownSearchFilterFields(filters: WorkspaceSearchFilters): boolean {
     (filters.date === undefined || hasOnlyKnownKeys(filters.date, ['field', 'from', 'to']))
 }
 
-/** Checks the known fields of one Search custom-field filter. */
+/**
+ * Checks the known fields of one Search custom-field filter.
+ *
+ * @param filter - Candidate custom-field filter.
+ * @returns Whether the filter contains only the public fields.
+ */
 function hasKnownSearchCustomFieldFields(filter: SearchCustomFieldFilter): boolean {
   return hasOnlyKnownKeys(filter, ['fieldId', 'operator', 'value'])
 }
 
-/** Checks an object for keys outside the supplied public contract allowlist. */
+/**
+ * Checks an object for keys outside the supplied public contract allowlist.
+ *
+ * @param value - Candidate object to inspect.
+ * @param allowedKeys - Keys permitted by the public contract.
+ * @returns Whether every own key is present in the allowlist.
+ */
 function hasOnlyKnownKeys(value: object, allowedKeys: readonly string[]): boolean {
   return Object.keys(value).every((key) => allowedKeys.includes(key))
 }

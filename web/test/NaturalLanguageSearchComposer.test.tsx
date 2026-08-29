@@ -101,6 +101,22 @@ describe('NaturalLanguageSearchComposerView', () => {
     expect(html).not.toContain('accessibility sign-off')
   })
 
+  test('does not expose the previous Apply action while a replacement generation is running', () => {
+    const html = renderToStaticMarkup(
+      <NaturalLanguageSearchComposerView
+        generation={aiSearchGenerationFixture}
+        isGenerating
+        locale="en"
+        onApply={() => undefined}
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).not.toContain('Apply filters')
+  })
+
   test('matches a draft only to the natural-language prompt that produced it', () => {
     expect(isAiSearchPromptCurrent('find overdue work', 'find overdue work')).toBe(true)
     expect(isAiSearchPromptCurrent('find overdue work', 'find recently overdue work')).toBe(false)
