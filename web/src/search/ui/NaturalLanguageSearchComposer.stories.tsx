@@ -90,6 +90,19 @@ export const ExplicitGenerate: Story = {
   },
 }
 
+/** Editing the natural-language request invalidates the prior generated review. */
+export const PromptChangedAfterGeneration: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(
+      canvas.getByLabelText('Create search filters from plain language'),
+      'Use a different request',
+    )
+    await expect(canvas.getByText('The plain-language request changed after generation. Generate again before applying these filters.')).toBeVisible()
+    await expect(canvas.queryByRole('button', { name: 'Apply filters' })).not.toBeInTheDocument()
+  },
+}
+
 /** Mobile filter review uses stacked controls and full-width primary actions. */
 export const Mobile: Story = {
   parameters: { viewport: { defaultViewport: 'mobile1' } },

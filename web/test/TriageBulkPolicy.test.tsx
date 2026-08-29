@@ -78,4 +78,24 @@ describe('Triage bulk policy projection', () => {
     expect(loadMoreButton).toBeDefined()
     expect(loadMoreButton).not.toContain('disabled=""')
   })
+
+  test('fences selected bulk mutations while an AI operation is pending', () => {
+    const entry = triageEntryFixtures[0]
+    if (!entry) throw new Error('Expected a triage fixture.')
+    const html = renderToStaticMarkup(
+      <TriageBulkToolbar
+        allowedActions={['assign', 'snooze', 'decline']}
+        entries={[createTriageEntryView(entry)]}
+        isAiOperationPending
+        onApply={async () => []}
+        onClear={() => undefined}
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Change owner<\/button>/)
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Snooze<\/button>/)
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Decline<\/button>/)
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Clear selection<\/button>/)
+  })
 })

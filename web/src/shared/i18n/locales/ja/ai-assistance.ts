@@ -83,6 +83,7 @@ export const aiAssistanceMessages = {
   'ai.search.validation.bounds': 'Keyword や filter の値を短くし、各リストの件数制限内に収めてから適用してください。',
   'ai.search.validation.dateRange': '有効な日付を入力し、開始日が終了日以前になるようにしてください。',
   'ai.search.validation.edited': '生成後に filter が変更されています。生成時の filter に戻すか、もう一度生成してから適用してください。',
+  'ai.search.validation.queryChanged': '生成後に自然言語の依頼が変更されています。これらの filter を適用する前に、もう一度生成してください。',
   'ai.search.validation.restore': '生成時の filter に戻す',
   'ai.search.validation.routeChanged': '生成後に Search の状態が変わっています。現在の route を確認し、もう一度生成してから適用してください。',
   'ai.search.apply': 'Filter を適用',

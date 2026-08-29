@@ -35,6 +35,7 @@ import {
 } from '../model/aiSearchDraft'
 import {
   isSearchRouteSignatureCurrent,
+  isAiSearchPromptCurrent,
   type ApprovedAiSearchApplication,
 } from '../model/aiSearchApplication'
 
@@ -187,6 +188,7 @@ export function NaturalLanguageSearchComposerView({
 }: NaturalLanguageSearchComposerViewProps) {
   const [query, setQuery] = useState('')
   const [generationRouteSignature, setGenerationRouteSignature] = useState<string>()
+  const [generationQuery, setGenerationQuery] = useState<string>()
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
 
   /** Submits only the operator's explicit Generate action. */
@@ -195,11 +197,19 @@ export function NaturalLanguageSearchComposerView({
     const normalizedQuery = query.trim()
     if (!canGenerate || !normalizedQuery || isOperationPending) return
     setGenerationRouteSignature(routeSignature)
+    setGenerationQuery(normalizedQuery)
     void onGenerate(normalizedQuery)
+  }
+
+  /** Keeps a generated review tied to the exact prompt that produced it. */
+  const handleQueryChange = (nextQuery: string) => {
+    if (generation && generationQuery === undefined) setGenerationQuery(query.trim())
+    setQuery(nextQuery)
   }
 
   const availableSearchDraft = getAvailableSearchDraft(generation)
   const invalidDraft = generation?.content.availability === 'available' && !availableSearchDraft
+  const isGenerationQueryCurrent = isAiSearchPromptCurrent(generationQuery, query)
 
   return (
     <div className="grid gap-4" data-testid="plain-language-search">
@@ -209,7 +219,7 @@ export function NaturalLanguageSearchComposerView({
           <textarea
             className="workbench-input min-h-24 resize-y px-3 py-2 text-app-body font-normal text-[var(--workbench-text)]"
             disabled={isOperationPending}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => handleQueryChange(event.target.value)}
             placeholder={t('ai.search.query.placeholder')}
             value={query}
           />
@@ -243,6 +253,7 @@ export function NaturalLanguageSearchComposerView({
           onDecide={onDecide}
           onFeedback={onFeedback}
           currentRouteSignature={routeSignature}
+          isGenerationQueryCurrent={isGenerationQueryCurrent}
           reviewedRouteSignature={generationRouteSignature ?? routeSignature}
           t={t}
         />
@@ -285,6 +296,8 @@ type SearchDraftReviewProps = {
   onFeedback?: (rating: CreateAiAssistanceFeedbackRequest['rating']) => void | Promise<void>
   /** Canonical Search route signature currently visible in the browser. */
   currentRouteSignature: string
+  /** Whether the prompt currently in the editor still matches the generated draft. */
+  isGenerationQueryCurrent: boolean
   /** Canonical Search route signature captured before this generation began. */
   reviewedRouteSignature: string
   /** Localized message resolver. */
@@ -325,6 +338,7 @@ function SearchDraftReview({
   onDecide,
   onFeedback,
   currentRouteSignature,
+  isGenerationQueryCurrent,
   reviewedRouteSignature,
   t,
 }: SearchDraftReviewProps) {
@@ -344,7 +358,7 @@ function SearchDraftReview({
     reviewedRouteSignature,
     currentRouteSignature,
   )
-  const canAdopt = isRouteCurrent && !hasInvalidFilterSet && !hasUnapprovedFilterEdits
+  const canAdopt = isRouteCurrent && isGenerationQueryCurrent && !hasInvalidFilterSet && !hasUnapprovedFilterEdits
 
   /** Records approval first, then applies the exact reviewed local filters. */
   const adoptFilters = async () => {
@@ -394,6 +408,14 @@ function SearchDraftReview({
           role="status"
         >
           {t('ai.search.validation.routeChanged')}
+        </p>
+      ) : null}
+      {!isGenerationQueryCurrent ? (
+        <p
+          className="border-l-2 border-[var(--workbench-warning)] bg-amber-50 px-3 py-2 text-app-caption font-medium text-amber-900"
+          role="status"
+        >
+          {t('ai.search.validation.queryChanged')}
         </p>
       ) : null}
       {hasUnapprovedFilterEdits ? (

@@ -268,6 +268,7 @@ export function TriageWorkbench({
                 allowedActions={allowedBulkActions}
                 entries={selectedBulkEntries}
                 errorMessage={detailErrorMessage}
+                isAiOperationPending={isAiOperationPending}
                 isPending={isBulkPending}
                 onApply={onBulkAction}
                 onClear={onClearSelection}

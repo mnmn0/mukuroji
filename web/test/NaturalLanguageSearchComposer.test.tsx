@@ -6,6 +6,7 @@ import {
   aiWithheldGenerationFixture,
 } from '../src/features/ai-assistance/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
+import { isAiSearchPromptCurrent } from '../src/search/model/aiSearchApplication'
 import { NaturalLanguageSearchComposerView } from '../src/search/ui/NaturalLanguageSearchComposer'
 
 describe('NaturalLanguageSearchComposerView', () => {
@@ -98,5 +99,12 @@ describe('NaturalLanguageSearchComposerView', () => {
     expect(html).toContain('unavailable because access changed')
     expect(html).not.toContain('Apply filters')
     expect(html).not.toContain('accessibility sign-off')
+  })
+
+  test('matches a draft only to the natural-language prompt that produced it', () => {
+    expect(isAiSearchPromptCurrent('find overdue work', 'find overdue work')).toBe(true)
+    expect(isAiSearchPromptCurrent('find overdue work', 'find recently overdue work')).toBe(false)
+    expect(isAiSearchPromptCurrent('find overdue work', '  find overdue work  ')).toBe(true)
+    expect(isAiSearchPromptCurrent(undefined, 'new request')).toBe(true)
   })
 })

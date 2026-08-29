@@ -28,6 +28,20 @@ export function isSearchRouteSignatureCurrent(
 }
 
 /**
+ * Checks whether the natural-language prompt still matches the prompt captured for a draft.
+ *
+ * @param generatedPrompt - Prompt captured when generation began, or undefined for an idle review.
+ * @param currentPrompt - Prompt currently edited by the operator.
+ * @returns `true` when applying the draft remains bound to the same prompt.
+ */
+export function isAiSearchPromptCurrent(
+  generatedPrompt: string | undefined,
+  currentPrompt: string,
+): boolean {
+  return generatedPrompt === undefined || generatedPrompt === currentPrompt.trim()
+}
+
+/**
  * Applies approved AI filters and report presentation to the existing Search route state.
  *
  * A grouped report uses the existing board grouping so the loaded result buckets remain
