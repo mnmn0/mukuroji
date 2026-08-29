@@ -100,7 +100,7 @@ export function AiAssistanceReview({
 }: AiAssistanceReviewProps) {
   const reviewTitleId = useId()
   const citationsTitleId = useId()
-  const [, setExpiryTick] = useState(0)
+  const [expiryTick, setExpiryTick] = useState(0)
 
   /** Re-renders the review when the retained generation crosses its expiry boundary. */
   useEffect(() => {
@@ -113,7 +113,7 @@ export function AiAssistanceReview({
       setExpiryTick((tick) => tick + 1)
     }, Math.min(delay, 2_147_000_000))
     return () => clearTimeout(timeoutId)
-  }, [generation?.expiresAt, generation?.id])
+  }, [generation?.expiresAt, generation?.id, expiryTick])
 
   if (!generation && !isGenerating && !errorKind) return null
 

@@ -1,6 +1,6 @@
 import type {
-  AiWorkItemSource,
   AiPlanningDraft,
+  AiWorkItemSource,
   PlanningSnapshot,
   WorkItemDependencyEndpoint,
   WorkItemConfiguration,
@@ -10,12 +10,8 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useId, useRef, useState } from 'react'
+import { useId, useRef, useState, type ReactNode } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
-import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
-import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
-import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
-import { AiWorkItemPlanningAssistant } from '../../features/ai-assistance/ui/AiWorkItemPlanningAssistant'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import type {
@@ -69,10 +65,59 @@ import {
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 
+/** Context passed from the Work Item container to the feature-owned AI renderer. */
+export type TaskDetailAiAssistanceRenderContext = {
+  /** Active Workspace member bearer token. */
+  accessToken?: string
+  /** Whether the Planning workflow is enabled for this route. */
+  aiAssistanceEnabled: boolean
+  /** Whether the Summary workflow is enabled for this route. */
+  aiSummaryAssistanceEnabled: boolean
+  /** Whether a Work Item mutation is currently in flight. */
+  isMutationPending: boolean
+  /** Locale used by the assistants. */
+  locale: Locale
+  /** Reports authenticated AI failures to the route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
+  /** Copies an approved Planning draft into the local Work Item editor. */
+  onPlanningAdopt?: (draft: AiPlanningDraft) => void | Promise<void>
+  /** Reports Planning operation state to the local Work Item save guard. */
+  onPlanningOperationPendingChange?: (pending: boolean) => void
+  /** Determines whether a Planning draft contains an editable supported field. */
+  canAdoptPlanningDraft?: (draft: AiPlanningDraft) => boolean
+  /** Rechecks local edits after the asynchronous Planning approval. */
+  shouldConfirmPlanningAdoption?: (draft: AiPlanningDraft) => boolean
+  /** Resolves a visible workflow status label. */
+  resolveStatusLabel?: (statusId: string) => string
+  /** Resolves a visible Team-qualified Work Item label. */
+  resolveWorkItemLabel?: (endpoint: WorkItemDependencyEndpoint) => string
+  /** Whether Planning adoption must confirm replacing local edits. */
+  requirePlanningAdoptionConfirmation?: boolean
+  /** Reports Summary operation state to the local Work Item save guard. */
+  onSummaryOperationPendingChange?: (pending: boolean) => void
+  /** Revision-fenced Work Item source shared by both workflows. */
+  source: AiWorkItemSource
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
+}
+
+/** AI slots returned by a feature-owned Work Item renderer. */
+export type TaskDetailAiAssistanceSlots = {
+  /** Planning assistant rendered above the Work Item fields. */
+  planning?: ReactNode
+  /** Summary assistant supplied to the collaboration panel. */
+  summary?: IssueSummaryAiAssistance
+}
+
+/** Builds feature-owned AI UI for the selected Work Item detail pane. */
+export type TaskDetailAiAssistanceRenderer = (
+  context: TaskDetailAiAssistanceRenderContext,
+) => TaskDetailAiAssistanceSlots
+
 /** Props accepted by the selected task detail pane. */
 export type TaskDetailPaneProps = {
-  /** Optional AI controller override used by isolated stories and interaction tests. */
-  aiAssistanceController?: AiAssistanceController
+  /** Optional feature-owned AI renderer supplied by the route container. */
+  renderAiAssistance?: TaskDetailAiAssistanceRenderer
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
   aiAssistanceEnabled?: boolean
   /** Whether the Summary workflow is enabled for the current Workspace member. */
@@ -178,9 +223,8 @@ type WorkItemEditorDirtyState = {
  */
 export function TaskDetailPane({
   accessToken,
-  aiAssistanceController,
   aiAssistanceEnabled = true,
-  aiSummaryAssistanceEnabled,
+  aiSummaryAssistanceEnabled = false,
   assigneeOptions,
   canAccessTriage = false,
   artifacts,
@@ -210,6 +254,7 @@ export function TaskDetailPane({
   projects,
   relationCandidates,
   relationCandidatesErrorMessage,
+  renderAiAssistance,
   t,
   task,
   workspaceMembers,
@@ -358,29 +403,51 @@ export function TaskDetailPane({
     type: 'work-item',
     workItemId: task.id,
   } satisfies AiWorkItemSource
-  const collaborationAiAssistance = (aiSummaryAssistanceEnabled ?? aiAssistanceEnabled) && accessToken && task.teamId
-    ? {
-        renderBrief: (
-          onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0],
-          onOperationPendingChange: Parameters<IssueSummaryAiAssistance['renderBrief']>[1],
-        ) => (
-          <AiSummaryAssistant
-            accessToken={accessToken}
-            adoptLabel={t('ai.summary.adoptContext')}
-            key={createAiAssistantSessionKey(aiSummarySource)}
-            locale={locale}
-            onAdopt={onAdopt}
-            onAuthenticatedApiError={onAuthenticatedApiError}
-            onOperationPendingChange={(pending) => {
-              reportAiSummaryOperationPending(pending)
-              onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
-            }}
-            sources={[aiSummarySource]}
-            t={t}
-          />
-        ),
-        sessionKey: createAiAssistantSessionKey(aiSummarySource),
-      }
+  const handleAiPlanningAdopt = (draft: AiPlanningDraft) => {
+    applyAiPlanningDraft(draft)
+  }
+  const handleAiPlanningOperationPendingChange = (pending: boolean) => {
+    reportAiPlanningOperationPending(pending)
+  }
+  const handleAiSummaryOperationPendingChange = (pending: boolean) => {
+    reportAiSummaryOperationPending(pending)
+  }
+  const confirmAiPlanningAdoption = () =>
+    shouldConfirmAiPlanningAdoption()
+  // The renderer only constructs inert React elements; the supplied callbacks
+  // are invoked later by user events inside the feature-owned assistants.
+  // eslint-disable-next-line react-hooks/refs
+  const aiAssistanceSlots = renderAiAssistance?.({
+    accessToken,
+    aiAssistanceEnabled,
+    aiSummaryAssistanceEnabled,
+    canAdoptPlanningDraft: (draft) => {
+      const hasSupportedField = Boolean(
+        draft.title || draft.description || draft.priority || draft.status,
+      )
+      const hasAvailableStatus = draft.status === undefined || workflowStatuses.some(
+        (status) => status.id === draft.status?.value,
+      )
+      return hasSupportedField && hasAvailableStatus
+    },
+    isMutationPending: isIssueSaving,
+    locale,
+    onAuthenticatedApiError,
+    onPlanningAdopt: isReadOnly ? undefined : handleAiPlanningAdopt,
+    onPlanningOperationPendingChange: handleAiPlanningOperationPendingChange,
+    onSummaryOperationPendingChange: handleAiSummaryOperationPendingChange,
+    requirePlanningAdoptionConfirmation: isEditorDirty,
+    resolveStatusLabel: (statusId) =>
+      workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId,
+    resolveWorkItemLabel: (endpoint) => planningSnapshot?.workItems.find(
+      (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
+    )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`,
+    shouldConfirmPlanningAdoption: confirmAiPlanningAdoption,
+    source: aiSummarySource,
+    t,
+  })
+  const collaborationAiAssistance = aiSummaryAssistanceEnabled
+    ? aiAssistanceSlots?.summary
     : undefined
 
   /** Copies supported approved fields into a fresh local form seed without saving them. */
@@ -628,41 +695,7 @@ export function TaskDetailPane({
             ) : null}
           </div>
         </div>
-        {aiAssistanceEnabled && (accessToken || aiAssistanceController) && task.teamId ? (
-          <AiWorkItemPlanningAssistant
-            accessToken={accessToken}
-            controller={aiAssistanceController}
-            isMutationPending={isIssueSaving}
-            key={editorIdentity}
-            locale={locale}
-            onAuthenticatedApiError={onAuthenticatedApiError}
-            onAdopt={isReadOnly ? undefined : applyAiPlanningDraft}
-            onOperationPendingChange={reportAiPlanningOperationPending}
-            canAdoptDraft={(draft) => {
-              const hasSupportedField = Boolean(
-                draft.title || draft.description || draft.priority || draft.status,
-              )
-              const hasAvailableStatus = draft.status === undefined || workflowStatuses.some(
-                (status) => status.id === draft.status?.value,
-              )
-              return hasSupportedField && hasAvailableStatus
-            }}
-            shouldConfirmAdoption={shouldConfirmAiPlanningAdoption}
-            resolveStatusLabel={(statusId) =>
-              workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId}
-            resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(
-              (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
-            )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`}
-            source={{
-              expectedRevision: issue?.revision ?? task.revision,
-              teamId: task.teamId,
-              type: 'work-item',
-              workItemId: task.id,
-            }}
-            requireAdoptionConfirmation={isEditorDirty}
-            t={t}
-          />
-        ) : null}
+        {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         <fieldset
           className="contents"
           disabled={isReadOnly || isWorkItemMutationPending}

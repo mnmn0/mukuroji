@@ -7,6 +7,7 @@ import type {
 import { renderToStaticMarkup } from 'react-dom/server'
 import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
+import { createTaskDetailAiAssistanceRenderer } from '../src/features/ai-assistance/ui/TaskDetailAiAssistance'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
 import type { TeamIssueDetail } from '../src/issues/api'
@@ -838,7 +839,6 @@ describe('independent task views', () => {
     }
     const html = renderToStaticMarkup(
       <TaskDetailPane
-        aiAssistanceController={aiAssistanceController}
         assigneeOptions={taskViewStoryProjectMembers}
         configuration={teamWorkItemConfigurationFixture}
         detail={taskViewStorySelectedIssueDetail}
@@ -849,6 +849,7 @@ describe('independent task views', () => {
         planningSnapshot={taskViewStoryPlanningSnapshot}
         projects={[{ id: 'refero', name: 'Refero' }]}
         relationCandidates={[]}
+        renderAiAssistance={createTaskDetailAiAssistanceRenderer(aiAssistanceController)}
         t={t}
         task={taskViewStoryTasks[0]}
         workspaceMembers={collaborationWorkspaceMemberFixtures}

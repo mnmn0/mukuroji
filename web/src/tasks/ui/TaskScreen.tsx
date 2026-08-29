@@ -156,7 +156,7 @@ import {
 } from '../model/taskSchedule'
 import { CreateTaskPanel } from './CreateTaskPanel'
 import { TaskActionFeedback } from './TaskActionFeedback'
-import { TaskDetailPane } from './TaskDetailPane'
+import { TaskDetailPane, type TaskDetailAiAssistanceRenderer } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
 import { TaskWorkspace } from './TaskWorkspace'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
@@ -259,6 +259,8 @@ export type TaskScreenProps = {
   aiAssistanceEnabled?: boolean
   /** Whether the Summary workflow is enabled for the current Workspace member. */
   aiSummaryAssistanceEnabled?: boolean
+  /** Feature-owned AI renderer supplied by the route container. */
+  renderAiAssistance?: TaskDetailAiAssistanceRenderer
   /** Saved task view active when canonical actions are invoked. */
   activeTaskViewId?: string
   /** Shared saved-view lifecycle and display controls rendered above task filters. */
@@ -463,7 +465,8 @@ export function TaskScreen({
   workspaceId = '',
   accessToken,
   aiAssistanceEnabled = true,
-  aiSummaryAssistanceEnabled,
+  aiSummaryAssistanceEnabled = false,
+  renderAiAssistance,
   onAuthenticatedApiError,
   locale,
   projectId,
@@ -2745,7 +2748,7 @@ export function TaskScreen({
                 <TaskDetailPane
                   accessToken={accessToken}
                   aiAssistanceEnabled={aiAssistanceEnabled}
-                  aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled ?? aiAssistanceEnabled}
+                  aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
                   assigneeOptions={assigneeOptions}
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={artifacts}
@@ -2799,6 +2802,7 @@ export function TaskScreen({
                   projects={selectedDetailTeamProjects}
                   relationCandidates={relationCandidates}
                   relationCandidatesErrorMessage={relationCandidatesErrorMessage}
+                  renderAiAssistance={renderAiAssistance}
                   t={t}
                   task={detailTask}
                   workspaceMembers={workspaceMembers}

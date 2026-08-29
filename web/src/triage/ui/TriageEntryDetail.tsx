@@ -75,7 +75,7 @@ const stateLabelKeys: Record<TriageEntryState, MessageKey> = {
   snoozed: 'triage.state.snoozed',
 }
 
-/** Tracks routing fields that an operator edited in the active triage action form. */
+/** Tracks local routing edits that require confirmation before AI adoption. */
 type TriageRoutingDirtyState = {
   /** Whether the owner field contains a local edit. */
   owner: boolean

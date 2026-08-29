@@ -10,6 +10,10 @@ import {
   canAdoptRequestTriageDraft,
   createSafeTriageRoutingOverride,
 } from '../src/requests/model/requestTriageRouting'
+import {
+  isRequestAiOperationPendingForSubmission,
+  updateRequestAiOperationFence,
+} from '../src/requests/model/requestAiOperationFence'
 
 const aiController: AiAssistanceController = {
   cancelGeneration: () => undefined,
@@ -24,6 +28,26 @@ const aiController: AiAssistanceController = {
 }
 
 describe('RequestQueue', () => {
+  test('ignores a delayed completion from the previous submission', () => {
+    const pendingFence = updateRequestAiOperationFence(
+      { pending: false },
+      'submission-a',
+      'submission-a',
+      true,
+    )
+    expect(pendingFence).toEqual({ ownerSubmissionId: 'submission-a', pending: true })
+    expect(updateRequestAiOperationFence(
+      pendingFence ?? { pending: false },
+      'submission-b',
+      'submission-a',
+      false,
+    )).toBeUndefined()
+    expect(isRequestAiOperationPendingForSubmission(
+      pendingFence ?? { pending: false },
+      'submission-b',
+    )).toBe(false)
+  })
+
   test('renders historical select labels and exposes a focusable detail control', () => {
     const submission = normalizeRequestSubmission(requestSubmissionFixture)
     const html = renderToStaticMarkup(

@@ -3,7 +3,7 @@ import type {
   RequestFormRoutingTarget,
   RequestSubmissionActionInput,
 } from '@mukuroji/contracts'
-import { useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageDraftComposer'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
@@ -18,6 +18,11 @@ import {
   type RequestRoutingAssigneeDirectory,
   type RequestRoutingProjectDirectory,
 } from '../model/requestTriageRouting'
+import {
+  isRequestAiOperationPendingForSubmission,
+  updateRequestAiOperationFence,
+  type RequestAiOperationFence,
+} from '../model/requestAiOperationFence'
 
 /** Props for the Request Intake queue, detail pane, and explicit actions. */
 export type RequestQueueProps = {
@@ -118,17 +123,44 @@ export function RequestQueue({
 }: RequestQueueProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
-  const isAiOperationPendingRef = useRef(false)
+  const [aiOperationOwner, setAiOperationOwner] = useState<string>()
+  const aiOperationOwnerRef = useRef<string | undefined>(undefined)
+  const selectedSubmissionId = selectedSubmission?.id
+  const selectedSubmissionIdRef = useRef(selectedSubmissionId)
+
+  /** Keeps delayed child callbacks associated with the current selected submission. */
+  useEffect(() => {
+    selectedSubmissionIdRef.current = selectedSubmissionId
+  }, [selectedSubmissionId])
+
+  const isPendingForSelectedSubmission = isRequestAiOperationPendingForSubmission(
+    { ownerSubmissionId: aiOperationOwner, pending: isAiOperationPending },
+    selectedSubmissionId,
+  )
 
   /** Keeps the request source fence synchronized before React renders. */
-  const reportAiOperationPending = (pending: boolean) => {
-    isAiOperationPendingRef.current = pending
-    setIsAiOperationPending(pending)
+  const reportAiOperationPending = (submissionId: string, pending: boolean) => {
+    const nextFence = updateRequestAiOperationFence(
+      {
+        ownerSubmissionId: aiOperationOwnerRef.current,
+        pending: isAiOperationPending,
+      } satisfies RequestAiOperationFence,
+      selectedSubmissionIdRef.current,
+      submissionId,
+      pending,
+    )
+    if (!nextFence) return
+    aiOperationOwnerRef.current = nextFence.ownerSubmissionId
+    setAiOperationOwner(nextFence.ownerSubmissionId)
+    setIsAiOperationPending(nextFence.pending)
   }
 
   /** Ignores source changes while an AI operation is awaiting its response. */
   const selectSubmission = (submissionId: string) => {
-    if (isAiOperationPendingRef.current) return
+    if (isPendingForSelectedSubmission) return
+    aiOperationOwnerRef.current = undefined
+    setAiOperationOwner(undefined)
+    setIsAiOperationPending(false)
     onSelectSubmission(submissionId)
   }
 
@@ -179,7 +211,7 @@ export function RequestQueue({
                         aria-current={selectedSubmission?.id === submission.id ? 'true' : undefined}
                         aria-label={`${t('requests.queue.openSubmission')}: ${submission.formName} ${submission.formVersionLabel}`}
                         className="group block min-h-10 w-full rounded-md px-2 py-1 text-left outline-none hover:bg-white focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)] focus-visible:ring-offset-2"
-                        disabled={isAiOperationPending}
+                        disabled={isPendingForSelectedSubmission}
                         onClick={() => selectSubmission(submission.id)}
                         type="button"
                       >
@@ -200,7 +232,7 @@ export function RequestQueue({
         )}
         {hasMore ? (
           <div className="border-t border-[var(--workbench-border)] p-4 text-center">
-            <button className="workbench-button-secondary min-h-10 px-5" disabled={isLoadingMore || isAiOperationPending} onClick={onLoadMore} type="button">
+            <button className="workbench-button-secondary min-h-10 px-5" disabled={isLoadingMore || isPendingForSelectedSubmission} onClick={onLoadMore} type="button">
               {isLoadingMore ? t('requests.queue.loadingMore') : t('requests.queue.loadMore')}
             </button>
           </div>
@@ -221,8 +253,10 @@ export function RequestQueue({
         submission={selectedSubmission}
         onAction={onAction}
         onAuthenticatedApiError={onAuthenticatedApiError}
-        isAiOperationPending={isAiOperationPending}
-        onOperationPendingChange={reportAiOperationPending}
+        isAiOperationPending={isPendingForSelectedSubmission}
+        onOperationPendingChange={(pending) => {
+          if (selectedSubmission) reportAiOperationPending(selectedSubmission.id, pending)
+        }}
         onOpenAttachment={onOpenAttachment}
         assigneeDirectory={assigneeDirectory}
         projectDirectory={projectDirectory}

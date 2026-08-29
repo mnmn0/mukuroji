@@ -3,11 +3,12 @@ import { expect, fn, userEvent, within } from 'storybook/test'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
 import { aiPlanningGenerationFixture } from '../../features/ai-assistance/fixtures'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import { createTaskDetailAiAssistanceRenderer } from '../../features/ai-assistance/ui/TaskDetailAiAssistance'
 import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
-import { TaskDetailPane } from './TaskDetailPane'
+import { TaskDetailPane, type TaskDetailPaneProps } from './TaskDetailPane'
 import {
   taskViewStoryProjectMembers,
   taskViewStoryPlanningSnapshot,
@@ -72,9 +73,19 @@ function createPlanningController(): AiAssistanceController {
 }
 
 /** Storybook metadata for the independent selected-task detail pane. */
+type TaskDetailPaneStoryArgs = TaskDetailPaneProps & {
+  /** Optional controller override used by the story's feature renderer. */
+  aiAssistanceController?: AiAssistanceController
+}
+
 const meta = {
   title: 'Application/Projects/Task Views/Detail Pane',
-  render: (args) => <TaskDetailPane {...args} />,
+  render: ({ aiAssistanceController, ...args }) => (
+    <TaskDetailPane
+      {...args}
+      renderAiAssistance={createTaskDetailAiAssistanceRenderer(aiAssistanceController)}
+    />
+  ),
   parameters: {
     layout: 'fullscreen',
   },
@@ -104,7 +115,7 @@ const meta = {
     task: taskViewStorySelectedTask,
     workspaceMembers: collaborationWorkspaceMemberFixtures,
   },
-} satisfies Meta<typeof TaskDetailPane>
+} satisfies Meta<TaskDetailPaneStoryArgs>
 
 export default meta
 
