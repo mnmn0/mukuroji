@@ -237,8 +237,9 @@ const customFieldFilterSchema = z.object({
   }
   if (
     (filter.operator === 'equals' || filter.operator === 'not-equals') &&
-    typeof filter.value === 'string' &&
-    (filter.value.trim().length === 0 || filter.value !== filter.value.trim())
+    (typeof filter.value !== 'string' ||
+      filter.value.trim().length === 0 ||
+      filter.value !== filter.value.trim())
   ) {
     context.addIssue({
       code: 'custom',

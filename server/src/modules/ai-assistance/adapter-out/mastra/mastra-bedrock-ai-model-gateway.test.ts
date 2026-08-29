@@ -301,6 +301,10 @@ describe('createMastraBedrockAiModelGateway', () => {
       { fieldId: 'field-1', operator: 'contains', value: '   ' },
       { fieldId: 'field-1', operator: 'is-empty', value: true },
       { fieldId: 'field-1', operator: 'equals', value: '   ' },
+      { fieldId: 'field-1', operator: 'equals', value: 10 },
+      { fieldId: 'field-1', operator: 'not-equals', value: false },
+      { fieldId: 'field-1', operator: 'equals', value: ['one'] },
+      { fieldId: 'field-1', operator: 'not-equals', value: null },
     ]
     for (const filter of invalidFilters) {
       const gateway = createMastraBedrockAiModelGateway({
