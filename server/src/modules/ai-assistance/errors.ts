@@ -1,3 +1,5 @@
+import type { AiAssistanceUsage } from '@mukuroji/contracts'
+
 /** Stable error categories exposed by the AI assistance application boundary. */
 export type AiAssistanceErrorCategory =
   | 'validation'
@@ -43,6 +45,9 @@ export class AiAssistanceError extends Error {
   /** Error category used by transport adapters. */
   readonly category: AiAssistanceErrorCategory
 
+  /** Provider-reported usage retained when structured output validation fails. */
+  readonly usage?: AiAssistanceUsage
+
   /**
    * Creates a safe AI assistance application error.
    *
@@ -50,16 +55,19 @@ export class AiAssistanceError extends Error {
    * @param code - Stable machine-readable error code.
    * @param message - Non-sensitive diagnostic message.
    * @param options - Optional standard error options.
+   * @param usage - Optional provider usage retained for failed-attempt accounting.
    */
   constructor(
     category: AiAssistanceErrorCategory,
     code: AiAssistanceErrorCode,
     message: string,
     options?: ErrorOptions,
+    usage?: AiAssistanceUsage,
   ) {
     super(message, options)
     this.name = 'AiAssistanceError'
     this.category = category
     this.code = code
+    this.usage = usage
   }
 }

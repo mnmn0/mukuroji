@@ -1064,6 +1064,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     const desired = createPolicy('2026-08-25T00:00:02.000Z')
     const harness = createHarness([
       transactionCancellation(['ConditionalCheckFailed', undefined, undefined]),
+      {},
     ], 'AuditTable')
     try {
       await expect(harness.store.putPolicyWithAudit(
@@ -1080,7 +1081,45 @@ describe('DynamoDbAiAssistanceStore', () => {
         category: 'conflict',
         code: 'AiAssistanceRevisionConflict',
       })
-      expect(harness.commands).toHaveLength(1)
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+        'GetCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('returns the durable policy when an atomic policy transaction response is lost', async () => {
+    const current = createPolicy('2026-08-25T00:00:01.000Z')
+    const desired = createPolicy('2026-08-25T00:00:02.000Z')
+    const harness = createHarness([
+      transactionCancellation(['ConditionalCheckFailed', undefined, undefined]),
+      {
+        Item: {
+          workspaceId: 'workspace-1',
+          recordKey: 'AI_POLICY#WORKSPACE',
+          recordType: 'ai-assistance-policy',
+          policy: current,
+        },
+      },
+    ], 'AuditTable')
+    try {
+      await expect(harness.store.putPolicyWithAudit(
+        'workspace-1',
+        'member-1@example.com',
+        desired,
+        0,
+        {
+          workspaceMemberVersion: 4,
+          workspaceRole: 'admin',
+        },
+        createPolicyAuditEvent(),
+      )).resolves.toEqual(current)
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+        'GetCommand',
+      ])
     } finally {
       harness.restore()
     }

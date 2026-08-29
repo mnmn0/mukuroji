@@ -89,16 +89,28 @@ describe('createMastraBedrockAiModelGateway', () => {
     })
   })
 
-  test('rejects model output containing unknown fields under the strict schema', async () => {
+  test('retains provider usage when structured output validation fails', async () => {
     const gateway = createMastraBedrockAiModelGateway({
       runStructuredGeneration: async () => ({
         object: { ...createOutput(), unauthorized: 'field' },
+        inputTokens: 12,
+        outputTokens: 34,
       }),
     })
 
-    await expect(gateway.generate(createInput())).rejects.toMatchObject({
-      code: 'InvalidAiAssistanceOutput',
-    })
+    try {
+      await gateway.generate(createInput())
+      throw new Error('Expected structured output validation to fail.')
+    } catch (error) {
+      expect(error).toMatchObject({
+        code: 'InvalidAiAssistanceOutput',
+        usage: {
+          inputTokens: 12,
+          outputTokens: 34,
+          costUnavailableReason: 'pricing-not-configured',
+        },
+      })
+    }
   })
 
   test('rejects non-finite or fractional provider usage before returning a draft', async () => {
@@ -251,6 +263,88 @@ describe('createMastraBedrockAiModelGateway', () => {
             interpretation: 'Long keyword.',
             filters: { keyword: 'x'.repeat(257) },
             caveats: [],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('enforces the Web title limit at the model boundary', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'triage',
+            title: {
+              value: 'x'.repeat(257),
+              reason: 'The title is descriptive.',
+              confidence: 'high',
+              citationIds: ['S1'],
+            },
+            customFields: [],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('rejects self-referential planning dependencies', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'planning',
+            subtasks: [],
+            dependencies: [{
+              id: 'dependency-1',
+              predecessor: { teamId: 'team-1', workItemId: 'work-item-1' },
+              successor: { teamId: 'team-1', workItemId: 'work-item-1' },
+              type: 'finish-to-start',
+              lagDays: 0,
+              reason: 'The same item is blocked by itself.',
+              confidence: 'high',
+              citationIds: ['S1'],
+            }],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('requires a nonempty Planning next action', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'planning',
+            subtasks: [],
+            dependencies: [],
+            statusUpdate: {
+              health: 'on-track',
+              risk: 'none',
+              summary: 'The work remains on track.',
+              riskSummary: '',
+              decisionSummary: '',
+              helpNeeded: '',
+              nextAction: '   ',
+              confidence: 'high',
+              citationIds: ['S1'],
+            },
           },
           uncertainty: { level: 'low', reason: 'Clear.' },
         },

@@ -7,6 +7,7 @@ import type {
   AiAssistanceTask,
   AiAssistanceUncertainty,
   AiAssistanceUsage,
+  CustomFieldDefinition,
   CreateAiAssistanceFeedbackRequest,
   DecideAiAssistanceGenerationRequest,
   GenerateAiAssistanceRequest,
@@ -53,6 +54,8 @@ export type AiAssistanceAllowedValues = {
   projectIds: readonly string[]
   /** Custom field identifiers visible to the current operator. */
   customFieldIds: readonly string[]
+  /** Team-scoped writable custom-field definitions used for model-output validation. */
+  customFieldDefinitions?: readonly AiAssistanceCustomFieldDefinition[]
   /** Relation identifiers visible to the current operator. */
   relationIds: readonly string[]
   /** Workflow status identifiers visible to the current operator. */
@@ -61,6 +64,26 @@ export type AiAssistanceAllowedValues = {
   workItemEndpoints: readonly WorkItemDependencyEndpoint[]
   /** Compatible triage routing combinations used to validate tuple semantics. */
   triageRoutingTuples?: readonly AiAssistanceTriageRoutingTuple[]
+}
+
+/** Team-scoped custom-field metadata accepted at the AI output boundary. */
+export type AiAssistanceCustomFieldDefinition = {
+  /** Team that owns the custom field definition. */
+  teamId: string
+  /** Custom field definition identifier. */
+  fieldId: string
+  /** Canonical Work Item custom-field value type. */
+  type: CustomFieldDefinition['type']
+  /** Whether the field must retain a value on Work Item adoption. */
+  required: boolean
+  /** Project scope; omitted or empty means every Project in the Team. */
+  projectIds?: readonly string[]
+  /** Select option identifiers accepted by this definition. */
+  optionIds?: readonly string[]
+  /** Canonical numeric and length constraints enforced by the Work Item boundary. */
+  validation?: CustomFieldDefinition['validation']
+  /** Currency code used by currency fields, when configured. */
+  currencyCode?: string
 }
 
 /** Private member identifiers used only to build one provider-local alias table. */

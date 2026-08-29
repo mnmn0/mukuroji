@@ -431,6 +431,7 @@ import {
   redactAiAssistanceText,
   type AiAssistanceActor,
   type AiAssistanceAllowedValues,
+  type AiAssistanceCustomFieldDefinition,
   type AiAssistanceAuthorizationState,
   type AiAssistanceTriageRoutingTuple,
   type AiAssistancePolicyAuthorizationFence,
@@ -19908,6 +19909,11 @@ type AiAssistanceResolverState = {
   sensitiveCustomFieldIds: ReadonlySet<string>
   /** Complete current custom-field identifiers keyed by visible Team. */
   customFieldIdsByTeamId: ReadonlyMap<string, ReadonlySet<string>>
+  /** Writable custom-field metadata keyed by visible Team for output validation. */
+  customFieldDefinitionsByTeamId: ReadonlyMap<
+    string,
+    readonly AiAssistanceCustomFieldDefinition[]
+  >
   /** Non-content authorization and configuration fences. */
   fence: unknown
   /** Current workflow definitions keyed by each visible Team. */
@@ -20082,6 +20088,10 @@ async function resolveAiAssistanceContext(
     projectIds: filterAiAllowedValuesVisibleInPrompt(
       promptContext,
       candidateAllowedValues.projectIds,
+    ),
+    customFieldDefinitions: filterAiCustomFieldDefinitionsVisibleInPrompt(
+      promptContext,
+      candidateAllowedValues.customFieldDefinitions ?? [],
     ),
     customFieldIds: filterAiAllowedValuesVisibleInPrompt(
       promptContext,
@@ -20276,14 +20286,38 @@ async function createAiAssistanceResolverState(
   )
   const customFieldIdsByTeamId = new Map(configurations.map(({ team, resolved }) => [
     team.id,
-    new Set(resolved.configuration.customFields.map((field) => field.id)),
+    new Set(resolved.configuration.customFields
+      .filter((field) => field.type !== 'formula')
+      .map((field) => field.id)),
   ]))
+  const customFieldDefinitions = configurations.flatMap(({ team, resolved }) =>
+    resolved.configuration.customFields.flatMap((field) => {
+      if (field.type === 'formula' || sensitiveCustomFieldIds.has(field.id)) return []
+      const definition: AiAssistanceCustomFieldDefinition = {
+        teamId: team.id,
+        fieldId: field.id,
+        type: field.type,
+        required: field.required,
+        ...(field.projectIds === undefined ? {} : { projectIds: [...field.projectIds] }),
+        ...(field.options === undefined
+          ? {}
+          : { optionIds: field.options.map((option) => option.id) }),
+        ...(field.validation === undefined ? {} : { validation: field.validation }),
+        ...(field.currencyCode === undefined ? {} : { currencyCode: field.currencyCode }),
+      }
+      return [definition]
+    })
+  )
+  const customFieldDefinitionsByTeamId = new Map<
+    string,
+    readonly AiAssistanceCustomFieldDefinition[]
+  >()
+  for (const definition of customFieldDefinitions) {
+    const definitions = customFieldDefinitionsByTeamId.get(definition.teamId) ?? []
+    customFieldDefinitionsByTeamId.set(definition.teamId, [...definitions, definition])
+  }
   const customFieldIds = uniqueAiAllowedValues(
-    configurations.flatMap(({ resolved }) =>
-      resolved.configuration.customFields.flatMap((field) =>
-        sensitiveCustomFieldIds.has(field.id) ? [] : [field.id]
-      )
-    ),
+    customFieldDefinitions.map((definition) => definition.fieldId),
     AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
   )
   const allowedValues: AiAssistanceAllowedValues = {
@@ -20292,6 +20326,9 @@ async function createAiAssistanceResolverState(
     teamIds,
     projectIds,
     customFieldIds,
+    customFieldDefinitions: customFieldDefinitions.filter((definition) =>
+      customFieldIds.includes(definition.fieldId)
+    ),
     relationIds: [],
     statuses,
     workItemEndpoints: [],
@@ -20324,7 +20361,7 @@ async function createAiAssistanceResolverState(
             ? {}
             : {
                 customFields: resolved.configuration.customFields.flatMap((field) =>
-                  sensitiveCustomFieldIds.has(field.id)
+                  field.type === 'formula' || sensitiveCustomFieldIds.has(field.id)
                     ? []
                     : [{
                         id: field.id,
@@ -20361,6 +20398,7 @@ async function createAiAssistanceResolverState(
     privacyAliases,
     sensitiveCustomFieldIds,
     customFieldIdsByTeamId,
+    customFieldDefinitionsByTeamId,
     workflowsByTeamId: new Map(configurations.map(({ team, resolved }) => [
       team.id,
       resolved.configuration.workflow,
@@ -21701,6 +21739,17 @@ function filterAiAllowedValuesVisibleInPrompt(
       ? prompt.includes(JSON.stringify(value))
       : aiPromptContainsExactIdentifier(prompt, alias)
   })
+}
+
+/** Keeps Team-scoped custom-field definitions whose identifiers survived prompt bounding. */
+function filterAiCustomFieldDefinitionsVisibleInPrompt(
+  prompt: string,
+  definitions: readonly AiAssistanceCustomFieldDefinition[],
+): AiAssistanceCustomFieldDefinition[] {
+  return definitions.filter((definition) =>
+    prompt.includes(JSON.stringify(definition.teamId)) &&
+    prompt.includes(JSON.stringify(definition.fieldId))
+  )
 }
 
 /**

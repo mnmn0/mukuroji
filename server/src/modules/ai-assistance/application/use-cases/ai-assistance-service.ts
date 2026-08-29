@@ -40,6 +40,7 @@ import {
 import type {
   AiAssistanceActor,
   AiAssistanceAllowedValues,
+  AiAssistanceCustomFieldDefinition,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
   AiAssistancePolicyAuthorization,
@@ -507,7 +508,7 @@ export function createAiAssistanceService(
       validateDraftReferences(aliasedDraft, {
         ...context,
         allowedValues: privateIdentifierAliases.modelAllowedValues,
-      })
+      }, request)
       const authorizationState = await authorization.isAuthorizationCurrent({
         actor,
         request: providerRequest,
@@ -529,7 +530,7 @@ export function createAiAssistanceService(
           citation,
           privateIdentifierAliases.disclosureTextAliases,
         ))
-      validateDraftReferences(safeDraft, context)
+      validateDraftReferences(safeDraft, context, request)
 
       const generation: AiAssistanceGeneration = {
         schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
@@ -580,6 +581,8 @@ export function createAiAssistanceService(
       )
     } catch (error) {
       const safeError = toSafeAttemptError(error)
+      const reportedUsage = modelResult?.usage ??
+        (error instanceof AiAssistanceError ? error.usage : undefined)
       if (!generationPersisted) {
         const failedAt = now()
         if (attemptStartedAt) {
@@ -587,13 +590,13 @@ export function createAiAssistanceService(
             ...completion,
             outcome: 'failed',
             endedAt: failedAt.toISOString(),
-            latencyMs: modelResult?.usage.latencyMs ?? Math.max(
+            latencyMs: reportedUsage?.latencyMs ?? Math.max(
               0,
               Math.round(failedAt.getTime() - attemptStartedAt.getTime()),
             ),
-            ...(modelResult?.usage === undefined
+            ...(reportedUsage === undefined
               ? { usageUnavailableReason: 'provider-did-not-report' }
-              : { usage: modelResult.usage }),
+              : { usage: reportedUsage }),
             ...(modelResult?.providerTraceId === undefined
               ? {}
               : { providerTraceId: modelResult.providerTraceId }),
@@ -1176,12 +1179,20 @@ function validateDraftForRequest(
       'The model returned a Planning status update for a Work Item source.',
     )
   }
+  if (!hasWorkItemDraft) {
+    throw new AiAssistanceError(
+      'validation',
+      'InvalidAiAssistanceOutput',
+      'The model returned an empty Work Item planning draft.',
+    )
+  }
 }
 
 /** Validates every citation and resource identifier emitted by the model. */
 function validateDraftReferences(
   draft: AiAssistanceDraft,
   context: ResolvedAiAssistanceContext,
+  request: GenerateAiAssistanceRequest,
 ): void {
   const citationIds = new Set(context.citations.map((citation) => citation.id))
   for (const citationId of collectDraftCitationIds(draft)) {
@@ -1193,7 +1204,7 @@ function validateDraftReferences(
       )
     }
   }
-  validateDraftAllowedValues(draft, context.allowedValues)
+  validateDraftAllowedValues(draft, context.allowedValues, request)
 }
 
 /** Collects all model-generated citation identifiers from a task draft. */
@@ -1234,6 +1245,7 @@ function collectDraftCitationIds(draft: AiAssistanceDraft): string[] {
 function validateDraftAllowedValues(
   draft: AiAssistanceDraft,
   allowed: AiAssistanceAllowedValues,
+  request: GenerateAiAssistanceRequest,
 ): void {
   if (draft.kind === 'triage') {
     requireAllowedOptional(draft.assigneeUserId?.value, allowed.assigneeUserIds, 'assignee')
@@ -1243,6 +1255,7 @@ function validateDraftAllowedValues(
     for (const field of draft.customFields) {
       requireAllowed(field.fieldId, allowed.customFieldIds, 'custom field')
     }
+    validateTriageCustomFields(draft, allowed, request)
     return
   }
   if (draft.kind === 'search') {
@@ -1255,6 +1268,7 @@ function validateDraftAllowedValues(
     for (const filter of draft.filters.customFields ?? []) {
       requireAllowed(filter.fieldId, allowed.customFieldIds, 'custom field')
     }
+    validateSearchCustomFields(draft, allowed)
     return
   }
   if (draft.kind === 'planning') {
@@ -1264,6 +1278,157 @@ function validateDraftAllowedValues(
       requireAllowedEndpoint(dependency.successor, allowed.workItemEndpoints)
     }
   }
+}
+
+/** Validates triage custom-field suggestions against the selected Team schema. */
+function validateTriageCustomFields(
+  draft: Extract<AiAssistanceDraft, { kind: 'triage' }>,
+  allowed: AiAssistanceAllowedValues,
+  request: GenerateAiAssistanceRequest,
+): void {
+  const definitions = allowed.customFieldDefinitions
+  if (definitions === undefined || draft.customFields.length === 0) return
+  const sourceTeamId = request.task === 'triage' && request.source.type === 'triage-entry'
+    ? request.source.teamId
+    : undefined
+  const teamId = draft.teamId?.value ?? sourceTeamId
+  const projectId = draft.projectId?.value
+  for (const field of draft.customFields) {
+    const matches = definitions.filter((definition) =>
+      definition.fieldId === field.fieldId &&
+      (teamId === undefined || definition.teamId === teamId) &&
+      isAiCustomFieldApplicableToProject(definition, projectId)
+    )
+    if (matches.length !== 1) {
+      throw new AiAssistanceError(
+        'validation',
+        'AiAssistanceOutputNotAllowed',
+        'The model returned a custom field that is not defined for the destination Team and Project.',
+      )
+    }
+    validateAiCustomFieldValue(field.value, matches[0])
+  }
+}
+
+/** Validates Search custom-field values against one unambiguous current definition. */
+function validateSearchCustomFields(
+  draft: Extract<AiAssistanceDraft, { kind: 'search' }>,
+  allowed: AiAssistanceAllowedValues,
+): void {
+  const definitions = allowed.customFieldDefinitions
+  if (definitions === undefined) return
+  for (const filter of draft.filters.customFields ?? []) {
+    if (filter.value === undefined) continue
+    const matches = definitions.filter((definition) => definition.fieldId === filter.fieldId)
+    if (matches.length !== 1) {
+      throw new AiAssistanceError(
+        'validation',
+        'AiAssistanceOutputNotAllowed',
+        'The model returned an ambiguous or unknown custom field filter.',
+      )
+    }
+    validateAiCustomFieldValue(filter.value, matches[0])
+  }
+}
+
+/** Checks whether one custom-field definition applies to the proposed Project. */
+function isAiCustomFieldApplicableToProject(
+  definition: AiAssistanceCustomFieldDefinition,
+  projectId: string | undefined,
+): boolean {
+  return definition.projectIds === undefined || definition.projectIds.length === 0 ||
+    (projectId !== undefined && definition.projectIds.includes(projectId))
+}
+
+/** Validates a model-proposed value using the canonical Work Item field semantics. */
+function validateAiCustomFieldValue(
+  value: string | number | boolean | string[] | null,
+  definition: AiAssistanceCustomFieldDefinition,
+): void {
+  if (value === null) {
+    if (definition.required) rejectAiCustomFieldValue('A required custom field cannot be cleared.')
+    return
+  }
+  if (definition.type === 'formula') {
+    rejectAiCustomFieldValue('Formula custom fields are read-only.')
+  }
+  if (definition.type === 'boolean' && typeof value !== 'boolean') {
+    rejectAiCustomFieldValue('The custom field value must be boolean.')
+  }
+  if (
+    (definition.type === 'number' || definition.type === 'currency' || definition.type === 'duration') &&
+    (typeof value !== 'number' || !Number.isFinite(value))
+  ) {
+    rejectAiCustomFieldValue('The custom field value must be a finite number.')
+  }
+  if (definition.type === 'duration' && typeof value === 'number' && value < 0) {
+    rejectAiCustomFieldValue('A duration custom field cannot be negative.')
+  }
+  if ((definition.type === 'text' || definition.type === 'person') && typeof value !== 'string') {
+    rejectAiCustomFieldValue('The custom field value must be a string.')
+  }
+  if (definition.type === 'date' &&
+      (typeof value !== 'string' || !isValidAiCalendarDate(value))) {
+    rejectAiCustomFieldValue('The custom field value must be a valid ISO date.')
+  }
+  if (definition.type === 'select') {
+    if (typeof value !== 'string' || !definition.optionIds?.includes(value)) {
+      rejectAiCustomFieldValue('The custom field value is not a configured select option.')
+    }
+  }
+  if (definition.type === 'multi-select') {
+    if (
+      !Array.isArray(value) ||
+      new Set(value).size !== value.length ||
+      !definition.optionIds ||
+      value.some((optionId) => !definition.optionIds?.includes(optionId))
+    ) {
+      rejectAiCustomFieldValue('The custom field value contains an invalid select option.')
+    }
+  }
+  const validation = definition.validation
+  if (validation === undefined) return
+  if (typeof value === 'number') {
+    if (validation.min !== undefined && value < validation.min) {
+      rejectAiCustomFieldValue('The custom field value is below its configured minimum.')
+    }
+    if (validation.max !== undefined && value > validation.max) {
+      rejectAiCustomFieldValue('The custom field value exceeds its configured maximum.')
+    }
+  }
+  const length = typeof value === 'string' || Array.isArray(value) ? value.length : undefined
+  if (length !== undefined) {
+    if (validation.minLength !== undefined && length < validation.minLength) {
+      rejectAiCustomFieldValue('The custom field value is shorter than its configured minimum.')
+    }
+    if (validation.maxLength !== undefined && length > validation.maxLength) {
+      rejectAiCustomFieldValue('The custom field value exceeds its configured maximum.')
+    }
+  }
+  if (
+    validation.pattern !== undefined &&
+    definition.type === 'text' &&
+    typeof value === 'string' &&
+    !new RegExp(validation.pattern).test(value)
+  ) {
+    rejectAiCustomFieldValue('The custom field value does not match its configured pattern.')
+  }
+}
+
+/** Checks one strict Gregorian date used by date custom fields. */
+function isValidAiCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+/** Throws the stable output-boundary error for an invalid custom-field proposal. */
+function rejectAiCustomFieldValue(message: string): never {
+  throw new AiAssistanceError(
+    'validation',
+    'AiAssistanceOutputNotAllowed',
+    message,
+  )
 }
 
 /** Requires a triage draft's Team, Project, and assignee to share one allowed route. */

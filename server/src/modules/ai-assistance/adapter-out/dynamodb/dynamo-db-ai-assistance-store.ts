@@ -939,6 +939,12 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         )
       }
       if (isTransactionConditionalFailureAt(error, 0)) {
+        try {
+          const current = await this.getPolicy(workspaceId)
+          if (current && isPolicyReplay(current, policy, expectedRevision)) return current
+        } catch {
+          // Preserve the compare-and-swap conflict when replay reconciliation is unavailable.
+        }
         throw revisionConflictError()
       }
       const mappedError = mapDynamoWriteError(error)

@@ -18,9 +18,11 @@ import type { AuditEventsClient } from './app-dependencies'
 const NOW = '2026-08-09T00:00:00.000Z'
 
 const TEST_AUDIT_EVENTS = {
+  /** Returns no audit event in composition tests. */
   async getEvent() {
     return undefined
   },
+  /** Returns an empty audit-event page in composition tests. */
   async query() {
     return { events: [] }
   },

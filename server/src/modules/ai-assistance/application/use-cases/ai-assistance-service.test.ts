@@ -9,6 +9,7 @@ import {
 import type {
   AiAssistanceActor,
   AiAssistanceAuthorizationState,
+  AiAssistanceCustomFieldDefinition,
   AiAssistanceGenerationBudgetReservation,
   AiAssistancePolicyAuditInput,
   AiAssistancePrivateMemberIdentifiers,
@@ -131,6 +132,8 @@ type HarnessConfiguration = {
   teamIds?: readonly string[]
   /** Optional Project allowlist override for routing compatibility tests. */
   projectIds?: readonly string[]
+  /** Optional Team-scoped custom-field definitions used by output validation tests. */
+  customFieldDefinitions?: readonly AiAssistanceCustomFieldDefinition[]
   /** Optional strict model draft used to exercise task-specific output validation. */
   outputDraft?: AiAssistanceDraft
   /** Optional end-to-end deadline used to exercise remaining-time enforcement. */
@@ -437,6 +440,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
           teamIds: configuration.teamIds ?? ['team-1'],
           projectIds: configuration.projectIds ?? ['project-1'],
           customFieldIds: ['field-1'],
+          ...(configuration.customFieldDefinitions === undefined
+            ? {}
+            : { customFieldDefinitions: configuration.customFieldDefinitions }),
           relationIds: ['relation-1'],
           statuses: ['workflow-status-1'],
           workItemEndpoints: [{ teamId: 'team-1', workItemId: 'work-item-1' }],
@@ -1177,6 +1183,31 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('rejects an empty Work Item planning draft', async () => {
+    const harness = createHarness({
+      outputDraft: {
+        kind: 'planning',
+        subtasks: [],
+        dependencies: [],
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createPlanningRequest('work-item'),
+      harness.authorization,
+      'request-empty-work-item-planning',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'InvalidAiAssistanceOutput',
+    })
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCode: 'InvalidAiAssistanceOutput',
+    })])
+  })
+
   test('rechecks source authorization before invoking the provider', async () => {
     const harness = createHarness()
     harness.setAuthorizationState({ current: false, reason: 'permission-changed' })
@@ -1508,6 +1539,71 @@ describe('createAiAssistanceService', () => {
       failureCategory: 'validation',
       failureCode: 'AiAssistanceOutputNotAllowed',
     })])
+  })
+
+  test('validates triage custom fields against the selected Team schema', async () => {
+    const definitions: AiAssistanceCustomFieldDefinition[] = [{
+      teamId: 'team-a',
+      fieldId: 'team-a-only',
+      type: 'text',
+      required: false,
+    }, {
+      teamId: 'team-b',
+      fieldId: 'release-channel',
+      type: 'select',
+      required: false,
+      optionIds: ['beta'],
+    }]
+    const request: GenerateAiAssistanceRequest = {
+      task: 'triage',
+      locale: 'en',
+      source: {
+        type: 'triage-entry',
+        teamId: 'team-a',
+        triageEntryId: 'triage-1',
+        expectedRevision: 1,
+      },
+    }
+    for (const [key, field] of [
+      ['wrong-team', {
+        fieldId: 'team-a-only',
+        value: 'should not cross Teams',
+      }],
+      ['invalid-option', {
+        fieldId: 'release-channel',
+        value: 'production',
+      }],
+    ] as const) {
+      const harness = createHarness({
+        teamIds: ['team-a', 'team-b'],
+        customFieldDefinitions: definitions,
+        outputDraft: {
+          kind: 'triage',
+          teamId: {
+            value: 'team-b',
+            reason: 'Team B owns this request.',
+            confidence: 'high',
+            citationIds: ['S1'],
+          },
+          customFields: [{
+            ...field,
+            reason: 'The field is suggested by the source.',
+            confidence: 'medium',
+            citationIds: ['S1'],
+          }],
+        },
+      })
+      await expect(harness.service.generate(
+        createActor(),
+        request,
+        harness.authorization,
+        `request-custom-field-${key}`,
+      )).rejects.toMatchObject({
+        category: 'validation',
+        code: 'AiAssistanceOutputNotAllowed',
+      })
+      expect(harness.storedGeneration()).toBeUndefined()
+    }
   })
 
   test('replays the same generation key without invoking the provider again', async () => {

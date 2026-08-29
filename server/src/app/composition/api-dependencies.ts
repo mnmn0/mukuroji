@@ -855,7 +855,7 @@ function createProductionAiAssistanceService(
       'WORKSPACE_ACCESS_TABLE_NAME or MUKUROJI_WORKSPACE_ACCESS_TABLE must be set for production AI policy authorization.',
     )
   }
-  const workspaceAccessTableName = configuredWorkspaceAccessTableName ??
+  const workspaceAccessTableName = configuredWorkspaceAccessTableName ||
     'mukuroji-workspace-access-local'
   const enterpriseIdentityTableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
   const defaultPolicy: AiAssistancePolicy = {

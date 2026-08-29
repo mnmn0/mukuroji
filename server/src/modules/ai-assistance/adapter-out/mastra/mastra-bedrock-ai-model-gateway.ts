@@ -117,17 +117,32 @@ export function createMastraBedrockAiModelGateway(
           traceId: input.traceId,
           abortSignal: controller.signal,
         })
-        const output = parseAiAssistanceModelOutput(result.object)
         const latencyMs = Math.max(0, Math.round(nowMilliseconds() - startedAt))
+        const usage = createUsage(
+          input.modelId,
+          result.inputTokens,
+          result.outputTokens,
+          latencyMs,
+          options.pricingByModelId,
+        )
+        let output: ReturnType<typeof parseAiAssistanceModelOutput>
+        try {
+          output = parseAiAssistanceModelOutput(result.object)
+        } catch (error) {
+          if (error instanceof AiAssistanceError) {
+            throw new AiAssistanceError(
+              error.category,
+              error.code,
+              error.message,
+              { cause: error },
+              usage,
+            )
+          }
+          throw error
+        }
         return {
           ...output,
-          usage: createUsage(
-            input.modelId,
-            result.inputTokens,
-            result.outputTokens,
-            latencyMs,
-            options.pricingByModelId,
-          ),
+          usage,
           ...(result.traceId ? { providerTraceId: result.traceId } : {}),
         }
       } catch (error) {

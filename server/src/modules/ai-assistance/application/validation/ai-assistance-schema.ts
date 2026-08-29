@@ -17,6 +17,7 @@ import { AiAssistanceError } from '../../errors'
 
 const identifierSchema = z.string().trim().min(1).max(256)
 const boundedTextSchema = z.string().trim().min(1).max(2_000)
+const titleTextSchema = z.string().trim().min(1).max(256)
 const confidenceSchema = z.enum(['high', 'medium', 'low'])
 const taskSchema = z.enum(['triage', 'summary', 'search', 'planning'])
 const revisionSchema = z.number().int().min(0)
@@ -115,6 +116,13 @@ const generateRequestSchema = z.discriminatedUnion('task', [
 
 const suggestedStringSchema = z.object({
   value: boundedTextSchema,
+  reason: boundedTextSchema,
+  confidence: confidenceSchema,
+  citationIds: z.array(identifierSchema).min(1).max(20),
+}).strict()
+
+const suggestedTitleSchema = z.object({
+  value: titleTextSchema,
   reason: boundedTextSchema,
   confidence: confidenceSchema,
   citationIds: z.array(identifierSchema).min(1).max(20),
@@ -253,7 +261,18 @@ const planningDependencySchema = z.object({
   reason: boundedTextSchema,
   confidence: confidenceSchema,
   citationIds: z.array(identifierSchema).min(1).max(20),
-}).strict()
+}).strict().superRefine((dependency, context) => {
+  if (
+    dependency.predecessor.teamId === dependency.successor.teamId &&
+    dependency.predecessor.workItemId === dependency.successor.workItemId
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['successor'],
+      message: 'A planning dependency cannot reference the same Work Item twice.',
+    })
+  }
+})
 
 const planningSubtasksSchema = z.array(planningSubtaskSchema).max(50)
 
@@ -266,7 +285,7 @@ const planningStatusUpdateSchema = z.object({
   riskSummary: z.string().trim().max(2_000),
   decisionSummary: z.string().trim().max(2_000),
   helpNeeded: z.string().trim().max(2_000),
-  nextAction: z.string().trim().max(2_000),
+  nextAction: z.string().trim().min(1).max(2_000),
   confidence: confidenceSchema,
   citationIds: z.array(identifierSchema).min(1).max(20),
 }).strict()
@@ -274,7 +293,7 @@ const planningStatusUpdateSchema = z.object({
 const draftSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('triage'),
-    title: suggestedStringSchema.optional(),
+    title: suggestedTitleSchema.optional(),
     description: suggestedStringSchema.optional(),
     priority: suggestedPrioritySchema.optional(),
     assigneeUserId: suggestedIdentifierSchema.optional(),
@@ -308,7 +327,7 @@ const draftSchema = z.discriminatedUnion('kind', [
   }).strict(),
   z.object({
     kind: z.literal('planning'),
-    title: suggestedStringSchema.optional(),
+    title: suggestedTitleSchema.optional(),
     description: suggestedStringSchema.optional(),
     priority: suggestedPrioritySchema.optional(),
     status: suggestedIdentifierSchema.optional(),
