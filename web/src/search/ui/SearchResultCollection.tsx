@@ -29,6 +29,10 @@ export type SearchResultCollectionProps = {
    */
   onNavigate: (path: string) => void
   /**
+   * AIの生成・承認・フィードバック操作中かどうかです。
+   */
+  isAiOperationPending?: boolean
+  /**
    * Workflow status ID ごとの configuration 由来の表示名です。
    */
   statusLabels?: Readonly<Record<string, string>>
@@ -71,6 +75,7 @@ function formatSearchSubtitle(
  * Search resultをtable、board、calendar、timelineの選択modeで描画します。
  */
 export function SearchResultCollection({
+  isAiOperationPending = false,
   layout,
   locale,
   onNavigate,
@@ -87,23 +92,24 @@ export function SearchResultCollection({
   )
 
   if (mode === 'board') {
-    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'calendar') {
-    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'timeline') {
-    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
-  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
 }
 
 function SearchTable({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   layout,
   locale,
   onNavigate,
@@ -112,6 +118,8 @@ function SearchTable({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -142,7 +150,7 @@ function SearchTable({
                     <button
                       className="w-full px-5 py-4 text-left transition hover:bg-[var(--workbench-surface-muted)] focus-visible:bg-[var(--workbench-surface-muted)] disabled:cursor-default"
                       data-testid={`search-result-${result.entityType}-${result.id}`}
-                      disabled={!path}
+                      disabled={isAiOperationPending || !path}
                       onClick={() => path && onNavigate(path)}
                       type="button"
                     >
@@ -174,6 +182,7 @@ function SearchTable({
 function SearchBoard({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   layout,
   locale,
   onNavigate,
@@ -182,6 +191,8 @@ function SearchBoard({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -210,7 +221,7 @@ function SearchBoard({
           </header>
           <div className="grid gap-2 p-3">
             {group.results.map((result) => (
-              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -222,6 +233,7 @@ function SearchBoard({
 function SearchCalendar({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   locale,
   onNavigate,
   results,
@@ -229,6 +241,8 @@ function SearchCalendar({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -248,7 +262,7 @@ function SearchCalendar({
           </h2>
           <div className="mt-3 grid gap-2">
             {group.results.map((result) => (
-              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -260,6 +274,7 @@ function SearchCalendar({
 function SearchTimeline({
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   locale,
   onNavigate,
   results,
@@ -267,6 +282,8 @@ function SearchTimeline({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -281,7 +298,7 @@ function SearchTimeline({
           return (
             <button
               className="grid w-full grid-cols-[120px_16px_minmax(0,1fr)_auto] items-center gap-4 px-5 py-4 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:cursor-default max-[680px]:grid-cols-[16px_minmax(0,1fr)]"
-              disabled={!path}
+              disabled={isAiOperationPending || !path}
               key={createResultKey(result)}
               onClick={() => path && onNavigate(path)}
               type="button"
@@ -318,6 +335,7 @@ function SearchResultCard({
   compact = false,
   formatStatus,
   formatSubtitle,
+  isAiOperationPending,
   locale,
   onNavigate,
   result,
@@ -326,6 +344,8 @@ function SearchResultCard({
   compact?: boolean
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  /** Whether result navigation is fenced while an AI operation is pending. */
+  isAiOperationPending: boolean
   locale: Locale
   onNavigate: (path: string) => void
   result: WorkspaceSearchResult
@@ -336,7 +356,7 @@ function SearchResultCard({
   return (
     <button
       className={`rounded-lg border border-[var(--workbench-border)] bg-white text-left transition hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)] disabled:cursor-default ${compact ? 'p-3' : 'p-4'}`}
-      disabled={!path}
+      disabled={isAiOperationPending || !path}
       onClick={() => path && onNavigate(path)}
       type="button"
     >

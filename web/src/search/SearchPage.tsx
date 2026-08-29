@@ -496,6 +496,12 @@ export function SearchPage() {
     setIsAiOperationPending(pending)
   }
 
+  /** Navigates to a Search result only when no AI operation is in flight. */
+  const navigateToSearchResult = (path: string) => {
+    if (isAiOperationPendingRef.current) return
+    navigate(path)
+  }
+
   return (
     <>
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
@@ -634,9 +640,10 @@ export function SearchPage() {
                   <SearchLoadingState t={t} />
                 ) : results.length > 0 ? (
                   <SearchResultCollection
+                    isAiOperationPending={isAiOperationPending}
                     layout={routeState.layout}
                     locale={locale}
-                    onNavigate={navigate}
+                    onNavigate={navigateToSearchResult}
                     results={results}
                     statusLabels={statusLabels}
                   />
