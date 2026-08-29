@@ -126,17 +126,45 @@ export async function decideAiAssistanceGeneration(
       'InvalidAiAssistanceResponse',
     )
   }
-  if (
-    generation.content.availability === 'available' &&
-    stableSerialize(generation.content) !== stableSerialize(options.expectedGeneration.content)
-  ) {
+  if (!isDecisionGenerationEnvelopeConsistent(generation, options.expectedGeneration)) {
     throw new AiAssistanceApiError(
       502,
-      'AI assistance decision returned content different from the reviewed generation.',
+      'AI assistance decision returned a generation different from the reviewed generation.',
       'InvalidAiAssistanceResponse',
     )
   }
   return generation
+}
+
+/**
+ * Verifies that a decision response preserves the reviewed generation envelope.
+ *
+ * A server-authoritative withholding is the only permitted content change: it removes
+ * disclosure after access or retention changes and never introduces new model output.
+ * The decision and optimistic-concurrency revision are intentionally allowed to change.
+ *
+ * @param generation - Parsed decision response returned by the server.
+ * @param expectedGeneration - Generation whose content and audit metadata were reviewed.
+ * @returns Whether the response is safe to replace the reviewed generation in local state.
+ */
+function isDecisionGenerationEnvelopeConsistent(
+  generation: AiAssistanceGeneration,
+  expectedGeneration: AiAssistanceGeneration,
+): boolean {
+  const immutableEnvelopeMatches = generation.schemaVersion === expectedGeneration.schemaVersion &&
+    generation.id === expectedGeneration.id &&
+    generation.task === expectedGeneration.task &&
+    stableSerialize(generation.details) === stableSerialize(expectedGeneration.details) &&
+    generation.createdAt === expectedGeneration.createdAt &&
+    generation.expiresAt === expectedGeneration.expiresAt
+  if (!immutableEnvelopeMatches) return false
+
+  if (stableSerialize(generation.content) === stableSerialize(expectedGeneration.content)) {
+    return true
+  }
+
+  return expectedGeneration.content.availability === 'available' &&
+    generation.content.availability === 'withheld'
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   Fragment,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1239,7 +1240,44 @@ export function TeamIssueScreen({
   })
   const pendingCreateWorkflowStatusIdRef = useRef<string | undefined>(undefined)
   const onSelectIssueRef = useRef(onSelectIssue)
+  const [pendingAiSummaryIssueKey, setPendingAiSummaryIssueKey] = useState<string>()
+  const isAiSummaryOperationPendingRef = useRef(false)
+  const activeAiSummaryIssueKey = selectedIssueId
+    ? createTaskViewItemKey(teamId, selectedIssueId)
+    : undefined
+  const activeAiSummaryIssueKeyRef = useRef(activeAiSummaryIssueKey)
+  const pendingAiSummaryIssueKeyRef = useRef<string | undefined>(undefined)
+  const isAiSummaryOperationPending = pendingAiSummaryIssueKey !== undefined &&
+    pendingAiSummaryIssueKey === activeAiSummaryIssueKey
 
+  /** Reports a keyed Brief operation so Team navigation can remain fenced. */
+  const reportAiSummaryOperationPending = useCallback((
+    issueKey: string,
+    pending: boolean,
+  ) => {
+    if (issueKey !== activeAiSummaryIssueKeyRef.current) return
+    if (!pending && pendingAiSummaryIssueKeyRef.current !== issueKey) return
+    pendingAiSummaryIssueKeyRef.current = pending ? issueKey : undefined
+    isAiSummaryOperationPendingRef.current = pending
+    setPendingAiSummaryIssueKey(pending ? issueKey : undefined)
+    if (pending) setTaskActionContextMenuState(undefined)
+  }, [])
+
+  /** Clears the selected Team Issue only when no Brief operation owns the detail pane. */
+  const clearSelectedIssueIfAllowed = useCallback(() => {
+    if (isAiSummaryOperationPendingRef.current) return
+    onSelectIssueRef.current?.('')
+  }, [])
+
+  useLayoutEffect(() => {
+    activeAiSummaryIssueKeyRef.current = activeAiSummaryIssueKey
+  }, [activeAiSummaryIssueKey])
+  useEffect(() => {
+    isAiSummaryOperationPendingRef.current = isAiSummaryOperationPending
+    if (!isAiSummaryOperationPending) {
+      pendingAiSummaryIssueKeyRef.current = undefined
+    }
+  }, [isAiSummaryOperationPending])
   useEffect(() => {
     onSelectIssueRef.current = onSelectIssue
   }, [onSelectIssue])
@@ -1259,6 +1297,7 @@ export function TeamIssueScreen({
 
   /** Applies one Team Issue view state locally and forwards it to the route controller. */
   const commitViewState = (nextViewState: TeamIssueViewState) => {
+    if (isAiSummaryOperationPendingRef.current) return
     setLocalDefinitionFilter(nextViewState.definitionFilter)
     setLocalSearchQuery(nextViewState.searchQuery)
     setLocalStatusFilter(nextViewState.statusFilter)
@@ -1410,8 +1449,8 @@ export function TeamIssueScreen({
     () => ({ kind: 'team', teamId }),
     [teamId],
   )
-  const canCreateIssueAction = onCreateIssue !== undefined
-  const canOpenIssueAction = onSelectIssue !== undefined
+  const canCreateIssueAction = onCreateIssue !== undefined && !isAiSummaryOperationPending
+  const canOpenIssueAction = onSelectIssue !== undefined && !isAiSummaryOperationPending
   const canEditIssueAction = onUpdateIssue !== undefined && canOpenIssueAction
   const canAssignIssueAction = canEditIssueAction && assigneeOptions.length > 0
   const canManageIssueRelationAction = onAddRelation !== undefined && canOpenIssueAction
@@ -1421,10 +1460,10 @@ export function TeamIssueScreen({
   [canMutateIssue])
   /** Checks whether one visible Team Issue has a different reachable workflow status. */
   const canMoveTeamIssueAction = useCallback((issue: TeamIssue) =>
-    canEditIssueAction && canMutateTeamIssueAction(issue) &&
+    !isAiSummaryOperationPending && canEditIssueAction && canMutateTeamIssueAction(issue) &&
       resolveEditableWorkflowStatuses(issue, configuration).some(
       (status) => status.id !== issue.workflowStatusId,
-    ), [canEditIssueAction, canMutateTeamIssueAction, configuration])
+    ), [canEditIssueAction, canMutateTeamIssueAction, configuration, isAiSummaryOperationPending])
   const teamActionLabels = useMemo<TaskSurfaceActionLabels>(() => ({
     archive: t('taskViews.action.archive'),
     assign: t('taskViews.action.assign'),
@@ -1449,6 +1488,15 @@ export function TeamIssueScreen({
     waitForMutation = false,
   ): Promise<WorkItemActionResult> | WorkItemActionResult => {
     const target = resolveTaskSurfaceActionTarget(context)
+    if (isAiSummaryOperationPendingRef.current) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'TeamTaskAiOperationPending',
+        'unavailable',
+        teamActionDisabledReasons.unavailable,
+      )
+    }
     const issue = target
       ? visibleIssues.find((candidate) =>
           candidate.teamId === target.teamId && candidate.id === target.workItemId
@@ -1465,7 +1513,7 @@ export function TeamIssueScreen({
     }
 
     const completion = waitForMutation
-      ? taskActionCompletion.begin(context, () => onSelectIssueRef.current?.(''))
+      ? taskActionCompletion.begin(context, clearSelectedIssueIfAllowed)
       : undefined
     setDetailUpdateError(undefined)
     if (!completion) taskActionCompletion.cancel()
@@ -1476,7 +1524,7 @@ export function TeamIssueScreen({
     onSelectIssueRef.current?.(issue.id)
     if (controlSelector) focusTeamIssueDetailControl(controlSelector)
     return completion ?? createSucceededTaskActionResult(context.actionId, target)
-  }, [t, taskActionCompletion, visibleIssues])
+  }, [clearSelectedIssueIfAllowed, t, taskActionCompletion, teamActionDisabledReasons.unavailable, visibleIssues])
 
   const currentTeamActionTarget = teamActionSelection.targets.length === 1
     ? teamActionSelection.targets[0]
@@ -1629,6 +1677,9 @@ export function TeamIssueScreen({
 
   /** Evaluates one Team detail entrance against its revision-bound visible target. */
   const evaluateTeamIssueTargetPermission = useCallback((context: WorkItemActionContext) => {
+    if (isAiSummaryOperationPendingRef.current) {
+      return denyTaskAction(teamActionDisabledReasons.unavailable)
+    }
     const targets = resolveTaskSurfaceActionTargets(context)
     if (targets.length === 0) return allowTaskAction()
     if (targets.length !== 1) {
@@ -1644,6 +1695,9 @@ export function TeamIssueScreen({
 
   /** Evaluates one canonical mutation against the current Team-qualified Work Item scope. */
   const evaluateTeamIssueMutationPermission = useCallback((context: WorkItemActionContext) => {
+    if (isAiSummaryOperationPendingRef.current) {
+      return denyTaskAction(teamActionDisabledReasons.unavailable)
+    }
     const targets = resolveTaskSurfaceActionTargets(context)
     if (targets.length === 0) return allowTaskAction()
     if (targets.length !== 1) {
@@ -1668,6 +1722,9 @@ export function TeamIssueScreen({
     assign: evaluateTeamIssueMutationPermission,
     edit: evaluateTeamIssueMutationPermission,
     move: (context) => {
+      if (isAiSummaryOperationPendingRef.current) {
+        return denyTaskAction(teamActionDisabledReasons.unavailable)
+      }
       const targets = resolveTaskSurfaceActionTargets(context)
       if (targets.length === 0) return allowTaskAction()
       if (targets.length !== 1) {
@@ -1686,6 +1743,9 @@ export function TeamIssueScreen({
     open: evaluateTeamIssueTargetPermission,
     relation: evaluateTeamIssueMutationPermission,
     watch: (context) => {
+      if (isAiSummaryOperationPendingRef.current) {
+        return denyTaskAction(teamActionDisabledReasons.unavailable)
+      }
       const target = resolveTaskSurfaceActionTarget(context)
       return target && selectedIssue && toggleIssueWatch &&
           selectedIssue.teamId === target.teamId && selectedIssue.id === target.workItemId
@@ -1733,6 +1793,7 @@ export function TeamIssueScreen({
     issue: TeamIssue,
     destinationWorkflowStatusId: string,
   ): Promise<void> => {
+    if (isAiSummaryOperationPendingRef.current) return
     const target = {
       expectedRevision: issue.revision,
       teamId: issue.teamId,
@@ -1765,6 +1826,7 @@ export function TeamIssueScreen({
    * @param workflowStatusId - Optional Board-column status default for the create editor.
    */
   const handleTeamCreateClick = useCallback((workflowStatusId?: string) => {
+    if (isAiSummaryOperationPendingRef.current) return
     pendingCreateWorkflowStatusIdRef.current = workflowStatusId
     void teamActions.execute(
       'create',
@@ -1785,7 +1847,7 @@ export function TeamIssueScreen({
     issueId: string,
     input: UpdateTeamIssueInput,
   ): Promise<void> => {
-    if (!onUpdateIssue) return
+    if (!onUpdateIssue || isAiSummaryOperationPendingRef.current) return
     const pendingCandidate = resolvePendingTaskActionContext(
       taskActionCompletion,
       ['assign', 'edit', 'move', 'relation'],
@@ -1838,7 +1900,7 @@ export function TeamIssueScreen({
           isConflict ? t('tasks.action.conflict') : t('taskViews.action.failed'),
           isConflict,
         ))
-        if (canDismissOwner) onSelectIssueRef.current?.('')
+        if (canDismissOwner) clearSelectedIssueIfAllowed()
       }
       if (
         selectedIssueUpdateErrorKey &&
@@ -1860,6 +1922,7 @@ export function TeamIssueScreen({
     t,
     taskActionCompletion,
     teamId,
+    clearSelectedIssueIfAllowed,
   ])
 
   /**
@@ -1873,6 +1936,7 @@ export function TeamIssueScreen({
     issueId: string,
     mutate: () => Promise<void>,
   ): Promise<void> => {
+    if (isAiSummaryOperationPendingRef.current) return
     const pendingCandidate = resolvePendingTaskActionContext(
       taskActionCompletion,
       ['assign', 'edit', 'move', 'relation'],
@@ -1914,11 +1978,11 @@ export function TeamIssueScreen({
           t('taskViews.action.failed'),
           isConflict,
         ))
-        if (canDismissOwner) onSelectIssueRef.current?.('')
+        if (canDismissOwner) clearSelectedIssueIfAllowed()
       }
       throw error
     }
-  }, [t, taskActionCompletion, teamId])
+  }, [clearSelectedIssueIfAllowed, t, taskActionCompletion, teamId])
 
   const taskActionContextMenuContext = useMemo(() => {
     if (!taskActionContextMenuState) return undefined
@@ -1950,6 +2014,7 @@ export function TeamIssueScreen({
    * @returns Nothing.
    */
   const handleOpenIssue = useCallback((issue: TeamIssue) => {
+    if (isAiSummaryOperationPendingRef.current) return
     const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
     setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
       key: issueKey,
@@ -1973,6 +2038,7 @@ export function TeamIssueScreen({
     anchorPoint,
     returnFocusElement,
   ) => {
+    if (isAiSummaryOperationPendingRef.current) return
     const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
     setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
       key: issueKey,
@@ -1991,7 +2057,7 @@ export function TeamIssueScreen({
 
   /** Routes one Team Issue menu activation through the canonical action registry. */
   const handleTeamIssueActionMenuExecute = useCallback((actionId: WorkItemActionId) => {
-    if (!taskActionContextMenuState) return
+    if (isAiSummaryOperationPendingRef.current || !taskActionContextMenuState) return
     void teamActions.execute(
       actionId,
       'context-menu',
@@ -2008,6 +2074,7 @@ export function TeamIssueScreen({
      * @returns Nothing.
      */
     const handleTeamKeyboard = (event: KeyboardEvent) => {
+      if (isAiSummaryOperationPendingRef.current) return
       const input = createTaskSurfaceKeyboardInput(
         event,
         isCreateOpen || Boolean(taskActionContextMenuState),
@@ -2077,6 +2144,7 @@ export function TeamIssueScreen({
                 <button
                   aria-expanded={isCreateOpen}
                   className="workbench-button-primary inline-flex h-10 items-center gap-2 px-4"
+                  disabled={isAiSummaryOperationPending}
                   onClick={() => isCreateOpen ? closeCreateIssue() : handleTeamCreateClick()}
                   type="button"
                 >
@@ -2119,7 +2187,7 @@ export function TeamIssueScreen({
                       closeCreateIssue()
                     }}
                     onSubmit={async (input) => {
-                      if (!onCreateIssue) {
+                      if (!onCreateIssue || isAiSummaryOperationPendingRef.current) {
                         return
                       }
 
@@ -2252,6 +2320,7 @@ export function TeamIssueScreen({
                       configuration={configuration}
                       dependencySummaries={dependencySummaries}
                       focusedIssueKey={taskViewSelection.focusedKey}
+                      isAiOperationPending={isAiSummaryOperationPending}
                       issues={visibleIssues}
                       presentation={taskViewPresentation}
                       locale={locale}
@@ -2268,6 +2337,7 @@ export function TeamIssueScreen({
                       configuration={configuration}
                       dependencySummaries={dependencySummaries}
                       focusedIssueKey={taskViewSelection.focusedKey}
+                      isAiOperationPending={isAiSummaryOperationPending}
                       issues={visibleIssues}
                       presentation={taskViewPresentation}
                       locale={locale}
@@ -2303,9 +2373,11 @@ export function TeamIssueScreen({
                 focusedCommentId={focusedCommentId}
                 focusedRootCommentId={focusedRootCommentId}
                 issue={selectedIssue}
+                isAiSummaryOperationPending={isAiSummaryOperationPending}
                 isRelationsLoading={isRelationsLoading}
                 locale={locale}
                 onAuthenticatedApiError={onAuthenticatedApiError}
+                onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
                 onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,
@@ -2656,6 +2728,7 @@ function IssueTable({
   dependencySummaries,
   focusedIssueKey,
   issues,
+  isAiOperationPending,
   locale,
   onIssueActionMenuOpen,
   onOpenIssue,
@@ -2670,6 +2743,8 @@ function IssueTable({
   dependencySummaries: Readonly<Record<string, WorkItemDependencySummary>>
   focusedIssueKey?: string
   issues: TeamIssue[]
+  /** Whether Team Issue navigation and row actions are fenced during an AI operation. */
+  isAiOperationPending: boolean
   locale: Locale
   /** Opens the canonical action menu for one Team Issue row. */
   onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
@@ -2734,7 +2809,7 @@ function IssueTable({
         data-task-view-selected={selectedForAction ? 'true' : 'false'}
         key={issue.id}
         onContextMenu={(event) => {
-          if (!onIssueActionMenuOpen) return
+          if (isAiOperationPending || !onIssueActionMenuOpen) return
           event.preventDefault()
           onIssueActionMenuOpen(
             issue,
@@ -2761,7 +2836,7 @@ function IssueTable({
                       wrapText ? 'whitespace-normal break-words' : 'truncate'
                     }`}
                     data-testid={`issue-row-${issue.id}`}
-                    disabled={!onOpenIssue}
+                    disabled={isAiOperationPending || !onOpenIssue}
                     onClick={() => onOpenIssue?.(issue)}
                     type="button"
                   >
@@ -2772,7 +2847,9 @@ function IssueTable({
                       aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
                       className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
                       data-testid={`team-issue-row-actions-${issue.id}`}
+                      disabled={isAiOperationPending}
                       onClick={(event) => {
+                        if (isAiOperationPending) return
                         const returnFocusElement = event.currentTarget
                         const bounds = returnFocusElement.getBoundingClientRect()
                         onIssueActionMenuOpen(
@@ -3106,6 +3183,7 @@ function IssueBoard({
   dependencySummaries,
   focusedIssueKey,
   issues,
+  isAiOperationPending,
   locale,
   onCreateIssueOpen,
   onIssueActionMenuOpen,
@@ -3125,6 +3203,8 @@ function IssueBoard({
   dependencySummaries: Readonly<Record<string, WorkItemDependencySummary>>
   focusedIssueKey?: string
   issues: TeamIssue[]
+  /** Whether Team Issue navigation and board actions are fenced during an AI operation. */
+  isAiOperationPending: boolean
   locale: Locale
   onCreateIssueOpen?: (workflowStatusId: string) => void
   /** Opens the canonical action menu for one Team Issue card. */
@@ -3147,7 +3227,7 @@ function IssueBoard({
   const [movingIssueIds, setMovingIssueIds] = useState<ReadonlySet<string>>(() => new Set())
   /** Checks the Board callback and the current issue-specific write scope together. */
   const canMoveIssue = (issue: TeamIssue) => Boolean(
-    onMoveIssueStatus && (canMoveIssueStatus?.(issue) ?? true),
+    !isAiOperationPending && onMoveIssueStatus && (canMoveIssueStatus?.(issue) ?? true),
   )
   const visibleFields = new Set((presentation?.columns ?? [
     { field: 'title' },
@@ -3216,6 +3296,11 @@ function IssueBoard({
   /** Resolves a dropped Team Work Item and requests a validated status change. */
   const handleDrop = (event: DragEvent<HTMLElement>, status: WorkflowStatusDefinition) => {
     event.preventDefault()
+    if (isAiOperationPending) {
+      setDraggedIssueId(undefined)
+      setDropTargetStatusId(undefined)
+      return
+    }
     const issueId = event.dataTransfer.getData('application/x-mukuroji-team-issue-id') ||
       event.dataTransfer.getData('text/plain') ||
       draggedIssueId
@@ -3302,7 +3387,7 @@ function IssueBoard({
               key={status.id}
               onDragLeave={() => setDropTargetStatusId(undefined)}
               onDragOver={(event) => {
-                if (!onMoveIssueStatus || !draggedIssueId) {
+                if (isAiOperationPending || !onMoveIssueStatus || !draggedIssueId) {
                   return
                 }
 
@@ -3333,6 +3418,7 @@ function IssueBoard({
                       aria-label={`${t('tasks.board.addInColumn')}: ${status.name}`}
                       className="grid h-7 w-7 place-items-center rounded-md border border-[var(--workbench-border-strong)] bg-white text-lg leading-none text-[var(--workbench-primary)] hover:border-[#99d7cf] hover:bg-[#e5f7f4]"
                       data-testid={`team-issue-add-${status.id}`}
+                      disabled={isAiOperationPending}
                       onClick={() => onCreateIssueOpen(status.id)}
                       type="button"
                     >
@@ -3403,7 +3489,7 @@ function IssueBoard({
                         }}
                         onDragStart={(event) => handleDragStart(event, issue)}
                         onContextMenu={(event) => {
-                          if (!onIssueActionMenuOpen) return
+                          if (isAiOperationPending || !onIssueActionMenuOpen) return
                           event.preventDefault()
                           onIssueActionMenuOpen(
                             issue,
@@ -3419,7 +3505,7 @@ function IssueBoard({
                             className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:cursor-default disabled:text-[var(--workbench-text)] ${
                               wrapText ? 'whitespace-normal break-words' : 'truncate'
                             }`}
-                            disabled={!onOpenIssue}
+                            disabled={isAiOperationPending || !onOpenIssue}
                             onClick={() => onOpenIssue?.(issue)}
                             type="button"
                           >
@@ -3430,7 +3516,9 @@ function IssueBoard({
                               aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
                               className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
                               data-testid={`team-issue-card-actions-${issue.id}`}
+                              disabled={isAiOperationPending}
                               onClick={(event) => {
+                                if (isAiOperationPending) return
                                 const returnFocusElement = event.currentTarget
                                 const bounds = returnFocusElement.getBoundingClientRect()
                                 onIssueActionMenuOpen(
@@ -3497,7 +3585,7 @@ function IssueBoard({
                           <select
                             aria-label={`${resolveIssueTitle(issue, t)}: ${t('tasks.column.status')}`}
                             className="workbench-input mt-3 h-8 w-full px-2 text-xs"
-                            disabled={isMoving}
+                            disabled={isAiOperationPending || isMoving}
                             onChange={(event) => moveIssueToStatus(issue, event.target.value)}
                             value={issue.workflowStatusId}
                           >
@@ -3553,10 +3641,12 @@ function IssueDetailPane({
   focusedCommentId,
   focusedRootCommentId,
   issue,
+  isAiSummaryOperationPending,
   isRelationsLoading,
   locale,
   onAddRelation,
   onAuthenticatedApiError,
+  onAiSummaryOperationPendingChange,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -3588,11 +3678,15 @@ function IssueDetailPane({
   focusedCommentId?: string
   focusedRootCommentId?: string
   issue?: TeamIssue
+  /** Whether the mounted Brief assistant currently fences Team Issue navigation. */
+  isAiSummaryOperationPending: boolean
   isRelationsLoading: boolean
   locale: Locale
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Reports an authenticated AI API failure to the route-level session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports the keyed Brief operation state to the Team Issue screen. */
+  onAiSummaryOperationPendingChange?: (issueKey: string, pending: boolean) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
@@ -3635,11 +3729,13 @@ function IssueDetailPane({
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
       issue={issue}
+      isAiSummaryOperationPending={isAiSummaryOperationPending}
       isRelationsLoading={isRelationsLoading}
       key={issue.id}
       locale={locale}
       onAddRelation={onAddRelation}
       onAuthenticatedApiError={onAuthenticatedApiError}
+      onAiSummaryOperationPendingChange={onAiSummaryOperationPendingChange}
       onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
       onDeleteScheduleDependency={onDeleteScheduleDependency}
@@ -3672,10 +3768,12 @@ function IssueDetailContent({
   focusedCommentId,
   focusedRootCommentId,
   issue,
+  isAiSummaryOperationPending,
   isRelationsLoading,
   locale,
   onAddRelation,
   onAuthenticatedApiError,
+  onAiSummaryOperationPendingChange,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -3720,6 +3818,8 @@ function IssueDetailContent({
   focusedRootCommentId?: string
   /** 編集対象 Issue です。 */
   issue: TeamIssue
+  /** Whether the mounted Brief assistant currently fences Team Issue navigation. */
+  isAiSummaryOperationPending: boolean
   /** Relation 候補の取得中かどうかです。 */
   isRelationsLoading: boolean
   /** 表示 locale です。 */
@@ -3728,6 +3828,8 @@ function IssueDetailContent({
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Reports an authenticated AI API failure to the route-level session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports the keyed Brief operation state to the Team Issue screen. */
+  onAiSummaryOperationPendingChange?: (issueKey: string, pending: boolean) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   /** Relation 解除 callback です。 */
@@ -3751,15 +3853,6 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
-  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
-  const isAiSummaryOperationPendingRef = useRef(false)
-
-  /** Keeps the Team Issue editor fenced while its Brief assistant is in flight. */
-  function reportAiSummaryOperationPending(pending: boolean) {
-    isAiSummaryOperationPendingRef.current = pending
-    setIsAiSummaryOperationPending(pending)
-  }
-
   const aiSummarySource = {
     expectedRevision: issue.revision,
     teamId: issue.teamId,
@@ -3780,7 +3873,10 @@ function IssueDetailContent({
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onOperationPendingChange={(pending) => {
-              reportAiSummaryOperationPending(pending)
+              onAiSummaryOperationPendingChange?.(
+                createTaskViewItemKey(issue.teamId, issue.id),
+                pending,
+              )
               onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
             }}
             sources={[aiSummarySource]}
@@ -3827,7 +3923,7 @@ function IssueDetailContent({
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (!onUpdateIssue || isAiSummaryOperationPendingRef.current) {
+          if (!onUpdateIssue || isAiSummaryOperationPending) {
             return
           }
 
@@ -4045,7 +4141,12 @@ function IssueDetailContent({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
-          onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
+          onAiSummaryOperationPendingChange={(pending) => {
+            onAiSummaryOperationPendingChange?.(
+              createTaskViewItemKey(issue.teamId, issue.id),
+              pending,
+            )
+          }}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}

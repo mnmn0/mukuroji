@@ -185,6 +185,48 @@ describe('AI assistance API', () => {
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
+  /** Rejects decision responses that rewrite immutable audit metadata after review. */
+  test('rejects a decision response that changes immutable audit metadata', async () => {
+    const responses = [
+      {
+        ...aiSearchGenerationFixture,
+        details: {
+          ...aiSearchGenerationFixture.details,
+          traceId: 'trace-rewritten-after-review',
+        },
+      },
+      {
+        ...aiSearchGenerationFixture,
+        createdAt: '2026-08-25T02:01:00.000Z',
+      },
+      {
+        ...aiSearchGenerationFixture,
+        expiresAt: '2026-10-01T02:00:00.000Z',
+      },
+    ].map((generation) => ({
+      ...generation,
+      decision: {
+        outcome: 'approved' as const,
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    }))
+
+    for (const response of responses) {
+      installFetchRecorder([response])
+      const error = await decideAiAssistanceGeneration({
+        accessToken: 'access-token',
+        generationId: 'generation/1',
+        expectedGeneration: aiSearchGenerationFixture,
+        expectedTask: 'search',
+        expectedOutcome: 'approved',
+        input: { expectedRevision: 3, outcome: 'approved' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
   /** Rejects a decision response whose reviewed citation set is replaced. */
   test('rejects a decision response with different reviewed citations', async () => {
     const content = aiSummaryGenerationFixture.content
