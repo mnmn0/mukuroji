@@ -20,7 +20,7 @@
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
 | `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
-| `AiBedrockModelId` | no | AI assistanceでdefault/allowlistの両方に使うexact Bedrock model ID。既定値はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` で、Tokyo/Osaka stackだけが使用できます。 |
+| `AiBedrockModelId` | no | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
 | `AiBedrockInputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |
 | `AiBedrockOutputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard output 100万token当たりUSD。 |
 | `AiBedrockModelArn` | yes | API Lambdaに `bedrock:InvokeModel` を許可するexact foundation-modelまたはinference-profile ARN。wildcardは使用できません。 |

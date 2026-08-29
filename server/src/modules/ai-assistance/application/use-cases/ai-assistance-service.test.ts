@@ -534,6 +534,18 @@ function createHarness(configuration: HarnessConfiguration = {}) {
 }
 
 describe('createAiAssistanceService', () => {
+  test('does not expose Workspace policy to a non-manager', async () => {
+    const harness = createHarness()
+
+    await expect(harness.service.getPolicy({
+      ...createActor(),
+      canManagePolicy: false,
+    })).rejects.toMatchObject({
+      category: 'authorization',
+      code: 'AiAssistanceDisabled',
+    })
+  })
+
   test('redacts operator input, source text, citations, and generated output before persistence', async () => {
     const harness = createHarness({
       promptContext: 'Authorized source for 佐藤 花子 and owner@example.com token=secret-value.',

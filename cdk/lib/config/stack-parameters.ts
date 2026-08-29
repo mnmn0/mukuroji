@@ -318,13 +318,14 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   const aiBedrockModelId = new cdk.CfnParameter(stack, 'AiBedrockModelId', {
     type: 'String',
     default: defaultAiBedrockModelId,
+    allowedValues: [defaultAiBedrockModelId],
     minLength: 1,
     maxLength: 256,
     allowedPattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$',
     constraintDescription:
       'AiBedrockModelId must be one exact Bedrock model or inference-profile identifier.',
     description:
-      'Exact Bedrock model identifier allowlisted for every AI assistance request.',
+      'Currently supported exact Bedrock model identifier allowlisted for every AI assistance request.',
   });
   const aiBedrockInputPricePerMillionTokensUsd = new cdk.CfnParameter(
     stack,

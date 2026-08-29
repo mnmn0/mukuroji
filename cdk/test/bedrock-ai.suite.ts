@@ -49,11 +49,12 @@ test('AI assistance parameters pin one exact model and validate the JP default',
 
   expect(parameters.AiBedrockModelId).toEqual({
     AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$',
+    AllowedValues: ['jp.anthropic.claude-sonnet-4-6'],
     ConstraintDescription:
       'AiBedrockModelId must be one exact Bedrock model or inference-profile identifier.',
     Default: 'jp.anthropic.claude-sonnet-4-6',
     Description:
-      'Exact Bedrock model identifier allowlisted for every AI assistance request.',
+      'Currently supported exact Bedrock model identifier allowlisted for every AI assistance request.',
     MaxLength: 256,
     MinLength: 1,
     Type: 'String',

@@ -20316,8 +20316,20 @@ async function createAiAssistanceResolverState(
     const definitions = customFieldDefinitionsByTeamId.get(definition.teamId) ?? []
     customFieldDefinitionsByTeamId.set(definition.teamId, [...definitions, definition])
   }
+  const customFieldDefinitionCounts = new Map<string, number>()
+  for (const definition of customFieldDefinitions) {
+    customFieldDefinitionCounts.set(
+      definition.fieldId,
+      (customFieldDefinitionCounts.get(definition.fieldId) ?? 0) + 1,
+    )
+  }
+  const providerCustomFieldDefinitions = task === 'search'
+    ? customFieldDefinitions.filter((definition) =>
+        customFieldDefinitionCounts.get(definition.fieldId) === 1
+      )
+    : customFieldDefinitions
   const customFieldIds = uniqueAiAllowedValues(
-    customFieldDefinitions.map((definition) => definition.fieldId),
+    providerCustomFieldDefinitions.map((definition) => definition.fieldId),
     AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
   )
   const allowedValues: AiAssistanceAllowedValues = {
@@ -20326,7 +20338,7 @@ async function createAiAssistanceResolverState(
     teamIds,
     projectIds,
     customFieldIds,
-    customFieldDefinitions: customFieldDefinitions.filter((definition) =>
+    customFieldDefinitions: providerCustomFieldDefinitions.filter((definition) =>
       customFieldIds.includes(definition.fieldId)
     ),
     relationIds: [],
@@ -20361,7 +20373,8 @@ async function createAiAssistanceResolverState(
             ? {}
             : {
                 customFields: resolved.configuration.customFields.flatMap((field) =>
-                  field.type === 'formula' || sensitiveCustomFieldIds.has(field.id)
+                  field.type === 'formula' || sensitiveCustomFieldIds.has(field.id) ||
+                    (task === 'search' && customFieldDefinitionCounts.get(field.id) !== 1)
                     ? []
                     : [{
                         id: field.id,

@@ -782,6 +782,13 @@ describe('AI assistance API composition', () => {
         sortOrder: 50,
         required: false,
       },
+      {
+        id: 'duplicate-budget',
+        name: 'Budget per Team',
+        type: 'number',
+        sortOrder: 60,
+        required: false,
+      },
     ]
     const privacyBusinessFields = Array.from({ length: 105 }, (_, index) => ({
         id: `zz-business-field-${String(index).padStart(3, '0')}`,
@@ -797,6 +804,13 @@ describe('AI assistance API composition', () => {
         name: 'Contact names',
         type: 'person',
         sortOrder: 106,
+        required: false,
+      },
+      {
+        id: 'duplicate-budget',
+        name: 'Budget per Team',
+        type: 'number',
+        sortOrder: 107,
         required: false,
       },
     ]
@@ -837,6 +851,10 @@ describe('AI assistance API composition', () => {
           expect(resolved.promptContext).not.toContain('contact-names')
           expect(resolved.promptContext).not.toContain('customer-email')
           expect(resolved.promptContext).not.toContain('shared-global-field')
+          if (request.task === 'search') {
+            expect(resolved.promptContext).not.toContain('duplicate-budget')
+            expect(resolved.allowedValues.customFieldIds).not.toContain('duplicate-budget')
+          }
           expect(resolved.promptContext).not.toContain('legacy-unknown')
           expect(resolved.promptContext).not.toContain('9012345678')
           expect(resolved.promptContext).not.toContain('8012345678')

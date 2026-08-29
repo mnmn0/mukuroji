@@ -158,9 +158,21 @@ export function createAiAssistanceService(
 
   validateEffectivePolicy(options.defaultPolicy, deploymentAllowedModelIds)
 
-  /** Reads the explicit or deployment-default Workspace policy. */
-  async function getPolicy(actor: AiAssistanceActor): Promise<AiAssistancePolicy> {
+  /** Reads the explicit or deployment-default Workspace policy for internal use cases. */
+  async function readPolicy(actor: AiAssistanceActor): Promise<AiAssistancePolicy> {
     return await options.store.getPolicy(actor.workspaceId) ?? options.defaultPolicy
+  }
+
+  /** Reads the Workspace policy only for an authenticated policy manager. */
+  async function getPolicy(actor: AiAssistanceActor): Promise<AiAssistancePolicy> {
+    if (!actor.canManagePolicy) {
+      throw new AiAssistanceError(
+        'authorization',
+        'AiAssistanceDisabled',
+        'The current operator cannot read AI assistance policy.',
+      )
+    }
+    return await readPolicy(actor)
   }
 
   /**
@@ -184,7 +196,7 @@ export function createAiAssistanceService(
       )
     }
     const request = parseUpdateAiAssistancePolicyRequest(input)
-    const previousPolicy = await getPolicy(actor)
+    const previousPolicy = await readPolicy(actor)
     const policy: AiAssistancePolicy = {
       schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
       enabled: request.enabled,
@@ -281,7 +293,7 @@ export function createAiAssistanceService(
   ): Promise<AiAssistanceGeneration> {
     const request = parseGenerateAiAssistanceRequest(input)
     const [policy, preference] = await Promise.all([
-      getPolicy(actor),
+      readPolicy(actor),
       getPreference(actor),
     ])
     requireGenerationEnabled(policy, preference, request.task)
@@ -448,7 +460,7 @@ export function createAiAssistanceService(
         throw authorizationChangedError(preProviderAuthorizationState.reason)
       }
       const [currentPolicy, currentPreference] = await Promise.all([
-        getPolicy(actor),
+        readPolicy(actor),
         getPreference(actor),
       ])
       if (!isGenerationConfigurationCurrent(
@@ -575,7 +587,7 @@ export function createAiAssistanceService(
       return await projectStoredGeneration(
         actor,
         stored,
-        await getPolicy(actor),
+        await readPolicy(actor),
         authorization,
         now,
       )
@@ -628,7 +640,7 @@ export function createAiAssistanceService(
         generationId,
         (workspaceId, id) => options.store.getGeneration(workspaceId, id),
       ),
-      getPolicy(actor),
+      readPolicy(actor),
     ])
     return await projectStoredGeneration(actor, record, policy, authorization, now)
   }
@@ -647,7 +659,7 @@ export function createAiAssistanceService(
         generationId,
         (workspaceId, id) => options.store.getGeneration(workspaceId, id),
       ),
-      getPolicy(actor),
+      readPolicy(actor),
     ])
     const effectiveGeneration = applyEffectiveRetention(record.generation, policy)
     if (Date.parse(effectiveGeneration.expiresAt) <= now().getTime()) {
@@ -680,7 +692,7 @@ export function createAiAssistanceService(
     return await projectStoredGeneration(
       actor,
       decided,
-      await getPolicy(actor),
+      await readPolicy(actor),
       authorization,
       now,
     )
@@ -713,7 +725,7 @@ export function createAiAssistanceService(
         generationId,
         (workspaceId, id) => options.store.getGeneration(workspaceId, id),
       ),
-      getPolicy(actor),
+      readPolicy(actor),
     ])
     const effectiveGeneration = applyEffectiveRetention(record.generation, policy)
     if (Date.parse(effectiveGeneration.expiresAt) <= now().getTime()) {

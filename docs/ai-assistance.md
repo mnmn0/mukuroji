@@ -15,7 +15,7 @@ CDK deploy では次の parameter を固定します。
 
 | Parameter | Contract |
 | --- | --- |
-| `AiBedrockModelId` | Runtime の default と allowlist の両方に使う exact model ID。既定値は `jp.anthropic.claude-sonnet-4-6`。 |
+| `AiBedrockModelId` | Runtime の default と allowlist の両方に使う、現在サポートしている exact model ID。現在は `jp.anthropic.claude-sonnet-4-6` のみを許可する。 |
 | `AiBedrockInputPricePerMillionTokensUsd` | deploy時にAWS公式料金表と照合した、model IDのstandard input 100万token当たりUSD。defaultは持たない。 |
 | `AiBedrockOutputPricePerMillionTokensUsd` | deploy時にAWS公式料金表と照合した、model IDのstandard output 100万token当たりUSD。defaultは持たない。 |
 | `AiBedrockModelArn` | API Lambda が `bedrock:InvokeModel` できる exact foundation-model / inference-profile ARN。default はなく、account と source region を確認して指定する。 |

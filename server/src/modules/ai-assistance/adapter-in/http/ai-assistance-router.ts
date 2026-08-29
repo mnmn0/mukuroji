@@ -74,6 +74,7 @@ export function createAiAssistanceRouter<Principal>(
   router.get('/api/ai-assistance/policy', async (context) => {
     try {
       const { actor } = await authenticateRequest(context, dependencies)
+      requireAiAssistancePolicyManager(actor)
       return context.json(await dependencies.service.getPolicy(actor))
     } catch (error) {
       return mapRouterError(context, error, dependencies.mapError)
@@ -297,6 +298,16 @@ async function authenticateRequest<Principal>(
       },
     },
   }
+}
+
+/** Requires Workspace management permission before exposing governance policy. */
+function requireAiAssistancePolicyManager(actor: AiAssistanceActor): void {
+  if (actor.canManagePolicy) return
+  throw new AiAssistanceError(
+    'authorization',
+    'AiAssistanceDisabled',
+    'The current operator cannot read AI assistance policy.',
+  )
 }
 
 /** Validates one path generation identifier without accepting physical table keys. */

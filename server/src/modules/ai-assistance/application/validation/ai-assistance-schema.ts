@@ -18,6 +18,8 @@ import { AiAssistanceError } from '../../errors'
 const identifierSchema = z.string().trim().min(1).max(256)
 const boundedTextSchema = z.string().trim().min(1).max(2_000)
 const titleTextSchema = z.string().trim().min(1).max(256)
+/** Maximum URL-encoded query size accepted by the existing Search GET route. */
+const searchFilterGetQueryMaximumBytes = 6_144
 const confidenceSchema = z.enum(['high', 'medium', 'low'])
 const taskSchema = z.enum(['triage', 'summary', 'search', 'planning'])
 const revisionSchema = z.number().int().min(0)
@@ -187,15 +189,61 @@ const customFieldFilterSchema = z.object({
   ]),
   value: customFieldValueSchema.optional(),
 }).strict().superRefine((filter, context) => {
-  if (
-    filter.value === undefined &&
-    filter.operator !== 'is-empty' &&
-    filter.operator !== 'is-not-empty'
-  ) {
+  const isEmptyOperator = filter.operator === 'is-empty' || filter.operator === 'is-not-empty'
+  if (filter.value === undefined && !isEmptyOperator) {
     context.addIssue({
       code: 'custom',
       path: ['value'],
       message: 'A value is required for this custom field operator.',
+    })
+    return
+  }
+  if (filter.value !== undefined && isEmptyOperator) {
+    context.addIssue({
+      code: 'custom',
+      path: ['value'],
+      message: 'Empty-check custom field operators cannot include a value.',
+    })
+    return
+  }
+  if (filter.value === undefined) return
+
+  const comparisonOperator = filter.operator === 'greater-than' ||
+    filter.operator === 'greater-than-or-equal' ||
+    filter.operator === 'less-than' ||
+    filter.operator === 'less-than-or-equal'
+  if (comparisonOperator && (typeof filter.value !== 'number' || !Number.isFinite(filter.value))) {
+    context.addIssue({
+      code: 'custom',
+      path: ['value'],
+      message: 'Comparison custom field operators require a finite number.',
+    })
+    return
+  }
+  if (filter.operator === 'contains') {
+    const validContainsValue = typeof filter.value === 'string'
+      ? filter.value.trim().length > 0 && filter.value === filter.value.trim()
+      : Array.isArray(filter.value) &&
+        filter.value.length > 0 &&
+        filter.value.every((item) => item.length > 0 && item === item.trim())
+    if (!validContainsValue) {
+      context.addIssue({
+        code: 'custom',
+        path: ['value'],
+        message: 'Contains custom field operators require a non-empty string or string array.',
+      })
+    }
+    return
+  }
+  if (
+    (filter.operator === 'equals' || filter.operator === 'not-equals') &&
+    typeof filter.value === 'string' &&
+    (filter.value.trim().length === 0 || filter.value !== filter.value.trim())
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['value'],
+      message: 'Equality custom field operators require a non-empty trimmed string.',
     })
   }
 })
@@ -229,7 +277,14 @@ const workspaceSearchFiltersSchema = z.object({
   ).optional(),
   projectIds: z.array(identifierSchema).max(100).optional(),
   teamIds: z.array(identifierSchema).max(100).optional(),
-}).strict()
+}).strict().superRefine((filters, context) => {
+  if (!isSearchFilterTransportWithinGetBudget(filters)) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Search filters exceed the canonical GET transport budget.',
+    })
+  }
+})
 
 const workItemEndpointSchema = z.object({
   teamId: identifierSchema,
@@ -238,7 +293,7 @@ const workItemEndpointSchema = z.object({
 
 const planningSubtaskSchema = z.object({
   id: identifierSchema,
-  title: boundedTextSchema,
+  title: titleTextSchema,
   description: z.string().trim().min(1).max(10_000).optional(),
   priority: workItemPrioritySchema,
   plannedEffortMinutes: z.number().int().min(0).max(10_000_000).optional(),
@@ -299,7 +354,15 @@ const draftSchema = z.discriminatedUnion('kind', [
     assigneeUserId: suggestedIdentifierSchema.optional(),
     teamId: suggestedIdentifierSchema.optional(),
     projectId: suggestedIdentifierSchema.optional(),
-    customFields: z.array(suggestedCustomFieldSchema).max(50),
+    customFields: z.array(suggestedCustomFieldSchema).max(50).superRefine((fields, context) => {
+      const fieldIds = fields.map((field) => field.fieldId)
+      if (new Set(fieldIds).size !== fieldIds.length) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Triage custom-field suggestions must use unique field identifiers.',
+        })
+      }
+    }),
   }).strict(),
   z.object({
     kind: z.literal('summary'),
@@ -379,6 +442,24 @@ function isValidCalendarDate(value: string): boolean {
   ]
   const maximumDay = daysByMonth[month - 1]
   return maximumDay !== undefined && day <= maximumDay
+}
+
+/**
+ * Checks the aggregate URL-encoded size accepted by the canonical Search GET transport.
+ *
+ * @param filters - Parsed Search filters that will be serialized into the GET query.
+ * @returns Whether the encoded `filters` query parameter fits the route budget.
+ */
+function isSearchFilterTransportWithinGetBudget(filters: unknown): boolean {
+  try {
+    const serialized = JSON.stringify(filters)
+    if (serialized === undefined) return false
+    return new TextEncoder().encode(
+      new URLSearchParams({ filters: serialized }).toString(),
+    ).byteLength <= searchFilterGetQueryMaximumBytes
+  } catch {
+    return false
+  }
 }
 
 const citationSchema = z.object({

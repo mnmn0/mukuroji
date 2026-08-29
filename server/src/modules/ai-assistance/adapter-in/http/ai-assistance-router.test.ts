@@ -179,6 +179,24 @@ function createHarness(
 }
 
 describe('createAiAssistanceRouter', () => {
+  test('does not expose policy to a non-manager', async () => {
+    let policyReadCount = 0
+    const service: AiAssistanceService = {
+      ...createService(),
+      async getPolicy() {
+        policyReadCount += 1
+        throw new Error('Policy must not be read by a non-manager.')
+      },
+    }
+    const harness = createHarness(false, service)
+    const response = await harness.router.request('/api/ai-assistance/policy', {
+      headers: { Authorization: 'Bearer token-1' },
+    })
+
+    expect(response.status).toBe(403)
+    expect(policyReadCount).toBe(0)
+  })
+
   test('passes a fresh management authorization callback to policy writes', async () => {
     let currentAuthorization: boolean | undefined
     const harness = createHarness(false, {

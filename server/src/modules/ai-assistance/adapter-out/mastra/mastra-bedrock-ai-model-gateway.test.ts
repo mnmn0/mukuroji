@@ -274,6 +274,55 @@ describe('createMastraBedrockAiModelGateway', () => {
     })
   })
 
+  test('rejects Search filters that exceed the canonical GET transport budget', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'search',
+            interpretation: 'A broad filter.',
+            filters: { statuses: Array.from({ length: 100 }, (_, index) => `status-${index}-${'x'.repeat(100)}`) },
+            caveats: [],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('enforces operator-specific Search custom-field values', async () => {
+    const invalidFilters = [
+      { fieldId: 'field-1', operator: 'greater-than', value: '10' },
+      { fieldId: 'field-1', operator: 'contains', value: [] },
+      { fieldId: 'field-1', operator: 'contains', value: '   ' },
+      { fieldId: 'field-1', operator: 'is-empty', value: true },
+      { fieldId: 'field-1', operator: 'equals', value: '   ' },
+    ]
+    for (const filter of invalidFilters) {
+      const gateway = createMastraBedrockAiModelGateway({
+        runStructuredGeneration: async () => ({
+          object: {
+            draft: {
+              kind: 'search',
+              interpretation: 'A custom-field filter.',
+              filters: { customFields: [filter] },
+              caveats: [],
+            },
+            uncertainty: { level: 'low', reason: 'Clear.' },
+          },
+        }),
+      })
+
+      await expect(gateway.generate(createInput())).rejects.toMatchObject({
+        code: 'InvalidAiAssistanceOutput',
+      })
+    }
+  })
+
   test('enforces the Web title limit at the model boundary', async () => {
     const gateway = createMastraBedrockAiModelGateway({
       runStructuredGeneration: async () => ({
@@ -287,6 +336,57 @@ describe('createMastraBedrockAiModelGateway', () => {
               citationIds: ['S1'],
             },
             customFields: [],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('enforces the Web limit for Planning subtask titles', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'planning',
+            subtasks: [{
+              id: 'subtask-1',
+              title: 'x'.repeat(257),
+              priority: 'high',
+              reason: 'The task is required.',
+              confidence: 'high',
+              citationIds: ['S1'],
+            }],
+            dependencies: [],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('rejects duplicate triage custom-field suggestions', async () => {
+    const suggestion = {
+      fieldId: 'field-1',
+      value: 'value',
+      reason: 'The field is relevant.',
+      confidence: 'high',
+      citationIds: ['S1'],
+    }
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'triage',
+            customFields: [suggestion, suggestion],
           },
           uncertainty: { level: 'low', reason: 'Clear.' },
         },
