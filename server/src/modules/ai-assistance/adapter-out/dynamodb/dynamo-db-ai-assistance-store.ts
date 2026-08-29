@@ -902,33 +902,41 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
             }),
       },
     }
+    const requiresWorkspaceMemberCondition =
+      (authorizationFence.principalKind ?? 'member') === 'member'
+    const workspaceMemberConditionItems = requiresWorkspaceMemberCondition
+      ? [createWorkspaceMemberAuthorizationCondition(
+          this.#workspaceAccessTableName,
+          workspaceId,
+          memberId,
+          authorizationFence,
+        )]
+      : []
+    const enterpriseConditionItems = authorizationFence.enterpriseControlRevision === undefined
+      ? []
+      : [createEnterpriseControlAuthorizationCondition(
+          this.#enterpriseIdentityTableName,
+          workspaceId,
+          authorizationFence.enterpriseControlRevision,
+        )]
+    const workspaceMemberConditionIndex = requiresWorkspaceMemberCondition ? 1 : undefined
+    const enterpriseConditionIndex = authorizationFence.enterpriseControlRevision === undefined
+      ? undefined
+      : 1 + workspaceMemberConditionItems.length
     try {
       await this.#documentClient.send(new TransactWriteCommand({
         TransactItems: [
           policyPut,
-          createWorkspaceMemberAuthorizationCondition(
-            this.#workspaceAccessTableName,
-            workspaceId,
-            memberId,
-            authorizationFence,
-          ),
-          ...(authorizationFence.enterpriseControlRevision === undefined
-            ? []
-            : [createEnterpriseControlAuthorizationCondition(
-                this.#enterpriseIdentityTableName,
-                workspaceId,
-                authorizationFence.enterpriseControlRevision,
-              )]),
+          ...workspaceMemberConditionItems,
+          ...enterpriseConditionItems,
           createAuditTransactPut(auditTableName, auditEvent),
         ],
       }))
       return policy
     } catch (error) {
-      const enterpriseConditionIndex = authorizationFence.enterpriseControlRevision === undefined
-        ? undefined
-        : 2
       if (
-        isTransactionConditionalFailureAt(error, 1) ||
+        (workspaceMemberConditionIndex !== undefined &&
+          isTransactionConditionalFailureAt(error, workspaceMemberConditionIndex)) ||
         (enterpriseConditionIndex !== undefined &&
           isTransactionConditionalFailureAt(error, enterpriseConditionIndex))
       ) {
@@ -1611,14 +1619,17 @@ function mapDynamoWriteError(error: unknown): AiAssistanceError {
 function validatePolicyAuthorizationFence(
   fence: AiAssistancePolicyAuthorizationFence,
 ): void {
+  const principalKind = fence.principalKind ?? 'member'
   if (
     !Number.isSafeInteger(fence.workspaceMemberVersion) ||
     fence.workspaceMemberVersion < 0 ||
     !fence.workspaceRole.trim() ||
+    !['member', 'service-account', 'break-glass'].includes(principalKind) ||
     (fence.enterpriseControlRevision !== undefined && (
       !Number.isSafeInteger(fence.enterpriseControlRevision) ||
       fence.enterpriseControlRevision < 0
-    ))
+    )) ||
+    (principalKind !== 'member' && fence.enterpriseControlRevision === undefined)
   ) {
     throw new AiAssistanceError(
       'authorization',

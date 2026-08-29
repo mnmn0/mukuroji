@@ -105,6 +105,7 @@ test('lazily rejects Bedrock bearer-token authentication before creating a provi
     expect(() => dependencies.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',
+      actorId: 'member-1',
       traceId: 'trace-1',
       canManagePolicy: false,
     })).toThrow('AWS_BEARER_TOKEN_BEDROCK is not supported')
@@ -126,6 +127,7 @@ test('lazily rejects a non-positive AI generation budget setting', () => {
     expect(() => dependencies.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',
+      actorId: 'member-1',
       traceId: 'trace-1',
       canManagePolicy: false,
     })).toThrow(`${environmentName} must be a positive integer.`)
@@ -150,6 +152,7 @@ test('lazily rejects incomplete or invalid Bedrock pricing configuration', () =>
     expect(() => incomplete.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',
+      actorId: 'member-1',
       traceId: 'trace-1',
       canManagePolicy: false,
     })).toThrow('input and output token prices must be configured together')
@@ -160,6 +163,7 @@ test('lazily rejects incomplete or invalid Bedrock pricing configuration', () =>
     expect(() => invalid.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',
+      actorId: 'member-1',
       traceId: 'trace-1',
       canManagePolicy: false,
     })).toThrow(`${inputName} must be a positive decimal number.`)

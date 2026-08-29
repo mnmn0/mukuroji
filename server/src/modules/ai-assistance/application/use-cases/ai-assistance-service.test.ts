@@ -48,6 +48,7 @@ function createActor(): AiAssistanceActor {
   return {
     workspaceId: 'workspace-1',
     memberId: 'operator-1',
+    actorId: 'operator-actor-1',
     traceId: 'trace-1',
     canManagePolicy: true,
   }
@@ -134,6 +135,10 @@ type HarnessConfiguration = {
   projectIds?: readonly string[]
   /** Optional Team-scoped custom-field definitions used by output validation tests. */
   customFieldDefinitions?: readonly AiAssistanceCustomFieldDefinition[]
+  /** Optional citation label used to exercise disclosure-time bounds. */
+  citationLabel?: string
+  /** Optional citation excerpt used to exercise disclosure-time bounds. */
+  citationExcerpt?: string
   /** Optional strict model draft used to exercise task-specific output validation. */
   outputDraft?: AiAssistanceDraft
   /** Optional end-to-end deadline used to exercise remaining-time enforcement. */
@@ -419,9 +424,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         citations: [{
           id: 'S1',
           sourceType: 'work-item' as const,
-          label: 'Owner owner@example.com',
+          label: configuration.citationLabel ?? 'Owner owner@example.com',
           href: '/teams/team-1/work-items/work-item-1',
-          excerpt: 'Bearer abc.def.ghi',
+          excerpt: configuration.citationExcerpt ?? 'Bearer abc.def.ghi',
           capturedRevision: 2,
         }],
         authorizationToken: 'authorization-snapshot-1',
@@ -1265,6 +1270,42 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('revalidates disclosed citation bounds before persistence', async () => {
+    const longDisplayName = 'A'.repeat(500)
+    const citationLabel = `Owner ${ASSIGNEE_PROVIDER_ALIAS} ${'x'.repeat(470)}`
+    const harness = createHarness({
+      citationLabel,
+      privateMemberIdentifiers: [
+        {
+          memberId: 'assignee@example.com',
+          providerAlias: ASSIGNEE_PROVIDER_ALIAS,
+          identifiers: [longDisplayName],
+        },
+        {
+          memberId: 'creator@example.com',
+          providerAlias: CREATOR_PROVIDER_ALIAS,
+          identifiers: [],
+        },
+      ],
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-privacy-expanded-citation',
+    )).rejects.toMatchObject({
+      category: 'upstream',
+      code: 'InvalidAiAssistanceRecord',
+    })
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCode: 'InvalidAiAssistanceRecord',
+    })])
+  })
+
   test('rechecks source authorization before invoking the provider', async () => {
     const harness = createHarness()
     harness.setAuthorizationState({ current: false, reason: 'permission-changed' })
@@ -1769,6 +1810,28 @@ describe('createAiAssistanceService', () => {
     )).rejects.toMatchObject({ code: 'AiAssistanceIdempotencyConflict' })
   })
 
+  test('rejects feedback when redaction expands it beyond the public bound', async () => {
+    const harness = createHarness()
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-feedback-bound',
+    )
+    const comment = `${'x'.repeat(1975)} sk-${'a'.repeat(16)}`
+
+    await expect(harness.service.createFeedback(
+      createActor(),
+      'generation-1',
+      { rating: 'helpful', comment },
+      'feedback-bound',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'InvalidAiAssistanceRequest',
+    })
+    expect(harness.feedbackRecords).toHaveLength(0)
+  })
+
   test('rejects a member opt-out before source resolution or provider execution', async () => {
     const harness = createHarness()
     harness.setPreferenceEnabled(false)
@@ -1879,7 +1942,8 @@ describe('createAiAssistanceService', () => {
     expect(policyAuditRecords).toHaveLength(1)
     expect(policyAuditRecords[0]).toMatchObject({
       workspaceId: 'workspace-1',
-      actorId: 'operator-1',
+      memberId: 'operator-1',
+      actorId: 'operator-actor-1',
       previousPolicy: expect.objectContaining({ revision: 0 }),
       nextPolicy: expect.objectContaining({
         revision: 1,

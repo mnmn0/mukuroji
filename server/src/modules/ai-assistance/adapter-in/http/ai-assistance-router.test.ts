@@ -138,6 +138,7 @@ function createHarness(
       return {
         workspaceId: principal.workspaceId,
         memberId: principal.memberId,
+        actorId: principal.memberId,
         traceId: 'trace-1',
         canManagePolicy: false,
       }

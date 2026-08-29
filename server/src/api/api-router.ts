@@ -19969,6 +19969,7 @@ function createAiAssistanceActor(
   return {
     workspaceId: principal.directoryId,
     memberId: principal.userKey,
+    actorId: principal.actorId,
     traceId: randomUUID(),
     canManagePolicy: canManageAiAssistanceWorkspace(principal),
   }
@@ -19988,11 +19989,13 @@ function createAiAssistancePolicyAuthorizationFence(
   if (
     principal.directoryId !== actor.workspaceId ||
     principal.userKey !== actor.memberId ||
+    principal.actorId !== actor.actorId ||
     !actor.canManagePolicy
   ) return undefined
   return {
     workspaceMemberVersion: principal.workspaceMember.version,
     workspaceRole: principal.workspaceRole,
+    principalKind: principal.principalKind ?? 'member',
     ...(principal.enterpriseIdentityControlRevision === undefined
       ? {}
       : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
@@ -21416,7 +21419,8 @@ function requireAiAssistanceActorMatchesPrincipal(
 ): void {
   if (
     actor.workspaceId === principal.directoryId &&
-    actor.memberId === principal.userKey
+    actor.memberId === principal.userKey &&
+    actor.actorId === principal.actorId
   ) return
   throw aiAssistanceAuthorizationChangedError()
 }

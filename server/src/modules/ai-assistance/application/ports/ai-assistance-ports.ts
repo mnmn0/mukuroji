@@ -26,6 +26,8 @@ export type AiAssistanceActor = {
   workspaceId: string
   /** Active Workspace member key resolved by the server. */
   memberId: string
+  /** Immutable authenticated principal identifier reserved for audit attribution. */
+  actorId: string
   /** Safe request trace identifier. */
   traceId: string
   /** Whether the current operator may update Workspace AI policy. */
@@ -129,6 +131,8 @@ export type AiAssistancePolicyAuthorizationFence = {
   workspaceMemberVersion: number
   /** Workspace role observed during fresh authentication. */
   workspaceRole: string
+  /** Authenticated principal kind used to select the authoritative commit fence. */
+  principalKind?: 'member' | 'service-account' | 'break-glass'
   /** Enterprise CONTROL revision when custom permissions participate in authorization. */
   enterpriseControlRevision?: number
 }
@@ -153,7 +157,9 @@ export type AiAssistancePolicyAuthorization = {
 export type AiAssistancePolicyAuditInput = {
   /** Workspace whose AI governance policy changed. */
   workspaceId: string
-  /** Member who performed the policy mutation. */
+  /** Mutable Workspace member key used to bind the policy write condition. */
+  memberId: string
+  /** Immutable authenticated principal who performed the policy mutation. */
   actorId: string
   /** Policy observed before the revision-fenced write. */
   previousPolicy: AiAssistancePolicy

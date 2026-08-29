@@ -248,6 +248,7 @@ async function authenticateRequest<Principal>(
           const currentActor = await dependencies.toActor(currentPrincipal, context)
           return currentActor.workspaceId === actor.workspaceId &&
             currentActor.memberId === actor.memberId &&
+            currentActor.actorId === actor.actorId &&
             currentActor.canManagePolicy
         } catch {
           return false
@@ -267,6 +268,7 @@ async function authenticateRequest<Principal>(
           if (
             currentActor.workspaceId !== actor.workspaceId ||
             currentActor.memberId !== actor.memberId ||
+            currentActor.actorId !== actor.actorId ||
             !currentActor.canManagePolicy
           ) return undefined
           return await dependencies.getPolicyAuthorizationFence?.(
@@ -286,7 +288,8 @@ async function authenticateRequest<Principal>(
         const freshActor = await dependencies.toActor(freshPrincipal, context)
         if (
           freshActor.workspaceId !== input.actor.workspaceId ||
-          freshActor.memberId !== input.actor.memberId
+          freshActor.memberId !== input.actor.memberId ||
+          freshActor.actorId !== input.actor.actorId
         ) {
           return { current: false, reason: 'permission-changed' }
         }

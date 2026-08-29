@@ -29,6 +29,7 @@ import {
   type AiAssistanceTextAlias,
 } from '../../domain/ai-assistance-redaction'
 import {
+  parseAiAssistanceGeneration,
   parseAiAssistanceModelOutput,
   parseAiAssistanceUsage,
   parseCreateAiAssistanceFeedbackRequest,
@@ -217,7 +218,8 @@ export function createAiAssistanceService(
     }
     const auditInput: AiAssistancePolicyAuditInput = {
       workspaceId: actor.workspaceId,
-      actorId: actor.memberId,
+      memberId: actor.memberId,
+      actorId: actor.actorId,
       previousPolicy,
       nextPolicy: policy,
     }
@@ -569,10 +571,14 @@ export function createAiAssistanceService(
         createdAt: createdAt.toISOString(),
         expiresAt: expiresAt.toISOString(),
       }
+      // Disclosure-time redaction can expand citation labels or excerpts. Parse the complete
+      // public generation after every transformation so the first persisted response obeys the
+      // same bounds as later reads and replays.
+      const validatedGeneration = parseAiAssistanceGeneration(generation)
       const stored = await options.store.createGeneration({
         workspaceId: actor.workspaceId,
         memberId: actor.memberId,
-        generation,
+        generation: validatedGeneration,
         request: providerRequest,
         authorizationToken: context.authorizationToken,
         auditedInput: context.promptContext,
@@ -710,12 +716,16 @@ export function createAiAssistanceService(
     idempotencyKeyValue: string,
   ): Promise<void> {
     const parsedFeedback = parseCreateAiAssistanceFeedbackRequest(input)
-    const feedback: CreateAiAssistanceFeedbackRequest = {
+    const redactedFeedback = {
       rating: parsedFeedback.rating,
       ...(parsedFeedback.comment === undefined
         ? {}
         : { comment: redactAiAssistanceText(parsedFeedback.comment) }),
     }
+    // Redaction markers are longer than many source tokens. Reparse the transformed payload
+    // before deriving its idempotency identity or writing it to the feedback table.
+    const feedback: CreateAiAssistanceFeedbackRequest =
+      parseCreateAiAssistanceFeedbackRequest(redactedFeedback)
     const idempotencyKey = requireIdempotencyKey(idempotencyKeyValue)
     const feedbackIdentity = createFeedbackIdentity(
       actor,

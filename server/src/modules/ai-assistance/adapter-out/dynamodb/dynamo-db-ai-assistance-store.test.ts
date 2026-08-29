@@ -55,7 +55,11 @@ function createReservation(
 }
 
 /** Creates a deterministic SDK harness that captures document commands. */
-function createHarness(responses: unknown[], auditTableName?: string) {
+function createHarness(
+  responses: unknown[],
+  auditTableName?: string,
+  enterpriseIdentityTableName?: string,
+) {
   const lowLevelClient = new DynamoDBClient({
     region: 'us-east-1',
     credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
@@ -88,6 +92,8 @@ function createHarness(responses: unknown[], auditTableName?: string) {
       documentClient,
       'WorkspaceSearchTable',
       auditTableName,
+      'mukuroji-workspace-access-local',
+      enterpriseIdentityTableName,
     ),
     commands,
     restore: () => sendSpy.mockRestore(),
@@ -1029,6 +1035,38 @@ describe('DynamoDbAiAssistanceStore', () => {
         .toBe('mukuroji-workspace-access-local')
       expect(readRecord(readRecord(transactionItems[2]).Put).TableName)
         .toBe('AuditTable')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('writes policy for a service account using the Enterprise fence', async () => {
+    const desired = createPolicy('2026-08-25T00:00:02.000Z')
+    const harness = createHarness([{}], 'AuditTable', 'EnterpriseIdentityTable')
+    try {
+      await expect(harness.store.putPolicyWithAudit(
+        'workspace-1',
+        'automation-project-1',
+        desired,
+        0,
+        {
+          workspaceMemberVersion: 1,
+          workspaceRole: 'member',
+          principalKind: 'service-account',
+          enterpriseControlRevision: 4,
+        },
+        createPolicyAuditEvent(),
+      )).resolves.toEqual(desired)
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      expect(Array.isArray(transactionItems)).toBeTrue()
+      if (!Array.isArray(transactionItems)) {
+        throw new TypeError('Expected transaction items.')
+      }
+      expect(transactionItems).toHaveLength(3)
+      expect(readRecord(readRecord(transactionItems[1]).ConditionCheck).TableName)
+        .toBe('EnterpriseIdentityTable')
+      expect(readRecord(readRecord(transactionItems[1]).ConditionCheck).Key)
+        .toEqual({ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'CONTROL' })
     } finally {
       harness.restore()
     }

@@ -751,7 +751,7 @@ function createAiAssistancePolicyAudit(
       if (store.putPolicyWithAudit) {
         return await store.putPolicyWithAudit(
           input.workspaceId,
-          input.actorId,
+          input.memberId,
           input.nextPolicy,
           expectedRevision,
           authorizationFence,
