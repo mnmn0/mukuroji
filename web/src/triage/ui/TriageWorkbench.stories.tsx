@@ -21,6 +21,10 @@ import { TriageWorkbench, type TriageWorkbenchProps } from './TriageWorkbench'
 const entryViews = triageEntryFixtures.map((entry) =>
   createTriageEntryView(entry, new Date('2026-08-09T01:30:00.000Z'))
 )
+const eligibleAssigneeIdsByProject = new Map([
+  ['launch-readiness', new Set(['member-ada'])],
+  ['launch-support', new Set(['member-ada'])],
+])
 const onAction = fn(async () => triageEntryFixtures[0] ?? Promise.reject(new Error('Missing fixture')))
 const onBulkAction = fn(async () => [])
 const onSaveConfiguration = fn(async () => triageConfigurationFixture)
@@ -61,6 +65,7 @@ const meta = {
     teamId: 'core-team',
     teamName: 'Core team',
     visibleProjectIds: ['launch-readiness', 'launch-support'],
+    eligibleAssigneeIdsByProject,
   },
 } satisfies Meta<typeof TriageWorkbench>
 

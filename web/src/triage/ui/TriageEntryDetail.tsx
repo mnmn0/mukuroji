@@ -41,6 +41,8 @@ export type TriageEntryDetailProps = {
   readonly teamId: string
   /** Project IDs currently visible to the viewer in this Team directory. */
   readonly visibleProjectIds?: readonly string[]
+  /** Active non-guest members keyed by their current Team-qualified Project. */
+  readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
   /** Selected permission-safe entry view. */
   readonly view?: TriageEntryView
   /** Current locale used for dates. */
@@ -108,6 +110,7 @@ export function TriageEntryDetail({
   onRetry,
   t,
   teamId,
+  eligibleAssigneeIdsByProject,
   visibleProjectIds = [],
   view,
 }: TriageEntryDetailProps) {
@@ -354,7 +357,13 @@ export function TriageEntryDetail({
                   const hasUnsupportedAssignee =
                     draft.assigneeUserId !== undefined && !entry.capabilities.canAssign
                   const hasSupportedAssignee =
-                    draft.assigneeUserId !== undefined && entry.capabilities.canAssign
+                    draft.assigneeUserId !== undefined &&
+                    entry.capabilities.canAssign &&
+                    isEligibleAssigneeForTriage(
+                      draft.assigneeUserId.value,
+                      draft.projectId?.value ?? entry.projectId ?? view.routingCandidate?.projectId,
+                      eligibleAssigneeIdsByProject,
+                    )
                   const hasSupportedProject =
                     draft.projectId !== undefined &&
                     !hasInvalidProject &&
@@ -689,6 +698,36 @@ function DetailTerm({ label, value }: { label: string; value: string }) {
       <dd className="min-w-0 break-words font-medium text-[var(--workbench-text)]">{value}</dd>
     </>
   )
+}
+
+/**
+ * Checks an AI-proposed owner against the current active member directory.
+ *
+ * A Project-qualified lookup is preferred whenever the entry has a destination
+ * Project. When no destination exists, an active member in any visible Team
+ * Project is accepted; an absent directory fails closed.
+ *
+ * @param assigneeUserId - Proposed Workspace member identifier.
+ * @param projectId - Proposed or current destination Project identifier.
+ * @param eligibleAssigneeIdsByProject - Current active member keys by Project.
+ * @returns Whether the owner is eligible for the destination.
+ */
+function isEligibleAssigneeForTriage(
+  assigneeUserId: string,
+  projectId: string | undefined,
+  eligibleAssigneeIdsByProject: ReadonlyMap<string, ReadonlySet<string>> | undefined,
+): boolean {
+  if (!eligibleAssigneeIdsByProject) return false
+  const normalizedAssignee = assigneeUserId.trim().toLowerCase()
+  if (!normalizedAssignee) return false
+  if (projectId) {
+    const eligibleMembers = eligibleAssigneeIdsByProject.get(projectId.trim().toLowerCase())
+    return eligibleMembers?.has(normalizedAssignee) ?? false
+  }
+  for (const eligibleMembers of eligibleAssigneeIdsByProject.values()) {
+    if (eligibleMembers.has(normalizedAssignee)) return true
+  }
+  return false
 }
 
 /** Renders one retained source-context count. */

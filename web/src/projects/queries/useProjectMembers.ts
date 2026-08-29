@@ -124,7 +124,7 @@ export function useWorkspaceProjectMembers(
 
   const query = useSWR(
     key,
-    ([, token]) => loadWorkspaceProjectMembers(token, projects),
+    ([, token, currentTeamId]) => loadWorkspaceProjectMembers(token, projects, currentTeamId),
     projectMemberQueryConfig,
   )
 

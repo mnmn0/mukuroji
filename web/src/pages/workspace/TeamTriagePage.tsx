@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
+import { isActiveProjectAssignmentCandidate } from '../../projects/api/members'
+import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TriageApiError } from '../../triage/api'
 import { useTriageMutations } from '../../triage/mutations/useTriageMutations'
@@ -35,6 +37,8 @@ export function TeamTriagePage() {
   const [selectedEntryIds, setSelectedEntryIds] = useState<readonly string[]>([])
   const teamId = params.teamId
   const activeTeam = workspace.teams.find((team) => team.id === teamId)
+  const teamProjects = activeTeam?.projects ?? []
+  const aiEnabled = workspace.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled
   const routeState = useMemo(() => readTriageRouteState(searchParams), [searchParams])
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const queue = useTriageQueue(
@@ -62,6 +66,25 @@ export function TeamTriagePage() {
     workspace.canLoadWorkspaceData && Boolean(activeTeam) && routeState.view === 'queue',
   )
   const selectedEntry = detail.data ? createTriageEntryView(detail.data) : undefined
+  const projectMembers = useWorkspaceProjectMembers(
+    workspace.accessToken,
+    activeTeam?.id,
+    teamProjects,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam) && aiEnabled,
+  )
+  const eligibleAssigneeIdsByProject = useMemo(() => {
+    const membersByProject = new Map<string, Set<string>>()
+    for (const access of projectMembers.data?.members ?? []) {
+      if (!isActiveProjectAssignmentCandidate(access.member)) continue
+      const projectKey = access.projectId.trim().toLowerCase()
+      const memberKey = access.member.id.trim().toLowerCase()
+      if (!projectKey || !memberKey) continue
+      const memberKeys = membersByProject.get(projectKey) ?? new Set<string>()
+      memberKeys.add(memberKey)
+      membersByProject.set(projectKey, memberKeys)
+    }
+    return membersByProject
+  }, [projectMembers.data?.members])
   const settings = useTriageSettings(
     workspace.accessToken,
     teamId,
@@ -122,7 +145,7 @@ export function TeamTriagePage() {
         allowedBulkActions={allowedBulkActions}
         bulkResults={mutation.bulkResults}
         canManageConfiguration={canManageConfiguration}
-        aiAssistanceEnabled={workspace.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled}
+        aiAssistanceEnabled={aiEnabled}
         configuration={settings.data}
         configurationErrorMessage={configurationErrorMessage}
         counts={countTriageEntryViews(entryViews)}
@@ -153,6 +176,7 @@ export function TeamTriagePage() {
         teamId={teamId ?? ''}
         teamName={activeTeam?.name ?? t('workspace.team.missing')}
         visibleProjectIds={activeTeam?.projects.map((project) => project.id)}
+        eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}
         onBulkAction={mutation.applyBulkAction}

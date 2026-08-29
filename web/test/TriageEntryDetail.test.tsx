@@ -195,6 +195,30 @@ describe('TriageEntryDetail', () => {
     expect(html).not.toContain('Use in Accept / Assign form')
   })
 
+  test('does not offer adoption for an assignee outside the proposed Project directory', () => {
+    const entry = triageEntryFixtures[0]
+    if (!entry) throw new Error('Expected a triage fixture.')
+    const html = renderToStaticMarkup(
+      <TriageEntryDetail
+        accessToken="access-token"
+        aiAssistanceController={aiController}
+        eligibleAssigneeIdsByProject={new Map([
+          ['launch-readiness', new Set(['member-eligible'])],
+          ['launch-support', new Set(['member-ada'])],
+        ])}
+        locale="en"
+        t={createTranslator('en')}
+        teamId="core-team"
+        view={createTriageEntryView(entry)}
+        visibleProjectIds={['launch-readiness', 'launch-support']}
+        onBack={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('member-ada')
+    expect(html).not.toContain('Use in Accept / Assign form')
+  })
+
   test('keeps the AI composer startable while a parent operation fence is active', () => {
     const entry = triageEntryFixtures[0]
     if (!entry) throw new Error('Expected a triage fixture.')

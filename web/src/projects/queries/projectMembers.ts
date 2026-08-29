@@ -13,15 +13,17 @@ import type { PlanningProjectRoleScope } from '../../planning/model/permissions'
  *
  * @param accessToken - Project member API の access token です。
  * @param projects - 取得対象の Project 一覧です。
+ * @param teamId - Optional Team scope used to qualify duplicate Project IDs.
  * @returns Project 情報付き member、失敗した Project ID、取得 error です。
  */
 export async function loadWorkspaceProjectMembers(
   accessToken: string,
   projects: readonly ProjectDirectoryProject[],
+  teamId?: string,
 ) {
   const results = await Promise.allSettled(
     projects.map(async (project) => ({
-      members: await getProjectMembers(accessToken, project.id),
+      members: await getProjectMembers(accessToken, project.id, teamId),
       project,
     })),
   )

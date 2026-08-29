@@ -38,6 +38,8 @@ export type TriageWorkbenchProps = {
   readonly teamName: string
   /** Project IDs currently visible to the viewer in this Team directory. */
   readonly visibleProjectIds?: readonly string[]
+  /** Active non-guest members keyed by their current Team-qualified Project. */
+  readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
   /** Active queue or settings surface. */
   readonly routeView: TriageRouteView
   /** Visible permission-safe queue entries. */
@@ -178,6 +180,7 @@ export function TriageWorkbench({
   t,
   teamId,
   teamName,
+  eligibleAssigneeIdsByProject,
   visibleProjectIds,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
@@ -323,6 +326,7 @@ export function TriageWorkbench({
                   onRetry={onRetryDetail}
                   t={t}
                   teamId={teamId}
+                  eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
                   visibleProjectIds={visibleProjectIds}
                   view={selectedEntry}
                 />
