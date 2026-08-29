@@ -48,6 +48,8 @@ export type { DocumentContextTab } from '../model/contextTabs'
 export type DocumentContextPanelProps = {
   /** Active Workspace member token; omission removes the AI Brief source and tab. */
   aiAssistanceAccessToken?: string
+  /** Session key that keeps the Brief mounted while a polled revision is pending. */
+  aiAssistantSessionKey?: string
   /**
    * Panel 対象の Document です。
    */
@@ -165,6 +167,7 @@ export type DocumentContextPanelProps = {
 export function DocumentContextPanel({
   activeTab,
   aiAssistanceAccessToken,
+  aiAssistantSessionKey,
   backlinks,
   comments,
   defaultAnchorId,
@@ -372,7 +375,7 @@ export function DocumentContextPanel({
           >
             <AiSummaryAssistant
               accessToken={aiAssistanceAccessToken}
-              key={createAiAssistantSessionKey({
+              key={aiAssistantSessionKey ?? createAiAssistantSessionKey({
                 documentId: document.id,
                 expectedRevision: document.revision,
                 type: 'document',

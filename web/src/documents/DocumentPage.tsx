@@ -1472,7 +1472,11 @@ export function DocumentScreen({
   const documentAiSessionKey = selectedDocument
     ? `${selectedDocument.id}:${selectedDocument.revision}`
     : ''
-  const documentAiSessionKeyRef = useRef(documentAiSessionKey)
+  const selectedDocumentId = selectedDocument?.id
+  const [mountedAiSessionKey, setMountedAiSessionKey] =
+    useState(documentAiSessionKey)
+  const mountedAiSessionKeyRef = useRef(documentAiSessionKey)
+  const mountedAiDocumentIdRef = useRef(selectedDocumentId)
   const isContextModal = useMediaQuery('(max-width: 1279px)')
 
   /** Reports the mounted Document Brief operation state to mutation guards. */
@@ -1482,14 +1486,32 @@ export function DocumentScreen({
   }, [])
 
   useEffect(() => {
-    if (documentAiSessionKeyRef.current !== documentAiSessionKey) {
-      documentAiSessionKeyRef.current = documentAiSessionKey
-      if (isAiOperationPendingRef.current) reportAiOperationPending(false)
+    const documentIdentityChanged =
+      mountedAiDocumentIdRef.current !== selectedDocumentId
+    const sessionChanged =
+      mountedAiSessionKeyRef.current !== documentAiSessionKey
+    if (!documentIdentityChanged && !sessionChanged) return
+
+    // A polling revision update must not remount the assistant while its
+    // request is in flight. The operation callback will trigger this effect
+    // again after the request settles, at which point the stale session is
+    // safely replaced with the latest revision.
+    if (!documentIdentityChanged && isAiOperationPendingRef.current) {
       return
     }
-    if (selectedDocument || !isAiOperationPendingRef.current) return
-    reportAiOperationPending(false)
-  }, [documentAiSessionKey, reportAiOperationPending, selectedDocument])
+
+    mountedAiDocumentIdRef.current = selectedDocumentId
+    mountedAiSessionKeyRef.current = documentAiSessionKey
+    setMountedAiSessionKey(documentAiSessionKey)
+    if (documentIdentityChanged && isAiOperationPendingRef.current) {
+      reportAiOperationPending(false)
+    }
+  }, [
+    documentAiSessionKey,
+    isAiOperationPending,
+    reportAiOperationPending,
+    selectedDocumentId,
+  ])
 
   const ensureDraftSaved = useCallback(async () => {
     const guard = draftGuardRef.current
@@ -1899,6 +1921,7 @@ export function DocumentScreen({
                 <DocumentContextPanel
                   activeTab={contextTab ?? 'brief'}
                   aiAssistanceAccessToken={resolvedAiAssistanceAccessToken}
+                  aiAssistantSessionKey={mountedAiSessionKey}
                   backlinks={data.backlinks}
                   comments={data.comments}
                   defaultAnchorId={defaultCommentAnchorId}
