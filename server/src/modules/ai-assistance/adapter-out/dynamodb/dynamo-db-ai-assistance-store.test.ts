@@ -346,6 +346,48 @@ function createPersistedGenerationItem(
 }
 
 describe('DynamoDbAiAssistanceStore', () => {
+  test('supports the full canonical Workspace member-key length for AI records', async () => {
+    const memberId = 'm'.repeat(320)
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.store.reserveGeneration(
+        createReservation({ memberId }),
+      )).resolves.toEqual({ status: 'reserved', generationId: 'generation-2' })
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      expect(Array.isArray(transactionItems)).toBeTrue()
+      if (!Array.isArray(transactionItems)) {
+        throw new TypeError('Expected transaction items.')
+      }
+      const receipt = readRecord(readRecord(transactionItems[0]).Put)
+      expect(readRecord(receipt.Item).memberId).toBe(memberId)
+      const memberBudget = readRecord(readRecord(transactionItems[2]).Update)
+      expect(readRecord(memberBudget.Key).recordKey).toContain(
+        encodeURIComponent(memberId),
+      )
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps policy, preference, and generation read failures to persistence errors', async () => {
+    const readers = [
+      (store: DynamoDbAiAssistanceStore) => store.getPolicy('workspace-1'),
+      (store: DynamoDbAiAssistanceStore) => store.getPreference('workspace-1', 'member-1'),
+      (store: DynamoDbAiAssistanceStore) => store.getGeneration('workspace-1', 'generation-1'),
+    ]
+    for (const read of readers) {
+      const harness = createHarness([new Error('DynamoDB unavailable')])
+      try {
+        await expect(read(harness.store)).rejects.toMatchObject({
+          category: 'upstream',
+          code: 'AiAssistancePersistenceError',
+        })
+      } finally {
+        harness.restore()
+      }
+    }
+  })
+
   test('rejects an oversized UTF-8 generation row before sending a DynamoDB command', async () => {
     const harness = createHarness([])
     try {

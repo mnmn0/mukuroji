@@ -56,6 +56,7 @@ const IDEMPOTENCY_RECORD_PREFIX = 'AI_IDEMPOTENCY#MEMBER#'
 const BUDGET_RECORD_PREFIX = 'AI_BUDGET#MINUTE#'
 const GENERATION_BUDGET_WINDOW_MS = 60_000
 const MAX_STORED_GENERATION_SERIALIZED_BYTES = 350 * 1_024
+const MAX_MEMBER_IDENTIFIER_LENGTH = 320
 
 const aiAssistanceErrorCategorySchema = z.enum([
   'validation',
@@ -372,6 +373,29 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
   }
 
   /**
+   * Reads one Workspace Search table item with a stable application error boundary.
+   *
+   * @param workspaceId - Workspace partition containing the item.
+   * @param recordKey - Server-built record key to read.
+   * @returns The strongly consistent DynamoDB response.
+   * @throws AiAssistancePersistenceError when DynamoDB rejects or times out the read.
+   */
+  async #readItem(
+    workspaceId: string,
+    recordKey: string,
+  ): Promise<GetCommandOutput> {
+    try {
+      return await this.#documentClient.send(new GetCommand({
+        TableName: this.#tableName,
+        Key: { workspaceId, recordKey },
+        ConsistentRead: true,
+      }))
+    } catch (error) {
+      throw mapDynamoReadError(error)
+    }
+  }
+
+  /**
    * Reads an existing receipt without charging a new generation budget.
    *
    * @param input - Workspace, member, idempotency, and fingerprint identity.
@@ -382,16 +406,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     input: ReadAiAssistanceGenerationReservationInput,
   ): Promise<AiAssistanceGenerationReservation | undefined> {
     const recordKey = createIdempotencyRecordKey(input.memberId, input.idempotencyKey)
-    let response: GetCommandOutput
-    try {
-      response = await this.#documentClient.send(new GetCommand({
-        TableName: this.#tableName,
-        Key: { workspaceId: input.workspaceId, recordKey },
-        ConsistentRead: true,
-      }))
-    } catch (error) {
-      throw mapDynamoWriteError(error)
-    }
+    const response = await this.#readItem(input.workspaceId, recordKey)
     if (!response.Item) return undefined
     const parsed = idempotencyItemSchema.safeParse(response.Item)
     if (
@@ -548,11 +563,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
     }
 
-    const response = await this.#documentClient.send(new GetCommand({
-      TableName: this.#tableName,
-      Key: { workspaceId: input.workspaceId, recordKey },
-      ConsistentRead: true,
-    }))
+    const response = await this.#readItem(input.workspaceId, recordKey)
     const parsed = idempotencyItemSchema.safeParse(response.Item)
     if (
       !parsed.success ||
@@ -602,16 +613,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       audit,
       status: 'started',
     }
-    let currentResponse: GetCommandOutput
-    try {
-      currentResponse = await this.#documentClient.send(new GetCommand({
-        TableName: this.#tableName,
-        Key: { workspaceId: input.workspaceId, recordKey },
-        ConsistentRead: true,
-      }))
-    } catch (error) {
-      throw mapDynamoWriteError(error)
-    }
+    const currentResponse = await this.#readItem(input.workspaceId, recordKey)
     const current = idempotencyItemSchema.safeParse(currentResponse.Item)
     if (
       !current.success ||
@@ -661,11 +663,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     } catch (error) {
       let response: GetCommandOutput
       try {
-        response = await this.#documentClient.send(new GetCommand({
-          TableName: this.#tableName,
-          Key: { workspaceId: input.workspaceId, recordKey },
-          ConsistentRead: true,
-        }))
+        response = await this.#readItem(input.workspaceId, recordKey)
       } catch {
         throw mapDynamoWriteError(error)
       }
@@ -760,11 +758,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     } catch (error) {
       let response: GetCommandOutput
       try {
-        response = await this.#documentClient.send(new GetCommand({
-          TableName: this.#tableName,
-          Key: { workspaceId: input.workspaceId, recordKey },
-          ConsistentRead: true,
-        }))
+        response = await this.#readItem(input.workspaceId, recordKey)
       } catch {
         throw mapDynamoWriteError(error)
       }
@@ -788,11 +782,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       } catch (retryError) {
         let retryResponse: GetCommandOutput
         try {
-          retryResponse = await this.#documentClient.send(new GetCommand({
-            TableName: this.#tableName,
-            Key: { workspaceId: input.workspaceId, recordKey },
-            ConsistentRead: true,
-          }))
+          retryResponse = await this.#readItem(input.workspaceId, recordKey)
         } catch {
           throw mapDynamoWriteError(retryError)
         }
@@ -850,11 +840,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       }))
     } catch (error) {
       if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
-      const response = await this.#documentClient.send(new GetCommand({
-        TableName: this.#tableName,
-        Key: { workspaceId: input.workspaceId, recordKey },
-        ConsistentRead: true,
-      }))
+      const response = await this.#readItem(input.workspaceId, recordKey)
       const parsed = idempotencyItemSchema.safeParse(response.Item)
       if (
         parsed.success &&
@@ -869,11 +855,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
 
   /** Reads the current Workspace policy with a strongly consistent read. */
   async getPolicy(workspaceId: string): Promise<AiAssistancePolicy | undefined> {
-    const response = await this.#documentClient.send(new GetCommand({
-      TableName: this.#tableName,
-      Key: { workspaceId, recordKey: POLICY_RECORD_KEY },
-      ConsistentRead: true,
-    }))
+    const response = await this.#readItem(workspaceId, POLICY_RECORD_KEY)
     if (!response.Item) return undefined
     const parsed = policyItemSchema.safeParse(response.Item)
     if (!parsed.success || parsed.data.workspaceId !== workspaceId) {
@@ -1032,11 +1014,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     memberId: string,
   ): Promise<AiAssistancePreference | undefined> {
     const recordKey = createPreferenceRecordKey(memberId)
-    const response = await this.#documentClient.send(new GetCommand({
-      TableName: this.#tableName,
-      Key: { workspaceId, recordKey },
-      ConsistentRead: true,
-    }))
+    const response = await this.#readItem(workspaceId, recordKey)
     if (!response.Item) return undefined
     const parsed = preferenceItemSchema.safeParse(response.Item)
     if (
@@ -1114,11 +1092,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     generationId: string,
   ): Promise<StoredAiAssistanceGeneration | undefined> {
     const recordKey = createGenerationRecordKey(generationId)
-    const response = await this.#documentClient.send(new GetCommand({
-      TableName: this.#tableName,
-      Key: { workspaceId, recordKey },
-      ConsistentRead: true,
-    }))
+    const response = await this.#readItem(workspaceId, recordKey)
     if (!response.Item) return undefined
     const parsed = baseStoredGenerationItemSchema.safeParse(response.Item)
     if (
@@ -1231,11 +1205,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       }))
     } catch (error) {
       if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
-      const response = await this.#documentClient.send(new GetCommand({
-        TableName: this.#tableName,
-        Key: { workspaceId: record.workspaceId, recordKey },
-        ConsistentRead: true,
-      }))
+      const response = await this.#readItem(record.workspaceId, recordKey)
       const parsed = feedbackItemSchema.safeParse(response.Item)
       if (
         parsed.success &&
@@ -1320,7 +1290,7 @@ export function createAiAssistanceIdempotencyRecordKey(
 
 /** Creates a canonical preference record key. */
 function createPreferenceRecordKey(memberId: string): string {
-  return `${PREFERENCE_RECORD_PREFIX}${encodeURIComponent(requireIdentifier(memberId))}`
+  return `${PREFERENCE_RECORD_PREFIX}${encodeURIComponent(requireMemberIdentifier(memberId))}`
 }
 
 /** Creates a canonical generation record key. */
@@ -1336,7 +1306,7 @@ function createFeedbackRecordKey(generationId: string, feedbackId: string): stri
 /** Creates a member-scoped idempotency key containing only a SHA-256 client-key digest. */
 function createIdempotencyRecordKey(memberId: string, idempotencyKey: string): string {
   const digest = createHash('sha256').update(requireIdentifier(idempotencyKey)).digest('hex')
-  return `${IDEMPOTENCY_RECORD_PREFIX}${encodeURIComponent(requireIdentifier(memberId))}#KEY#${digest}`
+  return `${IDEMPOTENCY_RECORD_PREFIX}${encodeURIComponent(requireMemberIdentifier(memberId))}#KEY#${digest}`
 }
 
 /** Creates a Workspace budget key for one exact UTC minute. */
@@ -1349,7 +1319,7 @@ function createMemberBudgetRecordKey(
   windowStartedAt: number,
   memberId: string,
 ): string {
-  return `${BUDGET_RECORD_PREFIX}${windowStartedAt}#MEMBER#${encodeURIComponent(requireIdentifier(memberId))}`
+  return `${BUDGET_RECORD_PREFIX}${windowStartedAt}#MEMBER#${encodeURIComponent(requireMemberIdentifier(memberId))}`
 }
 
 /**
@@ -1660,6 +1630,29 @@ function requireIdentifier(value: string): string {
     )
   }
   return normalized
+}
+
+/** Requires a bounded canonical Workspace member identifier before physical-key encoding. */
+function requireMemberIdentifier(value: string): string {
+  const normalized = value.trim()
+  if (!normalized || normalized.length > MAX_MEMBER_IDENTIFIER_LENGTH) {
+    throw new AiAssistanceError(
+      'validation',
+      'InvalidAiAssistanceRequest',
+      'AI assistance member identifier is invalid.',
+    )
+  }
+  return normalized
+}
+
+/** Maps a DynamoDB read failure to the stable persistence error contract. */
+function mapDynamoReadError(error: unknown): AiAssistanceError {
+  return new AiAssistanceError(
+    'upstream',
+    'AiAssistancePersistenceError',
+    'AI assistance persistence read failed.',
+    { cause: error },
+  )
 }
 
 /** Maps conditional writes while keeping raw AWS error details behind the adapter boundary. */

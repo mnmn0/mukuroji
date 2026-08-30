@@ -72,6 +72,30 @@ describe('AI assistance redaction', () => {
     }
   })
 
+  test('redacts presigned URL query credentials while retaining safe query context', () => {
+    const input = [
+      'https://bucket.s3.amazonaws.com/object.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256',
+      'X-Amz-Credential=access%2F20260830%2Fap-northeast-1%2Fs3%2Faws4_request',
+      'X-Amz-Security-Token=session-token&X-Amz-Signature=signature-value&keep=yes',
+      'https://storage.googleapis.com/bucket/object?GoogleAccessId=service%40example.test',
+      'X-Goog-Signature=google-signature&safe=1',
+    ].join('&')
+
+    const redacted = redactAiAssistanceText(input)
+
+    expect(redacted).toContain('X-Amz-Credential=[REDACTED_PRESIGNED_URL]')
+    expect(redacted).toContain('X-Amz-Security-Token=[REDACTED_PRESIGNED_URL]')
+    expect(redacted).toContain('X-Amz-Signature=[REDACTED_PRESIGNED_URL]')
+    expect(redacted).toContain('GoogleAccessId=[REDACTED_PRESIGNED_URL]')
+    expect(redacted).toContain('X-Goog-Signature=[REDACTED_PRESIGNED_URL]')
+    expect(redacted).toContain('keep=yes')
+    expect(redacted).toContain('safe=1')
+    expect(redacted).not.toContain('access%2F20260830')
+    expect(redacted).not.toContain('signature-value')
+    expect(redacted).not.toContain('google-signature')
+    expect(redactAiAssistanceText(redacted)).toBe(redacted)
+  })
+
   test('redacts known GitHub, Slack, and provider token prefixes', () => {
     // Assemble canaries at runtime so repository scanning does not mistake fixtures for live credentials.
     const tokens = [

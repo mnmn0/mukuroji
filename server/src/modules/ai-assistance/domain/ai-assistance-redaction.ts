@@ -9,11 +9,12 @@ const PRIVATE_KEY_PATTERN = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----EN
 const BASIC_AUTHORIZATION_PATTERN = /\b((?:proxy-)?authorization\s*:\s*basic)\s+[A-Za-z0-9+/]+={0,2}/giu
 const COOKIE_HEADER_PATTERN = /\b((?:set-cookie|cookie)\s*:)\s*[^\r\n]*/giu
 const URL_USERINFO_PATTERN = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/?#:@]+:[^\s/?#@]*@/gu
+const PRESIGNED_URL_QUERY_PATTERN = /([?&](?:x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential|security-token)|awsaccesskeyid|googleaccessid|signature|sig)=)(?!\[REDACTED_PRESIGNED_URL\])[^&#\s"'<>]+/giu
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu
 const JWT_PATTERN = /(^|[^A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})(?=$|[^A-Za-z0-9_-])/gu
 const AWS_ACCESS_KEY_PATTERN = /\b(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}\b/gu
 const PREFIXED_TOKEN_PATTERN = /\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprsce]-[A-Za-z0-9.-]{20,}|xapp-[A-Za-z0-9.-]{20,}|sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{35}|npm_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{20,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,})\b/gu
-const SECRET_ASSIGNMENT_PATTERN = /(["']?\b(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|csrf[_-]?token|xsrf[_-]?token|client[_-]?secret|private[_-]?token|aws[_-]?secret[_-]?access[_-]?key|aws[_-]?session[_-]?token|secret[_-]?access[_-]?key|session(?:[_-]?(?:id|token))?|j[_-]?session[_-]?id|php[_-]?sessid|asp\.net[_-]?session[_-]?id|connect\.sid|(?:next-auth|authjs)\.session-token|cookie|secret|token)["']?)(\s*[:=]\s*)(?!\[REDACTED_(?:SECRET|COOKIE)\])(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s,;}\])"'&#]+))/giu
+const SECRET_ASSIGNMENT_PATTERN = /(["']?\b(?:password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|csrf[_-]?token|xsrf[_-]?token|client[_-]?secret|private[_-]?token|aws[_-]?secret[_-]?access[_-]?key|aws[_-]?session[_-]?token|secret[_-]?access[_-]?key|session(?:[_-]?(?:id|token))?|j[_-]?session[_-]?id|php[_-]?sessid|asp\.net[_-]?session[_-]?id|connect\.sid|(?:next-auth|authjs)\.session-token|cookie|secret|token)["']?)(\s*[:=]\s*)(?!\[REDACTED_(?:SECRET|COOKIE|PRESIGNED_URL)\])(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s,;}\])"'&#]+))/giu
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu
 const JSON_PERSON_IDENTIFIER_PATTERN = /("(?:displayName|fullName|contactName|requesterName|applicantName|personName)"\s*:\s*")(?!\[REDACTED_PERSON\])(?:\\.|[^"\\])*(")/giu
 const LABELED_PERSON_PATTERN = /((?:\b(?:full\s+name|contact\s+name|requester\s+name|applicant\s+name|person\s+name)|(?:氏名|お名前|姓名|担当者名|申請者名|連絡先氏名))\s*[：:=])(?!\s*\[REDACTED_PERSON\])(\s*)([^,;|\r\n。]{1,120})/giu
@@ -80,6 +81,8 @@ export function redactAiAssistanceText(value: string): string {
       `${header} [REDACTED_COOKIE]`)
     .replace(URL_USERINFO_PATTERN, (_match, scheme: string) =>
       `${scheme}[REDACTED_CREDENTIALS]@`)
+    .replace(PRESIGNED_URL_QUERY_PATTERN, (_match, prefix: string) =>
+      `${prefix}[REDACTED_PRESIGNED_URL]`)
     .replace(BEARER_PATTERN, 'Bearer [REDACTED_TOKEN]')
     .replace(JWT_PATTERN, (_match, prefix: string) =>
       `${prefix}[REDACTED_JWT]`)
