@@ -7,6 +7,7 @@ import {
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import {
   createCustomFieldErrorMessages,
+  createVisibleCustomFieldValuePatch,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
   resolveWorkItemAssignee,
@@ -63,6 +64,30 @@ describe('Work Item display helpers', () => {
     expect(createCustomFieldErrorMessages(errors, definitions, 'en')).toEqual({
       estimate: 'A value is required. Enter a value at or above the minimum.',
     })
+  })
+
+  test('does not synthesize deletions for hidden detail custom fields', () => {
+    const definitions = [{
+      id: 'risk',
+      name: 'Risk',
+      required: false,
+      sortOrder: 0,
+      type: 'text' as const,
+    }]
+    const existingValues = { risk: 'high' }
+
+    expect(createVisibleCustomFieldValuePatch(
+      false,
+      definitions,
+      existingValues,
+      {},
+    )).toBeUndefined()
+    expect(createVisibleCustomFieldValuePatch(
+      true,
+      definitions,
+      existingValues,
+      {},
+    )).toEqual({ risk: null })
   })
 
   test('uses the active locale when relation graph detail is not loaded', () => {

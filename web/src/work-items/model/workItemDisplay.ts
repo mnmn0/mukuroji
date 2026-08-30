@@ -569,6 +569,28 @@ export function createCustomFieldValuePatch(
 }
 
 /**
+ * Creates a detail-form custom-field patch only when the field section was rendered.
+ *
+ * @param isVisible - Whether the current Work Item Type exposes custom fields in the detail form.
+ * @param definitions - Custom field definitions applicable to the selected type.
+ * @param existingValues - Values already stored on the Work Item.
+ * @param parsedValues - Values parsed from rendered form controls.
+ * @param projectId - Project used to resolve project-scoped field applicability.
+ * @returns A patch for rendered fields, or undefined when the section was hidden.
+ */
+export function createVisibleCustomFieldValuePatch(
+  isVisible: boolean,
+  definitions: readonly CustomFieldDefinition[],
+  existingValues: Readonly<Record<string, CustomFieldValue>> | undefined,
+  parsedValues: Readonly<Record<string, CustomFieldValue>>,
+  projectId?: string,
+): Record<string, CustomFieldValue | null> | undefined {
+  return isVisible
+    ? createCustomFieldValuePatch(definitions, existingValues, parsedValues, projectId)
+    : undefined
+}
+
+/**
  * 選択中 Work Item detail から relation graph revision を読み取ります。
  *
  * @param detail - 最新 detail response です。

@@ -49,7 +49,7 @@ import {
 } from '../../work-items/model/customFields'
 import {
   createCustomFieldErrorMessages,
-  createCustomFieldValuePatch,
+  createVisibleCustomFieldValuePatch,
   resolveEditableWorkflowStatuses,
   resolveWorkItemPersonOptions,
   resolveWorkItemWorkflowStatusId,
@@ -729,18 +729,20 @@ export function TaskDetailPane({
           }
 
           setFieldErrors({})
+          const customFieldValues = createVisibleCustomFieldValuePatch(
+            isDetailSectionVisible('custom-fields'),
+            selectedTypeCustomFieldDefinitions,
+            issue?.customFieldValues ?? task.customFieldValues,
+            parsedCustomFields.values,
+            nextAssignedProjectId || undefined,
+          )
           const nextIssueInput: UpdateTeamIssueInput = {
             assignedProjectId: nextAssignedProjectId || null,
-            customFieldValues: createCustomFieldValuePatch(
-              selectedTypeCustomFieldDefinitions,
-              issue?.customFieldValues ?? task.customFieldValues,
-              parsedCustomFields.values,
-              nextAssignedProjectId || undefined,
-            ),
             description: String(formData.get('description') ?? '').trim(),
             priority: resolveTaskPriority(formData.get('priority')),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
+            ...(customFieldValues === undefined ? {} : { customFieldValues }),
           }
 
           if (isWorkItemTypeChangeRequested && typeChangePreview) {
