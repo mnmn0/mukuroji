@@ -27840,6 +27840,7 @@ function readTaskViewFilters(value: unknown): TaskViewFilters {
   copyTaskViewStringFilter(filters, value, 'relationIds')
   copyTaskViewStringFilter(filters, value, 'projectIds')
   copyTaskViewStringFilter(filters, value, 'teamIds')
+  copyTaskViewStringFilter(filters, value, 'workItemTypeIds')
   if (value.customFields !== undefined) {
     if (!Array.isArray(value.customFields) || value.customFields.length > 50) {
       return invalidTaskViewApiInput('Task view custom field filters are invalid.')
@@ -27916,7 +27917,7 @@ function readTaskViewFilters(value: unknown): TaskViewFilters {
 function copyTaskViewStringFilter(
   target: TaskViewFilters,
   source: Record<string, unknown>,
-  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds',
+  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds' | 'workItemTypeIds',
 ): void {
   const candidate = source[key]
   if (candidate === undefined) return

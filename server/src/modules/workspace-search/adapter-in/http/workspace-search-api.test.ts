@@ -1412,6 +1412,7 @@ test('task view endpoints forward the complete lifecycle with current permission
     surface: 'project',
     scope: { kind: 'project', projectId: 'refero', teamId: 'core-team' },
     filters: {
+      workItemTypeIds: ['bug'],
       workflowStatuses: [{
         teamId: 'core-team',
         workItemTypeId: 'bug',
