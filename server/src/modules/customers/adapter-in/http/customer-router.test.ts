@@ -218,3 +218,145 @@ test('saves an accepted Triage Entry as a Customer Request and preserves its sou
   })
   expect((await client.getRequest('workspace-1', body.id)).customerId).toBe(customer.id)
 })
+
+test('rejects an accepted Triage retry when its existing request points to another Triage Entry', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const existing = await client.createRequest('workspace-1', 'member-1', {
+    customerId: customer.id,
+    triageEntryId: 'different-triage-entry',
+    source: { kind: 'email', provider: 'mail', referenceId: 'message-2', canNotify: true },
+    originalMessage: 'Already saved elsewhere.',
+    receivedAt: NOW,
+    importance: 'normal',
+  })
+  const entry: TriageEntry = {
+    schemaVersion: 1,
+    id: 'triage-2',
+    workspaceId: 'workspace-1',
+    source: { kind: 'email', sourceId: 'message-1', provider: 'mail' },
+    sourcePreview: {
+      title: 'Request',
+      body: 'Please support SSO.',
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: false,
+      truncated: false,
+    },
+    requester: { displayName: 'Ada Lovelace', guest: false },
+    receivedAt: NOW,
+    lastActivityAt: NOW,
+    state: 'accepted',
+    routing: { reason: 'Support', candidates: [] },
+    teamId: 'support',
+    permission: { visibility: 'full', canReply: true, guestVisible: true, checkedAt: NOW },
+    retention: { expiresAt: '2027-08-01T00:00:00.000Z' },
+    customerRequestId: existing.id,
+    capabilities: {
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: true,
+      canViewInternalContext: false,
+    },
+    events: [],
+    revision: 2,
+    createdAt: NOW,
+    updatedAt: NOW,
+  }
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    associateCustomer: async () => entry,
+  })
+
+  const response = await app.request('/api/teams/support/triage-entries/triage-2/customer-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: entry.revision,
+      customerId: customer.id,
+      importance: 'normal',
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'CustomerRequestTriageMismatch' })
+})
+
+test('validates partial Triage Customer associations against the current Customer', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Ada Lovelace',
+  })
+  const entry: TriageEntry = {
+    schemaVersion: 1,
+    id: 'triage-3',
+    workspaceId: 'workspace-1',
+    source: { kind: 'email', sourceId: 'message-3', provider: 'mail' },
+    sourcePreview: {
+      title: 'Request',
+      body: 'Please support SSO.',
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: false,
+      truncated: false,
+    },
+    requester: { displayName: 'Ada Lovelace', guest: false },
+    receivedAt: NOW,
+    lastActivityAt: NOW,
+    state: 'accepted',
+    routing: { reason: 'Support', candidates: [] },
+    teamId: 'support',
+    permission: { visibility: 'full', canReply: true, guestVisible: true, checkedAt: NOW },
+    retention: { expiresAt: '2027-08-01T00:00:00.000Z' },
+    customerId: customer.id,
+    revision: 2,
+    createdAt: NOW,
+    updatedAt: NOW,
+    capabilities: {
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: true,
+      canViewInternalContext: false,
+    },
+    events: [],
+  }
+  const association: CustomerTestTriage = {
+    getEntry: async () => entry,
+    associateCustomer: async (_workspaceId, _teamId, _entryId, _actor, input) => ({
+      ...entry,
+      contactId: input.contactId ?? undefined,
+      revision: entry.revision + 1,
+    }),
+  }
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, association)
+
+  const response = await app.request('/api/teams/support/triage-entries/triage-3/customer', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: entry.revision, contactId: contact.id }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ contactId: contact.id })
+})

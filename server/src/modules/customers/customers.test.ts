@@ -152,7 +152,31 @@ test('merges Customer identity and prepares idempotent source-capable completion
     skipReason: 'source-not-capable',
   })
   expect(repeatedCandidates).toEqual(candidates)
-  expect((await client.getRequest('workspace-1', request.id)).status).toBe('completed')
+  expect((await client.getRequest('workspace-1', request.id)).status).toBe('requested')
+})
+
+test('does not close a Customer Request when one of several linked Work Items completes', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+  })
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-2',
+  })
+
+  await client.prepareCompletionNotifications('workspace-1', 'support', 'work-item-1', 'member-1')
+
+  expect((await client.getRequest('workspace-1', request.id)).status).toBe('requested')
 })
 
 test('keeps Customer references and notification candidates consistent across destructive mutations', async () => {

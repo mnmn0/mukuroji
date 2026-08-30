@@ -478,9 +478,14 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const entryId = requirePathValue(context.req.param('entryId'), 'Triage Entry ID')
       const input = readTriageAssociationInput(await dependencies.readJson(context.req))
       await dependencies.verifyTriageAccess(principal, teamId, 'member')
+      const triage = dependencies.getTriage()
+      const currentEntry = await triage.getEntry(principal.directoryId, teamId, entryId)
       const customerClient = dependencies.getCustomers()
-      if (input.customerId && input.customerId !== null) {
-        const customer = await customerClient.getCustomer(principal.directoryId, input.customerId)
+      const effectiveCustomerId = input.customerId === undefined
+        ? currentEntry.customerId
+        : input.customerId
+      if (effectiveCustomerId && effectiveCustomerId !== null) {
+        const customer = await customerClient.getCustomer(principal.directoryId, effectiveCustomerId)
         if (input.contactId && !customer.contacts.some((contact) => contact.id === input.contactId)) {
           throw new CustomerError(404, 'CustomerContactNotFound', 'The customer contact was not found.')
         }
@@ -493,8 +498,9 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
             throw new CustomerError(409, 'CustomerRequestTriageMismatch', 'The Customer Request is not linked to this Triage Entry.')
           }
         }
+      } else if (input.contactId !== undefined || input.customerRequestId !== undefined) {
+        throw new CustomerError(400, 'InvalidCustomerInput', 'A Customer is required when a Contact or Customer Request is associated.')
       }
-      const triage = dependencies.getTriage()
       if (!triage.associateCustomer) {
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association is unavailable.')
       }
@@ -536,6 +542,9 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         const existing = await dependencies.getCustomers().getRequest(principal.directoryId, entry.customerRequestId)
         if (existing.customerId !== input.customerId) {
           throw new CustomerError(409, 'CustomerRequestAlreadyAssociated', 'This Triage Entry is already associated with another Customer Request.')
+        }
+        if (existing.triageEntryId !== entryId) {
+          throw new CustomerError(409, 'CustomerRequestTriageMismatch', 'The Customer Request is not linked to this Triage Entry.')
         }
         return context.json(projectRequest(principal, existing))
       }
@@ -945,9 +954,11 @@ function readMergeRequestInput(value: unknown): MergeCustomerRequestInput {
 /** Reads a Triage Customer association body. */
 function readTriageAssociationInput(value: unknown): UpdateTriageCustomerAssociationInput {
   const body = readRecord(value)
-  const customerId = body.customerId === null
-    ? null
-    : readRequiredString(body.customerId, 'Customer ID')
+  const customerId = body.customerId === undefined
+    ? undefined
+    : body.customerId === null
+      ? null
+      : readRequiredString(body.customerId, 'Customer ID')
   const contactId = body.contactId === undefined
     ? undefined
     : readNullableString(body.contactId, 'Contact ID')

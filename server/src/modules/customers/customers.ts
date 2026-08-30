@@ -679,15 +679,6 @@ export class InMemoryCustomerClient implements CustomerClient {
     )
     const candidates: CustomerCompletionNotification[] = []
     for (const request of requests) {
-      if (request.status !== 'completed' && request.status !== 'closed') {
-        const completedRequest: CustomerRequest = {
-          ...request,
-          status: 'completed',
-          revision: request.revision + 1,
-          updatedAt: now,
-        }
-        state.requests.set(request.id, completedRequest)
-      }
       const id = `completion:${teamId}:${workItemId}:${request.id}`
       const existing = state.notifications.get(id)
       if (existing) {
