@@ -573,40 +573,32 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         createRequestInputFromTriage(entry, { ...input, ...(contactId ? { contactId } : {}) }),
       )
-      try {
-        if (canonicalWorkItem && workItemAuthorization) {
-          request = await dependencies.getCustomers().linkRequestToWorkItem(
-            principal.directoryId,
-            request.id,
-            principal.userKey,
-            {
-              teamId: canonicalWorkItem.teamId,
-              workItemId: canonicalWorkItem.workItemId,
-              ...(workItemAuthorization.projectId ? { projectId: workItemAuthorization.projectId } : {}),
-            },
-          )
-        }
-        await triage.associateCustomer(
-          principal.directoryId,
-          teamId,
-          entryId,
-          { id: principal.userKey },
-          {
-            expectedRevision: entry.revision,
-            customerId: input.customerId,
-            ...(contactId ? { contactId } : {}),
-            customerRequestId: request.id,
-          },
-        )
-      } catch (error) {
-        await dependencies.getCustomers().deleteRequest(
+      if (canonicalWorkItem && workItemAuthorization) {
+        request = await dependencies.getCustomers().linkRequestToWorkItem(
           principal.directoryId,
           request.id,
           principal.userKey,
-          request.revision,
-        ).catch(() => undefined)
-        throw error
+          {
+            teamId: canonicalWorkItem.teamId,
+            workItemId: canonicalWorkItem.workItemId,
+            ...(workItemAuthorization.projectId ? { projectId: workItemAuthorization.projectId } : {}),
+          },
+        )
       }
+      // The deterministic Triage-originated Request remains available for a safe retry if
+      // this cross-store association returns an ambiguous failure.
+      await triage.associateCustomer(
+        principal.directoryId,
+        teamId,
+        entryId,
+        { id: principal.userKey },
+        {
+          expectedRevision: entry.revision,
+          customerId: input.customerId,
+          ...(contactId ? { contactId } : {}),
+          customerRequestId: request.id,
+        },
+      )
       return context.json(projectRequest(principal, request), 201)
     } catch (error) {
       return dependencies.mapError(context, error)

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type {
   CreateCustomerContactInput,
   CreateCustomerInput,
@@ -408,7 +408,20 @@ export class InMemoryCustomerClient implements CustomerClient {
     const state = this.state(workspaceId)
     this.requireCustomer(state, input.customerId)
     if (input.contactId) this.requireContactForCustomer(state, input.contactId, input.customerId)
-    const request = createCustomerRequestRecord(workspaceId, this.id(), input, this.now().toISOString())
+    const requestId = input.triageEntryId === undefined
+      ? this.id()
+      : createTriageRequestId(workspaceId, input.triageEntryId)
+    const request = createCustomerRequestRecord(workspaceId, requestId, input, this.now().toISOString())
+    const existing = state.requests.get(request.id)
+    if (existing) {
+      if (!sameRequestOrigin(existing, request)) {
+        throw new CustomerError(409, 'CustomerRequestAlreadyExists', 'A Customer Request already exists for this Triage Entry.')
+      }
+      if (existing.status === 'merged') {
+        throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot be reused.')
+      }
+      return clone(existing)
+    }
     state.requests.set(request.id, request)
     return clone(this.state(workspaceId).requests.get(request.id) ?? request)
   }
@@ -492,14 +505,10 @@ export class InMemoryCustomerClient implements CustomerClient {
     const workItemLinks = existingLink && input.projectId !== undefined && existingLink.projectId !== input.projectId
       ? request.workItemLinks.map((link) => link === existingLink ? { ...link, projectId: input.projectId } : link)
       : existingLink ? request.workItemLinks : [...request.workItemLinks, { ...input, linkedAt, linkedBy: actorId }]
-    const projectLinks = input.projectId !== undefined && !request.projectLinks.some((link) => link.projectId === input.projectId)
-      ? [...request.projectLinks, { projectId: input.projectId, linkedAt, linkedBy: actorId }]
-      : request.projectLinks
-    if (workItemLinks === request.workItemLinks && projectLinks === request.projectLinks) return clone(request)
+    if (workItemLinks === request.workItemLinks) return clone(request)
     const next = {
       ...request,
       workItemLinks,
-      projectLinks,
       revision: request.revision + 1,
       updatedAt: linkedAt,
     }
@@ -857,6 +866,24 @@ function compareByName(left: { name: string; id: string }, right: { name: string
 /** Returns whether one request remains open. */
 function isOpenRequest(status: CustomerRequest['status']): boolean {
   return status === 'requested' || status === 'in-progress'
+}
+
+/** Creates the deterministic ID used to make Triage-originated Request retries safe. */
+function createTriageRequestId(workspaceId: string, triageEntryId: string): string {
+  return `triage-${createHash('sha256').update(`${workspaceId}\u0000${triageEntryId}`, 'utf8').digest('hex')}`
+}
+
+/** Compares immutable origin fields for a deterministic Customer Request retry. */
+function sameRequestOrigin(left: CustomerRequest, right: CustomerRequest): boolean {
+  return left.workspaceId === right.workspaceId &&
+    left.customerId === right.customerId &&
+    left.contactId === right.contactId &&
+    left.triageEntryId === right.triageEntryId &&
+    JSON.stringify(left.source) === JSON.stringify(right.source) &&
+    left.originalMessage === right.originalMessage &&
+    left.receivedAt === right.receivedAt &&
+    left.importance === right.importance &&
+    JSON.stringify(left.externalReference) === JSON.stringify(right.externalReference)
 }
 
 /** Merges link arrays without duplicating a Work Item relation. */

@@ -76,6 +76,65 @@ test('links many Customer Requests to one Work Item and aggregates Project impac
   ])
 })
 
+test('makes Triage-originated Customer Request retries idempotent and conflict on another Customer', async () => {
+  const client = createClient()
+  const firstCustomer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const secondCustomer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Globex',
+    tier: 'growth',
+    size: 'small',
+    status: 'prospect',
+    health: 'unknown',
+  })
+  const input = {
+    ...requestInput(firstCustomer.id),
+    triageEntryId: 'triage-entry-1',
+  }
+
+  const first = await client.createRequest('workspace-1', 'member-1', input)
+  const repeated = await client.createRequest('workspace-1', 'member-1', input)
+
+  expect(repeated).toEqual(first)
+  expect((await client.listRequests('workspace-1')).requests).toHaveLength(1)
+  await expect(client.createRequest('workspace-1', 'member-1', {
+    ...input,
+    customerId: secondCustomer.id,
+  })).rejects.toMatchObject({ code: 'CustomerRequestAlreadyExists' })
+})
+
+test('removes a Work Item-derived Project from Customer navigation when its Work Item link is removed', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  const linked = await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+    projectId: 'project-1',
+  })
+
+  const unlinked = await client.unlinkRequestFromWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+    expectedRevision: linked.revision,
+  })
+
+  expect(unlinked.projectLinks).toEqual([])
+  expect((await client.getCustomer('workspace-1', customer.id)).projects).toEqual([])
+  expect((await client.getProjectImpact('workspace-1', 'project-1')).requestCount).toBe(0)
+})
+
 test('merges Customer identity and prepares idempotent source-capable completion candidates', async () => {
   const client = createClient()
   const target = await client.createCustomer('workspace-1', 'member-1', {
