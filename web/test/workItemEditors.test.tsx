@@ -5,7 +5,10 @@ import type {
 } from '@mukuroji/contracts'
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { WorkItemConfigurationPanel } from '../src/work-items/ui/WorkItemConfigurationPanel'
+import {
+  WorkItemConfigurationPanel,
+  WorkflowConfigurationSection,
+} from '../src/work-items/ui/WorkItemConfigurationPanel'
 import { WorkItemFieldsEditor } from '../src/work-items/ui/WorkItemFieldsEditor'
 import { workspaceWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import { normalizeWorkItemConfigurationForSave } from '../src/work-items/model/workItemConfigurationEditor'
@@ -108,6 +111,34 @@ describe('Work Item editors', () => {
     expect(html).toContain('step="any" type="number" value="1.5"')
     expect(html).toContain('step="any" type="number" value="2.25"')
     expect(html).toContain('step="any" type="number" value="0.75"')
+  })
+
+  test('renders a selector for additional workflows', () => {
+    const secondaryWorkflow = {
+      id: 'incident-workflow',
+      name: 'Incident workflow',
+      initialStatusId: 'reported',
+      statuses: [{
+        category: 'backlog' as const,
+        id: 'reported',
+        name: 'Reported',
+        sortOrder: 0,
+      }],
+      transitions: [],
+    }
+    const configuration = createConfiguration([])
+    const html = renderToStaticMarkup(
+      <WorkflowConfigurationSection
+        configuration={{ ...configuration, workflows: [secondaryWorkflow] }}
+        locale="en"
+        onChange={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Workflow to edit')
+    expect(html).toContain('Incident workflow')
+    expect(html).toContain('value="incident-workflow"')
+    expect(html).toContain('Add workflow')
   })
 })
 

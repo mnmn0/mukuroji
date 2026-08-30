@@ -944,6 +944,7 @@ function WorkflowTemplatePayloadFields({
   return (
     <div data-testid="automation-template-workflow-editor">
       <WorkflowConfigurationSection
+        allowMultipleWorkflows={false}
         configuration={configuration}
         locale={locale}
         onChange={(next) => onChange(next.workflow)}

@@ -289,10 +289,13 @@ function WorkItemConfigurationPanelContent({
 
 /** Workflow definition を status rail と transition matrix で編集します。 */
 export function WorkflowConfigurationSection({
+  allowMultipleWorkflows = true,
   configuration,
   locale,
   onChange,
 }: {
+  /** Whether the editor should expose additional reusable workflows. */
+  allowMultipleWorkflows?: boolean
   /** 編集中 configuration です。 */
   configuration: WorkItemConfiguration
   /** 表示 locale です。 */
@@ -301,13 +304,30 @@ export function WorkflowConfigurationSection({
   onChange: (configuration: WorkItemConfiguration) => void
 }) {
   const t = createTranslator(locale)
-  const statuses = sortWorkflowStatuses(configuration.workflow.statuses)
+  const workflows = [
+    configuration.workflow,
+    ...(configuration.workflows ?? []).filter((workflow) => workflow.id !== configuration.workflow.id),
+  ]
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState(configuration.workflow.id)
+  const selectedWorkflow = workflows.find((workflow) => workflow.id === selectedWorkflowId) ??
+    configuration.workflow
+  const statuses = sortWorkflowStatuses(selectedWorkflow.statuses)
+  const isPrimaryWorkflow = selectedWorkflow.id === configuration.workflow.id
   const updateWorkflow = (workflow: WorkItemConfiguration['workflow']) => {
-    onChange({ ...configuration, workflow })
+    if (workflow.id === configuration.workflow.id) {
+      onChange({ ...configuration, workflow })
+      return
+    }
+    onChange({
+      ...configuration,
+      workflows: (configuration.workflows ?? []).map((candidate) =>
+        candidate.id === workflow.id ? workflow : candidate,
+      ),
+    })
   }
   const updateStatus = (statusId: string, patch: Partial<WorkflowStatusDefinition>) => {
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       statuses: statuses.map((status) => status.id === statusId ? { ...status, ...patch } : status),
     })
   }
@@ -328,7 +348,7 @@ export function WorkflowConfigurationSection({
 
     nextStatuses.splice(targetIndex, 0, status)
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       statuses: nextStatuses.map((candidate, index) => ({ ...candidate, sortOrder: index })),
     })
   }
@@ -342,8 +362,8 @@ export function WorkflowConfigurationSection({
     }
 
     updateWorkflow({
-      ...configuration.workflow,
-      initialStatusId: configuration.workflow.initialStatusId || id,
+      ...selectedWorkflow,
+      initialStatusId: selectedWorkflow.initialStatusId || id,
       statuses: [...statuses, nextStatus],
     })
   }
@@ -355,32 +375,69 @@ export function WorkflowConfigurationSection({
     const nextStatuses = statuses
       .filter((status) => status.id !== statusId)
       .map((status, index) => ({ ...status, sortOrder: index }))
-    const initialStatusId = configuration.workflow.initialStatusId === statusId
-      ? nextStatuses[0]?.id ?? configuration.workflow.initialStatusId
-      : configuration.workflow.initialStatusId
+    const initialStatusId = selectedWorkflow.initialStatusId === statusId
+      ? nextStatuses[0]?.id ?? selectedWorkflow.initialStatusId
+      : selectedWorkflow.initialStatusId
 
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       initialStatusId,
       statuses: nextStatuses,
-      transitions: configuration.workflow.transitions.filter(
+      transitions: selectedWorkflow.transitions.filter(
         (transition) =>
           transition.fromStatusId !== statusId && transition.toStatusId !== statusId,
       ),
     })
   }
   const toggleTransition = (fromStatusId: string, toStatusId: string, enabled: boolean) => {
-    const withoutTransition = configuration.workflow.transitions.filter(
+    const withoutTransition = selectedWorkflow.transitions.filter(
       (transition) =>
         transition.fromStatusId !== fromStatusId || transition.toStatusId !== toStatusId,
     )
 
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       transitions: enabled
         ? [...withoutTransition, { fromStatusId, toStatusId }]
         : withoutTransition,
     })
+  }
+  /** Adds a reusable workflow to the configuration draft. */
+  const addWorkflow = () => {
+    if (!allowMultipleWorkflows) return
+    const id = createUniqueDefinitionId('workflow', workflows.map((workflow) => workflow.id))
+    const initialStatusId = createUniqueDefinitionId('status', [])
+    const workflow: WorkItemConfiguration['workflow'] = {
+      id,
+      name: t('workItems.configuration.newWorkflow'),
+      initialStatusId,
+      statuses: [{
+        category: 'backlog',
+        id: initialStatusId,
+        name: t('workItems.configuration.newStatus'),
+        sortOrder: 0,
+      }],
+      transitions: [],
+    }
+    onChange({
+      ...configuration,
+      workflows: [...(configuration.workflows ?? []), workflow],
+    })
+    setSelectedWorkflowId(id)
+  }
+  const workflowIsUsedByType = configuration.workItemTypes?.some((type) =>
+    type.defaultWorkflowId === selectedWorkflow.id,
+  ) ?? false
+  /** Removes the selected reusable workflow when no Work Item Type references it. */
+  const removeWorkflow = () => {
+    if (!allowMultipleWorkflows || isPrimaryWorkflow || workflowIsUsedByType) return
+    onChange({
+      ...configuration,
+      workflows: (configuration.workflows ?? []).filter((workflow) =>
+        workflow.id !== selectedWorkflow.id,
+      ),
+    })
+    setSelectedWorkflowId(configuration.workflow.id)
   }
 
   return (
@@ -395,18 +452,55 @@ export function WorkflowConfigurationSection({
             {t('workItems.configuration.workflowDescription')}
           </p>
         </div>
-        <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-          {t('workItems.configuration.workflowName')}
-          <input
-            className="workbench-input min-h-10 px-3"
-            required
-            value={configuration.workflow.name}
-            onChange={(event) => updateWorkflow({
-              ...configuration.workflow,
-              name: event.target.value,
-            })}
-          />
-        </label>
+        <div className="grid gap-3">
+          {allowMultipleWorkflows ? (
+            <div className="flex items-end gap-2">
+              <label className="grid min-w-0 flex-1 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workItems.configuration.workflowSelect')}
+                <select
+                  aria-label={t('workItems.configuration.workflowSelect')}
+                  className="workbench-input min-h-10 min-w-0 px-3"
+                  value={selectedWorkflow.id}
+                  onChange={(event) => setSelectedWorkflowId(event.target.value)}
+                >
+                  {workflows.map((workflow) => (
+                    <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="workbench-button-secondary min-h-10 px-3"
+                onClick={addWorkflow}
+                type="button"
+              >
+                + {t('workItems.configuration.addWorkflow')}
+              </button>
+              <button
+                className="workbench-button-secondary min-h-10 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={isPrimaryWorkflow || workflowIsUsedByType}
+                onClick={removeWorkflow}
+                title={workflowIsUsedByType
+                  ? t('workItems.configuration.workflowInUse')
+                  : t('workItems.configuration.removeWorkflow')}
+                type="button"
+              >
+                {t('workItems.configuration.removeWorkflow')}
+              </button>
+            </div>
+          ) : null}
+          <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+            {t('workItems.configuration.workflowName')}
+            <input
+              className="workbench-input min-h-10 px-3"
+              required
+              value={selectedWorkflow.name}
+              onChange={(event) => updateWorkflow({
+                ...selectedWorkflow,
+                name: event.target.value,
+              })}
+            />
+          </label>
+        </div>
       </div>
 
       <div className="grid grid-cols-[minmax(0,0.92fr)_minmax(520px,1.08fr)] gap-0 max-[1320px]:grid-cols-1">
@@ -500,11 +594,11 @@ export function WorkflowConfigurationSection({
                 </div>
                 <label className="col-start-2 col-end-4 flex min-h-8 cursor-pointer items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)] max-[680px]:col-end-3">
                   <input
-                    checked={configuration.workflow.initialStatusId === status.id}
+                    checked={selectedWorkflow.initialStatusId === status.id}
                     className="h-4 w-4 accent-[var(--workbench-primary)]"
                     name="workflow-initial-status"
                     onChange={() => updateWorkflow({
-                      ...configuration.workflow,
+                      ...selectedWorkflow,
                       initialStatusId: status.id,
                     })}
                     type="radio"
@@ -545,7 +639,7 @@ export function WorkflowConfigurationSection({
                     </th>
                     {statuses.map((toStatus) => {
                       const isSelf = fromStatus.id === toStatus.id
-                      const isAllowed = configuration.workflow.transitions.some(
+                      const isAllowed = selectedWorkflow.transitions.some(
                         (transition) =>
                           transition.fromStatusId === fromStatus.id &&
                           transition.toStatusId === toStatus.id,
