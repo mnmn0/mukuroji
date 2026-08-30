@@ -683,10 +683,9 @@ export function normalizeCustomFieldValues(
         return false
       }
 
-      const referenceDefinition = definitionsById.get(reference)
       if (
         options.allowRequiredMissing &&
-        referenceDefinition?.required &&
+        requiredFieldIds.has(reference) &&
         values[reference] === undefined
       ) {
         delete values[fieldId]

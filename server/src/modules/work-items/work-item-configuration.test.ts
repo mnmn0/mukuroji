@@ -443,6 +443,33 @@ test('defers formulas that reference required values omitted by quick capture', 
   })).toEqual({})
 })
 
+test('defers formulas that reference Work Item Type required values omitted by quick capture', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('amount', 'number'),
+      field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+    ],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['amount', 'total'],
+      requiredCustomFieldIds: ['amount'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(normalizeCustomFieldValues(configuration, undefined, {
+    allowRequiredMissing: true,
+    mode: 'create',
+    workItemTypeId: 'incident',
+  })).toEqual({})
+})
+
 test('removes stale deferred formula values during a quick-capture update', () => {
   const configuration = createConfiguration({
     customFields: [
