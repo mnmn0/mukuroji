@@ -79,6 +79,7 @@ import {
 import {
   resolveConfiguredWorkflowStatuses,
   resolveEditableWorkflowStatuses,
+  resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
@@ -187,10 +188,18 @@ export function MyTasksPage() {
   ]
   const taskViewWorkflowStatuses = taskViewConfigurations.flatMap(
     ([teamId, resolvedConfiguration]) =>
-      resolveConfiguredWorkflowStatuses(resolvedConfiguration.configuration).map((status) => ({
+      resolveWorkItemTypeWorkflowStatuses(resolvedConfiguration.configuration).map(({
+        status,
+        workItemTypeId,
+      }) => ({
         statusId: status.id,
         teamId,
+        workItemTypeId,
       })),
+  )
+  const taskViewLegacyStatusIds = taskViewConfigurations.flatMap(
+    ([, resolvedConfiguration]) =>
+      resolveConfiguredWorkflowStatuses(resolvedConfiguration.configuration).map((status) => status.id),
   )
   const taskViewController = useTaskViewController({
     accessToken: workspace.accessToken,
@@ -199,7 +208,7 @@ export function MyTasksPage() {
       columns: taskViewColumns,
       fields: taskViewFields,
       layoutModes: ['board'],
-      legacyStatusIds: taskViewWorkflowStatuses.map((status) => status.statusId),
+      legacyStatusIds: taskViewLegacyStatusIds,
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },

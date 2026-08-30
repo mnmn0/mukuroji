@@ -166,6 +166,7 @@ import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
   resolveConfiguredWorkflowStatuses,
+  resolveWorkItemTypeWorkflowStatuses,
   resolveCreateWorkflowStatuses,
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
@@ -755,8 +756,12 @@ export function TeamIssuePage() {
     ...taskViewBuiltInFields,
     ...taskViewCustomFields.map((field) => `custom:${field.id}`),
   ]
-  const taskViewWorkflowStatuses = resolveConfiguredWorkflowStatuses(taskViewConfiguration).map(
-    (status) => ({ statusId: status.id, teamId }),
+  const taskViewWorkflowStatuses = resolveWorkItemTypeWorkflowStatuses(taskViewConfiguration).map(({
+    status,
+    workItemTypeId,
+  }) => ({ statusId: status.id, teamId, workItemTypeId }))
+  const taskViewLegacyStatusIds = resolveConfiguredWorkflowStatuses(taskViewConfiguration).map(
+    (status) => status.id,
   )
   const taskViewController = useTaskViewController({
     accessToken,
@@ -765,7 +770,7 @@ export function TeamIssuePage() {
       columns: taskViewColumns,
       fields: taskViewFields,
       layoutModes: ['table', 'board'],
-      legacyStatusIds: taskViewWorkflowStatuses.map((status) => status.statusId),
+      legacyStatusIds: taskViewLegacyStatusIds,
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },

@@ -314,6 +314,9 @@ function normalizeTaskViewFilters(
     ...(filters.workflowStatuses ? {
       workflowStatuses: filters.workflowStatuses.map((status) => ({
         teamId: status.teamId,
+        ...(status.workItemTypeId !== undefined
+          ? { workItemTypeId: status.workItemTypeId }
+          : {}),
         statusId: status.statusId,
       })),
     } : {}),

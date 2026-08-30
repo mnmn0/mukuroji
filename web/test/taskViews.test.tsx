@@ -196,7 +196,7 @@ describe('independent task views', () => {
     )
 
     expect(html).toContain('aria-label="ボードビュー"')
-    expect(html).toContain('data-testid="project-task-column-core-team-active"')
+    expect(html).toContain('data-testid="project-task-column-core-team-default-active"')
     expect(html).toContain('ワイヤーフレームを確認する')
     expect(html).toContain('data-testid="task-card-actions-wireframe"')
     expect(unavailableHtml).toContain(
@@ -281,8 +281,8 @@ describe('independent task views', () => {
     expect(boardHtml).toContain('p-4')
     expect(boardHtml).toContain('高 (1)')
     expect(boardHtml).toContain('data-testid="work-item-assignee-avatar"')
-    expect(boardHtml).not.toContain('project-task-column-core-team-ready')
-    expect(boardHtml).not.toContain('project-task-column-core-team-done')
+    expect(boardHtml).not.toContain('project-task-column-core-team-default-ready')
+    expect(boardHtml).not.toContain('project-task-column-core-team-default-done')
     expect(boardHtml).not.toContain('2026-06-03')
   })
 

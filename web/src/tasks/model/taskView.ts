@@ -21,6 +21,7 @@ import {
 } from '../../work-items/model/workItemFilters'
 import {
   formatWorkItemCustomFieldValue,
+  createWorkItemTypeWorkflowStatusKey,
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
   resolveWorkItemTypeDefinition,
@@ -745,7 +746,7 @@ export function createProjectTaskStatusColumns(
     const showTypeName = typeIds.size > 1
 
     return typeWorkflowStatuses.map(({ status, workItemTypeId }): ProjectTaskStatusColumn => ({
-      key: `${teamId}:${workItemTypeId}:${status.id}`,
+      key: createWorkItemTypeWorkflowStatusKey(teamId, workItemTypeId, status.id),
       label: [
         showTeamName ? teamName : undefined,
         showTypeName
@@ -1052,9 +1053,16 @@ export function resolveEffectiveStatusFilter(
   statusFilter: StatusFilter,
   statusColumns: readonly ProjectTaskStatusColumn[],
 ): StatusFilter {
-  return statusFilter === 'all' || statusColumns.some((column) => column.key === statusFilter)
-    ? statusFilter
-    : 'all'
+  if (statusFilter === 'all' || statusColumns.some((column) => column.key === statusFilter)) {
+    return statusFilter
+  }
+  const separatorIndex = statusFilter.lastIndexOf(':')
+  if (separatorIndex <= 0 || separatorIndex >= statusFilter.length - 1) return 'all'
+  const legacyTeamId = statusFilter.slice(0, separatorIndex)
+  const legacyStatusId = statusFilter.slice(separatorIndex + 1)
+  return statusColumns.find((column) =>
+    column.teamId === legacyTeamId && column.status.id === legacyStatusId
+  )?.key ?? 'all'
 }
 
 /**

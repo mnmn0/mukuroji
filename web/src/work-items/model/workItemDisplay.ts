@@ -151,6 +151,22 @@ export type WorkItemTypeWorkflowStatus = {
 }
 
 /**
+ * Creates a collision-safe key for a Team, Work Item Type, and workflow status.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemTypeId - Work Item Type whose workflow owns the status.
+ * @param statusId - Stable workflow status identifier.
+ * @returns Stable key used by type-qualified status columns and filters.
+ */
+export function createWorkItemTypeWorkflowStatusKey(
+  teamId: string,
+  workItemTypeId: string,
+  statusId: string,
+): string {
+  return [teamId, workItemTypeId, statusId].join('\u0000')
+}
+
+/**
  * Resolves every configured Work Item Type workflow status for board columns.
  *
  * @param configuration - Team or Workspace Work Item configuration.

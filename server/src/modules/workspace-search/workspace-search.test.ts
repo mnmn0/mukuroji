@@ -2484,6 +2484,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
     activeCustomFieldIds: new Set(['kept', 'private']),
     readableCustomFieldIds: new Set(['kept']),
     activeStatusIds: new Set(['core\0todo']),
+    activeWorkflowStatusIds: new Set(['core\0bug\0todo']),
     readableColumnIds: new Set(['title', 'customFields']),
     readableActorIds: new Set(['owner@example.com']),
     readableRelationIds: new Set(['visible-relation']),
@@ -2507,6 +2508,8 @@ test('sanitizes deleted and permission-restricted task view references with stab
           workflowStatuses: [
             { teamId: 'core', statusId: 'todo' },
             { teamId: 'core', statusId: 'gone' },
+            { teamId: 'core', workItemTypeId: 'bug', statusId: 'todo' },
+            { teamId: 'core', workItemTypeId: 'bug', statusId: 'gone' },
             { teamId: 'secret', statusId: 'hidden' },
           ],
           customFields: [
@@ -2546,7 +2549,10 @@ test('sanitizes deleted and permission-restricted task view references with stab
     teamIds: ['core'],
     projectIds: ['project-1'],
     statuses: ['todo'],
-    workflowStatuses: [{ teamId: 'core', statusId: 'todo' }],
+    workflowStatuses: [
+      { teamId: 'core', statusId: 'todo' },
+      { teamId: 'core', workItemTypeId: 'bug', statusId: 'todo' },
+    ],
     customFields: [{ fieldId: 'kept', operator: 'equals', value: 'yes' }],
   })
   expect(created.definition.layout).toMatchObject({

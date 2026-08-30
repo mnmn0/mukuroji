@@ -10,6 +10,7 @@ import { taskScheduleInstantToLocalDate } from '../../tasks/model/taskSchedule'
 import {
   isCompletedWorkItem,
   isOpenWorkItem,
+  createWorkItemTypeWorkflowStatusKey,
   resolveWorkItemTypeDefinition,
   resolveWorkItemTypeWorkflowStatuses,
   resolveWorkItemWorkflowStatusId,
@@ -180,7 +181,7 @@ export function createWorkspaceTaskStatusColumns(
     const showTypeName = typeIds.size > 1
 
     return typeWorkflowStatuses.map(({ status, workItemTypeId }) => ({
-      key: `${teamId}:${workItemTypeId}:${status.id}`,
+      key: createWorkItemTypeWorkflowStatusKey(teamId, workItemTypeId, status.id),
       label: [
         showTeamName ? teamName : undefined,
         showTypeName

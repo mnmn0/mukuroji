@@ -71,6 +71,8 @@ export type TaskViewScope =
 export type TaskViewWorkflowStatusFilter = {
   /** Team that owns the workflow status definition. */
   teamId: string
+  /** Stable Work Item Type identifier whose workflow owns the status; omitted for legacy unqualified filters. */
+  workItemTypeId?: string
   /** Stable workflow status identifier within the Team configuration. */
   statusId: string
 }

@@ -469,7 +469,10 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
   if (value.workflowStatuses !== undefined && (
     !Array.isArray(value.workflowStatuses) ||
     !value.workflowStatuses.every((entry) =>
-      isRecord(entry) && typeof entry.teamId === 'string' && typeof entry.statusId === 'string'
+      isRecord(entry) &&
+      typeof entry.teamId === 'string' &&
+      typeof entry.statusId === 'string' &&
+      (entry.workItemTypeId === undefined || typeof entry.workItemTypeId === 'string')
     )
   )) return false
   if (value.customFields !== undefined && (

@@ -119,6 +119,7 @@ import {
   resolveConfiguredWorkflowStatuses,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
+  resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -417,15 +418,24 @@ export function TaskPage() {
   }, [projectId, workItemConfigurationLoadResult.configurationsByTeam])
   const taskViewWorkflowStatuses = useMemo(
     () => Object.entries(workItemConfigurationLoadResult.configurationsByTeam)
-      .flatMap(([teamId, resolved]) => resolveConfiguredWorkflowStatuses(resolved.configuration).map((status) => ({
-        statusId: status.id,
-        teamId,
-      }))),
+      .flatMap(([teamId, resolved]) =>
+        resolveWorkItemTypeWorkflowStatuses(resolved.configuration).map(({
+          status,
+          workItemTypeId,
+        }) => ({
+          statusId: status.id,
+          teamId,
+          workItemTypeId,
+        }))
+      ),
     [workItemConfigurationLoadResult.configurationsByTeam],
   )
   const taskViewLegacyStatusIds = useMemo(
-    () => [...new Set(taskViewWorkflowStatuses.map((status) => status.statusId))],
-    [taskViewWorkflowStatuses],
+    () => [...new Set(Object.values(workItemConfigurationLoadResult.configurationsByTeam)
+      .flatMap((resolved) =>
+        resolveConfiguredWorkflowStatuses(resolved.configuration).map((status) => status.id)
+      ))],
+    [workItemConfigurationLoadResult.configurationsByTeam],
   )
   const taskViewFields = useMemo(
     () => [

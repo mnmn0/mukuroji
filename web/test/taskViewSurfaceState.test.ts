@@ -137,6 +137,54 @@ describe('task-view surface adapters', () => {
     expect(next.layout.columns).toEqual(definition.layout.columns)
   })
 
+  test('round-trips type-qualified Project status filters without mixing equal status IDs', () => {
+    const definition = {
+      ...createBuiltInTaskViewDefinition(
+        'project',
+        { kind: 'project', projectId: 'refero', teamId: 'core:team' },
+        'table',
+      ),
+      filters: {
+        workflowStatuses: [{
+          teamId: 'core:team',
+          workItemTypeId: 'bug',
+          statusId: 'active',
+        }],
+      },
+    } satisfies TaskViewDefinition
+    const state = taskViewDefinitionToProjectState(definition)
+
+    expect(state.statusFilter).toBe('core:team\u0000bug\u0000active')
+    const next = projectStateToTaskViewDefinition(definition, {
+      ...state,
+      statusFilter: 'core:team\u0000bug\u0000review',
+    })
+    expect(next.filters.workflowStatuses).toEqual([{
+      teamId: 'core:team',
+      workItemTypeId: 'bug',
+      statusId: 'review',
+    }])
+
+    const defaultTask = {
+      ...taskViewStoryTasks[0],
+      id: 'default-active',
+      teamId: 'core:team',
+      workItemTypeId: 'default',
+      workflowStatusId: 'active',
+    }
+    const bugTask = {
+      ...defaultTask,
+      id: 'bug-active',
+      workItemTypeId: 'bug',
+    }
+    expect(applyTaskViewDefinitionToTasks([defaultTask, bugTask], definition)
+      .map((task) => task.id)).toEqual(['bug-active'])
+    expect(applyTaskViewDefinitionToTasks([defaultTask, bugTask], {
+      ...definition,
+      filters: { workflowStatuses: [{ teamId: 'core:team', statusId: 'active' }] },
+    }).map((task) => task.id)).toEqual(['default-active', 'bug-active'])
+  })
+
   test('retains an existing Project custom-field predicate when another control changes', () => {
     const definition = createProjectDefinition()
     const state = taskViewDefinitionToProjectState(definition)

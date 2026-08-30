@@ -425,9 +425,9 @@ describe('Team-scoped task status columns and configuration', () => {
     )
 
     expect(columns.map((column) => ({ key: column.key, label: column.label }))).toEqual([
-      { key: 'core-team:default:todo', label: 'Core · To do' },
-      { key: 'core-team:default:review', label: 'Core · Review' },
-      { key: 'design-team:default:todo', label: 'Design · To do' },
+      { key: 'core-team\u0000default\u0000todo', label: 'Core · To do' },
+      { key: 'core-team\u0000default\u0000review', label: 'Core · Review' },
+      { key: 'design-team\u0000default\u0000todo', label: 'Design · To do' },
     ])
     expect(isTaskInProjectStatusColumn(coreTask, columns[0]!)).toBe(true)
     expect(isTaskInProjectStatusColumn(coreTask, columns[2]!)).toBe(false)
@@ -469,9 +469,9 @@ describe('Team-scoped task status columns and configuration', () => {
     )
 
     expect(columns.map((column) => ({ key: column.key, label: column.label }))).toEqual([
-      { key: 'core-team:default:todo', label: 'Work Item · To do' },
-      { key: 'core-team:default:review', label: 'Work Item · Review' },
-      { key: 'core-team:bug:todo', label: 'Bug · Investigate' },
+      { key: 'core-team\u0000default\u0000todo', label: 'Work Item · To do' },
+      { key: 'core-team\u0000default\u0000review', label: 'Work Item · Review' },
+      { key: 'core-team\u0000bug\u0000todo', label: 'Bug · Investigate' },
     ])
     expect(isTaskInProjectStatusColumn(typedTask, columns[0]!)).toBe(false)
     expect(isTaskInProjectStatusColumn(typedTask, columns[2]!)).toBe(true)
@@ -611,7 +611,7 @@ describe('task custom-field display, filters, and sorting', () => {
         searchQuery: 'URGENT',
         sortOrder: 'due-date-asc',
         statusColumns: columns,
-        statusFilter: 'core-team:default:todo',
+        statusFilter: 'core-team\u0000default\u0000todo',
         t: translateTaskLabel,
         today: new Date(2026, 6, 23, 12),
       },
@@ -644,7 +644,8 @@ describe('task custom-field display, filters, and sorting', () => {
     const validDefinitionFilter = { category: 'started', customFieldId: 'risk' }
     const staleDefinitionFilter = { category: 'started', customFieldId: 'removed' }
 
-    expect(resolveEffectiveStatusFilter('core-team:default:todo', columns)).toBe('core-team:default:todo')
+    expect(resolveEffectiveStatusFilter('core-team\u0000default\u0000todo', columns))
+      .toBe('core-team\u0000default\u0000todo')
     expect(resolveEffectiveStatusFilter('removed-team:todo', columns)).toBe('all')
     expect(resolveEffectiveDefinitionFilter(validDefinitionFilter, configuration))
       .toBe(validDefinitionFilter)

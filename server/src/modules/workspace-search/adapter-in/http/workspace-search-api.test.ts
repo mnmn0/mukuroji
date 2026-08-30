@@ -1412,7 +1412,11 @@ test('task view endpoints forward the complete lifecycle with current permission
     surface: 'project',
     scope: { kind: 'project', projectId: 'refero', teamId: 'core-team' },
     filters: {
-      workflowStatuses: [{ teamId: 'core-team', statusId: 'review' }],
+      workflowStatuses: [{
+        teamId: 'core-team',
+        workItemTypeId: 'bug',
+        statusId: 'review',
+      }],
       customFields: [{ fieldId: 'score', operator: 'greater-than', value: 3 }],
     },
     layout: {

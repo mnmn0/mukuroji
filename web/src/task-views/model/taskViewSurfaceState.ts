@@ -1,11 +1,13 @@
-import type {
-  SearchCustomFieldFilter,
-  SearchCustomFieldValue,
-  TaskViewDefinition,
-  TaskViewLayoutMode,
-  TaskViewScope,
-  TaskViewSurface,
-  TaskViewUrlOverride,
+import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type SearchCustomFieldFilter,
+  type SearchCustomFieldValue,
+  type TaskViewDefinition,
+  type TaskViewLayoutMode,
+  type TaskViewScope,
+  type TaskViewSurface,
+  type TaskViewUrlOverride,
+  type TaskViewWorkflowStatusFilter,
 } from '@mukuroji/contracts'
 import type { CanonicalWorkItem } from '../../tasks/api'
 import {
@@ -16,6 +18,7 @@ import {
   hasWorkItemDefinitionFilterValue,
   type WorkItemDefinitionFilter,
 } from '../../work-items/model/workItemFilters'
+import { createWorkItemTypeWorkflowStatusKey } from '../../work-items/model/workItemDisplay'
 import type { TaskViewPresentationSettings } from './taskViewPresentation'
 
 const defaultTaskViewColumns = [
@@ -181,9 +184,7 @@ export function taskViewDefinitionToProjectState(
     sortOrder: definition.layout.sort.find((sort) => sort.field === 'dueDate')?.direction === 'desc'
       ? 'due-date-desc'
       : 'due-date-asc',
-    statusFilter: workflowStatus
-      ? `${workflowStatus.teamId}:${workflowStatus.statusId}`
-      : 'all',
+    statusFilter: workflowStatus ? createProjectStatusFilterValue(workflowStatus) : 'all',
   }
 }
 
@@ -601,7 +602,10 @@ export function filterTasksByTaskViewDefinition(
     if (
       definition.filters.workflowStatuses?.length &&
       !definition.filters.workflowStatuses.some((status) =>
-        status.teamId === task.teamId && status.statusId === task.workflowStatusId
+        status.teamId === task.teamId &&
+        status.statusId === task.workflowStatusId &&
+        (status.workItemTypeId === undefined ||
+          status.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID))
       )
     ) return false
     if (
@@ -916,9 +920,31 @@ function isProjectTaskLayout(value: string): value is ProjectTaskLayoutMode {
   return taskLayoutModes.some((mode) => mode === value)
 }
 
+/**
+ * Creates the status filter value used by Project task controls.
+ *
+ * @param status - Team- and optionally Type-qualified workflow status.
+ * @returns A legacy colon-delimited value or a collision-safe type-qualified key.
+ */
+function createProjectStatusFilterValue(status: TaskViewWorkflowStatusFilter): string {
+  if (status.workItemTypeId === undefined) {
+    return [status.teamId, status.statusId].join(':')
+  }
+  return createWorkItemTypeWorkflowStatusKey(
+    status.teamId,
+    status.workItemTypeId,
+    status.statusId,
+  )
+}
+
 /** Parses the Team-qualified status key used by Project task controls. */
 function parseProjectStatusFilter(value: string) {
   if (value === 'all') return undefined
+  const parts = value.split('\u0000')
+  const [teamId, workItemTypeId, statusId] = parts
+  if (parts.length === 3 && teamId && workItemTypeId && statusId) {
+    return { teamId, workItemTypeId, statusId }
+  }
   const separatorIndex = value.lastIndexOf(':')
   if (separatorIndex <= 0 || separatorIndex >= value.length - 1) return undefined
   return {

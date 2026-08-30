@@ -12,6 +12,7 @@ import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   ENTERPRISE_PERMISSION_IDS,
   createDefaultUnscheduledWorkItemSchedule,
+  DEFAULT_WORK_ITEM_TYPE_ID,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -382,6 +383,7 @@ import {
   createProjectWorkspaceSearchDocument,
   createTaskViewProjectScopeKey,
   createTaskViewStatusKey,
+  createTaskViewWorkflowStatusKey,
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
   type SavedViewAccessScope,
@@ -498,10 +500,12 @@ import {
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
+  getWorkItemConfigurationWorkflows,
   getWorkItemTypeCustomFieldDefinitions,
   normalizeCustomFieldValues,
   previewWorkItemTypeChange,
   resolveWorkItemType,
+  resolveWorkItemTypeWorkflow,
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
 } from '../modules/work-items/work-item-configuration'
@@ -26821,6 +26825,7 @@ async function createTaskViewAccessScope(
   )
   const readableCustomFieldIds = new Set(activeCustomFieldIds)
   const activeStatusIds = new Set<string>()
+  const activeWorkflowStatusIds = new Set<string>()
   const readableActorIds = new Set(activeMembers.flatMap((member) => [
     member.memberKey,
     member.email,
@@ -26840,8 +26845,29 @@ async function createTaskViewAccessScope(
       activeCustomFieldIds.add(field.id)
       if (canReadTeam) readableCustomFieldIds.add(field.id)
     }
-    for (const status of teamConfiguration.resolved.configuration.workflow.statuses) {
-      activeStatusIds.add(createTaskViewStatusKey(teamConfiguration.teamId, status.id))
+    const configuration = teamConfiguration.resolved.configuration
+    for (const workflow of getWorkItemConfigurationWorkflows(configuration)) {
+      for (const status of workflow.statuses) {
+        activeStatusIds.add(createTaskViewStatusKey(teamConfiguration.teamId, status.id))
+      }
+    }
+    const workItemTypeIds = configuration.workItemTypes?.map((type) => type.id) ?? []
+    if (!workItemTypeIds.includes(DEFAULT_WORK_ITEM_TYPE_ID)) {
+      workItemTypeIds.push(DEFAULT_WORK_ITEM_TYPE_ID)
+    }
+    for (const workItemTypeId of workItemTypeIds) {
+      const workflow = resolveWorkItemTypeWorkflow(
+        configuration,
+        workItemTypeId,
+        { allowArchived: true },
+      )
+      for (const status of workflow.statuses) {
+        activeWorkflowStatusIds.add(createTaskViewWorkflowStatusKey(
+          teamConfiguration.teamId,
+          workItemTypeId,
+          status.id,
+        ))
+      }
     }
   }
 
@@ -26850,6 +26876,7 @@ async function createTaskViewAccessScope(
     activeCustomFieldIds,
     readableCustomFieldIds,
     activeStatusIds,
+    activeWorkflowStatusIds,
     readableActorIds,
     resolveReadableRelationIds: (input) => resolveReadableTaskViewRelationIds(
       principal,
@@ -27836,6 +27863,15 @@ function readTaskViewFilters(value: unknown): TaskViewFilters {
           'Task view workflow status Team ID',
           256,
         ),
+        ...(status.workItemTypeId === undefined
+          ? {}
+          : {
+              workItemTypeId: readRequiredTaskViewText(
+                status.workItemTypeId,
+                'Task view workflow status Work Item Type ID',
+                256,
+              ),
+            }),
         statusId: readRequiredTaskViewText(
           status.statusId,
           'Task view workflow status ID',

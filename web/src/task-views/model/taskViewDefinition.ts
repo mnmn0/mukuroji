@@ -640,7 +640,8 @@ function sanitizeTaskViewFilters(
 ): TaskViewFilters {
   const allowedFields = new Set(options.fields)
   const allowedLegacyStatuses = new Set(options.legacyStatusIds ?? [])
-  const allowedWorkflowStatuses = new Set(
+  const allowedWorkflowStatuses = options.workflowStatuses
+  const allowedWorkflowStatusKeys = new Set(
     options.workflowStatuses.map(createWorkflowStatusKey),
   )
   const next = cloneTaskViewFilters(filters)
@@ -675,7 +676,11 @@ function sanitizeTaskViewFilters(
   }
   if (next.workflowStatuses) {
     next.workflowStatuses = next.workflowStatuses.filter((status) => {
-      if (allowedWorkflowStatuses.has(createWorkflowStatusKey(status))) {
+      if (isTaskViewWorkflowStatusAllowed(
+        status,
+        allowedWorkflowStatuses,
+        allowedWorkflowStatusKeys,
+      )) {
         return true
       }
       warnings.push(createMigrationWarning(
@@ -1052,9 +1057,17 @@ function readWorkflowStatusFilters(value: unknown): TaskViewWorkflowStatusFilter
     if (
       !isRecord(candidate) ||
       typeof candidate.teamId !== 'string' ||
-      typeof candidate.statusId !== 'string'
+      typeof candidate.statusId !== 'string' ||
+      candidate.workItemTypeId !== undefined &&
+        typeof candidate.workItemTypeId !== 'string'
     ) return undefined
-    result.push({ statusId: candidate.statusId, teamId: candidate.teamId })
+    result.push({
+      statusId: candidate.statusId,
+      teamId: candidate.teamId,
+      ...(typeof candidate.workItemTypeId === 'string'
+        ? { workItemTypeId: candidate.workItemTypeId }
+        : {}),
+    })
   }
   return result
 }
@@ -1270,7 +1283,32 @@ function cloneTaskViewScope(scope: TaskViewScope): TaskViewScope {
  * @returns Collision-safe lookup key.
  */
 function createWorkflowStatusKey(status: TaskViewWorkflowStatusFilter): string {
-  return `${status.teamId}\u0000${status.statusId}`
+  return [
+    status.teamId,
+    status.workItemTypeId ?? '',
+    status.statusId,
+  ].join('\u0000')
+}
+
+/**
+ * Tests a workflow status filter against the current status capabilities.
+ *
+ * @param status - Persisted status filter to validate.
+ * @param allowedStatuses - Current type-qualified and legacy status capabilities.
+ * @param allowedStatusKeys - Exact lookup keys for type-qualified status capabilities.
+ * @returns Whether the filter is still available.
+ */
+function isTaskViewWorkflowStatusAllowed(
+  status: TaskViewWorkflowStatusFilter,
+  allowedStatuses: readonly TaskViewWorkflowStatusFilter[],
+  allowedStatusKeys: ReadonlySet<string>,
+): boolean {
+  if (status.workItemTypeId !== undefined) {
+    return allowedStatusKeys.has(createWorkflowStatusKey(status))
+  }
+  return allowedStatuses.some((candidate) =>
+    candidate.teamId === status.teamId && candidate.statusId === status.statusId
+  )
 }
 
 /**

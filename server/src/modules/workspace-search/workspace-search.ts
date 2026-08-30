@@ -47,6 +47,7 @@ import {
   type TaskViewMigrationWarning,
   type TaskViewScope,
   type TaskViewSurface,
+  type TaskViewWorkflowStatusFilter,
   type TaskViewWritableProjectScope,
   type UpdateSavedTaskViewInput,
   type WorkflowStatusCategory,
@@ -349,6 +350,8 @@ export type TaskViewAccessScope = {
   readableCustomFieldIds?: ReadonlySet<string>
   /** 現在存在する `${teamId}\0${statusId}` 形式の Team-qualified workflow status key です。 */
   activeStatusIds?: ReadonlySet<string>
+  /** Type-qualified workflow status keys currently present in the visible configurations. */
+  activeWorkflowStatusIds?: ReadonlySet<string>
   /** Current viewer が layout で利用できる built-in field です。未指定時はすべて許可します。 */
   readableColumnIds?: ReadonlySet<string>
   /** Active actor identifiers whose filter references may be disclosed to the current viewer. */
@@ -3616,6 +3619,25 @@ export function createTaskViewStatusKey(teamId: string, statusId: string) {
 }
 
 /**
+ * Creates the canonical Type-qualified key used by task view status allowlists.
+ *
+ * @param teamId - Team that owns the workflow status.
+ * @param workItemTypeId - Work Item Type whose workflow owns the status.
+ * @param statusId - Stable workflow status identifier within the workflow.
+ * @returns Collision-safe allowlist key for the Team, Work Item Type, and status.
+ */
+export function createTaskViewWorkflowStatusKey(
+  teamId: string,
+  workItemTypeId: string,
+  statusId: string,
+) {
+  return `${requireText(teamId, 'Task view status Team ID')}\0${requireText(
+    workItemTypeId,
+    'Task view Work Item Type ID',
+  )}\0${requireText(statusId, 'Task view status ID')}`
+}
+
+/**
  * Creates the canonical Team-qualified key used by task view Project scopes.
  *
  * @param teamId - Team that owns the Project.
@@ -3726,10 +3748,7 @@ async function sanitizeTaskViewDefinition(
               addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
               return false
             }
-            if (
-              !access.activeStatusIds ||
-              access.activeStatusIds.has(createTaskViewStatusKey(status.teamId, status.statusId))
-            ) {
+            if (isTaskViewWorkflowStatusActive(status, access)) {
               return true
             }
             addTaskViewMigrationWarning(
@@ -3886,13 +3905,36 @@ function isReadableTaskViewBuiltInField(
   return !enforcePermission || !access.readableColumnIds || access.readableColumnIds.has(field)
 }
 
+/** Returns whether a type-qualified or legacy workflow status is currently active. */
+function isTaskViewWorkflowStatusActive(
+  status: TaskViewWorkflowStatusFilter,
+  access: TaskViewAccessScope,
+) {
+  if (status.workItemTypeId !== undefined && access.activeWorkflowStatusIds) {
+    return access.activeWorkflowStatusIds.has(createTaskViewWorkflowStatusKey(
+      status.teamId,
+      status.workItemTypeId,
+      status.statusId,
+    ))
+  }
+  if (access.activeStatusIds) {
+    return access.activeStatusIds.has(createTaskViewStatusKey(status.teamId, status.statusId))
+  }
+  if (status.workItemTypeId !== undefined || !access.activeWorkflowStatusIds) return true
+  const teamPrefix = `${requireText(status.teamId, 'Task view status Team ID')}\0`
+  const statusSuffix = `\0${requireText(status.statusId, 'Task view status ID')}`
+  return [...access.activeWorkflowStatusIds].some((key) =>
+    key.startsWith(teamPrefix) && key.endsWith(statusSuffix)
+  )
+}
+
 /** Returns whether a legacy unqualified status still exists in any relevant Team workflow. */
 function isTaskViewLegacyStatusActive(
   statusId: string,
   definition: TaskViewDefinition,
   access: TaskViewAccessScope,
 ) {
-  if (!access.activeStatusIds) return true
+  if (!access.activeStatusIds && !access.activeWorkflowStatusIds) return true
   const teamIds = new Set<string>()
   const scopeTeamId = getTaskViewScopeTeamId(definition.scope)
   if (scopeTeamId) teamIds.add(scopeTeamId)
@@ -3904,11 +3946,13 @@ function isTaskViewLegacyStatusActive(
   }
   if (teamIds.size) {
     return [...teamIds].some((teamId) =>
-      access.activeStatusIds?.has(createTaskViewStatusKey(teamId, statusId))
+      isTaskViewWorkflowStatusActive({ teamId, statusId }, access)
     )
   }
   const suffix = `\0${statusId}`
-  return [...access.activeStatusIds].some((key) => key.endsWith(suffix))
+  const activeStatusIds = access.activeStatusIds ?? access.activeWorkflowStatusIds
+  if (!activeStatusIds) return false
+  return [...activeStatusIds].some((key) => key.endsWith(suffix))
 }
 
 /** Appends one deterministic migration warning without exposing an unreadable identifier. */
@@ -4977,15 +5021,25 @@ function normalizeTaskViewWorkflowStatuses(
     if (!isRecordValue(value)) {
       return invalidTaskView('Task view workflow status is invalid.')
     }
+    const workItemTypeId = value.workItemTypeId === undefined
+      ? undefined
+      : requireText(value.workItemTypeId, 'Task view workflow status Work Item Type ID', 256)
     return {
       teamId: requireText(value.teamId, 'Task view workflow status Team ID', 256),
+      ...(workItemTypeId === undefined ? {} : { workItemTypeId }),
       statusId: requireText(value.statusId, 'Task view workflow status ID', 256),
     }
   })
-  return [...new Map(normalized.map((value) => [createTaskViewStatusKey(
-    value.teamId,
-    value.statusId,
-  ), value])).values()]
+  return [...new Map(normalized.map((value) => [
+    value.workItemTypeId === undefined
+      ? createTaskViewStatusKey(value.teamId, value.statusId)
+      : createTaskViewWorkflowStatusKey(
+          value.teamId,
+          value.workItemTypeId,
+          value.statusId,
+        ),
+    value,
+  ])).values()]
 }
 
 /** Validates and deduplicates a bounded string enum list. */
