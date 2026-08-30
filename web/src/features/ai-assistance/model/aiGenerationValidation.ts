@@ -178,6 +178,9 @@ export function isRetentionExpiredAiAssistanceGeneration(
   value: unknown,
   _now = Date.now(),
 ): value is AiAssistanceGeneration {
+  // The retention decision is server-authoritative; keep the injectable argument for callers
+  // and tests while deliberately ignoring the potentially skewed browser clock.
+  void _now
   if (!isAiAssistanceGeneration(value) || value.content.availability !== 'withheld' ||
     value.content.reasonCode !== 'retention-expired') return false
   const createdAt = Date.parse(value.createdAt)
