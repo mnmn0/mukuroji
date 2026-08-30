@@ -291,6 +291,18 @@ describe('AI assistance redaction', () => {
       value: '太郎',
     })).toBe('[REDACTED_PERSON]')
     expect(redactAiAssistancePromptFieldValue({
+      fieldId: '姓',
+      label: 'Field',
+      fieldType: 'short-text',
+      value: '山田',
+    })).toBe('[REDACTED_PERSON]')
+    expect(redactAiAssistancePromptFieldValue({
+      fieldId: '名',
+      label: 'Field',
+      fieldType: 'short-text',
+      value: '太郎',
+    })).toBe('[REDACTED_PERSON]')
+    expect(redactAiAssistancePromptFieldValue({
       fieldId: 'project-name',
       label: '名称',
       fieldType: 'short-text',

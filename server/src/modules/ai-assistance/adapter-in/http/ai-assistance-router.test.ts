@@ -174,6 +174,20 @@ function createHarness(
       currentCheckCount += 1
       return { current: true }
     },
+    getActorAuthorizationConditions() {
+      return [{
+        kind: 'workspace-member' as const,
+        tableName: 'WorkspaceAccessTable',
+        key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member-1' },
+        expectedAttributes: {
+          entryType: 'workspace-member',
+          status: 'active',
+          memberKey: 'member-1',
+          role: 'member',
+          version: 1,
+        },
+      }]
+    },
     readJson(request) {
       return request.json()
     },
@@ -259,6 +273,37 @@ describe('createAiAssistanceRouter', () => {
 
     expect(response.status).toBe(200)
     expect(currentAuthorization).toBeFalse()
+    expect(harness.authenticateCount()).toBe(2)
+  })
+
+  test('passes a fresh actor authorization fence to preference writes', async () => {
+    let observedConditions: unknown
+    const harness = createHarness(false, {
+      ...createService(),
+      async updatePreference(_actor, request, authorization) {
+        observedConditions = await authorization?.getActorAuthorizationConditions?.()
+        return {
+          schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+          enabled: request.enabled,
+          revision: request.expectedRevision + 1,
+          updatedAt: '2026-08-25T00:00:00.000Z',
+        }
+      },
+    })
+    const response = await harness.router.request('/api/ai-assistance/preferences/me', {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer token-1',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ enabled: false, expectedRevision: 0 }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(observedConditions).toEqual([expect.objectContaining({
+      kind: 'workspace-member',
+      key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member-1' },
+    })])
     expect(harness.authenticateCount()).toBe(2)
   })
 

@@ -109,6 +109,25 @@ describe('AI assistance generation response boundary', () => {
     })
   })
 
+  /** Trusts the server's withholding reason even when the browser clock is behind. */
+  test('accepts server-authoritative retention withholding before the local deadline', () => {
+    const now = Date.now()
+    const withheld = {
+      ...aiSearchGenerationFixture,
+      createdAt: new Date(now - 120_000).toISOString(),
+      expiresAt: new Date(now + 60_000).toISOString(),
+      content: {
+        availability: 'withheld',
+        reasonCode: 'retention-expired',
+      },
+    }
+
+    expect(parseAiAssistanceGenerationResponse(withheld, 'search', now).content).toEqual({
+      availability: 'withheld',
+      reasonCode: 'retention-expired',
+    })
+  })
+
   /** Rejects control characters that the downstream collaboration boundary cannot persist. */
   test('rejects unsafe control characters in Summary claims', () => {
     const content = aiSummaryGenerationFixture.content

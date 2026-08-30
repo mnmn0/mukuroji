@@ -3672,6 +3672,14 @@ test('retries a comment when only the comment-window fence changed concurrently'
     blocks: [],
   })
   memory.beforeTransaction(() => {
+    memory.put({
+      workspaceId: 'workspace-1',
+      recordKey: `COMMENT_WINDOW#${Buffer.from(document.id, 'utf8').toString('base64url')}`,
+      entryType: 'document-comment-window',
+      documentId: document.id,
+      revision: 1,
+      updatedAt: '2026-07-18T00:00:00.000Z',
+    })
     throw transactionCancellationError([
       'None',
       'None',
@@ -3691,7 +3699,7 @@ test('retries a comment when only the comment-window fence changed concurrently'
     workspaceId: 'workspace-1',
     documentId: document.id,
     access: ownerAccess,
-  })).toBe(1)
+  })).toBe(2)
 })
 
 test('stores at most one replaceable presence lease per Workspace member', async () => {

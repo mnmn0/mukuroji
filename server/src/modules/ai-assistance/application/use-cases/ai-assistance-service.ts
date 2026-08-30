@@ -290,8 +290,13 @@ export function createAiAssistanceService(
   async function updatePreference(
     actor: AiAssistanceActor,
     input: UpdateAiAssistancePreferenceRequest,
+    authorization?: AiAssistanceAuthorizationCallbacks,
   ): Promise<AiAssistancePreference> {
     const request = parseUpdateAiAssistancePreferenceRequest(input)
+    const authorizationConditions = await authorization?.getActorAuthorizationConditions?.()
+    if (authorizationConditions === undefined || authorizationConditions.length === 0) {
+      throw authorizationChangedError('permission-changed')
+    }
     return await options.store.putPreference(
       actor.workspaceId,
       actor.memberId,
@@ -302,6 +307,7 @@ export function createAiAssistanceService(
         updatedAt: now().toISOString(),
       },
       request.expectedRevision,
+      authorizationConditions,
     )
   }
 

@@ -1171,6 +1171,94 @@ describe('AI assistance API composition', () => {
     expect(authorizationToken).not.toContain('未完了')
   })
 
+  test('fences selected Search members, status, custom field, Team, and Project filters', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const baseConfigurationClient = createFakeWorkItemConfigurationClient()
+    const workItemConfigurations = createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(workspaceId, teamId) {
+        const resolved = await baseConfigurationClient.getTeamConfiguration(workspaceId, teamId)
+        return {
+          ...resolved,
+          configuration: {
+            ...resolved.configuration,
+            customFields: [{
+              id: 'budget-field',
+              name: 'Budget',
+              type: 'number',
+              sortOrder: 1,
+              required: false,
+            }],
+          },
+        }
+      },
+    })
+    const selectedDraft: AiAssistanceDraft = {
+      kind: 'search',
+      interpretation: 'Find the selected work.',
+      filters: {
+        assigneeUserIds: ['demo@example.com'],
+        creatorUserIds: ['demo@example.com'],
+        statuses: ['todo'],
+        customFields: [{ fieldId: 'budget-field', operator: 'greater-than', value: 100 }],
+        teamIds: ['core-team'],
+        projectIds: ['refero'],
+      },
+      caveats: [],
+    }
+    let selectedConditions: ResolvedAiAssistanceContext['authorizationConditions'] = []
+    setTestAppDependencies({
+      workItemConfigurations,
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          await authorization.resolveContext({ actor, request })
+          const selected = await authorization.resolveContext({
+            actor,
+            request,
+            draft: selectedDraft,
+          })
+          selectedConditions = selected.authorizationConditions ?? []
+          return createSearchGeneration()
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-search-selected-fences' },
+      body: JSON.stringify({
+        task: 'search',
+        locale: 'en',
+        query: 'Find selected work.',
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'workspace-member',
+      key: {
+        workspaceId: 'user#demo@example.com',
+        recordKey: 'MEMBER#demo@example.com',
+      },
+    }))
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'work-item-configuration',
+      expectedAttributes: expect.objectContaining({
+        scopeId: 'core-team',
+      }),
+    }))
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'directory-reference',
+      key: {
+        directoryId: 'user#demo@example.com',
+        entryKey: 'PROJECT#refero',
+      },
+    }))
+  })
+
   test('uses the requested locale for AI directory labels', async () => {
     const calls = configureFakeProjectClients(true, {
       projectAccesses: [{ projectId: 'refero', role: 'viewer' }],

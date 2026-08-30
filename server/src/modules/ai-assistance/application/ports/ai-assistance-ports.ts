@@ -277,6 +277,8 @@ export type AiAssistanceAuthorizationCallbacks = {
   isAuthorizationCurrent(
     input: CheckAiAssistanceAuthorizationInput,
   ): Promise<AiAssistanceAuthorizationState>
+  /** Reads current actor authorization rows for a preference commit. */
+  getActorAuthorizationConditions?(): Promise<readonly AiAssistanceAuthorizationCondition[]>
 }
 
 /** Provider request passed through the replaceable model gateway port. */
@@ -616,6 +618,7 @@ export interface AiAssistanceStore {
     memberId: string,
     preference: AiAssistancePreference,
     expectedRevision: number,
+    authorizationConditions?: readonly AiAssistanceAuthorizationCondition[],
   ): Promise<AiAssistancePreference>
   /** Creates one immutable generation record. */
   createGeneration(
@@ -705,6 +708,7 @@ export interface AiAssistanceService {
   updatePreference(
     actor: AiAssistanceActor,
     request: UpdateAiAssistancePreferenceRequest,
+    authorization?: AiAssistanceAuthorizationCallbacks,
   ): Promise<AiAssistancePreference>
   /**
    * Generates, validates, reauthorizes, and persists one draft.

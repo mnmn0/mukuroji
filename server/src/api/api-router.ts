@@ -1193,8 +1193,12 @@ const aiAssistanceService: AiAssistanceService = {
     ),
   getPreference: (actor) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.getPreference(actor),
-  updatePreference: (actor, request) =>
-    requireAppDependencies().aiAssistance.aiAssistanceService.updatePreference(actor, request),
+  updatePreference: (actor, request, authorization) =>
+    requireAppDependencies().aiAssistance.aiAssistanceService.updatePreference(
+      actor,
+      request,
+      authorization,
+    ),
   generate: (actor, request, authorization, idempotencyKey, requestStartedAtMs) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.generate(
       actor,
@@ -5978,6 +5982,8 @@ routeApp.route('/', createAiAssistanceRouter<WorkspacePrincipal>({
   getPolicyAuthorizationFence: createAiAssistancePolicyAuthorizationFence,
   resolveContext: resolveAiAssistanceContext,
   isAuthorizationCurrent: isAiAssistanceAuthorizationCurrent,
+  getActorAuthorizationConditions: (principal) =>
+    createAiAssistancePrincipalAuthorizationConditions(principal),
   readJson,
   mapError: toAiAssistanceExternalErrorResponse,
 }))
@@ -20483,36 +20489,7 @@ async function createAiAssistanceAuthorizationConditions(
   sources: readonly ResolvedAiPromptSource[],
   selectedDraft?: AiAssistanceDraft,
 ): Promise<AiAssistanceAuthorizationCondition[]> {
-  const workspaceAccessTableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
-    getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
-    'mukuroji-workspace-access-local'
-  const principalKind = principal.principalKind ?? 'member'
-  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
-  if (
-    principalKind === 'service-account' &&
-    (principal.enterpriseIdentityControlRevision === undefined ||
-      !enterpriseTableName)
-  ) {
-    throw aiAssistanceAuthorizationChangedError()
-  }
-  const conditions: AiAssistanceAuthorizationCondition[] = principalKind ===
-    'service-account'
-    ? []
-    : [{
-        kind: 'workspace-member',
-        tableName: workspaceAccessTableName,
-        key: {
-          workspaceId: principal.directoryId,
-          recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
-        },
-        expectedAttributes: {
-          entryType: 'workspace-member',
-          status: 'active',
-          memberKey: normalizeProjectMemberKey(principal.userKey),
-          role: principal.workspaceRole,
-          version: principal.workspaceMember.version,
-        },
-      }]
+  const conditions = createAiAssistancePrincipalAuthorizationConditions(principal)
   conditions.push({
     kind: 'planning',
     tableName: getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
@@ -20545,25 +20522,6 @@ async function createAiAssistanceAuthorizationConditions(
         ? { allowMissingWhenExpectedZero: true }
         : {}),
     })
-  }
-  if (principal.enterpriseIdentityControlRevision !== undefined) {
-    if (enterpriseTableName) {
-      conditions.push({
-        kind: 'enterprise-control',
-        tableName: enterpriseTableName,
-        key: {
-          scopeKey: `WORKSPACE#${principal.directoryId}`,
-          recordKey: 'CONTROL',
-        },
-        expectedAttributes: {
-          entryType: 'enterprise-identity-control',
-          controlRevision: principal.enterpriseIdentityControlRevision,
-        },
-        ...(principal.enterpriseIdentityControlRevision === 0
-          ? { allowMissingWhenExpectedZero: true }
-          : {}),
-      })
-    }
   }
   const seen = new Set<string>()
   const deduplicated = [
@@ -20600,6 +20558,69 @@ async function createAiAssistanceAuthorizationConditions(
     )
   }
   return deduplicated
+}
+
+/**
+ * Builds the current actor rows that authorize a member preference write.
+ *
+ * Preference updates have no source request, so this intentionally fences only
+ * the authenticated Workspace membership and Enterprise control rows. The
+ * caller must still bind these rows to the actor identity before persistence.
+ *
+ * @param principal - Freshly authenticated Workspace principal.
+ * @returns Exact membership and Enterprise control conditions for the actor.
+ */
+function createAiAssistancePrincipalAuthorizationConditions(
+  principal: WorkspacePrincipal,
+): AiAssistanceAuthorizationCondition[] {
+  const workspaceAccessTableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
+    getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+    'mukuroji-workspace-access-local'
+  const principalKind = principal.principalKind ?? 'member'
+  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  if (
+    principalKind === 'service-account' &&
+    (principal.enterpriseIdentityControlRevision === undefined || !enterpriseTableName)
+  ) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  const conditions: AiAssistanceAuthorizationCondition[] = principalKind ===
+    'service-account'
+    ? []
+    : [{
+        kind: 'workspace-member',
+        tableName: workspaceAccessTableName,
+        key: {
+          workspaceId: principal.directoryId,
+          recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
+        },
+        expectedAttributes: {
+          entryType: 'workspace-member',
+          status: 'active',
+          memberKey: normalizeProjectMemberKey(principal.userKey),
+          role: principal.workspaceRole,
+          version: principal.workspaceMember.version,
+        },
+      }]
+  if (principal.enterpriseIdentityControlRevision !== undefined) {
+    if (!enterpriseTableName) return conditions
+    conditions.push({
+      kind: 'enterprise-control',
+      tableName: enterpriseTableName,
+      key: {
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: 'CONTROL',
+      },
+      expectedAttributes: {
+        entryType: 'enterprise-identity-control',
+        controlRevision: principal.enterpriseIdentityControlRevision,
+      },
+      ...(principal.enterpriseIdentityControlRevision === 0
+        ? { allowMissingWhenExpectedZero: true }
+        : {}),
+    })
+  }
+  return conditions
 }
 
 /**
@@ -21105,7 +21126,7 @@ function createAiAssistanceProjectMembershipAuthorizationCondition(
  * @param state - Fresh resolver state containing active member and route rows.
  * @param sources - Sources used to infer the current triage destination.
  * @param draft - Canonical draft being committed, when this is a final check.
- * @returns Selected configuration, member, and Project membership conditions.
+ * @returns Selected configuration, member, directory, and Project membership conditions.
  */
 async function createAiAssistanceSelectedDraftAuthorizationConditions(
   principal: WorkspacePrincipal,
@@ -21113,6 +21134,83 @@ async function createAiAssistanceSelectedDraftAuthorizationConditions(
   sources: readonly ResolvedAiPromptSource[],
   draft: AiAssistanceDraft | undefined,
 ): Promise<AiAssistanceAuthorizationCondition[]> {
+  if (draft?.kind === 'search') {
+    const conditions: AiAssistanceAuthorizationCondition[] = []
+    const selectedMemberIds = new Set([
+      ...(draft.filters.assigneeUserIds ?? []),
+      ...(draft.filters.creatorUserIds ?? []),
+    ])
+    for (const memberId of selectedMemberIds) {
+      const memberCondition = state.workspaceMemberAuthorizationConditionsByMemberId.get(
+        memberId,
+      )
+      if (memberCondition === undefined) {
+        throw aiAssistanceAuthorizationChangedError()
+      }
+      conditions.push(memberCondition)
+    }
+
+    const selectedTeamIds = new Set(draft.filters.teamIds ?? [])
+    const selectedProjectIds = new Set(draft.filters.projectIds ?? [])
+    const projectTeamIds = new Map<string, Set<string>>()
+    for (const team of state.searchContext.directory.teams) {
+      for (const project of team.projects) {
+        if (!selectedProjectIds.has(project.id)) continue
+        const teamIds = projectTeamIds.get(project.id) ?? new Set<string>()
+        teamIds.add(team.id)
+        projectTeamIds.set(project.id, teamIds)
+      }
+    }
+    for (const projectId of selectedProjectIds) {
+      if (!projectTeamIds.has(projectId)) {
+        throw aiAssistanceAuthorizationChangedError()
+      }
+    }
+
+    const selectedConfigurationTeamIds = new Set(selectedTeamIds)
+    for (const projectId of selectedProjectIds) {
+      for (const projectTeamId of projectTeamIds.get(projectId) ?? []) {
+        selectedConfigurationTeamIds.add(projectTeamId)
+      }
+    }
+    const selectedStatusIds = new Set(draft.filters.statuses ?? [])
+    const selectedCustomFieldIds = new Set(
+      (draft.filters.customFields ?? []).map((filter) => filter.fieldId),
+    )
+    for (const [teamId, workflow] of state.workflowsByTeamId) {
+      const statusMatches = workflow.statuses.some((status) => selectedStatusIds.has(status.id))
+      const customFieldMatches = [...selectedCustomFieldIds].some((fieldId) =>
+        state.customFieldIdsByTeamId.get(teamId)?.has(fieldId) === true
+      )
+      if (statusMatches || customFieldMatches) selectedConfigurationTeamIds.add(teamId)
+    }
+    for (const teamId of selectedConfigurationTeamIds) {
+      const configurationConditions = state.configurationAuthorizationConditionsByTeamId.get(
+        teamId,
+      )
+      if (configurationConditions === undefined) {
+        throw aiAssistanceAuthorizationChangedError()
+      }
+      conditions.push(...configurationConditions)
+    }
+    for (const teamId of selectedTeamIds) {
+      conditions.push(...await createAiAssistanceDirectoryReferenceAuthorizationConditions(
+        principal.directoryId,
+        teamId,
+        undefined,
+      ))
+    }
+    for (const [projectId, teamIds] of projectTeamIds) {
+      for (const teamId of teamIds) {
+        conditions.push(...await createAiAssistanceDirectoryReferenceAuthorizationConditions(
+          principal.directoryId,
+          teamId,
+          projectId,
+        ))
+      }
+    }
+    return conditions
+  }
   if (draft?.kind !== 'triage') return []
   const sourceRouting = sources.find((source) => source.triageSourceRouting !== undefined)
     ?.triageSourceRouting

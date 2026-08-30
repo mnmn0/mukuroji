@@ -1103,6 +1103,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     memberId: string,
     preference: AiAssistancePreference,
     expectedRevision: number,
+    authorizationConditions?: readonly AiAssistanceAuthorizationCondition[],
   ): Promise<AiAssistancePreference> {
     try {
       await this.#putRevisionFencedItem(
@@ -1115,6 +1116,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         },
         'preference',
         expectedRevision,
+        authorizationConditions,
       )
       return preference
     } catch (error) {
@@ -1494,27 +1496,66 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     item: Record<string, unknown>,
     valueAttribute: 'policy' | 'preference',
     expectedRevision: number,
+    authorizationConditions?: readonly AiAssistanceAuthorizationCondition[],
   ): Promise<void> {
     try {
-      await this.#documentClient.send(new PutCommand({
-        TableName: this.#tableName,
-        Item: item,
-        ConditionExpression: expectedRevision === 0
-          ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
-          : '#value.#revision = :expectedRevision',
-        ...(expectedRevision === 0
-          ? {}
-          : {
-              ExpressionAttributeNames: {
-                '#value': valueAttribute,
-                '#revision': 'revision',
-              },
-              ExpressionAttributeValues: {
-                ':expectedRevision': expectedRevision,
-              },
-            }),
-      }))
+      const revisionPut = {
+        Put: {
+          TableName: this.#tableName,
+          Item: item,
+          ConditionExpression: expectedRevision === 0
+            ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
+            : '#value.#revision = :expectedRevision',
+          ...(expectedRevision === 0
+            ? {}
+            : {
+                ExpressionAttributeNames: {
+                  '#value': valueAttribute,
+                  '#revision': 'revision',
+                },
+                ExpressionAttributeValues: {
+                  ':expectedRevision': expectedRevision,
+                },
+              }),
+        },
+      }
+      if (authorizationConditions === undefined || authorizationConditions.length === 0) {
+        await this.#documentClient.send(new PutCommand({
+          TableName: this.#tableName,
+          Item: item,
+          ConditionExpression: revisionPut.Put.ConditionExpression,
+          ...(revisionPut.Put.ExpressionAttributeNames === undefined
+            ? {}
+            : { ExpressionAttributeNames: revisionPut.Put.ExpressionAttributeNames }),
+          ...(revisionPut.Put.ExpressionAttributeValues === undefined
+            ? {}
+            : { ExpressionAttributeValues: revisionPut.Put.ExpressionAttributeValues }),
+        }))
+      } else {
+        await this.#documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            revisionPut,
+            ...createAiAssistanceAuthorizationConditionChecks(authorizationConditions),
+          ],
+        }))
+      }
     } catch (error) {
+      if (
+        authorizationConditions !== undefined &&
+        authorizationConditions.length > 0 &&
+        isTransactionConditionalFailureAtOrAfter(error, 1)
+      ) {
+        throw aiAssistanceAuthorizationChangedError(
+          'AI assistance actor authorization changed during preference update.',
+        )
+      }
+      if (
+        authorizationConditions !== undefined &&
+        authorizationConditions.length > 0 &&
+        isTransactionConditionalFailureAt(error, 0)
+      ) {
+        throw revisionConflictError()
+      }
       throw mapDynamoWriteError(error)
     }
   }
@@ -1612,14 +1653,24 @@ function createBudgetCounterTransactionItem(
         '#expiresAt = if_not_exists(#expiresAt, :expiresAt) ' +
         'ADD #generationCount :one, #reservedTokens :reservedTokens',
       ConditionExpression:
-        '(attribute_not_exists(#recordType) OR (' +
+        '((attribute_not_exists(#workspaceId) AND attribute_not_exists(#recordKey)) OR (' +
+        '#workspaceId = :workspaceId AND #recordKey = :recordKey AND ' +
         '#recordType = :recordType AND #scopeKey = :scopeKey AND ' +
-        '#windowStartedAt = :windowStartedAt AND #windowExpiresAt = :windowExpiresAt)) ' +
+        '#windowStartedAt = :windowStartedAt AND #windowExpiresAt = :windowExpiresAt AND ' +
+        '#expiresAt = :expiresAt AND ' +
+        'attribute_type(#generationCount, :numberType) AND ' +
+        'attribute_type(#reservedTokens, :numberType) AND ' +
+        'attribute_type(#windowStartedAt, :numberType) AND ' +
+        'attribute_type(#windowExpiresAt, :numberType) AND ' +
+        'attribute_type(#expiresAt, :numberType) AND ' +
+        '#generationCount >= :zero AND #reservedTokens >= :zero)) ' +
         'AND (attribute_not_exists(#generationCount) OR ' +
         '#generationCount <= :maximumPreviousGenerationCount) ' +
         'AND (attribute_not_exists(#reservedTokens) OR ' +
         '#reservedTokens <= :maximumPreviousReservedTokens)',
       ExpressionAttributeNames: {
+        '#workspaceId': 'workspaceId',
+        '#recordKey': 'recordKey',
         '#recordType': 'recordType',
         '#scopeKey': 'scopeKey',
         '#windowStartedAt': 'windowStartedAt',
@@ -1629,12 +1680,16 @@ function createBudgetCounterTransactionItem(
         '#reservedTokens': 'reservedTokens',
       },
       ExpressionAttributeValues: {
+        ':workspaceId': input.workspaceId,
+        ':recordKey': input.recordKey,
         ':recordType': 'ai-assistance-generation-budget',
         ':scopeKey': input.scopeKey,
         ':windowStartedAt': input.windowStartedAt,
         ':windowExpiresAt': input.windowExpiresAt,
         ':expiresAt': Math.floor(input.windowExpiresAt / 1_000),
         ':one': 1,
+        ':zero': 0,
+        ':numberType': 'N',
         ':reservedTokens': input.reservedTokens,
         ':maximumPreviousGenerationCount': input.generationLimit - 1,
         ':maximumPreviousReservedTokens': input.tokenLimit - input.reservedTokens,

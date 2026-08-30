@@ -586,8 +586,8 @@ function createLazyAiAssistanceService(
     updatePolicy: (actor, request, authorization) =>
       resolveService().updatePolicy(actor, request, authorization),
     getPreference: (actor) => resolveService().getPreference(actor),
-    updatePreference: (actor, request) =>
-      resolveService().updatePreference(actor, request),
+    updatePreference: (actor, request, authorization) =>
+      resolveService().updatePreference(actor, request, authorization),
     generate: (actor, request, authorization, idempotencyKey, requestStartedAtMs) =>
       resolveService().generate(
         actor,

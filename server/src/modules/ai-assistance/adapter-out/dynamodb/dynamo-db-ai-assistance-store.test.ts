@@ -592,6 +592,12 @@ describe('DynamoDbAiAssistanceStore', () => {
       for (const item of transactionItems.slice(1)) {
         const update = readRecord(readRecord(item).Update)
         expect(update.ConditionExpression).toContain(
+          'attribute_not_exists(#workspaceId) AND attribute_not_exists(#recordKey)',
+        )
+        expect(update.ConditionExpression).toContain(
+          'attribute_type(#generationCount, :numberType)',
+        )
+        expect(update.ConditionExpression).toContain(
           '#generationCount <= :maximumPreviousGenerationCount',
         )
         expect(update.ConditionExpression).toContain(
@@ -1799,6 +1805,95 @@ describe('DynamoDbAiAssistanceStore', () => {
     try {
       await expect(harness.store.putPreference('workspace-1', 'member-1', desired, 0))
         .resolves.toEqual(current)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('commits a preference together with the current member authorization fence', async () => {
+    const preference: AiAssistancePreference = {
+      schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+      enabled: false,
+      revision: 1,
+      updatedAt: '2026-08-25T00:00:02.000Z',
+    }
+    const authorizationConditions = [{
+      kind: 'workspace-member' as const,
+      tableName: 'WorkspaceAccessTable',
+      key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member-1' },
+      expectedAttributes: {
+        entryType: 'workspace-member',
+        status: 'active',
+        memberKey: 'member-1',
+        role: 'member',
+        version: 2,
+      },
+    }]
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.store.putPreference(
+        'workspace-1',
+        'member-1',
+        preference,
+        0,
+        authorizationConditions,
+      )).resolves.toEqual(preference)
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+      ])
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      if (!Array.isArray(transactionItems)) throw new TypeError('Expected transaction items.')
+      expect(transactionItems).toHaveLength(2)
+      expect(readRecord(readRecord(transactionItems[1]).ConditionCheck).TableName)
+        .toBe('WorkspaceAccessTable')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('keeps preference CAS replay semantics when the authorization fence is present', async () => {
+    const current: AiAssistancePreference = {
+      schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+      enabled: false,
+      revision: 1,
+      updatedAt: '2026-08-25T00:00:01.000Z',
+    }
+    const desired: AiAssistancePreference = {
+      ...current,
+      updatedAt: '2026-08-25T00:00:02.000Z',
+    }
+    const authorizationConditions = [{
+      kind: 'workspace-member' as const,
+      tableName: 'WorkspaceAccessTable',
+      key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member-1' },
+      expectedAttributes: {
+        entryType: 'workspace-member',
+        status: 'active',
+        memberKey: 'member-1',
+        role: 'member',
+        version: 2,
+      },
+    }]
+    const harness = createHarness([
+      transactionCancellation(['ConditionalCheckFailed', 'None']),
+      {
+        Item: {
+          workspaceId: 'workspace-1',
+          recordKey: 'AI_PREF#MEMBER#member-1',
+          recordType: 'ai-assistance-preference',
+          memberId: 'member-1',
+          preference: current,
+        },
+      },
+    ])
+    try {
+      await expect(harness.store.putPreference(
+        'workspace-1',
+        'member-1',
+        desired,
+        0,
+        authorizationConditions,
+      )).resolves.toEqual(current)
     } finally {
       harness.restore()
     }

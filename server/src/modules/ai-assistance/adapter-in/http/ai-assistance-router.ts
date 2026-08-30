@@ -2,6 +2,7 @@ import { Hono, type Context } from 'hono'
 import type { HonoRequest } from 'hono/request'
 import type {
   AiAssistanceActor,
+  AiAssistanceAuthorizationCondition,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceAuthorizationState,
   AiAssistanceService,
@@ -54,6 +55,14 @@ export type AiAssistanceRouterDependencies<Principal> = {
     input: CheckAiAssistanceAuthorizationInput,
     context: Context,
   ): Promise<AiAssistanceAuthorizationState>
+  /** Resolves current actor authorization rows for a preference commit. */
+  getActorAuthorizationConditions?(
+    principal: Principal,
+    actor: AiAssistanceActor,
+    context: Context,
+  ): readonly AiAssistanceAuthorizationCondition[] |
+    Promise<readonly AiAssistanceAuthorizationCondition[]> |
+    undefined
   /** Parses a JSON request with the application's canonical body-size/error boundary. */
   readJson(request: HonoRequest): Promise<unknown>
   /** Maps authentication, source authorization, and unexpected errors safely. */
@@ -110,11 +119,11 @@ export function createAiAssistanceRouter<Principal>(
 
   router.put('/api/ai-assistance/preferences/me', async (context) => {
     try {
-      const { actor } = await authenticateRequest(context, dependencies)
+      const { actor, authorization } = await authenticateRequest(context, dependencies)
       const request = parseUpdateAiAssistancePreferenceRequest(
         await dependencies.readJson(context.req),
       )
-      return context.json(await dependencies.service.updatePreference(actor, request))
+      return context.json(await dependencies.service.updatePreference(actor, request, authorization))
     } catch (error) {
       return mapRouterError(context, error, dependencies.mapError)
     }
@@ -302,6 +311,31 @@ async function authenticateRequest<Principal>(
           { ...input, actor: freshActor },
           context,
         )
+      },
+      getActorAuthorizationConditions: async () => {
+        const currentAccessToken = dependencies.readBearerAccessToken(context)
+        if (currentAccessToken === undefined || currentAccessToken !== accessToken) {
+          return []
+        }
+        try {
+          const currentPrincipal = await dependencies.authenticate(
+            currentAccessToken,
+            context,
+          )
+          const currentActor = await dependencies.toActor(currentPrincipal, context)
+          if (
+            currentActor.workspaceId !== actor.workspaceId ||
+            currentActor.memberId !== actor.memberId ||
+            currentActor.actorId !== actor.actorId
+          ) return []
+          return await dependencies.getActorAuthorizationConditions?.(
+            currentPrincipal,
+            currentActor,
+            context,
+          ) ?? []
+        } catch {
+          return []
+        }
       },
     },
   }
