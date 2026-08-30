@@ -39,7 +39,7 @@ export function CustomerImpactPanel({ signal, t }: CustomerImpactPanelProps) {
           </p>
         </div>
         <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${signalClassName}`}>
-          {t('customers.detail.impactSignal').replace('{signal}', signal.prioritySignal)}
+          {t('customers.detail.impactSignal').replace('{signal}', t(impactSignalLabels[signal.prioritySignal]))}
         </span>
       </div>
 
@@ -50,9 +50,7 @@ export function CustomerImpactPanel({ signal, t }: CustomerImpactPanelProps) {
         />
         <ImpactMetric
           label={t('customers.businessValue')}
-          value={signal.highestBusinessValue === undefined
-            ? '—'
-            : String(signal.highestBusinessValue)}
+          value={signal.businessValueTotal === 0 ? '—' : String(signal.businessValueTotal)}
         />
       </dl>
 
@@ -94,7 +92,7 @@ export function CustomerImpactPanel({ signal, t }: CustomerImpactPanelProps) {
                   {request.requestId}
                 </span>
                 <span className="font-semibold text-[var(--workbench-muted)]">
-                  {request.status} · {request.importance}
+                  {t(requestStatusLabels[request.status])} · {t(requestImportanceLabels[request.importance])}
                 </span>
               </li>
             ))}
@@ -103,6 +101,31 @@ export function CustomerImpactPanel({ signal, t }: CustomerImpactPanelProps) {
       ) : null}
     </section>
   )
+}
+
+/** Localized labels for the explainable Customer impact priority signal. */
+const impactSignalLabels: Record<CustomerImpactSignal['prioritySignal'], MessageKey> = {
+  none: 'customers.values.signal.none',
+  watch: 'customers.values.signal.watch',
+  high: 'customers.values.signal.high',
+  critical: 'customers.values.signal.critical',
+}
+
+/** Localized labels for Customer Request lifecycle values in impact projections. */
+const requestStatusLabels: Record<CustomerImpactSignal['requests'][number]['status'], MessageKey> = {
+  requested: 'customers.values.requestStatus.requested',
+  'in-progress': 'customers.values.requestStatus.inProgress',
+  completed: 'customers.values.requestStatus.completed',
+  closed: 'customers.values.requestStatus.closed',
+  merged: 'customers.values.requestStatus.merged',
+}
+
+/** Localized labels for Customer Request importance values in impact projections. */
+const requestImportanceLabels: Record<CustomerImpactSignal['requests'][number]['importance'], MessageKey> = {
+  low: 'customers.values.importance.low',
+  normal: 'customers.values.importance.normal',
+  high: 'customers.values.importance.high',
+  urgent: 'customers.values.importance.urgent',
 }
 
 /** Renders one compact impact statistic. */

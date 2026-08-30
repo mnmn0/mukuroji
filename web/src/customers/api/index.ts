@@ -1,5 +1,6 @@
 export {
   CustomerApiError,
+  createCustomerRequestFromTriage,
   createCustomerSavedView,
   getCustomer,
   getCustomerSavedViews,

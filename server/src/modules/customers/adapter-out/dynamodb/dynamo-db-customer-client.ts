@@ -117,13 +117,13 @@ export class DynamoDbCustomerClient implements CustomerClient {
 
   /** Lists customers within one Workspace boundary. */
   async listCustomers(workspaceId: string, input?: CustomerListInput): Promise<CustomerPage> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.listCustomers(workspaceId, input)
   }
 
   /** Reads a customer and its related graph. */
   async getCustomer(workspaceId: string, customerId: string): Promise<CustomerDetail> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.getCustomer(workspaceId, customerId)
   }
 
@@ -149,13 +149,13 @@ export class DynamoDbCustomerClient implements CustomerClient {
 
   /** Lists contacts belonging to a customer. */
   async listContacts(workspaceId: string, customerId: string): Promise<CustomerContact[]> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.listContacts(workspaceId, customerId)
   }
 
   /** Reads one contact under its customer boundary. */
   async getContact(workspaceId: string, customerId: string, contactId: string): Promise<CustomerContact> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.getContact(workspaceId, customerId, contactId)
   }
 
@@ -181,13 +181,13 @@ export class DynamoDbCustomerClient implements CustomerClient {
 
   /** Lists customer requests within a Workspace boundary. */
   async listRequests(workspaceId: string, input?: CustomerRequestListInput): Promise<CustomerRequestPage> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.listRequests(workspaceId, input)
   }
 
   /** Reads one Customer Request. */
   async getRequest(workspaceId: string, requestId: string): Promise<CustomerRequest> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.getRequest(workspaceId, requestId)
   }
 
@@ -233,25 +233,25 @@ export class DynamoDbCustomerClient implements CustomerClient {
 
   /** Returns customer impact for one canonical Work Item. */
   async getWorkItemImpact(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerImpactSignal> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.getWorkItemImpact(workspaceId, teamId, workItemId)
   }
 
   /** Returns customer impact for one Project. */
   async getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.getProjectImpact(workspaceId, projectId)
   }
 
   /** Returns Work Items associated with a Customer. */
   async listCustomerWorkItems(workspaceId: string, customerId: string): Promise<CustomerWorkItemSummary[]> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.listCustomerWorkItems(workspaceId, customerId)
   }
 
   /** Lists saved customer directory views. */
   async listSavedViews(workspaceId: string): Promise<CustomerSavedView[]> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.listSavedViews(workspaceId)
   }
 
@@ -272,7 +272,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
 
   /** Exports all Customer-owned records for one Workspace. */
   async exportWorkspace(workspaceId: string): Promise<CustomerWorkspaceExport> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.exportWorkspace(workspaceId)
   }
 
@@ -288,7 +288,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
 
   /** Lists previously prepared completion notification candidates. */
   async listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]> {
-    const { memory } = await this.readMemory(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.listCompletionNotifications(workspaceId, teamId, workItemId)
   }
 
@@ -304,6 +304,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
         TableName: this.tableName,
         KeyConditionExpression: 'workspaceId = :workspaceId',
         ExpressionAttributeValues: { ':workspaceId': workspaceId },
+        ConsistentRead: true,
         Limit: 250,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
@@ -332,11 +333,32 @@ export class DynamoDbCustomerClient implements CustomerClient {
   }
 
   /** Loads a Workspace graph into the shared in-memory application implementation. */
-  private async readMemory(workspaceId: string): Promise<{ memory: InMemoryCustomerClient; loaded: LoadedCustomerWorkspace }> {
+  private async readMemory(workspaceId: string): Promise<{
+    memory: InMemoryCustomerClient
+    loaded: LoadedCustomerWorkspace
+    retentionResult: CustomerRetentionResult
+  }> {
     const loaded = await this.load(workspaceId)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
     memory.replaceWorkspaceState(workspaceId, loaded.state)
-    return { memory, loaded }
+    const retentionResult = await memory.redactExpired(workspaceId, this.now().toISOString())
+    return { memory, loaded, retentionResult }
+  }
+
+  /** Loads a Workspace graph and persists any retention redaction before returning it. */
+  private async readMemoryForRead(workspaceId: string): Promise<{
+    memory: InMemoryCustomerClient
+    loaded: LoadedCustomerWorkspace
+  }> {
+    const result = await this.readMemory(workspaceId)
+    if (
+      result.retentionResult.customersRedacted > 0 ||
+      result.retentionResult.contactsRedacted > 0 ||
+      result.retentionResult.requestsRedacted > 0
+    ) {
+      await this.persist(workspaceId, result.loaded, result.memory.readWorkspaceState(workspaceId))
+    }
+    return result
   }
 
   /** Applies one in-memory operation and durably commits its graph diff. */
@@ -367,6 +389,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
     for (const recordKey of previousRows.keys()) {
       if (!nextRows.has(recordKey)) transactItems.push({ Delete: { TableName: this.tableName, Key: { workspaceId, recordKey } } })
     }
+    if (transactItems.length === 0) return
     const nextRevision = loaded.revision + 1
     transactItems.push({
       Put: {
@@ -490,27 +513,123 @@ function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRo
 
 /** Performs a small structural Customer validation at the persistence boundary. */
 function isCustomer(value: unknown): value is Customer {
-  return isRecord(value) && value.schemaVersion === 1 && typeof value.id === 'string' && typeof value.workspaceId === 'string' && typeof value.name === 'string' && typeof value.tier === 'string' && typeof value.size === 'string' && typeof value.status === 'string' && typeof value.health === 'string' && typeof value.revision === 'number' && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string'
+  return isRecord(value) && value.schemaVersion === 1 && isString(value.id) && isString(value.workspaceId) && isString(value.name) &&
+    isOneOf(value.tier, ['strategic', 'enterprise', 'growth', 'standard', 'trial']) &&
+    isOneOf(value.size, ['startup', 'small', 'mid-market', 'enterprise']) &&
+    isOneOf(value.status, ['prospect', 'active', 'inactive', 'churned']) &&
+    isOneOf(value.health, ['healthy', 'watch', 'at-risk', 'critical', 'unknown']) &&
+    isOptionalString(value.domain) && isOptionalString(value.ownerUserId) &&
+    (value.businessValue === undefined || isNonnegativeNumber(value.businessValue) && value.businessValue <= 100) &&
+    isOptionalString(value.notes) && isOptionalRetention(value.retention) &&
+    isSafeNonnegativeInteger(value.contactCount) && isSafeNonnegativeInteger(value.requestCount) &&
+    isSafeNonnegativeInteger(value.openRequestCount) && isSafeRevision(value.revision) &&
+    isIsoInstant(value.createdAt) && isIsoInstant(value.updatedAt)
 }
 
 /** Performs a small structural Contact validation at the persistence boundary. */
 function isContact(value: unknown): value is CustomerContact {
-  return isRecord(value) && typeof value.id === 'string' && typeof value.workspaceId === 'string' && typeof value.customerId === 'string' && typeof value.name === 'string' && typeof value.primary === 'boolean' && (value.status === 'active' || value.status === 'inactive') && typeof value.revision === 'number'
+  return isRecord(value) && isString(value.id) && isString(value.workspaceId) && isString(value.customerId) && isString(value.name) &&
+    isOptionalString(value.email) && isOptionalString(value.role) && isOptionalString(value.phone) &&
+    typeof value.primary === 'boolean' && (value.status === 'active' || value.status === 'inactive') &&
+    isOptionalRetention(value.retention) && isSafeRevision(value.revision) &&
+    isIsoInstant(value.createdAt) && isIsoInstant(value.updatedAt)
 }
 
 /** Performs a small structural Customer Request validation at the persistence boundary. */
 function isRequest(value: unknown): value is CustomerRequest {
-  return isRecord(value) && value.schemaVersion === 1 && typeof value.id === 'string' && typeof value.workspaceId === 'string' && typeof value.customerId === 'string' && isRecord(value.source) && typeof value.originalMessage === 'string' && typeof value.receivedAt === 'string' && typeof value.importance === 'string' && typeof value.status === 'string' && Array.isArray(value.workItemLinks) && Array.isArray(value.projectLinks) && typeof value.revision === 'number'
+  return isRecord(value) && value.schemaVersion === 1 && isString(value.id) && isString(value.workspaceId) && isString(value.customerId) &&
+    isOptionalString(value.contactId) && isOptionalString(value.triageEntryId) && isRequestSource(value.source) &&
+    isString(value.originalMessage) && isIsoInstant(value.receivedAt) &&
+    isOneOf(value.importance, ['low', 'normal', 'high', 'urgent']) &&
+    isOneOf(value.status, ['requested', 'in-progress', 'completed', 'closed', 'merged']) &&
+    isOptionalString(value.mergedIntoRequestId) &&
+    (value.mergedAt === undefined || isIsoInstant(value.mergedAt)) && isOptionalString(value.mergedBy) &&
+    isOptionalExternalReference(value.externalReference) &&
+    Array.isArray(value.workItemLinks) && value.workItemLinks.every(isWorkItemLink) &&
+    Array.isArray(value.projectLinks) && value.projectLinks.every(isProjectLink) &&
+    isOptionalRetention(value.retention) && isSafeRevision(value.revision) &&
+    isIsoInstant(value.createdAt) && isIsoInstant(value.updatedAt)
 }
 
 /** Performs a small structural saved-view validation at the persistence boundary. */
 function isSavedView(value: unknown): value is CustomerSavedView {
-  return isRecord(value) && typeof value.id === 'string' && typeof value.workspaceId === 'string' && typeof value.name === 'string' && isRecord(value.filters) && typeof value.revision === 'number'
+  return isRecord(value) && isString(value.id) && isString(value.workspaceId) && isString(value.name) &&
+    isCustomerListInput(value.filters) && isOptionalOneOf(value.groupBy, ['tier', 'size', 'status', 'health', 'owner']) &&
+    isSafeRevision(value.revision) && isIsoInstant(value.createdAt) && isIsoInstant(value.updatedAt)
 }
 
 /** Performs a small structural notification validation at the persistence boundary. */
 function isNotification(value: unknown): value is CustomerCompletionNotification {
-  return isRecord(value) && typeof value.id === 'string' && typeof value.workspaceId === 'string' && typeof value.requestId === 'string' && typeof value.customerId === 'string' && typeof value.teamId === 'string' && typeof value.workItemId === 'string' && typeof value.canNotify === 'boolean' && typeof value.preparedAt === 'string'
+  return isRecord(value) && isString(value.id) && isString(value.workspaceId) && isString(value.requestId) &&
+    isString(value.customerId) && isString(value.teamId) && isString(value.workItemId) &&
+    typeof value.canNotify === 'boolean' && isOptionalOneOf(value.skipReason, ['source-not-capable', 'permission-restricted', 'retention-redacted']) &&
+    isIsoInstant(value.preparedAt)
+}
+
+/** Validates the provider-neutral source metadata on a Customer Request. */
+function isRequestSource(value: unknown): boolean {
+  return isRecord(value) && isOneOf(value.kind, [
+    'form',
+    'chat',
+    'email',
+    'webhook',
+    'manual-handoff',
+    'portal',
+    'phone',
+    'manual',
+  ]) && isOptionalString(value.provider) && isOptionalString(value.referenceId) &&
+    isOptionalString(value.permalink) && typeof value.canNotify === 'boolean'
+}
+
+/** Validates an optional Customer Request external reference. */
+function isOptionalExternalReference(value: unknown): boolean {
+  return value === undefined || isRecord(value) && isString(value.provider) && isString(value.id) && isOptionalString(value.permalink)
+}
+
+/** Validates a Work Item link retained on a Customer Request. */
+function isWorkItemLink(value: unknown): boolean {
+  return isRecord(value) && isString(value.teamId) && isString(value.workItemId) &&
+    isOptionalString(value.projectId) && isIsoInstant(value.linkedAt) && isString(value.linkedBy)
+}
+
+/** Validates a Project link retained on a Customer Request. */
+function isProjectLink(value: unknown): boolean {
+  return isRecord(value) && isString(value.projectId) && isIsoInstant(value.linkedAt) && isString(value.linkedBy)
+}
+
+/** Validates the filter fields persisted in a saved Customer directory view. */
+function isCustomerListInput(value: unknown): boolean {
+  return isRecord(value) && isOptionalString(value.search) &&
+    isOptionalOneOf(value.tier, ['strategic', 'enterprise', 'growth', 'standard', 'trial']) &&
+    isOptionalOneOf(value.size, ['startup', 'small', 'mid-market', 'enterprise']) &&
+    isOptionalOneOf(value.status, ['prospect', 'active', 'inactive', 'churned']) &&
+    isOptionalOneOf(value.health, ['healthy', 'watch', 'at-risk', 'critical', 'unknown']) &&
+    (value.minBusinessValue === undefined || isNonnegativeNumber(value.minBusinessValue) && value.minBusinessValue <= 100) &&
+    (value.minRequestCount === undefined || isSafeNonnegativeInteger(value.minRequestCount)) &&
+    isOptionalOneOf(value.sortBy, ['name', 'tier', 'size', 'status', 'health', 'businessValue', 'requestCount', 'openRequestCount', 'updatedAt']) &&
+    isOptionalOneOf(value.sortDirection, ['ascending', 'descending']) && isOptionalString(value.cursor)
+}
+
+/** Validates optional retention metadata. */
+function isOptionalRetention(value: unknown): boolean {
+  return value === undefined || isRecord(value) &&
+    (value.expiresAt === undefined || isIsoInstant(value.expiresAt)) &&
+    (value.redactedAt === undefined || isIsoInstant(value.redactedAt))
+}
+
+/** Validates an optional member of a finite string union. */
+function isOptionalOneOf<const Expected extends string>(value: unknown, values: readonly Expected[]): boolean {
+  return value === undefined || isOneOf(value, values)
+}
+
+/** Validates a nonnegative safe integer. */
+function isSafeNonnegativeInteger(value: unknown): value is number {
+  return isSafeRevision(value)
+}
+
+/** Validates an ISO instant stored at a persistence boundary. */
+function isIsoInstant(value: unknown): value is string {
+  return isString(value) && Number.isFinite(Date.parse(value))
 }
 
 /** Checks whether a stored revision is safe. */
@@ -521,6 +640,26 @@ function isSafeRevision(value: unknown): value is number {
 /** Checks whether a value is a non-array object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Checks whether an untrusted value is a string. */
+function isString(value: unknown): value is string {
+  return typeof value === 'string'
+}
+
+/** Checks whether an untrusted optional value is a string. */
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || isString(value)
+}
+
+/** Checks whether an untrusted value is a finite nonnegative number. */
+function isNonnegativeNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/** Checks whether an untrusted value belongs to a finite string union. */
+function isOneOf<const Expected extends string>(value: unknown, values: readonly Expected[]): value is Expected {
+  return isString(value) && values.some((candidate) => candidate === value)
 }
 
 /** Reads a bounded non-empty string. */

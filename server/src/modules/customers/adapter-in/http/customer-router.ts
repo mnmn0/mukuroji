@@ -3,6 +3,7 @@ import type {
   CreateCustomerContactInput,
   CreateCustomerInput,
   CreateCustomerRequestInput,
+  CreateCustomerRequestFromTriageInput,
   CreateCustomerSavedViewInput,
   Customer,
   CustomerContact,
@@ -56,8 +57,8 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   verifyWorkItemAccess(principal: Principal, teamId: string, workItemId: string, minimum: 'viewer' | 'member'): Promise<CustomerWorkItemAuthorization>
   /** Resolves and authorizes a Project before reading or mutating its associations. */
   verifyProjectAccess(principal: Principal, projectId: string, minimum: 'viewer' | 'member'): Promise<void>
-  /** Returns the Triage client used for Customer associations. */
-  getTriage(): TriageClient
+  /** Returns the Triage operations used for Customer associations. */
+  getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer'>
   /** Safely parses a JSON request body. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Maps Customer, authentication, authorization, and persistence failures to HTTP. */
@@ -510,6 +511,99 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     }
   })
 
+  router.post('/api/teams/:teamId/triage-entries/:entryId/customer-request', async (context) => {
+    try {
+      const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const teamId = requirePathValue(context.req.param('teamId'), 'Team ID')
+      const entryId = requirePathValue(context.req.param('entryId'), 'Triage Entry ID')
+      const input = readCreateRequestFromTriageInput(await dependencies.readJson(context.req))
+      await dependencies.verifyTriageAccess(principal, teamId, 'member')
+      const triage = dependencies.getTriage()
+      if (!triage.associateCustomer) {
+        throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association is unavailable.')
+      }
+      const entry = await triage.getEntry(principal.directoryId, teamId, entryId)
+      if (entry.state !== 'accepted') {
+        throw new CustomerError(409, 'TriageEntryNotAccepted', 'Only an accepted Triage Entry can become a Customer Request.')
+      }
+      if (entry.permission.visibility !== 'full') {
+        throw new CustomerError(403, 'TriageSourceUnavailable', 'Current source visibility does not allow creating a Customer Request.')
+      }
+      if (entry.revision !== input.expectedRevision) {
+        throw new CustomerError(409, 'TriageRevisionConflict', 'The Triage Entry changed. Reload and try again.')
+      }
+      if (entry.customerRequestId) {
+        const existing = await dependencies.getCustomers().getRequest(principal.directoryId, entry.customerRequestId)
+        if (existing.customerId !== input.customerId) {
+          throw new CustomerError(409, 'CustomerRequestAlreadyAssociated', 'This Triage Entry is already associated with another Customer Request.')
+        }
+        return context.json(projectRequest(principal, existing))
+      }
+      if (entry.customerId && entry.customerId !== input.customerId) {
+        throw new CustomerError(409, 'CustomerAlreadyAssociated', 'This Triage Entry is already associated with another Customer.')
+      }
+      const canonicalWorkItem = entry.canonicalWorkItem
+      if (canonicalWorkItem && canonicalWorkItem.teamId !== teamId) {
+        throw new CustomerError(409, 'TriageWorkItemMismatch', 'The accepted Triage Entry points to a different Team Work Item.')
+      }
+      const workItemAuthorization = canonicalWorkItem
+        ? await dependencies.verifyWorkItemAccess(
+            principal,
+            canonicalWorkItem.teamId,
+            canonicalWorkItem.workItemId,
+            'member',
+          )
+        : undefined
+      const customer = await dependencies.getCustomers().getCustomer(principal.directoryId, input.customerId)
+      const contactId = input.contactId ?? entry.contactId
+      if (contactId && !customer.contacts.some((contact) => contact.id === contactId)) {
+        throw new CustomerError(404, 'CustomerContactNotFound', 'The customer contact was not found.')
+      }
+      let request = await dependencies.getCustomers().createRequest(
+        principal.directoryId,
+        principal.userKey,
+        createRequestInputFromTriage(entry, { ...input, ...(contactId ? { contactId } : {}) }),
+      )
+      try {
+        if (canonicalWorkItem && workItemAuthorization) {
+          request = await dependencies.getCustomers().linkRequestToWorkItem(
+            principal.directoryId,
+            request.id,
+            principal.userKey,
+            {
+              teamId: canonicalWorkItem.teamId,
+              workItemId: canonicalWorkItem.workItemId,
+              ...(workItemAuthorization.projectId ? { projectId: workItemAuthorization.projectId } : {}),
+            },
+          )
+        }
+        await triage.associateCustomer(
+          principal.directoryId,
+          teamId,
+          entryId,
+          { id: principal.userKey },
+          {
+            expectedRevision: entry.revision,
+            customerId: input.customerId,
+            ...(contactId ? { contactId } : {}),
+            customerRequestId: request.id,
+          },
+        )
+      } catch (error) {
+        await dependencies.getCustomers().deleteRequest(
+          principal.directoryId,
+          request.id,
+          principal.userKey,
+          request.revision,
+        ).catch(() => undefined)
+        throw error
+      }
+      return context.json(projectRequest(principal, request), 201)
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
   router.get('/api/teams/:teamId/issues/:issueId/customer-impact', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
@@ -707,6 +801,46 @@ function readCreateRequestInput(value: unknown): CreateCustomerRequestInput {
     importance: readEnum(body.importance, ['low', 'normal', 'high', 'urgent'], 'Customer Request importance'),
     ...(body.externalReference === undefined ? {} : { externalReference: readExternalReference(body.externalReference) }),
     ...(readOptionalString(body.retentionExpiresAt) ? { retentionExpiresAt: readOptionalString(body.retentionExpiresAt) } : {}),
+  }
+}
+
+/** Reads the minimal input used to save an accepted Triage Entry as a Customer Request. */
+function readCreateRequestFromTriageInput(value: unknown): CreateCustomerRequestFromTriageInput {
+  const body = readRecord(value)
+  return {
+    expectedRevision: readInteger(body.expectedRevision, 'Triage revision'),
+    customerId: readRequiredString(body.customerId, 'Customer ID'),
+    ...(readOptionalString(body.contactId) ? { contactId: readOptionalString(body.contactId) } : {}),
+    importance: readEnum(body.importance, ['low', 'normal', 'high', 'urgent'], 'Customer Request importance'),
+  }
+}
+
+/** Builds a Customer Request from the permission-safe Triage source projection. */
+function createRequestInputFromTriage(
+  entry: TriageEntry,
+  input: CreateCustomerRequestFromTriageInput,
+): CreateCustomerRequestInput {
+  const provider = entry.source.provider ?? entry.source.kind
+  return {
+    customerId: input.customerId,
+    ...(input.contactId ? { contactId: input.contactId } : {}),
+    triageEntryId: entry.id,
+    source: {
+      kind: entry.source.kind,
+      ...(entry.source.provider ? { provider: entry.source.provider } : {}),
+      referenceId: entry.source.sourceId,
+      ...(entry.sourcePreview.permalink ? { permalink: entry.sourcePreview.permalink } : {}),
+      canNotify: entry.permission.canReply,
+    },
+    originalMessage: entry.sourcePreview.body,
+    receivedAt: entry.receivedAt,
+    importance: input.importance,
+    externalReference: {
+      provider,
+      id: entry.source.sourceId,
+      ...(entry.sourcePreview.permalink ? { permalink: entry.sourcePreview.permalink } : {}),
+    },
+    retentionExpiresAt: entry.retention.expiresAt,
   }
 }
 

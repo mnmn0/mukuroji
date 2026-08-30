@@ -10,8 +10,10 @@ import type {
   CustomerRequestSourceKind,
   CustomerRequestStatus,
   CustomerSavedView,
+  CreateCustomerRequestFromTriageInput,
   CreateCustomerSavedViewInput,
 } from '@mukuroji/contracts'
+import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { isRecord } from '../../shared/api/jsonValidation'
 
 /** Error returned by a Customer directory request. */
@@ -107,6 +109,32 @@ export async function getProjectCustomerImpact(
   )
   if (!isCustomerImpactSignal(data)) {
     throw new CustomerApiError(502, 'Customer impact response is invalid.')
+  }
+  return data
+}
+
+/** Saves one accepted Team Triage Entry as a Customer Request. */
+export async function createCustomerRequestFromTriage(
+  accessToken: string,
+  teamId: string,
+  entryId: string,
+  input: CreateCustomerRequestFromTriageInput,
+  context: MutationRequestContext,
+): Promise<CustomerRequest> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/teams/${encodeURIComponent(teamId)}/triage-entries/${encodeURIComponent(entryId)}/customer-request`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(context),
+      },
+      method: 'POST',
+    },
+  )
+  if (!isCustomerRequest(data)) {
+    throw new CustomerApiError(502, 'Customer Request response is invalid.')
   }
   return data
 }
@@ -244,10 +272,12 @@ function isCustomerContact(value: unknown): boolean {
 /** Validates one Customer Request response. */
 function isCustomerRequest(value: unknown): value is CustomerRequest {
   return isRecord(value) && value.schemaVersion === 1 && isString(value.id) &&
-    isString(value.workspaceId) && isString(value.customerId) && isCustomerRequestSource(value.source) &&
+    isString(value.workspaceId) && isString(value.customerId) && isOptionalString(value.contactId) &&
+    isOptionalString(value.triageEntryId) && isCustomerRequestSource(value.source) &&
     isString(value.originalMessage) && isString(value.receivedAt) &&
     isOneOf(value.importance, ['low', 'normal', 'high', 'urgent']) &&
     isOneOf(value.status, ['requested', 'in-progress', 'completed', 'closed', 'merged']) &&
+    isOptionalString(value.mergedIntoRequestId) && isOptionalString(value.mergedAt) && isOptionalString(value.mergedBy) &&
     Array.isArray(value.workItemLinks) && value.workItemLinks.every(isWorkItemLink) &&
     Array.isArray(value.projectLinks) && value.projectLinks.every(isProjectLink) &&
     isPositiveNumber(value.revision) &&

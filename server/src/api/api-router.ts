@@ -1728,16 +1728,52 @@ const enterpriseRoutePermissionRules = [
   { method: 'GET', pathPattern: '/api/request-queue*', permission: 'requests.read' },
   { method: 'GET', pathPattern: '/api/request-submissions*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-submissions*', permission: 'requests.manage' },
-  { method: 'GET', pathPattern: '/api/customers/export', permission: 'requests.manage' },
-  { method: 'GET', pathPattern: '/api/customers*', permission: 'requests.read' },
-  { method: '*', pathPattern: '/api/customers*', permission: 'requests.manage' },
-  { method: 'GET', pathPattern: '/api/customer-requests*', permission: 'requests.read' },
-  { method: '*', pathPattern: '/api/customer-requests*', permission: 'requests.manage' },
-  { method: '*', pathPattern: '/api/customer-contacts*', permission: 'requests.manage' },
+  {
+    method: 'GET',
+    pathPattern: '/api/customers/export',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/customers*',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/customers*',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/customer-requests*',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/customer-requests*',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/customer-contacts*',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
   {
     method: 'PUT',
     pathPattern: '/api/teams/:teamId/triage-settings',
     permission: 'teams.manage',
+  },
+  {
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/triage-entries/:entryId/customer-request',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
   },
   {
     method: 'GET',
@@ -1839,6 +1875,12 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: 'GET',
+    pathPattern: '/api/teams/:teamId/issues/:issueId/customer-impact',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
+  {
+    method: 'GET',
     pathPattern: '/api/teams/:teamId/issues*',
     permission: 'work-items.read',
   },
@@ -1849,6 +1891,12 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.read' },
   { method: '*', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.write' },
+  {
+    method: 'GET',
+    pathPattern: '/api/projects/:projectId/customer-impact',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
   {
     method: 'GET',
     pathPattern: '/api/projects/:projectId/users*',
@@ -9039,6 +9087,16 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         )
       }
     }
+    const customerCompletionPreparation = hasCustomerReadAccess(principal) && detail.issue.statusCategory === 'completed'
+      ? prepareCustomerCompletionNotificationsBestEffort(
+          workspaceDependencies.customers,
+          principal.directoryId,
+          teamId,
+          issueId,
+          principal.userKey,
+          'Work Item detail read',
+        )
+      : Promise.resolve()
     const [collaborationComments, resolvedConfiguration, relationPage, customerImpact] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
@@ -9050,13 +9108,14 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       }, collaborationReadBudget),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
-      principal.workspaceRole === 'guest'
-        ? Promise.resolve(undefined)
-        : workspaceDependencies.customers.getWorkItemImpact(
+      hasCustomerReadAccess(principal)
+        ? workspaceDependencies.customers.getWorkItemImpact(
             principal.directoryId,
             teamId,
             issueId,
-          ),
+          )
+        : Promise.resolve(undefined),
+      customerCompletionPreparation,
     ])
     const allCollaborationComments = collaborationComments.sort(
       compareMigrationAwareComments,
@@ -9370,11 +9429,13 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       detail.issue.statusCategory !== 'completed' &&
       response.issue.statusCategory === 'completed'
     ) {
-      await workspaceDependencies.customers.prepareCompletionNotifications(
+      await prepareCustomerCompletionNotificationsBestEffort(
+        workspaceDependencies.customers,
         principal.directoryId,
         teamId,
         issueId,
         principal.userKey,
+        'Work Item update',
       )
     }
     return c.json(response)
@@ -13251,11 +13312,13 @@ function createApiBulkOperationAdapter(
         prepared.detail.issue.statusCategory !== 'completed' &&
         response.issue.statusCategory === 'completed'
       ) {
-        await workspaceDependencies.customers.prepareCompletionNotifications(
+        await prepareCustomerCompletionNotificationsBestEffort(
+          workspaceDependencies.customers,
           principal.directoryId,
           prepared.item.teamId,
           prepared.item.workItemId,
           principal.userKey,
+          'bulk Work Item update',
         )
       }
       return {
@@ -13780,11 +13843,13 @@ async function executeAutomationWorkItemUpdate(
     detail.issue.statusCategory !== 'completed' &&
     updatedIssue.statusCategory === 'completed'
   ) {
-    await dependencies.customers.prepareCompletionNotifications(
+    await prepareCustomerCompletionNotificationsBestEffort(
+      dependencies.customers,
       context.execution.workspaceId,
       target.teamId,
       target.workItemId,
       `automation:${context.execution.ruleId}`,
+      'automation Work Item update',
     )
   }
 }
@@ -19958,6 +20023,32 @@ function hasEnterpriseWorkspaceRequestPermission(principal: WorkspacePrincipal):
   )
 }
 
+/** Checks whether the authenticated principal may receive Customer impact data. */
+function hasCustomerReadAccess(principal: WorkspacePrincipal): boolean {
+  if (principal.workspaceRole === 'guest') return false
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) return principal.enterprisePermissions === undefined
+  const resource: EnterpriseAuthorizationResource = {
+    workspaceId: principal.directoryId,
+    kind: 'workspace',
+  }
+  const customerReadPermissions: readonly EnterprisePermissionId[] = [
+    'requests.read',
+    'requests.manage',
+    'workspace.manage',
+  ]
+  return customerReadPermissions.some((permission) =>
+    evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource,
+    }).allowed
+  )
+}
+
 /**
  * Checks exact Workspace management access without trusting a weaker route authorization.
  *
@@ -25309,13 +25400,25 @@ async function requireCustomerWorkspaceAccess(
     requireCustomerManagement(principal)
   } else if (minimum === 'write') {
     requireWorkspaceBusinessWrite(principal)
+    requireCustomerReadAccess(principal)
   } else {
     requireWorkspaceBusinessRead(principal)
+    requireCustomerReadAccess(principal)
   }
   return {
     ...principal,
-    canViewSensitiveData: principal.workspaceRole !== 'guest',
+    canViewSensitiveData: minimum === 'manage' || hasCustomerReadAccess(principal),
   }
+}
+
+/** Requires the Workspace-scoped Customer read capability. */
+function requireCustomerReadAccess(principal: WorkspacePrincipal): void {
+  if (hasCustomerReadAccess(principal)) return
+  throw new WorkspaceAccessError(
+    403,
+    'CustomerReadDenied',
+    'Customer read permission is required.',
+  )
 }
 
 /** Requires Customer merge, export, and deletion management authority. */
@@ -32800,6 +32903,38 @@ async function projectWorkspaceSearchDocumentBestEffort(
     await workItemDependencies.workspaceSearch.upsertDocument(createDocument())
   } catch (error) {
     console.error(`Workspace search projection failed after ${operation}.`, error)
+  }
+}
+
+/**
+ * Prepares Customer Request completion candidates without changing the outcome of a committed
+ * Work Item mutation when the separate Customer store is temporarily unavailable.
+ *
+ * @param customers - Customer persistence port.
+ * @param workspaceId - Workspace containing the completed Work Item.
+ * @param teamId - Team owning the Work Item.
+ * @param workItemId - Completed Work Item identifier.
+ * @param actorId - Actor or service identity preparing the candidates.
+ * @param operation - Safe operation label used for error logging.
+ * @returns A promise that resolves after preparation succeeds or the failure is recorded.
+ */
+async function prepareCustomerCompletionNotificationsBestEffort(
+  customers: WorkspaceDependencies['customers'],
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+  actorId: string,
+  operation: string,
+): Promise<void> {
+  try {
+    await customers.prepareCompletionNotifications(
+      workspaceId,
+      teamId,
+      workItemId,
+      actorId,
+    )
+  } catch (error) {
+    console.error(`Customer completion notification preparation failed after ${operation}.`, error)
   }
 }
 
@@ -40329,11 +40464,13 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         detail.issue.statusCategory !== 'completed' &&
         response.issue.statusCategory === 'completed'
       ) {
-        await workspaceDependencies.customers.prepareCompletionNotifications(
+        await prepareCustomerCompletionNotificationsBestEffort(
+          workspaceDependencies.customers,
           principal.directoryId,
           teamId,
           workItemId,
           principal.userKey,
+          'Public Work Item update',
         )
       }
       return projectPublicWorkItem(response.issue)
@@ -40927,11 +41064,13 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           detail.issue.statusCategory !== 'completed' &&
           response.issue.statusCategory === 'completed'
         ) {
-          await workspaceDependencies.customers.prepareCompletionNotifications(
+          await prepareCustomerCompletionNotificationsBestEffort(
+            workspaceDependencies.customers,
             input.workspaceId,
             input.teamId,
             input.workItemId,
             principal.userKey,
+            'Connector Work Item synchronization',
           )
         }
         return {

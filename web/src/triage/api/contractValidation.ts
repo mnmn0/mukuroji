@@ -86,6 +86,9 @@ export function readTriageEntry(value: unknown): TriageEntry {
   const mergeReceipt = record.mergeReceipt === undefined
     ? undefined
     : readMergeReceipt(record.mergeReceipt)
+  const customerId = readOptionalString(record.customerId)
+  const contactId = readOptionalString(record.contactId)
+  const customerRequestId = readOptionalString(record.customerRequestId)
 
   if (record.schemaVersion !== TRIAGE_ENTRY_SCHEMA_VERSION) {
     throw invalidContractError()
@@ -111,6 +114,9 @@ export function readTriageEntry(value: unknown): TriageEntry {
     updatedAt: requireString(record.updatedAt),
     workspaceId: requireString(record.workspaceId),
     ...(canonicalWorkItem ? { canonicalWorkItem } : {}),
+    ...(contactId ? { contactId } : {}),
+    ...(customerId ? { customerId } : {}),
+    ...(customerRequestId ? { customerRequestId } : {}),
     ...(mergeReceipt ? { mergeReceipt } : {}),
     ...(ownerUserId ? { ownerUserId } : {}),
     ...(projectId ? { projectId } : {}),

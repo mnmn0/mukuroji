@@ -193,12 +193,13 @@ export class InMemoryCustomerClient implements CustomerClient {
     const requests = [...state.requests.values()]
       .filter((request) => request.customerId === customer.id)
       .sort(compareByReceivedAt)
+    const activeRequests = requests.filter((request) => request.status !== 'merged')
     return {
       customer: clone(this.withCustomerCounts(state, customer)),
       contacts: contacts.map(clone),
       requests: requests.map(clone),
-      workItems: deriveCustomerWorkItemSummaries(requests),
-      projects: deriveCustomerProjectSummaries(requests),
+      workItems: deriveCustomerWorkItemSummaries(activeRequests),
+      projects: deriveCustomerProjectSummaries(activeRequests),
     }
   }
 
@@ -211,7 +212,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       customerIdentityKey(candidate.name, candidate.domain) === customerIdentityKey(customer.name, customer.domain)
     )) throw new CustomerError(409, 'CustomerAlreadyExists', 'A customer with the same name and domain already exists.')
     state.customers.set(customer.id, customer)
-    return clone(customer)
+    return clone(this.state(workspaceId).customers.get(customer.id) ?? customer)
   }
 
   /** Updates a customer under an optimistic revision fence. */
@@ -255,14 +256,18 @@ export class InMemoryCustomerClient implements CustomerClient {
     const target = this.requireCustomer(state, input.targetCustomerId)
     assertRevision(source.revision, input.sourceExpectedRevision, 'Source customer')
     assertRevision(target.revision, input.targetExpectedRevision, 'Target customer')
+    const mergedAt = this.now().toISOString()
     for (const contact of state.contacts.values()) {
       if (contact.customerId !== source.id) continue
-      state.contacts.set(contact.id, { ...contact, customerId: target.id, revision: contact.revision + 1, updatedAt: this.now().toISOString() })
+      state.contacts.set(contact.id, { ...contact, customerId: target.id, revision: contact.revision + 1, updatedAt: mergedAt })
     }
     for (const request of state.requests.values()) {
       if (request.customerId !== source.id) continue
-      state.requests.set(request.id, { ...request, customerId: target.id, revision: request.revision + 1, updatedAt: this.now().toISOString() })
+      state.requests.set(request.id, { ...request, customerId: target.id, revision: request.revision + 1, updatedAt: mergedAt })
     }
+    const retainedPrimaryContact = [...state.contacts.values()]
+      .find((contact) => contact.customerId === target.id && contact.primary)
+    if (retainedPrimaryContact) this.clearPrimaryContacts(state, target.id, retainedPrimaryContact.id)
     for (const [notificationId, notification] of state.notifications) {
       if (notification.customerId === source.id) {
         state.notifications.set(notificationId, { ...notification, customerId: target.id })
@@ -272,7 +277,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     const mergedTarget = {
       ...target,
       revision: target.revision + 1,
-      updatedAt: this.now().toISOString(),
+      updatedAt: mergedAt,
     }
     state.customers.set(target.id, mergedTarget)
     return await this.getCustomer(workspaceId, target.id)
@@ -309,7 +314,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     if (input.primary) this.clearPrimaryContacts(state, customerId)
     state.contacts.set(contact.id, contact)
-    return clone(contact)
+    return clone(this.state(workspaceId).contacts.get(contact.id) ?? contact)
   }
 
   /** Updates a customer contact under an optimistic revision fence. */
@@ -405,7 +410,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     if (input.contactId) this.requireContactForCustomer(state, input.contactId, input.customerId)
     const request = createCustomerRequestRecord(workspaceId, this.id(), input, this.now().toISOString())
     state.requests.set(request.id, request)
-    return clone(request)
+    return clone(this.state(workspaceId).requests.get(request.id) ?? request)
   }
 
   /** Updates a Customer Request under an optimistic revision fence. */
@@ -414,7 +419,9 @@ export class InMemoryCustomerClient implements CustomerClient {
     const state = this.state(workspaceId)
     const current = state.requests.get(requestId)
     if (!current) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
+    if (current.status === 'merged') throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot be updated.')
     assertRevision(current.revision, input.expectedRevision, 'Customer Request')
+    if (input.status === 'merged') throw new CustomerError(400, 'InvalidCustomerInput', 'A Customer Request can only become merged through a merge operation.')
     if (input.contactId && !state.contacts.has(input.contactId)) throw notFound('CustomerContactNotFound', 'The customer contact was not found.')
     if (input.contactId) this.requireContactForCustomer(state, input.contactId, current.customerId)
     const updated = updateCustomerRequestRecord(current, input, this.now().toISOString())
@@ -444,8 +451,12 @@ export class InMemoryCustomerClient implements CustomerClient {
     if (source.customerId !== target.customerId) {
       throw new CustomerError(400, 'InvalidCustomerMerge', 'Requests from different Customers cannot be merged.')
     }
+    if (source.status === 'merged' || target.status === 'merged') {
+      throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot participate in another merge.')
+    }
     assertRevision(source.revision, input.sourceExpectedRevision, 'Source Customer Request')
     assertRevision(target.revision, input.targetExpectedRevision, 'Target Customer Request')
+    const mergedAt = this.now().toISOString()
     const workItemLinks = mergeLinks(target.workItemLinks, source.workItemLinks)
     const projectLinks = mergeProjectLinks(target.projectLinks, source.projectLinks)
     const mergedTarget = {
@@ -453,11 +464,19 @@ export class InMemoryCustomerClient implements CustomerClient {
       workItemLinks,
       projectLinks,
       revision: target.revision + 1,
-      updatedAt: this.now().toISOString(),
+      updatedAt: mergedAt,
+    }
+    const mergedSource: CustomerRequest = {
+      ...source,
+      status: 'merged',
+      mergedIntoRequestId: target.id,
+      mergedAt,
+      mergedBy: actorId,
+      revision: source.revision + 1,
+      updatedAt: mergedAt,
     }
     state.requests.set(target.id, mergedTarget)
-    state.requests.delete(source.id)
-    this.deleteRequestNotifications(state, source.id)
+    state.requests.set(source.id, mergedSource)
     return clone(mergedTarget)
   }
 
@@ -494,6 +513,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
+    if (request.status === 'merged') throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot be unlinked.')
     assertRevision(request.revision, input.expectedRevision, 'Customer Request')
     const next = {
       ...request,
@@ -529,6 +549,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
+    if (request.status === 'merged') throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot be unlinked.')
     assertRevision(request.revision, input.expectedRevision, 'Customer Request')
     if (!request.projectLinks.some((link) => link.projectId === input.projectId)) return clone(request)
     const next = {
@@ -636,7 +657,7 @@ export class InMemoryCustomerClient implements CustomerClient {
 
   /** Applies retention redaction to expired Customer-owned records. */
   async redactExpired(workspaceId: string, now = this.now().toISOString()) {
-    const state = this.state(workspaceId)
+    const state = this.rawState(workspaceId)
     const redacted = redactExpiredCustomerData(
       [...state.customers.values()],
       [...state.contacts.values()],
@@ -701,6 +722,21 @@ export class InMemoryCustomerClient implements CustomerClient {
 
   /** Returns or creates one isolated Workspace state container. */
   private state(workspaceId: string): CustomerWorkspaceState {
+    const state = this.rawState(workspaceId)
+    const redacted = redactExpiredCustomerData(
+      [...state.customers.values()],
+      [...state.contacts.values()],
+      [...state.requests.values()],
+      this.now().toISOString(),
+    )
+    for (const customer of redacted.customers) state.customers.set(customer.id, customer)
+    for (const contact of redacted.contacts) state.contacts.set(contact.id, contact)
+    for (const request of redacted.requests) state.requests.set(request.id, request)
+    return state
+  }
+
+  /** Returns or creates one Workspace state container without applying retention. */
+  private rawState(workspaceId: string): CustomerWorkspaceState {
     const existing = this.workspaces.get(workspaceId)
     if (existing) return existing
     const state: CustomerWorkspaceState = {

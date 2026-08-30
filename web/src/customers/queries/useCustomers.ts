@@ -1,5 +1,7 @@
 import useSWR from 'swr'
-import type { CustomerListInput } from '@mukuroji/contracts'
+import useSWRInfinite from 'swr/infinite'
+import type { CustomerListInput, CustomerPage } from '@mukuroji/contracts'
+import { useEffect } from 'react'
 import {
   getCustomer,
   getCustomerSavedViews,
@@ -18,15 +20,41 @@ export function useCustomers(
   input: CustomerListInput,
   enabled: boolean,
 ) {
-  const key = accessToken && enabled
-    ? ['customers', accessToken, input] as const
-    : null
-  const query = useSWR(
-    key,
-    ([, token, queryInput]) => getCustomers(token, queryInput),
+  const query = useSWRInfinite(
+    (pageIndex, previousPage: CustomerPage | null) => {
+      if (!accessToken || !enabled) return null
+      if (pageIndex > 0 && !previousPage?.nextCursor) return null
+      return [
+        'customers',
+        accessToken,
+        input,
+        pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
+      ] as const
+    },
+    ([, token, queryInput, cursor]) => getCustomers(token, {
+      ...queryInput,
+      cursor: cursor || undefined,
+      limit: queryInput.limit ?? 100,
+    }),
     customerQueryConfig,
   )
-  return { ...query, key }
+  const { data: pageData, isValidating, setSize, size } = query
+  useEffect(() => {
+    if (!enabled || !pageData || isValidating) return
+    if (!pageData.at(-1)?.nextCursor) return
+    void setSize(size + 1)
+  }, [enabled, isValidating, pageData, setSize, size])
+  const pages = pageData ?? []
+  const customers = pages.flatMap((page) => page.customers)
+  const nextCursor = pages.at(-1)?.nextCursor
+  return {
+    ...query,
+    data: pageData
+      ? { customers, ...(nextCursor ? { nextCursor } : {}) }
+      : undefined,
+    isLoadingMore: Boolean(query.data && query.data.length < query.size && query.isValidating),
+    key: accessToken && enabled ? ['customers', accessToken, input] as const : null,
+  }
 }
 
 /** Loads saved Customer directory views when the Workspace directory is available. */

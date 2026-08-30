@@ -201,3 +201,83 @@ test('keeps Customer references and notification candidates consistent across de
     domain: customer.domain,
   })).rejects.toMatchObject({ code: 'CustomerAlreadyExists' })
 })
+
+test('retains Customer Request provenance when duplicate requests are merged', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const target = await client.createRequest('workspace-1', 'member-1', {
+    ...requestInput(customer.id),
+    originalMessage: 'Target request',
+  })
+  const source = await client.createRequest('workspace-1', 'member-1', {
+    ...requestInput(customer.id),
+    source: { kind: 'webhook', provider: 'crm', referenceId: 'source-42', canNotify: true },
+    originalMessage: 'Source request with provenance',
+    externalReference: { provider: 'crm', id: 'source-42', permalink: 'https://crm.example/requests/source-42' },
+    importance: 'urgent',
+  })
+  await client.linkRequestToWorkItem('workspace-1', source.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+  })
+
+  const merged = await client.mergeRequest('workspace-1', source.id, 'member-1', {
+    targetRequestId: target.id,
+    sourceExpectedRevision: source.revision + 1,
+    targetExpectedRevision: target.revision,
+  })
+  const retainedSource = await client.getRequest('workspace-1', source.id)
+
+  expect(merged.workItemLinks).toEqual([
+    {
+      teamId: 'support',
+      workItemId: 'work-item-1',
+      linkedAt: NOW.toISOString(),
+      linkedBy: 'member-1',
+    },
+  ])
+  expect(retainedSource).toMatchObject({
+    id: source.id,
+    status: 'merged',
+    mergedIntoRequestId: target.id,
+    mergedAt: NOW.toISOString(),
+    mergedBy: 'member-1',
+    source: { kind: 'webhook', provider: 'crm', referenceId: 'source-42', canNotify: true },
+    originalMessage: 'Source request with provenance',
+    externalReference: { provider: 'crm', id: 'source-42' },
+    importance: 'urgent',
+  })
+  await expect(client.updateRequest('workspace-1', source.id, 'member-1', {
+    expectedRevision: retainedSource.revision,
+    originalMessage: 'should not change',
+  })).rejects.toMatchObject({ code: 'CustomerRequestMerged' })
+})
+
+test('applies retention before returning Customer-owned records', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', {
+    ...requestInput(customer.id),
+    retentionExpiresAt: '2026-07-31T00:00:00.000Z',
+  })
+
+  const read = await client.getRequest('workspace-1', request.id)
+
+  expect(read).toMatchObject({
+    originalMessage: '',
+    source: { kind: 'email', canNotify: false },
+    retention: { redactedAt: NOW.toISOString() },
+  })
+})

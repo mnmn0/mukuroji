@@ -212,6 +212,12 @@ export type CustomerRequest = {
   externalReference?: CustomerRequestExternalReference
   /** Current request lifecycle state. */
   status: CustomerRequestStatus
+  /** Retained request identifier when this request was merged into another request. */
+  mergedIntoRequestId?: string
+  /** ISO instant when this request was merged into another request. */
+  mergedAt?: string
+  /** Workspace actor that merged this request. */
+  mergedBy?: string
   /** Work Items that represent or aggregate this request. */
   workItemLinks: CustomerRequestWorkItemLink[]
   /** Projects that represent or aggregate this request. */
@@ -527,6 +533,18 @@ export type CreateCustomerRequestInput = {
   externalReference?: CustomerRequestExternalReference
   /** Optional retention deadline. */
   retentionExpiresAt?: string
+}
+
+/** Input for saving an accepted Triage Entry as a Customer Request. */
+export type CreateCustomerRequestFromTriageInput = {
+  /** Triage revision observed before creating the Customer Request. */
+  expectedRevision: number
+  /** Customer organization making the request. */
+  customerId: string
+  /** Contact making the request, when known. */
+  contactId?: string
+  /** Importance signal assigned to the request. */
+  importance: CustomerRequestImportance
 }
 
 /** Input for revision-checked Customer Request updates. */

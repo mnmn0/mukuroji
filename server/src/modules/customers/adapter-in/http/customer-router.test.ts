@@ -1,15 +1,28 @@
 import { expect, test } from 'bun:test'
 import { Hono } from 'hono'
+import type { TriageEntry } from '@mukuroji/contracts'
 import type { CustomerPrincipal } from './customer-router'
 import { createCustomerRouter } from './customer-router'
 import { CustomerError } from '../../domain/customer'
 import { InMemoryCustomerClient } from '../../customers'
+import type { TriageClient } from '../../../triage'
 
 /** Stable instant shared by Customer Router fixtures. */
 const NOW = '2026-08-01T00:00:00.000Z'
 
+/** Triage operations used by Customer Router integration tests. */
+type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer'>
+
 /** Creates a router with an in-memory Customer client and deterministic authorization. */
-function createTestApp(client: InMemoryCustomerClient, principal: CustomerPrincipal): Hono {
+function createTestApp(
+  client: InMemoryCustomerClient,
+  principal: CustomerPrincipal,
+  triage: CustomerTestTriage = {
+    getEntry: async () => {
+      throw new Error('Triage is not used by this test.')
+    },
+  },
+): Hono {
   const app = new Hono()
   app.route('/', createCustomerRouter({
     getCustomers: () => client,
@@ -17,7 +30,7 @@ function createTestApp(client: InMemoryCustomerClient, principal: CustomerPrinci
     verifyTriageAccess: async () => undefined,
     verifyWorkItemAccess: async () => ({ projectId: 'project-1' }),
     verifyProjectAccess: async () => undefined,
-    getTriage: () => { throw new Error('Triage is not used by this test.') },
+    getTriage: () => triage,
     readJson: async (request) => await request.json(),
     mapError: (_context, error) => {
       if (error instanceof CustomerError) {
@@ -110,4 +123,98 @@ test('projects sensitive Customer fields and request content for restricted read
   expect(response.status).toBe(200)
   expect(body.customer.domain).toBeUndefined()
   expect(body.requests[0]).toMatchObject({ originalMessage: '', source: { canNotify: false } })
+})
+
+test('saves an accepted Triage Entry as a Customer Request and preserves its source trace', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const entry: TriageEntry = {
+    canonicalWorkItem: {
+      projectId: 'project-stale',
+      teamId: 'support',
+      workItemId: 'work-item-1',
+    },
+    schemaVersion: 1,
+    id: 'triage-1',
+    workspaceId: 'workspace-1',
+    source: { kind: 'email', sourceId: 'message-1', provider: 'mail' },
+    sourcePreview: {
+      title: 'SSO request',
+      body: 'Please support SSO.',
+      permalink: 'https://mail.example/messages/message-1',
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: false,
+      truncated: false,
+    },
+    requester: { displayName: 'Ada Lovelace', guest: false },
+    receivedAt: NOW,
+    lastActivityAt: NOW,
+    state: 'accepted',
+    routing: { reason: 'Support', candidates: [] },
+    teamId: 'support',
+    permission: { visibility: 'full', canReply: true, guestVisible: true, checkedAt: NOW },
+    retention: { expiresAt: '2027-08-01T00:00:00.000Z' },
+    capabilities: {
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: true,
+      canViewInternalContext: false,
+    },
+    events: [],
+    revision: 3,
+    createdAt: NOW,
+    updatedAt: NOW,
+  }
+  const triage: CustomerTestTriage = {
+    getEntry: async () => entry,
+    associateCustomer: async (_workspaceId, _teamId, _entryId, _actor, input) => ({
+      ...entry,
+      customerId: input.customerId ?? undefined,
+      contactId: input.contactId ?? undefined,
+      customerRequestId: input.customerRequestId ?? undefined,
+      revision: entry.revision + 1,
+    }),
+  }
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, triage)
+
+  const response = await app.request('/api/teams/support/triage-entries/triage-1/customer-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: entry.revision,
+      customerId: customer.id,
+      importance: 'high',
+    }),
+  })
+  const body: {
+    id: string
+    triageEntryId?: string
+    source: { kind: string; referenceId?: string; permalink?: string }
+    originalMessage: string
+    workItemLinks: Array<{ teamId: string; workItemId: string; projectId?: string }>
+  } = await response.json()
+
+  expect(response.status).toBe(201)
+  expect(body).toMatchObject({
+    triageEntryId: entry.id,
+    source: {
+      kind: 'email',
+      referenceId: 'message-1',
+      permalink: 'https://mail.example/messages/message-1',
+    },
+    originalMessage: 'Please support SSO.',
+    workItemLinks: [{ teamId: 'support', workItemId: 'work-item-1', projectId: 'project-1' }],
+  })
+  expect((await client.getRequest('workspace-1', body.id)).customerId).toBe(customer.id)
 })

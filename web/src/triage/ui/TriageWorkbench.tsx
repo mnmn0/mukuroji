@@ -1,4 +1,9 @@
 import { useRef, useState } from 'react'
+import type {
+  CreateCustomerRequestFromTriageInput,
+  Customer,
+  CustomerRequest,
+} from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ShieldIcon } from '../../shared/ui/icons'
@@ -117,6 +122,15 @@ export type TriageWorkbenchProps = {
     entryId: string,
     input: TriageActionInput,
   ) => Promise<TriageEntry>
+  /** Saves one accepted Triage Entry as a Customer Request. */
+  readonly onCreateCustomerRequest?: (
+    entryId: string,
+    input: CreateCustomerRequestFromTriageInput,
+  ) => Promise<CustomerRequest>
+  /** Customers currently visible to the current Workspace member. */
+  readonly customerOptions?: readonly Pick<Customer, 'id' | 'name'>[]
+  /** Whether the Customer picker is still loading. */
+  readonly isCustomerOptionsLoading?: boolean
   /** Applies one explicit bounded bulk action. */
   readonly onBulkAction?: (
     input: TriageBulkActionInput,
@@ -150,6 +164,7 @@ export function TriageWorkbench({
   filters,
   hasMore = false,
   isBulkPending = false,
+  isCustomerOptionsLoading = false,
   isConfigurationLoading = false,
   isDetailLoading = false,
   isQueueLoading = false,
@@ -161,6 +176,7 @@ export function TriageWorkbench({
   onAction,
   onBackToQueue,
   onBulkAction,
+  onCreateCustomerRequest,
   onClearSelection,
   onEntrySelectionChange,
   onFiltersChange,
@@ -180,6 +196,7 @@ export function TriageWorkbench({
   t,
   teamId,
   teamName,
+  customerOptions,
   eligibleAssigneeIdsByProject,
   visibleProjectIds,
 }: TriageWorkbenchProps) {
@@ -323,6 +340,9 @@ export function TriageWorkbench({
                   onAction={onAction}
                   onActionComplete={restoreQueueFocus}
                   onBack={backToQueue}
+                  onCreateCustomerRequest={onCreateCustomerRequest}
+                  customerOptions={customerOptions}
+                  isCustomerOptionsLoading={isCustomerOptionsLoading}
                   onRetry={onRetryDetail}
                   t={t}
                   teamId={teamId}

@@ -185,7 +185,7 @@ export function CustomerDirectoryView({
             <span>{t('customers.filters.savedView')}</span>
             <select
               className="workbench-input min-h-10 w-full"
-              defaultValue=""
+              value={savedViews.find((view) => matchesSavedView(view, filters, groupBy))?.id ?? ''}
               onChange={(event) => {
                 const view = savedViews.find((candidate) => candidate.id === event.target.value)
                 if (view) onApplySavedView(view)
@@ -229,9 +229,9 @@ export function CustomerDirectoryView({
               </h2>
             </div>
             <div className="divide-y divide-[var(--workbench-border)]">
-              {groupCustomers(customers, groupBy).map((group) => (
+              {groupCustomers(customers, groupBy, t).map((group) => (
                 <div key={group.key}>
-                  {groupBy ? <h3 className="bg-[var(--workbench-surface-muted)] px-5 py-2 text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{group.label}</h3> : null}
+              {groupBy ? <h3 className="bg-[var(--workbench-surface-muted)] px-5 py-2 text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{group.label}</h3> : null}
                   {group.customers.map((customer) => (
                     <button
                       className={`grid w-full gap-3 px-5 py-4 text-left transition hover:bg-teal-50/60 ${detail?.customer.id === customer.id ? 'bg-teal-50' : ''}`}
@@ -246,11 +246,11 @@ export function CustomerDirectoryView({
                             {customer.domain ?? t('customers.noDomain')}
                           </span>
                         </span>
-                        <CustomerBadge value={customer.health} />
+                        <CustomerBadge t={t} value={customer.health} />
                       </span>
                       <span className="flex flex-wrap gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
-                        <span>{t('customers.tier')}: {customer.tier}</span>
-                        <span>{t('customers.size')}: {customer.size}</span>
+                        <span>{t('customers.tier')}: {t(customerTierLabels[customer.tier])}</span>
+                        <span>{t('customers.size')}: {t(customerSizeLabels[customer.size])}</span>
                         <span>{t('customers.requestCount').replace('{count}', String(customer.requestCount))}</span>
                       </span>
                     </button>
@@ -306,12 +306,12 @@ function CustomerDetailPanel({
             <h2 className="mt-2 text-xl font-bold text-[var(--workbench-text)]">{customer.name}</h2>
             <p className="mt-1 text-sm text-[var(--workbench-muted)]">{customer.domain ?? t('customers.noDomain')}</p>
           </div>
-          <CustomerBadge value={customer.health} />
+          <CustomerBadge t={t} value={customer.health} />
         </div>
         <dl className="mt-5 grid grid-cols-2 gap-3 text-sm">
-          <Metric label={t('customers.tier')} value={customer.tier} />
-          <Metric label={t('customers.size')} value={customer.size} />
-          <Metric label={t('customers.status')} value={customer.status} />
+          <Metric label={t('customers.tier')} value={t(customerTierLabels[customer.tier])} />
+          <Metric label={t('customers.size')} value={t(customerSizeLabels[customer.size])} />
+          <Metric label={t('customers.status')} value={t(customerStatusLabels[customer.status])} />
           <Metric label={t('customers.businessValue')} value={customer.businessValue === undefined ? '—' : String(customer.businessValue)} />
           <Metric label={t('customers.contacts')} value={String(customer.contactCount)} />
           <Metric label={t('customers.openRequests')} value={String(customer.openRequestCount)} />
@@ -345,13 +345,13 @@ function CustomerDetailPanel({
               <li className="rounded-lg border border-[var(--workbench-border)] p-3" key={request.id}>
                 <div className="flex flex-wrap justify-between gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
                   <span>{t('customers.detail.requestReceived').replace('{date}', formatDate(request.receivedAt, locale))}</span>
-                  <span>{t('customers.detail.status').replace('{status}', request.status)}</span>
+                  <span>{t('customers.detail.status').replace('{status}', t(requestStatusLabels[request.status]))}</span>
                 </div>
                 <p className="mt-2 line-clamp-3 text-sm text-[var(--workbench-text)]">
                   {request.originalMessage || t('customers.detail.messageUnavailable')}
                 </p>
                 <p className="mt-2 text-xs font-semibold text-[var(--workbench-muted)]">
-                  {t('customers.detail.importance').replace('{importance}', request.importance)}
+                  {t('customers.detail.importance').replace('{importance}', t(requestImportanceLabels[request.importance]))}
                 </p>
               </li>
             ))}
@@ -369,7 +369,7 @@ function CustomerDetailPanel({
               <li className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] px-3 py-2" key={`${workItem.teamId}:${workItem.workItemId}`}>
                 <span className="text-sm text-[var(--workbench-text)]">
                   <span className="font-semibold">{workItem.workItemId}</span>
-                  <span className="ml-2 text-xs text-[var(--workbench-muted)]">{workItem.lifecycle}</span>
+                  <span className="ml-2 text-xs text-[var(--workbench-muted)]">{t(workItemLifecycleLabels[workItem.lifecycle])}</span>
                 </span>
                 <button className="workbench-button-secondary min-h-8 px-3 text-xs" onClick={() => onOpenWorkItem(workItem)} type="button">
                   {t('customers.detail.openWorkItem')}
@@ -405,13 +405,13 @@ function CustomerDetailPanel({
 }
 
 /** Renders a compact Customer health badge. */
-function CustomerBadge({ value }: { /** Customer health value. */ value: Customer['health'] }) {
+function CustomerBadge({ t, value }: { /** Translator for Customer labels. */ t: (key: MessageKey) => string; /** Customer health value. */ value: Customer['health'] }) {
   const className = value === 'critical' || value === 'at-risk'
     ? 'border-red-200 bg-red-50 text-red-700'
     : value === 'watch'
       ? 'border-amber-200 bg-amber-50 text-amber-800'
       : 'border-emerald-200 bg-emerald-50 text-emerald-700'
-  return <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${className}`}>{value}</span>
+  return <span className={`rounded-full border px-2.5 py-1 text-xs font-bold ${className}`}>{t(customerHealthLabels[value])}</span>
 }
 
 /** Renders one detail metric without knowing the Customer transport shape. */
@@ -429,71 +429,130 @@ function formatDate(value: string, locale: string): string {
 type CustomerFilterOption<Value extends string> = {
   /** URL or view value represented by the option. */
   value: Value
-  /** Human-readable option label. */
-  label: string
+  /** Message key for the option label. */
+  labelKey: MessageKey
 }
 
 /** Customer tier options supported by the directory filter. */
 const customerTierOptions = [
-  { value: 'strategic', label: 'Strategic' },
-  { value: 'enterprise', label: 'Enterprise' },
-  { value: 'growth', label: 'Growth' },
-  { value: 'standard', label: 'Standard' },
-  { value: 'trial', label: 'Trial' },
+  { value: 'strategic', labelKey: 'customers.values.tier.strategic' },
+  { value: 'enterprise', labelKey: 'customers.values.tier.enterprise' },
+  { value: 'growth', labelKey: 'customers.values.tier.growth' },
+  { value: 'standard', labelKey: 'customers.values.tier.standard' },
+  { value: 'trial', labelKey: 'customers.values.tier.trial' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['tier']>>[]
 
 /** Customer size options supported by the directory filter. */
 const customerSizeOptions = [
-  { value: 'startup', label: 'Startup' },
-  { value: 'small', label: 'Small' },
-  { value: 'mid-market', label: 'Mid-market' },
-  { value: 'enterprise', label: 'Enterprise' },
+  { value: 'startup', labelKey: 'customers.values.size.startup' },
+  { value: 'small', labelKey: 'customers.values.size.small' },
+  { value: 'mid-market', labelKey: 'customers.values.size.midMarket' },
+  { value: 'enterprise', labelKey: 'customers.values.size.enterprise' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['size']>>[]
 
 /** Customer lifecycle options supported by the directory filter. */
 const customerStatusOptions = [
-  { value: 'prospect', label: 'Prospect' },
-  { value: 'active', label: 'Active' },
-  { value: 'inactive', label: 'Inactive' },
-  { value: 'churned', label: 'Churned' },
+  { value: 'prospect', labelKey: 'customers.values.status.prospect' },
+  { value: 'active', labelKey: 'customers.values.status.active' },
+  { value: 'inactive', labelKey: 'customers.values.status.inactive' },
+  { value: 'churned', labelKey: 'customers.values.status.churned' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['status']>>[]
 
 /** Customer health options supported by the directory filter. */
 const customerHealthOptions = [
-  { value: 'healthy', label: 'Healthy' },
-  { value: 'watch', label: 'Watch' },
-  { value: 'at-risk', label: 'At risk' },
-  { value: 'critical', label: 'Critical' },
-  { value: 'unknown', label: 'Unknown' },
+  { value: 'healthy', labelKey: 'customers.values.health.healthy' },
+  { value: 'watch', labelKey: 'customers.values.health.watch' },
+  { value: 'at-risk', labelKey: 'customers.values.health.atRisk' },
+  { value: 'critical', labelKey: 'customers.values.health.critical' },
+  { value: 'unknown', labelKey: 'customers.values.health.unknown' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['health']>>[]
 
 /** Customer sort options supported by the directory filter. */
 const customerSortOptions = [
-  { value: 'updatedAt', label: 'Recently updated' },
-  { value: 'name', label: 'Name' },
-  { value: 'tier', label: 'Tier' },
-  { value: 'size', label: 'Size' },
-  { value: 'status', label: 'Status' },
-  { value: 'health', label: 'Health' },
-  { value: 'businessValue', label: 'Business value' },
-  { value: 'requestCount', label: 'Request count' },
-  { value: 'openRequestCount', label: 'Open requests' },
+  { value: 'updatedAt', labelKey: 'customers.filters.sort.updatedAt' },
+  { value: 'name', labelKey: 'customers.filters.sort.name' },
+  { value: 'tier', labelKey: 'customers.filters.sort.tier' },
+  { value: 'size', labelKey: 'customers.filters.sort.size' },
+  { value: 'status', labelKey: 'customers.filters.sort.status' },
+  { value: 'health', labelKey: 'customers.filters.sort.health' },
+  { value: 'businessValue', labelKey: 'customers.filters.sort.businessValue' },
+  { value: 'requestCount', labelKey: 'customers.filters.sort.requestCount' },
+  { value: 'openRequestCount', labelKey: 'customers.filters.sort.openRequestCount' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['sortBy']>>[]
 
 /** Customer sort-direction options supported by the directory filter. */
 const customerSortDirectionOptions = [
-  { value: 'descending', label: 'Descending' },
-  { value: 'ascending', label: 'Ascending' },
+  { value: 'descending', labelKey: 'customers.filters.direction.descending' },
+  { value: 'ascending', labelKey: 'customers.filters.direction.ascending' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['sortDirection']>>[]
 
 /** Customer grouping options supported by saved directory views. */
 const customerGroupOptions = [
-  { value: 'tier', label: 'Tier' },
-  { value: 'size', label: 'Size' },
-  { value: 'status', label: 'Status' },
-  { value: 'health', label: 'Health' },
-  { value: 'owner', label: 'Owner' },
+  { value: 'tier', labelKey: 'customers.filters.group.tier' },
+  { value: 'size', labelKey: 'customers.filters.group.size' },
+  { value: 'status', labelKey: 'customers.filters.group.status' },
+  { value: 'health', labelKey: 'customers.filters.group.health' },
+  { value: 'owner', labelKey: 'customers.filters.group.owner' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerSavedView['groupBy']>>[]
+
+/** Localized labels for Customer commercial tiers. */
+const customerTierLabels: Record<Customer['tier'], MessageKey> = {
+  strategic: 'customers.values.tier.strategic',
+  enterprise: 'customers.values.tier.enterprise',
+  growth: 'customers.values.tier.growth',
+  standard: 'customers.values.tier.standard',
+  trial: 'customers.values.tier.trial',
+}
+
+/** Localized labels for Customer organization sizes. */
+const customerSizeLabels: Record<Customer['size'], MessageKey> = {
+  startup: 'customers.values.size.startup',
+  small: 'customers.values.size.small',
+  'mid-market': 'customers.values.size.midMarket',
+  enterprise: 'customers.values.size.enterprise',
+}
+
+/** Localized labels for Customer lifecycle statuses. */
+const customerStatusLabels: Record<Customer['status'], MessageKey> = {
+  prospect: 'customers.values.status.prospect',
+  active: 'customers.values.status.active',
+  inactive: 'customers.values.status.inactive',
+  churned: 'customers.values.status.churned',
+}
+
+/** Localized labels for Customer health values. */
+const customerHealthLabels: Record<Customer['health'], MessageKey> = {
+  healthy: 'customers.values.health.healthy',
+  watch: 'customers.values.health.watch',
+  'at-risk': 'customers.values.health.atRisk',
+  critical: 'customers.values.health.critical',
+  unknown: 'customers.values.health.unknown',
+}
+
+/** Localized labels for Customer Request lifecycle values. */
+const requestStatusLabels: Record<CustomerDetail['requests'][number]['status'], MessageKey> = {
+  requested: 'customers.values.requestStatus.requested',
+  'in-progress': 'customers.values.requestStatus.inProgress',
+  completed: 'customers.values.requestStatus.completed',
+  closed: 'customers.values.requestStatus.closed',
+  merged: 'customers.values.requestStatus.merged',
+}
+
+/** Localized labels for Customer Request importance values. */
+const requestImportanceLabels: Record<CustomerDetail['requests'][number]['importance'], MessageKey> = {
+  low: 'customers.values.importance.low',
+  normal: 'customers.values.importance.normal',
+  high: 'customers.values.importance.high',
+  urgent: 'customers.values.importance.urgent',
+}
+
+/** Localized labels for Customer Work Item lifecycle projections. */
+const workItemLifecycleLabels: Record<CustomerWorkItemSummary['lifecycle'], MessageKey> = {
+  requested: 'customers.values.lifecycle.requested',
+  'in-progress': 'customers.values.lifecycle.inProgress',
+  completed: 'customers.values.lifecycle.completed',
+  unknown: 'customers.values.lifecycle.unknown',
+}
 
 /** Renders one typed Customer select with an optional all-values option. */
 function FilterSelect<Value extends string>({
@@ -526,7 +585,7 @@ function FilterSelect<Value extends string>({
         value={value ?? ''}
       >
         {includeEmpty ? <option value="">{t('customers.filters.all')}</option> : null}
-        {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        {options.map((option) => <option key={option.value} value={option.value}>{t(option.labelKey)}</option>)}
       </select>
     </label>
   )
@@ -588,16 +647,59 @@ type CustomerGroup = {
 function groupCustomers(
   customers: readonly Customer[],
   groupBy: CustomerSavedView['groupBy'],
+  t: (key: MessageKey) => string,
 ): CustomerGroup[] {
   if (!groupBy) return [{ key: 'all', label: '', customers: [...customers] }]
   const groups = new Map<string, Customer[]>()
   for (const customer of customers) {
-    const value = groupBy === 'owner'
-      ? customer.ownerUserId ?? 'Unassigned'
-      : customer[groupBy]
-    const group = groups.get(value) ?? []
+    const value = readCustomerGroupValue(customer, groupBy, t)
+    const group = groups.get(value.key) ?? []
     group.push(customer)
-    groups.set(value, group)
+    groups.set(value.key, group)
   }
-  return [...groups.entries()].map(([key, groupedCustomers]) => ({ key, label: key, customers: groupedCustomers }))
+  return [...groups.entries()].map(([key, groupedCustomers]) => ({
+    key,
+    label: readCustomerGroupValue(groupedCustomers[0] ?? customers[0]!, groupBy, t).label,
+    customers: groupedCustomers,
+  }))
+}
+
+/** Resolves one localized Customer grouping value. */
+function readCustomerGroupValue(
+  customer: Customer,
+  groupBy: NonNullable<CustomerSavedView['groupBy']>,
+  t: (key: MessageKey) => string,
+): { key: string; label: string } {
+  switch (groupBy) {
+    case 'tier':
+      return { key: customer.tier, label: t(customerTierLabels[customer.tier]) }
+    case 'size':
+      return { key: customer.size, label: t(customerSizeLabels[customer.size]) }
+    case 'status':
+      return { key: customer.status, label: t(customerStatusLabels[customer.status]) }
+    case 'health':
+      return { key: customer.health, label: t(customerHealthLabels[customer.health]) }
+    case 'owner':
+      return customer.ownerUserId
+        ? { key: customer.ownerUserId, label: customer.ownerUserId }
+        : { key: 'unassigned', label: t('customers.values.unassigned') }
+  }
+}
+
+/** Compares the URL-backed directory state with one saved view definition. */
+function matchesSavedView(
+  view: CustomerSavedView,
+  filters: CustomerListInput,
+  groupBy: CustomerSavedView['groupBy'],
+): boolean {
+  return view.groupBy === groupBy &&
+    view.filters.search === filters.search &&
+    view.filters.tier === filters.tier &&
+    view.filters.size === filters.size &&
+    view.filters.status === filters.status &&
+    view.filters.health === filters.health &&
+    view.filters.minBusinessValue === filters.minBusinessValue &&
+    view.filters.minRequestCount === filters.minRequestCount &&
+    view.filters.sortBy === filters.sortBy &&
+    view.filters.sortDirection === filters.sortDirection
 }

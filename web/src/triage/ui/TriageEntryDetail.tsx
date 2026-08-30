@@ -1,4 +1,10 @@
-import type { AiTriageDraft } from '@mukuroji/contracts'
+import type {
+  AiTriageDraft,
+  CreateCustomerRequestFromTriageInput,
+  Customer,
+  CustomerRequest,
+  CustomerRequestImportance,
+} from '@mukuroji/contracts'
 import {
   useRef,
   useState,
@@ -64,6 +70,15 @@ export type TriageEntryDetailProps = {
     entryId: string,
     input: TriageActionInput,
   ) => Promise<TriageEntry>
+  /** Saves one accepted Triage Entry as a Customer Request. */
+  readonly onCreateCustomerRequest?: (
+    entryId: string,
+    input: CreateCustomerRequestFromTriageInput,
+  ) => Promise<CustomerRequest>
+  /** Customers currently visible to the current Workspace member. */
+  readonly customerOptions?: readonly Pick<Customer, 'id' | 'name'>[]
+  /** Whether the Customer picker is still loading. */
+  readonly isCustomerOptionsLoading?: boolean
   /** Restores queue navigation after a successful action. */
   readonly onActionComplete?: (entryId: string) => void
 }
@@ -98,12 +113,15 @@ export function TriageEntryDetail({
   aiAssistanceEnabled = true,
   aiAssistanceController,
   errorMessage,
+  customerOptions,
+  isCustomerOptionsLoading = false,
   isAiOperationPending = false,
   isLoading = false,
   isPending = false,
   locale,
   onAuthenticatedApiError,
   onAction,
+  onCreateCustomerRequest,
   onActionComplete,
   onBack,
   onOperationPendingChange,
@@ -118,6 +136,11 @@ export function TriageEntryDetail({
   const [acceptMode, setAcceptMode] = useState<'create' | 'link'>('create')
   const [actionError, setActionError] = useState(false)
   const [actionAnnouncement, setActionAnnouncement] = useState('')
+  const [customerRequestError, setCustomerRequestError] = useState(false)
+  const [customerRequestAnnouncement, setCustomerRequestAnnouncement] = useState('')
+  const [customerId, setCustomerId] = useState(view?.entry.customerId ?? '')
+  const [customerRequestImportance, setCustomerRequestImportance] =
+    useState<CustomerRequestImportance>('normal')
   const [ownerUserId, setOwnerUserId] = useState(view?.entry.ownerUserId ?? '')
   const [projectId, setProjectId] = useState(
     view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '',
@@ -134,6 +157,28 @@ export function TriageEntryDetail({
   const [isActionMutationPending, setIsActionMutationPending] = useState(false)
   const isActionMutationPendingRef = useRef(false)
   const actionIsPending = isPending || isActionMutationPending || isAiOperationPending
+
+  const submitCustomerRequest = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (
+      !view ||
+      !onCreateCustomerRequest ||
+      !customerId ||
+      actionIsPending
+    ) return
+    setCustomerRequestError(false)
+    setCustomerRequestAnnouncement('')
+    try {
+      await onCreateCustomerRequest(view.entry.id, {
+        customerId,
+        expectedRevision: view.entry.revision,
+        importance: customerRequestImportance,
+      })
+      setCustomerRequestAnnouncement(t('triage.customerRequest.succeeded'))
+    } catch {
+      setCustomerRequestError(true)
+    }
+  }
 
   const closeAction = () => {
     setActionMode(undefined)
@@ -491,6 +536,71 @@ export function TriageEntryDetail({
                 .replace('{attachments}', String(entry.mergeReceipt.mergedAttachmentCount))
                 .replace('{watchers}', String(entry.mergeReceipt.mergedWatcherCount))}
             </p>
+          </DetailSection>
+        ) : null}
+
+        {entry.state === 'accepted' && onCreateCustomerRequest && entry.permission.visibility === 'full' ? (
+          <DetailSection title={t('triage.detail.customerRequest')}>
+            {entry.customerRequestId ? (
+              <p className="text-sm font-semibold text-[var(--workbench-text)]">
+                {t('triage.customerRequest.associated').replace('{id}', entry.customerRequestId)}
+              </p>
+            ) : isCustomerOptionsLoading ? (
+              <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
+                {t('triage.customerRequest.loading')}
+              </p>
+            ) : customerOptions === undefined ? null : customerOptions.length === 0 ? (
+              <p className="text-sm font-medium text-[var(--workbench-muted)]">
+                {t('triage.customerRequest.noCustomers')}
+              </p>
+            ) : (
+              <form className="grid gap-4" onSubmit={(event) => void submitCustomerRequest(event)}>
+                <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('triage.customerRequest.customer')}
+                  <select
+                    className="workbench-input min-h-10 px-3"
+                    onChange={(event) => setCustomerId(event.target.value)}
+                    required
+                    value={customerId}
+                  >
+                    <option value="">{t('triage.customerRequest.chooseCustomer')}</option>
+                    {customerOptions.map((customer) => (
+                      <option key={customer.id} value={customer.id}>{customer.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('triage.customerRequest.importance')}
+                  <select
+                    className="workbench-input min-h-10 px-3"
+                    onChange={(event) => setCustomerRequestImportance(
+                      readCustomerRequestImportance(event.target.value),
+                    )}
+                    value={customerRequestImportance}
+                  >
+                    <option value="low">{t('customers.values.importance.low')}</option>
+                    <option value="normal">{t('customers.values.importance.normal')}</option>
+                    <option value="high">{t('customers.values.importance.high')}</option>
+                    <option value="urgent">{t('customers.values.importance.urgent')}</option>
+                  </select>
+                </label>
+                {customerRequestError ? (
+                  <p className="border-l-2 border-red-400 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700" role="alert">
+                    {t('triage.customerRequest.error')}
+                  </p>
+                ) : null}
+                <p aria-live="polite" className="sr-only" role="status">
+                  {customerRequestAnnouncement}
+                </p>
+                <button
+                  className="workbench-button-primary min-h-10 w-fit px-4"
+                  disabled={actionIsPending}
+                  type="submit"
+                >
+                  {actionIsPending ? t('triage.customerRequest.saving') : t('triage.customerRequest.save')}
+                </button>
+              </form>
+            )}
           </DetailSection>
         ) : null}
 
@@ -864,6 +974,12 @@ function modeButtonClass(active: boolean) {
   return `min-h-10 rounded-md border px-4 text-sm font-semibold ${active
     ? 'border-[var(--workbench-primary)] bg-teal-50 text-[var(--workbench-primary)]'
     : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-text)]'}`
+}
+
+/** Keeps Customer Request importance inside the supported contract values. */
+function readCustomerRequestImportance(value: string): CustomerRequestImportance {
+  if (value === 'low' || value === 'high' || value === 'urgent') return value
+  return 'normal'
 }
 
 /** Reads and trims one string field from an action form. */
