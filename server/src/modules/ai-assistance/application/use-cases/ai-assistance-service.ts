@@ -296,7 +296,6 @@ export function createAiAssistanceService(
    *
    * @param actor - Authenticated actor bound to the receipt.
    * @param reservation - Durable receipt classification returned by the store.
-   * @param policy - Current policy used for retention projection.
    * @param authorization - Current source authorization used for disclosure.
    * @param completionIdentity - Idempotency identity used to repair a pending attempt.
    * @returns The existing generation projected through current authorization.
@@ -305,7 +304,6 @@ export function createAiAssistanceService(
   async function replayGenerationReservation(
     actor: AiAssistanceActor,
     reservation: AiAssistanceGenerationReservation,
-    policy: AiAssistancePolicy,
     authorization: AiAssistanceAuthorizationCallbacks,
     completionIdentity: Pick<
       CompleteAiAssistanceGenerationReservationInput,
@@ -355,7 +353,16 @@ export function createAiAssistanceService(
         usage: existing.generation.details.usage,
       })
     }
-    return await projectStoredGeneration(actor, existing, policy, authorization, now)
+    // The initial policy read happens before the reservation read. Re-read it
+    // after the receipt is resolved so a concurrent retention shortening cannot
+    // disclose content through an idempotent replay using stale policy data.
+    return await projectStoredGeneration(
+      actor,
+      existing,
+      await readPolicy(actor),
+      authorization,
+      now,
+    )
   }
 
   /** Generates one permission-fenced structured draft. */
@@ -386,7 +393,6 @@ export function createAiAssistanceService(
       return await replayGenerationReservation(
         actor,
         existingReservation,
-        policy,
         authorization,
         { idempotencyKey, inputFingerprint },
       )
@@ -434,7 +440,6 @@ export function createAiAssistanceService(
       return await replayGenerationReservation(
         actor,
         reservation,
-        policy,
         authorization,
         { idempotencyKey, inputFingerprint },
       )

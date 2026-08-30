@@ -163,6 +163,8 @@ type HarnessConfiguration = {
   revokeAuthorizationAfterPersistence?: boolean
   /** Captures policy transitions sent to the optional audit boundary. */
   policyAuditRecords?: AiAssistancePolicyAuditInput[]
+  /** Changes retention after the initial replay policy read. */
+  shortenPolicyBeforeReplayProjection?: boolean
 }
 
 /** Creates a service harness with deterministic fake ports. */
@@ -172,6 +174,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let policyEnabled = true
   let policyRetentionDays = 30
   let policyRevision = 0
+  let policyReadCount = 0
   let currentTime = NOW
   let resolveContextCount = 0
   let gatewayBarrier: Promise<void> | undefined
@@ -335,6 +338,11 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       reservationFailureCode = input.failureCode
     },
     async getPolicy() {
+      policyReadCount += 1
+      if (configuration.shortenPolicyBeforeReplayProjection && policyReadCount === 6) {
+        policyRetentionDays = 1
+        policyRevision = 1
+      }
       return {
         ...createPolicy(),
         enabled: policyEnabled,
@@ -2002,6 +2010,30 @@ describe('createAiAssistanceService', () => {
     expect(replay).toEqual(first)
     expect(harness.gatewayInputs).toHaveLength(1)
     expect(harness.budgetReservationCount()).toBe(1)
+  })
+
+  test('replays with the current retention policy after the receipt read', async () => {
+    const harness = createHarness({ shortenPolicyBeforeReplayProjection: true })
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-retention-replay',
+    )
+    harness.setNow('2026-08-27T00:00:00.000Z')
+
+    const replay = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-retention-replay',
+    )
+
+    expect(replay.content).toEqual({
+      availability: 'withheld',
+      reasonCode: 'retention-expired',
+    })
+    expect(JSON.stringify(replay)).not.toContain('Safe summary.')
   })
 
   test('rejects one generation key reused with different redacted input', async () => {
