@@ -1216,11 +1216,12 @@ const aiAssistanceService: AiAssistanceService = {
       request,
       authorization,
     ),
-  createFeedback: (actor, generationId, request, idempotencyKey) =>
+  createFeedback: (actor, generationId, request, authorization, idempotencyKey) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.createFeedback(
       actor,
       generationId,
       request,
+      authorization,
       idempotencyKey,
     ),
 }

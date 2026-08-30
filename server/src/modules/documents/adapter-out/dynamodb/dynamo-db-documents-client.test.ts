@@ -3660,6 +3660,40 @@ test('advances the Document comment-window revision with each insertion', async 
   }))
 })
 
+test('retries a comment when only the comment-window fence changed concurrently', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Comment-window retry',
+    blocks: [],
+  })
+  memory.beforeTransaction(() => {
+    throw transactionCancellationError([
+      'None',
+      'None',
+      'ConditionalCheckFailed',
+    ])
+  })
+
+  await expect(client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Retry this comment',
+  })).resolves.toMatchObject({
+    body: 'Retry this comment',
+  })
+  expect(await client.getCommentWindowRevision({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).toBe(1)
+})
+
 test('stores at most one replaceable presence lease per Workspace member', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)

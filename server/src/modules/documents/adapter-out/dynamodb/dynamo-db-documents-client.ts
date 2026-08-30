@@ -2854,11 +2854,11 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         ? commentSemanticFingerprint(comment)
         : normalized.fingerprint,
     }
-    const commentWindowRevision = await this.readCommentWindowRevision(
+    let commentWindowRevision = await this.readCommentWindowRevision(
       input.workspaceId,
       input.documentId,
     )
-    const commentWindowItem: StoredDocumentCommentWindowItem = {
+    let commentWindowItem: StoredDocumentCommentWindowItem = {
       workspaceId: input.workspaceId,
       recordKey: commentWindowKey(input.documentId),
       entryType: 'document-comment-window',
@@ -2866,6 +2866,23 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       revision: commentWindowRevision + 1,
       updatedAt: now,
     }
+    /** Builds the retryable comment-window fence write for this comment transaction. */
+    const createCommentWindowAction = () => ({
+      Put: {
+        TableName: this.tableName,
+        Item: commentWindowItem,
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) OR (' +
+          'entryType = :commentWindowEntryType AND ' +
+          'documentId = :commentWindowDocumentId AND ' +
+          'revision = :commentWindowRevision)',
+        ExpressionAttributeValues: {
+          ':commentWindowEntryType': 'document-comment-window',
+          ':commentWindowDocumentId': input.documentId,
+          ':commentWindowRevision': commentWindowRevision,
+        },
+      },
+    })
     const notificationCandidates = [
       ...new Set(
         mentions
@@ -2964,85 +2981,95 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           ConditionExpression: 'attribute_not_exists(workspaceId)',
         },
       },
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: commentWindowItem,
-          ConditionExpression:
-            'attribute_not_exists(workspaceId) OR (' +
-            'entryType = :commentWindowEntryType AND ' +
-            'documentId = :commentWindowDocumentId AND ' +
-            'revision = :commentWindowRevision)',
-          ExpressionAttributeValues: {
-            ':commentWindowEntryType': 'document-comment-window',
-            ':commentWindowDocumentId': input.documentId,
-            ':commentWindowRevision': commentWindowRevision,
-          },
-        },
-      },
+      createCommentWindowAction(),
       ...(auditPut === undefined ? [] : [auditPut]),
       ...authorizationGuardConditionChecks(
         mutationAuthorizationGuards,
       ),
     ]
     assertTransactionSize(actions)
-    try {
-      await this.client.send(new TransactWriteCommand({
-        TransactItems: actions,
-      }))
-      return comment
-    } catch (error) {
-      if (!isConditionalFailure(error)) {
-        throw normalizeDynamoError(error)
-      }
-      if (
-        !await this.authorizationGuardsMatch(
-          mutationAuthorizationGuards,
-        )
-      ) {
+    const commentWindowActionIndex = (storedParent === undefined ? 0 : 1) + 2
+    for (
+      let attempt = 0;
+      attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT;
+      attempt += 1
+    ) {
+      try {
+        await this.client.send(new TransactWriteCommand({
+          TransactItems: actions,
+        }))
+        return comment
+      } catch (error) {
+        if (!isConditionalFailure(error)) {
+          throw normalizeDynamoError(error)
+        }
+        if (isOnlyTransactionConditionalFailureAt(error, commentWindowActionIndex)) {
+          commentWindowRevision = await this.readCommentWindowRevision(
+            input.workspaceId,
+            input.documentId,
+          )
+          commentWindowItem = {
+            ...commentWindowItem,
+            revision: commentWindowRevision + 1,
+            updatedAt: this.now().toISOString(),
+          }
+          actions[commentWindowActionIndex] = createCommentWindowAction()
+          continue
+        }
+        if (
+          !await this.authorizationGuardsMatch(
+            mutationAuthorizationGuards,
+          )
+        ) {
+          throw new DocumentError(
+            409,
+            'DocumentAuthorizationChanged',
+            'Document authorization changed while creating the comment.',
+          )
+        }
+        if (input.commentId !== undefined) {
+          const replay = await this.readCommentCreateReplay(
+            input.workspaceId,
+            input.documentId,
+            id,
+            input.access.memberKey,
+            receipt.fingerprint,
+          )
+          if (replay !== undefined) return replay
+        }
+        if (storedParent !== undefined) {
+          const currentParent = await this.findStoredComment(
+            input.workspaceId,
+            input.documentId,
+            storedParent.id,
+          )
+          if (currentParent.resolved) {
+            throw new DocumentError(
+              409,
+              'DocumentCommentThreadResolved',
+              'Resolved comment threads cannot receive replies.',
+            )
+          }
+          if (currentParent.updatedAt !== storedParent.updatedAt) {
+            throw new DocumentError(
+              409,
+              'DocumentCommentConflict',
+              'The comment thread changed concurrently.',
+            )
+          }
+        }
         throw new DocumentError(
           409,
-          'DocumentAuthorizationChanged',
-          'Document authorization changed while creating the comment.',
+          'DocumentCommentConflict',
+          'The comment could not be created concurrently.',
         )
       }
-      if (input.commentId !== undefined) {
-        const replay = await this.readCommentCreateReplay(
-          input.workspaceId,
-          input.documentId,
-          id,
-          input.access.memberKey,
-          receipt.fingerprint,
-        )
-        if (replay !== undefined) return replay
-      }
-      if (storedParent !== undefined) {
-        const currentParent = await this.findStoredComment(
-          input.workspaceId,
-          input.documentId,
-          storedParent.id,
-        )
-        if (currentParent.resolved) {
-          throw new DocumentError(
-            409,
-            'DocumentCommentThreadResolved',
-            'Resolved comment threads cannot receive replies.',
-          )
-        }
-        if (currentParent.updatedAt !== storedParent.updatedAt) {
-          throw new DocumentError(
-            409,
-            'DocumentCommentConflict',
-            'The comment thread changed concurrently.',
-          )
-        }
-      }
-      throw new DocumentError(
-        409,
-        'DocumentCommentConflict',
-        'The comment could not be created concurrently.',
-      )
     }
+    throw new DocumentError(
+      409,
+      'DocumentCommentConflict',
+      'The comment could not be created concurrently.',
+    )
   }
 
   private async readCommentCreateReplay(
@@ -8196,6 +8223,25 @@ function isConditionalFailure(error: unknown): boolean {
   return codes.every((code) => typeof code === 'string') &&
     failures.length > 0 &&
     failures.every((code) => code === 'ConditionalCheckFailed')
+}
+
+/** Returns whether only the supplied transaction action failed its conditional check. */
+function isOnlyTransactionConditionalFailureAt(
+  error: unknown,
+  actionIndex: number,
+): boolean {
+  if (
+    !isRecord(error) ||
+    error.name !== 'TransactionCanceledException'
+  ) return false
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons) || reasons.length <= actionIndex) return false
+  return reasons.every((reason, reasonIndex) => {
+    if (!isRecord(reason) || typeof reason.Code !== 'string') return false
+    return reasonIndex === actionIndex
+      ? reason.Code === 'ConditionalCheckFailed'
+      : reason.Code === 'None'
+  })
 }
 
 /**

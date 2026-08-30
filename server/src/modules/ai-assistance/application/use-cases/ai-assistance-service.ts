@@ -894,6 +894,7 @@ export function createAiAssistanceService(
     actor: AiAssistanceActor,
     generationId: string,
     input: CreateAiAssistanceFeedbackRequest,
+    authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKeyValue: string,
   ): Promise<void> {
     const parsedFeedback = parseCreateAiAssistanceFeedbackRequest(input)
@@ -943,10 +944,27 @@ export function createAiAssistanceService(
         'The AI assistance generation is no longer available for feedback.',
       )
     }
+    const authorizationState = await authorization.isAuthorizationCurrent({
+      actor,
+      request: record.request,
+      authorizationToken: record.authorizationToken,
+    })
+    if (!authorizationState.current) {
+      throw authorizationChangedError(authorizationState.reason)
+    }
+    if (
+      authorizationState.authorizationConditions === undefined ||
+      authorizationState.authorizationConditions.length === 0
+    ) {
+      throw authorizationChangedError('permission-changed')
+    }
     const feedbackCommitFence: AiAssistanceFeedbackCommitFence = {
       policyRevision: currentPolicy.revision,
       effectiveExpiresAt: currentGeneration.expiresAt,
       commitAt: feedbackCommitAt.toISOString(),
+      ...(authorizationState.authorizationConditions === undefined
+        ? {}
+        : { authorizationConditions: authorizationState.authorizationConditions }),
     }
     await options.store.putFeedback({
       workspaceId: actor.workspaceId,

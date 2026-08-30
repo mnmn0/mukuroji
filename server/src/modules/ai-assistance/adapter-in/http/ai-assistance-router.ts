@@ -183,7 +183,7 @@ export function createAiAssistanceRouter<Principal>(
     '/api/ai-assistance/generations/:generationId/feedback',
     async (context) => {
       try {
-        const { actor } = await authenticateRequest(context, dependencies)
+        const { actor, authorization } = await authenticateRequest(context, dependencies)
         const generationId = requireGenerationId(context.req.param('generationId'))
         const request = parseCreateAiAssistanceFeedbackRequest(
           await dependencies.readJson(context.req),
@@ -195,6 +195,7 @@ export function createAiAssistanceRouter<Principal>(
           actor,
           generationId,
           request,
+          authorization,
           idempotencyKey,
         )
         return context.body(null, 204)

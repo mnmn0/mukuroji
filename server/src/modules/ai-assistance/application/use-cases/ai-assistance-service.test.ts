@@ -8,6 +8,7 @@ import {
 } from '@mukuroji/contracts'
 import type {
   AiAssistanceActor,
+  AiAssistanceAuthorizationCallbacks,
   AiAssistanceAuthorizationState,
   AiAssistanceCustomFieldDefinition,
   AiAssistanceGenerationBudgetReservation,
@@ -492,7 +493,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     now: () => new Date(currentTime),
     createId: () => 'generation-1',
   })
-  const authorization = {
+  const authorization: AiAssistanceAuthorizationCallbacks = {
     async resolveContext() {
       resolveContextCount += 1
       if (configuration.advanceBeforeProviderMs !== undefined) {
@@ -556,7 +557,22 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       if (configuration.revokeAuthorizationBeforePersistence && authorizationCheckCount === 3) {
         authorizationState = { current: false, reason: 'source-changed' }
       }
-      return authorizationState
+      if (!authorizationState.current) return authorizationState
+      return {
+        ...authorizationState,
+        authorizationConditions: [{
+          kind: 'workspace-member',
+          tableName: 'workspace-access',
+          key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#operator-1' },
+          expectedAttributes: {
+            entryType: 'workspace-member',
+            status: 'active',
+            memberKey: 'operator-1',
+            role: 'admin',
+            version: 1,
+          },
+        }],
+      }
     },
   }
   return {
@@ -1575,6 +1591,7 @@ describe('createAiAssistanceService', () => {
       createActor(),
       'generation-1',
       { rating: 'helpful' },
+      harness.authorization,
       'feedback-1',
     )).rejects.toMatchObject({ code: 'AiAssistanceGenerationNotFound' })
     expect(harness.feedbackRecords).toHaveLength(0)
@@ -2432,12 +2449,14 @@ describe('createAiAssistanceService', () => {
       createActor(),
       'generation-1',
       feedback,
+      harness.authorization,
       'feedback-1',
     )
     await harness.service.createFeedback(
       createActor(),
       'generation-1',
       feedback,
+      harness.authorization,
       'feedback-1',
     )
 
@@ -2453,8 +2472,34 @@ describe('createAiAssistanceService', () => {
       createActor(),
       'generation-1',
       { rating: 'not-helpful', comment: 'Different' },
+      harness.authorization,
       'feedback-1',
     )).rejects.toMatchObject({ code: 'AiAssistanceIdempotencyConflict' })
+  })
+
+  test('rejects feedback when the actor authorization is no longer current', async () => {
+    const harness = createHarness()
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-feedback-authorization',
+    )
+    harness.setAuthorizationState({
+      current: false,
+      reason: 'permission-changed',
+    })
+
+    await expect(harness.service.createFeedback(
+      createActor(),
+      'generation-1',
+      { rating: 'helpful' },
+      harness.authorization,
+      'feedback-authorization',
+    )).rejects.toMatchObject({
+      code: 'AiAssistanceAuthorizationChanged',
+    })
+    expect(harness.feedbackRecords).toHaveLength(0)
   })
 
   test('rejects feedback when redaction expands it beyond the public bound', async () => {
@@ -2471,6 +2516,7 @@ describe('createAiAssistanceService', () => {
       createActor(),
       'generation-1',
       { rating: 'helpful', comment },
+      harness.authorization,
       'feedback-bound',
     )).rejects.toMatchObject({
       category: 'validation',

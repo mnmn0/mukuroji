@@ -513,6 +513,8 @@ export type AiAssistanceFeedbackCommitFence = {
   effectiveExpiresAt: string
   /** ISO 8601 instant used to reject feedback that expires before the write boundary. */
   commitAt: string
+  /** Source-of-truth rows that must still authorize the feedback actor at commit time. */
+  authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
 }
 
 /** Provider attempt metadata persisted before any paid model call starts. */
@@ -734,11 +736,21 @@ export interface AiAssistanceService {
     request: DecideAiAssistanceGenerationRequest,
     authorization: AiAssistanceAuthorizationCallbacks,
   ): Promise<AiAssistanceGeneration>
-  /** Records immutable quality feedback. */
+  /**
+   * Records immutable quality feedback after rechecking the actor authorization boundary.
+   *
+   * @param actor - Authenticated Workspace member submitting feedback.
+   * @param generationId - Generation that receives the feedback.
+   * @param request - Strictly validated feedback payload.
+   * @param authorization - Current source and actor authorization callbacks.
+   * @param idempotencyKey - Client key bound to the feedback identity.
+   * @returns A promise that resolves after the feedback write is durable.
+   */
   createFeedback(
     actor: AiAssistanceActor,
     generationId: string,
     request: CreateAiAssistanceFeedbackRequest,
+    authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKey: string,
   ): Promise<void>
 }

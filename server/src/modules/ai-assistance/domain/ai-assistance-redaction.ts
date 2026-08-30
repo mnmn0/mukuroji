@@ -189,6 +189,8 @@ export function classifyAiAssistanceSensitivePromptField(
   ) return '[REDACTED_EMAIL]'
   if (
     /(?:氏名|お名前|姓名|担当者名|申請者名|連絡先氏名)/u.test(label) ||
+    semanticLabel === '姓' ||
+    semanticLabel === '名' ||
     semanticCandidates.some((candidate) =>
       /^(?:name|your name|your full name|first name|last name|given name|surname|family name)$/u.test(candidate) ||
       /(?:^|\s)(?:full|contact|requester|applicant|person|customer|employee|user)\s+names?(?:\s|$)/u

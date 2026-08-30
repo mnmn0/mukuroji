@@ -605,8 +605,14 @@ function createLazyAiAssistanceService(
         request,
         authorization,
       ),
-    createFeedback: (actor, generationId, request, idempotencyKey) =>
-      resolveService().createFeedback(actor, generationId, request, idempotencyKey),
+    createFeedback: (actor, generationId, request, authorization, idempotencyKey) =>
+      resolveService().createFeedback(
+        actor,
+        generationId,
+        request,
+        authorization,
+        idempotencyKey,
+      ),
   }
 }
 

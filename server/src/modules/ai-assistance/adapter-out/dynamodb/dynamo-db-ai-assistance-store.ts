@@ -1393,6 +1393,11 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       validateFeedbackCommitFence(record, commitFence)
     }
     const recordKey = createFeedbackRecordKey(record.generationId, record.feedbackId)
+    const authorizationConditionItems = commitFence === undefined
+      ? []
+      : createAiAssistanceAuthorizationConditionChecks(
+          commitFence.authorizationConditions,
+        )
     const feedbackPut = {
       Put: {
         TableName: this.#tableName,
@@ -1432,6 +1437,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
               'policy',
               commitFence.policyRevision,
             ),
+            ...authorizationConditionItems,
           ],
         }))
       }
@@ -1452,6 +1458,14 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
           'not-found',
           'AiAssistanceGenerationNotFound',
           'The AI assistance generation is no longer available for feedback.',
+        )
+      }
+      if (
+        commitFence !== undefined &&
+        isTransactionConditionalFailureAtOrAfter(error, 3)
+      ) {
+        throw aiAssistanceAuthorizationChangedError(
+          'AI assistance actor authorization changed during feedback.',
         )
       }
       const feedbackConditionFailed = isConditionalCheckFailed(error) ||

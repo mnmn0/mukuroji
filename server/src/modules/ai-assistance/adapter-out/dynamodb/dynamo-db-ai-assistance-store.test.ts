@@ -1226,6 +1226,58 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('fences feedback writes against the current actor authorization', async () => {
+    const feedback: StoredAiAssistanceFeedback = {
+      workspaceId: 'workspace-1',
+      feedbackId: 'feedback-authorization',
+      generationId: 'generation-1',
+      memberId: 'member-1',
+      feedback: { rating: 'helpful' },
+      inputFingerprint: FINGERPRINT,
+      createdAt: '2026-08-25T00:00:00.000Z',
+      expiresAt: '2026-09-24T00:00:00.000Z',
+    }
+    const harness = createHarness([
+      transactionCancellation(['None', 'None', 'None', 'ConditionalCheckFailed']),
+    ])
+    try {
+      await expect(harness.store.putFeedback(feedback, {
+        policyRevision: 1,
+        effectiveExpiresAt: feedback.expiresAt,
+        commitAt: feedback.createdAt,
+        authorizationConditions: [{
+          kind: 'workspace-member',
+          tableName: 'WorkspaceAccessTable',
+          key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member-1' },
+          expectedAttributes: {
+            entryType: 'workspace-member',
+            status: 'active',
+            memberKey: 'member-1',
+            role: 'member',
+            version: 3,
+          },
+        }],
+      })).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceAuthorizationChanged',
+      })
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      if (!Array.isArray(transactionItems)) throw new TypeError('Expected transaction items.')
+      expect(transactionItems).toHaveLength(4)
+      const authorizationCheck = readRecord(readRecord(transactionItems[3]).ConditionCheck)
+      expect(authorizationCheck.TableName).toBe('WorkspaceAccessTable')
+      expect(authorizationCheck.Key).toEqual({
+        workspaceId: 'workspace-1',
+        recordKey: 'MEMBER#member-1',
+      })
+      expect(authorizationCheck.ConditionExpression).toContain(
+        '#authorization0 = :authorization0',
+      )
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('rejects feedback whose generation expires at the commit boundary', async () => {
     const feedback: StoredAiAssistanceFeedback = {
       workspaceId: 'workspace-1',
