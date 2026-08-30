@@ -173,12 +173,22 @@ const generationAttemptSchema = z.object({
   failureCode: aiAssistanceErrorCodeSchema.optional(),
 }).strict()
 
-/** One item in the atomic idempotency and generation-budget transaction. */
+/**
+ * One DynamoDB transaction operation used by an idempotency and budget write.
+ *
+ * @remarks The alias keeps transaction item construction type-safe without
+ * exposing the AWS SDK input type through the application port.
+ */
 type AiAssistanceBudgetTransactionItem = NonNullable<
   TransactWriteCommandInput['TransactItems']
 >[number]
 
-/** Values used to build one scope-specific fixed-window counter update. */
+/**
+ * Values used to build one scope-specific fixed-window counter update.
+ *
+ * @remarks The counter update is conditional on both the logical scope and
+ * the configured generation/token limits.
+ */
 type CreateBudgetCounterTransactionItemInput = {
   /** Workspace Search table physical name. */
   tableName: string

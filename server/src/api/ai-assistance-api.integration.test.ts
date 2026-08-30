@@ -1225,6 +1225,12 @@ describe('AI assistance API composition', () => {
     setTestAppDependencies({
       workspaceAccess: {
         ...existingWorkspaceAccess,
+        /**
+         * Adds a workspace-only fixture member to the active-member projection.
+         *
+         * @param workspaceId - Workspace whose existing active members are extended.
+         * @returns Existing active members followed by the workspace-only fixture member.
+         */
         async listActiveMembers(workspaceId) {
           const existing = await existingWorkspaceAccess.listActiveMembers(workspaceId)
           const template = existing[0]
