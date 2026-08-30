@@ -200,6 +200,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let authorizationCheckCount = 0
   const gatewayInputs: AiModelGenerationInput[] = []
   const feedbackRecords: StoredAiAssistanceFeedback[] = []
+  const feedbackCommitFences: unknown[] = []
   const startedAttempts: StartAiAssistanceGenerationAttemptInput[] = []
   const finalizedAttempts: FinalizeAiAssistanceGenerationAttemptInput[] = []
   const generationCommitFences: unknown[] = []
@@ -395,7 +396,8 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       }
       return storedGeneration
     },
-    async putFeedback(record) {
+    async putFeedback(record, commitFence) {
+      feedbackCommitFences.push(commitFence)
       const existing = feedbackRecords.find((candidate) =>
         candidate.feedbackId === record.feedbackId)
       if (existing?.inputFingerprint === record.inputFingerprint) return
@@ -533,6 +535,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     },
     gatewayStarted: () => gatewayStarted,
     feedbackRecords,
+    feedbackCommitFences,
     failedReservations,
     finalizedAttempts,
     finalizeAttemptCallCount: () => finalizeAttemptCallCount,
@@ -2284,6 +2287,10 @@ describe('createAiAssistanceService', () => {
     expect(harness.feedbackRecords[0]?.feedback.comment).toBe(
       'Contact [REDACTED_EMAIL] token=[REDACTED_SECRET]',
     )
+    expect(harness.feedbackCommitFences[0]).toEqual(expect.objectContaining({
+      effectiveExpiresAt: harness.feedbackRecords[0]?.expiresAt,
+      commitAt: harness.feedbackRecords[0]?.createdAt,
+    }))
     await expect(harness.service.createFeedback(
       createActor(),
       'generation-1',

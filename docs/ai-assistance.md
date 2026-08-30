@@ -74,6 +74,8 @@ Provider完了後にもpolicyとmember preferenceをstrongly consistentに再読
 出力を破棄します。Generation作成はsource authorization token、policy revision、member preference revisionを同じ
 commit fenceへ持ち込み、sourceを直前に再確認したうえで保存します。Decisionも最新policy revision、member preference
 revision、effective期限を同じCAS境界へbindするため、再読直後の設定変更も古い出力やdecisionを保存できません。
+Feedbackも書き込み直前のcommit時刻をeffective期限へbindし、対象generationの期限がその時刻を過ぎている場合は
+DynamoDB transactionのgeneration condition checkで拒否します。
 
 Policy更新時のtable scan、TTL rewrite、同期delete、backup purgeは行いません。DynamoDB TTL削除は非同期なので、
 論理期限後も元rowが物理的に残る期間があります。また、短縮後にpolicyを再延長した場合、まだTTL削除されて

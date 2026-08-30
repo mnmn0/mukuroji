@@ -1178,12 +1178,13 @@ describe('DynamoDbAiAssistanceStore', () => {
       expiresAt: '2026-09-24T00:00:00.000Z',
     }
     const harness = createHarness([
-      transactionCancellation(['None', 'ConditionalCheckFailed']),
+      transactionCancellation(['None', 'None', 'ConditionalCheckFailed']),
     ])
     try {
       await expect(harness.store.putFeedback(feedback, {
         policyRevision: 1,
         effectiveExpiresAt: feedback.expiresAt,
+        commitAt: feedback.createdAt,
       })).rejects.toMatchObject({
         category: 'conflict',
         code: 'AiAssistanceAuthorizationChanged',
@@ -1191,6 +1192,39 @@ describe('DynamoDbAiAssistanceStore', () => {
       expect(harness.commands.map((command) => command.name)).toEqual([
         'TransactWriteCommand',
       ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects feedback whose generation expires at the commit boundary', async () => {
+    const feedback: StoredAiAssistanceFeedback = {
+      workspaceId: 'workspace-1',
+      feedbackId: 'feedback-expired',
+      generationId: 'generation-1',
+      memberId: 'member-1',
+      feedback: { rating: 'helpful' },
+      inputFingerprint: FINGERPRINT,
+      createdAt: '2026-09-23T23:59:59.999Z',
+      expiresAt: '2026-09-24T00:00:00.000Z',
+    }
+    const harness = createHarness([
+      transactionCancellation(['None', 'ConditionalCheckFailed', 'None']),
+    ])
+    try {
+      await expect(harness.store.putFeedback(feedback, {
+        policyRevision: 1,
+        effectiveExpiresAt: feedback.expiresAt,
+        commitAt: feedback.createdAt,
+      })).rejects.toMatchObject({
+        category: 'not-found',
+        code: 'AiAssistanceGenerationNotFound',
+      })
+      const transaction = harness.commands[0]
+      expect(transaction?.name).toBe('TransactWriteCommand')
+      expect(JSON.stringify(transaction?.input)).toContain(
+        '#generation.#expiresAt > :commitAt',
+      )
     } finally {
       harness.restore()
     }

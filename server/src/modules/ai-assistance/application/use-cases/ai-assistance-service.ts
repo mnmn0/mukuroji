@@ -904,7 +904,8 @@ export function createAiAssistanceService(
     // feedback row with a stale deadline.
     const currentPolicy = await readPolicy(actor)
     const currentGeneration = applyEffectiveRetention(record.generation, currentPolicy)
-    if (Date.parse(currentGeneration.expiresAt) <= now().getTime()) {
+    const feedbackCommitAt = now()
+    if (Date.parse(currentGeneration.expiresAt) <= feedbackCommitAt.getTime()) {
       throw new AiAssistanceError(
         'not-found',
         'AiAssistanceGenerationNotFound',
@@ -914,6 +915,7 @@ export function createAiAssistanceService(
     const feedbackCommitFence: AiAssistanceFeedbackCommitFence = {
       policyRevision: currentPolicy.revision,
       effectiveExpiresAt: currentGeneration.expiresAt,
+      commitAt: feedbackCommitAt.toISOString(),
     }
     await options.store.putFeedback({
       workspaceId: actor.workspaceId,
@@ -922,7 +924,7 @@ export function createAiAssistanceService(
       memberId: actor.memberId,
       feedback,
       inputFingerprint: feedbackIdentity.inputFingerprint,
-      createdAt: now().toISOString(),
+      createdAt: feedbackCommitAt.toISOString(),
       expiresAt: currentGeneration.expiresAt,
     }, feedbackCommitFence)
   }

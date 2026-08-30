@@ -349,7 +349,28 @@ const planningDependencySchema = z.object({
 
 const planningSubtasksSchema = z.array(planningSubtaskSchema).max(50)
 
-const planningDependenciesSchema = z.array(planningDependencySchema).max(100)
+const planningDependenciesSchema = z.array(planningDependencySchema).max(100).superRefine(
+  (dependencies, context) => {
+    const seenEdges = new Set<string>()
+    dependencies.forEach((dependency, index) => {
+      const edgeKey = JSON.stringify([
+        dependency.predecessor.teamId,
+        dependency.predecessor.workItemId,
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      ])
+      if (seenEdges.has(edgeKey)) {
+        context.addIssue({
+          code: 'custom',
+          path: [index],
+          message: 'Planning dependencies must use unique predecessor and successor endpoints.',
+        })
+        return
+      }
+      seenEdges.add(edgeKey)
+    })
+  },
+)
 
 const planningStatusUpdateSchema = z.object({
   health: z.enum(['unknown', 'on-track', 'at-risk', 'off-track']),

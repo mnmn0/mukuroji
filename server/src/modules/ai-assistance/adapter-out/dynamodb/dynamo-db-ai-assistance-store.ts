@@ -1388,6 +1388,12 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         await this.#documentClient.send(new TransactWriteCommand({
           TransactItems: [
             feedbackPut,
+            createGenerationExpirationConditionCheck(
+              this.#tableName,
+              record.workspaceId,
+              record.generationId,
+              commitFence.commitAt,
+            ),
             createNestedRevisionConditionCheck(
               this.#tableName,
               record.workspaceId,
@@ -1401,10 +1407,20 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     } catch (error) {
       if (
         commitFence !== undefined &&
-        isTransactionConditionalFailureAt(error, 1)
+        isTransactionConditionalFailureAt(error, 2)
       ) {
         throw aiAssistanceAuthorizationChangedError(
           'AI assistance retention policy changed during feedback.',
+        )
+      }
+      if (
+        commitFence !== undefined &&
+        isTransactionConditionalFailureAt(error, 1)
+      ) {
+        throw new AiAssistanceError(
+          'not-found',
+          'AiAssistanceGenerationNotFound',
+          'The AI assistance generation is no longer available for feedback.',
         )
       }
       const feedbackConditionFailed = isConditionalCheckFailed(error) ||
@@ -1920,14 +1936,57 @@ function validateFeedbackCommitFence(
   fence: AiAssistanceFeedbackCommitFence,
 ): void {
   const expiresAt = Date.parse(fence.effectiveExpiresAt)
+  const commitAt = Date.parse(fence.commitAt)
+  const canonicalExpiresAt = Number.isFinite(expiresAt)
+    ? new Date(expiresAt).toISOString()
+    : undefined
+  const canonicalCommitAt = Number.isFinite(commitAt)
+    ? new Date(commitAt).toISOString()
+    : undefined
   if (
     !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
-    !Number.isFinite(expiresAt) ||
+    !Number.isFinite(expiresAt) || !Number.isFinite(commitAt) ||
+    canonicalExpiresAt !== fence.effectiveExpiresAt ||
+    canonicalCommitAt !== fence.commitAt ||
+    commitAt >= expiresAt ||
+    record.createdAt !== fence.commitAt ||
     record.expiresAt !== fence.effectiveExpiresAt
   ) {
     throw aiAssistanceAuthorizationChangedError(
       'AI assistance retention policy is no longer current.',
     )
+  }
+}
+
+/** Builds a condition check that keeps feedback writes before its generation expires. */
+function createGenerationExpirationConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  generationId: string,
+  commitAt: string,
+): AiAssistanceBudgetTransactionItem {
+  const commitAtMilliseconds = Date.parse(commitAt)
+  if (!Number.isFinite(commitAtMilliseconds)) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance retention deadline is invalid.',
+    )
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        workspaceId,
+        recordKey: createGenerationRecordKey(generationId),
+      },
+      ConditionExpression: '#generation.#expiresAt > :commitAt',
+      ExpressionAttributeNames: {
+        '#generation': 'generation',
+        '#expiresAt': 'expiresAt',
+      },
+      ExpressionAttributeValues: {
+        ':commitAt': commitAt,
+      },
+    },
   }
 }
 

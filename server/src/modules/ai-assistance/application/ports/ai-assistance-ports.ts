@@ -484,6 +484,8 @@ export type AiAssistanceFeedbackCommitFence = {
   policyRevision: number
   /** Effective generation deadline computed from the current policy. */
   effectiveExpiresAt: string
+  /** ISO 8601 instant used to reject feedback that expires before the write boundary. */
+  commitAt: string
 }
 
 /** Provider attempt metadata persisted before any paid model call starts. */

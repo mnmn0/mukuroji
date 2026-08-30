@@ -476,6 +476,38 @@ describe('createMastraBedrockAiModelGateway', () => {
     })
   })
 
+  test('rejects duplicate planning dependency edges', async () => {
+    const dependency = {
+      id: 'dependency-1',
+      predecessor: { teamId: 'team-1', workItemId: 'work-item-1' },
+      successor: { teamId: 'team-1', workItemId: 'work-item-2' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      reason: 'The predecessor must finish first.',
+      confidence: 'high',
+      citationIds: ['S1'],
+    }
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'planning',
+            subtasks: [],
+            dependencies: [
+              dependency,
+              { ...dependency, id: 'dependency-2', type: 'start-to-start' },
+            ],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
   test('requires a nonempty Planning next action', async () => {
     const gateway = createMastraBedrockAiModelGateway({
       runStructuredGeneration: async () => ({
