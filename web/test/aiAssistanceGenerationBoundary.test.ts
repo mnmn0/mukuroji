@@ -90,6 +90,25 @@ describe('AI assistance generation response boundary', () => {
     )
   })
 
+  /** Accepts an expired server withholding without reintroducing retained content. */
+  test('accepts a retention-expired withholding envelope', () => {
+    const now = Date.now()
+    const withheld = {
+      ...aiSearchGenerationFixture,
+      createdAt: new Date(now - 120_000).toISOString(),
+      expiresAt: new Date(now - 60_000).toISOString(),
+      content: {
+        availability: 'withheld',
+        reasonCode: 'retention-expired',
+      },
+    }
+
+    expect(parseAiAssistanceGenerationResponse(withheld, 'search', now).content).toEqual({
+      availability: 'withheld',
+      reasonCode: 'retention-expired',
+    })
+  })
+
   /** Rejects control characters that the downstream collaboration boundary cannot persist. */
   test('rejects unsafe control characters in Summary claims', () => {
     const content = aiSummaryGenerationFixture.content

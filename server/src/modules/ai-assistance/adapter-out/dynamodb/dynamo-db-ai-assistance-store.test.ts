@@ -1269,7 +1269,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     const current = createGenerationRecord('Permission-filtered source context.')
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['None', 'ConditionalCheckFailed']),
+      transactionCancellation(['None', 'ConditionalCheckFailed', 'None', 'None']),
     ])
     try {
       await expect(harness.store.decideGeneration(
@@ -1281,6 +1281,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           policyRevision: 3,
           preferenceRevision: 0,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          commitAt: '2026-08-25T00:02:00.000Z',
           authorizationToken: 'authorization-snapshot-1',
         },
       )).rejects.toMatchObject({
@@ -1300,7 +1301,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     const current = createGenerationRecord('Permission-filtered source context.')
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['None', 'None', 'ConditionalCheckFailed']),
+      transactionCancellation(['None', 'None', 'ConditionalCheckFailed', 'None']),
     ])
     try {
       await expect(harness.store.decideGeneration(
@@ -1312,6 +1313,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           policyRevision: 3,
           preferenceRevision: 2,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          commitAt: '2026-08-25T00:02:00.000Z',
           authorizationToken: 'authorization-snapshot-1',
         },
       )).rejects.toMatchObject({
@@ -1327,11 +1329,49 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('rejects a decision whose generation expires at the commit boundary', async () => {
+    const base = createGenerationRecord('Permission-filtered source context.')
+    const current = {
+      ...base,
+      generation: {
+        ...base.generation,
+        expiresAt: '2026-08-25T00:03:00.000Z',
+      },
+    }
+    const harness = createHarness([
+      { Item: createPersistedGenerationItem(current) },
+      transactionCancellation(['None', 'None', 'None', 'ConditionalCheckFailed']),
+    ])
+    try {
+      await expect(harness.store.decideGeneration(
+        'workspace-1',
+        'generation-1',
+        { outcome: 'approved', expectedRevision: 1 },
+        '2026-08-25T00:02:00.000Z',
+        {
+          policyRevision: 3,
+          preferenceRevision: 2,
+          effectiveExpiresAt: '2026-08-25T00:03:00.000Z',
+          commitAt: '2026-08-25T00:02:00.000Z',
+          authorizationToken: current.authorizationToken,
+        },
+      )).rejects.toMatchObject({
+        category: 'not-found',
+        code: 'AiAssistanceGenerationNotFound',
+      })
+      expect(JSON.stringify(harness.commands[1]?.input)).toContain(
+        '#generation.#expiresAt > :commitAt',
+      )
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('maps a generation condition cancellation to a revision conflict', async () => {
     const current = createGenerationRecord('Permission-filtered source context.')
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['ConditionalCheckFailed', 'None', 'None']),
+      transactionCancellation(['ConditionalCheckFailed', 'None', 'None', 'None']),
       { Item: createPersistedGenerationItem(current) },
     ])
     try {
@@ -1344,6 +1384,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           policyRevision: 3,
           preferenceRevision: 2,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          commitAt: '2026-08-25T00:02:00.000Z',
           authorizationToken: 'authorization-snapshot-1',
         },
       )).rejects.toMatchObject({
@@ -1370,7 +1411,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['ConditionalCheckFailed', 'None', 'None']),
+      transactionCancellation(['ConditionalCheckFailed', 'None', 'None', 'None']),
       { Item: changed },
     ])
     try {
@@ -1383,6 +1424,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           policyRevision: 3,
           preferenceRevision: 2,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          commitAt: '2026-08-25T00:02:00.000Z',
           authorizationToken: current.authorizationToken,
         },
       )).rejects.toMatchObject({

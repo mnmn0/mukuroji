@@ -18,13 +18,13 @@ import { AiAssistanceError } from '../../errors'
 const identifierSchema = z.string().trim().min(1).max(256)
 /** Member identifiers may be longer than generic resource identifiers (for example, long emails). */
 const memberIdentifierSchema = z.string().trim().min(1).max(320)
-const boundedTextSchema = z.string().trim().min(1).max(2_000)
-const titleTextSchema = z.string().trim().min(1).max(256)
-const planningStatusTextSchema = z.string().trim().max(2_000).refine(
+const boundedTextSchema = createSafeTextSchema(2_000)
+const titleTextSchema = createSafeTextSchema(256)
+const planningStatusTextSchema = createSafeTextSchema(2_000, 0).refine(
   isWellFormedUnicode,
   { message: 'Planning status text must be well-formed Unicode.' },
 )
-const requiredPlanningStatusTextSchema = z.string().trim().min(1).max(2_000).refine(
+const requiredPlanningStatusTextSchema = createSafeTextSchema(2_000).refine(
   isWellFormedUnicode,
   { message: 'Planning status text must be well-formed Unicode.' },
 )
@@ -169,10 +169,16 @@ const suggestedEffortSchema = z.object({
 }).strict()
 
 const customFieldValueSchema = z.union([
-  z.string().max(2_000),
+  z.string().max(2_000).refine(
+    (value) => !hasUnsafeControlCharacter(value),
+    { message: 'Custom-field text must not contain unsafe control characters.' },
+  ),
   z.number().finite(),
   z.boolean(),
-  z.array(z.string().max(500)).max(100),
+  z.array(z.string().max(500).refine(
+    (value) => !hasUnsafeControlCharacter(value),
+    { message: 'Custom-field text must not contain unsafe control characters.' },
+  )).max(100),
   z.null(),
 ])
 
@@ -267,7 +273,7 @@ const customFieldFilterSchema = z.object({
 })
 
 const workspaceSearchFiltersSchema = z.object({
-  keyword: z.string().trim().min(1).max(256).optional(),
+  keyword: createSafeTextSchema(256).optional(),
   entityTypes: z.array(z.enum([
     'work-item',
     'project',
@@ -312,7 +318,7 @@ const workItemEndpointSchema = z.object({
 const planningSubtaskSchema = z.object({
   id: identifierSchema,
   title: titleTextSchema,
-  description: z.string().trim().min(1).max(10_000).optional(),
+  description: createSafeTextSchema(10_000).optional(),
   priority: workItemPrioritySchema,
   plannedEffortMinutes: z.number().int().min(0).max(10_000_000).optional(),
   reason: boundedTextSchema,
@@ -353,12 +359,7 @@ const planningDependenciesSchema = z.array(planningDependencySchema).max(100).su
   (dependencies, context) => {
     const seenEdges = new Set<string>()
     dependencies.forEach((dependency, index) => {
-      const edgeKey = JSON.stringify([
-        dependency.predecessor.teamId,
-        dependency.predecessor.workItemId,
-        dependency.successor.teamId,
-        dependency.successor.workItemId,
-      ])
+      const edgeKey = planningDependencyEdgeKey(dependency)
       if (seenEdges.has(edgeKey)) {
         context.addIssue({
           code: 'custom',
@@ -369,6 +370,13 @@ const planningDependenciesSchema = z.array(planningDependencySchema).max(100).su
       }
       seenEdges.add(edgeKey)
     })
+    if (hasPlanningDependencyCycle(dependencies)) {
+      context.addIssue({
+        code: 'custom',
+        path: [],
+        message: 'Planning dependencies must not contain directed cycles.',
+      })
+    }
   },
 )
 
@@ -425,7 +433,7 @@ const draftSchema = z.discriminatedUnion('kind', [
         'team',
       ]).optional(),
     }).strict().optional(),
-    caveats: z.array(z.string().trim().min(1).max(1_000)).max(20),
+    caveats: z.array(createSafeTextSchema(1_000)).max(20),
   }).strict(),
   z.object({
     kind: z.literal('planning'),
@@ -450,6 +458,97 @@ export const aiAssistanceModelOutputSchema = z.object({
   draft: draftSchema,
   uncertainty: uncertaintySchema,
 }).strict()
+
+/**
+ * Creates a bounded text schema that rejects unsafe C0 and DEL control characters.
+ *
+ * @param maximumLength - Inclusive UTF-16 length limit.
+ * @param minimumLength - Inclusive minimum length after trimming.
+ * @returns A Zod string schema with the shared generated-prose safety rules.
+ */
+function createSafeTextSchema(maximumLength: number, minimumLength = 1) {
+  return z.string()
+    .trim()
+    .min(minimumLength)
+    .max(maximumLength)
+    .refine(
+      (value) => !hasUnsafeControlCharacter(value),
+      { message: 'Text must not contain unsafe control characters.' },
+    )
+}
+
+/**
+ * Checks text for a disallowed C0 or DEL control character.
+ *
+ * @param value - Text to inspect.
+ * @returns Whether the text contains a control character that cannot cross the API boundary.
+ */
+function hasUnsafeControlCharacter(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint === 127 || (codePoint < 32 && codePoint !== 9 && codePoint !== 10)
+  })
+}
+
+/**
+ * Creates a stable directed edge key for one planning dependency.
+ *
+ * @param dependency - Dependency whose predecessor and successor form the edge.
+ * @returns A serialized endpoint pair used for duplicate detection.
+ */
+function planningDependencyEdgeKey(
+  dependency: {
+    predecessor: { teamId: string; workItemId: string }
+    successor: { teamId: string; workItemId: string }
+  },
+): string {
+  return JSON.stringify([
+    dependency.predecessor.teamId,
+    dependency.predecessor.workItemId,
+    dependency.successor.teamId,
+    dependency.successor.workItemId,
+  ])
+}
+
+/**
+ * Checks whether directed planning dependencies contain a cycle.
+ *
+ * @param dependencies - Parsed dependency edges to inspect.
+ * @returns Whether a path returns to a previously visiting endpoint.
+ */
+function hasPlanningDependencyCycle(
+  dependencies: ReadonlyArray<{
+    predecessor: { teamId: string; workItemId: string }
+    successor: { teamId: string; workItemId: string }
+  }>,
+): boolean {
+  const outgoing = new Map<string, Set<string>>()
+  for (const dependency of dependencies) {
+    const predecessor = `${dependency.predecessor.teamId}\u0000${dependency.predecessor.workItemId}`
+    const successor = `${dependency.successor.teamId}\u0000${dependency.successor.workItemId}`
+    const successors = outgoing.get(predecessor) ?? new Set<string>()
+    successors.add(successor)
+    outgoing.set(predecessor, successors)
+    if (!outgoing.has(successor)) outgoing.set(successor, new Set<string>())
+  }
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (node: string): boolean => {
+    if (visiting.has(node)) return true
+    if (visited.has(node)) return false
+    visiting.add(node)
+    for (const successor of outgoing.get(node) ?? []) {
+      if (visit(successor)) return true
+    }
+    visiting.delete(node)
+    visited.add(node)
+    return false
+  }
+  for (const node of outgoing.keys()) {
+    if (visit(node)) return true
+  }
+  return false
+}
 
 /**
  * Checks one fixed-width ISO calendar date without accepting timestamp coercion.
@@ -534,9 +633,9 @@ const citationSchema = z.object({
     'document',
     'planning-target',
   ]),
-  label: z.string().trim().min(1).max(500),
-  href: z.string().trim().min(1).max(2_000),
-  excerpt: z.string().trim().max(2_000).optional(),
+  label: createSafeTextSchema(500),
+  href: createSafeTextSchema(2_000),
+  excerpt: createSafeTextSchema(2_000, 0).optional(),
   capturedRevision: revisionSchema,
 }).strict()
 

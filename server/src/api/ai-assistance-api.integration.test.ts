@@ -1292,6 +1292,67 @@ describe('AI assistance API composition', () => {
     expect(JSON.stringify(resolvedContext.promptContext)).not.toContain('later-project')
   })
 
+  test('withholds triage output when destination Project membership changes during generation', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer', teamId: 'core-team' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const entry = createTriageEntry('full')
+    const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+    let projectMemberReads = 0
+    setTestAppDependencies({
+      projectDirectory: {
+        ...existingProjectDirectory,
+        async getProjectMembers(directoryId, projectId, teamId) {
+          const response = await existingProjectDirectory.getProjectMembers(
+            directoryId,
+            projectId,
+            teamId,
+          )
+          projectMemberReads += 1
+          return projectMemberReads === 1
+            ? response
+            : { ...response, members: [] }
+        },
+      },
+      triage: createTriageClient(entry),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          const resolved = await authorization.resolveContext({ actor, request })
+          const current = await authorization.isAuthorizationCurrent({
+            actor,
+            request,
+            authorizationToken: resolved.authorizationToken,
+          })
+          if (current.current) {
+            throw new Error('Expected Project membership changes to invalidate authorization.')
+          }
+          expect(current.reason).toBe('source-changed')
+          return createWithheldGeneration(request.task, current.reason)
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-triage-project-membership-fence' },
+      body: JSON.stringify({
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'triage-entry',
+          teamId: 'core-team',
+          triageEntryId: entry.id,
+          expectedRevision: entry.revision,
+        },
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(projectMemberReads).toBeGreaterThanOrEqual(2)
+  })
+
   test('does not expose member candidates outside an Enterprise reader scope', async () => {
     await withTestEnvironment({
       COGNITO_CLIENT_ID: 'mukuroji-main-client',

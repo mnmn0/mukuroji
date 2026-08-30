@@ -472,6 +472,8 @@ export type AiAssistanceDecisionCommitFence = {
   preferenceRevision: number
   /** Effective generation deadline computed from the current policy. */
   effectiveExpiresAt: string
+  /** ISO 8601 instant at which the decision write crossed the application boundary. */
+  commitAt: string
   /** Opaque source authorization snapshot rechecked immediately before the decision write. */
   authorizationToken: string
   /** Source-of-truth rows checked atomically with the decision write. */

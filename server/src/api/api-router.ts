@@ -19922,11 +19922,6 @@ type AiAssistanceResolverState = {
   sensitiveCustomFieldIds: ReadonlySet<string>
   /** Complete current custom-field identifiers keyed by visible Team. */
   customFieldIdsByTeamId: ReadonlyMap<string, ReadonlySet<string>>
-  /** Writable custom-field metadata keyed by visible Team for output validation. */
-  customFieldDefinitionsByTeamId: ReadonlyMap<
-    string,
-    readonly AiAssistanceCustomFieldDefinition[]
-  >
   /** Non-content authorization and configuration fences. */
   fence: unknown
   /** Current workflow definitions keyed by each visible Team. */
@@ -20012,7 +20007,7 @@ async function resolveAiAssistanceProjectMemberIds(
           member.id.trim().toLowerCase(),
         )
         return canonicalMemberId === undefined ? [] : [canonicalMemberId]
-      })
+      }).sort((left, right) => left.localeCompare(right))
       memberIdsByProjectRoutingKey.set(
         createAiAssistanceProjectRoutingKey(project.teamId, project.projectId),
         memberIds,
@@ -20467,7 +20462,7 @@ async function createAiAssistanceResolverState(
         eligibleMemberIdSet,
       )
     : new Map<string, readonly string[]>()
-  const triageRoutingTuples: AiAssistanceTriageRoutingTuple[] = routingTeams.flatMap((team) => [
+  const allTriageRoutingTuples: AiAssistanceTriageRoutingTuple[] = routingTeams.flatMap((team) => [
     {
       teamId: team.id,
       assigneeUserIds: eligibleMemberIds,
@@ -20483,7 +20478,16 @@ async function createAiAssistanceResolverState(
             ) ?? []
           : eligibleMemberIds,
       })),
-  ]).slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
+  ])
+  const triageRoutingTuples = allTriageRoutingTuples.slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
+  const triageRoutingFence = allTriageRoutingTuples
+    .map((tuple) => ({
+      teamId: tuple.teamId,
+      ...(tuple.projectId === undefined ? {} : { projectId: tuple.projectId }),
+      assigneeUserIds: [...tuple.assigneeUserIds].sort((left, right) => left.localeCompare(right)),
+    }))
+    .sort((left, right) => left.teamId.localeCompare(right.teamId) ||
+      (left.projectId ?? '').localeCompare(right.projectId ?? ''))
   const triageTeamIds = uniqueAiAllowedValues(
     triageRoutingTuples.map((tuple) => tuple.teamId),
     AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
@@ -20539,14 +20543,6 @@ async function createAiAssistanceResolverState(
       return [definition]
     })
   )
-  const customFieldDefinitionsByTeamId = new Map<
-    string,
-    readonly AiAssistanceCustomFieldDefinition[]
-  >()
-  for (const definition of customFieldDefinitions) {
-    const definitions = customFieldDefinitionsByTeamId.get(definition.teamId) ?? []
-    customFieldDefinitionsByTeamId.set(definition.teamId, [...definitions, definition])
-  }
   const customFieldDefinitionCounts = new Map<string, number>()
   for (const definition of customFieldDefinitions) {
     customFieldDefinitionCounts.set(
@@ -20644,7 +20640,6 @@ async function createAiAssistanceResolverState(
     privacyAliases,
     sensitiveCustomFieldIds,
     customFieldIdsByTeamId,
-    customFieldDefinitionsByTeamId,
     workflowsByTeamId: new Map(configurations.map(({ team, resolved }) => [
       team.id,
       resolved.configuration.workflow,
@@ -20669,6 +20664,7 @@ async function createAiAssistanceResolverState(
             .sort((left, right) => left.projectId.localeCompare(right.projectId)),
         })),
       memberIds,
+      triageRoutingTuples: triageRoutingFence,
       memberDirectoryRevisions: currentMembers.map((member) => ({
         memberId: member.id,
         version: member.version,

@@ -1233,7 +1233,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     decidedAt: string,
     commitFence?: AiAssistanceDecisionCommitFence,
   ): Promise<StoredAiAssistanceGeneration> {
-    if (commitFence !== undefined) validateDecisionCommitFence(commitFence)
+    if (commitFence !== undefined) validateDecisionCommitFence(commitFence, decidedAt)
     const current = await this.getGeneration(workspaceId, generationId)
     if (!current) {
       throw new AiAssistanceError(
@@ -1314,6 +1314,12 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
               'preference',
               commitFence.preferenceRevision,
             ),
+            createGenerationExpirationConditionCheck(
+              this.#tableName,
+              workspaceId,
+              generationId,
+              commitFence.commitAt,
+            ),
             ...authorizationConditionItems,
           ],
         }))
@@ -1324,10 +1330,20 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         commitFence !== undefined &&
         (isTransactionConditionalFailureAt(error, 1) ||
           isTransactionConditionalFailureAt(error, 2) ||
-          isTransactionConditionalFailureAtOrAfter(error, 3))
+          isTransactionConditionalFailureAtOrAfter(error, 4))
       ) {
         throw aiAssistanceAuthorizationChangedError(
           'AI assistance policy or member preference changed during decision.',
+        )
+      }
+      if (
+        commitFence !== undefined &&
+        isTransactionConditionalFailureAt(error, 3)
+      ) {
+        throw new AiAssistanceError(
+          'not-found',
+          'AiAssistanceGenerationNotFound',
+          'The AI assistance generation is no longer available for a decision.',
         )
       }
       const generationConditionFailed = isConditionalCheckFailed(error) ||
@@ -1916,12 +1932,19 @@ function validateGenerationCommitFence(
 /** Validates the policy revision and deadline captured for a decision write. */
 function validateDecisionCommitFence(
   fence: AiAssistanceDecisionCommitFence,
+  decidedAt: string,
 ): void {
   const expiresAt = Date.parse(fence.effectiveExpiresAt)
+  const commitAt = Date.parse(fence.commitAt)
   if (
     !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
     !Number.isSafeInteger(fence.preferenceRevision) || fence.preferenceRevision < 0 ||
     !Number.isFinite(expiresAt) ||
+    !Number.isFinite(commitAt) ||
+    new Date(expiresAt).toISOString() !== fence.effectiveExpiresAt ||
+    new Date(commitAt).toISOString() !== fence.commitAt ||
+    fence.commitAt !== decidedAt ||
+    commitAt >= expiresAt ||
     !fence.authorizationToken.trim() || fence.authorizationToken.length > 8_192
   ) {
     throw aiAssistanceAuthorizationChangedError(

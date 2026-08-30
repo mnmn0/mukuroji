@@ -2137,8 +2137,8 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-control-character-custom-field',
     )).rejects.toMatchObject({
-      category: 'validation',
-      code: 'AiAssistanceOutputNotAllowed',
+      category: 'upstream',
+      code: 'InvalidAiAssistanceOutput',
     })
     expect(harness.storedGeneration()).toBeUndefined()
   })

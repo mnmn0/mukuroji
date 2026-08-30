@@ -508,6 +508,76 @@ describe('createMastraBedrockAiModelGateway', () => {
     })
   })
 
+  test('rejects cyclic planning dependency edges', async () => {
+    const dependency = {
+      id: 'dependency-1',
+      predecessor: { teamId: 'team-1', workItemId: 'work-item-1' },
+      successor: { teamId: 'team-1', workItemId: 'work-item-2' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      reason: 'The first item must finish first.',
+      confidence: 'high',
+      citationIds: ['S1'],
+    }
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'planning',
+            subtasks: [],
+            dependencies: [
+              dependency,
+              {
+                ...dependency,
+                id: 'dependency-2',
+                predecessor: dependency.successor,
+                successor: dependency.predecessor,
+              },
+            ],
+          },
+          uncertainty: { level: 'low', reason: 'The graph is cyclic.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate({
+      ...createInput(),
+      task: 'planning',
+      request: {
+        task: 'planning',
+        locale: 'ja',
+        source: {
+          type: 'work-item',
+          teamId: 'team-1',
+          workItemId: 'work-item-1',
+          expectedRevision: 1,
+        },
+      },
+    })).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('rejects unsafe control characters in generated prose', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'search',
+            interpretation: 'Unsafe\u0001 interpretation.',
+            filters: {},
+            caveats: [],
+          },
+          uncertainty: { level: 'low', reason: 'Safe enough.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
   test('requires a nonempty Planning next action', async () => {
     const gateway = createMastraBedrockAiModelGateway({
       runStructuredGeneration: async () => ({

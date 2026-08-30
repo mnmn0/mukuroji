@@ -17,21 +17,27 @@ import type {
   WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
 import { AiAssistanceApiError } from './errors'
-import { isCurrentAiAssistanceGeneration } from '../model/aiGenerationValidation'
+import {
+  isCurrentAiAssistanceGeneration,
+  isRetentionExpiredAiAssistanceGeneration,
+} from '../model/aiGenerationValidation'
 
 /**
  * Converts an untrusted AI generation response into a validated transport value.
  *
  * @param value - Unknown JSON returned by the AI assistance endpoint.
  * @param expectedTask - Optional workflow requested by the caller.
+ * @param now - Current epoch milliseconds, injectable for deterministic tests.
  * @returns A generation that satisfies the complete public contract.
  * @throws AiAssistanceApiError when the response shape is unsafe to expose.
  */
 export function parseAiAssistanceGenerationResponse(
   value: unknown,
   expectedTask?: AiAssistanceTask,
+  now = Date.now(),
 ): AiAssistanceGeneration {
-  if (isCurrentAiAssistanceGeneration(value) &&
+  if ((isCurrentAiAssistanceGeneration(value, now) ||
+    isRetentionExpiredAiAssistanceGeneration(value, now)) &&
     (expectedTask === undefined || value.task === expectedTask) &&
     hasKnownGenerationFields(value)) return value
   throw new AiAssistanceApiError(

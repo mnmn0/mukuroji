@@ -830,13 +830,15 @@ export function createAiAssistanceService(
       throw authorizationChangedError(decisionAuthorizationState.reason)
     }
     const decisionGeneration = applyEffectiveRetention(record.generation, decisionPolicy)
-    if (Date.parse(decisionGeneration.expiresAt) <= now().getTime()) {
+    const decisionCommitAt = now()
+    if (Date.parse(decisionGeneration.expiresAt) <= decisionCommitAt.getTime()) {
       return withholdGeneration(decisionGeneration, 'retention-expired')
     }
     const decisionCommitFence: AiAssistanceDecisionCommitFence = {
       policyRevision: decisionPolicy.revision,
       preferenceRevision: decisionPreference.revision,
       effectiveExpiresAt: decisionGeneration.expiresAt,
+      commitAt: decisionCommitAt.toISOString(),
       authorizationToken: record.authorizationToken,
       ...(decisionAuthorizationState.authorizationConditions === undefined
         ? {}
@@ -846,7 +848,7 @@ export function createAiAssistanceService(
       actor.workspaceId,
       generationId,
       request,
-      now().toISOString(),
+      decisionCommitAt.toISOString(),
       decisionCommitFence,
     )
     return await projectStoredGeneration(

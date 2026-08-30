@@ -162,6 +162,30 @@ export function isCurrentAiAssistanceGeneration(
 }
 
 /**
+ * Validates a server-authoritative retention-expired withholding envelope.
+ *
+ * Expired available drafts remain invalid, but a withheld envelope is safe to
+ * render because it contains no draft, citations, or other retained content.
+ *
+ * @param value - Unknown generation value received from the API.
+ * @param now - Current epoch milliseconds, injectable for deterministic tests.
+ * @returns Whether the value is a structurally valid, expired retention withholding.
+ */
+export function isRetentionExpiredAiAssistanceGeneration(
+  value: unknown,
+  now = Date.now(),
+): value is AiAssistanceGeneration {
+  if (!isAiAssistanceGeneration(value) || value.content.availability !== 'withheld' ||
+    value.content.reasonCode !== 'retention-expired') return false
+  const createdAt = Date.parse(value.createdAt)
+  const expiresAt = Date.parse(value.expiresAt)
+  return Number.isFinite(createdAt) &&
+    Number.isFinite(expiresAt) &&
+    expiresAt > createdAt &&
+    expiresAt <= now
+}
+
+/**
  * Checks only the retention timestamps so other response safety errors can keep their own classification.
  *
  * @param value - Unknown generation-like value received at a response or render boundary.
