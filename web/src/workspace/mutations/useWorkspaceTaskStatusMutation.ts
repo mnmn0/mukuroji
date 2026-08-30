@@ -13,6 +13,7 @@ import {
   replaceWorkspaceTask,
   updateWorkspaceTaskStatus,
 } from '../../work-items/model/workspaceWorkItems'
+import { resolveWorkItemTypeWorkflow } from '../../work-items/model/workItemDisplay'
 
 /**
  * Inputs for the My Tasks status mutation controller.
@@ -84,9 +85,10 @@ export function useWorkspaceTaskStatusMutation({
     }
 
     const configuration = configurationsByTeam[canonicalTask.teamId]?.configuration
-    const nextStatus = configuration?.workflow.statuses.find(
-      (status) => status.id === workflowStatusId,
-    )
+    const nextStatus = resolveWorkItemTypeWorkflow(
+      configuration,
+      canonicalTask.workItemTypeId,
+    )?.statuses.find((status) => status.id === workflowStatusId)
 
     if (!nextStatus) {
       return

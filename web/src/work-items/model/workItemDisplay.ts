@@ -142,6 +142,34 @@ export function resolveWorkItemTypeWorkflow(
       : undefined)
 }
 
+/** A workflow status paired with the Work Item Type that owns its workflow. */
+export type WorkItemTypeWorkflowStatus = {
+  /** Stable Work Item Type identifier owning the workflow status. */
+  workItemTypeId: string
+  /** Workflow status definition exposed by the Work Item Type. */
+  status: WorkflowStatusDefinition
+}
+
+/**
+ * Resolves every configured Work Item Type workflow status for board columns.
+ *
+ * @param configuration - Team or Workspace Work Item configuration.
+ * @returns Type-qualified workflow statuses in type and status display order.
+ */
+export function resolveWorkItemTypeWorkflowStatuses(
+  configuration: WorkItemConfigurationLike,
+): WorkItemTypeWorkflowStatus[] {
+  return resolveWorkItemTypes(configuration).flatMap((type) => {
+    const workflow = resolveWorkItemTypeWorkflow(configuration, type.id)
+    return workflow
+      ? sortWorkflowStatuses(workflow.statuses).map((status) => ({
+          status,
+          workItemTypeId: type.id,
+        }))
+      : []
+  })
+}
+
 /** Returns the custom fields available to a Work Item Type in display order. */
 export function resolveWorkItemTypeCustomFields(
   configuration: WorkItemConfigurationLike,

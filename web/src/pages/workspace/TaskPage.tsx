@@ -116,6 +116,7 @@ import {
   useTeamWorkItemConfigurations,
 } from '../../work-items/queries/useWorkItemConfigurations'
 import {
+  resolveConfiguredWorkflowStatuses,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
 } from '../../work-items/model/workItemDisplay'
@@ -416,7 +417,7 @@ export function TaskPage() {
   }, [projectId, workItemConfigurationLoadResult.configurationsByTeam])
   const taskViewWorkflowStatuses = useMemo(
     () => Object.entries(workItemConfigurationLoadResult.configurationsByTeam)
-      .flatMap(([teamId, resolved]) => resolved.configuration.workflow.statuses.map((status) => ({
+      .flatMap(([teamId, resolved]) => resolveConfiguredWorkflowStatuses(resolved.configuration).map((status) => ({
         statusId: status.id,
         teamId,
       }))),

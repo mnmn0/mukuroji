@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemScheduleDueDate,
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusDefinition,
@@ -9,19 +10,23 @@ import { taskScheduleInstantToLocalDate } from '../../tasks/model/taskSchedule'
 import {
   isCompletedWorkItem,
   isOpenWorkItem,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeWorkflowStatuses,
   resolveWorkItemWorkflowStatusId,
 } from './workItemDisplay'
 
 /**
- * Describes a Team-scoped workflow status column in the Workspace Kanban board.
+ * Describes a Team- and Work Item Type-scoped workflow status column in the Workspace Kanban board.
  */
 export type WorkspaceTaskStatusColumn = {
   /** Unique column ID used as the React key and drag target. */
   key: string
-  /** Column label that distinguishes identically named statuses across Teams. */
+  /** Column label that distinguishes identically named statuses across Teams and Types. */
   label: string
   /** ID of the Team that owns the canonical Work Item workflow. */
   teamId: string
+  /** Work Item Type whose workflow owns the status. */
+  workItemTypeId: string
   /** Status definition used for the column label and category tone. */
   status: WorkflowStatusDefinition
 }
@@ -151,7 +156,7 @@ export function replaceWorkspaceTask<TTask extends CanonicalWorkItem>(
  * @param tasks - Work Items displayed in the Kanban board.
  * @param configurationsByTeam - Resolved configurations keyed by Team ID.
  * @param teams - Directory used to resolve Team names.
- * @returns Columns grouped by Team and workflow status.
+ * @returns Columns grouped by Team, Work Item Type, and workflow status.
  */
 export function createWorkspaceTaskStatusColumns(
   tasks: readonly CanonicalWorkItem[],
@@ -170,16 +175,23 @@ export function createWorkspaceTaskStatusColumns(
 
     const teamName = teams.find((team) => team.id === teamId)?.name ?? teamId
 
-    return [...configuration.workflow.statuses]
-      .sort((first, second) =>
-        first.sortOrder - second.sortOrder || first.name.localeCompare(second.name)
-      )
-      .map((status) => ({
-        key: `${teamId}:${status.id}`,
-        label: showTeamName ? `${teamName} · ${status.name}` : status.name,
-        status,
-        teamId,
-      }))
+    const typeWorkflowStatuses = resolveWorkItemTypeWorkflowStatuses(configuration)
+    const typeIds = new Set(typeWorkflowStatuses.map(({ workItemTypeId }) => workItemTypeId))
+    const showTypeName = typeIds.size > 1
+
+    return typeWorkflowStatuses.map(({ status, workItemTypeId }) => ({
+      key: `${teamId}:${workItemTypeId}:${status.id}`,
+      label: [
+        showTeamName ? teamName : undefined,
+        showTypeName
+          ? resolveWorkItemTypeDefinition(configuration, workItemTypeId)?.name ?? workItemTypeId
+          : undefined,
+        status.name,
+      ].filter((part): part is string => part !== undefined).join(' · '),
+      status,
+      teamId,
+      workItemTypeId,
+    }))
   })
 }
 
@@ -188,13 +200,15 @@ export function createWorkspaceTaskStatusColumns(
  *
  * @param task - Work Item to evaluate.
  * @param column - Column to evaluate.
- * @returns True when both the Team and status match.
+ * @returns True when Team, Work Item Type, and status all match.
  */
 export function isTaskInWorkspaceStatusColumn(
   task: CanonicalWorkItem,
   column: WorkspaceTaskStatusColumn,
 ) {
-  return column.teamId === task.teamId && column.status.id === task.workflowStatusId
+  return column.teamId === task.teamId &&
+    column.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) &&
+    column.status.id === task.workflowStatusId
 }
 
 /**

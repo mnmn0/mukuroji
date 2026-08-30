@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  DEFAULT_WORK_ITEM_TYPE,
   createDefaultDueDateWorkItemSchedule,
   deriveWorkItemScheduleDueDate,
 } from '@mukuroji/contracts'
 import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import {
   calculateWorkspaceActionScore,
   calculateWorkspaceProgress,
@@ -13,6 +15,8 @@ import {
   createWorkspacePortfolioProjects,
   createWorkspaceSummary,
   createWorkspaceTaskKey,
+  createWorkspaceTaskStatusColumns,
+  isTaskInWorkspaceStatusColumn,
   isWorkspaceTaskAssignedToUser,
   isWorkspaceTaskOverdue,
   parseWorkspaceTaskDueDate,
@@ -134,6 +138,55 @@ describe('Workspace Work Item model', () => {
     expect(createWorkspaceTaskKey(coreTask)).not.toBe(createWorkspaceTaskKey(designTask))
     expect(isWorkspaceTaskAssignedToUser(coreTask, [' person@example.com '])).toBe(true)
     expect(isWorkspaceTaskAssignedToUser(coreTask, ['someone@example.com'])).toBe(false)
+  })
+
+  test('renders and matches type-specific workflow columns', () => {
+    const typedConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      workflows: [
+        teamWorkItemConfigurationFixture.workflow,
+        {
+          id: 'bug-workflow',
+          initialStatusId: 'active',
+          name: 'Bug workflow',
+          statuses: [{
+            category: 'started' as const,
+            id: 'active',
+            name: 'Investigate',
+            sortOrder: 0,
+          }],
+          transitions: [],
+        },
+      ],
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: 'bug-workflow',
+        id: 'bug',
+        name: 'Bug',
+        sortOrder: 1,
+      }],
+    }
+    const task = createTask({
+      teamId: 'core-team',
+      workItemTypeId: 'bug',
+      workflowStatusId: 'active',
+    })
+    const columns = createWorkspaceTaskStatusColumns(
+      [task],
+      { 'core-team': { configuration: typedConfiguration } },
+      [{ id: 'core-team', name: 'Core', projects: [] }],
+    )
+    const defaultColumn = columns.find((column) =>
+      column.workItemTypeId === 'default' && column.status.id === 'active'
+    )
+    const bugColumn = columns.find((column) =>
+      column.workItemTypeId === 'bug' && column.status.id === 'active'
+    )
+
+    expect(defaultColumn?.label).toBe('Work Item · In progress')
+    expect(bugColumn?.label).toBe('Bug · Investigate')
+    expect(defaultColumn && isTaskInWorkspaceStatusColumn(task, defaultColumn)).toBe(false)
+    expect(bugColumn && isTaskInWorkspaceStatusColumn(task, bugColumn)).toBe(true)
   })
 
   test('scopes duplicate Project IDs to their owning Team in portfolio rows', () => {

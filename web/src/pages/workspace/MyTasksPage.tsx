@@ -76,7 +76,10 @@ import {
   isOpenableWorkspaceTask,
   isWorkspaceTaskAssignedToUser,
 } from '../../work-items/model/workspaceWorkItems'
-import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
+import {
+  resolveConfiguredWorkflowStatuses,
+  resolveEditableWorkflowStatuses,
+} from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
@@ -184,7 +187,7 @@ export function MyTasksPage() {
   ]
   const taskViewWorkflowStatuses = taskViewConfigurations.flatMap(
     ([teamId, resolvedConfiguration]) =>
-      resolvedConfiguration.configuration.workflow.statuses.map((status) => ({
+      resolveConfiguredWorkflowStatuses(resolvedConfiguration.configuration).map((status) => ({
         statusId: status.id,
         teamId,
       })),

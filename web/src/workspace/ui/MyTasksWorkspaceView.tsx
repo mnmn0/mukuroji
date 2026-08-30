@@ -1,4 +1,7 @@
-import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type ResolvedWorkItemConfiguration,
+} from '@mukuroji/contracts'
 import { Fragment, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -219,7 +222,9 @@ export function MyTasksWorkspaceView({
       !onMoveTaskStatus ||
       !carriesTaskKey ||
       (draggedTask && !canMoveTask(draggedTask)) ||
-      (draggedTask && column.teamId !== draggedTask.teamId)
+      (draggedTask && column.teamId !== draggedTask.teamId) ||
+      (draggedTask &&
+        column.workItemTypeId !== (draggedTask.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID))
     ) {
       return
     }
@@ -256,7 +261,10 @@ export function MyTasksWorkspaceView({
       return
     }
 
-    if (column.teamId === task.teamId) {
+    if (
+      column.teamId === task.teamId &&
+      column.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID)
+    ) {
       moveTaskToStatus(task, column.status.id)
     }
   }

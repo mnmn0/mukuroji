@@ -1,7 +1,8 @@
-import type {
-  ResolvedWorkItemConfiguration,
-  WorkItemConfiguration,
-  WorkItemPatch,
+import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type ResolvedWorkItemConfiguration,
+  type WorkItemConfiguration,
+  type WorkItemPatch,
 } from '@mukuroji/contracts'
 import { Fragment, useState, type DragEvent } from 'react'
 import type { CanonicalWorkItem } from '../api/tasks'
@@ -222,7 +223,11 @@ export function TaskBoardView({
     setDraggedTaskKey(undefined)
     setDropTargetColumnKey(undefined)
 
-    if (task && task.teamId === column.teamId) {
+    if (
+      task &&
+      task.teamId === column.teamId &&
+      (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === column.workItemTypeId
+    ) {
       void moveTaskToStatus(task, column.status.id).catch(() => undefined)
     }
   }
@@ -279,7 +284,12 @@ export function TaskBoardView({
                 ? tasks.find((candidate) => createTaskKey(candidate) === draggedTaskKey)
                 : undefined
 
-              if (!draggedTask || !canEditTask(draggedTask) || draggedTask.teamId !== column.teamId) {
+              if (
+                !draggedTask ||
+                !canEditTask(draggedTask) ||
+                draggedTask.teamId !== column.teamId ||
+                (draggedTask.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) !== column.workItemTypeId
+              ) {
                 return
               }
 
@@ -306,6 +316,7 @@ export function TaskBoardView({
                       projectId: projectId ?? tasks[0]?.assignedProjectId ?? '',
                       source: 'board',
                       teamId: column.teamId,
+                      workItemTypeId: column.workItemTypeId,
                       workflowStatusId: column.status.id,
                     })}
                     type="button"

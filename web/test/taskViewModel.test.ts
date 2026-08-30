@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  DEFAULT_WORK_ITEM_TYPE,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type ResolvedWorkItemConfiguration,
@@ -150,7 +151,7 @@ describe('task selection model', () => {
 
 describe('contextual task mutations', () => {
   test('projects inline changes optimistically and restores touched fields for undo', () => {
-    const configuration = createConfiguration('core-team', [
+    const baseConfiguration = createConfiguration('core-team', [
       createStatus('todo', 'To do', 'unstarted', 0),
       createStatus('active', 'In progress', 'started', 1),
     ], [
@@ -170,6 +171,25 @@ describe('contextual task mutations', () => {
         type: 'text',
       },
     ])
+    const configuration: WorkItemConfiguration = {
+      ...baseConfiguration,
+      workItemTypes: [
+        {
+          ...DEFAULT_WORK_ITEM_TYPE,
+          defaultWorkflowId: baseConfiguration.workflow.id,
+          id: 'bug',
+          name: 'Bug',
+          sortOrder: 1,
+        },
+        {
+          ...DEFAULT_WORK_ITEM_TYPE,
+          defaultWorkflowId: baseConfiguration.workflow.id,
+          id: 'feature',
+          name: 'Feature',
+          sortOrder: 2,
+        },
+      ],
+    }
     const task = createTask({
       customFieldValues: { note: 'Keep this', risk: 'low' },
       schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
@@ -405,15 +425,56 @@ describe('Team-scoped task status columns and configuration', () => {
     )
 
     expect(columns.map((column) => ({ key: column.key, label: column.label }))).toEqual([
-      { key: 'core-team:todo', label: 'Core · To do' },
-      { key: 'core-team:review', label: 'Core · Review' },
-      { key: 'design-team:todo', label: 'Design · To do' },
+      { key: 'core-team:default:todo', label: 'Core · To do' },
+      { key: 'core-team:default:review', label: 'Core · Review' },
+      { key: 'design-team:default:todo', label: 'Design · To do' },
     ])
     expect(isTaskInProjectStatusColumn(coreTask, columns[0]!)).toBe(true)
     expect(isTaskInProjectStatusColumn(coreTask, columns[2]!)).toBe(false)
     expect(createProjectStatusTestToken('Core Team:Review / Ready')).toBe(
       'core-team-review-ready',
     )
+  })
+
+  test('includes type-specific workflow statuses and keeps equal status IDs isolated by type', () => {
+    const typedConfiguration: WorkItemConfiguration = {
+      ...coreConfiguration,
+      workflows: [
+        coreConfiguration.workflow,
+        {
+          id: 'bug-workflow',
+          initialStatusId: 'todo',
+          name: 'Bug workflow',
+          statuses: [createStatus('todo', 'Investigate', 'started', 0)],
+          transitions: [],
+        },
+      ],
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: 'bug-workflow',
+        id: 'bug',
+        name: 'Bug',
+        sortOrder: 1,
+      }],
+    }
+    const typedTask = createTask({
+      teamId: 'core-team',
+      workItemTypeId: 'bug',
+      workflowStatusId: 'todo',
+    })
+    const columns = createProjectTaskStatusColumns(
+      [typedTask],
+      { 'core-team': { configuration: typedConfiguration } },
+      teams,
+    )
+
+    expect(columns.map((column) => ({ key: column.key, label: column.label }))).toEqual([
+      { key: 'core-team:default:todo', label: 'Work Item · To do' },
+      { key: 'core-team:default:review', label: 'Work Item · Review' },
+      { key: 'core-team:bug:todo', label: 'Bug · Investigate' },
+    ])
+    expect(isTaskInProjectStatusColumn(typedTask, columns[0]!)).toBe(false)
+    expect(isTaskInProjectStatusColumn(typedTask, columns[2]!)).toBe(true)
   })
 
   test('uses a single unprefixed fallback Team workflow when explicitly scoped', () => {
@@ -550,7 +611,7 @@ describe('task custom-field display, filters, and sorting', () => {
         searchQuery: 'URGENT',
         sortOrder: 'due-date-asc',
         statusColumns: columns,
-        statusFilter: 'core-team:todo',
+        statusFilter: 'core-team:default:todo',
         t: translateTaskLabel,
         today: new Date(2026, 6, 23, 12),
       },
@@ -583,7 +644,7 @@ describe('task custom-field display, filters, and sorting', () => {
     const validDefinitionFilter = { category: 'started', customFieldId: 'risk' }
     const staleDefinitionFilter = { category: 'started', customFieldId: 'removed' }
 
-    expect(resolveEffectiveStatusFilter('core-team:todo', columns)).toBe('core-team:todo')
+    expect(resolveEffectiveStatusFilter('core-team:default:todo', columns)).toBe('core-team:default:todo')
     expect(resolveEffectiveStatusFilter('removed-team:todo', columns)).toBe('all')
     expect(resolveEffectiveDefinitionFilter(validDefinitionFilter, configuration))
       .toBe(validDefinitionFilter)

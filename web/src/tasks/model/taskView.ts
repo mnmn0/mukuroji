@@ -1,10 +1,11 @@
-import type {
-  CustomFieldDefinition,
-  ResolvedWorkItemConfiguration,
-  WorkflowStatusDefinition,
-  WorkItemConfiguration,
-  WorkItemPatch,
-  WorkItemSchedule,
+import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type CustomFieldDefinition,
+  type ResolvedWorkItemConfiguration,
+  type WorkflowStatusDefinition,
+  type WorkItemConfiguration,
+  type WorkItemPatch,
+  type WorkItemSchedule,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
@@ -22,11 +23,13 @@ import {
   formatWorkItemCustomFieldValue,
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypeDefinition,
   resolveWorkItemTypeLabel,
   resolveWorkItemTypeCustomFields,
+  resolveWorkItemTypeWorkflow,
+  resolveWorkItemTypeWorkflowStatuses,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
-  sortWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
@@ -137,13 +140,15 @@ export type AssigneeFilterOption = {
 
 /** A Team-scoped workflow status column used by filters and boards. */
 export type ProjectTaskStatusColumn = {
-  /** Composite Team and status identity used as a React key and filter value. */
+  /** Composite Team, Work Item Type, and status identity used as a React key and filter value. */
   key: string
   /** Team that owns the workflow status. */
   teamId: string
+  /** Work Item Type whose workflow owns the status. */
+  workItemTypeId: string
   /** Workflow status represented by the column. */
   status: WorkflowStatusDefinition
-  /** Column label, optionally prefixed with the Team name. */
+  /** Column label, optionally prefixed with the Team and Work Item Type names. */
   label: string
 }
 
@@ -214,7 +219,10 @@ export function applyTaskPatchOptimistically(
   }
 
   const nextStatus = patch.workflowStatusId && configuration
-    ? configuration.workflow.statuses.find((status) => status.id === patch.workflowStatusId)
+    ? resolveWorkItemTypeWorkflow(
+        configuration,
+        patch.workItemTypeId ?? task.workItemTypeId,
+      )?.statuses.find((status) => status.id === patch.workflowStatusId)
     : undefined
 
   return {
@@ -705,7 +713,7 @@ export function resolveProjectTaskGroupValue(
  * @param teams - Project directory entries used to resolve Team labels.
  * @param fallbackTeamId - Team ID used by a single-Team Project view.
  * @param fallbackConfiguration - Configuration used by a single-Team Project view.
- * @returns Workflow columns ordered by Team ID and configured status order.
+ * @returns Workflow columns ordered by Team ID, Work Item Type, and status order.
  */
 export function createProjectTaskStatusColumns(
   tasks: readonly CanonicalWorkItem[],
@@ -732,13 +740,23 @@ export function createProjectTaskStatusColumns(
 
     const teamName = teams.find((team) => team.id === teamId)?.name ?? teamId
 
-    return sortWorkflowStatuses(configuration.workflow.statuses)
-      .map((status): ProjectTaskStatusColumn => ({
-        key: `${teamId}:${status.id}`,
-        label: showTeamName ? `${teamName} · ${status.name}` : status.name,
-        status,
-        teamId,
-      }))
+    const typeWorkflowStatuses = resolveWorkItemTypeWorkflowStatuses(configuration)
+    const typeIds = new Set(typeWorkflowStatuses.map(({ workItemTypeId }) => workItemTypeId))
+    const showTypeName = typeIds.size > 1
+
+    return typeWorkflowStatuses.map(({ status, workItemTypeId }): ProjectTaskStatusColumn => ({
+      key: `${teamId}:${workItemTypeId}:${status.id}`,
+      label: [
+        showTeamName ? teamName : undefined,
+        showTypeName
+          ? resolveWorkItemTypeDefinition(configuration, workItemTypeId)?.name ?? workItemTypeId
+          : undefined,
+        status.name,
+      ].filter((part): part is string => part !== undefined).join(' · '),
+      status,
+      teamId,
+      workItemTypeId,
+    }))
   })
 }
 
@@ -747,13 +765,15 @@ export function createProjectTaskStatusColumns(
  *
  * @param task - Task evaluated for column membership.
  * @param column - Team-scoped workflow status column.
- * @returns True when both Team ID and workflow status ID match.
+ * @returns True when Team, Work Item Type, and workflow status ID all match.
  */
 export function isTaskInProjectStatusColumn(
   task: CanonicalWorkItem,
   column: ProjectTaskStatusColumn,
 ) {
-  return column.teamId === task.teamId && column.status.id === task.workflowStatusId
+  return column.teamId === task.teamId &&
+    column.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) &&
+    column.status.id === task.workflowStatusId
 }
 
 /**
