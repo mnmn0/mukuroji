@@ -169,13 +169,13 @@ const suggestedEffortSchema = z.object({
 }).strict()
 
 const customFieldValueSchema = z.union([
-  z.string().max(2_000).refine(
+  z.string().trim().max(2_000).refine(
     (value) => !hasUnsafeControlCharacter(value),
     { message: 'Custom-field text must not contain unsafe control characters.' },
   ),
   z.number().finite(),
   z.boolean(),
-  z.array(z.string().max(500).refine(
+  z.array(z.string().trim().max(500).refine(
     (value) => !hasUnsafeControlCharacter(value),
     { message: 'Custom-field text must not contain unsafe control characters.' },
   )).max(100),

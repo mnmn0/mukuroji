@@ -776,6 +776,7 @@ describe('AI assistance API composition', () => {
         'contact-names': ['Alex Smith'],
         'customer-email': 'hidden@example.com',
         'project-budget': 1_234_567,
+        'customer-segment': 'customer-alice',
         'shared-global-field': 'must-not-cross-global-classification',
         'legacy-unknown': 8_012_345_678,
       },
@@ -817,6 +818,18 @@ describe('AI assistance API composition', () => {
         type: 'number',
         sortOrder: 40,
         required: false,
+      },
+      {
+        id: 'customer-segment',
+        name: 'Customer segment',
+        type: 'select',
+        sortOrder: 45,
+        required: false,
+        options: [{
+          id: 'customer-alice',
+          name: 'Alice Smith',
+          sortOrder: 10,
+        }],
       },
       {
         id: 'shared-global-field',
@@ -894,6 +907,7 @@ describe('AI assistance API composition', () => {
           expect(resolved.promptContext).not.toContain('contact-names')
           expect(resolved.promptContext).not.toContain('customer-email')
           expect(resolved.promptContext).not.toContain('shared-global-field')
+          expect(resolved.promptContext).not.toContain('Alice Smith')
           if (request.task === 'search') {
             expect(resolved.promptContext).not.toContain('duplicate-budget')
             expect(resolved.allowedValues.customFieldIds).not.toContain('duplicate-budget')

@@ -45,6 +45,14 @@ describe('AI assistance redaction', () => {
         expected: 'Proxy-Authorization: Basic [REDACTED_TOKEN]',
       },
       {
+        input: 'Authorization: AWS4-HMAC-SHA256 Credential=access/2026 Signature=secret',
+        expected: 'Authorization: AWS4-HMAC-SHA256 [REDACTED_TOKEN]',
+      },
+      {
+        input: 'Proxy-Authorization: ApiKey opaque-secret; scope=private',
+        expected: 'Proxy-Authorization: ApiKey [REDACTED_TOKEN]',
+      },
+      {
         input: 'Cookie: session=opaque-session; theme=dark\nTrace: retained',
         expected: 'Cookie: [REDACTED_COOKIE]\nTrace: retained',
       },
@@ -186,6 +194,18 @@ describe('AI assistance redaction', () => {
       fieldType: 'number',
       value: 9_012_345_678,
     })).toBe('[REDACTED_PHONE]')
+    expect(redactAiAssistancePromptFieldValue({
+      fieldId: 'customerPhone',
+      label: 'Contact value',
+      fieldType: 'number',
+      value: 9_012_345_678,
+    })).toBe('[REDACTED_PHONE]')
+    expect(redactAiAssistancePromptFieldValue({
+      fieldId: 'contactAddress',
+      label: 'Contact value',
+      fieldType: 'short-text',
+      value: '123 Main Street',
+    })).toBe('[REDACTED_ADDRESS]')
     expect(redactAiAssistancePromptFieldValue({
       fieldId: 'customer-phone',
       label: 'Customer phone',

@@ -53,6 +53,7 @@ export type {
   AiAssistancePolicyAuthorizationFence,
   AiAssistancePolicyAudit,
   AiAssistancePolicyAuditInput,
+  AiAssistancePlanningDependency,
   AiAssistancePrivateMemberIdentifiers,
   AiAssistanceTriageRoutingTuple,
   AiAssistanceTriageSourceRouting,

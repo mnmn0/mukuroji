@@ -54,6 +54,14 @@ export type AiAssistanceTriageSourceRouting = {
   projectId?: string
 }
 
+/** One persisted predecessor/successor edge in the current Planning graph. */
+export type AiAssistancePlanningDependency = {
+  /** Work Item that must precede the successor. */
+  predecessor: WorkItemDependencyEndpoint
+  /** Work Item whose schedule is constrained by the predecessor. */
+  successor: WorkItemDependencyEndpoint
+}
+
 /** Current server-resolved identifiers that structured model output may reference. */
 export type AiAssistanceAllowedValues = {
   /** Workspace member identifiers visible to the current operator. */
@@ -74,6 +82,8 @@ export type AiAssistanceAllowedValues = {
   statuses: readonly string[]
   /** Work Item endpoints visible to the current operator. */
   workItemEndpoints: readonly WorkItemDependencyEndpoint[]
+  /** Persisted Planning edges used to reject duplicate edges and cycles across the whole graph. */
+  existingPlanningDependencies?: readonly AiAssistancePlanningDependency[]
   /** Compatible triage routing combinations used to validate tuple semantics. */
   triageRoutingTuples?: readonly AiAssistanceTriageRoutingTuple[]
 }
@@ -134,6 +144,7 @@ export type AiAssistanceAuthorizationCondition = {
     | 'planning'
     | 'document-authorization'
     | 'enterprise-control'
+    | 'project-membership'
     | 'source'
   /** Physical persistence table resolved by the composition boundary. */
   tableName: string
@@ -141,6 +152,8 @@ export type AiAssistanceAuthorizationCondition = {
   key: Readonly<Record<string, string>>
   /** Exact scalar attributes that must remain unchanged through the commit. */
   expectedAttributes: Readonly<Record<string, string | number | boolean>>
+  /** Attributes that must remain absent, such as a logical archive marker. */
+  expectedAbsentAttributes?: readonly string[]
   /** Allows an absent row when the expected generation is zero. */
   allowMissingWhenExpectedZero?: boolean
 }

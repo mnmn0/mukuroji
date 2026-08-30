@@ -54,6 +54,7 @@ import type {
   AiAssistancePolicyAuthorizationFence,
   AiAssistancePolicyAudit,
   AiAssistancePolicyAuditInput,
+  AiAssistancePlanningDependency,
   AiAssistancePrivateMemberIdentifiers,
   AiAssistanceTriageRoutingTuple,
   AiModelGenerationResult,
@@ -559,7 +560,7 @@ export function createAiAssistanceService(
         request: providerRequest,
         promptContext: context.promptContext,
         citations: context.citations,
-        allowedValues: privateIdentifierAliases.modelAllowedValues,
+        allowedValues: privateIdentifierAliases.providerAllowedValues,
         traceId: actor.traceId,
         maxOutputTokens,
         timeoutMs: remainingProviderTimeoutMs,
@@ -1498,7 +1499,75 @@ function validateDraftAllowedValues(
       requireAllowedEndpoint(dependency.predecessor, allowed.workItemEndpoints)
       requireAllowedEndpoint(dependency.successor, allowed.workItemEndpoints)
     }
+    validateAiPlanningDependencies(
+      draft.dependencies,
+      allowed.existingPlanningDependencies,
+    )
   }
+}
+
+/** Rejects proposed Planning edges that duplicate or cycle through the persisted graph. */
+function validateAiPlanningDependencies(
+  proposedDependencies: Extract<AiAssistanceDraft, { kind: 'planning' }>['dependencies'],
+  existingDependencies: readonly AiAssistancePlanningDependency[] | undefined,
+): void {
+  const seenEdges = new Set<string>()
+  const outgoing = new Map<string, Set<string>>()
+  const addEdge = (
+    predecessor: WorkItemDependencyEndpoint,
+    successor: WorkItemDependencyEndpoint,
+  ): void => {
+    const predecessorKey = createEndpointKey(predecessor)
+    const successorKey = createEndpointKey(successor)
+    const edgeKey = `${predecessorKey}->${successorKey}`
+    seenEdges.add(edgeKey)
+    const successors = outgoing.get(predecessorKey) ?? new Set<string>()
+    successors.add(successorKey)
+    outgoing.set(predecessorKey, successors)
+    if (!outgoing.has(successorKey)) outgoing.set(successorKey, new Set<string>())
+  }
+  for (const dependency of existingDependencies ?? []) {
+    addEdge(dependency.predecessor, dependency.successor)
+  }
+  for (const dependency of proposedDependencies) {
+    const edgeKey = `${createEndpointKey(dependency.predecessor)}->${createEndpointKey(dependency.successor)}`
+    if (seenEdges.has(edgeKey)) {
+      throw new AiAssistanceError(
+        'validation',
+        'AiAssistanceOutputNotAllowed',
+        'The model returned a Planning dependency that already exists.',
+      )
+    }
+    addEdge(dependency.predecessor, dependency.successor)
+    if (hasDirectedEndpointCycle(outgoing)) {
+      throw new AiAssistanceError(
+        'validation',
+        'AiAssistanceOutputNotAllowed',
+        'The model returned a Planning dependency that creates a cycle.',
+      )
+    }
+  }
+}
+
+/** Checks a directed endpoint graph for a path that returns to an active node. */
+function hasDirectedEndpointCycle(outgoing: ReadonlyMap<string, ReadonlySet<string>>): boolean {
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const visit = (node: string): boolean => {
+    if (visiting.has(node)) return true
+    if (visited.has(node)) return false
+    visiting.add(node)
+    for (const successor of outgoing.get(node) ?? []) {
+      if (visit(successor)) return true
+    }
+    visiting.delete(node)
+    visited.add(node)
+    return false
+  }
+  for (const node of outgoing.keys()) {
+    if (visit(node)) return true
+  }
+  return false
 }
 
 /** Validates triage custom-field suggestions against the selected Team schema. */
@@ -1514,7 +1583,10 @@ function validateTriageCustomFields(
     ? request.source.teamId
     : triageSourceRouting?.teamId
   const teamId = draft.teamId?.value ?? sourceTeamId
-  const projectId = draft.projectId?.value ?? triageSourceRouting?.projectId
+  const projectId = draft.projectId?.value ??
+    (triageSourceRouting !== undefined && teamId === triageSourceRouting.teamId
+      ? triageSourceRouting.projectId
+      : undefined)
   for (const field of draft.customFields) {
     const matches = definitions.filter((definition) =>
       definition.fieldId === field.fieldId &&
@@ -1689,7 +1761,10 @@ function validateTriageRoutingTuple(
 ): void {
   if (tuples === undefined) return
   const teamId = draft.teamId?.value ?? sourceRouting?.teamId
-  const projectId = draft.projectId?.value ?? sourceRouting?.projectId
+  const projectId = draft.projectId?.value ??
+    (sourceRouting !== undefined && teamId === sourceRouting.teamId
+      ? sourceRouting.projectId
+      : undefined)
   const assigneeUserId = draft.assigneeUserId?.value
   if (teamId === undefined && projectId === undefined && assigneeUserId === undefined) return
   if (tuples.some((tuple) =>
@@ -1708,6 +1783,8 @@ function validateTriageRoutingTuple(
 type PrivateIdentifierAliases = {
   /** Model-visible allowlists with member IDs replaced by random request-local aliases. */
   modelAllowedValues: AiAssistanceAllowedValues
+  /** Provider-visible allowlists with internal persisted graph metadata removed. */
+  providerAllowedValues: AiAssistanceAllowedValues
   /** Canonical member identifier keyed by generation-local alias. */
   canonicalMemberIdByAlias: ReadonlyMap<string, string>
   /** Exact text replacements applied before generic email redaction. */
@@ -1765,9 +1842,29 @@ function createPrivateIdentifierAliases(
       disclosureByAlias.set(alias, '[REDACTED_PERSON]')
     }
   }
+  const {
+    existingPlanningDependencies: _existingPlanningDependencies,
+    ...providerAllowedValues
+  } = allowed
   return {
     modelAllowedValues: {
       ...allowed,
+      assigneeUserIds: allowed.assigneeUserIds.map((value) =>
+        aliasByCanonicalMemberId.get(value) ?? value),
+      creatorUserIds: allowed.creatorUserIds.map((value) =>
+        aliasByCanonicalMemberId.get(value) ?? value),
+      ...(allowed.triageRoutingTuples === undefined
+        ? {}
+        : {
+            triageRoutingTuples: allowed.triageRoutingTuples.map((tuple) => ({
+              ...tuple,
+              assigneeUserIds: tuple.assigneeUserIds.map((value) =>
+                aliasByCanonicalMemberId.get(value) ?? value),
+            })),
+          }),
+    },
+    providerAllowedValues: {
+      ...providerAllowedValues,
       assigneeUserIds: allowed.assigneeUserIds.map((value) =>
         aliasByCanonicalMemberId.get(value) ?? value),
       creatorUserIds: allowed.creatorUserIds.map((value) =>

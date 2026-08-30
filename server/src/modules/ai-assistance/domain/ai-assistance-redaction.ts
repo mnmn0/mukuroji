@@ -6,7 +6,7 @@ import type {
 } from '@mukuroji/contracts'
 
 const PRIVATE_KEY_PATTERN = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu
-const BASIC_AUTHORIZATION_PATTERN = /\b((?:proxy-)?authorization\s*:\s*basic)\s+[A-Za-z0-9+/]+={0,2}/giu
+const AUTHORIZATION_HEADER_PATTERN = /\b((?:proxy-)?authorization\s*:\s*)([^\s\r\n]+)(?:[^\r\n]*)/giu
 const COOKIE_HEADER_PATTERN = /\b((?:set-cookie|cookie)\s*:)\s*[^\r\n]*/giu
 const URL_USERINFO_PATTERN = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?=[^\s/?#]*:[^\s/?#]*@)[^\s/?#]*@(?=[^\s/?#])/gu
 const PRESIGNED_URL_QUERY_PATTERN = /([?&](?:x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential|security-token)|awsaccesskeyid|googleaccessid|signature|sig)=)(?!\[REDACTED_PRESIGNED_URL\])[^&#\s"'<>]+/giu
@@ -75,8 +75,8 @@ export type AiAssistancePrivateIdentifierGroup = {
 export function redactAiAssistanceText(value: string): string {
   return value
     .replace(PRIVATE_KEY_PATTERN, '[REDACTED_PRIVATE_KEY]')
-    .replace(BASIC_AUTHORIZATION_PATTERN, (_match, authorization: string) =>
-      `${authorization} [REDACTED_TOKEN]`)
+    .replace(AUTHORIZATION_HEADER_PATTERN, (_match, prefix: string, scheme: string) =>
+      `${prefix}${scheme} [REDACTED_TOKEN]`)
     .replace(COOKIE_HEADER_PATTERN, (_match, header: string) =>
       `${header} [REDACTED_COOKIE]`)
     .replace(URL_USERINFO_PATTERN, (_match, scheme: string) =>
@@ -174,10 +174,11 @@ export function classifyAiAssistanceSensitivePromptField(
 ): AiAssistanceSensitiveFieldMarker | undefined {
   if (field.fieldType === 'email') return '[REDACTED_EMAIL]'
   if (field.fieldType === 'person') return '[REDACTED_PERSON]'
-  const label = field.label.normalize('NFKC').trim().toLocaleLowerCase('en-US')
-  const semanticLabel = normalizeSensitivePromptFieldLabel(label)
+  const normalizedLabel = field.label.normalize('NFKC').trim()
+  const label = normalizedLabel.toLocaleLowerCase('en-US')
+  const semanticLabel = normalizeSensitivePromptFieldLabel(normalizedLabel)
   const fieldId = normalizeSensitivePromptFieldLabel(
-    field.fieldId.normalize('NFKC').trim().toLocaleLowerCase('en-US'),
+    field.fieldId.normalize('NFKC').trim(),
   )
   const semanticCandidates = [semanticLabel, fieldId]
   if (
@@ -518,9 +519,9 @@ function redactCustomFieldValue(
   value: string | number | boolean | string[] | null,
   aliases: readonly AiAssistanceTextAlias[],
 ): string | number | boolean | string[] | null {
-  if (typeof value === 'string') return redactAliasedAiAssistanceText(value, aliases)
+  if (typeof value === 'string') return redactAliasedAiAssistanceText(value, aliases).trim()
   if (Array.isArray(value)) {
-    return value.map((entry) => redactAliasedAiAssistanceText(entry, aliases))
+    return value.map((entry) => redactAliasedAiAssistanceText(entry, aliases).trim())
   }
   return value
 }
@@ -542,11 +543,14 @@ function redactAliasedAiAssistanceText(
 /**
  * Removes punctuation and non-semantic form requirement qualifiers from one field label.
  *
- * @param label - NFKC-normalized lower-case field label.
+ * @param label - NFKC-normalized field label or identifier.
  * @returns Token-normalized label suitable for exact sensitive-field classification.
  */
 function normalizeSensitivePromptFieldLabel(label: string): string {
   return label
+    .replace(/([a-z0-9])([A-Z])/gu, '$1 $2')
+    .replace(/([A-Z])([A-Z][a-z])/gu, '$1 $2')
+    .toLocaleLowerCase('en-US')
     .replace(/[\p{P}\p{S}]+/gu, ' ')
     .split(/\s+/u)
     .filter((token) =>

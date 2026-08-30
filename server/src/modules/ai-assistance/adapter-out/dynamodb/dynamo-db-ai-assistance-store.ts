@@ -2068,7 +2068,8 @@ function createAiAssistanceAuthorizationConditionCheck(
   if (
     !condition.tableName.trim() ||
     Object.keys(condition.key).length === 0 ||
-    Object.keys(condition.expectedAttributes).length === 0
+    Object.keys(condition.expectedAttributes).length === 0 ||
+    (condition.expectedAbsentAttributes?.some((attribute) => !attribute.trim()) ?? false)
   ) {
     throw aiAssistanceAuthorizationChangedError(
       'AI assistance source authorization condition is invalid.',
@@ -2082,8 +2083,21 @@ function createAiAssistanceAuthorizationConditionCheck(
   }
   const expectedEntries = Object.entries(condition.expectedAttributes)
     .sort(([left], [right]) => left.localeCompare(right))
+  const expectedAbsentAttributes = [...(condition.expectedAbsentAttributes ?? [])]
+    .sort((left, right) => left.localeCompare(right))
+  if (new Set(expectedAbsentAttributes).size !== expectedAbsentAttributes.length) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance source authorization condition is invalid.',
+    )
+  }
   const expressionAttributeNames = Object.fromEntries(
-    expectedEntries.map(([attribute], index) => [`#authorization${index}`, attribute]),
+    [
+      ...expectedEntries.map(([attribute], index) => [`#authorization${index}`, attribute]),
+      ...expectedAbsentAttributes.map((attribute, index) => [
+        `#authorizationAbsent${index}`,
+        attribute,
+      ]),
+    ],
   )
   const expressionAttributeValues = Object.fromEntries(
     expectedEntries.map(([, value], index) => [`:authorization${index}`, value]),
@@ -2091,6 +2105,12 @@ function createAiAssistanceAuthorizationConditionCheck(
   const expectedExpression = expectedEntries
     .map((_, index) => `#authorization${index} = :authorization${index}`)
     .join(' AND ')
+  const absentExpression = expectedAbsentAttributes
+    .map((_, index) => `attribute_not_exists(#authorizationAbsent${index})`)
+    .join(' AND ')
+  const presentExpression = absentExpression
+    ? `(${expectedExpression} AND ${absentExpression})`
+    : `(${expectedExpression})`
   const missingKeyAttribute = keyEntries
     .map(([attribute]) => attribute)
     .sort()[0]
@@ -2098,8 +2118,10 @@ function createAiAssistanceAuthorizationConditionCheck(
     expressionAttributeNames['#authorizationKey'] = missingKeyAttribute
   }
   const conditionExpression = condition.allowMissingWhenExpectedZero
-    ? `(attribute_not_exists(#authorizationKey) OR (${expectedExpression}))`
-    : expectedExpression
+    ? `(attribute_not_exists(#authorizationKey) OR ${presentExpression})`
+    : absentExpression
+      ? presentExpression
+      : expectedExpression
   return {
     ConditionCheck: {
       TableName: condition.tableName,

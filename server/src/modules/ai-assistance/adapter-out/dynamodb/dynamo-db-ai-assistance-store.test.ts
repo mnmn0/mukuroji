@@ -510,6 +510,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           tableName: 'RequestIntakeTable',
           key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' },
           expectedAttributes: { entryType: 'triage-entry', revision: 2 },
+          expectedAbsentAttributes: ['archivedAt'],
         }],
       })).resolves.toEqual(record)
       const transactionItems = harness.commands[0]?.input.TransactItems
@@ -523,6 +524,7 @@ describe('DynamoDbAiAssistanceStore', () => {
       })
       expect(sourceCheck.ConditionExpression).toContain('#authorization0 = :authorization0')
       expect(sourceCheck.ConditionExpression).toContain('#authorization1 = :authorization1')
+      expect(sourceCheck.ConditionExpression).toContain('attribute_not_exists(#authorizationAbsent0)')
     } finally {
       harness.restore()
     }

@@ -438,6 +438,7 @@ import {
   type AiAssistanceTriageSourceRouting,
   type AiAssistancePolicyAuthorizationFence,
   type AiAssistancePolicyAuthorization,
+  type AiAssistancePlanningDependency,
   type AiAssistanceService,
   type AiAssistanceTextAlias,
   type CheckAiAssistanceAuthorizationInput,
@@ -19886,6 +19887,9 @@ const AI_ASSISTANCE_WORK_ITEM_CANDIDATE_LIMIT = 20
 /** Maximum number of AI prompt sources resolved concurrently in one request. */
 const AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY = 4
 
+/** Maximum Project membership rows included in one AI commit transaction. */
+const AI_ASSISTANCE_PROJECT_MEMBERSHIP_CONDITION_LIMIT = 90
+
 /** One permission-safe source fragment and the non-content fences that authorize it. */
 type ResolvedAiPromptSource = {
   /** Bounded prompt fragment built from an authorized application projection. */
@@ -19898,12 +19902,24 @@ type ResolvedAiPromptSource = {
   relationIds: readonly string[]
   /** Visible Work Item endpoints that planning output may reference. */
   workItemEndpoints: readonly WorkItemDependencyEndpoint[]
+  /** Persisted Planning edges used to reject duplicate or cyclic additions. */
+  existingPlanningDependencies?: readonly AiAssistancePlanningDependency[]
   /** Current or directly reachable workflow statuses for a Work Item source. */
   workflowStatusIds: readonly string[]
   /** Current Team and Project routing for a triage source, when applicable. */
   triageSourceRouting?: AiAssistanceTriageSourceRouting
   /** Source-of-truth row that must remain unchanged through a later AI commit. */
   authorizationCondition: AiAssistanceAuthorizationCondition
+}
+
+/** Current Project membership row used to bind a triage route to its source-of-truth revision. */
+type AiAssistanceProjectMembership = {
+  /** Canonical active member identifier. */
+  memberId: string
+  /** Current Project role for the member. */
+  role: ProjectRole
+  /** Last update timestamp of the membership row. */
+  updatedAt: string
 }
 
 /** Shared live authorization and configuration state used by one resolver pass. */
@@ -19924,6 +19940,8 @@ type AiAssistanceResolverState = {
   customFieldIdsByTeamId: ReadonlyMap<string, ReadonlySet<string>>
   /** Non-content authorization and configuration fences. */
   fence: unknown
+  /** Current Project membership rows used by triage routing and commit fencing. */
+  projectMembershipConditions: readonly AiAssistanceAuthorizationCondition[]
   /** Current workflow definitions keyed by each visible Team. */
   workflowsByTeamId: ReadonlyMap<string, WorkItemConfiguration['workflow']>
 }
@@ -19969,14 +19987,17 @@ async function resolveAiAssistanceTeamConfigurations(
  * @param directoryId - Workspace directory that owns the Projects.
  * @param projects - Team-qualified destination Projects visible to the request.
  * @param eligibleMemberIds - Active, non-guest Workspace members already visible to the model.
- * @returns Team/project routing keys mapped to their current eligible member IDs.
+ * @returns Team/project routing keys mapped to membership revisions and eligible member IDs.
  */
 async function resolveAiAssistanceProjectMemberIds(
   directoryId: string,
   projects: readonly Readonly<{ teamId: string; projectId: string }>[],
   eligibleMemberIds: ReadonlySet<string>,
-): Promise<ReadonlyMap<string, readonly string[]>> {
-  const memberIdsByProjectRoutingKey = new Map<string, readonly string[]>()
+): Promise<ReadonlyMap<string, readonly AiAssistanceProjectMembership[]>> {
+  const membersByProjectRoutingKey = new Map<
+    string,
+    readonly AiAssistanceProjectMembership[]
+  >()
   const eligibleMemberIdsByNormalizedId = new Map<string, string>()
   for (const memberId of eligibleMemberIds) {
     eligibleMemberIdsByNormalizedId.set(memberId.trim().toLowerCase(), memberId)
@@ -20002,19 +20023,25 @@ async function resolveAiAssistanceProjectMemberIds(
       if (project === undefined) {
         throw new Error('AI assistance Project membership response ordering changed.')
       }
-      const memberIds = response.members.flatMap((member) => {
+      const members = response.members.flatMap((member) => {
         const canonicalMemberId = eligibleMemberIdsByNormalizedId.get(
           member.id.trim().toLowerCase(),
         )
-        return canonicalMemberId === undefined ? [] : [canonicalMemberId]
-      }).sort((left, right) => left.localeCompare(right))
-      memberIdsByProjectRoutingKey.set(
+        return canonicalMemberId === undefined
+          ? []
+          : [{
+              memberId: canonicalMemberId,
+              role: member.role,
+              updatedAt: member.updatedAt,
+            }]
+      }).sort((left, right) => left.memberId.localeCompare(right.memberId))
+      membersByProjectRoutingKey.set(
         createAiAssistanceProjectRoutingKey(project.teamId, project.projectId),
-        memberIds,
+        members,
       )
     }
   }
-  return memberIdsByProjectRoutingKey
+  return membersByProjectRoutingKey
 }
 
 /** Creates a collision-free key for a Team-qualified Project routing tuple. */
@@ -20127,6 +20154,9 @@ async function resolveAiAssistanceContext(
     ...state.allowedValues.workItemEndpoints,
     ...resolvedSources.flatMap((source) => source.workItemEndpoints),
   ])
+  const existingPlanningDependencies = uniqueAiAssistancePlanningDependencies(
+    resolvedSources.flatMap((source) => source.existingPlanningDependencies ?? []),
+  )
   const candidateAllowedValues: AiAssistanceAllowedValues = {
     ...state.allowedValues,
     relationIds,
@@ -20137,6 +20167,7 @@ async function resolveAiAssistanceContext(
         )
       : state.allowedValues.statuses,
     workItemEndpoints,
+    existingPlanningDependencies,
     triageRoutingTuples: state.allowedValues.triageRoutingTuples,
   }
   const promptContext = serializeBoundedAiPromptContext({
@@ -20188,6 +20219,7 @@ async function resolveAiAssistanceContext(
       promptContext,
       candidateAllowedValues.workItemEndpoints,
     ),
+    existingPlanningDependencies: candidateAllowedValues.existingPlanningDependencies,
     triageRoutingTuples: filterAiTriageRoutingTuplesVisibleInPrompt(
       promptContext,
       candidateAllowedValues.triageRoutingTuples ?? [],
@@ -20307,7 +20339,11 @@ function createAiAssistanceAuthorizationConditions(
     }
   }
   const seen = new Set<string>()
-  return [...conditions, ...sources.map((source) => source.authorizationCondition)]
+  return [
+    ...conditions,
+    ...state.projectMembershipConditions,
+    ...sources.map((source) => source.authorizationCondition),
+  ]
     .filter((condition) => {
       const key = `${condition.tableName}:${JSON.stringify(condition.key)}`
       if (seen.has(key)) return false
@@ -20455,13 +20491,26 @@ async function createAiAssistanceResolverState(
         .filter((project) => projectIds.includes(project.id))
         .map((project) => ({ teamId: team.id, projectId: project.id })))
     : []
+  const boundedRoutingProjects = routingProjects.slice(
+    0,
+    AI_ASSISTANCE_PROJECT_MEMBERSHIP_CONDITION_LIMIT,
+  )
+  const boundedRoutingProjectKeys = new Set(
+    boundedRoutingProjects.map((project) =>
+      createAiAssistanceProjectRoutingKey(project.teamId, project.projectId)
+    ),
+  )
   const projectMemberIdsByProjectRoutingKey = task === 'triage'
     ? await resolveAiAssistanceProjectMemberIds(
         principal.directoryId,
-        routingProjects,
+        boundedRoutingProjects,
         eligibleMemberIdSet,
       )
-    : new Map<string, readonly string[]>()
+    : new Map<string, readonly AiAssistanceProjectMembership[]>()
+  const projectMembershipConditions = createAiAssistanceProjectMembershipConditions(
+    principal.directoryId,
+    projectMemberIdsByProjectRoutingKey,
+  )
   const allTriageRoutingTuples: AiAssistanceTriageRoutingTuple[] = routingTeams.flatMap((team) => [
     {
       teamId: team.id,
@@ -20469,13 +20518,16 @@ async function createAiAssistanceResolverState(
     },
     ...team.projects
       .filter((project) => projectIds.includes(project.id))
+      .filter((project) => task !== 'triage' || boundedRoutingProjectKeys.has(
+        createAiAssistanceProjectRoutingKey(team.id, project.id),
+      ))
       .map((project) => ({
         teamId: team.id,
         projectId: project.id,
         assigneeUserIds: task === 'triage'
           ? projectMemberIdsByProjectRoutingKey.get(
               createAiAssistanceProjectRoutingKey(team.id, project.id),
-            ) ?? []
+            )?.map((member) => member.memberId) ?? []
           : eligibleMemberIds,
       })),
   ])
@@ -20612,7 +20664,6 @@ async function createAiAssistanceResolverState(
                           required: field.required,
                           options: field.options?.map((option) => ({
                             id: option.id,
-                            name: option.name,
                           })),
                         }]
                   ),
@@ -20640,6 +20691,7 @@ async function createAiAssistanceResolverState(
     privacyAliases,
     sensitiveCustomFieldIds,
     customFieldIdsByTeamId,
+    projectMembershipConditions,
     workflowsByTeamId: new Map(configurations.map(({ team, resolved }) => [
       team.id,
       resolved.configuration.workflow,
@@ -20691,6 +20743,61 @@ async function createAiAssistanceResolverState(
       })),
     },
   }
+}
+
+/** Builds exact DynamoDB conditions for every Project membership used by triage routing. */
+function createAiAssistanceProjectMembershipConditions(
+  workspaceId: string,
+  membersByProjectRoutingKey: ReadonlyMap<
+    string,
+    readonly AiAssistanceProjectMembership[]
+  >,
+): AiAssistanceAuthorizationCondition[] {
+  const memberships: Array<{
+    projectId: string
+    member: AiAssistanceProjectMembership
+  }> = []
+  for (const [routingKey, members] of membersByProjectRoutingKey) {
+    const separatorIndex = routingKey.indexOf('\u0000')
+    const projectId = separatorIndex < 0 ? undefined : routingKey.slice(separatorIndex + 1)
+    if (projectId === undefined || !projectId) {
+      throw new AiAssistanceError(
+        'validation',
+        'InvalidAiAssistanceRequest',
+        'Resolved AI Project membership routing is invalid.',
+      )
+    }
+    for (const member of members) memberships.push({ projectId, member })
+  }
+  if (memberships.length > AI_ASSISTANCE_PROJECT_MEMBERSHIP_CONDITION_LIMIT) {
+    throw new AiAssistanceError(
+      'upstream',
+      'AiAssistancePersistenceError',
+      'AI triage routing exceeds the safe Project membership fence limit.',
+    )
+  }
+  const tableName = getEnv('MUKUROJI_PROJECT_DIRECTORY_TABLE') ??
+    getEnv('PROJECT_DIRECTORY_TABLE_NAME') ??
+    'mukuroji-project-directory-local'
+  return memberships.map(({ projectId, member }) => {
+    const memberKey = normalizeProjectMemberKey(member.memberId)
+    return {
+      kind: 'project-membership',
+      tableName,
+      key: {
+        directoryId: workspaceId,
+        entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}`,
+      },
+      expectedAttributes: {
+        entryType: 'project-member',
+        projectId,
+        memberKey,
+        role: member.role,
+        updatedAt: member.updatedAt,
+      },
+      expectedAbsentAttributes: ['archivedAt'],
+    }
+  })
 }
 
 /** Creates one cryptographically random, provider-safe member alias. */
@@ -21324,6 +21431,10 @@ async function resolveAiWorkItemSource(
     },
     relationIds: detail.issue.relationIds,
     workItemEndpoints: filterAiWorkItemEndpointsVisibleInPrompt(prompt, shownEndpoints),
+    existingPlanningDependencies: planning.workItemDependencies.map((dependency) => ({
+      predecessor: dependency.predecessor,
+      successor: dependency.successor,
+    })),
     workflowStatusIds,
     authorizationCondition: {
       kind: 'source',
@@ -21675,6 +21786,10 @@ async function resolveAiPlanningTargetSource(
         workItemId: workItem.id,
       })),
     ),
+    existingPlanningDependencies: visible.workItemDependencies.map((dependency) => ({
+      predecessor: dependency.predecessor,
+      successor: dependency.successor,
+    })),
     workflowStatusIds: [],
     authorizationCondition: {
       kind: 'source',
@@ -22016,6 +22131,20 @@ function uniqueAiWorkItemEndpoints(
       createWorkItemDependencyKey(left).localeCompare(createWorkItemDependencyKey(right))
     )
     .slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
+}
+
+/** Deduplicates persisted Planning edges by their directed endpoint pair. */
+function uniqueAiAssistancePlanningDependencies(
+  dependencies: readonly AiAssistancePlanningDependency[],
+): AiAssistancePlanningDependency[] {
+  const byKey = new Map<string, AiAssistancePlanningDependency>()
+  for (const dependency of dependencies) {
+    const key = `${createWorkItemDependencyKey(dependency.predecessor)}->${createWorkItemDependencyKey(dependency.successor)}`
+    byKey.set(key, dependency)
+  }
+  return [...byKey.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, dependency]) => dependency)
 }
 
 /**

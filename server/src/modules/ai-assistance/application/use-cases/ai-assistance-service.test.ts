@@ -12,6 +12,7 @@ import type {
   AiAssistanceCustomFieldDefinition,
   AiAssistanceGenerationBudgetReservation,
   AiAssistancePolicyAuditInput,
+  AiAssistancePlanningDependency,
   AiAssistancePrivateMemberIdentifiers,
   AiAssistanceTriageRoutingTuple,
   AiAssistanceTriageSourceRouting,
@@ -135,6 +136,10 @@ type HarnessConfiguration = {
   teamIds?: readonly string[]
   /** Optional Project allowlist override for routing compatibility tests. */
   projectIds?: readonly string[]
+  /** Optional Work Item dependency endpoints used by Planning graph tests. */
+  workItemEndpoints?: readonly { teamId: string; workItemId: string }[]
+  /** Persisted Planning edges used to exercise duplicate/cycle validation. */
+  existingPlanningDependencies?: readonly AiAssistancePlanningDependency[]
   /** Optional Team-scoped custom-field definitions used by output validation tests. */
   customFieldDefinitions?: readonly AiAssistanceCustomFieldDefinition[]
   /** Optional citation label used to exercise disclosure-time bounds. */
@@ -510,7 +515,12 @@ function createHarness(configuration: HarnessConfiguration = {}) {
             : { customFieldDefinitions: configuration.customFieldDefinitions }),
           relationIds: ['relation-1'],
           statuses: ['workflow-status-1'],
-          workItemEndpoints: [{ teamId: 'team-1', workItemId: 'work-item-1' }],
+          workItemEndpoints: configuration.workItemEndpoints ?? [
+            { teamId: 'team-1', workItemId: 'work-item-1' },
+          ],
+          ...(configuration.existingPlanningDependencies === undefined
+            ? {}
+            : { existingPlanningDependencies: configuration.existingPlanningDependencies }),
           ...(configuration.triageRoutingTuples === undefined
             ? {}
             : { triageRoutingTuples: configuration.triageRoutingTuples }),
@@ -1324,6 +1334,60 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('rejects Planning dependencies that duplicate or cycle through persisted edges', async () => {
+    const endpoints = [
+      { teamId: 'team-1', workItemId: 'work-item-1' },
+      { teamId: 'team-1', workItemId: 'work-item-2' },
+    ]
+    const existing = [{ predecessor: endpoints[0], successor: endpoints[1] }]
+    const request = createPlanningRequest('work-item')
+    const cases: Array<{
+      key: string
+      dependency: {
+        predecessor: typeof endpoints[number]
+        successor: typeof endpoints[number]
+      }
+    }> = [
+      {
+        key: 'duplicate',
+        dependency: { predecessor: endpoints[0], successor: endpoints[1] },
+      },
+      {
+        key: 'cycle',
+        dependency: { predecessor: endpoints[1], successor: endpoints[0] },
+      },
+    ]
+    for (const testCase of cases) {
+      const harness = createHarness({
+        workItemEndpoints: endpoints,
+        existingPlanningDependencies: existing,
+        outputDraft: {
+          kind: 'planning',
+          subtasks: [],
+          dependencies: [{
+            id: `dependency-${testCase.key}`,
+            ...testCase.dependency,
+            type: 'finish-to-start',
+            lagDays: 0,
+            reason: 'The current graph supports this dependency review.',
+            confidence: 'high',
+            citationIds: ['S1'],
+          }],
+        },
+      })
+      await expect(harness.service.generate(
+        createActor(),
+        request,
+        harness.authorization,
+        `request-planning-${testCase.key}`,
+      )).rejects.toMatchObject({
+        category: 'validation',
+        code: 'AiAssistanceOutputNotAllowed',
+      })
+      expect(harness.storedGeneration()).toBeUndefined()
+    }
+  })
+
   test('revalidates a draft after private identifier disclosure expands its text', async () => {
     const longDisplayName = 'A'.repeat(500)
     const harness = createHarness({
@@ -2002,6 +2066,53 @@ describe('createAiAssistanceService', () => {
 
     expect(generation.content.availability).toBe('available')
     expect(harness.storedGeneration()).toBeDefined()
+  })
+
+  test('trims custom-field text before canonical validation and persistence', async () => {
+    const harness = createHarness({
+      customFieldDefinitions: [{
+        teamId: 'team-1',
+        fieldId: 'short-label',
+        type: 'text',
+        required: false,
+        validation: { minLength: 2, maxLength: 10 },
+      }],
+      outputDraft: {
+        kind: 'triage',
+        customFields: [{
+          fieldId: 'short-label',
+          value: ' ab ',
+          reason: 'The normalized value satisfies the current field contract.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        }],
+      },
+    })
+
+    const generation = await harness.service.generate(
+      createActor(),
+      {
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'triage-entry',
+          teamId: 'team-1',
+          triageEntryId: 'triage-1',
+          expectedRevision: 1,
+        },
+      },
+      harness.authorization,
+      'request-custom-field-trim',
+    )
+
+    if (generation.content.availability !== 'available') {
+      throw new Error('Expected a persisted AI draft.')
+    }
+    expect(generation.content.draft.kind).toBe('triage')
+    if (generation.content.draft.kind !== 'triage') {
+      throw new Error('Expected a triage draft.')
+    }
+    expect(generation.content.draft.customFields[0]?.value).toBe('ab')
   })
 
   test('rejects currency values that exceed the configured precision', async () => {
