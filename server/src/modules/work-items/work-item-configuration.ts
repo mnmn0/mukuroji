@@ -653,7 +653,7 @@ export function normalizeCustomFieldValues(
       }
       continue
     }
-    validateCustomFieldValue(definition, value)
+    validateCustomFieldValue(definition, value, requiredFieldIds.has(definition.id))
   }
 
   const applicableFormulaDefinitions = new Map(
@@ -1874,9 +1874,20 @@ function readCustomFieldValue(
   return value.trim()
 }
 
-function validateCustomFieldValue(definition: CustomFieldDefinition, value: CustomFieldValue) {
+/**
+ * Validates a normalized custom field value against its definition and Work Item Type scope.
+ *
+ * @param definition - Custom field definition that owns the value.
+ * @param value - Normalized custom field value to validate.
+ * @param required - Whether the value is required for the current Work Item Type.
+ */
+function validateCustomFieldValue(
+  definition: CustomFieldDefinition,
+  value: CustomFieldValue,
+  required = definition.required,
+) {
   if (
-    definition.required &&
+    required &&
     ((typeof value === 'string' && value.length === 0) ||
       (Array.isArray(value) && value.length === 0))
   ) {

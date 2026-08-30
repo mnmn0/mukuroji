@@ -581,6 +581,38 @@ test('rejects empty required values, control characters, and duplicate multi-sel
   )).toThrow('cannot be negative')
 })
 
+test('enforces Work Item Type required fields when values are explicitly empty', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('summary', 'text'),
+      field('labels', 'multi-select', { options: options('alpha', 'beta') }),
+    ],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['summary', 'labels'],
+      requiredCustomFieldIds: ['summary', 'labels'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(() => normalizeCustomFieldValues(
+    configuration,
+    { summary: '', labels: ['alpha'] },
+    { mode: 'create', workItemTypeId: 'incident' },
+  )).toThrow('Custom field "summary" is required.')
+  expect(() => normalizeCustomFieldValues(
+    configuration,
+    { summary: 'Database outage', labels: [] },
+    { mode: 'create', workItemTypeId: 'incident' },
+  )).toThrow('Custom field "labels" is required.')
+})
+
 test('rejects unsafe patterns and currency values beyond their minor-unit precision', () => {
   expect(() => createConfiguration({
     customFields: [field('text', 'text', { validation: { pattern: '(a+)+' } })],
