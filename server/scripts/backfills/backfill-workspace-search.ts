@@ -692,6 +692,7 @@ export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOper
       assigneeUserId: item.assigneeUserId,
       creatorUserId: item.creatorMemberKey,
       status: item.workflowStatusId,
+      workItemTypeId: item.workItemTypeId,
       customFields: readCanonicalCustomFieldValues(item.customFieldValues),
       relationIds: item.relationIds,
       dueDate: item.dueDate,

@@ -191,6 +191,7 @@ describe('Workspace search backfill mapping', () => {
       workflowSchemaVersion: 1,
       workflowStatusId: 'review',
       statusCategory: 'started',
+      workItemTypeId: 'incident',
       customFieldValues: { effort: 8, approved: true },
       dueDate: '2026-07-20',
       schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
@@ -232,6 +233,7 @@ describe('Workspace search backfill mapping', () => {
     expect(first.document.subtitle).toBe('release-check')
     expect(first.document.customFields).toEqual({ effort: 8, approved: true })
     expect(first.document.status).toBe('review')
+    expect(first.document.workItemTypeId).toBe('incident')
     expect(first.document.relationIds).toEqual(['blocks:launch'])
     expect(second.document.relationIds).toEqual([])
     expect(first.document.dueDate).toBe('2026-07-20')
