@@ -105,8 +105,8 @@ identifier alias、credential/PII redaction、field-aware maskは、文字列・
 Request Intakeはimmutable form snapshotのfield ID、localized label、field typeを使い、email、氏名、電話、住所fieldの
 回答を元のscalar型にかかわらずserialization前にdeterministic markerへ置換し、配列もraw leafを残しません。その他のshort/long textは業務文脈を丸ごと捨てず、既存の
 credential/email redactionに加えて、label付き氏名、一般的な電話番号、郵便住所patternを送信前にmaskします。同じ
-redactorをsource prompt、operator guidance/query、citation、model生成prose、uncertaintyへ適用します。HTTPS URLに
-含まれるpresigned URLの署名、credential、security token query値（AWS/GCSの代表的な形式を含む）も値ごとmaskし、
+redactorをsource prompt、operator guidance/query、citation、model生成prose、uncertaintyへ適用します。HTTP(S) URLおよび
+プロトコル相対URLに含まれるpresigned URLの署名、credential、security token query値（AWS/GCSの代表的な形式を含む）も値ごとmaskし、
 署名付きURLのbearer materialをProviderやattempt auditへ残しません。
 
 Work Item custom fieldは、現在閲覧可能な全Team configurationを上限による切捨て前に分類します。`person`型と、field

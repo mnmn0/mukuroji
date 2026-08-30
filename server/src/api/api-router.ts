@@ -20213,9 +20213,12 @@ async function createAiAssistanceResolverState(
   const visibleTeams = searchContext.directory.teams
     .filter((team) => searchContext.searchAccess.teamIds.has(team.id))
     .sort((left, right) => left.id.localeCompare(right.id))
+  const teamsForConfiguration = triageSourceTeamId === undefined
+    ? visibleTeams
+    : visibleTeams.filter((team) => team.id === triageSourceTeamId)
   const [activeMembers, configurations] = await Promise.all([
     workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId),
-    resolveAiAssistanceTeamConfigurations(principal.directoryId, visibleTeams),
+    resolveAiAssistanceTeamConfigurations(principal.directoryId, teamsForConfiguration),
   ])
   const teamIds = uniqueAiAllowedValues(
     visibleTeams.map((team) => team.id),

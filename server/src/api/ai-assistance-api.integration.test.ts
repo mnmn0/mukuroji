@@ -1173,9 +1173,18 @@ describe('AI assistance API composition', () => {
       workspaceRole: 'member',
     })
     const entry = createTriageEntry('full')
+    const baseConfigurationClient = createFakeWorkItemConfigurationClient()
+    const resolvedConfigurationTeamIds: string[] = []
+    const workItemConfigurations = createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(workspaceId, teamId) {
+        resolvedConfigurationTeamIds.push(teamId)
+        return await baseConfigurationClient.getTeamConfiguration(workspaceId, teamId)
+      },
+    })
     let resolvedContext: ResolvedAiAssistanceContext | undefined
     setTestAppDependencies({
       triage: createTriageClient(entry),
+      workItemConfigurations,
       aiAssistanceService: createAiService({
         async generate(actor, request, authorization) {
           resolvedContext = await authorization.resolveContext({ actor, request })
@@ -1205,6 +1214,7 @@ describe('AI assistance API composition', () => {
     }
     expect(resolvedContext.allowedValues.teamIds).toEqual(['core-team'])
     expect(resolvedContext.allowedValues.projectIds).toEqual(['refero'])
+    expect(resolvedConfigurationTeamIds).toEqual(['core-team'])
     expect(resolvedContext.allowedValues.triageRoutingTuples?.every((tuple) =>
       tuple.teamId === 'core-team' &&
       (tuple.projectId === undefined || tuple.projectId === 'refero')
