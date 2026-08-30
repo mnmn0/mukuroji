@@ -19964,14 +19964,14 @@ async function resolveAiAssistanceTeamConfigurations(
  * @param directoryId - Workspace directory that owns the Projects.
  * @param projects - Team-qualified destination Projects visible to the request.
  * @param eligibleMemberIds - Active, non-guest Workspace members already visible to the model.
- * @returns Project IDs mapped to their current eligible member IDs.
+ * @returns Team/project routing keys mapped to their current eligible member IDs.
  */
 async function resolveAiAssistanceProjectMemberIds(
   directoryId: string,
   projects: readonly Readonly<{ teamId: string; projectId: string }>[],
   eligibleMemberIds: ReadonlySet<string>,
 ): Promise<ReadonlyMap<string, readonly string[]>> {
-  const memberIdsByProjectId = new Map<string, readonly string[]>()
+  const memberIdsByProjectRoutingKey = new Map<string, readonly string[]>()
   const eligibleMemberIdsByNormalizedId = new Map<string, string>()
   for (const memberId of eligibleMemberIds) {
     eligibleMemberIdsByNormalizedId.set(memberId.trim().toLowerCase(), memberId)
@@ -19992,17 +19992,29 @@ async function resolveAiAssistanceProjectMemberIds(
         project.teamId,
       )
     ))
-    for (const response of responses) {
+    for (const [index, response] of responses.entries()) {
+      const project = batch[index]
+      if (project === undefined) {
+        throw new Error('AI assistance Project membership response ordering changed.')
+      }
       const memberIds = response.members.flatMap((member) => {
         const canonicalMemberId = eligibleMemberIdsByNormalizedId.get(
           member.id.trim().toLowerCase(),
         )
         return canonicalMemberId === undefined ? [] : [canonicalMemberId]
       })
-      memberIdsByProjectId.set(response.projectId, memberIds)
+      memberIdsByProjectRoutingKey.set(
+        createAiAssistanceProjectRoutingKey(project.teamId, project.projectId),
+        memberIds,
+      )
     }
   }
-  return memberIdsByProjectId
+  return memberIdsByProjectRoutingKey
+}
+
+/** Creates a collision-free key for a Team-qualified Project routing tuple. */
+function createAiAssistanceProjectRoutingKey(teamId: string, projectId: string): string {
+  return `${teamId}\u0000${projectId}`
 }
 
 /**
@@ -20334,7 +20346,7 @@ async function createAiAssistanceResolverState(
         .filter((project) => projectIds.includes(project.id))
         .map((project) => ({ teamId: team.id, projectId: project.id })))
     : []
-  const projectMemberIdsByProjectId = task === 'triage'
+  const projectMemberIdsByProjectRoutingKey = task === 'triage'
     ? await resolveAiAssistanceProjectMemberIds(
         principal.directoryId,
         routingProjects,
@@ -20352,7 +20364,9 @@ async function createAiAssistanceResolverState(
         teamId: team.id,
         projectId: project.id,
         assigneeUserIds: task === 'triage'
-          ? projectMemberIdsByProjectId.get(project.id) ?? []
+          ? projectMemberIdsByProjectRoutingKey.get(
+              createAiAssistanceProjectRoutingKey(team.id, project.id),
+            ) ?? []
           : eligibleMemberIds,
       })),
   ]).slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
