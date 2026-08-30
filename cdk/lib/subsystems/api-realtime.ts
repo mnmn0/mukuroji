@@ -565,6 +565,12 @@ export function buildApiRuntime(
     workItemImportBucket,
   } = input.fileStorage;
   const {
+    aiBedrockDestinationModelArns,
+    aiBedrockDestinationModelArnsConfigured,
+    aiBedrockInputPricePerMillionTokensUsd,
+    aiBedrockModelArn,
+    aiBedrockModelId,
+    aiBedrockOutputPricePerMillionTokensUsd,
     automationInboundWebhookSecretArn,
     automationWebhookSecretArn,
     cognitoUserPoolArn,
@@ -592,7 +598,7 @@ export function buildApiRuntime(
       })}-api-v2`,
       depsLockFilePath,
       projectRoot,
-      timeout: cdk.Duration.seconds(15),
+      timeout: cdk.Duration.seconds(20),
       memorySize: 512,
       description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
       currentVersionOptions: {
@@ -608,6 +614,50 @@ export function buildApiRuntime(
         target: 'node22',
       },
     },
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_ALLOWED_MODEL_IDS',
+    aiBedrockModelId.valueAsString,
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_BEDROCK_REGION',
+    cdk.Aws.REGION,
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_DEFAULT_MODEL_ID',
+    aiBedrockModelId.valueAsString,
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD',
+    aiBedrockInputPricePerMillionTokensUsd.valueAsString,
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD',
+    aiBedrockOutputPricePerMillionTokensUsd.valueAsString,
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_TABLE_NAME',
+    workspaceSearchTable.tableName,
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE',
+    '32',
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE',
+    '4',
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE',
+    '32000000',
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE',
+    '4000000',
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION',
+    '1000000',
   );
   bindRuntimeControls(input.runtimeControls, apiFunction, 'api', false);
 
@@ -781,6 +831,42 @@ export function buildApiRuntime(
   if (!apiFunction.role) {
     throw new Error('API Lambda execution role was not created.');
   }
+  apiFunction.role.attachInlinePolicy(new iam.Policy(
+    scope,
+    'ApiBedrockModelInvokePolicy',
+    {
+      statements: [new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: [aiBedrockModelArn.valueAsString],
+      })],
+    },
+  ));
+  const apiBedrockDestinationModelInvokePolicy = new iam.Policy(
+    scope,
+    'ApiBedrockDestinationModelInvokePolicy',
+    {
+      statements: [new iam.PolicyStatement({
+        actions: ['bedrock:InvokeModel'],
+        resources: cdk.Fn.split(
+          ',',
+          aiBedrockDestinationModelArns.valueAsString,
+        ),
+        conditions: {
+          StringEquals: {
+            'bedrock:InferenceProfileArn': aiBedrockModelArn.valueAsString,
+          },
+        },
+      })],
+    },
+  );
+  apiFunction.role.attachInlinePolicy(apiBedrockDestinationModelInvokePolicy);
+  const apiBedrockDestinationModelInvokePolicyResource =
+    apiBedrockDestinationModelInvokePolicy.node.defaultChild;
+  if (!(apiBedrockDestinationModelInvokePolicyResource instanceof iam.CfnPolicy)) {
+    throw new Error('API Bedrock destination-model IAM policy was not created.');
+  }
+  apiBedrockDestinationModelInvokePolicyResource.cfnOptions.condition =
+    aiBedrockDestinationModelArnsConfigured;
   apiFunction.role.attachInlinePolicy(new iam.Policy(
     scope,
     'ApiDeveloperPlatformKmsPolicy',

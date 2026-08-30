@@ -585,7 +585,7 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
  * @param entry The canonical entry to evaluate.
  * @returns Whether the entry may be disclosed to the principal.
  */
-function isTriageEntryVisible(
+export function isTriageEntryVisible(
   principal: TriagePrincipal,
   entry: Pick<TriageEntry, 'projectId'>,
 ): boolean {
@@ -600,7 +600,7 @@ function isTriageEntryVisible(
  * @param entry The permission-projected Triage Entry.
  * @returns A response that contains no cross-Project routing metadata.
  */
-function projectTriageEntryForPrincipal(
+export function projectTriageEntryForPrincipal(
   principal: TriagePrincipal,
   entry: TriageEntry,
 ): TriageEntry {

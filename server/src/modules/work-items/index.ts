@@ -39,6 +39,10 @@ export {
   isCanonicalWorkItemRelationIds,
   type CanonicalWorkItemRecord,
 } from './canonical-work-item'
+/**
+ * Exposes Work Item configuration guards and canonical value helpers, including
+ * currency precision validation used by schedule and cost fields.
+ */
 export {
   WorkItemConfigurationError,
   assertWorkflowTransitionAllowed,
@@ -46,6 +50,7 @@ export {
   createWorkItemRelationGraphRevisionConditionCheck,
   createWorkItemConfigurationScopeKey,
   createWorkItemRelationIds,
+  hasSupportedCurrencyPrecision,
   isWorkflowTransitionAllowed,
   normalizeCustomFieldValues,
   resolveWorkflowStatus,

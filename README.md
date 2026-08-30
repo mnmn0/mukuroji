@@ -13,6 +13,8 @@ mukuroji は、プロジェクトやタスクの進捗をチームで見渡す�
 
 SLO、alarm、incident response、migration、deploy、restore drill の運用契約は
 [`docs/operational-readiness.md`](docs/operational-readiness.md) を参照してください。
+Bedrock model allowlist、Lambda/local認証、live evaluationの運用契約は
+[`docs/ai-assistance.md`](docs/ai-assistance.md)を参照してください。
 
 ## セットアップ
 
@@ -227,6 +229,12 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
 - `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
+- `AI_ASSISTANCE_BEDROCK_REGION`: AI assistanceが呼ぶBedrock Runtime region。本番はLambdaの`AWS_REGION`、localのJP既定は`ap-northeast-1`
+- `AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD` / `AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD`: exact model/profile用にdeploy時レビューしたstandard token単価。両方を設定した場合だけgeneration auditへ推定costを保存します。
+- `AI_ASSISTANCE_DEFAULT_MODEL_ID` / `AI_ASSISTANCE_ALLOWED_MODEL_IDS`: defaultとcomma-separated allowlist。本番CDKは両方を同じexact `AiBedrockModelId`（既定 `jp.anthropic.claude-sonnet-4-6`）へ固定します。
+- `AI_ASSISTANCE_TABLE_NAME`: AI generation recordをAI専用key prefixで保存する既存Workspace Search table名。本番CDKは同tableへ自動bindします。
+- `AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE` / `AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE`: 新しいgeneration idempotency keyのUTC 1分固定窓上限（既定32 / 4）。
+- `AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION`: 同じatomic reservationで管理するworst-case token budget（既定32,000,000 / 4,000,000 / 1,000,000）。
 - `ANALYTICS_TABLE_NAME`: 保存済みレポート、immutable snapshot、定期配信 receipt を保存する DynamoDB table 名。未指定時は `mukuroji-analytics-local`
 - `ANALYTICS_SCHEDULE_INDEX_NAME`: 定期配信対象の取得に使う `scheduleShard` / `nextDeliveryAtRecordKey` GSI 名。未指定時は `ScheduleDueIndex`
 - `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
@@ -345,6 +353,11 @@ export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characte
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export AWS_REGION=ap-northeast-1
+export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6'
+export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
+export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
+export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
@@ -378,6 +391,10 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
+  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
@@ -401,6 +418,10 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
+  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk diff CdkStack \
@@ -424,6 +445,10 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
+  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 ```
 

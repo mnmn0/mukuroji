@@ -450,6 +450,18 @@ export type ListDocumentCommentsRequest = {
 }
 
 /**
+ * Identifies the Document comment-window revision used by commit-time fences.
+ */
+export type GetDocumentCommentWindowRevisionRequest = {
+  /** Canonical Workspace ID. */
+  workspaceId: string
+  /** Document whose comment insertions are being fenced. */
+  documentId: string
+  /** Current viewer access used to revalidate Document visibility. */
+  access: DocumentAccessContext
+}
+
+/**
  * Document comment resolve/reopen input です。
  */
 export type ResolveDocumentCommentRequest = {

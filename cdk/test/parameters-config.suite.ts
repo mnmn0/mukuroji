@@ -134,6 +134,9 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     'AlarmPrimaryTopicName',
     'AlarmSecondaryTopicName',
     'ApiRuntimeConfigurationRevision',
+    'AiBedrockInputPricePerMillionTokensUsd',
+    'AiBedrockModelArn',
+    'AiBedrockOutputPricePerMillionTokensUsd',
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }

@@ -2,7 +2,9 @@ import { expect, spyOn, test } from 'bun:test'
 import {
   CreateTableCommand,
   DescribeTableCommand,
+  DescribeTimeToLiveCommand,
   DynamoDBClient,
+  UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { COLLABORATION_CONTEXT_SCHEMA_VERSION } from '@mukuroji/contracts'
@@ -3494,9 +3496,24 @@ test('waits for a newly created local search table to become active', async () =
   const commands: string[] = []
   let describeCount = 0
   const dynamoDbClient = {
-    async send(command: CreateTableCommand | DescribeTableCommand) {
+    async send(
+      command:
+        | CreateTableCommand
+        | DescribeTableCommand
+        | DescribeTimeToLiveCommand
+        | UpdateTimeToLiveCommand,
+    ) {
       commands.push(command.constructor.name)
       if (command instanceof CreateTableCommand) return {}
+      if (command instanceof DescribeTimeToLiveCommand) {
+        return {
+          TimeToLiveDescription: {
+            AttributeName: 'expiresAt',
+            TimeToLiveStatus: 'ENABLED',
+          },
+        }
+      }
+      if (command instanceof UpdateTimeToLiveCommand) return {}
       describeCount += 1
       if (describeCount === 1) {
         const error = new Error('missing')
@@ -3522,6 +3539,97 @@ test('waits for a newly created local search table to become active', async () =
     'CreateTableCommand',
     'DescribeTableCommand',
     'DescribeTableCommand',
+    'DescribeTimeToLiveCommand',
+  ])
+})
+
+test('enables and verifies expiresAt TTL on an existing local search table', async () => {
+  const commands: string[] = []
+  let ttlDescribeCount = 0
+  const dynamoDbClient = {
+    async send(
+      command:
+        | DescribeTableCommand
+        | DescribeTimeToLiveCommand
+        | UpdateTimeToLiveCommand,
+    ) {
+      commands.push(command.constructor.name)
+      if (command instanceof DescribeTableCommand) {
+        return {
+          Table: {
+            TableStatus: 'ACTIVE',
+            KeySchema: [
+              { AttributeName: 'workspaceId', KeyType: 'HASH' },
+              { AttributeName: 'recordKey', KeyType: 'RANGE' },
+            ],
+          },
+        }
+      }
+      if (command instanceof UpdateTimeToLiveCommand) return {}
+      ttlDescribeCount += 1
+      return ttlDescribeCount === 1
+        ? { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } }
+        : {
+            TimeToLiveDescription: {
+              AttributeName: 'expiresAt',
+              TimeToLiveStatus: 'ENABLING',
+            },
+          }
+    },
+  } as unknown as DynamoDBClient
+
+  await ensureLocalWorkspaceSearchTable('search-table', dynamoDbClient)
+
+  expect(commands).toEqual([
+    'DescribeTableCommand',
+    'DescribeTimeToLiveCommand',
+    'UpdateTimeToLiveCommand',
+    'DescribeTimeToLiveCommand',
+  ])
+})
+
+test('waits for a disabling local TTL operation before enabling expiresAt', async () => {
+  const commands: string[] = []
+  let ttlDescribeCount = 0
+  const dynamoDbClient = {
+    async send(
+      command: DescribeTableCommand | DescribeTimeToLiveCommand | UpdateTimeToLiveCommand,
+    ) {
+      commands.push(command.constructor.name)
+      if (command instanceof DescribeTableCommand) {
+        return {
+          Table: {
+            TableStatus: 'ACTIVE',
+            KeySchema: [
+              { AttributeName: 'workspaceId', KeyType: 'HASH' },
+              { AttributeName: 'recordKey', KeyType: 'RANGE' },
+            ],
+          },
+        }
+      }
+      if (command instanceof UpdateTimeToLiveCommand) return {}
+      ttlDescribeCount += 1
+      return ttlDescribeCount === 1
+        ? { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLING' } }
+        : ttlDescribeCount === 2
+          ? { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } }
+          : {
+              TimeToLiveDescription: {
+                AttributeName: 'expiresAt',
+                TimeToLiveStatus: 'ENABLING',
+              },
+            }
+    },
+  } as unknown as DynamoDBClient
+
+  await ensureLocalWorkspaceSearchTable('search-table', dynamoDbClient)
+
+  expect(commands).toEqual([
+    'DescribeTableCommand',
+    'DescribeTimeToLiveCommand',
+    'DescribeTimeToLiveCommand',
+    'UpdateTimeToLiveCommand',
+    'DescribeTimeToLiveCommand',
   ])
 })
 

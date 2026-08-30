@@ -1,4 +1,5 @@
 export * from './analytics'
+/** Re-exports AI assistance contracts for server and Web consumers. */
 export * from './ai-assistance'
 export * from './api-runtime-configuration'
 export * from './automation'

@@ -21,7 +21,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Description: 'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
-    Timeout: 15,
+    Timeout: 20,
     Environment: {
       Variables: Match.objectLike({
         MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
@@ -46,6 +46,17 @@ test('shared server handler is bundled as a Lambda asset with production environ
 
   expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
   expect(Object.keys(variables).sort()).toEqual([
+    'AI_ASSISTANCE_ALLOWED_MODEL_IDS',
+    'AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD',
+    'AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD',
+    'AI_ASSISTANCE_BEDROCK_REGION',
+    'AI_ASSISTANCE_DEFAULT_MODEL_ID',
+    'AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE',
+    'AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE',
+    'AI_ASSISTANCE_TABLE_NAME',
+    'AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE',
+    'AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE',
+    'AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION',
     'MUKUROJI_API_CORE_CONFIG_SECRET_ARN',
     'MUKUROJI_API_DATA_CONFIG_SECRET_ARN',
     'MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN',

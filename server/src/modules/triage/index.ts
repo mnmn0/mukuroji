@@ -83,6 +83,8 @@ export {
 /** Team triage HTTP adapter and composable action boundary. */
 export {
   createTriageRouter,
+  isTriageEntryVisible,
+  projectTriageEntryForPrincipal,
   type TriagePrincipal,
   type TriageRouterBulkActionRequest,
   type TriageRouterActionRequest,

@@ -20,6 +20,11 @@
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
 | `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `AiBedrockModelId` | no | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
+| `AiBedrockInputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |
+| `AiBedrockOutputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard output 100万token当たりUSD。 |
+| `AiBedrockModelArn` | yes | API Lambdaに `bedrock:InvokeModel` を許可するexact foundation-modelまたはinference-profile ARN。wildcardは使用できません。 |
+| `AiBedrockDestinationModelArns` | JP既定profileではyes | Cross-Region inference profileの全destination foundation-model ARNを空白なしcomma-separatedで指定します。Direct model invocationでは空にします。指定時だけprofile ARN一致condition付きIAM statementを作ります。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
@@ -106,7 +111,7 @@ templateとdeployed configurationの両方で照合します。
 - `EnterpriseScimGroupJobFunctionName`, `EnterpriseScimGroupJobDlqUrl`
 - `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
-- `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt。receipt のみ `expiresAt` TTL で失効）
+- `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt、保持期限付きAI generation/idempotency/feedback/budget record。期限付きrowは `expiresAt` TTL で失効）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
 - `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`
@@ -133,6 +138,25 @@ identity/revision、全canonical key、nested secretを検証し終えてから�
 `ApiGatewayUrl`へ切り替えてください。いずれも同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
 切り替えます。以後は、新しいconfiguration secretとLambda Versionの準備完了後にAliasが新Versionへ
 切り替わるため、HTTP API trafficはcode/configurationが揃ったversion単位で切り替わります。
+
+## Bedrock AI assistance boundary
+
+API Lambdaにはstack region、exact default/allowlisted model ID、既存Workspace Search table名を
+`AI_ASSISTANCE_BEDROCK_REGION`、`AI_ASSISTANCE_DEFAULT_MODEL_ID`、
+`AI_ASSISTANCE_ALLOWED_MODEL_IDS`、`AI_ASSISTANCE_TABLE_NAME`として直接bindします。review済みinput/output
+単価も `AI_ASSISTANCE_BEDROCK_*_PRICE_PER_MILLION_TOKENS_USD` としてbindし、provider token usageから
+generation recordの推定costを算出します。加えて
+Workspace/memberの1分固定窓generation上限（32 / 4）とtoken予約上限
+（32,000,000 / 4,000,000、1 keyあたり1,000,000）を`AI_ASSISTANCE_*_PER_MINUTE` /
+`AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION`へ固定します。AI recordは
+既存tableのAI専用key prefixへ保存し、新しいtableは作成しません。同期10–12秒のmodel callに対して
+Lambda timeoutは20秒ですが、p95 12秒alarmは維持します。
+
+Production認証はLambda execution roleの短期credentialとSigV4だけを使い、
+`AWS_BEARER_TOKEN_BEDROCK`、static access key、Bedrock API keyを設定しません。IAM actionは
+non-streamingの`bedrock:InvokeModel`だけで、exact configured ARN以外を許可しません。Local profile、
+JP profile/destination ARN inventory、scheduled live evalを含む完全な手順は
+[`docs/ai-assistance.md`](../docs/ai-assistance.md)を参照してください。
 
 ## Connector runtime configuration
 
@@ -552,6 +576,11 @@ to the `comment` stage commands.
 
 ```sh
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export AWS_REGION=ap-northeast-1
+export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6'
+export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
+export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
+export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
@@ -576,6 +605,10 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
+  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
@@ -599,11 +632,20 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
+  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 ```
 
 ```sh
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export AWS_REGION=ap-northeast-1
+export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6'
+export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
+export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
+export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
@@ -628,6 +670,10 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
+  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
@@ -651,6 +697,10 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
+  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
+  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS" \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```

@@ -1,4 +1,5 @@
 const serverModules = [
+  'ai-assistance',
   'analytics',
   'audit',
   'authentication',

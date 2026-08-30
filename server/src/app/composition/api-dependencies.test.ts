@@ -8,12 +8,25 @@ import {
 } from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
 import {
+  createProductionAiAssistanceDependencies,
   createTriageActionReferenceValidator,
   createTriageAdmissionValidator,
   createTriageConfigurationReferenceValidator,
 } from './api-dependencies'
+import type { AuditEventsClient } from './app-dependencies'
 
 const NOW = '2026-08-09T00:00:00.000Z'
+
+const TEST_AUDIT_EVENTS = {
+  /** Returns no audit event in composition tests. */
+  async getEvent() {
+    return undefined
+  },
+  /** Returns an empty audit-event page in composition tests. */
+  async query() {
+    return { events: [] }
+  },
+} satisfies AuditEventsClient
 
 const ENTRY = {
   schemaVersion: TRIAGE_ENTRY_SCHEMA_VERSION,
@@ -83,6 +96,88 @@ const CONFIGURATION = {
   revision: 0,
   updatedAt: NOW,
 } satisfies TriageConfiguration
+
+test('lazily rejects Bedrock bearer-token authentication before creating a provider', () => {
+  const originalBearerToken = Bun.env.AWS_BEARER_TOKEN_BEDROCK
+  Bun.env.AWS_BEARER_TOKEN_BEDROCK = 'must-not-be-used'
+  try {
+    const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    expect(() => dependencies.aiAssistanceService.getPolicy({
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      actorId: 'member-1',
+      auditActorKind: 'user',
+      traceId: 'trace-1',
+      canManagePolicy: false,
+    })).toThrow('AWS_BEARER_TOKEN_BEDROCK is not supported')
+  } finally {
+    if (originalBearerToken === undefined) {
+      delete Bun.env.AWS_BEARER_TOKEN_BEDROCK
+    } else {
+      Bun.env.AWS_BEARER_TOKEN_BEDROCK = originalBearerToken
+    }
+  }
+})
+
+test('lazily rejects a non-positive AI generation budget setting', () => {
+  const environmentName = 'AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE'
+  const original = Bun.env[environmentName]
+  Bun.env[environmentName] = '0'
+  try {
+    const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    expect(() => dependencies.aiAssistanceService.getPolicy({
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      actorId: 'member-1',
+      auditActorKind: 'user',
+      traceId: 'trace-1',
+      canManagePolicy: false,
+    })).toThrow(`${environmentName} must be a positive integer.`)
+  } finally {
+    if (original === undefined) {
+      delete Bun.env[environmentName]
+    } else {
+      Bun.env[environmentName] = original
+    }
+  }
+})
+
+test('lazily rejects incomplete or invalid Bedrock pricing configuration', () => {
+  const inputName = 'AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD'
+  const outputName = 'AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD'
+  const originalInput = Bun.env[inputName]
+  const originalOutput = Bun.env[outputName]
+  try {
+    Bun.env[inputName] = '3'
+    delete Bun.env[outputName]
+    const incomplete = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    expect(() => incomplete.aiAssistanceService.getPolicy({
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      actorId: 'member-1',
+      auditActorKind: 'user',
+      traceId: 'trace-1',
+      canManagePolicy: false,
+    })).toThrow('input and output token prices must be configured together')
+
+    Bun.env[inputName] = 'not-a-price'
+    Bun.env[outputName] = '15'
+    const invalid = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    expect(() => invalid.aiAssistanceService.getPolicy({
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      actorId: 'member-1',
+      auditActorKind: 'user',
+      traceId: 'trace-1',
+      canManagePolicy: false,
+    })).toThrow(`${inputName} must be a positive decimal number.`)
+  } finally {
+    if (originalInput === undefined) delete Bun.env[inputName]
+    else Bun.env[inputName] = originalInput
+    if (originalOutput === undefined) delete Bun.env[outputName]
+    else Bun.env[outputName] = originalOutput
+  }
+})
 
 test('rejects Team-level admission when the strongly read Team is missing', async () => {
   let directoryReads = 0

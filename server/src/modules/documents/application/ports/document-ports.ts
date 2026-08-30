@@ -19,6 +19,7 @@ import type {
   DocumentPresenceRequest,
   DocumentPublicShareRequest,
   ExportDocumentRequest,
+  GetDocumentCommentWindowRevisionRequest,
   GetDocumentRequest,
   HeartbeatDocumentPresenceRequest,
   InstantiateDocumentTemplateRequest,
@@ -231,6 +232,15 @@ export interface DocumentPreferencePort {
 
 /** Creates, reads, and resolves document comments. */
 export interface DocumentCommentsPort {
+  /**
+   * Reads the monotonic revision advanced by every comment insertion.
+   *
+   * @param input - Document identity and current viewer access.
+   * @returns Current comment-window revision, or zero for legacy Documents without a fence row.
+   */
+  getCommentWindowRevision?: (
+    input: GetDocumentCommentWindowRevisionRequest,
+  ) => Promise<number>
   /**
    * Returns an existing comment for an idempotent create replay.
    *

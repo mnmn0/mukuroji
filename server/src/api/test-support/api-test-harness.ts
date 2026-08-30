@@ -153,7 +153,7 @@ function runWithTestAppDependencies<Result>(
 
 const originalBulkRecoveryTitle = 'Initial title'
 
-function createBulkRecoveryIssue() {
+function createBulkRecoveryIssue(): CanonicalWorkItem {
   const schedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -685,6 +685,7 @@ function createDocumentFake(
     updatePreference: unsupported,
     listRecent: unsupported,
     getCommentCreateReplay: unsupported,
+    getCommentWindowRevision: async () => 0,
     createComment: unsupported,
     listComments: unsupported,
     resolveComment: unsupported,

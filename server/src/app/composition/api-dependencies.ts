@@ -1,4 +1,5 @@
 import type {
+  AiAssistancePolicy,
   ResolvedWorkItemConfiguration,
   TriageActionInput,
   TriageEntry,
@@ -6,12 +7,16 @@ import type {
   WorkItemRelationMutationResponse,
   WorkItemRelationType,
 } from '@mukuroji/contracts'
+import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
+import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
   createCanonicalPublicWorkItemService,
   shouldEnableWorkspaceSearchProjection,
   testEnterpriseIdentityProviderConnection,
 } from '../../api/api-router'
 import type {
+  AiAssistanceDependencies,
+  AuditEventsClient,
   AppDependencyOverrides,
   AppDependencies,
   AuthenticationDependencies,
@@ -21,6 +26,14 @@ import type {
   WorkItemDependencies,
   WorkspaceDependencies,
 } from './app-dependencies'
+import {
+  createAiAssistanceService,
+  createMastraBedrockAiModelGateway,
+  DynamoDbAiAssistanceStore,
+  type AiAssistancePolicyAudit,
+  type AiAssistancePolicyAuditInput,
+  type AiAssistanceService,
+} from '../../modules/ai-assistance'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
@@ -50,9 +63,13 @@ import {
   InMemoryAnalyticsRepository,
 } from '../../modules/analytics/analytics'
 import {
+  calculateAuditExpiresAt,
+  createAuditEvent,
+  createMutationAuditContext,
   DynamoDbAuditEventsClient,
   getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,
+  type AuditEventV1,
 } from '../../modules/audit/audit'
 import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
@@ -520,6 +537,392 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     ),
     triage,
     analytics: createAnalyticsRepository(),
+  }
+}
+
+/** Stable prompt template version retained with every production generation. */
+const AI_ASSISTANCE_PROMPT_VERSION = 'ai-assistance-v1'
+
+/** Local-only model default used when CDK has not bound a deployment allowlist. */
+const LOCAL_AI_ASSISTANCE_MODEL_ID = 'jp.anthropic.claude-sonnet-4-6'
+
+/** Default audit retention applied before a Workspace writes an explicit policy. */
+const DEFAULT_AI_ASSISTANCE_RETENTION_DAYS = 30
+
+/** Default unique generation-key limit per Workspace and UTC minute. */
+const DEFAULT_AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE = 32
+
+/** Default unique generation-key limit per member and UTC minute. */
+const DEFAULT_AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE = 4
+
+/** Default conservative Workspace token-reservation cap per UTC minute. */
+const DEFAULT_AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE = 32_000_000
+
+/** Default conservative member token-reservation cap per UTC minute. */
+const DEFAULT_AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE = 4_000_000
+
+/** Default worst-case input-plus-output token charge for one unique key. */
+const DEFAULT_AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION = 1_000_000
+
+/**
+ * Creates a service proxy that initializes Bedrock and persistence only on first AI use.
+ *
+ * @param createService - Factory for the complete production service.
+ * @returns A lazy service implementing the complete AI assistance application port.
+ */
+function createLazyAiAssistanceService(
+  createService: () => AiAssistanceService,
+): AiAssistanceService {
+  let service: AiAssistanceService | undefined
+
+  /** Resolves the production service once for this application dependency graph. */
+  function resolveService(): AiAssistanceService {
+    service ??= createService()
+    return service
+  }
+
+  return {
+    getPolicy: (actor) => resolveService().getPolicy(actor),
+    updatePolicy: (actor, request, authorization) =>
+      resolveService().updatePolicy(actor, request, authorization),
+    getPreference: (actor) => resolveService().getPreference(actor),
+    updatePreference: (actor, request, authorization) =>
+      resolveService().updatePreference(actor, request, authorization),
+    generate: (actor, request, authorization, idempotencyKey, requestStartedAtMs) =>
+      resolveService().generate(
+        actor,
+        request,
+        authorization,
+        idempotencyKey,
+        requestStartedAtMs,
+      ),
+    getGeneration: (actor, generationId, authorization) =>
+      resolveService().getGeneration(actor, generationId, authorization),
+    decideGeneration: (actor, generationId, request, authorization) =>
+      resolveService().decideGeneration(
+        actor,
+        generationId,
+        request,
+        authorization,
+      ),
+    createFeedback: (actor, generationId, request, authorization, idempotencyKey) =>
+      resolveService().createFeedback(
+        actor,
+        generationId,
+        request,
+        authorization,
+        idempotencyKey,
+      ),
+  }
+}
+
+/**
+ * Parses a comma-separated deployment model allowlist without accepting empty entries.
+ *
+ * @param value - Optional environment value bound by CDK or local configuration.
+ * @param defaultModelId - Model used when local development omits an allowlist.
+ * @returns Stable unique model identifiers in configuration order.
+ */
+function readAiAssistanceAllowedModelIds(
+  value: string | undefined,
+  defaultModelId: string,
+): string[] {
+  if (value === undefined) return [defaultModelId]
+  const modelIds = value.split(',').map((entry) => entry.trim())
+  if (modelIds.length === 0 || modelIds.some((entry) => entry.length === 0)) {
+    throw new TypeError(
+      'AI_ASSISTANCE_ALLOWED_MODEL_IDS must contain only non-empty model IDs.',
+    )
+  }
+  return [...new Set(modelIds)]
+}
+
+/**
+ * Parses one optional positive safe-integer AI budget setting.
+ *
+ * @param value - Optional environment value.
+ * @param name - Environment variable name used in the safe configuration error.
+ * @param fallback - Reviewed deployment default used when the value is absent.
+ * @returns Validated positive safe integer.
+ */
+function readAiAssistanceBudgetInteger(
+  value: string | undefined,
+  name: string,
+  fallback: number,
+): number {
+  if (value === undefined) return fallback
+  const normalized = value.trim()
+  if (!/^[1-9]\d*$/u.test(normalized)) {
+    throw new TypeError(`${name} must be a positive integer.`)
+  }
+  const parsed = Number(normalized)
+  if (!Number.isSafeInteger(parsed)) {
+    throw new TypeError(`${name} must be a positive safe integer.`)
+  }
+  return parsed
+}
+
+/**
+ * Parses one optional positive deployment-reviewed Bedrock token price.
+ *
+ * @param value - Optional environment value in USD per one million tokens.
+ * @param name - Environment variable name used in the safe configuration error.
+ * @returns Validated finite positive price, or undefined when not configured.
+ */
+function readAiAssistanceTokenPrice(
+  value: string | undefined,
+  name: string,
+): number | undefined {
+  if (value === undefined) return undefined
+  const normalized = value.trim()
+  if (!/^(?:0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(?:\.[0-9]+)?)$/u.test(normalized)) {
+    throw new TypeError(`${name} must be a positive decimal number.`)
+  }
+  const parsed = Number(normalized)
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1_000_000) {
+    throw new TypeError(`${name} must be a positive decimal number.`)
+  }
+  return parsed
+}
+
+/**
+ * Creates the append-only audit writer used for AI policy transitions.
+ *
+ * @param auditEvents - Existing Workspace audit event persistence.
+ * @param store - DynamoDB store used for atomic policy and audit persistence.
+ * @returns Application audit boundary that records redacted before/after policy state.
+ */
+function createAiAssistancePolicyAudit(
+  auditEvents: AuditEventsClient,
+  store: DynamoDbAiAssistanceStore,
+): AiAssistancePolicyAudit {
+  /** Creates one immutable, policy-only audit event. */
+  function createPolicyAuditEvent(input: AiAssistancePolicyAuditInput): AuditEventV1 {
+    const occurredAt = new Date().toISOString()
+    const context = createMutationAuditContext({
+      workspaceId: input.workspaceId,
+      actor: { id: input.actorId, kind: input.actorKind },
+      idempotencyKey: `ai-assistance-policy:${input.workspaceId}:${input.nextPolicy.revision}`,
+      request: {
+        method: 'PUT',
+        path: '/api/ai-assistance/policy',
+        body: {
+          expectedRevision: input.previousPolicy.revision,
+          revision: input.nextPolicy.revision,
+        },
+      },
+      source: {
+        kind: 'api',
+        method: 'PUT',
+        route: '/api/ai-assistance/policy',
+      },
+      occurredAt,
+    })
+    return createAuditEvent({
+      context,
+      eventType: 'ai-assistance.policy.updated',
+      entity: { type: 'workspace', id: input.workspaceId },
+      target: { type: 'workspace', id: input.workspaceId },
+      action: 'updated',
+      before: input.previousPolicy,
+      after: input.nextPolicy,
+      summary: 'AI assistance policy was updated.',
+      metadata: {
+        previousRevision: input.previousPolicy.revision,
+        revision: input.nextPolicy.revision,
+      },
+      expiresAt: calculateAuditExpiresAt(
+        occurredAt,
+        getConfiguredAuditRetentionDays(),
+      ),
+    })
+  }
+
+  /** Appends one event for non-transactional compatibility adapters. */
+  async function recordEvent(input: AiAssistancePolicyAuditInput): Promise<void> {
+    if (!auditEvents.putEvent) {
+      throw new Error('AI assistance policy audit writer is unavailable.')
+    }
+    await auditEvents.putEvent(createPolicyAuditEvent(input))
+  }
+
+  return {
+    async record(input) {
+      await recordEvent(input)
+    },
+    async persist(input, expectedRevision, authorizationFence, write) {
+      const auditEvent = createPolicyAuditEvent(input)
+      // The Dynamo adapter owns the cross-table TransactWrite boundary. The
+      // fallback keeps custom test/local adapters compatible with this port.
+      if (store.putPolicyWithAudit) {
+        return await store.putPolicyWithAudit(
+          input.workspaceId,
+          input.memberId,
+          input.nextPolicy,
+          expectedRevision,
+          authorizationFence,
+          auditEvent,
+        )
+      }
+      const storedPolicy = await write()
+      await recordEvent(input)
+      return storedPolicy
+    },
+  }
+}
+
+/**
+ * Creates the production AI service with SigV4 credentials and exact model allowlists.
+ *
+ * @param auditEvents - Existing Workspace audit persistence boundary.
+ * @returns Mastra/Bedrock service backed by the existing Workspace Search table.
+ */
+function createProductionAiAssistanceService(
+  auditEvents: AuditEventsClient,
+): AiAssistanceService {
+  if (!auditEvents) {
+    throw new TypeError('AI assistance audit events dependency is required.')
+  }
+  const config = loadServerConfig()
+  const environment = config.environment
+  if (environment.AWS_BEARER_TOKEN_BEDROCK !== undefined) {
+    throw new TypeError(
+      'AWS_BEARER_TOKEN_BEDROCK is not supported; use the Lambda execution role or the standard AWS credential chain.',
+    )
+  }
+  const configuredDefaultModelId = environment.AI_ASSISTANCE_DEFAULT_MODEL_ID?.trim()
+  const defaultModelId = configuredDefaultModelId || LOCAL_AI_ASSISTANCE_MODEL_ID
+  const allowedModelIds = readAiAssistanceAllowedModelIds(
+    environment.AI_ASSISTANCE_ALLOWED_MODEL_IDS,
+    defaultModelId,
+  )
+  if (!allowedModelIds.includes(defaultModelId)) {
+    throw new TypeError(
+      'AI_ASSISTANCE_DEFAULT_MODEL_ID must be included in AI_ASSISTANCE_ALLOWED_MODEL_IDS.',
+    )
+  }
+  const workspaceGenerationLimitPerMinute = readAiAssistanceBudgetInteger(
+    environment.AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE,
+    'AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE',
+    DEFAULT_AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE,
+  )
+  const memberGenerationLimitPerMinute = readAiAssistanceBudgetInteger(
+    environment.AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE,
+    'AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE',
+    DEFAULT_AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE,
+  )
+  const workspaceTokenLimitPerMinute = readAiAssistanceBudgetInteger(
+    environment.AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE,
+    'AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE',
+    DEFAULT_AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE,
+  )
+  const memberTokenLimitPerMinute = readAiAssistanceBudgetInteger(
+    environment.AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE,
+    'AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE',
+    DEFAULT_AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE,
+  )
+  const worstCaseTokensPerGeneration = readAiAssistanceBudgetInteger(
+    environment.AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION,
+    'AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION',
+    DEFAULT_AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION,
+  )
+  const inputTokenPrice = readAiAssistanceTokenPrice(
+    environment.AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD,
+    'AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD',
+  )
+  const outputTokenPrice = readAiAssistanceTokenPrice(
+    environment.AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD,
+    'AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD',
+  )
+  if ((inputTokenPrice === undefined) !== (outputTokenPrice === undefined)) {
+    throw new TypeError(
+      'AI assistance Bedrock input and output token prices must be configured together.',
+    )
+  }
+  const tableName = environment.AI_ASSISTANCE_TABLE_NAME?.trim() ||
+    environment.WORKSPACE_SEARCH_TABLE_NAME?.trim() ||
+    environment.MUKUROJI_WORKSPACE_SEARCH_TABLE?.trim()
+  if (config.production && !tableName) {
+    throw new TypeError(
+      'AI_ASSISTANCE_TABLE_NAME must be set for durable AI assistance storage.',
+    )
+  }
+  const auditTableName = getConfiguredAuditTableName()
+  if (config.production && !auditTableName) {
+    throw new TypeError(
+      'MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for AI policy audit writes.',
+    )
+  }
+  const configuredWorkspaceAccessTableName =
+    environment.WORKSPACE_ACCESS_TABLE_NAME?.trim() ||
+    environment.MUKUROJI_WORKSPACE_ACCESS_TABLE?.trim()
+  if (config.production && !configuredWorkspaceAccessTableName) {
+    throw new TypeError(
+      'WORKSPACE_ACCESS_TABLE_NAME or MUKUROJI_WORKSPACE_ACCESS_TABLE must be set for production AI policy authorization.',
+    )
+  }
+  const workspaceAccessTableName = configuredWorkspaceAccessTableName ||
+    'mukuroji-workspace-access-local'
+  const enterpriseIdentityTableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
+  const defaultPolicy: AiAssistancePolicy = {
+    schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+    enabled: true,
+    allowedModelIds,
+    defaultModelId,
+    enabledTasks: ['triage', 'summary', 'search', 'planning'],
+    retentionDays: DEFAULT_AI_ASSISTANCE_RETENTION_DAYS,
+    revision: 0,
+    updatedAt: '1970-01-01T00:00:00.000Z',
+  }
+  const dynamoDbClient = createDynamoDbClient()
+  const store = new DynamoDbAiAssistanceStore(
+    createDynamoDbDocumentClient(dynamoDbClient),
+    tableName ?? 'mukuroji-workspace-search-local',
+    auditTableName ?? 'mukuroji-audit-events',
+    workspaceAccessTableName,
+    enterpriseIdentityTableName,
+  )
+  return createAiAssistanceService({
+    gateway: createMastraBedrockAiModelGateway({
+      region: environment.AI_ASSISTANCE_BEDROCK_REGION?.trim() || config.awsRegion,
+      credentialProvider: fromNodeProviderChain(),
+      ...(inputTokenPrice === undefined || outputTokenPrice === undefined
+        ? {}
+        : {
+            pricingByModelId: {
+              [defaultModelId]: {
+                inputPerMillionTokensUsd: inputTokenPrice,
+                outputPerMillionTokensUsd: outputTokenPrice,
+              },
+            },
+          }),
+    }),
+    store,
+    defaultPolicy,
+    deploymentAllowedModelIds: allowedModelIds,
+    promptVersion: AI_ASSISTANCE_PROMPT_VERSION,
+    policyAudit: createAiAssistancePolicyAudit(auditEvents, store),
+    workspaceGenerationLimitPerMinute,
+    memberGenerationLimitPerMinute,
+    workspaceTokenLimitPerMinute,
+    memberTokenLimitPerMinute,
+    worstCaseTokensPerGeneration,
+  })
+}
+
+/**
+ * Creates the production AI assistance dependency bundle lazily.
+ *
+ * @param auditEvents - Existing audit event client used for policy-transition persistence.
+ * @returns AI assistance dependencies that defer provider configuration until use.
+ */
+export function createProductionAiAssistanceDependencies(
+  auditEvents: AuditEventsClient,
+): AiAssistanceDependencies {
+  return {
+    aiAssistanceService: createLazyAiAssistanceService(
+      () => createProductionAiAssistanceService(auditEvents),
+    ),
   }
 }
 
@@ -1126,16 +1529,18 @@ export function createProductionConnectorAppDependencies(): AppDependencies {
   const timeTrackingService = createTimeTrackingService(
     createTimeTrackingIdempotencyPort(adapters.idempotency, adapters.transactions),
   )
+  const workspace = createProductionWorkspaceDependencies()
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
-    workspace: createProductionWorkspaceDependencies(),
+    workspace,
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
     timeTracking: { timeTrackingService },
     capacityPlanning: {
       capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
+    aiAssistance: createProductionAiAssistanceDependencies(workspace.auditEvents),
     developerPlatform: {
       ...adapters,
       publicWorkItems: createCanonicalPublicWorkItemService(),
@@ -1160,16 +1565,18 @@ export function createProductionAppDependencies(): AppDependencies {
       developerPlatform.transactions,
     ),
   )
+  const workspace = createProductionWorkspaceDependencies()
   return {
     operational: createProductionOperationalDependencies(),
     authentication: createProductionAuthenticationDependencies(),
-    workspace: createProductionWorkspaceDependencies(),
+    workspace,
     workItems: createProductionWorkItemDependencies(),
     automation: createProductionAutomationDependencies(),
     timeTracking: { timeTrackingService },
     capacityPlanning: {
       capacityPlanningService: createCapacityPlanningService(timeTrackingService),
     },
+    aiAssistance: createProductionAiAssistanceDependencies(workspace.auditEvents),
     developerPlatform,
   }
 }
@@ -1203,6 +1610,7 @@ export function createTestAppDependencies(): AppDependencies {
         createCapacityPlanningDataSource(timeTrackingService),
       ),
     },
+    aiAssistance: production.aiAssistance,
   }
 }
 
@@ -1328,6 +1736,12 @@ export function overrideAppDependencies(
       ...dependencies.capacityPlanning,
       ...(overrides.capacityPlanningService
         ? { capacityPlanningService: overrides.capacityPlanningService }
+        : {}),
+    },
+    aiAssistance: {
+      ...dependencies.aiAssistance,
+      ...(overrides.aiAssistanceService
+        ? { aiAssistanceService: overrides.aiAssistanceService }
         : {}),
     },
     developerPlatform: {

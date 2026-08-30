@@ -3,6 +3,11 @@ import { RegionInfo } from 'aws-cdk-lib/region-info';
 
 const restoreDrillApproverRoleArnSuffix =
   'iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$';
+const defaultAiBedrockModelId = 'jp.anthropic.claude-sonnet-4-6';
+const bedrockResourceNamePattern = '[A-Za-z0-9._:-]+';
+/** Positive decimal price range accepted by both CloudFormation and the runtime. */
+const aiBedrockTokenPricePattern =
+  '^(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?))$';
 
 /**
  * Resolves a literal stack partition when CDK has a concrete deployment identity.
@@ -44,6 +49,39 @@ function buildRestoreDrillApproverRoleArnPattern(stack: cdk.Stack): string {
 }
 
 /**
+ * Builds a pattern for one exact invokable Bedrock model or inference-profile ARN.
+ *
+ * @param stack Stack owning the Bedrock model parameter.
+ * @returns Pattern restricted to supported partitions and invokable resource types.
+ */
+function buildAiBedrockModelArnPattern(stack: cdk.Stack): string {
+  const partition = resolveLiteralStackPartition(stack);
+  const partitionPattern = partition ?? '(?:aws|aws-us-gov|aws-cn)';
+  if (partition !== undefined &&
+      partition !== 'aws' && partition !== 'aws-us-gov' && partition !== 'aws-cn') {
+    throw new Error(`AI assistance does not support the ${partition} AWS partition.`);
+  }
+  return `^arn:${partitionPattern}:bedrock:(?:[a-z0-9-]*::foundation-model/${bedrockResourceNamePattern}|[a-z0-9-]+:[0-9]{12}:(?:inference-profile|application-inference-profile)/${bedrockResourceNamePattern})$`;
+}
+
+/**
+ * Builds a pattern for an optional exact comma-separated destination model ARN list.
+ *
+ * @param stack Stack owning the destination-model parameter.
+ * @returns Pattern accepting an empty value or exact foundation-model ARNs only.
+ */
+function buildAiBedrockDestinationModelArnsPattern(stack: cdk.Stack): string {
+  const partition = resolveLiteralStackPartition(stack);
+  const partitionPattern = partition ?? '(?:aws|aws-us-gov|aws-cn)';
+  if (partition !== undefined &&
+      partition !== 'aws' && partition !== 'aws-us-gov' && partition !== 'aws-cn') {
+    throw new Error(`AI assistance does not support the ${partition} AWS partition.`);
+  }
+  const arn = `arn:${partitionPattern}:bedrock:[a-z0-9-]*::foundation-model/${bedrockResourceNamePattern}`;
+  return `^(?:|${arn}(?:,${arn})*)$`;
+}
+
+/**
  * CloudFormation parameters and derived values shared by stack subsystems.
  */
 export interface StackParameters {
@@ -75,6 +113,18 @@ export interface StackParameters {
   readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter;
   /** Operator-incremented immutable API configuration revision. */
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
+  /** Exact Bedrock model identifier allowed for AI assistance. */
+  readonly aiBedrockModelId: cdk.CfnParameter;
+  /** Reviewed Bedrock input-token price in USD per one million tokens. */
+  readonly aiBedrockInputPricePerMillionTokensUsd: cdk.CfnParameter;
+  /** Reviewed Bedrock output-token price in USD per one million tokens. */
+  readonly aiBedrockOutputPricePerMillionTokensUsd: cdk.CfnParameter;
+  /** Exact invokable Bedrock model or inference-profile ARN. */
+  readonly aiBedrockModelArn: cdk.CfnParameter;
+  /** Optional comma-separated exact destination foundation-model ARNs. */
+  readonly aiBedrockDestinationModelArns: cdk.CfnParameter;
+  /** Whether destination foundation-model permissions must be synthesized. */
+  readonly aiBedrockDestinationModelArnsConfigured: cdk.CfnCondition;
   /** Anonymous request submission limit per capability and hour. */
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Secret authenticating request intake email Webhooks. */
@@ -265,6 +315,142 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         'Operator-incremented revision that replaces immutable API configuration secrets and publishes a matching Lambda version.',
     },
   );
+  const aiBedrockModelId = new cdk.CfnParameter(stack, 'AiBedrockModelId', {
+    type: 'String',
+    default: defaultAiBedrockModelId,
+    allowedValues: [defaultAiBedrockModelId],
+    minLength: 1,
+    maxLength: 256,
+    allowedPattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$',
+    constraintDescription:
+      'AiBedrockModelId must be one exact Bedrock model or inference-profile identifier.',
+    description:
+      'Currently supported exact Bedrock model identifier allowlisted for every AI assistance request.',
+  });
+  const aiBedrockInputPricePerMillionTokensUsd = new cdk.CfnParameter(
+    stack,
+    'AiBedrockInputPricePerMillionTokensUsd',
+    {
+      type: 'String',
+      minLength: 1,
+      maxLength: 32,
+      allowedPattern: aiBedrockTokenPricePattern,
+      constraintDescription:
+        'AiBedrockInputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
+      description:
+        'Deployment-reviewed Bedrock standard input-token price in USD per one million tokens for AiBedrockModelId.',
+    },
+  );
+  const aiBedrockOutputPricePerMillionTokensUsd = new cdk.CfnParameter(
+    stack,
+    'AiBedrockOutputPricePerMillionTokensUsd',
+    {
+      type: 'String',
+      minLength: 1,
+      maxLength: 32,
+      allowedPattern: aiBedrockTokenPricePattern,
+      constraintDescription:
+        'AiBedrockOutputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
+      description:
+        'Deployment-reviewed Bedrock standard output-token price in USD per one million tokens for AiBedrockModelId.',
+    },
+  );
+  const aiBedrockModelArn = new cdk.CfnParameter(stack, 'AiBedrockModelArn', {
+    type: 'String',
+    minLength: 1,
+    maxLength: 2_048,
+    allowedPattern: buildAiBedrockModelArnPattern(stack),
+    constraintDescription:
+      'AiBedrockModelArn must be one exact foundation-model or inference-profile ARN in the deployment partition.',
+    description:
+      'Exact Bedrock model or inference-profile ARN that the API Lambda may invoke.',
+  });
+  const aiBedrockDestinationModelArns = new cdk.CfnParameter(
+    stack,
+    'AiBedrockDestinationModelArns',
+    {
+      type: 'String',
+      default: '',
+      maxLength: 4_096,
+      allowedPattern: buildAiBedrockDestinationModelArnsPattern(stack),
+      constraintDescription:
+        'AiBedrockDestinationModelArns must be empty or comma-separated exact foundation-model ARNs without whitespace.',
+      description:
+        'Exact destination foundation-model ARNs required by the configured inference profile; leave empty for direct model invocation.',
+    },
+  );
+  const aiBedrockDestinationModelArnsConfigured = new cdk.CfnCondition(
+    stack,
+    'AiBedrockDestinationModelArnsConfigured',
+    {
+      expression: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
+        aiBedrockDestinationModelArns.valueAsString,
+        '',
+      )),
+    },
+  );
+  new cdk.CfnRule(stack, 'DefaultAiBedrockModelCompatibility', {
+    ruleCondition: cdk.Fn.conditionEquals(
+      aiBedrockModelId.valueAsString,
+      defaultAiBedrockModelId,
+    ),
+    assertions: [
+      {
+        assert: cdk.Fn.conditionOr(
+          cdk.Fn.conditionEquals(cdk.Aws.REGION, 'ap-northeast-1'),
+          cdk.Fn.conditionEquals(cdk.Aws.REGION, 'ap-northeast-3'),
+        ),
+        assertDescription:
+          'The default JP Claude Sonnet 4.6 profile must be invoked from Tokyo or Osaka.',
+      },
+      {
+        assert: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
+          aiBedrockDestinationModelArns.valueAsString,
+          '',
+        )),
+        assertDescription:
+          'The default JP Claude Sonnet 4.6 profile requires exact Tokyo and Osaka destination foundation-model ARNs.',
+      },
+      {
+        assert: cdk.Fn.conditionEquals(
+          aiBedrockModelArn.valueAsString,
+          cdk.Fn.sub(
+            `arn:\${AWS::Partition}:bedrock:\${AWS::Region}:\${AWS::AccountId}:inference-profile/${defaultAiBedrockModelId}`,
+          ),
+        ),
+        assertDescription:
+          'The default JP Claude Sonnet 4.6 model ARN must be the regional inference-profile ARN.',
+      },
+      {
+        assert: cdk.Fn.conditionOr(
+          cdk.Fn.conditionEquals(
+            aiBedrockDestinationModelArns.valueAsString,
+            cdk.Fn.join(',', [
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+            ]),
+          ),
+          cdk.Fn.conditionEquals(
+            aiBedrockDestinationModelArns.valueAsString,
+            cdk.Fn.join(',', [
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+            ]),
+          ),
+        ),
+        assertDescription:
+          'The default JP Claude Sonnet 4.6 profile must include exactly the Tokyo and Osaka foundation-model destinations.',
+      },
+    ],
+  });
   const requestRateLimitPerHour = new cdk.CfnParameter(stack, 'RequestRateLimitPerHour', {
     type: 'Number',
     default: 10,
@@ -432,6 +618,12 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     workspaceAuditPseudonymKey,
     restoreDrillCleanupApproverRoleArn,
     apiRuntimeConfigurationRevision,
+    aiBedrockModelId,
+    aiBedrockInputPricePerMillionTokensUsd,
+    aiBedrockOutputPricePerMillionTokensUsd,
+    aiBedrockModelArn,
+    aiBedrockDestinationModelArns,
+    aiBedrockDestinationModelArnsConfigured,
     requestRateLimitPerHour,
     requestEmailWebhookSecret,
     requestTokenHashSecret,
