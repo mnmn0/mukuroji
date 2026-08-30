@@ -599,6 +599,46 @@ describe('AI assistance API composition', () => {
     expect(observedCanManagePolicy).toBe(false)
   })
 
+  test('does not treat an unfenced system-admin group as Workspace AI policy access', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      workspaceRole: 'member',
+      systemAdminMemberKeys: ['demo@example.com'],
+    })
+    let serviceCalls = 0
+    let observedCanManagePolicy: boolean | undefined
+    setTestAppDependencies({
+      aiAssistanceService: createAiService({
+        async updatePolicy(actor) {
+          serviceCalls += 1
+          observedCanManagePolicy = actor.canManagePolicy
+          throw new AiAssistanceError(
+            'authorization',
+            'AiAssistanceDisabled',
+            'Unfenced system-admin group must not manage AI policy.',
+          )
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/policy', {
+      method: 'PUT',
+      headers: createAiHeaders(),
+      body: JSON.stringify({
+        enabled: true,
+        allowedModelIds: ['model-1'],
+        defaultModelId: 'model-1',
+        enabledTasks: ['triage', 'summary', 'search', 'planning'],
+        retentionDays: 30,
+        expectedRevision: 0,
+      }),
+    })
+
+    expect(response.status).toBe(403)
+    expect(serviceCalls).toBe(1)
+    expect(observedCanManagePolicy).toBe(false)
+  })
+
   test('denies Request Intake sources to an Enterprise Workspace reader before source access', async () => {
     await withTestEnvironment({
       COGNITO_CLIENT_ID: 'mukuroji-main-client',
@@ -995,7 +1035,7 @@ describe('AI assistance API composition', () => {
             actor,
             request,
             authorizationToken: resolved.authorizationToken,
-          })).toEqual({ current: true })
+          })).toEqual(expect.objectContaining({ current: true }))
           return createSearchGeneration()
         },
       }),

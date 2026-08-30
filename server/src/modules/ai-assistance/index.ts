@@ -41,6 +41,7 @@ export {
 export type {
   AiAssistanceActor,
   AiAssistanceAllowedValues,
+  AiAssistanceAuthorizationCondition,
   AiAssistanceCustomFieldDefinition,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceAuthorizationState,

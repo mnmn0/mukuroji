@@ -122,6 +122,27 @@ export type ResolvedAiAssistanceContext = {
   privateMemberIdentifiers: readonly AiAssistancePrivateMemberIdentifiers[]
   /** Current source routing used to resolve Team- and Project-scoped fields. */
   triageSourceRouting?: AiAssistanceTriageSourceRouting
+  /** Source-of-truth conditions that must hold in the generation/decision write. */
+  authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
+}
+
+/** One source-of-truth persistence row checked at an AI commit boundary. */
+export type AiAssistanceAuthorizationCondition = {
+  /** Semantic source used for safe transaction-failure classification. */
+  kind:
+    | 'workspace-member'
+    | 'planning'
+    | 'document-authorization'
+    | 'enterprise-control'
+    | 'source'
+  /** Physical persistence table resolved by the composition boundary. */
+  tableName: string
+  /** Canonical primary-key values for the source-of-truth row. */
+  key: Readonly<Record<string, string>>
+  /** Exact scalar attributes that must remain unchanged through the commit. */
+  expectedAttributes: Readonly<Record<string, string | number | boolean>>
+  /** Allows an absent row when the expected generation is zero. */
+  allowMissingWhenExpectedZero?: boolean
 }
 
 /** Current state of a previously captured authorization snapshot. */
@@ -129,6 +150,8 @@ export type AiAssistanceAuthorizationState =
   | {
       /** The snapshot is still current for this operator. */
       current: true
+      /** Fresh source-of-truth rows to include in a subsequent atomic commit. */
+      authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
     }
   | {
       /** The snapshot is no longer current. */
@@ -437,6 +460,8 @@ export type AiAssistanceGenerationCommitFence = {
   preferenceRevision: number
   /** Opaque source authorization snapshot rechecked immediately before persistence. */
   authorizationToken: string
+  /** Source-of-truth rows checked atomically with the generation write. */
+  authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
 }
 
 /** Policy, member-preference, and effective retention values fenced at decision persistence. */
@@ -449,6 +474,8 @@ export type AiAssistanceDecisionCommitFence = {
   effectiveExpiresAt: string
   /** Opaque source authorization snapshot rechecked immediately before the decision write. */
   authorizationToken: string
+  /** Source-of-truth rows checked atomically with the decision write. */
+  authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
 }
 
 /** Policy revision and effective retention deadline fenced at feedback persistence. */
@@ -524,6 +551,15 @@ export interface AiAssistanceStore {
   ): Promise<void>
   /** Finalizes one provider attempt and its receipt after success or failure. */
   finalizeGenerationAttempt(
+    input: FinalizeAiAssistanceGenerationAttemptInput,
+  ): Promise<void>
+  /**
+   * Repairs a started receipt when terminal finalization failed after provider execution.
+   *
+   * @param input - Safe terminal failure metadata and receipt identity.
+   * @returns A promise that resolves once a terminal recovery marker is durable.
+   */
+  recoverGenerationAttempt?(
     input: FinalizeAiAssistanceGenerationAttemptInput,
   ): Promise<void>
   /** Finalizes one receipt that failed before the provider attempt started. */

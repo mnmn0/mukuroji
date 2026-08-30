@@ -2099,6 +2099,47 @@ describe('createAiAssistanceService', () => {
     }
   })
 
+  test('rejects control characters in text custom-field suggestions', async () => {
+    const harness = createHarness({
+      customFieldDefinitions: [{
+        teamId: 'team-1',
+        fieldId: 'text-field',
+        type: 'text',
+        required: false,
+      }],
+      outputDraft: {
+        kind: 'triage',
+        customFields: [{
+          fieldId: 'text-field',
+          value: 'safe\u0000text',
+          reason: 'The source suggests this text.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        }],
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      {
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'triage-entry',
+          teamId: 'team-1',
+          triageEntryId: 'triage-1',
+          expectedRevision: 1,
+        },
+      },
+      harness.authorization,
+      'request-control-character-custom-field',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'AiAssistanceOutputNotAllowed',
+    })
+    expect(harness.storedGeneration()).toBeUndefined()
+  })
+
   test('replays the same generation key without invoking the provider again', async () => {
     const harness = createHarness()
 

@@ -431,6 +431,7 @@ import {
   redactAiAssistanceText,
   type AiAssistanceActor,
   type AiAssistanceAllowedValues,
+  type AiAssistanceAuthorizationCondition,
   type AiAssistanceCustomFieldDefinition,
   type AiAssistanceAuthorizationState,
   type AiAssistanceTriageRoutingTuple,
@@ -535,6 +536,7 @@ import {
   type BulkOperationAdapter,
 } from '../modules/automation'
 import {
+  PLANNING_STORAGE_SCHEMA_VERSION,
   createPlanningWorkItemDependencySummary,
   PlanningError,
   requirePlanningWorkItemHasNoScheduleDependencies,
@@ -19828,7 +19830,13 @@ async function requireAiRequestSubmissionAdministration(
  * @returns Whether the principal may manage AI policy and Request Intake source content.
  */
 function canManageAiAssistanceWorkspace(principal: WorkspacePrincipal): boolean {
-  if (principal.isSystemAdmin) return true
+  if (principal.isSystemAdmin) {
+    // A Cognito system-admin group is not a durable commit-time fence. Only
+    // retain the bypass when the Workspace membership itself is a durable
+    // manager authorization checked by the policy transaction; otherwise fail
+    // closed instead of relying on a group that can disappear mid-request.
+    return principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin'
+  }
   if (principal.enterprisePermissions !== undefined) {
     return hasEnterpriseWorkspacePermission(principal, 'workspace.manage')
   }
@@ -19894,6 +19902,8 @@ type ResolvedAiPromptSource = {
   workflowStatusIds: readonly string[]
   /** Current Team and Project routing for a triage source, when applicable. */
   triageSourceRouting?: AiAssistanceTriageSourceRouting
+  /** Source-of-truth row that must remain unchanged through a later AI commit. */
+  authorizationCondition: AiAssistanceAuthorizationCondition
 }
 
 /** Shared live authorization and configuration state used by one resolver pass. */
@@ -20199,6 +20209,11 @@ async function resolveAiAssistanceContext(
   }
   const triageSourceRouting = resolvedSources.find((source) =>
     source.triageSourceRouting !== undefined)?.triageSourceRouting
+  const authorizationConditions = createAiAssistanceAuthorizationConditions(
+    principal,
+    state,
+    resolvedSources,
+  )
   return {
     promptContext,
     citations: resolvedSources.map((source) => source.citation),
@@ -20208,8 +20223,102 @@ async function resolveAiAssistanceContext(
     }),
     allowedValues,
     privateMemberIdentifiers: state.privateMemberIdentifiers,
+    authorizationConditions,
     ...(triageSourceRouting === undefined ? {} : { triageSourceRouting }),
   }
+}
+
+/**
+ * Builds source-of-truth conditions for the next AI generation or decision commit.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param state - Directory and authorization state captured for the resolver pass.
+ * @param sources - Authorized source snapshots whose revisions were read.
+ * @returns Deduplicated persistence rows that must remain unchanged at commit time.
+ */
+function createAiAssistanceAuthorizationConditions(
+  principal: WorkspacePrincipal,
+  state: AiAssistanceResolverState,
+  sources: readonly ResolvedAiPromptSource[],
+): AiAssistanceAuthorizationCondition[] {
+  const workspaceAccessTableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
+    getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+    'mukuroji-workspace-access-local'
+  const conditions: AiAssistanceAuthorizationCondition[] = [{
+    kind: 'workspace-member',
+    tableName: workspaceAccessTableName,
+    key: {
+      workspaceId: principal.directoryId,
+      recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
+    },
+    expectedAttributes: {
+      entryType: 'workspace-member',
+      status: 'active',
+      memberKey: normalizeProjectMemberKey(principal.userKey),
+      role: principal.workspaceRole,
+      version: principal.workspaceMember.version,
+    },
+  }, {
+    kind: 'planning',
+    tableName: getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+    key: {
+      workspaceId: `FENCE#${principal.directoryId}`,
+      recordKey: 'META',
+    },
+    expectedAttributes: {
+      entryType: 'planning-meta',
+      schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
+      revision: state.searchContext.planningRevision,
+    },
+    ...(state.searchContext.planningRevision === 0
+      ? { allowMissingWhenExpectedZero: true }
+      : {}),
+  }]
+  if (state.searchContext.documentAuthorizationRevision !== undefined) {
+    conditions.push({
+      kind: 'document-authorization',
+      tableName: getEnv('DOCUMENTS_TABLE_NAME') ?? 'mukuroji-documents-local',
+      key: {
+        workspaceId: principal.directoryId,
+        recordKey: 'DOCUMENT_AUTHORIZATION_REVISION',
+      },
+      expectedAttributes: {
+        entryType: 'document-authorization-revision',
+        revision: state.searchContext.documentAuthorizationRevision,
+      },
+      ...(state.searchContext.documentAuthorizationRevision === 0
+        ? { allowMissingWhenExpectedZero: true }
+        : {}),
+    })
+  }
+  if (principal.enterpriseIdentityControlRevision !== undefined) {
+    const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')
+    if (enterpriseTableName) {
+      conditions.push({
+        kind: 'enterprise-control',
+        tableName: enterpriseTableName,
+        key: {
+          scopeKey: `WORKSPACE#${principal.directoryId}`,
+          recordKey: 'CONTROL',
+        },
+        expectedAttributes: {
+          entryType: 'enterprise-identity-control',
+          controlRevision: principal.enterpriseIdentityControlRevision,
+        },
+        ...(principal.enterpriseIdentityControlRevision === 0
+          ? { allowMissingWhenExpectedZero: true }
+          : {}),
+      })
+    }
+  }
+  const seen = new Set<string>()
+  return [...conditions, ...sources.map((source) => source.authorizationCondition)]
+    .filter((condition) => {
+      const key = `${condition.tableName}:${JSON.stringify(condition.key)}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
 }
 
 /**
@@ -20232,7 +20341,12 @@ async function isAiAssistanceAuthorizationCurrent(
       request: input.request,
     }, context)
     return current.authorizationToken === input.authorizationToken
-      ? { current: true }
+      ? {
+          current: true,
+          ...(current.authorizationConditions === undefined
+            ? {}
+            : { authorizationConditions: current.authorizationConditions }),
+        }
       : { current: false, reason: 'source-changed' }
   } catch (error) {
     if (isAiAssistancePermissionLoss(error)) {
@@ -20798,6 +20912,18 @@ async function resolveAiTriageSource(
     workItemEndpoints: [],
     workflowStatusIds: [],
     triageSourceRouting: sourceRouting,
+    authorizationCondition: {
+      kind: 'source',
+      tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+      key: {
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: `TRIAGE#${source.triageEntryId}`,
+      },
+      expectedAttributes: {
+        entryType: 'triage-entry',
+        revision: projected.revision,
+      },
+    },
   }
 }
 
@@ -20936,6 +21062,18 @@ async function resolveAiRequestSubmissionSource(
       ...(submission.routingTarget.projectId === undefined
         ? {}
         : { projectId: submission.routingTarget.projectId }),
+    },
+    authorizationCondition: {
+      kind: 'source',
+      tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+      key: {
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: `SUBMISSION#${submission.id}`,
+      },
+      expectedAttributes: {
+        entryType: 'submission',
+        revision: submission.revision,
+      },
     },
   }
 }
@@ -21191,6 +21329,17 @@ async function resolveAiWorkItemSource(
     relationIds: detail.issue.relationIds,
     workItemEndpoints: filterAiWorkItemEndpointsVisibleInPrompt(prompt, shownEndpoints),
     workflowStatusIds,
+    authorizationCondition: {
+      kind: 'source',
+      tableName: getTeamIssuesTableName(),
+      key: {
+        directoryTeamId: `${principal.directoryId}#team#${source.teamId}`,
+        issueId: source.workItemId,
+      },
+      expectedAttributes: {
+        revision: detail.issue.revision,
+      },
+    },
   }
 }
 
@@ -21316,6 +21465,18 @@ async function resolveAiDocumentSource(
     relationIds: document.relations.map((relation) => relation.id),
     workItemEndpoints: [],
     workflowStatusIds: [],
+    authorizationCondition: {
+      kind: 'source',
+      tableName: getEnv('DOCUMENTS_TABLE_NAME') ?? 'mukuroji-documents-local',
+      key: {
+        workspaceId: principal.directoryId,
+        recordKey: `DOCUMENT#${document.id}`,
+      },
+      expectedAttributes: {
+        entryType: 'document',
+        revision: document.revision,
+      },
+    },
   }
 }
 
@@ -21519,6 +21680,20 @@ async function resolveAiPlanningTargetSource(
       })),
     ),
     workflowStatusIds: [],
+    authorizationCondition: {
+      kind: 'source',
+      tableName: getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+      key: {
+        workspaceId: `FENCE#${principal.directoryId}`,
+        recordKey: 'META',
+      },
+      expectedAttributes: {
+        entryType: 'planning-meta',
+        schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
+        revision: snapshot.revision,
+      },
+      ...(snapshot.revision === 0 ? { allowMissingWhenExpectedZero: true } : {}),
+    },
   }
 }
 

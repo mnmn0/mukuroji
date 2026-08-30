@@ -497,6 +497,37 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('fences generation persistence against source-of-truth revisions', async () => {
+    const record = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.store.createGeneration(record, {
+        policyRevision: 3,
+        preferenceRevision: 2,
+        authorizationToken: record.authorizationToken,
+        authorizationConditions: [{
+          kind: 'source',
+          tableName: 'RequestIntakeTable',
+          key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' },
+          expectedAttributes: { entryType: 'triage-entry', revision: 2 },
+        }],
+      })).resolves.toEqual(record)
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      if (!Array.isArray(transactionItems)) throw new TypeError('Expected transaction items.')
+      expect(transactionItems).toHaveLength(4)
+      const sourceCheck = readRecord(readRecord(transactionItems[3]).ConditionCheck)
+      expect(sourceCheck.TableName).toBe('RequestIntakeTable')
+      expect(sourceCheck.Key).toEqual({
+        scopeKey: 'WORKSPACE#workspace-1',
+        recordKey: 'TRIAGE#triage-1',
+      })
+      expect(sourceCheck.ConditionExpression).toContain('#authorization0 = :authorization0')
+      expect(sourceCheck.ConditionExpression).toContain('#authorization1 = :authorization1')
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('rejects generation persistence when a governance fence changes', async () => {
     const record = createGenerationRecord('Permission-filtered source context.')
     const harness = createHarness([

@@ -19,6 +19,7 @@ import { z } from 'zod'
 import type {
   AiAssistanceStore,
   AiAssistanceGenerationAttemptAuditEnvelope,
+  AiAssistanceAuthorizationCondition,
   AiAssistanceDecisionCommitFence,
   AiAssistanceFeedbackCommitFence,
   AiAssistanceGenerationCommitFence,
@@ -804,6 +805,23 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     }
   }
 
+  /** Repairs a started receipt after a previous terminal write failed. */
+  async recoverGenerationAttempt(
+    input: FinalizeAiAssistanceGenerationAttemptInput,
+  ): Promise<void> {
+    if (input.outcome !== 'failed') {
+      throw new AiAssistanceError(
+        'validation',
+        'InvalidAiAssistanceRequest',
+        'AI assistance attempt recovery must finalize a failed attempt.',
+      )
+    }
+    // Reuse the exact identity and conditional terminal update. This path is
+    // deliberately provider-free and budget-free; a response-loss replay is
+    // reconciled by the strong read in finalizeGenerationAttempt.
+    await this.finalizeGenerationAttempt(input)
+  }
+
   /** Finalizes a reservation that stopped before any provider attempt began. */
   async failGenerationReservation(
     input: FailAiAssistanceGenerationReservationInput,
@@ -1112,6 +1130,9 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
             'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
         }))
       } else {
+        const authorizationConditionItems = createAiAssistanceAuthorizationConditionChecks(
+          commitFence.authorizationConditions,
+        )
         await this.#documentClient.send(new TransactWriteCommand({
           TransactItems: [
             {
@@ -1136,6 +1157,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
               'preference',
               commitFence.preferenceRevision,
             ),
+            ...authorizationConditionItems,
           ],
         }))
       }
@@ -1144,7 +1166,8 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       if (
         commitFence !== undefined &&
         (isTransactionConditionalFailureAt(error, 1) ||
-          isTransactionConditionalFailureAt(error, 2))
+          isTransactionConditionalFailureAt(error, 2) ||
+          isTransactionConditionalFailureAtOrAfter(error, 3))
       ) {
         throw aiAssistanceAuthorizationChangedError(
           'AI assistance policy or member preference changed during generation.',
@@ -1261,6 +1284,9 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       if (commitFence === undefined) {
         await this.#documentClient.send(new PutCommand(generationPut.Put))
       } else {
+        const authorizationConditionItems = createAiAssistanceAuthorizationConditionChecks(
+          commitFence.authorizationConditions,
+        )
         await this.#documentClient.send(new TransactWriteCommand({
           TransactItems: [
             generationPut,
@@ -1278,6 +1304,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
               'preference',
               commitFence.preferenceRevision,
             ),
+            ...authorizationConditionItems,
           ],
         }))
       }
@@ -1286,7 +1313,8 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       if (
         commitFence !== undefined &&
         (isTransactionConditionalFailureAt(error, 1) ||
-          isTransactionConditionalFailureAt(error, 2))
+          isTransactionConditionalFailureAt(error, 2) ||
+          isTransactionConditionalFailureAtOrAfter(error, 3))
       ) {
         throw aiAssistanceAuthorizationChangedError(
           'AI assistance policy or member preference changed during decision.',
@@ -1932,6 +1960,75 @@ function createNestedRevisionConditionCheck(
   }
 }
 
+/**
+ * Converts an application authorization condition into a DynamoDB transaction check.
+ *
+ * @param condition - Source-of-truth row and exact attributes captured by the resolver.
+ * @returns A conditional transaction item that fails closed when the row changed or disappeared.
+ */
+function createAiAssistanceAuthorizationConditionCheck(
+  condition: AiAssistanceAuthorizationCondition,
+): AiAssistanceBudgetTransactionItem {
+  if (
+    !condition.tableName.trim() ||
+    Object.keys(condition.key).length === 0 ||
+    Object.keys(condition.expectedAttributes).length === 0
+  ) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance source authorization condition is invalid.',
+    )
+  }
+  const keyEntries = Object.entries(condition.key)
+  if (keyEntries.some(([, value]) => !value.trim())) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance source authorization condition is invalid.',
+    )
+  }
+  const expectedEntries = Object.entries(condition.expectedAttributes)
+    .sort(([left], [right]) => left.localeCompare(right))
+  const expressionAttributeNames = Object.fromEntries(
+    expectedEntries.map(([attribute], index) => [`#authorization${index}`, attribute]),
+  )
+  const expressionAttributeValues = Object.fromEntries(
+    expectedEntries.map(([, value], index) => [`:authorization${index}`, value]),
+  )
+  const expectedExpression = expectedEntries
+    .map((_, index) => `#authorization${index} = :authorization${index}`)
+    .join(' AND ')
+  const missingKeyAttribute = keyEntries
+    .map(([attribute]) => attribute)
+    .sort()[0]
+  if (condition.allowMissingWhenExpectedZero && missingKeyAttribute !== undefined) {
+    expressionAttributeNames['#authorizationKey'] = missingKeyAttribute
+  }
+  const conditionExpression = condition.allowMissingWhenExpectedZero
+    ? `(attribute_not_exists(#authorizationKey) OR (${expectedExpression}))`
+    : expectedExpression
+  return {
+    ConditionCheck: {
+      TableName: condition.tableName,
+      Key: { ...condition.key },
+      ConditionExpression: conditionExpression,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues,
+    },
+  }
+}
+
+/** Creates all source-of-truth checks while preserving resolver order. */
+function createAiAssistanceAuthorizationConditionChecks(
+  conditions: readonly AiAssistanceAuthorizationCondition[] | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  if (conditions === undefined) return []
+  const seen = new Set<string>()
+  return conditions.flatMap((condition) => {
+    const key = `${condition.tableName}:${JSON.stringify(condition.key)}`
+    if (seen.has(key)) return []
+    seen.add(key)
+    return [createAiAssistanceAuthorizationConditionCheck(condition)]
+  })
+}
+
 /** Validates the server-owned policy authorization values before building conditions. */
 function validatePolicyAuthorizationFence(
   fence: AiAssistancePolicyAuthorizationFence,
@@ -2048,6 +2145,23 @@ function isTransactionConditionalFailureAt(
   const reason = reasons[index]
   if (typeof reason !== 'object' || reason === null) return false
   return Reflect.get(reason, 'Code') === 'ConditionalCheckFailed'
+}
+
+/** Returns whether any transaction condition at or after an index failed. */
+function isTransactionConditionalFailureAtOrAfter(
+  error: unknown,
+  startIndex: number,
+): boolean {
+  if (readErrorName(error) !== 'TransactionCanceledException') return false
+  if (typeof error !== 'object' || error === null) return false
+  const reasons = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(reasons)) return false
+  return reasons.some((reason, index) =>
+    index >= startIndex &&
+    typeof reason === 'object' &&
+    reason !== null &&
+    Reflect.get(reason, 'Code') === 'ConditionalCheckFailed'
+  )
 }
 
 /** Returns whether an adapter error is the stable revision compare-and-swap conflict. */

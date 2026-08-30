@@ -49,6 +49,7 @@ import type {
   AiAssistanceGenerationBudgetReservation,
   AiAssistanceGenerationReservation,
   CompleteAiAssistanceGenerationReservationInput,
+  FinalizeAiAssistanceGenerationAttemptInput,
   AiAssistancePolicyAuthorization,
   AiAssistancePolicyAuthorizationFence,
   AiAssistancePolicyAudit,
@@ -667,6 +668,9 @@ export function createAiAssistanceService(
         policyRevision: postProviderPolicy.revision,
         preferenceRevision: postProviderPreference.revision,
         authorizationToken: context.authorizationToken,
+        ...(commitAuthorizationState.authorizationConditions === undefined
+          ? {}
+          : { authorizationConditions: commitAuthorizationState.authorizationConditions }),
       }
       const stored = await options.store.createGeneration({
         workspaceId: actor.workspaceId,
@@ -703,7 +707,7 @@ export function createAiAssistanceService(
       if (!generationPersisted) {
         const failedAt = now()
         if (attemptStartedAt) {
-          await options.store.finalizeGenerationAttempt({
+          const failedAttempt = {
             ...completion,
             outcome: 'failed',
             endedAt: failedAt.toISOString(),
@@ -719,7 +723,23 @@ export function createAiAssistanceService(
               : { providerTraceId }),
             failureCategory: safeError.category,
             failureCode: safeError.code,
-          })
+          } satisfies FinalizeAiAssistanceGenerationAttemptInput
+          try {
+            await options.store.finalizeGenerationAttempt(failedAttempt)
+          } catch (finalizationError) {
+            // A response-loss or transient write failure must not leave a paid
+            // started receipt pending forever. Adapters may expose a separate
+            // repair call that retries only this terminal marker; it never
+            // invokes the provider or reserves budget again.
+            if (options.store.recoverGenerationAttempt === undefined) {
+              throw finalizationError
+            }
+            try {
+              await options.store.recoverGenerationAttempt(failedAttempt)
+            } catch {
+              throw finalizationError
+            }
+          }
         } else {
           await options.store.failGenerationReservation({
             ...completion,
@@ -818,6 +838,9 @@ export function createAiAssistanceService(
       preferenceRevision: decisionPreference.revision,
       effectiveExpiresAt: decisionGeneration.expiresAt,
       authorizationToken: record.authorizationToken,
+      ...(decisionAuthorizationState.authorizationConditions === undefined
+        ? {}
+        : { authorizationConditions: decisionAuthorizationState.authorizationConditions }),
     }
     const decided = await options.store.decideGeneration(
       actor.workspaceId,
@@ -1570,6 +1593,16 @@ function validateAiCustomFieldValue(
   }
   if ((definition.type === 'text' || definition.type === 'person') && typeof value !== 'string') {
     rejectAiCustomFieldValue('The custom field value must be a string.')
+  }
+  if (
+    definition.type === 'text' &&
+    typeof value === 'string' &&
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0
+      return codePoint <= 31 || codePoint === 127
+    })
+  ) {
+    rejectAiCustomFieldValue('The text custom field value cannot contain control characters.')
   }
   if (definition.type === 'date' &&
       (typeof value !== 'string' || !isValidAiCalendarDate(value))) {
