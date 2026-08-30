@@ -1276,18 +1276,27 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
             'attribute_not_exists(#generation.#decision)' +
             (commitFence === undefined
               ? ''
-              : ' AND #authorizationToken = :authorizationToken'),
+              : ' AND #authorizationToken = :authorizationToken AND ' +
+                '#generation.#expiresAt > :commitAt'),
           ExpressionAttributeNames: {
             '#generation': 'generation',
             '#revision': 'revision',
             '#decision': 'decision',
-            ...(commitFence === undefined ? {} : { '#authorizationToken': 'authorizationToken' }),
+            ...(commitFence === undefined
+              ? {}
+              : {
+                  '#authorizationToken': 'authorizationToken',
+                  '#expiresAt': 'expiresAt',
+                }),
           },
           ExpressionAttributeValues: {
             ':expectedRevision': request.expectedRevision,
             ...(commitFence === undefined
               ? {}
-              : { ':authorizationToken': commitFence.authorizationToken }),
+              : {
+                  ':authorizationToken': commitFence.authorizationToken,
+                  ':commitAt': commitFence.commitAt,
+                }),
           },
         },
       }
@@ -1314,12 +1323,6 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
               'preference',
               commitFence.preferenceRevision,
             ),
-            createGenerationExpirationConditionCheck(
-              this.#tableName,
-              workspaceId,
-              generationId,
-              commitFence.commitAt,
-            ),
             ...authorizationConditionItems,
           ],
         }))
@@ -1330,20 +1333,10 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         commitFence !== undefined &&
         (isTransactionConditionalFailureAt(error, 1) ||
           isTransactionConditionalFailureAt(error, 2) ||
-          isTransactionConditionalFailureAtOrAfter(error, 4))
+          isTransactionConditionalFailureAtOrAfter(error, 3))
       ) {
         throw aiAssistanceAuthorizationChangedError(
           'AI assistance policy or member preference changed during decision.',
-        )
-      }
-      if (
-        commitFence !== undefined &&
-        isTransactionConditionalFailureAt(error, 3)
-      ) {
-        throw new AiAssistanceError(
-          'not-found',
-          'AiAssistanceGenerationNotFound',
-          'The AI assistance generation is no longer available for a decision.',
         )
       }
       const generationConditionFailed = isConditionalCheckFailed(error) ||
@@ -1354,6 +1347,17 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         latest = await this.getGeneration(workspaceId, generationId)
       } catch {
         // Preserve the original conditional conflict when reconciliation fails.
+      }
+      if (
+        commitFence !== undefined &&
+        latest !== undefined &&
+        Date.parse(latest.generation.expiresAt) <= Date.parse(commitFence.commitAt)
+      ) {
+        throw new AiAssistanceError(
+          'not-found',
+          'AiAssistanceGenerationNotFound',
+          'The AI assistance generation is no longer available for a decision.',
+        )
       }
       if (
         commitFence !== undefined &&

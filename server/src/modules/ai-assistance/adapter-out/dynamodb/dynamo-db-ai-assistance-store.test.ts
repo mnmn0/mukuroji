@@ -1269,7 +1269,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     const current = createGenerationRecord('Permission-filtered source context.')
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['None', 'ConditionalCheckFailed', 'None', 'None']),
+      transactionCancellation(['None', 'ConditionalCheckFailed', 'None']),
     ])
     try {
       await expect(harness.store.decideGeneration(
@@ -1301,7 +1301,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     const current = createGenerationRecord('Permission-filtered source context.')
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['None', 'None', 'ConditionalCheckFailed', 'None']),
+      transactionCancellation(['None', 'None', 'ConditionalCheckFailed']),
     ])
     try {
       await expect(harness.store.decideGeneration(
@@ -1335,12 +1335,13 @@ describe('DynamoDbAiAssistanceStore', () => {
       ...base,
       generation: {
         ...base.generation,
-        expiresAt: '2026-08-25T00:03:00.000Z',
+        expiresAt: '2026-08-25T00:02:00.000Z',
       },
     }
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['None', 'None', 'None', 'ConditionalCheckFailed']),
+      transactionCancellation(['ConditionalCheckFailed', 'None', 'None']),
+      { Item: createPersistedGenerationItem(current) },
     ])
     try {
       await expect(harness.store.decideGeneration(
@@ -1362,6 +1363,11 @@ describe('DynamoDbAiAssistanceStore', () => {
       expect(JSON.stringify(harness.commands[1]?.input)).toContain(
         '#generation.#expiresAt > :commitAt',
       )
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'TransactWriteCommand',
+        'GetCommand',
+      ])
     } finally {
       harness.restore()
     }
@@ -1371,7 +1377,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     const current = createGenerationRecord('Permission-filtered source context.')
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['ConditionalCheckFailed', 'None', 'None', 'None']),
+      transactionCancellation(['ConditionalCheckFailed', 'None', 'None']),
       { Item: createPersistedGenerationItem(current) },
     ])
     try {
@@ -1411,7 +1417,7 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
     const harness = createHarness([
       { Item: createPersistedGenerationItem(current) },
-      transactionCancellation(['ConditionalCheckFailed', 'None', 'None', 'None']),
+      transactionCancellation(['ConditionalCheckFailed', 'None', 'None']),
       { Item: changed },
     ])
     try {
