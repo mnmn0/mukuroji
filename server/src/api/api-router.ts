@@ -20312,10 +20312,15 @@ async function resolveAiAssistanceContext(
         0,
         Math.min(
           AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT,
-          Math.floor((AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS -
-            sources.length - AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE -
-            configurationSourceCount * 2 - selectedOutputConditionReserve) /
-            documentSourceCount),
+          Math.floor(
+            (AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS -
+              sources.length -
+              documentSourceCount -
+              AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE -
+              configurationSourceCount * 2 -
+              selectedOutputConditionReserve) /
+              documentSourceCount,
+          ),
         ),
       )
   const state = await createAiAssistanceResolverState(
@@ -21473,28 +21478,54 @@ async function resolveAiTriageSource(
   }
 }
 
-/** Creates commit-time conditions for every Document comment included in the prompt window. */
+/**
+ * Creates commit-time conditions for a Document comment window and its retained rows.
+ *
+ * The window row detects newly inserted comments that do not change the Document revision,
+ * while individual rows continue to fence edits or resolution changes for retained comments.
+ */
 function createAiDocumentCommentAuthorizationConditions(
   workspaceId: string,
+  documentId: string,
+  commentWindowRevision: number,
   comments: readonly DocumentComment[],
 ): AiAssistanceAuthorizationCondition[] {
   const tableName = getEnv('DOCUMENTS_TABLE_NAME') ?? 'mukuroji-documents-local'
-  return comments.map((comment) => ({
+  const windowCondition: AiAssistanceAuthorizationCondition = {
     kind: 'source',
     tableName,
     key: {
       workspaceId,
-      recordKey: `COMMENT#${encodeAiDocumentKeyPart(comment.documentId)}#${comment.createdAt}#${encodeAiDocumentKeyPart(comment.id)}`,
+      recordKey: `COMMENT_WINDOW#${encodeAiDocumentKeyPart(documentId)}`,
     },
     expectedAttributes: {
-      entryType: 'document-comment',
-      id: comment.id,
-      documentId: comment.documentId,
-      resolved: comment.resolved,
-      createdAt: comment.createdAt,
-      updatedAt: comment.updatedAt,
+      entryType: 'document-comment-window',
+      documentId,
+      revision: commentWindowRevision,
     },
-  }))
+    ...(commentWindowRevision === 0
+      ? { allowMissingWhenExpectedZero: true }
+      : {}),
+  }
+  return [
+    windowCondition,
+    ...comments.map((comment): AiAssistanceAuthorizationCondition => ({
+      kind: 'source',
+      tableName,
+      key: {
+        workspaceId,
+        recordKey: `COMMENT#${encodeAiDocumentKeyPart(comment.documentId)}#${comment.createdAt}#${encodeAiDocumentKeyPart(comment.id)}`,
+      },
+      expectedAttributes: {
+        entryType: 'document-comment',
+        id: comment.id,
+        documentId: comment.documentId,
+        resolved: comment.resolved,
+        createdAt: comment.createdAt,
+        updatedAt: comment.updatedAt,
+      },
+    })),
+  ]
 }
 
 /** Encodes a Document key component using the storage client's canonical base64url format. */
@@ -21936,7 +21967,7 @@ async function resolveAiDocumentSource(
   if (documentAuthorizationRevision === undefined) {
     throw aiAssistanceAuthorizationChangedError()
   }
-  const [initialDocument, initialCommentPage] =
+  const [initialDocument, initialCommentPage, initialCommentWindowRevision] =
     await readAiDocumentSnapshot(principal, source.documentId, state.searchContext.documentAccess)
   if (initialDocument.id !== source.documentId) {
     throw new AiAssistanceError(
@@ -21958,7 +21989,7 @@ async function resolveAiDocumentSource(
   // The initial read establishes identity and access; use a second, consistent
   // read immediately before constructing the prompt so edits made during the
   // first read cannot reach the provider as stale document content.
-  const [document, commentPage] =
+  const [document, commentPage, commentWindowRevision] =
     await readAiDocumentSnapshot(principal, source.documentId, state.searchContext.documentAccess)
   if (document.id !== source.documentId) {
     throw new AiAssistanceError(
@@ -21979,6 +22010,7 @@ async function resolveAiDocumentSource(
   if (
     createAiDocumentContentFingerprint(initialDocument) !==
       createAiDocumentContentFingerprint(document) ||
+    initialCommentWindowRevision !== commentWindowRevision ||
     createAiDocumentCommentWindowFingerprint(
       initialCommentPage.comments,
       initialCommentPage.nextCursor,
@@ -22038,6 +22070,7 @@ async function resolveAiDocumentSource(
       planningRevision: state.searchContext.planningRevision,
       documentAuthorizationRevision,
       commentWindow: {
+        revision: commentWindowRevision,
         rows: promptComments.map((comment) => ({
           id: comment.id,
           updatedAt: comment.updatedAt,
@@ -22064,6 +22097,8 @@ async function resolveAiDocumentSource(
     },
     authorizationConditions: createAiDocumentCommentAuthorizationConditions(
       principal.directoryId,
+      document.id,
+      commentWindowRevision,
       promptComments,
     ),
   }
@@ -22082,6 +22117,11 @@ async function readAiDocumentSnapshot(
   documentId: string,
   access: DocumentAccessContext,
 ) {
+  const getCommentWindowRevision = workItemDependencies.documents
+    .getCommentWindowRevision
+  if (getCommentWindowRevision === undefined) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
   return await Promise.all([
     workItemDependencies.documents.get({
       workspaceId: principal.directoryId,
@@ -22093,6 +22133,11 @@ async function readAiDocumentSnapshot(
       documentId,
       access,
       limit: 40,
+    }),
+    getCommentWindowRevision.call(workItemDependencies.documents, {
+      workspaceId: principal.directoryId,
+      documentId,
+      access,
     }),
   ])
 }
@@ -22436,10 +22481,88 @@ function boundAiPromptPart(
   const normalized = normalizePrivateAiPromptValue(value, aliases)
   const serialized = JSON.stringify(normalized)
   if (serialized.length <= characterLimit) return normalized
-  return {
-    truncated: true,
-    contentExcerpt: serialized.slice(0, Math.max(0, characterLimit - 100)),
+  const allIdentifiers = collectAiPromptIdentifiers(normalized)
+  let identifiers = allIdentifiers
+  while (true) {
+    const envelopeLength = JSON.stringify({
+      truncated: true,
+      ...(identifiers.length === 0 ? {} : { identifiers }),
+      contentExcerpt: '',
+    }).length
+    let excerpt = serialized.slice(
+      0,
+      Math.max(0, characterLimit - envelopeLength),
+    )
+    let bounded = {
+      truncated: true,
+      ...(identifiers.length === 0 ? {} : { identifiers }),
+      contentExcerpt: excerpt,
+    }
+    while (JSON.stringify(bounded).length > characterLimit && excerpt.length > 0) {
+      const excess = JSON.stringify(bounded).length - characterLimit
+      excerpt = excerpt.slice(0, Math.max(0, excerpt.length - Math.max(excess, 1)))
+      bounded = {
+        truncated: true,
+        ...(identifiers.length === 0 ? {} : { identifiers }),
+        contentExcerpt: excerpt,
+      }
+    }
+    if (JSON.stringify(bounded).length <= characterLimit || identifiers.length === 0) {
+      return bounded
+    }
+    identifiers = identifiers.slice(0, -1)
   }
+}
+
+/**
+ * Collects bounded, provider-safe identifier values from a normalized prompt fragment.
+ *
+ * Identifier values are emitted as a real JSON array alongside a truncated excerpt so
+ * grounding filters can still see them when the excerpt itself is JSON-escaped.
+ *
+ * @param value - Alias- and redaction-normalized prompt fragment.
+ * @returns Unique server-authorized identifiers in stable traversal order.
+ */
+function collectAiPromptIdentifiers(value: unknown): string[] {
+  const identifiers: string[] = []
+  const seen = new Set<string>()
+  const visit = (candidate: unknown, key: string | undefined, depth: number): void => {
+    if (identifiers.length >= AI_ASSISTANCE_ALLOWED_VALUE_LIMIT || depth > 8) return
+    if (typeof candidate === 'string') {
+      if (!isAiPromptIdentifierKey(key)) return
+      const identifier = candidate.trim()
+      if (
+        identifier.length === 0 ||
+        identifier.length > 500 ||
+        seen.has(identifier)
+      ) return
+      seen.add(identifier)
+      identifiers.push(identifier)
+      return
+    }
+    if (Array.isArray(candidate)) {
+      candidate.slice(0, 200).forEach((entry) => visit(entry, key, depth + 1))
+      return
+    }
+    if (!isRecord(candidate)) return
+    Object.entries(candidate)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .slice(0, 200)
+      .forEach(([entryKey, entry]) => visit(entry, entryKey, depth + 1))
+  }
+  visit(value, undefined, 0)
+  return identifiers
+}
+
+/** Returns whether a prompt object key denotes a stable identifier value. */
+function isAiPromptIdentifierKey(key: string | undefined): boolean {
+  if (key === undefined) return false
+  const normalized = key.replace(/[^A-Za-z0-9]/gu, '').toLocaleLowerCase('en-US')
+  return normalized === 'id' ||
+    normalized.endsWith('id') ||
+    normalized.endsWith('ids') ||
+    normalized.endsWith('identifier') ||
+    normalized.endsWith('identifiers')
 }
 
 /**
@@ -22667,8 +22790,8 @@ function filterAiWorkItemEndpointsVisibleInPrompt(
 ): WorkItemDependencyEndpoint[] {
   const serializedPrompt = JSON.stringify(prompt)
   return endpoints.filter((endpoint) =>
-    serializedPrompt.includes(JSON.stringify(endpoint.teamId)) &&
-    serializedPrompt.includes(JSON.stringify(endpoint.workItemId))
+    aiPromptContainsSerializedValue(serializedPrompt, endpoint.teamId) &&
+    aiPromptContainsSerializedValue(serializedPrompt, endpoint.workItemId)
   )
 }
 
@@ -22679,9 +22802,9 @@ function filterAiTriageRoutingTuplesVisibleInPrompt(
   aliases: readonly AiAssistanceTextAlias[] = [],
 ): AiAssistanceTriageRoutingTuple[] {
   return tuples.flatMap((tuple) => {
-    const teamVisible = prompt.includes(JSON.stringify(tuple.teamId))
+    const teamVisible = aiPromptContainsSerializedValue(prompt, tuple.teamId)
     const projectVisible = tuple.projectId === undefined ||
-      prompt.includes(JSON.stringify(tuple.projectId))
+      aiPromptContainsSerializedValue(prompt, tuple.projectId)
     if (!teamVisible || !projectVisible) return []
     const assigneeUserIds = filterAiAllowedValuesVisibleInPrompt(
       prompt,
@@ -22714,7 +22837,7 @@ function filterAiAllowedValuesVisibleInPrompt(
   return values.filter((value) => {
     const alias = aliasByValue.get(value)
     return alias === undefined
-      ? prompt.includes(JSON.stringify(value))
+      ? aiPromptContainsSerializedValue(prompt, value)
       : aiPromptContainsExactIdentifier(prompt, alias)
   })
 }
@@ -22725,9 +22848,26 @@ function filterAiCustomFieldDefinitionsVisibleInPrompt(
   definitions: readonly AiAssistanceCustomFieldDefinition[],
 ): AiAssistanceCustomFieldDefinition[] {
   return definitions.filter((definition) =>
-    prompt.includes(JSON.stringify(definition.teamId)) &&
-    prompt.includes(JSON.stringify(definition.fieldId))
+    aiPromptContainsSerializedValue(prompt, definition.teamId) &&
+    aiPromptContainsSerializedValue(prompt, definition.fieldId)
   )
+}
+
+/**
+ * Finds a JSON string value in both a normal prompt object and a JSON-encoded excerpt.
+ *
+ * Bounded prompt fragments are stored as strings inside the outer prompt JSON. In that
+ * representation the inner quotes are escaped, so checking only the unescaped token can
+ * incorrectly discard an identifier that is still visible to the provider.
+ *
+ * @param prompt - Final serialized prompt context.
+ * @param value - Server-authorized identifier to locate.
+ * @returns Whether the identifier is present in either JSON representation.
+ */
+function aiPromptContainsSerializedValue(prompt: string, value: string): boolean {
+  const serialized = JSON.stringify(value)
+  const escapedSerialized = JSON.stringify(serialized).slice(1, -1)
+  return prompt.includes(serialized) || prompt.includes(escapedSerialized)
 }
 
 /**

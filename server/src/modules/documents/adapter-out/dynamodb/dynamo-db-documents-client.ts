@@ -63,6 +63,7 @@ import type {
   DocumentPublicShareRequest,
   DocumentSearchAccessReadContext,
   ExportDocumentRequest,
+  GetDocumentCommentWindowRevisionRequest,
   GetDocumentRequest,
   HeartbeatDocumentPresenceRequest,
   InstantiateDocumentTemplateRequest,
@@ -511,6 +512,27 @@ type StoredDocumentCommentItem = StoredDocumentComment & {
   recordKey: string
   /** Row discriminator です。 */
   entryType: 'document-comment'
+}
+
+/**
+ * Monotonic insertion fence for one Document's comment stream.
+ *
+ * The row is kept separate from the Document revision because comments are append-only
+ * collaboration records and historically did not update the Document row.
+ */
+type StoredDocumentCommentWindowItem = {
+  /** Canonical Workspace partition key. */
+  workspaceId: string
+  /** Deterministic Document comment-window sort key. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'document-comment-window'
+  /** Document whose comment insertions advance this fence. */
+  documentId: string
+  /** Monotonic insertion revision. */
+  revision: number
+  /** Timestamp of the latest insertion included in the revision. */
+  updatedAt: string
 }
 
 /**
@@ -2729,6 +2751,27 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     )
   }
 
+  /**
+   * Reads the strongly consistent comment-insertion revision for one Document.
+   *
+   * @param input - Document identity and current viewer access.
+   * @returns Monotonic comment-window revision, or zero for a legacy Document.
+   */
+  async getCommentWindowRevision(
+    input: GetDocumentCommentWindowRevisionRequest,
+  ): Promise<number> {
+    await this.ensureTable()
+    await this.get({
+      workspaceId: input.workspaceId,
+      documentId: input.documentId,
+      access: input.access,
+    })
+    return await this.readCommentWindowRevision(
+      input.workspaceId,
+      input.documentId,
+    )
+  }
+
   /** Root comment または reply を作成します。 */
   async createComment(
     input: CreateDocumentCommentRequest,
@@ -2810,6 +2853,18 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       fingerprint: normalized.id === undefined
         ? commentSemanticFingerprint(comment)
         : normalized.fingerprint,
+    }
+    const commentWindowRevision = await this.readCommentWindowRevision(
+      input.workspaceId,
+      input.documentId,
+    )
+    const commentWindowItem: StoredDocumentCommentWindowItem = {
+      workspaceId: input.workspaceId,
+      recordKey: commentWindowKey(input.documentId),
+      entryType: 'document-comment-window',
+      documentId: input.documentId,
+      revision: commentWindowRevision + 1,
+      updatedAt: now,
     }
     const notificationCandidates = [
       ...new Set(
@@ -2907,6 +2962,22 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           TableName: this.tableName,
           Item: receipt,
           ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: commentWindowItem,
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) OR (' +
+            'entryType = :commentWindowEntryType AND ' +
+            'documentId = :commentWindowDocumentId AND ' +
+            'revision = :commentWindowRevision)',
+          ExpressionAttributeValues: {
+            ':commentWindowEntryType': 'document-comment-window',
+            ':commentWindowDocumentId': input.documentId,
+            ':commentWindowRevision': commentWindowRevision,
+          },
         },
       },
       ...(auditPut === undefined ? [] : [auditPut]),
@@ -3015,6 +3086,40 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         existingReceipt.commentRecordKey,
       ),
     )
+  }
+
+  /** Reads and validates the internal comment-window fence row. */
+  private async readCommentWindowRevision(
+    workspaceId: string,
+    documentId: string,
+  ): Promise<number> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId,
+        recordKey: commentWindowKey(documentId),
+      },
+      ConsistentRead: true,
+    }))
+    const item = result.Item as StoredDocumentCommentWindowItem | undefined
+    if (item === undefined) return 0
+    if (
+      item.workspaceId !== workspaceId ||
+      item.recordKey !== commentWindowKey(documentId) ||
+      item.entryType !== 'document-comment-window' ||
+      item.documentId !== documentId ||
+      !Number.isSafeInteger(item.revision) ||
+      item.revision < 1 ||
+      typeof item.updatedAt !== 'string' ||
+      !Number.isFinite(Date.parse(item.updatedAt))
+    ) {
+      throw new DocumentError(
+        500,
+        'InvalidDocumentCommentWindow',
+        'The Document comment authorization fence is invalid.',
+      )
+    }
+    return item.revision
   }
 
   /** Document comments を page 取得します。 */
@@ -5862,6 +5967,11 @@ function recentKey(
 
 function commentKey(documentId: string, createdAt: string, commentId: string): string {
   return `COMMENT#${encodeKeyPart(documentId)}#${createdAt}#${encodeKeyPart(commentId)}`
+}
+
+/** Builds the deterministic sort key for one Document comment-window fence row. */
+function commentWindowKey(documentId: string): string {
+  return `COMMENT_WINDOW#${encodeKeyPart(documentId)}`
 }
 
 function commentReceiptKey(documentId: string, commentId: string): string {

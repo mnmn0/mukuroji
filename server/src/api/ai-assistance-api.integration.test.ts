@@ -2390,6 +2390,20 @@ describe('AI assistance API composition', () => {
       tableName: 'mukuroji-documents-local',
       key: {
         workspaceId: 'user#demo@example.com',
+        recordKey: `COMMENT_WINDOW#${Buffer.from(document.id, 'utf8').toString('base64url')}`,
+      },
+      expectedAttributes: {
+        entryType: 'document-comment-window',
+        documentId: document.id,
+        revision: 0,
+      },
+      allowMissingWhenExpectedZero: true,
+    }))
+    expect(capturedConditions).toContainEqual(expect.objectContaining({
+      kind: 'source',
+      tableName: 'mukuroji-documents-local',
+      key: {
+        workspaceId: 'user#demo@example.com',
         recordKey: `COMMENT#${Buffer.from(document.id, 'utf8').toString('base64url')}#${comment.createdAt}#${Buffer.from(comment.id, 'utf8').toString('base64url')}`,
       },
       expectedAttributes: {
@@ -2401,6 +2415,68 @@ describe('AI assistance API composition', () => {
         updatedAt: comment.updatedAt,
       },
     }))
+  })
+
+  test('rejects a Document draft when a new comment is inserted after source resolution', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const document = createDocument()
+    let commentWindowRevision = 0
+    let providerCalls = 0
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 4
+        },
+        async get() {
+          return document
+        },
+        async listComments() {
+          return { comments: [] }
+        },
+        async getCommentWindowRevision() {
+          return commentWindowRevision
+        },
+      }),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          const resolved = await authorization.resolveContext({ actor, request })
+          providerCalls += 1
+          commentWindowRevision = 1
+          const current = await authorization.isAuthorizationCurrent({
+            actor,
+            request,
+            authorizationToken: resolved.authorizationToken,
+          })
+          if (current.current) {
+            throw new Error('Expected the inserted comment to invalidate authorization.')
+          }
+          expect(current.reason).toBe('source-changed')
+          return createWithheldGeneration(request.task, current.reason)
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-document-comment-insert-fence' },
+      body: JSON.stringify({
+        task: 'summary',
+        locale: 'ja',
+        sources: [{
+          type: 'document',
+          documentId: document.id,
+          expectedRevision: document.revision,
+        }],
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(providerCalls).toBe(1)
+    expect(await response.text()).toContain('source-changed')
   })
 
   test('rejects metadata-only Triage content before the provider boundary', async () => {
@@ -2717,6 +2793,63 @@ describe('AI assistance API composition', () => {
     expect(response.status).toBe(201)
     expect(promptContext).not.toContain('sato@example.com')
     expect(promptContext).not.toContain('assigneeUserId')
+  })
+
+  test('retains identifiers from a structurally serialized Work Item prompt excerpt', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const issue = {
+      ...createBulkRecoveryIssue(),
+      description: 'Long description '.repeat(500),
+      workflowSchemaVersion: 1,
+      source: 'dynamodb',
+    } satisfies TeamIssueResponseItem
+    const teamIssues = createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: issue.teamId, issues: [issue] }
+      },
+      async getTeamIssueDetail() {
+        return { issue, comments: [], activity: [] }
+      },
+    })
+    let resolvedContext: ResolvedAiAssistanceContext | undefined
+    setTestAppDependencies({
+      teamIssues,
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          resolvedContext = await authorization.resolveContext({ actor, request })
+          return createWithheldGeneration(request.task, 'source-changed')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-serialized-excerpt-identifiers' },
+      body: JSON.stringify({
+        task: 'planning',
+        locale: 'en',
+        source: {
+          type: 'work-item',
+          teamId: issue.teamId,
+          workItemId: issue.id,
+          expectedRevision: issue.revision,
+        },
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    if (resolvedContext === undefined) {
+      throw new Error('Expected the AI resolver to return a planning context.')
+    }
+    expect(resolvedContext.promptContext).toContain('contentExcerpt')
+    expect(resolvedContext.allowedValues.workItemEndpoints).toContainEqual({
+      teamId: issue.teamId,
+      workItemId: issue.id,
+    })
   })
 
   test('withholds a stored generation after a Document comment timestamp changes', async () => {

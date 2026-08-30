@@ -34,6 +34,22 @@ describe('AI assistance redaction', () => {
     expect(first).not.toContain('BEGIN PRIVATE KEY')
   })
 
+  test('redacts armored PGP private-key blocks', () => {
+    const input = [
+      '-----BEGIN PGP PRIVATE KEY BLOCK-----',
+      'Version: test',
+      '',
+      'armored-private-material',
+      '-----END PGP PRIVATE KEY BLOCK-----',
+    ].join('\n')
+
+    const redacted = redactAiAssistanceText(input)
+
+    expect(redacted).toBe('[REDACTED_PRIVATE_KEY]')
+    expect(redacted).not.toContain('armored-private-material')
+    expect(redactAiAssistanceText(redacted)).toBe(redacted)
+  })
+
   test('redacts authentication headers, cookies, sessions, JWTs, and URL userinfo', () => {
     const cases = [
       {

@@ -3612,6 +3612,54 @@ test('stores document mention notification source events atomically with comment
   })
 })
 
+test('advances the Document comment-window revision with each insertion', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Comment window fence',
+    blocks: [],
+  })
+
+  expect(await client.getCommentWindowRevision({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).toBe(0)
+
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'First',
+  })
+  expect(await client.getCommentWindowRevision({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).toBe(1)
+
+  await client.createComment({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    body: 'Second',
+  })
+  expect(await client.getCommentWindowRevision({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })).toBe(2)
+  expect(memory.items()).toContainEqual(expect.objectContaining({
+    entryType: 'document-comment-window',
+    documentId: document.id,
+    revision: 2,
+  }))
+})
+
 test('stores at most one replaceable presence lease per Workspace member', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
@@ -6203,6 +6251,20 @@ function matchesCondition(
   const condition = operation.ConditionExpression
   if (typeof condition !== 'string') return true
   if (condition === 'attribute_not_exists(workspaceId)') return current === undefined
+  if (
+    condition ===
+    'attribute_not_exists(workspaceId) OR (entryType = :commentWindowEntryType AND documentId = :commentWindowDocumentId AND revision = :commentWindowRevision)'
+  ) {
+    const values = operation.ExpressionAttributeValues as Record<string, unknown>
+    return (
+      current === undefined ||
+      (
+        current.entryType === values[':commentWindowEntryType'] &&
+        current.documentId === values[':commentWindowDocumentId'] &&
+        current.revision === values[':commentWindowRevision']
+      )
+    )
+  }
   if (
     condition ===
     'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch'

@@ -5,7 +5,7 @@ import type {
   GenerateAiAssistanceRequest,
 } from '@mukuroji/contracts'
 
-const PRIVATE_KEY_PATTERN = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu
+const PRIVATE_KEY_PATTERN = /-----BEGIN [^-\r\n]*PRIVATE KEY[^-\r\n]*-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY[^-\r\n]*-----/giu
 const AUTHORIZATION_HEADER_PATTERN = /\b((?:proxy-)?authorization\s*:\s*)(?:[^\r\n]*)/giu
 const COOKIE_HEADER_PATTERN = /\b((?:set-cookie|cookie)\s*:)\s*[^\r\n]*/giu
 const URL_USERINFO_PATTERN = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?=[^\s/?#]+@)[^\s/?#]*@(?=[^\s/?#])/gu
