@@ -1067,6 +1067,14 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     const item = createStoredGenerationItem(record, recordKey)
     requireStoredAiAssistanceItemSize(item)
     if (commitFence !== undefined) validateGenerationCommitFence(commitFence)
+    if (
+      commitFence !== undefined &&
+      commitFence.authorizationToken !== record.authorizationToken
+    ) {
+      throw aiAssistanceAuthorizationChangedError(
+        'AI assistance source authorization changed during generation.',
+      )
+    }
     try {
       if (commitFence === undefined) {
         await this.#documentClient.send(new PutCommand({
@@ -1228,6 +1236,13 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
               'policy',
               commitFence.policyRevision,
             ),
+            createNestedRevisionConditionCheck(
+              this.#tableName,
+              workspaceId,
+              createPreferenceRecordKey(current.memberId),
+              'preference',
+              commitFence.preferenceRevision,
+            ),
           ],
         }))
       }
@@ -1235,10 +1250,11 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     } catch (error) {
       if (
         commitFence !== undefined &&
-        isTransactionConditionalFailureAt(error, 1)
+        (isTransactionConditionalFailureAt(error, 1) ||
+          isTransactionConditionalFailureAt(error, 2))
       ) {
         throw aiAssistanceAuthorizationChangedError(
-          'AI assistance retention policy changed during decision.',
+          'AI assistance policy or member preference changed during decision.',
         )
       }
       const generationConditionFailed = isConditionalCheckFailed(error) ||
@@ -1250,7 +1266,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       } catch {
         // Preserve the original conditional conflict when reconciliation fails.
       }
-      throw mapDynamoWriteError(error)
+      throw revisionConflictError()
     }
   }
 
@@ -1749,16 +1765,17 @@ function aiAssistanceAuthorizationChangedError(message: string): AiAssistanceErr
   )
 }
 
-/** Validates the policy and preference revisions used for generation persistence. */
+/** Validates the governance revisions and source authorization used for generation persistence. */
 function validateGenerationCommitFence(
   fence: AiAssistanceGenerationCommitFence,
 ): void {
   if (
     !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
-    !Number.isSafeInteger(fence.preferenceRevision) || fence.preferenceRevision < 0
+    !Number.isSafeInteger(fence.preferenceRevision) || fence.preferenceRevision < 0 ||
+    !fence.authorizationToken.trim() || fence.authorizationToken.length > 8_192
   ) {
     throw aiAssistanceAuthorizationChangedError(
-      'AI assistance policy or member preference is no longer current.',
+      'AI assistance policy, member preference, or source authorization is no longer current.',
     )
   }
 }
@@ -1770,6 +1787,7 @@ function validateDecisionCommitFence(
   const expiresAt = Date.parse(fence.effectiveExpiresAt)
   if (
     !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
+    !Number.isSafeInteger(fence.preferenceRevision) || fence.preferenceRevision < 0 ||
     !Number.isFinite(expiresAt)
   ) {
     throw aiAssistanceAuthorizationChangedError(

@@ -19959,6 +19959,53 @@ async function resolveAiAssistanceTeamConfigurations(
 }
 
 /**
+ * Resolves current Project membership for AI triage routing in bounded batches.
+ *
+ * @param directoryId - Workspace directory that owns the Projects.
+ * @param projects - Team-qualified destination Projects visible to the request.
+ * @param eligibleMemberIds - Active, non-guest Workspace members already visible to the model.
+ * @returns Project IDs mapped to their current eligible member IDs.
+ */
+async function resolveAiAssistanceProjectMemberIds(
+  directoryId: string,
+  projects: readonly Readonly<{ teamId: string; projectId: string }>[],
+  eligibleMemberIds: ReadonlySet<string>,
+): Promise<ReadonlyMap<string, readonly string[]>> {
+  const memberIdsByProjectId = new Map<string, readonly string[]>()
+  const eligibleMemberIdsByNormalizedId = new Map<string, string>()
+  for (const memberId of eligibleMemberIds) {
+    eligibleMemberIdsByNormalizedId.set(memberId.trim().toLowerCase(), memberId)
+  }
+  for (
+    let offset = 0;
+    offset < projects.length;
+    offset += AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY
+  ) {
+    const batch = projects.slice(
+      offset,
+      offset + AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY,
+    )
+    const responses = await Promise.all(batch.map((project) =>
+      workspaceDependencies.projectDirectory.getProjectMembers(
+        directoryId,
+        project.projectId,
+        project.teamId,
+      )
+    ))
+    for (const response of responses) {
+      const memberIds = response.members.flatMap((member) => {
+        const canonicalMemberId = eligibleMemberIdsByNormalizedId.get(
+          member.id.trim().toLowerCase(),
+        )
+        return canonicalMemberId === undefined ? [] : [canonicalMemberId]
+      })
+      memberIdsByProjectId.set(response.projectId, memberIds)
+    }
+  }
+  return memberIdsByProjectId
+}
+
+/**
  * Projects a fresh Workspace principal into the AI application actor.
  *
  * @param principal - Current server-authenticated Workspace principal.
@@ -20278,9 +20325,22 @@ async function createAiAssistanceResolverState(
   const eligibleMemberIds = visibleMembers
     .filter((member) => member.role !== 'guest')
     .map((member) => member.id)
+  const eligibleMemberIdSet = new Set(eligibleMemberIds)
   const routingTeams = triageSourceTeamId === undefined
     ? visibleTeams
     : visibleTeams.filter((team) => team.id === triageSourceTeamId)
+  const routingProjects = task === 'triage'
+    ? routingTeams.flatMap((team) => team.projects
+        .filter((project) => projectIds.includes(project.id))
+        .map((project) => ({ teamId: team.id, projectId: project.id })))
+    : []
+  const projectMemberIdsByProjectId = task === 'triage'
+    ? await resolveAiAssistanceProjectMemberIds(
+        principal.directoryId,
+        routingProjects,
+        eligibleMemberIdSet,
+      )
+    : new Map<string, readonly string[]>()
   const triageRoutingTuples: AiAssistanceTriageRoutingTuple[] = routingTeams.flatMap((team) => [
     {
       teamId: team.id,
@@ -20291,7 +20351,9 @@ async function createAiAssistanceResolverState(
       .map((project) => ({
         teamId: team.id,
         projectId: project.id,
-        assigneeUserIds: eligibleMemberIds,
+        assigneeUserIds: task === 'triage'
+          ? projectMemberIdsByProjectId.get(project.id) ?? []
+          : eligibleMemberIds,
       })),
   ]).slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
   const triageTeamIds = uniqueAiAllowedValues(

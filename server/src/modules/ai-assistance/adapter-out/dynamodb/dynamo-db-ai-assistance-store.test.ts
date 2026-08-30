@@ -460,6 +460,7 @@ describe('DynamoDbAiAssistanceStore', () => {
       await expect(harness.store.createGeneration(record, {
         policyRevision: 3,
         preferenceRevision: 2,
+        authorizationToken: record.authorizationToken,
       })).resolves.toEqual(record)
       expect(harness.commands.map((command) => command.name)).toEqual([
         'TransactWriteCommand',
@@ -485,6 +486,7 @@ describe('DynamoDbAiAssistanceStore', () => {
       await expect(harness.store.createGeneration(record, {
         policyRevision: 3,
         preferenceRevision: 2,
+        authorizationToken: record.authorizationToken,
       })).rejects.toMatchObject({
         category: 'conflict',
         code: 'AiAssistanceAuthorizationChanged',
@@ -492,6 +494,24 @@ describe('DynamoDbAiAssistanceStore', () => {
       expect(harness.commands.map((command) => command.name)).toEqual([
         'TransactWriteCommand',
       ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects generation persistence when the source authorization fence does not match', async () => {
+    const record = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.store.createGeneration(record, {
+        policyRevision: 3,
+        preferenceRevision: 2,
+        authorizationToken: 'different-authorization-snapshot',
+      })).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceAuthorizationChanged',
+      })
+      expect(harness.commands).toHaveLength(0)
     } finally {
       harness.restore()
     }
@@ -1144,6 +1164,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         '2026-08-25T00:02:00.000Z',
         {
           policyRevision: 3,
+          preferenceRevision: 0,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
         },
       )).rejects.toMatchObject({
@@ -1153,6 +1174,68 @@ describe('DynamoDbAiAssistanceStore', () => {
       expect(harness.commands.map((command) => command.name)).toEqual([
         'GetCommand',
         'TransactWriteCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fences a decision against a concurrent member preference change', async () => {
+    const current = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([
+      { Item: createPersistedGenerationItem(current) },
+      transactionCancellation(['None', 'None', 'ConditionalCheckFailed']),
+    ])
+    try {
+      await expect(harness.store.decideGeneration(
+        'workspace-1',
+        'generation-1',
+        { outcome: 'approved', expectedRevision: 1 },
+        '2026-08-25T00:02:00.000Z',
+        {
+          policyRevision: 3,
+          preferenceRevision: 2,
+          effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+        },
+      )).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceAuthorizationChanged',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'TransactWriteCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a generation condition cancellation to a revision conflict', async () => {
+    const current = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([
+      { Item: createPersistedGenerationItem(current) },
+      transactionCancellation(['ConditionalCheckFailed', 'None', 'None']),
+      { Item: createPersistedGenerationItem(current) },
+    ])
+    try {
+      await expect(harness.store.decideGeneration(
+        'workspace-1',
+        'generation-1',
+        { outcome: 'approved', expectedRevision: 1 },
+        '2026-08-25T00:02:00.000Z',
+        {
+          policyRevision: 3,
+          preferenceRevision: 2,
+          effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+        },
+      )).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceRevisionConflict',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'TransactWriteCommand',
+        'GetCommand',
       ])
     } finally {
       harness.restore()

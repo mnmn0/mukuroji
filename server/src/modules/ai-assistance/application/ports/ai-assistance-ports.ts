@@ -435,12 +435,16 @@ export type AiAssistanceGenerationCommitFence = {
   policyRevision: number
   /** Member AI preference revision observed after provider completion. */
   preferenceRevision: number
+  /** Opaque source authorization snapshot rechecked immediately before persistence. */
+  authorizationToken: string
 }
 
-/** Policy revision and effective retention deadline fenced at decision persistence. */
+/** Policy, member-preference, and effective retention values fenced at decision persistence. */
 export type AiAssistanceDecisionCommitFence = {
   /** Workspace AI policy revision observed immediately before the decision write. */
   policyRevision: number
+  /** Member AI preference revision observed immediately before the decision write. */
+  preferenceRevision: number
   /** Effective generation deadline computed from the current policy. */
   effectiveExpiresAt: string
 }

@@ -61,6 +61,10 @@ describe('AI assistance redaction', () => {
         expected: 'postgresql://[REDACTED_CREDENTIALS]@db.example.test/work',
       },
       {
+        input: 'https://user@example.com:p@ssword@host.example.test/path',
+        expected: 'https://[REDACTED_CREDENTIALS]@host.example.test/path',
+      },
+      {
         input: 'JSESSIONID=0123456789abcdef next-auth.session-token=opaque-session',
         expected: 'JSESSIONID=[REDACTED_SECRET] ' +
           'next-auth.session-token=[REDACTED_SECRET]',

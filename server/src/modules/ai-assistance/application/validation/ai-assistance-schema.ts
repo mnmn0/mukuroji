@@ -16,6 +16,8 @@ import { z } from 'zod'
 import { AiAssistanceError } from '../../errors'
 
 const identifierSchema = z.string().trim().min(1).max(256)
+/** Member identifiers may be longer than generic resource identifiers (for example, long emails). */
+const memberIdentifierSchema = z.string().trim().min(1).max(320)
 const boundedTextSchema = z.string().trim().min(1).max(2_000)
 const titleTextSchema = z.string().trim().min(1).max(256)
 const planningStatusTextSchema = z.string().trim().max(2_000).refine(
@@ -145,6 +147,13 @@ const suggestedIdentifierSchema = z.object({
   citationIds: z.array(identifierSchema).min(1).max(20),
 }).strict()
 
+const suggestedMemberIdentifierSchema = z.object({
+  value: memberIdentifierSchema,
+  reason: boundedTextSchema,
+  confidence: confidenceSchema,
+  citationIds: z.array(identifierSchema).min(1).max(20),
+}).strict()
+
 const suggestedPrioritySchema = z.object({
   value: workItemPrioritySchema,
   reason: boundedTextSchema,
@@ -268,8 +277,8 @@ const workspaceSearchFiltersSchema = z.object({
     'file',
     'document',
   ])).max(7).optional(),
-  assigneeUserIds: z.array(identifierSchema).max(100).optional(),
-  creatorUserIds: z.array(identifierSchema).max(100).optional(),
+  assigneeUserIds: z.array(memberIdentifierSchema).max(100).optional(),
+  creatorUserIds: z.array(memberIdentifierSchema).max(100).optional(),
   statuses: z.array(identifierSchema).max(100).optional(),
   customFields: z.array(customFieldFilterSchema).max(50).optional(),
   relationIds: z.array(identifierSchema).max(100).optional(),
@@ -360,7 +369,7 @@ const draftSchema = z.discriminatedUnion('kind', [
     title: suggestedTitleSchema.optional(),
     description: suggestedStringSchema.optional(),
     priority: suggestedPrioritySchema.optional(),
-    assigneeUserId: suggestedIdentifierSchema.optional(),
+    assigneeUserId: suggestedMemberIdentifierSchema.optional(),
     teamId: suggestedIdentifierSchema.optional(),
     projectId: suggestedIdentifierSchema.optional(),
     customFields: z.array(suggestedCustomFieldSchema).max(50).superRefine((fields, context) => {

@@ -651,9 +651,21 @@ export function createAiAssistanceService(
       // public generation after every transformation so the first persisted response obeys the
       // same bounds as later reads and replays.
       const validatedGeneration = parseAiAssistanceGeneration(generation)
+      // Perform the final source fence immediately before the persistence transaction. The
+      // earlier post-provider check protects transformation work; this check closes the
+      // mutable-source window between that check and the durable generation write.
+      const commitAuthorizationState = await authorization.isAuthorizationCurrent({
+        actor,
+        request: providerRequest,
+        authorizationToken: context.authorizationToken,
+      })
+      if (!commitAuthorizationState.current) {
+        throw authorizationChangedError(commitAuthorizationState.reason)
+      }
       const generationCommitFence: AiAssistanceGenerationCommitFence = {
         policyRevision: postProviderPolicy.revision,
         preferenceRevision: postProviderPreference.revision,
+        authorizationToken: context.authorizationToken,
       }
       const stored = await options.store.createGeneration({
         workspaceId: actor.workspaceId,
@@ -784,13 +796,17 @@ export function createAiAssistanceService(
     // Re-read retention immediately before the write. The store also checks this
     // revision atomically so a concurrent policy shortening cannot commit a stale
     // decision between this read and DynamoDB's conditional write.
-    const decisionPolicy = await readPolicy(actor)
+    const [decisionPolicy, decisionPreference] = await Promise.all([
+      readPolicy(actor),
+      getPreference(actor),
+    ])
     const decisionGeneration = applyEffectiveRetention(record.generation, decisionPolicy)
     if (Date.parse(decisionGeneration.expiresAt) <= now().getTime()) {
       return withholdGeneration(decisionGeneration, 'retention-expired')
     }
     const decisionCommitFence: AiAssistanceDecisionCommitFence = {
       policyRevision: decisionPolicy.revision,
+      preferenceRevision: decisionPreference.revision,
       effectiveExpiresAt: decisionGeneration.expiresAt,
     }
     const decided = await options.store.decideGeneration(

@@ -8,7 +8,7 @@ import type {
 const PRIVATE_KEY_PATTERN = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu
 const BASIC_AUTHORIZATION_PATTERN = /\b((?:proxy-)?authorization\s*:\s*basic)\s+[A-Za-z0-9+/]+={0,2}/giu
 const COOKIE_HEADER_PATTERN = /\b((?:set-cookie|cookie)\s*:)\s*[^\r\n]*/giu
-const URL_USERINFO_PATTERN = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/?#:@]+:[^\s/?#@]*@/gu
+const URL_USERINFO_PATTERN = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?=[^\s/?#]*:[^\s/?#]*@)[^\s/?#]*@(?=[^\s/?#])/gu
 const PRESIGNED_URL_QUERY_PATTERN = /([?&](?:x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential|security-token)|awsaccesskeyid|googleaccessid|signature|sig)=)(?!\[REDACTED_PRESIGNED_URL\])[^&#\s"'<>]+/giu
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu
 const JWT_PATTERN = /(^|[^A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})(?=$|[^A-Za-z0-9_-])/gu

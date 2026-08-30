@@ -1181,6 +1181,25 @@ describe('AI assistance API composition', () => {
         return await baseConfigurationClient.getTeamConfiguration(workspaceId, teamId)
       },
     })
+    const existingWorkspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+    setTestAppDependencies({
+      workspaceAccess: {
+        ...existingWorkspaceAccess,
+        async listActiveMembers(workspaceId) {
+          const existing = await existingWorkspaceAccess.listActiveMembers(workspaceId)
+          const template = existing[0]
+          if (template === undefined) throw new Error('Expected an active member fixture.')
+          return [
+            ...existing,
+            createAiDirectoryMember(
+              template,
+              'workspace-only-assignee@example.test',
+              'Workspace-only Assignee',
+            ),
+          ]
+        },
+      },
+    })
     let resolvedContext: ResolvedAiAssistanceContext | undefined
     setTestAppDependencies({
       triage: createTriageClient(entry),
@@ -1219,6 +1238,10 @@ describe('AI assistance API composition', () => {
       tuple.teamId === 'core-team' &&
       (tuple.projectId === undefined || tuple.projectId === 'refero')
     )).toBeTrue()
+    const referoTuple = resolvedContext.allowedValues.triageRoutingTuples?.find((tuple) =>
+      tuple.projectId === 'refero'
+    )
+    expect(referoTuple?.assigneeUserIds).not.toContain('workspace-only-assignee@example.test')
     expect(JSON.stringify(resolvedContext.promptContext)).not.toContain('Later Team')
     expect(JSON.stringify(resolvedContext.promptContext)).not.toContain('later-project')
   })

@@ -161,6 +161,8 @@ type HarnessConfiguration = {
   triageSourceRouting?: AiAssistanceTriageSourceRouting
   /** Revokes source authorization after the generation record is persisted. */
   revokeAuthorizationAfterPersistence?: boolean
+  /** Revokes source authorization immediately before the generation persistence call. */
+  revokeAuthorizationBeforePersistence?: boolean
   /** Captures policy transitions sent to the optional audit boundary. */
   policyAuditRecords?: AiAssistancePolicyAuditInput[]
   /** Changes retention after the initial replay policy read. */
@@ -195,6 +197,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let budgetReservationCount = 0
   let lastBudget: AiAssistanceGenerationBudgetReservation | undefined
   let authorizationState: AiAssistanceAuthorizationState = { current: true }
+  let authorizationCheckCount = 0
   const gatewayInputs: AiModelGenerationInput[] = []
   const feedbackRecords: StoredAiAssistanceFeedback[] = []
   const startedAttempts: StartAiAssistanceGenerationAttemptInput[] = []
@@ -516,6 +519,10 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       }
     },
     async isAuthorizationCurrent() {
+      authorizationCheckCount += 1
+      if (configuration.revokeAuthorizationBeforePersistence && authorizationCheckCount === 3) {
+        authorizationState = { current: false, reason: 'source-changed' }
+      }
       return authorizationState
     },
   }
@@ -536,6 +543,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     lastBudget: () => lastBudget,
     policyPutCalls: () => policyPutCalls,
     resolveContextCount: () => resolveContextCount,
+    authorizationCheckCount: () => authorizationCheckCount,
     service,
     startedAttempts,
     setAuthorizationState(value: AiAssistanceAuthorizationState) {
@@ -1535,6 +1543,27 @@ describe('createAiAssistanceService', () => {
     })
   })
 
+  test('does not persist a draft when source authorization changes at the commit fence', async () => {
+    const harness = createHarness({ revokeAuthorizationBeforePersistence: true })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-commit-source-fence',
+    )).rejects.toMatchObject({
+      category: 'conflict',
+      code: 'AiAssistanceSourceChanged',
+    })
+    expect(harness.authorizationCheckCount()).toBe(3)
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCategory: 'conflict',
+      failureCode: 'AiAssistanceSourceChanged',
+    })])
+  })
+
   test('rejects a deployment-disallowed requested model before source retrieval', async () => {
     const harness = createHarness()
     const request = { ...createSummaryRequest(), modelId: 'model-2' }
@@ -1642,6 +1671,57 @@ describe('createAiAssistanceService', () => {
     ))
       .rejects.toMatchObject({ code: 'AiAssistanceOutputNotAllowed' })
     expect(gatewayInputs).toHaveLength(1)
+  })
+
+  test('accepts a canonical member identifier after restoring a provider alias', async () => {
+    const longMemberId = `member-${'x'.repeat(313)}`
+    const providerAlias = 'U_long_member_0001'
+    const harness = createHarness({
+      privateMemberIdentifiers: [{
+        memberId: longMemberId,
+        providerAlias,
+        identifiers: ['Long Member'],
+      }, {
+        memberId: 'creator@example.com',
+        providerAlias: CREATOR_PROVIDER_ALIAS,
+        identifiers: [],
+      }],
+      assigneeUserIds: [longMemberId],
+      outputDraft: {
+        kind: 'triage',
+        assigneeUserId: {
+          value: providerAlias,
+          reason: 'The provider-local member alias is grounded in the source.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        },
+        customFields: [],
+      },
+    })
+    const request: GenerateAiAssistanceRequest = {
+      task: 'triage',
+      locale: 'en',
+      source: {
+        type: 'triage-entry',
+        teamId: 'team-1',
+        triageEntryId: 'triage-1',
+        expectedRevision: 1,
+      },
+    }
+
+    const generation = await harness.service.generate(
+      createActor(),
+      request,
+      harness.authorization,
+      'request-long-member-id',
+    )
+
+    if (
+      generation.content.availability !== 'available' ||
+      generation.content.draft.kind !== 'triage'
+    ) throw new Error('Expected an available Triage generation.')
+    expect(generation.content.draft.assigneeUserId?.value).toBe(longMemberId)
+    expect(harness.gatewayInputs[0]?.allowedValues.assigneeUserIds).toEqual([providerAlias])
   })
 
   test('rejects a triage routing tuple that mixes independently allowed values', async () => {
