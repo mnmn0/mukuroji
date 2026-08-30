@@ -67,6 +67,8 @@ export function sortCustomFieldOptions(
 export function normalizeWorkItemConfigurationForSave(
   configuration: WorkItemConfiguration,
 ): WorkItemConfiguration {
+  const availableCustomFieldIds = new Set(configuration.customFields.map((field) => field.id))
+
   return {
     ...cloneWorkItemConfiguration(configuration),
     workflow: {
@@ -105,17 +107,21 @@ export function normalizeWorkItemConfigurationForSave(
       })),
       sortOrder: index,
     })),
-    workItemTypes: configuration.workItemTypes?.map((type, index) => ({
-      ...type,
-      name: type.name.trim(),
-      iconToken: type.iconToken.trim(),
-      description: type.description?.trim() || undefined,
-      customFieldIds: [...new Set(type.customFieldIds)],
-      requiredCustomFieldIds: [...new Set(type.requiredCustomFieldIds)]
-        .filter((fieldId) => type.customFieldIds.includes(fieldId)),
-      detailSections: [...new Set(type.detailSections)],
-      allowedChildTypeIds: [...new Set(type.allowedChildTypeIds)],
-      sortOrder: index,
-    })),
+    workItemTypes: configuration.workItemTypes?.map((type, index) => {
+      const customFieldIds = [...new Set(type.customFieldIds)]
+        .filter((fieldId) => availableCustomFieldIds.has(fieldId))
+      return {
+        ...type,
+        name: type.name.trim(),
+        iconToken: type.iconToken.trim(),
+        description: type.description?.trim() || undefined,
+        customFieldIds,
+        requiredCustomFieldIds: [...new Set(type.requiredCustomFieldIds)]
+          .filter((fieldId) => customFieldIds.includes(fieldId)),
+        detailSections: [...new Set(type.detailSections)],
+        allowedChildTypeIds: [...new Set(type.allowedChildTypeIds)],
+        sortOrder: index,
+      }
+    }),
   }
 }

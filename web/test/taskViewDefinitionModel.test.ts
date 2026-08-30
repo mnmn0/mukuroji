@@ -209,6 +209,17 @@ describe('task view definition migration and sanitization', () => {
     ])
   })
 
+  test('preserves Work Item Type filters while sanitizing saved definitions', () => {
+    const result = sanitizeTaskViewDefinition({
+      ...builtInDefinition,
+      filters: {
+        workItemTypeIds: ['incident'],
+      },
+    }, options)
+
+    expect(result.definition.filters.workItemTypeIds).toEqual(['incident'])
+  })
+
   test('keeps custom filters while removing raw custom layout fields from a URL override', () => {
     const overridden = applyTaskViewUrlOverride(builtInDefinition, {
       filters: {

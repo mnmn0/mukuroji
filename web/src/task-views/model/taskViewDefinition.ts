@@ -96,6 +96,7 @@ const taskViewFilterIds: readonly string[] = [
   'priorities',
   'dueDatePreset',
   'includeArchived',
+  'workItemTypeIds',
 ]
 const taskViewLayoutOverrideIds: readonly string[] = [
   'mode',
@@ -725,7 +726,8 @@ function readTaskViewFilters(value: unknown): TaskViewFilters | undefined {
     !copyStringArray(value, 'statuses', filters) ||
     !copyStringArray(value, 'relationIds', filters) ||
     !copyStringArray(value, 'projectIds', filters) ||
-    !copyStringArray(value, 'teamIds', filters)
+    !copyStringArray(value, 'teamIds', filters) ||
+    !copyStringArray(value, 'workItemTypeIds', filters)
   ) return undefined
 
   if (Object.hasOwn(value, 'customFields')) {
@@ -1088,7 +1090,8 @@ function copyStringArray(
     | 'statuses'
     | 'relationIds'
     | 'projectIds'
-    | 'teamIds',
+    | 'teamIds'
+    | 'workItemTypeIds',
   target: TaskViewFilters,
 ): boolean {
   if (!Object.hasOwn(source, key)) return true
@@ -1228,6 +1231,7 @@ function cloneTaskViewFilters(filters: TaskViewFilters): TaskViewFilters {
     ...(filters.date ? { date: { ...filters.date } } : {}),
     ...(filters.projectIds ? { projectIds: [...filters.projectIds] } : {}),
     ...(filters.teamIds ? { teamIds: [...filters.teamIds] } : {}),
+    ...(filters.workItemTypeIds ? { workItemTypeIds: [...filters.workItemTypeIds] } : {}),
     ...(filters.workflowStatuses ? {
       workflowStatuses: filters.workflowStatuses.map((status) => ({ ...status })),
     } : {}),

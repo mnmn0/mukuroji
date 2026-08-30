@@ -990,8 +990,18 @@ function CustomFieldsConfigurationSection({
 }) {
   const t = createTranslator(locale)
   const fields = sortCustomFieldDefinitions(configuration.customFields)
+  /** Updates custom fields while removing type references to fields no longer available. */
   const updateFields = (customFields: CustomFieldDefinition[]) => {
-    onChange({ ...configuration, customFields })
+    const availableFieldIds = new Set(customFields.map((field) => field.id))
+    onChange({
+      ...configuration,
+      customFields,
+      workItemTypes: configuration.workItemTypes?.map((type) => ({
+        ...type,
+        customFieldIds: type.customFieldIds.filter((fieldId) => availableFieldIds.has(fieldId)),
+        requiredCustomFieldIds: type.requiredCustomFieldIds.filter((fieldId) => availableFieldIds.has(fieldId)),
+      })),
+    })
   }
   const updateField = (
     fieldId: string,

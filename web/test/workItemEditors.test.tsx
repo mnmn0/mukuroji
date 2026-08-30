@@ -3,6 +3,7 @@ import type {
   CustomFieldDefinition,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { WorkItemConfigurationPanel } from '../src/work-items/ui/WorkItemConfigurationPanel'
 import { WorkItemFieldsEditor } from '../src/work-items/ui/WorkItemFieldsEditor'
@@ -52,6 +53,25 @@ describe('Work Item editors', () => {
       ])
     expect(configuration.customFields[0]?.options?.map((option) => option.id))
       .toEqual(['released', 'planned', 'active'])
+  })
+
+  test('removes deleted custom fields from Work Item Type references before saving', () => {
+    const configuration = createConfiguration([
+      createCustomFieldDefinition('risk', 'Risk', 0),
+    ])
+    const normalized = normalizeWorkItemConfigurationForSave({
+      ...configuration,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: configuration.workflow.id,
+        id: 'incident',
+        customFieldIds: ['risk', 'deleted-field'],
+        requiredCustomFieldIds: ['risk', 'deleted-field'],
+      }],
+    })
+
+    expect(normalized.workItemTypes?.[0]?.customFieldIds).toEqual(['risk'])
+    expect(normalized.workItemTypes?.[0]?.requiredCustomFieldIds).toEqual(['risk'])
   })
 
   test('allows decimal defaults for every numeric custom field type', () => {
