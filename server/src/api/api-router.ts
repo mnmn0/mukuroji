@@ -19989,12 +19989,16 @@ type AiAssistanceResolverState = {
   privateMemberIdentifiers: ResolvedAiAssistanceContext['privateMemberIdentifiers']
   /** Exact member ID and display-name replacements applied before prompt bounding. */
   privacyAliases: readonly AiAssistanceTextAlias[]
+  /** Active non-guest member identifiers eligible for triage routing. */
+  eligibleMemberIds: readonly string[]
   /** Field identifiers excluded globally when any visible Team defines them as sensitive. */
   sensitiveCustomFieldIds: ReadonlySet<string>
   /** Complete current custom-field identifiers keyed by visible Team. */
   customFieldIdsByTeamId: ReadonlyMap<string, ReadonlySet<string>>
   /** Non-content authorization and configuration fences. */
-  fence: unknown
+  fence: Record<string, unknown>
+  /** Complete routing tuples retained for the authorization token, including bounded additions. */
+  triageRoutingFence: readonly AiAssistanceTriageRoutingTuple[]
   /** Current Project membership rows keyed by Team-qualified routing key. */
   projectMembershipsByRoutingKey: ReadonlyMap<
     string,
@@ -20110,6 +20114,120 @@ async function resolveAiAssistanceProjectMemberIds(
     }
   }
   return membersByProjectRoutingKey
+}
+
+/**
+ * Retains a triage source's Team and Project route when the provider allowlist is bounded.
+ *
+ * Directory results are globally capped for prompt size. A source route must be promoted
+ * before that cap is applied; otherwise a content-only model response would inherit a
+ * source Project that is absent from the validated routing tuple set.
+ *
+ * @param principal - Workspace principal whose Project memberships are being resolved.
+ * @param state - Resolver state containing the bounded route and active-member metadata.
+ * @param sourceRouting - Source Team and optional Project inferred from the authorized source.
+ * @returns Resolver state with the source route first in provider-facing allowlists.
+ */
+async function prioritizeAiAssistanceSourceRouting(
+  principal: WorkspacePrincipal,
+  state: AiAssistanceResolverState,
+  sourceRouting: AiAssistanceTriageSourceRouting | undefined,
+): Promise<AiAssistanceResolverState> {
+  if (sourceRouting === undefined) return state
+  const currentTuples = state.allowedValues.triageRoutingTuples ?? []
+  const sourceTeamTuple = currentTuples.find((tuple) =>
+    tuple.teamId === sourceRouting.teamId && tuple.projectId === undefined)
+  const teamTuple = sourceTeamTuple ?? {
+    teamId: sourceRouting.teamId,
+    assigneeUserIds: state.eligibleMemberIds,
+  }
+  const sourceProjectTuple = sourceRouting.projectId === undefined
+    ? undefined
+    : currentTuples.find((tuple) =>
+        tuple.teamId === sourceRouting.teamId &&
+        tuple.projectId === sourceRouting.projectId)
+  let projectMembershipsByRoutingKey = state.projectMembershipsByRoutingKey
+  let projectTuple = sourceProjectTuple
+  if (sourceRouting.projectId !== undefined && projectTuple === undefined) {
+    const routingKey = createAiAssistanceProjectRoutingKey(
+      sourceRouting.teamId,
+      sourceRouting.projectId,
+    )
+    const resolvedMemberships = await resolveAiAssistanceProjectMemberIds(
+      principal.directoryId,
+      [{ teamId: sourceRouting.teamId, projectId: sourceRouting.projectId }],
+      new Set(state.eligibleMemberIds),
+    )
+    const memberships = resolvedMemberships.get(routingKey)
+    if (memberships === undefined) throw aiAssistanceAuthorizationChangedError()
+    projectTuple = {
+      teamId: sourceRouting.teamId,
+      projectId: sourceRouting.projectId,
+      assigneeUserIds: memberships.map((member) => member.memberId),
+    }
+    const updatedProjectMembershipsByRoutingKey = new Map(
+      state.projectMembershipsByRoutingKey,
+    )
+    updatedProjectMembershipsByRoutingKey.set(routingKey, memberships)
+    projectMembershipsByRoutingKey = updatedProjectMembershipsByRoutingKey
+  }
+  const promotedTuples = [
+    ...(projectTuple === undefined ? [] : [projectTuple]),
+    teamTuple,
+    ...currentTuples.filter((tuple) =>
+      !(tuple.teamId === sourceRouting.teamId && tuple.projectId === undefined) &&
+      !(tuple.teamId === sourceRouting.teamId && tuple.projectId === sourceRouting.projectId)),
+  ].slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
+  const modelTeamIds = prioritizedUniqueAiAllowedValues(
+    promotedTuples.map((tuple) => tuple.teamId),
+    AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
+    [sourceRouting.teamId],
+  )
+  const modelProjectIds = prioritizedUniqueAiAllowedValues(
+    promotedTuples.flatMap((tuple) => tuple.projectId === undefined ? [] : [tuple.projectId]),
+    AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
+    sourceRouting.projectId === undefined ? [] : [sourceRouting.projectId],
+  )
+  const routeByKey = new Map<string, AiAssistanceTriageRoutingTuple>()
+  for (const tuple of promotedTuples) {
+    routeByKey.set(
+      createAiAssistanceProjectRoutingKey(tuple.teamId, tuple.projectId ?? ''),
+      tuple,
+    )
+  }
+  const triageRoutingFence = [...state.triageRoutingFence]
+  for (const tuple of [teamTuple, ...(projectTuple === undefined ? [] : [projectTuple])]) {
+    const key = createAiAssistanceProjectRoutingKey(tuple.teamId, tuple.projectId ?? '')
+    if (!triageRoutingFence.some((candidate) =>
+      createAiAssistanceProjectRoutingKey(candidate.teamId, candidate.projectId ?? '') === key)) {
+      triageRoutingFence.push(tuple)
+    }
+  }
+  const sortedFence = triageRoutingFence
+    .map((tuple) => ({
+      teamId: tuple.teamId,
+      ...(tuple.projectId === undefined ? {} : { projectId: tuple.projectId }),
+      assigneeUserIds: [...tuple.assigneeUserIds].sort((left, right) => left.localeCompare(right)),
+    }))
+    .sort((left, right) => left.teamId.localeCompare(right.teamId) ||
+      (left.projectId ?? '').localeCompare(right.projectId ?? ''))
+  return {
+    ...state,
+    allowedValues: {
+      ...state.allowedValues,
+      teamIds: modelTeamIds,
+      projectIds: modelProjectIds,
+      triageRoutingTuples: [...routeByKey.values()],
+    },
+    projectMembershipsByRoutingKey,
+    triageRoutingFence,
+    fence: {
+      ...state.fence,
+      teamIds: modelTeamIds,
+      projectIds: modelProjectIds,
+      triageRoutingTuples: sortedFence,
+    },
+  }
 }
 
 /** Creates a collision-free key for a Team-qualified Project routing tuple. */
@@ -20230,50 +20348,57 @@ async function resolveAiAssistanceContext(
       )
     )))
   }
+  const triageSourceRouting = resolvedSources.find((source) =>
+    source.triageSourceRouting !== undefined)?.triageSourceRouting
+  const resolverState = await prioritizeAiAssistanceSourceRouting(
+    principal,
+    state,
+    input.request.task === 'triage' ? triageSourceRouting : undefined,
+  )
   const relationIds = uniqueAiAllowedValues([
-    ...state.allowedValues.relationIds,
+    ...resolverState.allowedValues.relationIds,
     ...resolvedSources.flatMap((source) => source.relationIds),
   ], AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
   const workItemEndpoints = uniqueAiWorkItemEndpoints([
-    ...state.allowedValues.workItemEndpoints,
+    ...resolverState.allowedValues.workItemEndpoints,
     ...resolvedSources.flatMap((source) => source.workItemEndpoints),
   ])
   const existingPlanningDependencies = uniqueAiAssistancePlanningDependencies(
     resolvedSources.flatMap((source) => source.existingPlanningDependencies ?? []),
   )
   const candidateAllowedValues: AiAssistanceAllowedValues = {
-    ...state.allowedValues,
+    ...resolverState.allowedValues,
     relationIds,
     statuses: input.request.task === 'planning'
       ? uniqueAiAllowedValues(
           resolvedSources.flatMap((source) => source.workflowStatusIds),
           AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
         )
-      : state.allowedValues.statuses,
+      : resolverState.allowedValues.statuses,
     workItemEndpoints,
     existingPlanningDependencies,
-    triageRoutingTuples: state.allowedValues.triageRoutingTuples,
+    triageRoutingTuples: resolverState.allowedValues.triageRoutingTuples,
   }
   const promptContext = serializeBoundedAiPromptContext({
     task: input.request.task,
-    ...(state.directoryPrompt === undefined
+    ...(resolverState.directoryPrompt === undefined
       ? {}
-      : { directory: state.directoryPrompt }),
+      : { directory: resolverState.directoryPrompt }),
     sources: resolvedSources.map((source) => source.prompt),
     ...(input.request.task === 'search'
       ? { naturalLanguageQuery: input.request.query }
       : {}),
-  }, state.privacyAliases)
+  }, resolverState.privacyAliases)
   const allowedValues: AiAssistanceAllowedValues = {
     assigneeUserIds: filterAiAllowedValuesVisibleInPrompt(
       promptContext,
       candidateAllowedValues.assigneeUserIds,
-      state.privacyAliases,
+      resolverState.privacyAliases,
     ),
     creatorUserIds: filterAiAllowedValuesVisibleInPrompt(
       promptContext,
       candidateAllowedValues.creatorUserIds,
-      state.privacyAliases,
+      resolverState.privacyAliases,
     ),
     teamIds: filterAiAllowedValuesVisibleInPrompt(
       promptContext,
@@ -20307,22 +20432,20 @@ async function resolveAiAssistanceContext(
     triageRoutingTuples: filterAiTriageRoutingTuplesVisibleInPrompt(
       promptContext,
       candidateAllowedValues.triageRoutingTuples ?? [],
-      state.privacyAliases,
+      resolverState.privacyAliases,
     ),
   }
   if (!await isWorkspaceSearchAuthorizationCurrent(
     principal.directoryId,
-    state.searchContext.planningRevision,
-    state.searchContext.documentAuthorizationRevision,
-    state.searchContext.documentAccess,
+    resolverState.searchContext.planningRevision,
+    resolverState.searchContext.documentAuthorizationRevision,
+    resolverState.searchContext.documentAccess,
   )) {
     throw aiAssistanceAuthorizationChangedError()
   }
-  const triageSourceRouting = resolvedSources.find((source) =>
-    source.triageSourceRouting !== undefined)?.triageSourceRouting
-  const authorizationConditions = createAiAssistanceAuthorizationConditions(
+  const authorizationConditions = await createAiAssistanceAuthorizationConditions(
     principal,
-    state,
+    resolverState,
     resolvedSources,
     input.draft,
   )
@@ -20330,11 +20453,11 @@ async function resolveAiAssistanceContext(
     promptContext,
     citations: resolvedSources.map((source) => source.citation),
     authorizationToken: createAiAssistanceAuthorizationToken({
-      state: state.fence,
+      state: resolverState.fence,
       sources: resolvedSources.map((source) => source.fence),
     }),
     allowedValues,
-    privateMemberIdentifiers: state.privateMemberIdentifiers,
+    privateMemberIdentifiers: resolverState.privateMemberIdentifiers,
     authorizationConditions,
     ...(triageSourceRouting === undefined ? {} : { triageSourceRouting }),
   }
@@ -20348,12 +20471,12 @@ async function resolveAiAssistanceContext(
  * @param sources - Authorized source snapshots whose revisions were read.
  * @returns Deduplicated persistence rows that must remain unchanged at commit time.
  */
-function createAiAssistanceAuthorizationConditions(
+async function createAiAssistanceAuthorizationConditions(
   principal: WorkspacePrincipal,
   state: AiAssistanceResolverState,
   sources: readonly ResolvedAiPromptSource[],
   selectedDraft?: AiAssistanceDraft,
-): AiAssistanceAuthorizationCondition[] {
+): Promise<AiAssistanceAuthorizationCondition[]> {
   const workspaceAccessTableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
     getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
     'mukuroji-workspace-access-local'
@@ -20450,7 +20573,7 @@ function createAiAssistanceAuthorizationConditions(
       source.authorizationCondition,
       ...(source.authorizationConditions ?? []),
     ]),
-    ...createAiAssistanceSelectedDraftAuthorizationConditions(
+    ...await createAiAssistanceSelectedDraftAuthorizationConditions(
       principal,
       state,
       sources,
@@ -20795,6 +20918,7 @@ async function createAiAssistanceResolverState(
     directoryPrompt,
     privateMemberIdentifiers,
     privacyAliases,
+    eligibleMemberIds,
     sensitiveCustomFieldIds,
     customFieldIdsByTeamId,
     projectMembershipsByRoutingKey: projectMemberIdsByProjectRoutingKey,
@@ -20814,6 +20938,7 @@ async function createAiAssistanceResolverState(
       team.id,
       resolved.configuration.workflow,
     ])),
+    triageRoutingFence,
     fence: {
       workspaceId: principal.directoryId,
       memberId: principal.userKey,
@@ -20976,12 +21101,12 @@ function createAiAssistanceProjectMembershipAuthorizationCondition(
  * @param draft - Canonical draft being committed, when this is a final check.
  * @returns Selected configuration, member, and Project membership conditions.
  */
-function createAiAssistanceSelectedDraftAuthorizationConditions(
+async function createAiAssistanceSelectedDraftAuthorizationConditions(
   principal: WorkspacePrincipal,
   state: AiAssistanceResolverState,
   sources: readonly ResolvedAiPromptSource[],
   draft: AiAssistanceDraft | undefined,
-): AiAssistanceAuthorizationCondition[] {
+): Promise<AiAssistanceAuthorizationCondition[]> {
   if (draft?.kind !== 'triage') return []
   const sourceRouting = sources.find((source) => source.triageSourceRouting !== undefined)
     ?.triageSourceRouting
@@ -21001,6 +21126,11 @@ function createAiAssistanceSelectedDraftAuthorizationConditions(
     throw aiAssistanceAuthorizationChangedError()
   }
   const conditions: AiAssistanceAuthorizationCondition[] = [...configurationConditions]
+  conditions.push(...await createAiAssistanceDirectoryReferenceAuthorizationConditions(
+    principal.directoryId,
+    selectedTeamId,
+    selectedProjectId,
+  ))
   const selectedAssigneeId = draft.assigneeUserId?.value
   if (selectedAssigneeId === undefined) return conditions
   const memberCondition = state.workspaceMemberAuthorizationConditionsByMemberId.get(
@@ -21023,6 +21153,85 @@ function createAiAssistanceSelectedDraftAuthorizationConditions(
     membership,
   ))
   return conditions
+}
+
+/**
+ * Resolves active Team and Project rows into AI commit-fence conditions.
+ *
+ * The directory adapter owns the physical sort keys, so this boundary consumes its
+ * strongly-read condition checks and binds the semantic identifiers again before the
+ * AI generation transaction. This prevents an archive or replacement from winning a
+ * race after the final source re-read.
+ *
+ * @param workspaceId - Workspace that owns the directory rows.
+ * @param teamId - Destination Team that must remain active.
+ * @param projectId - Optional destination Project that must remain active in the Team.
+ * @returns Exact directory-row conditions for the selected destination.
+ */
+async function createAiAssistanceDirectoryReferenceAuthorizationConditions(
+  workspaceId: string,
+  teamId: string,
+  projectId: string | undefined,
+): Promise<AiAssistanceAuthorizationCondition[]> {
+  const createChecks = workspaceDependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  if (!createChecks) throw aiAssistanceAuthorizationChangedError()
+  let checks: NonNullable<TransactWriteCommandInput['TransactItems']>
+  try {
+    checks = await createChecks.call(
+      workspaceDependencies.projectDirectory,
+      workspaceId,
+      teamId,
+      projectId,
+    )
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw aiAssistanceAuthorizationChangedError()
+    }
+    throw error
+  }
+  const expectedCheckCount = projectId === undefined ? 1 : 2
+  if (checks.length !== expectedCheckCount) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  return checks.map((item, index) => {
+    const conditionCheck = item.ConditionCheck
+    if (conditionCheck === undefined || conditionCheck.TableName === undefined) {
+      throw aiAssistanceAuthorizationChangedError()
+    }
+    const key = Object.fromEntries(
+      Object.entries(conditionCheck.Key ?? {}).flatMap(([name, value]) =>
+        typeof value === 'string' && value.trim() ? [[name, value]] : []),
+    )
+    if (
+      Object.keys(key).length === 0 ||
+      Object.keys(key).length !== Object.keys(conditionCheck.Key ?? {}).length ||
+      key.directoryId !== workspaceId ||
+      key.entryKey === undefined
+    ) {
+      throw aiAssistanceAuthorizationChangedError()
+    }
+    const destinationKind = index === 0 ? 'team' : 'project'
+    const expectedAttributes: Record<string, string> = destinationKind === 'team'
+      ? { entryType: 'team', teamId }
+      : { entryType: 'project', teamId, projectId: projectId ?? '' }
+    if (destinationKind === 'project' && !projectId) {
+      throw aiAssistanceAuthorizationChangedError()
+    }
+    const expectedEntryToken = destinationKind === 'team'
+      ? `TEAM#${teamId}`
+      : `PROJECT#${projectId}`
+    if (!key.entryKey.includes(expectedEntryToken)) {
+      throw aiAssistanceAuthorizationChangedError()
+    }
+    return {
+      kind: 'directory-reference',
+      tableName: conditionCheck.TableName,
+      key,
+      expectedAttributes,
+      expectedAbsentAttributes: ['archivedAt'],
+    }
+  })
 }
 
 /** Creates one cryptographically random, provider-safe member alias. */
@@ -22385,6 +22594,30 @@ function uniqueAiAllowedValues(values: readonly string[], limit: number): string
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))]
     .sort()
     .slice(0, limit)
+}
+
+/**
+ * Deduplicates an allowlist while retaining explicitly required values before the cap.
+ *
+ * @param values - Candidate identifiers to normalize and bound.
+ * @param limit - Maximum number of identifiers returned.
+ * @param preferredValues - Identifiers that must be retained when present.
+ * @returns Ordered unique identifiers with preferred values first.
+ */
+function prioritizedUniqueAiAllowedValues(
+  values: readonly string[],
+  limit: number,
+  preferredValues: readonly string[],
+): string[] {
+  const uniqueValues = [...new Set(values.map((value) => value.trim()).filter(Boolean))]
+  const preferred = preferredValues
+    .map((value) => value.trim())
+    .filter((value, index, candidates) => value.length > 0 && candidates.indexOf(value) === index)
+    .filter((value) => uniqueValues.includes(value))
+  const remaining = uniqueValues
+    .filter((value) => !preferred.includes(value))
+    .sort()
+  return [...preferred, ...remaining].slice(0, limit)
 }
 
 /**

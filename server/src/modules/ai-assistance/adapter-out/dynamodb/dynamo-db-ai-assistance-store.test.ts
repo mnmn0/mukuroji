@@ -650,6 +650,22 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('leaves an unstarted pending receipt available for expired-lease takeover', async () => {
+    const receipt = createPendingReceipt('generation-1', 1)
+    const harness = createHarness([{ Item: receipt }])
+    try {
+      await expect(harness.store.readGenerationReservation({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+      })).resolves.toBeUndefined()
+      expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('records and finalizes only safe provider attempt metadata on the receipt', async () => {
     const rawAudit = createAttemptAudit({
       request: {

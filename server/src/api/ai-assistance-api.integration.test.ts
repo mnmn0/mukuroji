@@ -1284,6 +1284,7 @@ describe('AI assistance API composition', () => {
     expect(observedPrompt).not.toContain('later-project')
     expect(resolvedContext.allowedValues.teamIds).not.toContain('later-team')
     expect(resolvedContext.allowedValues.projectIds).not.toContain('later-project')
+    expect(resolvedContext.allowedValues.projectIds).toContain('refero')
     const routingTuples = resolvedContext.allowedValues.triageRoutingTuples ?? []
     const routingTeamIds = new Set(routingTuples.map((tuple) => tuple.teamId))
     const routingProjectIds = new Set(
@@ -1657,6 +1658,31 @@ describe('AI assistance API composition', () => {
         role: 'manager',
         updatedAt: '2026-06-08T00:00:00.000Z',
       },
+    }))
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'directory-reference',
+      key: {
+        directoryId: 'user#demo@example.com',
+        entryKey: 'TEAM#core-team',
+      },
+      expectedAttributes: {
+        entryType: 'team',
+        teamId: 'core-team',
+      },
+      expectedAbsentAttributes: ['archivedAt'],
+    }))
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'directory-reference',
+      key: {
+        directoryId: 'user#demo@example.com',
+        entryKey: 'PROJECT#refero',
+      },
+      expectedAttributes: {
+        entryType: 'project',
+        teamId: 'core-team',
+        projectId: 'refero',
+      },
+      expectedAbsentAttributes: ['archivedAt'],
     }))
   })
 

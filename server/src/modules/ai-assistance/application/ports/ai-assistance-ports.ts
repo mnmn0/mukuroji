@@ -145,6 +145,7 @@ export type AiAssistanceAuthorizationCondition = {
     | 'document-authorization'
     | 'enterprise-control'
     | 'project-membership'
+    | 'directory-reference'
     | 'work-item-configuration'
     | 'source'
   /** Physical persistence table resolved by the composition boundary. */
