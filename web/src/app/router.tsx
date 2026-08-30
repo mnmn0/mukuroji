@@ -26,6 +26,7 @@ import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
 import { PublicRequestFormPage } from '../requests/PublicRequestFormPage'
 import { RequestIntakePage } from '../requests/RequestIntakePage'
+import { CustomerPage } from '../pages/workspace/CustomerPage'
 import { EnterpriseSsoCallbackPage } from '../pages/auth/EnterpriseSsoCallbackPage'
 import { DocumentPage } from '../documents/DocumentPage'
 import { SharedDocumentPage } from '../documents/SharedDocumentPage'
@@ -117,6 +118,14 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/requests',
                 element: <RequestIntakePage />,
+              },
+              {
+                path: '/customers',
+                element: <CustomerPage />,
+              },
+              {
+                path: '/customers/:customerId',
+                element: <CustomerPage />,
               },
               {
                 path: '/search',

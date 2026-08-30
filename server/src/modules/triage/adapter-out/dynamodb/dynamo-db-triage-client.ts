@@ -11,6 +11,7 @@ import {
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import {
   TRIAGE_BULK_ACTION_LIMIT,
@@ -24,6 +25,7 @@ import {
   type TriageBulkTarget,
   type TriageConfiguration,
   type TriageEntry,
+  type TriageEntryEvent,
   type TriageEntryListInput,
   type TriageEntryPage,
   type TriageMutationReceipt,
@@ -35,6 +37,7 @@ import {
   type TriageSlaPolicy,
   type TriageSourceKind,
   type TriageWorkItemSourcePage,
+  type UpdateTriageCustomerAssociationInput,
   type UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 import {
@@ -477,6 +480,92 @@ export class DynamoDbTriageClient implements TriageClient {
     idempotency: TriageIdempotency,
   ): Promise<TriageMutationReceipt | undefined> {
     return await this.readReceipt(workspaceId, entryId, 'action', idempotency, teamId)
+  }
+
+  /** Associates a Triage Entry with a Customer graph under an optimistic revision fence.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param teamId The expected Team ID.
+   * @param entryId The target Triage Entry identifier.
+   * @param actor The authenticated mutation actor.
+   * @param input The customer association and expected revision.
+   * @returns The updated permission-safe Triage Entry.
+   */
+  async associateCustomer(
+    workspaceId: string,
+    teamId: string,
+    entryId: string,
+    actor: TriageActor,
+    input: UpdateTriageCustomerAssociationInput,
+  ): Promise<TriageEntry> {
+    requireUserId(actor.id, 'Triage actor ID')
+    const current = await this.getEntryForMutation(workspaceId, teamId, entryId)
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+      throw new TriageError(400, 'InvalidTriageInput', 'Triage revision is invalid.')
+    }
+    if (current.revision !== input.expectedRevision) {
+      throw new TriageError(409, 'TriageRevisionConflict', 'The triage entry changed.')
+    }
+    const now = this.now().toISOString()
+    const nextCustomerId = input.customerId === null
+      ? undefined
+      : input.customerId ?? current.customerId
+    const customerChanged = nextCustomerId !== current.customerId
+    const nextContactId = input.contactId === null
+      ? undefined
+      : input.contactId ?? (customerChanged ? undefined : current.contactId)
+    const nextCustomerRequestId = input.customerRequestId === null
+      ? undefined
+      : input.customerRequestId ?? (customerChanged ? undefined : current.customerRequestId)
+    if (
+      nextCustomerId === current.customerId &&
+      nextContactId === current.contactId &&
+      nextCustomerRequestId === current.customerRequestId
+    ) return projectTriageEntryForResponse(current, now)
+    const associationEvent: TriageEntryEvent = {
+      id: this.id(),
+      type: 'customer-associated',
+      actorId: actor.id,
+      summary: 'Customer association updated.',
+      createdAt: now,
+    }
+    const next: TriageEntry = {
+      ...current,
+      ...(nextCustomerId === undefined ? { customerId: undefined } : { customerId: nextCustomerId }),
+      ...(nextContactId === undefined ? { contactId: undefined } : { contactId: nextContactId }),
+      ...(nextCustomerRequestId === undefined ? { customerRequestId: undefined } : { customerRequestId: nextCustomerRequestId }),
+      events: [...current.events, associationEvent].slice(-50),
+      revision: current.revision + 1,
+      updatedAt: now,
+    }
+    validateTriageCustomerAssociation(next)
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: createTriageEntryKey(workspaceId, entryId),
+        UpdateExpression: 'SET #entry = :entry, #revision = :revision',
+        ConditionExpression: '#revision = :expectedRevision AND #teamId = :teamId',
+        ExpressionAttributeNames: {
+          '#entry': 'entry',
+          '#revision': 'revision',
+          '#teamId': 'teamId',
+        },
+        ExpressionAttributeValues: {
+          ':entry': next,
+          ':revision': next.revision,
+          ':expectedRevision': input.expectedRevision,
+          ':teamId': teamId,
+        },
+      }))
+    } catch (error) {
+      if (isConditionalConflict(error)) {
+        throw new TriageError(409, 'TriageRevisionConflict', 'The triage entry changed.', {
+          cause: error,
+        })
+      }
+      throw error
+    }
+    return projectTriageEntryForResponse(next, now)
   }
 
   /** Strongly reads one canonical stored entry without applying a response projection. */
@@ -2527,6 +2616,18 @@ function requireIdentifier(value: string, label: string): string {
     throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`)
   }
   return identifier
+}
+
+/** Validates optional Customer graph identifiers embedded in a Triage Entry. */
+function validateTriageCustomerAssociation(entry: TriageEntry): void {
+  if (entry.customerId === undefined && (entry.contactId !== undefined || entry.customerRequestId !== undefined)) {
+    throw new TriageError(400, 'InvalidTriageInput', 'A Customer is required when a Contact or Customer Request is associated.')
+  }
+  if (entry.customerId !== undefined) requireIdentifier(entry.customerId, 'Customer ID')
+  if (entry.contactId !== undefined) requireIdentifier(entry.contactId, 'Customer contact ID')
+  if (entry.customerRequestId !== undefined) {
+    requireIdentifier(entry.customerRequestId, 'Customer Request ID')
+  }
 }
 
 /** Validates a canonical Workspace identifier that may contain Cognito delimiters. */

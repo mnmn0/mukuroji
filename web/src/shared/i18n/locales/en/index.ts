@@ -18,6 +18,7 @@ import { projectsMessages } from './projects'
 import { capacityPlanningMessages } from './capacity-planning'
 import { triageMessages } from './triage'
 import { aiAssistanceMessages } from './ai-assistance'
+import { customersMessages } from './customers'
 
 /**
  * Verifies that a locale dictionary contains exactly the canonical message keys.
@@ -54,4 +55,5 @@ export const enMessages = defineMessages({
   ...capacityPlanningMessages,
   ...triageMessages,
   ...aiAssistanceMessages,
+  ...customersMessages,
 })

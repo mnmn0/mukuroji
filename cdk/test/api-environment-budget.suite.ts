@@ -215,6 +215,7 @@ const expectedDataConfiguration = {
   CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN: base64(
     ref('ConnectorRuntimeSecret7993B96D'),
   ),
+  CUSTOMERS_TABLE_NAME: base64(ref('CustomersTableB554B793')),
   DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: base64(
     getAtt('DeveloperPlatformConnectorKey7AD18512', 'Arn'),
   ),

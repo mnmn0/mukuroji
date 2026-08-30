@@ -12,6 +12,7 @@ import type {
   TriageMutationReceipt,
   TriageWorkItemReference,
   TriageWorkItemSourcePage,
+  UpdateTriageCustomerAssociationInput,
   UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
@@ -261,6 +262,22 @@ export interface TriageClient {
     cursor?: string,
     visibleProjectIds?: readonly string[],
   ): Promise<TriageWorkItemSourcePage>
+  /** Associates a Triage Entry with a Customer graph using a revision fence.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param teamId The expected Team ID.
+   * @param entryId The Triage Entry identifier.
+   * @param actor The authenticated actor performing the association.
+   * @param input The association and expected revision.
+   * @returns The updated permission-safe entry, when the adapter supports the operation.
+   */
+  associateCustomer?(
+    workspaceId: string,
+    teamId: string,
+    entryId: string,
+    actor: TriageActor,
+    input: UpdateTriageCustomerAssociationInput,
+  ): Promise<TriageEntry>
 }
 
 /** Recursively sorts object keys for a stable semantic fingerprint.

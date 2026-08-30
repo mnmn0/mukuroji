@@ -280,6 +280,7 @@ function bindApiRuntimeConfiguration(
     automationTable,
     capacityPlanningTable,
     collaborationTable,
+    customersTable,
     connectorRuntimeSecret,
     developerPlatformConnectorKey,
     developerPlatformStateKey,
@@ -430,6 +431,7 @@ function bindApiRuntimeConfiguration(
       AUTOMATION_TABLE_NAME: automationTable.tableName,
       AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
       COLLABORATION_TABLE_NAME: collaborationTable.tableName,
+      CUSTOMERS_TABLE_NAME: customersTable.tableName,
       CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN:
         connectorRuntimeSecret.secretArn,
       DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID:
@@ -539,6 +541,7 @@ export function buildApiRuntime(
     automationTable,
     capacityPlanningTable,
     collaborationTable,
+    customersTable,
     connectorRuntimeSecret,
     developerPlatformConnectorKey,
     developerPlatformStateKey,
@@ -669,6 +672,7 @@ export function buildApiRuntime(
   tenantAdministrationTable.grants.readWriteData(apiFunction);
   documentsTable.grants.readWriteData(apiFunction);
   collaborationTable.grants.readWriteData(apiFunction);
+  customersTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
   apiFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -787,6 +791,7 @@ export function buildApiRuntime(
           fileProofingTable.tableArn,
           focusTable.tableArn,
           workspaceSearchTable.tableArn,
+          customersTable.tableArn,
         ],
         conditions: {
           'ForAnyValue:StringEquals': {

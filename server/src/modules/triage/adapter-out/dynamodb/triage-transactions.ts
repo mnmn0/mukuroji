@@ -977,6 +977,9 @@ function isTriageEntry(value: unknown): value is TriageEntry {
     'sla',
     'snoozedUntil',
     'retention',
+    'customerId',
+    'contactId',
+    'customerRequestId',
     'canonicalWorkItem',
     'mergeReceipt',
     'capabilities',
@@ -1004,6 +1007,9 @@ function isTriageEntry(value: unknown): value is TriageEntry {
       ? isIsoInstant(value.snoozedUntil)
       : value.snoozedUntil === undefined) &&
     isRetention(value.retention) &&
+    (value.customerId === undefined || isIdentifier(value.customerId)) &&
+    (value.contactId === undefined || isIdentifier(value.contactId)) &&
+    (value.customerRequestId === undefined || isIdentifier(value.customerRequestId)) &&
     (value.canonicalWorkItem === undefined || isWorkItemReference(value.canonicalWorkItem)) &&
     (value.mergeReceipt === undefined || isMergeReceipt(value.mergeReceipt)) &&
     isCapabilities(value.capabilities) &&
@@ -1216,7 +1222,7 @@ function isEvent(value: unknown): value is TriageEntryEvent {
 /** Validates a persisted event discriminator. */
 function isEventType(value: unknown): value is TriageEntryEvent['type'] {
   return value === 'created' || value === 'assigned' || value === 'accepted' ||
-    value === 'linked' || value === 'duplicate' || value === 'declined' ||
+    value === 'linked' || value === 'customer-associated' || value === 'duplicate' || value === 'declined' ||
     value === 'snoozed' || value === 'information-requested' ||
     value === 'activity-received' || value === 'resurfaced' ||
     value === 'sla-breached' || value === 'escalated' ||

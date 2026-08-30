@@ -9,6 +9,7 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
   requests: '/requests',
+  customers: '/customers',
   documents: '/documents',
   dashboard: '/dashboard',
   planning: '/planning/timeline',

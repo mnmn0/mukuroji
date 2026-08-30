@@ -72,6 +72,7 @@ import type {
   CanonicalWorkItem,
   ConfirmedWorkItemSchedule,
   CustomFieldValue,
+  CustomerImpactSignal,
   RequestSubmissionEvent,
   ResolvedWorkItemConfiguration,
   TriageEntry,
@@ -709,6 +710,8 @@ export type TeamIssueDetailResponse = {
   relations?: WorkItemRelation[]
   /** Relation mutation の optimistic concurrency に使う graph revision です。 */
   relationGraphRevision?: number
+  /** Customer Requests aggregated onto this Work Item. */
+  customerImpact?: CustomerImpactSignal
 }
 
 /**
@@ -4051,6 +4054,7 @@ const TRIAGE_CONTEXT_EVENT_SUMMARIES = {
   assigned: 'Triage assignment changed.',
   accepted: 'Triage entry was accepted.',
   linked: 'Triage entry was linked to a Work Item.',
+  'customer-associated': 'Triage Customer association changed.',
   duplicate: 'Triage entry was marked as duplicate.',
   declined: 'Triage entry was declined.',
   snoozed: 'Triage entry was snoozed.',

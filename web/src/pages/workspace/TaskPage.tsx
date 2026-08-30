@@ -63,6 +63,7 @@ import {
   useTeamIssueDetail,
   useTeamIssues,
 } from '../../issues/queries/useWorkItems'
+import { useProjectCustomerImpact } from '../../customers/queries/useCustomers'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
   applyIssueCollaborationTabToSearchParams,
@@ -244,6 +245,15 @@ export function TaskPage() {
   )
   const canAccessTriage = workspaceAccess?.currentMember.status === 'active' &&
     workspaceAccess.currentMember.role !== 'guest'
+  const {
+    data: projectCustomerImpact,
+    error: projectCustomerImpactError,
+    key: projectCustomerImpactKey,
+  } = useProjectCustomerImpact(
+    accessToken,
+    projectId,
+    Boolean(user && !currentUserError && canAccessTriage),
+  )
   const {
     data: planningSnapshot,
     error: planningError,
@@ -601,6 +611,7 @@ export function TaskPage() {
       ...(issueArtifacts.sessionErrors ?? []),
       ...(projectFiles.sessionErrors ?? []),
       ...(collaboration.sessionErrors ?? []),
+      ...(projectCustomerImpactError ? [projectCustomerImpactError] : []),
     ],
     currentPath,
   )
@@ -1505,6 +1516,7 @@ export function TaskPage() {
       relationCandidates={relationCandidates}
       relationCandidatesErrorMessage={relationCandidatesErrorMessage}
       selectedIssueDetail={selectedIssueDetail}
+      projectCustomerImpact={projectCustomerImpactKey ? projectCustomerImpact : undefined}
       resolvedConfiguration={listConfigurationTeamId ? resolvedConfiguration : undefined}
       resolvedConfigurationsByTeam={workItemConfigurationLoadResult.configurationsByTeam}
       configurationFailedTeamIds={failedConfigurationTeamIds}

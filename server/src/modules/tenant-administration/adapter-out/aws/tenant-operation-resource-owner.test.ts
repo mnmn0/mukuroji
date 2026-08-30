@@ -45,6 +45,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     developerPlatformTableName: 'developer-platform',
     analyticsTableName: 'analytics',
     requestIntakeTableName: 'request-intake',
+    customersTableName: 'customers',
     projectDirectoryTableName: 'project-directory',
     auditEventsTableName: 'audit-events',
     workspaceAccessTableName: 'workspace-access',
@@ -234,7 +235,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(8), operation)
+      await owner.execute(createDataJob(9), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'request-intake',
         ExpressionAttributeValues: {
@@ -243,7 +244,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(10), operation)
+      await owner.execute(createDataJob(11), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'documents',
         ExpressionAttributeValues: {
@@ -252,7 +253,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(11), operation)
+      await owner.execute(createDataJob(12), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'collaboration',
         ExpressionAttributeValues: {
@@ -260,7 +261,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(13), operation)
+      await owner.execute(createDataJob(14), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'notifications',
         ExpressionAttributeValues: {
@@ -268,7 +269,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(14), operation)
+      await owner.execute(createDataJob(15), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'focus',
         ExpressionAttributeValues: {
@@ -276,7 +277,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(15), operation)
+      await owner.execute(createDataJob(16), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'realtime-sessions',
         ExpressionAttributeValues: {
@@ -284,7 +285,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(16), operation)
+      await owner.execute(createDataJob(17), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'file-proofing',
         ExpressionAttributeValues: {
@@ -674,7 +675,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       operationId: 'operation-1',
       step: 'snapshot',
       cursor: {
-        targetIndex: 18,
+        targetIndex: 19,
         phase: 'snapshot',
         processedCount: 0,
       },
@@ -788,7 +789,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       operationId: operation.operationId,
       step: 'snapshot',
       cursor: {
-        targetIndex: 22,
+        targetIndex: 23,
         phase: 'snapshot',
         processedCount: 0,
       },
@@ -829,7 +830,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(copiedPaths[1]).toContain(
         '/snapshot/work-item-import-sources/job-1/source.source',
       )
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(25)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(26)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -906,7 +907,7 @@ describe('AwsTenantOperationResourceOwner', () => {
 
     try {
       const regularFiles = await owner.execute(
-        createDataJob(17, workspaceId),
+        createDataJob(18, workspaceId),
         operation,
       )
       if (regularFiles.status !== 'continuing') {
@@ -937,7 +938,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(deletionBodies[0]).toContain('version-2')
       expect(deletionBodies[1]).toContain(importObjectKey)
       expect(deletionBodies[1]).toContain('version-3')
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(20)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(21)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -1028,7 +1029,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 19 },
+      cursor: { targetIndex: 20, processedCount: 20 },
     }
 
     try {
@@ -1242,7 +1243,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 19 },
+      cursor: { targetIndex: 20, processedCount: 20 },
     }
 
     try {

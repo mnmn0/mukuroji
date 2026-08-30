@@ -45,6 +45,8 @@ export type DataStoreResources = {
   readonly analyticsTable: dynamodb.Table;
   /** Public request intake state table. */
   readonly requestIntakeTable: dynamodb.Table;
+  /** Workspace-scoped Customer, Contact, Customer Request, and saved-view table. */
+  readonly customersTable: dynamodb.Table;
   /** Envelope key for developer platform Webhook secrets. */
   readonly developerPlatformWebhookKey: kms.Key;
   /** Envelope key for developer platform connector credentials. */
@@ -238,6 +240,15 @@ export function buildDataStores(
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     timeToLiveAttribute: 'expiresAt',
+  });
+
+  const customersTable = new dynamodb.Table(stack, 'CustomersTable', {
+    partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
 
   developerPlatformTable.addGlobalSecondaryIndex({
@@ -548,6 +559,7 @@ export function buildDataStores(
     developerPlatformTable,
     analyticsTable,
     requestIntakeTable,
+    customersTable,
     developerPlatformWebhookKey,
     developerPlatformConnectorKey,
     developerPlatformStateKey,

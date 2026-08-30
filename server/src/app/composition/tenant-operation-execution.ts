@@ -260,6 +260,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     developerPlatformTableName: requireEnvironment('DEVELOPER_PLATFORM_TABLE_NAME'),
     analyticsTableName: requireEnvironment('ANALYTICS_TABLE_NAME'),
     requestIntakeTableName: requireEnvironment('REQUEST_INTAKE_TABLE_NAME'),
+    customersTableName: requireEnvironment('CUSTOMERS_TABLE_NAME'),
     projectDirectoryTableName: requireEnvironment('PROJECT_DIRECTORY_TABLE_NAME'),
     auditEventsTableName: requireEnvironment('AUDIT_EVENTS_TABLE_NAME'),
     workspaceAccessTableName: requireEnvironment('WORKSPACE_ACCESS_TABLE_NAME'),

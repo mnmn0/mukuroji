@@ -32,6 +32,8 @@ export type StackOutputResources = {
   readonly analyticsTable: dynamodb.ITable;
   /** Public request intake table. */
   readonly requestIntakeTable: dynamodb.ITable;
+  /** Workspace-scoped Customer and Customer Request table. */
+  readonly customersTable: dynamodb.ITable;
   /** Append-only Work Item event table. */
   readonly teamIssueEventsTable: dynamodb.ITable;
   /** Workspace directory identifier parameter. */
@@ -199,6 +201,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'RequestIntakeTableName', {
     value: resources.requestIntakeTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'CustomersTableName', {
+    value: resources.customersTable.tableName,
   });
   new cdk.CfnOutput(scope, 'TeamIssueEventsTableName', {
     value: resources.teamIssueEventsTable.tableName,

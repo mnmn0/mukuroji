@@ -402,6 +402,11 @@ import {
   createAdminRequestIntakeRouter,
 } from '../modules/request-intake/adapter-in/http/admin-request-intake-router'
 import {
+  CustomerError,
+  createCustomerRouter,
+} from '../modules/customers'
+import type { CustomerPrincipal } from '../modules/customers/adapter-in/http/customer-router'
+import {
   createPublicRequestIntakeRouter,
 } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
 import {
@@ -1230,6 +1235,9 @@ const aiAssistanceService: AiAssistanceService = {
     ),
 }
 const workspaceDependencies: WorkspaceDependencies = {
+  get customers() {
+    return requireAppDependencies().workspace.customers
+  },
   get dashboardSummary() {
     return requireAppDependencies().workspace.dashboardSummary
   },
@@ -1720,6 +1728,12 @@ const enterpriseRoutePermissionRules = [
   { method: 'GET', pathPattern: '/api/request-queue*', permission: 'requests.read' },
   { method: 'GET', pathPattern: '/api/request-submissions*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-submissions*', permission: 'requests.manage' },
+  { method: 'GET', pathPattern: '/api/customers/export', permission: 'requests.manage' },
+  { method: 'GET', pathPattern: '/api/customers*', permission: 'requests.read' },
+  { method: '*', pathPattern: '/api/customers*', permission: 'requests.manage' },
+  { method: 'GET', pathPattern: '/api/customer-requests*', permission: 'requests.read' },
+  { method: '*', pathPattern: '/api/customer-requests*', permission: 'requests.manage' },
+  { method: '*', pathPattern: '/api/customer-contacts*', permission: 'requests.manage' },
   {
     method: 'PUT',
     pathPattern: '/api/teams/:teamId/triage-settings',
@@ -5973,6 +5987,33 @@ routeApp.route('/', createTriageRouter({
   mapError: toTriageErrorResponse,
 }))
 
+routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>({
+  getCustomers: () => workspaceDependencies.customers,
+  requireWorkspaceAccess: requireCustomerWorkspaceAccess,
+  verifyTriageAccess: async (principal, teamId, minimum) => {
+    await requireTeamPermission(principal, teamId, minimum)
+  },
+  verifyWorkItemAccess: async (principal, teamId, workItemId, minimum) => {
+    const context = await requireTeamPermission(principal, teamId, minimum)
+    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      workItemId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    )
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, minimum)
+    return detail.issue.assignedProjectId
+      ? { projectId: detail.issue.assignedProjectId }
+      : {}
+  },
+  verifyProjectAccess: async (principal, projectId, minimum) => {
+    await requireProjectPermission(principal, projectId, minimum)
+  },
+  getTriage: () => workItemDependencies.triage,
+  readJson,
+  mapError: toCustomerErrorResponse,
+}))
+
 routeApp.route('/', createAiAssistanceRouter<WorkspacePrincipal>({
   service: aiAssistanceService,
   readBearerAccessToken,
@@ -8998,7 +9039,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         )
       }
     }
-    const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
+    const [collaborationComments, resolvedConfiguration, relationPage, customerImpact] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
         viewerMemberKey: principal.userKey,
@@ -9009,6 +9050,13 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       }, collaborationReadBudget),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
+      principal.workspaceRole === 'guest'
+        ? Promise.resolve(undefined)
+        : workspaceDependencies.customers.getWorkItemImpact(
+            principal.directoryId,
+            teamId,
+            issueId,
+          ),
     ])
     const allCollaborationComments = collaborationComments.sort(
       compareMigrationAwareComments,
@@ -9036,6 +9084,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         resolvedConfiguration,
         relations: visibleRelations,
         relationGraphRevision: relationPage.graphRevision,
+        customerImpact,
       },
       principal.directoryId,
     )
@@ -9317,6 +9366,17 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       response.issue,
       'Work Item update',
     )
+    if (
+      detail.issue.statusCategory !== 'completed' &&
+      response.issue.statusCategory === 'completed'
+    ) {
+      await workspaceDependencies.customers.prepareCompletionNotifications(
+        principal.directoryId,
+        teamId,
+        issueId,
+        principal.userKey,
+      )
+    }
     return c.json(response)
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
@@ -13187,6 +13247,17 @@ function createApiBulkOperationAdapter(
         response.issue,
         'bulk Work Item update',
       )
+      if (
+        prepared.detail.issue.statusCategory !== 'completed' &&
+        response.issue.statusCategory === 'completed'
+      ) {
+        await workspaceDependencies.customers.prepareCompletionNotifications(
+          principal.directoryId,
+          prepared.item.teamId,
+          prepared.item.workItemId,
+          principal.userKey,
+        )
+      }
       return {
         resultingRevision: response.issue.revision,
         undoPayload: structuredClone(checkpoint.undoPayload),
@@ -13469,6 +13540,8 @@ export interface AutomationActionExecutorDependencies {
   auditEvents: WorkspaceDependencies['auditEvents']
   /** Provides canonical Work Item persistence. */
   teamIssues: WorkItemDependencies['teamIssues']
+  /** Prepares Customer Request completion notification candidates. */
+  customers: WorkspaceDependencies['customers']
   /** Provides canonical Work Item collaboration persistence. */
   collaboration: WorkItemDependencies['collaboration']
   /** Provides Work Item workflow and relation configuration. */
@@ -13500,6 +13573,9 @@ const ambientAutomationActionExecutorDependencies: AutomationActionExecutorDepen
   },
   get teamIssues() {
     return workItemDependencies.teamIssues
+  },
+  get customers() {
+    return workspaceDependencies.customers
   },
   get collaboration() {
     return workItemDependencies.collaboration
@@ -13700,6 +13776,17 @@ async function executeAutomationWorkItemUpdate(
     undefined,
     dependencies,
   )
+  if (
+    detail.issue.statusCategory !== 'completed' &&
+    updatedIssue.statusCategory === 'completed'
+  ) {
+    await dependencies.customers.prepareCompletionNotifications(
+      context.execution.workspaceId,
+      target.teamId,
+      target.workItemId,
+      `automation:${context.execution.ruleId}`,
+    )
+  }
 }
 
 /**
@@ -25106,6 +25193,24 @@ function toTriageErrorResponse(context: Context, error: unknown) {
   return context.json({ code: error.code, message: error.message }, status)
 }
 
+/** Converts Customer, authorization, and persistence failures into the API envelope. */
+function toCustomerErrorResponse(context: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) return toAuthErrorResponse(context, error)
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(context, error)
+  if (error instanceof ProjectDataError) return toProjectDataErrorResponse(context, error)
+  if (!(error instanceof CustomerError)) {
+    console.error(error)
+    return context.json({ code: 'CustomerUnavailable', message: 'Customer data is unavailable.' }, 503)
+  }
+  if (error.status >= 500) console.error(error)
+  const status = error.status === 400 || error.status === 401 || error.status === 403 ||
+      error.status === 404 || error.status === 409 || error.status === 413 ||
+      error.status === 422 || error.status === 429 || error.status === 503
+    ? error.status
+    : 502
+  return context.json({ code: error.code, message: error.message }, status)
+}
+
 function requireSystemAdmin(principal: ProjectPrincipal) {
   if (
     principal.isSystemAdmin ||
@@ -25188,6 +25293,47 @@ function requireWorkspaceBusinessRead(principal: WorkspacePrincipal) {
       'A read-capable Workspace permission is required.',
     )
   }
+}
+
+/** Authenticates a Customer route and applies its Workspace-level capability. */
+async function requireCustomerWorkspaceAccess(
+  context: Context,
+  minimum: 'read' | 'write' | 'manage',
+): Promise<WorkspacePrincipal & CustomerPrincipal> {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new WorkspaceAccessError(401, 'WorkspaceAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (minimum === 'manage') {
+    requireCustomerManagement(principal)
+  } else if (minimum === 'write') {
+    requireWorkspaceBusinessWrite(principal)
+  } else {
+    requireWorkspaceBusinessRead(principal)
+  }
+  return {
+    ...principal,
+    canViewSensitiveData: principal.workspaceRole !== 'guest',
+  }
+}
+
+/** Requires Customer merge, export, and deletion management authority. */
+function requireCustomerManagement(principal: WorkspacePrincipal): void {
+  if (principal.isSystemAdmin && (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin')) return
+  if (principal.enterprisePermissions !== undefined) {
+    if (
+      hasEnterpriseWorkspacePermission(principal, 'requests.manage') ||
+      hasEnterpriseWorkspacePermission(principal, 'workspace.manage')
+    ) return
+  } else if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return
+  }
+  throw new WorkspaceAccessError(
+    403,
+    'CustomerManagementDenied',
+    'Customer management permission is required.',
+  )
 }
 
 /**
@@ -40179,6 +40325,17 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         response.issue,
         'Public Work Item update',
       )
+      if (
+        detail.issue.statusCategory !== 'completed' &&
+        response.issue.statusCategory === 'completed'
+      ) {
+        await workspaceDependencies.customers.prepareCompletionNotifications(
+          principal.directoryId,
+          teamId,
+          workItemId,
+          principal.userKey,
+        )
+      }
       return projectPublicWorkItem(response.issue)
     },
 
@@ -40766,6 +40923,17 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           response.issue,
           'Connector Work Item synchronization',
         )
+        if (
+          detail.issue.statusCategory !== 'completed' &&
+          response.issue.statusCategory === 'completed'
+        ) {
+          await workspaceDependencies.customers.prepareCompletionNotifications(
+            input.workspaceId,
+            input.teamId,
+            input.workItemId,
+            principal.userKey,
+          )
+        }
         return {
           kind: 'applied',
           workItem: toConnectorWorkItemSnapshot(response.issue),

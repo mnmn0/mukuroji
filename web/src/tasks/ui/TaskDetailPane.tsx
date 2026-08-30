@@ -52,6 +52,7 @@ import {
   type WorkItemRelationEditorInput,
 } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { CanonicalWorkItem } from '../api/tasks'
+import { CustomerImpactPanel } from '../../customers/ui/CustomerImpactPanel'
 import { resolveTaskPriority, taskPriorities } from '../model/taskView'
 import {
   areTaskSchedulesEqual,
@@ -302,6 +303,7 @@ export function TaskDetailPane({
   const hasMatchingIssueDetail = Boolean(
     task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
   )
+  const customerImpact = hasMatchingIssueDetail ? detail?.customerImpact : undefined
   const matchingDetailIssue = hasMatchingIssueDetail ? detail?.issue : undefined
   const selectedIssue = matchingDetailIssue && task && matchingDetailIssue.revision < task.revision
     ? task
@@ -887,6 +889,7 @@ export function TaskDetailPane({
         ) : null}
         {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
       </form>
+      {customerImpact ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
       <form
         aria-label={t('tasks.schedule.title')}
         className="hidden"

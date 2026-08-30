@@ -56,6 +56,10 @@ import {
 } from './runtime-control'
 import { createCognitoClient } from '../../modules/authentication'
 import {
+  DynamoDbCustomerClient,
+  InMemoryCustomerClient,
+} from '../../modules/customers'
+import {
   DynamoDbDashboardSummaryClient,
 } from '../../modules/analytics'
 import {
@@ -487,6 +491,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const { tenantAdministration, workspaceAccess } =
     createProductionTenantMeteredWorkspaceAccess()
   return {
+    customers: new DynamoDbCustomerClient(),
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents: createAuditEventsClient(),
@@ -1594,6 +1599,7 @@ export function createTestAppDependencies(): AppDependencies {
     operational: createTestOperationalDependencies(),
     workspace: {
       ...production.workspace,
+      customers: new InMemoryCustomerClient(),
       tenantEntitlementEnforcement: createTestTenantEntitlementEnforcement(),
     },
     workItems: {
@@ -1646,6 +1652,7 @@ export function overrideAppDependencies(
     },
     workspace: {
       ...dependencies.workspace,
+      ...(overrides.customers ? { customers: overrides.customers } : {}),
       ...(overrides.dashboardSummary
         ? { dashboardSummary: overrides.dashboardSummary }
         : {}),

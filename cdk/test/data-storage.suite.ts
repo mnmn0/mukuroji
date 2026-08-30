@@ -16,6 +16,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'WorkItemConfigurationTable35E94558',
     'AutomationTableE3D67F0D',
     'PlanningTable2A0D4CC5',
+    'CustomersTableB554B793',
     'DeveloperPlatformTable772E085C',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
@@ -35,7 +36,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(24);
+  expect(Object.keys(tables)).toHaveLength(25);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({

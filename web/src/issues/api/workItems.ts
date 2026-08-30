@@ -2,6 +2,7 @@ import type {
   CanonicalWorkItem,
   ConfirmWorkItemScheduleChangeInput,
   CreateWorkItemInput,
+  CustomerImpactSignal,
   PreviewWorkItemScheduleInput,
   ResolvedWorkItemConfiguration,
   TeamIssueCommentResponseItem,
@@ -59,6 +60,8 @@ export type TeamIssueDetail = {
    * Relation mutation の optimistic concurrency に使う Team graph revision です。
    */
   relationGraphRevision?: number
+  /** Customer Requests aggregated onto this Work Item. */
+  customerImpact?: CustomerImpactSignal
 }
 
 /**
