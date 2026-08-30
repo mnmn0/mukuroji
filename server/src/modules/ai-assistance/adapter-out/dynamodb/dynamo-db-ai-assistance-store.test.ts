@@ -1546,6 +1546,37 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('retains the Workspace membership fence for break-glass policy writes', async () => {
+    const desired = createPolicy('2026-08-25T00:00:02.000Z')
+    const harness = createHarness([{}], 'AuditTable', 'EnterpriseIdentityTable')
+    try {
+      await expect(harness.store.putPolicyWithAudit(
+        'workspace-1',
+        'break-glass@example.com',
+        desired,
+        0,
+        {
+          workspaceMemberVersion: 7,
+          workspaceRole: 'admin',
+          principalKind: 'break-glass',
+          enterpriseControlRevision: 4,
+        },
+        createPolicyAuditEvent(),
+      )).resolves.toEqual(desired)
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      if (!Array.isArray(transactionItems)) {
+        throw new TypeError('Expected transaction items.')
+      }
+      expect(transactionItems).toHaveLength(4)
+      expect(readRecord(readRecord(transactionItems[1]).ConditionCheck).TableName)
+        .toBe('mukuroji-workspace-access-local')
+      expect(readRecord(readRecord(transactionItems[2]).ConditionCheck).TableName)
+        .toBe('EnterpriseIdentityTable')
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('maps a transaction membership fence failure to an authorization conflict', async () => {
     const desired = createPolicy('2026-08-25T00:00:02.000Z')
     const harness = createHarness([

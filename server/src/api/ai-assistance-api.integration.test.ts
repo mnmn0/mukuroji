@@ -2116,6 +2116,69 @@ describe('AI assistance API composition', () => {
     expect(responseText).not.toContain('Edited comment body')
   })
 
+  test('includes the captured Document comment rows in the generation commit fence', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const document = createDocument()
+    const comment = createDocumentComment(NOW, 'Comment included in the AI source.')
+    let capturedConditions: ResolvedAiAssistanceContext['authorizationConditions'] = []
+    setTestAppDependencies({
+      documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 4
+        },
+        async get() {
+          return document
+        },
+        async listComments() {
+          return { comments: [comment] }
+        },
+      }),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          const resolved = await authorization.resolveContext({ actor, request })
+          capturedConditions = resolved.authorizationConditions ?? []
+          return createWithheldGeneration(request.task, 'source-changed')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: createAiHeaders(),
+      body: JSON.stringify({
+        task: 'summary',
+        locale: 'ja',
+        sources: [{
+          type: 'document',
+          documentId: document.id,
+          expectedRevision: document.revision,
+        }],
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(capturedConditions).toContainEqual(expect.objectContaining({
+      kind: 'source',
+      tableName: 'mukuroji-documents-local',
+      key: {
+        workspaceId: 'user#demo@example.com',
+        recordKey: `COMMENT#${Buffer.from(document.id, 'utf8').toString('base64url')}#${comment.createdAt}#${Buffer.from(comment.id, 'utf8').toString('base64url')}`,
+      },
+      expectedAttributes: {
+        entryType: 'document-comment',
+        id: comment.id,
+        documentId: comment.documentId,
+        resolved: false,
+        createdAt: comment.createdAt,
+        updatedAt: comment.updatedAt,
+      },
+    }))
+  })
+
   test('rejects metadata-only Triage content before the provider boundary', async () => {
     configureFakeProjectClients(true, {
       projectAccesses: [{ projectId: 'refero', role: 'viewer' }],

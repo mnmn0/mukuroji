@@ -19928,6 +19928,20 @@ const AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY = 4
 /** Maximum Project membership rows included in one AI commit transaction. */
 const AI_ASSISTANCE_PROJECT_MEMBERSHIP_CONDITION_LIMIT = 90
 
+/** Maximum operations accepted by a DynamoDB transaction write. */
+const AI_ASSISTANCE_DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
+
+/** Generation and decision transactions reserve one Put plus two revision checks. */
+const AI_ASSISTANCE_GENERATION_TRANSACTION_FIXED_ITEM_COUNT = 3
+
+/** Maximum authorization conditions that fit beside the fixed transaction operations. */
+const AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS =
+  AI_ASSISTANCE_DYNAMODB_TRANSACTION_ITEM_LIMIT -
+  AI_ASSISTANCE_GENERATION_TRANSACTION_FIXED_ITEM_COUNT
+
+/** Conservative non-source condition reserve for Workspace, Planning, Document, and Enterprise rows. */
+const AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE = 4
+
 /** One permission-safe source fragment and the non-content fences that authorize it. */
 type ResolvedAiPromptSource = {
   /** Bounded prompt fragment built from an authorized application projection. */
@@ -19948,6 +19962,8 @@ type ResolvedAiPromptSource = {
   triageSourceRouting?: AiAssistanceTriageSourceRouting
   /** Source-of-truth row that must remain unchanged through a later AI commit. */
   authorizationCondition: AiAssistanceAuthorizationCondition
+  /** Additional source rows, such as the bounded Document comment window, fenced at commit time. */
+  authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
 }
 
 /** Current Project membership row used to bind a triage route to its source-of-truth revision. */
@@ -20155,6 +20171,18 @@ async function resolveAiAssistanceContext(
   requireAiAssistanceActorMatchesPrincipal(principal, input.actor)
   requireWorkspaceBusinessRead(principal)
   const sources = getAiAssistanceRequestSources(input.request)
+  const documentSourceCount = sources.filter((source) => source.type === 'document').length
+  const documentCommentLimit = documentSourceCount === 0
+    ? AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT
+    : Math.max(
+        0,
+        Math.min(
+          AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT,
+          Math.floor((AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS -
+            sources.length - AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE) /
+            documentSourceCount),
+        ),
+      )
   const state = await createAiAssistanceResolverState(
     principal,
     sources.some((source) => source.type === 'document'),
@@ -20181,6 +20209,7 @@ async function resolveAiAssistanceContext(
         state,
         context,
         `source-${offset + index + 1}`,
+        documentCommentLimit,
       )
     )))
   }
@@ -20309,21 +20338,34 @@ function createAiAssistanceAuthorizationConditions(
   const workspaceAccessTableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
     getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
     'mukuroji-workspace-access-local'
-  const conditions: AiAssistanceAuthorizationCondition[] = [{
-    kind: 'workspace-member',
-    tableName: workspaceAccessTableName,
-    key: {
-      workspaceId: principal.directoryId,
-      recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
-    },
-    expectedAttributes: {
-      entryType: 'workspace-member',
-      status: 'active',
-      memberKey: normalizeProjectMemberKey(principal.userKey),
-      role: principal.workspaceRole,
-      version: principal.workspaceMember.version,
-    },
-  }, {
+  const principalKind = principal.principalKind ?? 'member'
+  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  if (
+    principalKind === 'service-account' &&
+    (principal.enterpriseIdentityControlRevision === undefined ||
+      !enterpriseTableName)
+  ) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  const conditions: AiAssistanceAuthorizationCondition[] = principalKind ===
+    'service-account'
+    ? []
+    : [{
+        kind: 'workspace-member',
+        tableName: workspaceAccessTableName,
+        key: {
+          workspaceId: principal.directoryId,
+          recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
+        },
+        expectedAttributes: {
+          entryType: 'workspace-member',
+          status: 'active',
+          memberKey: normalizeProjectMemberKey(principal.userKey),
+          role: principal.workspaceRole,
+          version: principal.workspaceMember.version,
+        },
+      }]
+  conditions.push({
     kind: 'planning',
     tableName: getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
     key: {
@@ -20338,7 +20380,7 @@ function createAiAssistanceAuthorizationConditions(
     ...(state.searchContext.planningRevision === 0
       ? { allowMissingWhenExpectedZero: true }
       : {}),
-  }]
+  })
   if (state.searchContext.documentAuthorizationRevision !== undefined) {
     conditions.push({
       kind: 'document-authorization',
@@ -20357,7 +20399,6 @@ function createAiAssistanceAuthorizationConditions(
     })
   }
   if (principal.enterpriseIdentityControlRevision !== undefined) {
-    const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')
     if (enterpriseTableName) {
       conditions.push({
         kind: 'enterprise-control',
@@ -20377,10 +20418,13 @@ function createAiAssistanceAuthorizationConditions(
     }
   }
   const seen = new Set<string>()
-  return [
+  const deduplicated = [
     ...conditions,
     ...state.projectMembershipConditions,
-    ...sources.map((source) => source.authorizationCondition),
+    ...sources.flatMap((source) => [
+      source.authorizationCondition,
+      ...(source.authorizationConditions ?? []),
+    ]),
   ]
     .filter((condition) => {
       const key = `${condition.tableName}:${JSON.stringify(condition.key)}`
@@ -20388,6 +20432,14 @@ function createAiAssistanceAuthorizationConditions(
       seen.add(key)
       return true
     })
+  if (deduplicated.length > AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS) {
+    throw new AiAssistanceError(
+      'upstream',
+      'AiAssistancePersistenceError',
+      'AI assistance authorization fences exceed the DynamoDB transaction limit.',
+    )
+  }
+  return deduplicated
 }
 
 /**
@@ -20887,6 +20939,7 @@ function getAiAssistanceRequestSources(
  * @param state - Shared current directory and document authorization state.
  * @param context - Current request context used by canonical authorization helpers.
  * @param citationId - Generation-local server-owned citation identifier.
+ * @param documentCommentLimit - Per-document comment bound sized for the commit transaction.
  * @returns Bounded source prompt, citation, and revision fence.
  */
 async function resolveAiAssistanceSource(
@@ -20895,6 +20948,7 @@ async function resolveAiAssistanceSource(
   state: AiAssistanceResolverState,
   context: Context,
   citationId: string,
+  documentCommentLimit: number,
 ): Promise<ResolvedAiPromptSource> {
   if (source.type === 'triage-entry') {
     return await resolveAiTriageSource(principal, source, state, context, citationId)
@@ -20912,7 +20966,13 @@ async function resolveAiAssistanceSource(
     return await resolveAiWorkItemSource(principal, source, state, citationId)
   }
   if (source.type === 'document') {
-    return await resolveAiDocumentSource(principal, source, state, citationId)
+    return await resolveAiDocumentSource(
+      principal,
+      source,
+      state,
+      citationId,
+      documentCommentLimit,
+    )
   }
   return await resolveAiPlanningTargetSource(principal, source, state, citationId)
 }
@@ -21066,6 +21126,35 @@ async function resolveAiTriageSource(
       },
     },
   }
+}
+
+/** Creates commit-time conditions for every Document comment included in the prompt window. */
+function createAiDocumentCommentAuthorizationConditions(
+  workspaceId: string,
+  comments: readonly DocumentComment[],
+): AiAssistanceAuthorizationCondition[] {
+  const tableName = getEnv('DOCUMENTS_TABLE_NAME') ?? 'mukuroji-documents-local'
+  return comments.map((comment) => ({
+    kind: 'source',
+    tableName,
+    key: {
+      workspaceId,
+      recordKey: `COMMENT#${encodeAiDocumentKeyPart(comment.documentId)}#${comment.createdAt}#${encodeAiDocumentKeyPart(comment.id)}`,
+    },
+    expectedAttributes: {
+      entryType: 'document-comment',
+      id: comment.id,
+      documentId: comment.documentId,
+      resolved: comment.resolved,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+    },
+  }))
+}
+
+/** Encodes a Document key component using the storage client's canonical base64url format. */
+function encodeAiDocumentKeyPart(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64url')
 }
 
 /** Resolves one Workspace-admin-only Request Intake submission. */
@@ -21494,6 +21583,7 @@ async function resolveAiDocumentSource(
   source: Extract<AiAssistanceSource, { type: 'document' }>,
   state: AiAssistanceResolverState,
   citationId: string,
+  documentCommentLimit: number,
 ): Promise<ResolvedAiPromptSource> {
   const documentAuthorizationRevision = state.searchContext.documentAuthorizationRevision
   if (documentAuthorizationRevision === undefined) {
@@ -21558,8 +21648,10 @@ async function resolveAiDocumentSource(
   }
   const body = createDocumentWorkspaceSearchBody(document)
   const promptComments = commentPage.comments
-    .slice(0, AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
+    .slice(0, documentCommentLimit)
     .reverse()
+  const commentsTruncated = commentPage.nextCursor !== undefined ||
+    commentPage.comments.length > documentCommentLimit
   return {
     prompt: boundAiPromptPart({
       sourceType: source.type,
@@ -21580,7 +21672,7 @@ async function resolveAiDocumentSource(
           resolved: comment.resolved,
           createdAt: comment.createdAt,
         })),
-      commentsTruncated: commentPage.nextCursor !== undefined,
+      commentsTruncated,
     }, AI_ASSISTANCE_SOURCE_PROMPT_CHARACTER_LIMIT, state.privacyAliases),
     citation: {
       id: citationId,
@@ -21605,6 +21697,7 @@ async function resolveAiDocumentSource(
           resolved: comment.resolved,
         })),
         nextCursor: commentPage.nextCursor,
+        truncated: commentsTruncated,
       },
     },
     relationIds: document.relations.map((relation) => relation.id),
@@ -21622,6 +21715,10 @@ async function resolveAiDocumentSource(
         revision: document.revision,
       },
     },
+    authorizationConditions: createAiDocumentCommentAuthorizationConditions(
+      principal.directoryId,
+      promptComments,
+    ),
   }
 }
 

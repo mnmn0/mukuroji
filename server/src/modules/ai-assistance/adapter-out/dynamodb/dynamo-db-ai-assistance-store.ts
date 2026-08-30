@@ -1004,7 +1004,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       },
     }
     const requiresWorkspaceMemberCondition =
-      (authorizationFence.principalKind ?? 'member') === 'member'
+      (authorizationFence.principalKind ?? 'member') !== 'service-account'
     const workspaceMemberConditionItems = requiresWorkspaceMemberCondition
       ? [createWorkspaceMemberAuthorizationCondition(
           this.#workspaceAccessTableName,
