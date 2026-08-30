@@ -1933,7 +1933,17 @@ function validateGenerationCommitFence(
   }
 }
 
-/** Validates the policy revision and deadline captured for a decision write. */
+/**
+ * Validates the policy revision and deadline captured for a decision write.
+ *
+ * The decision timestamp must exactly match the commit timestamp, and the
+ * commit must occur before the effective expiration boundary. This prevents a
+ * stale or already-expired decision fence from being persisted.
+ *
+ * @param fence Policy, authorization, expiration, and commit values captured for the decision.
+ * @param decidedAt Timestamp assigned to the decision record.
+ * @returns Nothing when the fence is valid; throws a stable authorization error otherwise.
+ */
 function validateDecisionCommitFence(
   fence: AiAssistanceDecisionCommitFence,
   decidedAt: string,

@@ -1793,7 +1793,19 @@ type PrivateIdentifierAliases = {
   disclosureTextAliases: readonly AiAssistanceTextAlias[]
 }
 
-/** Creates resolver-supplied random aliases for potentially identifying member keys. */
+/**
+ * Creates resolver-supplied random aliases for potentially identifying member keys.
+ *
+ * The returned model allowlist keeps the caller-authorized member values while
+ * replacing canonical identifiers with request-local aliases. The provider
+ * allowlist additionally omits internal planning graph metadata, and the
+ * disclosure map only restores identifiers that are present in the authorized
+ * output allowlist.
+ *
+ * @param allowed Resolver-authorized member values and routing tuples.
+ * @param privateMembers Request-local aliases and their canonical member identifiers.
+ * @returns Alias maps and provider/model projections that preserve the privacy invariants.
+ */
 function createPrivateIdentifierAliases(
   allowed: AiAssistanceAllowedValues,
   privateMembers: readonly AiAssistancePrivateMemberIdentifiers[],
