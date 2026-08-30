@@ -173,11 +173,13 @@ describe('contextual task mutations', () => {
     const task = createTask({
       customFieldValues: { note: 'Keep this', risk: 'low' },
       schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+      workItemTypeId: 'bug',
       workflowStatusId: 'todo',
     })
     const patch = {
       customFieldValues: { note: null, risk: 'low' },
       schedule: createDefaultDueDateTaskSchedule('2026-07-25'),
+      workItemTypeId: 'feature',
       workflowStatusId: 'active',
     }
 
@@ -189,12 +191,14 @@ describe('contextual task mutations', () => {
       dueDate: '2026-07-25',
       schedule: createDefaultDueDateTaskSchedule('2026-07-25'),
       statusCategory: 'started',
+      workItemTypeId: 'feature',
       workflowStatusId: 'active',
     })
     expect(optimisticTask.customFieldValues).not.toHaveProperty('note')
     expect(inversePatch).toEqual({
       customFieldValues: { note: 'Keep this', risk: 'low' },
       schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+      workItemTypeId: 'bug',
       workflowStatusId: 'todo',
     })
   })

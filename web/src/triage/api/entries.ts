@@ -52,6 +52,7 @@ export function getTriageEntries(
   if (options.sla) query.set('sla', options.sla)
   if (options.state) query.set('state', options.state)
   if (options.sourceKind) query.set('sourceKind', options.sourceKind)
+  if (options.workItemTypeId) query.set('workItemTypeId', options.workItemTypeId)
   if (options.ownerUserId) query.set('owner', options.ownerUserId)
 
   return requestJson(

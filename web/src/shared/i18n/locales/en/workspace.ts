@@ -29,6 +29,8 @@ export const workspaceMessages = {
   'workspace.focus.section.snoozed': 'Snoozed',
   'workspace.focus.section.done': 'Done',
   'workspace.focus.generatedAt': 'As of {time}',
+  'workspace.focus.filter.workItemType': 'Work Item Type',
+  'workspace.focus.filter.allTypes': 'All types',
   'workspace.focus.loading': 'Loading the Focus queue',
   'workspace.focus.loadError': 'Could not load the Focus queue.',
   'workspace.focus.overviewStale':

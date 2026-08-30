@@ -124,6 +124,10 @@ export type WorkspaceSearchFilters = {
    * Team scope の候補です。
    */
   teamIds?: string[]
+  /**
+   * Work Item Type の候補です。Work Item 以外の entity には一致しません。
+   */
+  workItemTypeIds?: string[]
 }
 
 /**
@@ -206,6 +210,10 @@ export type WorkspaceSearchResult = {
    * Entity の workflow status code です。
    */
   status?: string
+  /**
+   * Work Item に適用された stable Work Item Type ID です。
+   */
+  workItemTypeId?: string
   /**
    * Entity の custom field value map です。
    */

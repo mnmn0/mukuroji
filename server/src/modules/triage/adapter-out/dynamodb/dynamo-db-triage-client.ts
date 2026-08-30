@@ -16,6 +16,7 @@ import {
   TRIAGE_BULK_ACTION_LIMIT,
   TRIAGE_CONFIGURATION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE_ID,
   type CreateManualTriageEntryInput,
   type TriageActionInput,
   type TriageBulkActionInput,
@@ -1738,6 +1739,11 @@ function matchesQueueFilter(
   ) return false
   if (input.state && entry.state !== input.state) return false
   if (input.sourceKind && entry.source.kind !== input.sourceKind) return false
+  if (
+    input.workItemTypeId &&
+    (!entry.canonicalWorkItem ||
+      (entry.canonicalWorkItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) !== input.workItemTypeId)
+  ) return false
   const normalizedEntryOwner = entry.ownerUserId?.trim().toLowerCase()
   if (ownerUserId === 'UNOWNED' && normalizedEntryOwner !== undefined) return false
   if (ownerUserId && ownerUserId !== 'UNOWNED' && normalizedEntryOwner !== ownerUserId) return false
@@ -1833,6 +1839,7 @@ function createQueueCursorScope(
       : [...input.visibleProjectIds].sort(),
     query: input.query,
     sla: input.sla,
+    workItemTypeId: input.workItemTypeId,
   })
 }
 

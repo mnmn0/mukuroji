@@ -55,6 +55,7 @@ export const requestsMessages = {
   'requests.action.moreInfo': '追加情報を依頼',
   'requests.action.duplicate': '重複として確定',
   'requests.action.convert': 'Work Item に変換',
+  'requests.action.workItemType': 'Work Item Type',
   'requests.action.assignee': '担当者 User ID',
   'requests.action.message': 'Requester へのメッセージ',
   'requests.action.reason': '却下理由',

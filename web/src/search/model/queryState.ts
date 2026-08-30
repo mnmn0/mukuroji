@@ -59,7 +59,7 @@ const searchCustomFieldOperators = [
   'is-empty',
   'is-not-empty',
 ] as const satisfies readonly SearchCustomFieldOperator[]
-const defaultColumns = ['title', 'type', 'status', 'assignee', 'project', 'updatedAt']
+const defaultColumns = ['title', 'type', 'workItemType', 'status', 'assignee', 'project', 'updatedAt']
 
 /**
  * Parses URLSearchParams into versioned Workspace Search state.
@@ -99,6 +99,7 @@ export function parseSearchRouteState(searchParams: URLSearchParams): SearchRout
     creatorUserIds: readRepeatedStrings(searchParams, 'creator'),
     teamIds: readRepeatedStrings(searchParams, 'team'),
     projectIds: readRepeatedStrings(searchParams, 'project'),
+    workItemTypeIds: readRepeatedStrings(searchParams, 'workItemType'),
     date: dateFrom || dateTo ? {
       field: readEnumValue(searchParams.get('dateField'), ['createdAt', 'updatedAt', 'dueDate'] as const) ?? 'updatedAt',
       from: dateFrom,
@@ -144,6 +145,7 @@ export function serializeSearchRouteState(state: SearchRouteState) {
   appendValues(searchParams, 'creator', readStringArray(filters.creatorUserIds))
   appendValues(searchParams, 'team', readStringArray(filters.teamIds))
   appendValues(searchParams, 'project', readStringArray(filters.projectIds))
+  appendValues(searchParams, 'workItemType', readStringArray(filters.workItemTypeIds))
   const date = asRecord(filters.date)
   const dateField = readString(date.field)
   if (dateField && dateField !== 'updatedAt') {

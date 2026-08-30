@@ -425,6 +425,7 @@ const components = {
         'priority',
         'creatorMemberKey',
         'workflowStatusId',
+        'workItemTypeId',
         'statusCategory',
         'workflowSchemaVersion',
         'customFieldValues',
@@ -455,6 +456,7 @@ const components = {
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
         creatorMemberKey: { type: 'string' },
         workflowStatusId: { type: 'string' },
+        workItemTypeId: { type: 'string' },
         statusCategory: {
           type: 'string',
           enum: ['backlog', 'unstarted', 'started', 'completed', 'canceled'],
@@ -477,6 +479,7 @@ const components = {
         description: { type: 'string' },
         assignedProjectId: { type: 'string' },
         assigneeUserId: { type: 'string' },
+        workItemTypeId: { type: 'string' },
         workflowStatusId: { type: 'string' },
         customFieldValues: { type: 'object', additionalProperties: true },
         quickCapture: {
@@ -498,7 +501,17 @@ const components = {
         description: { type: 'string' },
         assignedProjectId: { type: ['string', 'null'] },
         assigneeUserId: { type: 'string' },
+        workItemTypeId: { type: 'string' },
         workflowStatusId: { type: 'string' },
+        typeChangeResolution: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['discardCustomFieldIds'],
+          properties: {
+            discardCustomFieldIds: { type: 'array', items: { type: 'string' } },
+            workflowStatusId: { type: 'string' },
+          },
+        },
         customFieldValues: { type: 'object', additionalProperties: true },
         schedule: schemaRef('WorkItemSchedule'),
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -1169,6 +1182,12 @@ const paths = {
           in: 'query',
           schema: { type: 'string' },
           description: 'Workflow status ID filter です。',
+        },
+        {
+          name: 'workItemTypeId',
+          in: 'query',
+          schema: { type: 'string' },
+          description: 'Stable Work Item Type ID filter です。',
         },
         {
           name: 'updatedAfter',

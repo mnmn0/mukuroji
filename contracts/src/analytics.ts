@@ -57,6 +57,8 @@ export type AnalyticsFilter = {
   assigneeUserIds?: string[]
   /** 対象 workflow status category の許可一覧です。 */
   statusCategories?: string[]
+  /** 対象 Work Item Type の許可一覧です。 */
+  workItemTypeIds?: string[]
   /** Custom field value に適用する条件一覧です。 */
   customFields?: AnalyticsCustomFieldFilter[]
   /** `asOf` 時点で archive 済みの Work Item を含めるかどうかです。 */
@@ -67,7 +69,7 @@ export type AnalyticsFilter = {
 export type AnalyticsGroupBy =
   | {
       /** Calendar bucket または Work Item dimension です。 */
-      dimension: 'day' | 'week' | 'month' | 'team' | 'project' | 'assignee' | 'status'
+      dimension: 'day' | 'week' | 'month' | 'team' | 'project' | 'assignee' | 'status' | 'work-item-type'
       /** Built-in dimension では custom field ID を指定しません。 */
       customFieldId?: never
     }

@@ -1156,9 +1156,10 @@ function isSla(value: unknown): value is NonNullable<TriageEntry['sla']> {
 function isWorkItemReference(
   value: unknown,
 ): value is NonNullable<TriageEntry['canonicalWorkItem']> {
-  return isRecord(value) && hasOnlyKeys(value, ['teamId', 'workItemId', 'projectId']) &&
+  return isRecord(value) && hasOnlyKeys(value, ['teamId', 'workItemId', 'projectId', 'workItemTypeId']) &&
     isIdentifier(value.teamId) && isIdentifier(value.workItemId) &&
-    (value.projectId === undefined || isIdentifier(value.projectId))
+    (value.projectId === undefined || isIdentifier(value.projectId)) &&
+    (value.workItemTypeId === undefined || isIdentifier(value.workItemTypeId))
 }
 
 /** Validates duplicate-context merge counts and completion time. */

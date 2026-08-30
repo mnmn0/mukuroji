@@ -24,6 +24,7 @@ const defaultTaskViewColumns = [
   'assignee',
   'dueDate',
   'priority',
+  'workItemType',
 ]
 const taskLayoutModes: readonly TaskViewLayoutMode[] = [
   'table',
@@ -55,6 +56,8 @@ export type TeamIssueViewState = {
   definitionFilter: WorkItemDefinitionFilter
   /** Case-insensitive Issue search query. */
   searchQuery: string
+  /** Work Item Type identifier or the all-type sentinel. */
+  workItemTypeFilter: string
   /** Workflow status identifier or the all-status sentinel. */
   statusFilter: string
   /** Active Team Issue layout. */
@@ -174,6 +177,7 @@ export function taskViewDefinitionToProjectState(
     dueDateFilter: readProjectDueDateFilter(definition.filters.dueDatePreset),
     priorityFilter: definition.filters.priorities?.[0] ?? 'all',
     searchQuery: definition.filters.keyword ?? '',
+    workItemTypeFilter: definition.filters.workItemTypeIds?.[0] ?? 'all',
     sortOrder: definition.layout.sort.find((sort) => sort.field === 'dueDate')?.direction === 'desc'
       ? 'due-date-desc'
       : 'due-date-asc',
@@ -255,6 +259,15 @@ export function projectStateToTaskViewDefinition(
       )
     }
   }
+  if (state.workItemTypeFilter !== currentState.workItemTypeFilter) {
+    if (state.workItemTypeFilter === 'all') delete filters.workItemTypeIds
+    else {
+      filters.workItemTypeIds = updatePrimaryFilterValue(
+        definition.filters.workItemTypeIds,
+        state.workItemTypeFilter,
+      )
+    }
+  }
   if (state.dueDateFilter !== currentState.dueDateFilter) {
     if (state.dueDateFilter === 'all') delete filters.dueDatePreset
     else filters.dueDatePreset = state.dueDateFilter
@@ -296,6 +309,7 @@ export function taskViewDefinitionToTeamState(
     },
     searchQuery: definition.filters.keyword ?? '',
     statusFilter: workflowStatus?.statusId ?? 'all',
+    workItemTypeFilter: definition.filters.workItemTypeIds?.[0] ?? 'all',
     viewMode: definition.layout.mode === 'board' ? 'board' : 'table',
   }
 }
@@ -339,6 +353,15 @@ export function teamStateToTaskViewDefinition(
       filters.workflowCategories = updatePrimaryFilterValue(
         definition.filters.workflowCategories,
         state.definitionFilter.category,
+      )
+    }
+  }
+  if (state.workItemTypeFilter !== currentState.workItemTypeFilter) {
+    if (state.workItemTypeFilter === 'all') delete filters.workItemTypeIds
+    else {
+      filters.workItemTypeIds = updatePrimaryFilterValue(
+        definition.filters.workItemTypeIds,
+        state.workItemTypeFilter,
       )
     }
   }
@@ -552,6 +575,10 @@ export function filterTasksByTaskViewDefinition(
       (!task.assignedProjectId || !definition.filters.projectIds.includes(task.assignedProjectId))
     ) return false
     if (
+      definition.filters.workItemTypeIds?.length &&
+      !definition.filters.workItemTypeIds.includes(task.workItemTypeId ?? 'default')
+    ) return false
+    if (
       definition.filters.assigneeUserIds?.length &&
       (!task.assigneeUserId || !definition.filters.assigneeUserIds.includes(task.assigneeUserId))
     ) return false
@@ -660,6 +687,7 @@ function matchesCanonicalTaskViewKeyword(
     task.assigneeUserId,
     task.assignedProjectId,
     task.workflowStatusId,
+    task.workItemTypeId ?? 'default',
   ].some((value) => value?.normalize('NFKC').toLocaleLowerCase().includes(normalizedKeyword))
 }
 
@@ -708,6 +736,7 @@ function resolveTaskViewFieldValue(
     case 'assignee': return task.assigneeName ?? task.assigneeEmail ?? task.assigneeUserId
     case 'dueDate': return task.dueDate
     case 'priority': return ['low', 'medium', 'high'].indexOf(task.priority)
+    case 'workItemType': return task.workItemTypeId ?? 'default'
     case 'project': return task.assignedProjectId
     case 'team': return task.teamId
     case 'createdAt': return task.createdAt

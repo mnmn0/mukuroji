@@ -15,8 +15,14 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_TYPE_ID,
   type CustomFieldDefinition,
   type CustomFieldValue,
+  type WorkItemDetailSectionId,
+  type WorkItemTypeChangePreview,
+  type WorkItemTypeChangeResolution,
+  type WorkItemTypeDefinition,
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
@@ -146,6 +152,8 @@ export type NormalizeCustomFieldValuesOptions = {
   projectId?: string
   /** Backlog/Triage の quick capture では required value の欠落を許可します。 */
   allowRequiredMissing?: boolean
+  /** Values are validated against this Work Item Type definition. */
+  workItemTypeId?: string
 }
 
 /** Workflow status の解決結果です。 */
@@ -328,8 +336,20 @@ export function validateWorkItemConfiguration(
   }
   const revision = readNonNegativeInteger(value.revision, 'Configuration revision')
   const workflow = validateWorkflowDefinition(value.workflow)
+  const workflows = value.workflows === undefined
+    ? undefined
+    : readWorkflowDefinitions(value.workflows)
+  if (workflows !== undefined) {
+    assertUnique([workflow.id, ...workflows.map((candidate) => candidate.id)], 'Workflow ID')
+  }
   const customFields = readCustomFieldDefinitions(value.customFields)
   validateFormulaDefinitions(customFields)
+  const workItemTypes = value.workItemTypes === undefined
+    ? undefined
+    : readWorkItemTypeDefinitions(value.workItemTypes, customFields, [
+        workflow,
+        ...(workflows ?? []),
+      ])
 
   return {
     scopeType,
@@ -337,7 +357,9 @@ export function validateWorkItemConfiguration(
     schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     revision,
     workflow,
+    ...(workflows === undefined ? {} : { workflows }),
     customFields,
+    ...(workItemTypes === undefined ? {} : { workItemTypes }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
@@ -356,14 +378,213 @@ export function validateWorkflowDefinition(value: unknown): WorkItemConfiguratio
   }
 }
 
+/** Resolves every workflow available to a Work Item Type. */
+export function getWorkItemConfigurationWorkflows(
+  configuration: WorkItemConfiguration,
+): readonly WorkItemConfiguration['workflow'][] {
+  return configuration.workflows === undefined
+    ? [configuration.workflow]
+    : [configuration.workflow, ...configuration.workflows.filter((workflow) =>
+        workflow.id !== configuration.workflow.id,
+      )]
+}
+
+/** Resolves the active or archived Work Item Type for a configuration. */
+export function resolveWorkItemType(
+  configuration: WorkItemConfiguration,
+  requestedTypeId?: unknown,
+  options: { allowArchived?: boolean } = {},
+): WorkItemTypeDefinition {
+  const typeId = requestedTypeId === undefined || requestedTypeId === null || requestedTypeId === ''
+    ? DEFAULT_WORK_ITEM_TYPE_ID
+    : readConfigurationId(requestedTypeId, 'Work Item Type ID')
+  const configuredType = configuration.workItemTypes?.find((candidate) => candidate.id === typeId)
+  const type = configuredType ?? (
+    typeId === DEFAULT_WORK_ITEM_TYPE_ID && configuredType === undefined
+      ? DEFAULT_WORK_ITEM_TYPE
+      : undefined
+  )
+  if (!type) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemType',
+      `Work Item Type "${typeId}" is not defined.`,
+    )
+  }
+  if (!options.allowArchived && type.status === 'archived') {
+    throw new WorkItemConfigurationError(
+      400,
+      'ArchivedWorkItemType',
+      `Work Item Type "${typeId}" is archived and cannot be used for new Work Items.`,
+    )
+  }
+  return type
+}
+
+/**
+ * Checks whether a child Work Item Type is permitted by its parent's definition.
+ *
+ * @param configuration - Resolved Work Item configuration for the Team.
+ * @param parentTypeId - Stored type identifier of the parent Work Item.
+ * @param childTypeId - Stored type identifier of the child Work Item.
+ * @returns Nothing when the parent-child type relation is allowed.
+ * @throws WorkItemConfigurationError when either type is invalid or the relation is denied.
+ */
+export function assertWorkItemChildTypeAllowed(
+  configuration: WorkItemConfiguration,
+  parentTypeId: unknown,
+  childTypeId: unknown,
+): void {
+  const parentType = resolveWorkItemType(configuration, parentTypeId, { allowArchived: true })
+  const childType = resolveWorkItemType(configuration, childTypeId, { allowArchived: true })
+  if (parentType.allowedChildTypeIds.includes(childType.id)) return
+
+  throw new WorkItemConfigurationError(
+    409,
+    'WorkItemChildTypeDenied',
+    `Work Item Type "${childType.id}" cannot be created as a child of "${parentType.id}".`,
+  )
+}
+
+/** Resolves the workflow selected by a Work Item Type. */
+export function resolveWorkItemTypeWorkflow(
+  configuration: WorkItemConfiguration,
+  typeId?: unknown,
+  options: { allowArchived?: boolean } = {},
+): WorkItemConfiguration['workflow'] {
+  const type = resolveWorkItemType(configuration, typeId, options)
+  const hasExplicitType = configuration.workItemTypes?.some((candidate) => candidate.id === type.id) ?? false
+  const workflowId = type.id === DEFAULT_WORK_ITEM_TYPE_ID && !hasExplicitType
+    ? configuration.workflow.id
+    : type.defaultWorkflowId
+  const workflow = getWorkItemConfigurationWorkflows(configuration).find((candidate) =>
+    candidate.id === workflowId,
+  )
+  if (!workflow) {
+    throw invalidConfiguration(
+      `Work Item Type "${type.id}" references unavailable workflow "${workflowId}".`,
+    )
+  }
+  return workflow
+}
+
+/** Returns the custom fields visible to a Work Item Type in definition order. */
+export function getWorkItemTypeCustomFieldDefinitions(
+  configuration: WorkItemConfiguration,
+  typeId?: unknown,
+  options: { allowArchived?: boolean } = {},
+): readonly CustomFieldDefinition[] {
+  const type = resolveWorkItemType(configuration, typeId, options)
+  const hasExplicitType = configuration.workItemTypes?.some((candidate) => candidate.id === type.id) ?? false
+  if (type.id === DEFAULT_WORK_ITEM_TYPE_ID && !hasExplicitType) {
+    return configuration.customFields
+  }
+  const fieldIds = new Set(type.customFieldIds)
+  return configuration.customFields.filter((definition) => fieldIds.has(definition.id))
+}
+
+/** Calculates the data and workflow impact of a Work Item Type change. */
+export function previewWorkItemTypeChange(
+  configuration: WorkItemConfiguration,
+  currentTypeId: unknown,
+  currentWorkflowStatusId: string,
+  currentCustomFieldValues: Readonly<Record<string, CustomFieldValue>>,
+  targetTypeId: unknown,
+  projectId?: string,
+  expectedRevision = 0,
+): WorkItemTypeChangePreview {
+  const currentType = resolveWorkItemType(configuration, currentTypeId, { allowArchived: true })
+  const targetType = resolveWorkItemType(configuration, targetTypeId)
+  const targetWorkflow = resolveWorkItemTypeWorkflow(configuration, targetType.id)
+  const targetDefinitions = getWorkItemTypeCustomFieldDefinitions(configuration, targetType.id)
+    .filter((definition) => isFieldApplicable(definition, projectId))
+  const targetDefinitionIds = new Set(targetDefinitions.map((definition) => definition.id))
+  const lostCustomFieldIds = Object.keys(currentCustomFieldValues)
+    .filter((fieldId) => !targetDefinitionIds.has(fieldId))
+    .sort()
+  const targetStatus = targetWorkflow.statuses.find((status) => status.id === currentWorkflowStatusId)
+  const requiredCustomFieldIds = new Set([
+    ...targetDefinitions
+      .filter((definition) => definition.required)
+      .map((definition) => definition.id),
+    ...targetType.requiredCustomFieldIds,
+  ])
+  const missingRequiredCustomFieldIds = [...requiredCustomFieldIds]
+    .filter((fieldId) =>
+      targetDefinitionIds.has(fieldId) &&
+      currentCustomFieldValues[fieldId] === undefined,
+    )
+    .sort()
+
+  return {
+    expectedRevision,
+    currentWorkItemTypeId: currentType.id,
+    currentWorkflowStatusId,
+    targetWorkItemTypeId: targetType.id,
+    lostCustomFieldIds,
+    ...(targetStatus ? {} : { invalidWorkflowStatusId: currentWorkflowStatusId }),
+    targetInitialWorkflowStatusId: targetWorkflow.initialStatusId,
+    missingRequiredCustomFieldIds,
+    requiresResolution: lostCustomFieldIds.length > 0 ||
+      targetStatus === undefined ||
+      missingRequiredCustomFieldIds.length > 0,
+  }
+}
+
+/** Validates the explicit acknowledgements required before a type change is persisted. */
+export function assertWorkItemTypeChangeResolution(
+  preview: WorkItemTypeChangePreview,
+  resolution: WorkItemTypeChangeResolution | undefined,
+  requestedWorkflowStatusId?: unknown,
+): string {
+  const discarded = [...new Set(resolution?.discardCustomFieldIds ?? [])].sort()
+  const expectedDiscarded = [...preview.lostCustomFieldIds].sort()
+  if (discarded.join('\u0000') !== expectedDiscarded.join('\u0000')) {
+    throw new WorkItemConfigurationError(
+      409,
+      'WorkItemTypeChangeResolutionRequired',
+      'Changing the Work Item Type requires an explicit resolution for every lost custom field.',
+    )
+  }
+  const requestedStatus = requestedWorkflowStatusId ?? resolution?.workflowStatusId
+  if (preview.invalidWorkflowStatusId !== undefined && requestedStatus === undefined) {
+    throw new WorkItemConfigurationError(
+      409,
+      'WorkItemTypeChangeResolutionRequired',
+      'Changing the Work Item Type requires a replacement workflow status.',
+    )
+  }
+  if (requestedStatus !== undefined && typeof requestedStatus !== 'string') {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkflowStatus',
+      'Replacement workflow status must be a string.',
+    )
+  }
+  return requestedStatus ?? (
+    preview.invalidWorkflowStatusId === undefined
+      ? preview.currentWorkflowStatusId
+      : preview.targetInitialWorkflowStatusId
+  )
+}
+
 /** Work Item custom field値へdefault/patchを適用し、全definitionに対して検証します。 */
 export function normalizeCustomFieldValues(
   configuration: WorkItemConfiguration,
   input: unknown,
   options: NormalizeCustomFieldValuesOptions,
 ) {
-  const definitions = configuration.customFields
+  const workItemType = resolveWorkItemType(configuration, options.workItemTypeId, {
+    allowArchived: true,
+  })
+  const definitions = getWorkItemTypeCustomFieldDefinitions(configuration, workItemType.id, {
+    allowArchived: true,
+  })
   const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]))
+  const requiredFieldIds = new Set([
+    ...definitions.filter((definition) => definition.required).map((definition) => definition.id),
+    ...workItemType.requiredCustomFieldIds,
+  ])
   const values: Record<string, CustomFieldValue> = {}
 
   if (options.mode === 'update') {
@@ -427,7 +648,7 @@ export function normalizeCustomFieldValues(
     }
     const value = values[definition.id]
     if (value === undefined) {
-      if (definition.required && !options.allowRequiredMissing) {
+      if (requiredFieldIds.has(definition.id) && !options.allowRequiredMissing) {
         throw invalidFieldValue(`Custom field "${definition.id}" is required.`)
       }
       continue
@@ -488,13 +709,17 @@ export function normalizeCustomFieldValues(
 export function resolveWorkflowStatus(
   configuration: WorkItemConfiguration,
   requestedStatusId?: unknown,
+  workItemTypeId?: unknown,
 ): ResolvedWorkflowStatus {
-  const statuses = configuration.workflow.statuses
+  const workflow = workItemTypeId === undefined
+    ? configuration.workflow
+    : resolveWorkItemTypeWorkflow(configuration, workItemTypeId, { allowArchived: true })
+  const statuses = workflow.statuses
   const requested = typeof requestedStatusId === 'string'
     ? statuses.find((status) => status.id === requestedStatusId.trim())
     : undefined
   const status = requested ?? statuses.find(
-    (candidate) => candidate.id === configuration.workflow.initialStatusId,
+    (candidate) => candidate.id === workflow.initialStatusId,
   )
   if (!status) {
     throw invalidConfiguration('Workflow initial status is unavailable.')
@@ -517,11 +742,15 @@ export function isWorkflowTransitionAllowed(
   configuration: WorkItemConfiguration,
   fromStatusId: string,
   toStatusId: string,
+  workItemTypeId?: unknown,
 ) {
   if (fromStatusId === toStatusId) {
     return true
   }
-  return configuration.workflow.transitions.some((transition) =>
+  const workflow = workItemTypeId === undefined
+    ? configuration.workflow
+    : resolveWorkItemTypeWorkflow(configuration, workItemTypeId, { allowArchived: true })
+  return workflow.transitions.some((transition) =>
     transition.fromStatusId === fromStatusId && transition.toStatusId === toStatusId,
   )
 }
@@ -531,8 +760,9 @@ export function assertWorkflowTransitionAllowed(
   configuration: WorkItemConfiguration,
   fromStatusId: string,
   toStatusId: string,
+  workItemTypeId?: unknown,
 ) {
-  if (!isWorkflowTransitionAllowed(configuration, fromStatusId, toStatusId)) {
+  if (!isWorkflowTransitionAllowed(configuration, fromStatusId, toStatusId, workItemTypeId)) {
     throw new WorkItemConfigurationError(
       409,
       'WorkflowTransitionDenied',
@@ -1260,6 +1490,136 @@ function createConfigurationGuards(
       revision: resolved.inheritedFrom === 'workspace' ? resolved.configuration.revision : 0,
     },
   ]
+}
+
+function readWorkflowDefinitions(value: unknown): WorkItemConfiguration['workflow'][] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw invalidConfiguration('Workflows must be an array with at most 100 entries.')
+  }
+  const workflows = value.map((workflow) => validateWorkflowDefinition(workflow))
+  assertUnique(workflows.map((workflow) => workflow.id), 'Workflow ID')
+  return workflows
+}
+
+function readWorkItemTypeDefinitions(
+  value: unknown,
+  customFields: readonly CustomFieldDefinition[],
+  workflows: readonly WorkItemConfiguration['workflow'][],
+): WorkItemTypeDefinition[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw invalidConfiguration('Work Item Types must be an array with at most 100 entries.')
+  }
+  const types = value.map((candidate) => readWorkItemTypeDefinition(candidate))
+  assertUnique(types.map((type) => type.id), 'Work Item Type ID')
+  assertUnique(types.map((type) => type.sortOrder), 'Work Item Type sortOrder')
+  const customFieldIds = new Set(customFields.map((definition) => definition.id))
+  const customFieldsById = new Map(customFields.map((definition) => [definition.id, definition]))
+  const workflowIds = new Set(workflows.map((workflow) => workflow.id))
+  const typeIds = new Set([...types.map((type) => type.id), DEFAULT_WORK_ITEM_TYPE_ID])
+  for (const type of types) {
+    if (!workflowIds.has(type.defaultWorkflowId)) {
+      throw invalidConfiguration(
+        `Work Item Type "${type.id}" references unknown workflow "${type.defaultWorkflowId}".`,
+      )
+    }
+    if (type.customFieldIds.some((fieldId) => !customFieldIds.has(fieldId))) {
+      throw invalidConfiguration(`Work Item Type "${type.id}" references an unknown custom field.`)
+    }
+    if (type.requiredCustomFieldIds.some((fieldId) => !type.customFieldIds.includes(fieldId))) {
+      throw invalidConfiguration(
+        `Work Item Type "${type.id}" has a required custom field that is not available.`,
+      )
+    }
+    if (type.requiredCustomFieldIds.some((fieldId) => customFieldsById.get(fieldId)?.type === 'formula')) {
+      throw invalidConfiguration(`Work Item Type "${type.id}" cannot require a formula field.`)
+    }
+    const typeFieldIds = new Set(type.customFieldIds)
+    for (const fieldId of type.customFieldIds) {
+      const definition = customFieldsById.get(fieldId)
+      if (definition?.type !== 'formula') continue
+      const missingReference = readFormulaReferences(definition.formulaExpression ?? '')
+        .find((reference) => !typeFieldIds.has(reference))
+      if (missingReference) {
+        throw invalidConfiguration(
+          `Work Item Type "${type.id}" formula field "${fieldId}" references an unavailable field "${missingReference}".`,
+        )
+      }
+    }
+    if (type.allowedChildTypeIds.some((childTypeId) => !typeIds.has(childTypeId))) {
+      throw invalidConfiguration(`Work Item Type "${type.id}" references an unknown child type.`)
+    }
+  }
+  return types
+}
+
+function readWorkItemTypeDefinition(value: unknown): WorkItemTypeDefinition {
+  if (!isRecord(value)) {
+    throw invalidConfiguration('Work Item Type definition must be an object.')
+  }
+  const customFieldIds = readConfigurationIdList(value.customFieldIds, 'Work Item Type custom field IDs')
+  const requiredCustomFieldIds = readConfigurationIdList(
+    value.requiredCustomFieldIds,
+    'Work Item Type required custom field IDs',
+  )
+  const detailSections = readDetailSections(value.detailSections)
+  const allowedChildTypeIds = readConfigurationIdList(
+    value.allowedChildTypeIds,
+    'Work Item Type child type IDs',
+  )
+  if (value.status !== 'active' && value.status !== 'archived') {
+    throw invalidConfiguration('Work Item Type status is invalid.')
+  }
+  return {
+    id: readConfigurationId(value.id, 'Work Item Type ID'),
+    name: readDisplayName(value.name, 'Work Item Type name'),
+    iconToken: readConfigurationId(value.iconToken, 'Work Item Type icon token'),
+    ...(value.description === undefined
+      ? {}
+      : { description: readBoundedText(value.description, 'Work Item Type description', 2_000) }),
+    status: value.status,
+    defaultWorkflowId: readConfigurationId(value.defaultWorkflowId, 'Work Item Type workflow ID'),
+    customFieldIds,
+    requiredCustomFieldIds,
+    detailSections,
+    allowedChildTypeIds,
+    sortOrder: readNonNegativeInteger(value.sortOrder, 'Work Item Type sortOrder'),
+  }
+}
+
+function readConfigurationIdList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw invalidConfiguration(`${label} must be an array with at most 100 entries.`)
+  }
+  const values = value.map((candidate) => readConfigurationId(candidate, label))
+  assertUnique(values, label)
+  return values
+}
+
+function readDetailSections(value: unknown): WorkItemDetailSectionId[] {
+  if (!Array.isArray(value) || value.length > 20) {
+    throw invalidConfiguration('Work Item Type detail sections must be an array with at most 20 entries.')
+  }
+  const sections = value.map((candidate) => {
+    if (!isWorkItemDetailSectionId(candidate)) {
+      throw invalidConfiguration('Work Item Type detail section is invalid.')
+    }
+    return candidate
+  })
+  assertUnique(sections, 'Work Item Type detail section')
+  return sections
+}
+
+function readBoundedText(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw invalidConfiguration(`${label} is invalid.`)
+  }
+  return value.trim()
+}
+
+function isWorkItemDetailSectionId(value: unknown): value is WorkItemDetailSectionId {
+  return value === 'overview' || value === 'description' || value === 'custom-fields' ||
+    value === 'workflow' || value === 'schedule' || value === 'relations' ||
+    value === 'files' || value === 'activity'
 }
 
 function readCustomFieldDefinitions(value: unknown) {

@@ -1,5 +1,10 @@
 import { useRef, type KeyboardEvent } from 'react'
-import { TRIAGE_BULK_ACTION_LIMIT } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  TRIAGE_BULK_ACTION_LIMIT,
+  type WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ClockIcon, ShieldIcon } from '../../shared/ui/icons'
 import type {
@@ -13,6 +18,8 @@ import type {
 import { resolveTriageNavigationIndex } from '../model/keyboard'
 import type { TriageEntryView } from '../model/triageView'
 import { TriageSourceIcon } from './TriageSourceIcon'
+import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
+import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 
 /** Props accepted by the Team triage queue list and filters. */
 export type TriageQueueProps = {
@@ -22,6 +29,8 @@ export type TriageQueueProps = {
   readonly entries: readonly TriageEntryView[]
   /** URL-backed filters controlling the visible queue. */
   readonly filters: TriageQueueFilters
+  /** Work Item configuration used to label and group canonical entries. */
+  readonly workItemConfiguration?: WorkItemConfiguration
   /** Whether initial queue data is loading. */
   readonly isLoading?: boolean
   /** Whether another cursor page is loading. */
@@ -125,8 +134,16 @@ export function TriageQueue({
   selectedEntryId,
   selectedEntryIds,
   t,
+  workItemConfiguration,
 }: TriageQueueProps) {
   const rowButtons = useRef(new Map<string, HTMLButtonElement>())
+  const workItemTypes = resolveWorkItemTypes(workItemConfiguration)
+  const workItemTypeLabels = new Map(workItemTypes.map((type) => [type.id, type.name]))
+  const workItemTypeDefinitions = new Map(workItemTypes.map((type) => [type.id, type]))
+  const groupedEntries = groupTriageEntries(entries, workItemTypeLabels)
+  const navigableEntries = groupedEntries.flatMap((group) =>
+    group.entries.map(({ view }) => view),
+  )
   const selectedIdSet = new Set(selectedEntryIds)
   const selectableEntries = entries.filter((view) => canBulkAct(view, allowedBulkActions))
   const visibleSelectionCandidates = selectableEntries.slice(0, TRIAGE_BULK_ACTION_LIMIT)
@@ -139,9 +156,9 @@ export function TriageQueue({
   ) => {
     if (isAiOperationPending) return
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return
-    const nextIndex = resolveTriageNavigationIndex(index, event.key, entries.length)
+    const nextIndex = resolveTriageNavigationIndex(index, event.key, navigableEntries.length)
     if (nextIndex === undefined) return
-    const nextEntry = entries[nextIndex]
+    const nextEntry = navigableEntries[nextIndex]
     if (!nextEntry) return
     event.preventDefault()
     onSelectEntry(nextEntry.entry.id)
@@ -262,6 +279,20 @@ export function TriageQueue({
                 <option key={sla} value={sla}>{t(slaLabelKeys[sla])}</option>
               ))}
             </FilterSelect>
+            <FilterSelect
+              label={t('triage.filter.workItemType')}
+              disabled={isAiOperationPending}
+              value={filters.workItemTypeId ?? ''}
+              onChange={(value) => onFiltersChange({
+                ...filters,
+                workItemTypeId: value || undefined,
+              })}
+            >
+              <option value="">{t('triage.filter.all')}</option>
+              {workItemTypes.map((type) => (
+                <option key={type.id} value={type.id}>{type.name}</option>
+              ))}
+            </FilterSelect>
           </div>
         </div>
       </div>
@@ -299,7 +330,14 @@ export function TriageQueue({
         </div>
       ) : (
         <ul className="divide-y divide-[var(--workbench-border)]" data-testid="triage-entry-list">
-          {entries.map((view, index) => {
+          {groupedEntries.map((group) => (
+            <li className="list-none" key={group.typeId}>
+              <div className="flex items-center justify-between gap-3 bg-[var(--workbench-surface-muted)] px-3 py-2 text-xs font-bold uppercase tracking-[0.06em] text-[var(--workbench-muted)]">
+                <h3>{group.label}</h3>
+                <span className="tabular-nums">{group.entries.length}</span>
+              </div>
+              <ul className="divide-y divide-[var(--workbench-border)]">
+          {group.entries.map(({ view, index }) => {
             const entry = view.entry
             const isSelected = entry.id === selectedEntryId
             const isBulkSelectable = canBulkAct(view, allowedBulkActions)
@@ -355,6 +393,15 @@ export function TriageQueue({
                             : `${entry.requester.displayName} · ${view.sourceLabel}`}
                         </span>
                         <span className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-semibold text-[var(--workbench-muted)]">
+                          <span className="workbench-badge inline-flex items-center gap-1.5">
+                            <WorkItemTypeIcon
+                              className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
+                              iconToken={workItemTypeDefinitions.get(
+                                entry.canonicalWorkItem?.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+                              )?.iconToken ?? DEFAULT_WORK_ITEM_TYPE.iconToken}
+                            />
+                            {workItemTypeLabels.get(entry.canonicalWorkItem?.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) ?? DEFAULT_WORK_ITEM_TYPE_ID}
+                          </span>
                           <span>{formatDateTime(entry.lastActivityAt, locale)}</span>
                           <span>{entry.ownerUserId ?? t('triage.queue.unowned')}</span>
                           <SlaLabel state={view.slaState} t={t} />
@@ -378,6 +425,9 @@ export function TriageQueue({
               </li>
             )
           })}
+              </ul>
+            </li>
+          ))}
         </ul>
       )}
 
@@ -497,8 +547,42 @@ function canBulkAct(
 function hasActiveFilters(filters: TriageQueueFilters) {
   return Boolean(
     filters.query || filters.state || filters.source || filters.sla ||
-    (filters.owner && filters.owner !== 'all'),
+    filters.workItemTypeId || (filters.owner && filters.owner !== 'all'),
   )
+}
+
+/** Groups triage entries by canonical Work Item Type while preserving queue order in each group. */
+function groupTriageEntries(
+  entries: readonly TriageEntryView[],
+  labels: ReadonlyMap<string, string>,
+): Array<{
+  typeId: string
+  label: string
+  entries: Array<{ view: TriageEntryView; index: number }>
+}> {
+  const groups = new Map<string, {
+    typeId: string
+    label: string
+    entries: Array<{ view: TriageEntryView; index: number }>
+  }>()
+  entries.forEach((view, index) => {
+    const typeId = view.entry.canonicalWorkItem?.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+    const group = groups.get(typeId) ?? {
+      entries: [],
+      label: labels.get(typeId) ?? typeId,
+      typeId,
+    }
+    group.entries.push({ index, view })
+    groups.set(typeId, group)
+  })
+  let navigationIndex = 0
+  return [...groups.values()].map((group) => ({
+    ...group,
+    entries: group.entries.map(({ view }) => ({
+      index: navigationIndex++,
+      view,
+    })),
+  }))
 }
 
 /** Narrows a select value to a supported entry state. */

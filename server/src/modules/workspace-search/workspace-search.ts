@@ -15,6 +15,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
   TASK_VIEW_SCHEMA_VERSION,
@@ -169,6 +170,8 @@ export type WorkspaceSearchDocument = {
   creatorUserId?: string
   /** Entity の workflow status code です。 */
   status?: string
+  /** Stable Work Item Type ID for Work Item entities. */
+  workItemTypeId?: string
   /** Custom field value map です。 */
   customFields?: Record<string, SearchCustomFieldValue>
   /** Entity が持つ relation ID です。 */
@@ -1039,6 +1042,7 @@ export function createWorkspaceSearchDocument(
   copyOptionalText(document, input, 'assigneeUserId', 512)
   copyOptionalText(document, input, 'creatorUserId', 512)
   copyOptionalText(document, input, 'status', 256)
+  copyOptionalText(document, input, 'workItemTypeId', 256)
   copyOptionalText(document, input, 'createdAt', 128)
   copyOptionalText(document, input, 'updatedAt', 128)
   if (input.sourceRevision !== undefined) {
@@ -1273,6 +1277,8 @@ export function createWorkItemWorkspaceSearchDocument(input: {
   creatorUserId?: string
   /** Work Item の現在 status です。 */
   status?: string
+  /** Work Item の stable Type ID です。 */
+  workItemTypeId?: string
   /** Work Item の custom field values です。 */
   customFields?: Record<string, SearchCustomFieldValue>
   /** Work Item の relation IDs です。 */
@@ -1304,6 +1310,7 @@ export function createWorkItemWorkspaceSearchDocument(input: {
     ...(input.assigneeUserId ? { assigneeUserId: input.assigneeUserId } : {}),
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.status ? { status: input.status } : {}),
+    ...(input.workItemTypeId ? { workItemTypeId: input.workItemTypeId } : {}),
     ...(input.customFields ? { customFields: input.customFields } : {}),
     ...(input.relationIds ? { relationIds: input.relationIds } : {}),
     ...(input.dueDate ? { dueDate: input.dueDate } : {}),
@@ -4056,6 +4063,7 @@ function normalizeWorkspaceSearchFilters(filters: unknown) {
   copyFilterStringList(normalized, filters, 'relationIds')
   copyFilterStringList(normalized, filters, 'projectIds')
   copyFilterStringList(normalized, filters, 'teamIds')
+  copyFilterStringList(normalized, filters, 'workItemTypeIds')
   if (filters.customFields) {
     if (!Array.isArray(filters.customFields) || filters.customFields.length > 50) {
       throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Custom field filters are invalid.')
@@ -4093,6 +4101,13 @@ function matchesWorkspaceSearchFilters(
   if (filters.statuses?.length && (!document.status || !filters.statuses.includes(document.status))) return false
   if (filters.projectIds?.length && (!document.projectId || !filters.projectIds.includes(document.projectId))) return false
   if (filters.teamIds?.length && (!document.teamId || !filters.teamIds.includes(document.teamId))) return false
+  if (
+    filters.workItemTypeIds?.length &&
+    (
+      document.entityType !== 'work-item' ||
+      !filters.workItemTypeIds.includes(document.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID)
+    )
+  ) return false
   if (filters.relationIds?.length && !filters.relationIds.every((relationId) => document.relationIds?.includes(relationId))) return false
   if (filters.customFields?.length && !filters.customFields.every((filter) => matchesCustomFieldFilter(document.customFields?.[filter.fieldId], filter))) return false
   if (filters.date) {
@@ -6216,7 +6231,7 @@ function normalizeStringList(values: unknown[], label: string, maxItems: number)
 function copyFilterStringList(
   target: WorkspaceSearchFilters,
   source: Record<string, unknown>,
-  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds',
+  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds' | 'workItemTypeIds',
 ) {
   const value = source[key]
   if (value !== undefined) {
@@ -6431,13 +6446,16 @@ function copyOptionalText<
 function copyOptionalResultFields(result: WorkspaceSearchResult, document: WorkspaceSearchDocument) {
   for (const key of [
     'subtitle', 'body', 'teamId', 'projectId', 'parentId', 'assigneeUserId',
-    'creatorUserId', 'status', 'dueDate', 'createdAt', 'updatedAt',
+    'creatorUserId', 'status', 'workItemTypeId', 'dueDate', 'createdAt', 'updatedAt',
   ] as const) {
     const value = document[key]
     if (value !== undefined) result[key] = value
   }
   if (document.customFields) {
     result.customFields = document.customFields
+  }
+  if (document.entityType === 'work-item' && result.workItemTypeId === undefined) {
+    result.workItemTypeId = DEFAULT_WORK_ITEM_TYPE_ID
   }
 }
 

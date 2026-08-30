@@ -742,6 +742,7 @@ function readListInput(context: Context): TriageEntryListInput {
   const query = context.req.query('query')?.trim()
   const state = context.req.query('state')
   const sourceKind = context.req.query('sourceKind')
+  const workItemTypeId = context.req.query('workItemTypeId')
   const sla = context.req.query('sla')
   const ownerUserId = context.req.query('ownerUserId')
   const ownerAlias = context.req.query('owner')
@@ -753,6 +754,7 @@ function readListInput(context: Context): TriageEntryListInput {
     ...(query ? { query: readQueueQuery(query) } : {}),
     ...(state ? { state: readState(state) } : {}),
     ...(sourceKind ? { sourceKind: readSourceKind(sourceKind) } : {}),
+    ...(workItemTypeId ? { workItemTypeId: readIdentifier(workItemTypeId, 'Work Item Type ID') } : {}),
     ...(sla ? { sla: readQueueSlaFilter(sla) } : {}),
     ...(owner
       ? { ownerUserId: readOwnerFilter(owner) }
@@ -798,7 +800,7 @@ function readAction(value: unknown): TriageActionInput {
     }
   }
   if (record.action === 'accept' && record.mode === 'create') {
-    requireOnlyKeys(record, ['action', 'mode', 'expectedRevision', 'projectId'], 'Accept-create action')
+    requireOnlyKeys(record, ['action', 'mode', 'expectedRevision', 'projectId', 'workItemTypeId'], 'Accept-create action')
     return {
       action: 'accept',
       mode: 'create',
@@ -806,6 +808,9 @@ function readAction(value: unknown): TriageActionInput {
       ...(record.projectId === undefined
         ? {}
         : { projectId: readIdentifier(record.projectId, 'Project ID') }),
+      ...(record.workItemTypeId === undefined
+        ? {}
+        : { workItemTypeId: readIdentifier(record.workItemTypeId, 'Work Item Type ID') }),
     }
   }
   if (record.action === 'accept' && record.mode === 'link') {

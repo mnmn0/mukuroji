@@ -33,6 +33,14 @@ describe('Automation rule domain', () => {
       type: 'status',
       toStatusId: 'cancelled',
     }, event)).toBe(false)
+    expect(matchesAutomationTrigger({
+      type: 'work-item-type',
+      fromWorkItemTypeId: 'default',
+      toWorkItemTypeId: 'incident',
+    }, {
+      ...event,
+      changes: [{ field: 'workItemTypeId', before: 'default', after: 'incident' }],
+    })).toBe(true)
   })
 
   test('evaluates nested conditions against typed domain roots', () => {

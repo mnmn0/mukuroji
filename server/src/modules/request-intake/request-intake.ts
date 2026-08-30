@@ -727,6 +727,7 @@ export function createRequestWorkItemInput(
     input: {
       title: title.slice(0, 500),
       ...(description ? { description } : {}),
+      ...(overrides.workItemTypeId ? { workItemTypeId: overrides.workItemTypeId } : {}),
       ...(target.projectId ? { assignedProjectId: target.projectId } : {}),
       assigneeUserId: target.assigneeUserId,
       ...(target.workflowStatusId ? { workflowStatusId: target.workflowStatusId } : {}),

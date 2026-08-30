@@ -469,6 +469,8 @@ export type CanonicalWorkItem = WorkItemBase & {
   status?: never
   /** Configuration workflow 内の status ID です。 */
   workflowStatusId: string
+  /** Stable Work Item Type identifier. Legacy rows omit this and resolve to the built-in type. */
+  workItemTypeId?: string
   /** List/report の横断集計に利用する標準 status category です。 */
   statusCategory: WorkflowStatusCategory
   /** Value を検証した workflow configuration schema version です。 */
@@ -563,6 +565,8 @@ export type CreateWorkItemInput = {
    * 担当者を参照する Workspace user ID です。
    */
   assigneeUserId: string
+  /** Stable Work Item Type selected for the new Work Item. */
+  workItemTypeId?: string
   /**
    * 作成時に適用する workflow status ID です。
    */
@@ -603,6 +607,10 @@ export type WorkItemPatch = {
    * 変更後の担当者 ID です。
    */
   assigneeUserId?: string
+  /** Stable Work Item Type that should replace the current type. */
+  workItemTypeId?: string
+  /** Explicit acknowledgement for fields or status affected by a type change. */
+  typeChangeResolution?: import('./work-item-types').WorkItemTypeChangeResolution
   /**
    * 変更後の workflow status ID です。
    */

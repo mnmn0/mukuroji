@@ -1300,6 +1300,8 @@ export type ListPublicWorkItemsRequest = {
    * Workflow status ID filter です。
    */
   workflowStatusId?: string
+  /** Stable Work Item Type ID filter. */
+  workItemTypeId?: string
   /**
    * この ISO 8601 timestamp 以降に更新された resource へ絞り込みます。
    */

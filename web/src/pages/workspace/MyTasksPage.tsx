@@ -93,6 +93,7 @@ const taskViewBuiltInFields = [
   'assignee',
   'dueDate',
   'priority',
+  'workItemType',
   'project',
   'team',
 ]
@@ -708,6 +709,7 @@ export function MyTasksPage() {
     { id: 'assignee', label: t('tasks.column.assignee') },
     { id: 'dueDate', label: t('tasks.column.dueDate') },
     { id: 'priority', label: t('tasks.column.priority') },
+    { id: 'workItemType', label: t('tasks.column.workItemType') },
     { id: 'project', label: t('workspace.column.project') },
     { id: 'team', label: t('workspace.column.team') },
     ...(taskViewCustomFields.length > 0

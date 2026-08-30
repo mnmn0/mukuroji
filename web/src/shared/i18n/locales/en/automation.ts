@@ -55,6 +55,7 @@ export const automationMessages = {
   'automation.trigger.assigneeChange': 'Assignee changed',
   'automation.trigger.dueDate': 'Due date changed or reached',
   'automation.trigger.customFieldChange': 'Custom field changed',
+  'automation.trigger.workItemTypeChange': 'Work Item Type changed',
   'automation.trigger.comment': 'Comment added',
   'automation.trigger.formSubmission': 'Form submitted',
   'automation.trigger.webhook': 'Webhook received',

@@ -30,6 +30,7 @@ import {
   type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleWeekday,
   type WorkItemSyncConflict,
+  type WorkItemTypeChangeResolution,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
 import type {
@@ -2448,6 +2449,7 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'customFieldValues',
     'schedule',
     'priority',
+    'workItemTypeId',
   ], 'Work Item body')
   const description = readOptionalString(body.description, 'description', 100_000)
   return {
@@ -2462,6 +2464,9 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
       : {}),
     ...(body.workflowStatusId !== undefined
       ? { workflowStatusId: readIdentifier(body.workflowStatusId, 'workflowStatusId') }
+      : {}),
+    ...(body.workItemTypeId !== undefined
+      ? { workItemTypeId: readIdentifier(body.workItemTypeId, 'workItemTypeId') }
       : {}),
     ...(body.customFieldValues !== undefined
       ? { customFieldValues: readCustomFieldValues(body.customFieldValues, false) }
@@ -2481,6 +2486,8 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'customFieldValues',
     'schedule',
     'priority',
+    'workItemTypeId',
+    'typeChangeResolution',
   ], 'Work Item patch')
   const result: UpdatePublicWorkItemRequest = {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
@@ -2497,6 +2504,12 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   }
   if ('workflowStatusId' in body) {
     result.workflowStatusId = readIdentifier(body.workflowStatusId, 'workflowStatusId')
+  }
+  if ('workItemTypeId' in body) {
+    result.workItemTypeId = readIdentifier(body.workItemTypeId, 'workItemTypeId')
+  }
+  if ('typeChangeResolution' in body) {
+    result.typeChangeResolution = readPublicWorkItemTypeChangeResolution(body.typeChangeResolution)
   }
   if ('customFieldValues' in body) {
     result.customFieldValues = readCustomFieldValues(body.customFieldValues, true)
@@ -2518,6 +2531,29 @@ function readDeletePublicWorkItemRequest(value: unknown) {
   assertAllowedFields(body, ['expectedRevision'], 'Delete request')
   return {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
+  }
+}
+
+/** Reads the explicit acknowledgement required for a public Work Item Type change. */
+function readPublicWorkItemTypeChangeResolution(
+  value: unknown,
+): WorkItemTypeChangeResolution {
+  const body = requireRecord(value, 'typeChangeResolution must be an object.')
+  assertAllowedFields(
+    body,
+    ['discardCustomFieldIds', 'workflowStatusId'],
+    'typeChangeResolution',
+  )
+  return {
+    discardCustomFieldIds: readStringArray(
+      body.discardCustomFieldIds,
+      'typeChangeResolution.discardCustomFieldIds',
+      200,
+      true,
+    ).map((fieldId) => readIdentifier(fieldId, 'discardCustomFieldId')),
+    ...(body.workflowStatusId === undefined
+      ? {}
+      : { workflowStatusId: readIdentifier(body.workflowStatusId, 'workflowStatusId') }),
   }
 }
 
@@ -3312,6 +3348,7 @@ function readWorkItemFilters(c: Context) {
   const assignedProjectId = c.req.query('assignedProjectId')
   const assigneeUserId = c.req.query('assigneeUserId')
   const workflowStatusId = c.req.query('workflowStatusId')
+  const workItemTypeId = c.req.query('workItemTypeId')
   const updatedAfter = c.req.query('updatedAfter')
   return {
     teamId,
@@ -3323,6 +3360,9 @@ function readWorkItemFilters(c: Context) {
       : {}),
     ...(workflowStatusId
       ? { workflowStatusId: readIdentifier(workflowStatusId, 'workflowStatusId') }
+      : {}),
+    ...(workItemTypeId
+      ? { workItemTypeId: readIdentifier(workItemTypeId, 'workItemTypeId') }
       : {}),
     ...(updatedAfter
       ? { updatedAfter: readIsoTimestamp(updatedAfter, 'updatedAfter') }

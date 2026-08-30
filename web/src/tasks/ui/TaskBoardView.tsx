@@ -22,6 +22,7 @@ import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyC
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypeLabel,
 } from '../../work-items/model/workItemDisplay'
 import {
   createProjectStatusTestToken,
@@ -52,6 +53,7 @@ import {
   TaskPriorityBadge,
   TaskStatusBadge,
   TaskViewHeading,
+  TaskWorkItemTypeBadge,
 } from './TaskViewPrimitives'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 
@@ -136,6 +138,7 @@ export function TaskBoardView({
   const visibleFields = new Set((presentation?.columns ?? [
     { field: 'title' },
     { field: 'status' },
+    { field: 'workItemType' },
     { field: 'assignee' },
     { field: 'dueDate' },
     { field: 'priority' },
@@ -474,6 +477,12 @@ export function TaskBoardView({
                           onCommit={(value) => moveTaskToStatus(task, value)}
                         />
                       ) : null}
+                      {visibleFields.has('workItemType') ? (
+                        <TaskWorkItemTypeBadge
+                          configuration={taskConfiguration}
+                          task={task}
+                        />
+                      ) : null}
                       {visibleFields.has('assignee') ? (
                         <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[#5f6874]">
                           {showAssigneeAvatars ? (
@@ -666,6 +675,7 @@ function resolveProjectBoardGroupValue(
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'workItemType': value = resolveWorkItemTypeLabel(task, configuration); break
     case 'project': value = task.assignedProjectId ?? '—'; break
     case 'team': value = task.teamId; break
     default: {

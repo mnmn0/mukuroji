@@ -67,6 +67,7 @@ export function parseAnalyticsRouteState(
     projectIds: readOptionalRepeated(searchParams, 'project'),
     assigneeUserIds: readOptionalRepeated(searchParams, 'assignee'),
     statusCategories: readOptionalRepeated(searchParams, 'status'),
+    workItemTypeIds: readOptionalRepeated(searchParams, 'workItemType'),
     customFields: readCustomFields(searchParams),
     includeArchived: searchParams.has('archived')
       ? searchParams.get('archived') === '1'
@@ -140,6 +141,7 @@ export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
   appendFilterValues(searchParams, 'project', filter.projectIds)
   appendFilterValues(searchParams, 'assignee', filter.assigneeUserIds)
   appendFilterValues(searchParams, 'status', filter.statusCategories)
+  appendFilterValues(searchParams, 'workItemType', filter.workItemTypeIds)
 
   for (const customField of readUnknownArray(filter.customFields)) {
     searchParams.append('customField', stableStringify(customField))

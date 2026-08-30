@@ -1,5 +1,6 @@
-import type { AiTriageDraft } from '@mukuroji/contracts'
+import type { AiTriageDraft, WorkItemConfiguration } from '@mukuroji/contracts'
 import {
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -22,6 +23,12 @@ import {
 } from '../model/keyboard'
 import type { TriageEntryView } from '../model/triageView'
 import { TriageSourceIcon } from './TriageSourceIcon'
+import {
+  resolveWorkItemTypes,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeLabel,
+} from '../../work-items/model/workItemDisplay'
+import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 
 /** Props accepted by the permission-aware triage entry detail pane. */
 export type TriageEntryDetailProps = {
@@ -45,6 +52,8 @@ export type TriageEntryDetailProps = {
   readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
   /** Selected permission-safe entry view. */
   readonly view?: TriageEntryView
+  /** Work Item configuration used to label an accepted canonical Work Item. */
+  readonly workItemConfiguration?: WorkItemConfiguration
   /** Current locale used for dates. */
   readonly locale: 'ja' | 'en'
   /** Whether the selected entry detail is loading. */
@@ -112,10 +121,18 @@ export function TriageEntryDetail({
   teamId,
   eligibleAssigneeIdsByProject,
   visibleProjectIds = [],
+  workItemConfiguration,
   view,
 }: TriageEntryDetailProps) {
+  const workItemTypes = useMemo(
+    () => resolveWorkItemTypes(workItemConfiguration).filter((type) => type.status === 'active'),
+    [workItemConfiguration],
+  )
   const [actionMode, setActionMode] = useState<TriageActionMode>()
   const [acceptMode, setAcceptMode] = useState<'create' | 'link'>('create')
+  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
+    () => workItemTypes[0]?.id ?? 'default',
+  )
   const [actionError, setActionError] = useState(false)
   const [actionAnnouncement, setActionAnnouncement] = useState('')
   const [ownerUserId, setOwnerUserId] = useState(view?.entry.ownerUserId ?? '')
@@ -208,6 +225,8 @@ export function TriageEntryDetail({
   }
 
   const entry = view.entry
+  const selectedWorkItemType = workItemTypes.find((type) => type.id === selectedWorkItemTypeId) ??
+    workItemTypes[0]
   const canonicalPath = entry.canonicalWorkItem
     ? createTeamIssuesPath(
         entry.canonicalWorkItem.teamId,
@@ -307,6 +326,21 @@ export function TriageEntryDetail({
                 ? t('triage.permission.denied')
                 : `${entry.requester.displayName}${entry.requester.guest ? ` · ${t('triage.detail.guest')}` : ''}`}
             </p>
+            {entry.canonicalWorkItem ? (
+              <span className="mt-2 inline-flex items-center gap-1.5 workbench-badge">
+                <WorkItemTypeIcon
+                  className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
+                  iconToken={resolveWorkItemTypeDefinition(
+                    workItemConfiguration,
+                    entry.canonicalWorkItem.workItemTypeId,
+                  )?.iconToken ?? 'work-item'}
+                />
+                {resolveWorkItemTypeLabel(
+                  { workItemTypeId: entry.canonicalWorkItem.workItemTypeId },
+                  workItemConfiguration,
+                )}
+              </span>
+            ) : null}
           </div>
           <span className={stateTone(entry.state)}>{t(stateLabelKeys[entry.state])}</span>
         </div>
@@ -594,22 +628,42 @@ export function TriageEntryDetail({
                   ) : null}
                 </div>
                 {acceptMode === 'create' && entry.capabilities.canAcceptCreate ? (
-                  <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-                    {t('triage.action.projectId')}
-                    <input
-                      autoFocus
-                      className="workbench-input min-h-10 px-3"
-                      name="projectId"
-                      onChange={(event) => {
-                        setProjectId(event.target.value)
-                        const nextDirtyState = { ...routingDirtyRef.current, project: true }
-                        routingDirtyRef.current = nextDirtyState
-                        setRoutingDirty(nextDirtyState)
-                      }}
-                      placeholder={t('triage.action.projectOptional')}
-                      value={projectId}
-                    />
-                  </label>
+                  <>
+                    <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                      {t('triage.action.workItemType')}
+                      <select
+                        className="workbench-input min-h-10 px-3"
+                        name="workItemTypeId"
+                        onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
+                        value={selectedWorkItemType?.id ?? 'default'}
+                      >
+                        {workItemTypes.map((type) => (
+                          <option key={type.id} value={type.id}>{type.name}</option>
+                        ))}
+                      </select>
+                      {selectedWorkItemType?.description ? (
+                        <span className="text-xs font-medium text-[var(--workbench-muted)]">
+                          {selectedWorkItemType.description}
+                        </span>
+                      ) : null}
+                    </label>
+                    <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                      {t('triage.action.projectId')}
+                      <input
+                        autoFocus
+                        className="workbench-input min-h-10 px-3"
+                        name="projectId"
+                        onChange={(event) => {
+                          setProjectId(event.target.value)
+                          const nextDirtyState = { ...routingDirtyRef.current, project: true }
+                          routingDirtyRef.current = nextDirtyState
+                          setRoutingDirty(nextDirtyState)
+                        }}
+                        placeholder={t('triage.action.projectOptional')}
+                        value={projectId}
+                      />
+                    </label>
+                  </>
                 ) : (
                   <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                     {t('triage.action.workItemId')}
@@ -797,11 +851,13 @@ function createActionInput(
   if (actionMode === 'accept') {
     if (acceptMode === 'create' && entry.capabilities.canAcceptCreate) {
       const projectId = readFormValue(formData, 'projectId')
+      const workItemTypeId = readFormValue(formData, 'workItemTypeId')
       return {
         action: 'accept',
         expectedRevision,
         mode: 'create',
         ...(projectId ? { projectId } : {}),
+        ...(workItemTypeId ? { workItemTypeId } : {}),
       }
     }
     const workItemId = readFormValue(formData, 'workItemId')

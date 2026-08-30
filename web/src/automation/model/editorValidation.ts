@@ -34,7 +34,7 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000
 
 /** Trigger type が設定値を必須とするか返します。 */
 export function automationTriggerRequiresConfiguration(type: AutomationTrigger['type']) {
-  return type === 'custom-field' || type === 'form' || type === 'webhook'
+  return type === 'custom-field' || type === 'work-item-type' || type === 'form' || type === 'webhook'
 }
 
 /** Trigger type が汎用設定欄を使用するか返します。 */
@@ -119,6 +119,7 @@ export function parseAutomationTemplatePayload(value: string):
     'schedule',
     'teamId',
     'title',
+    'workItemTypeId',
     'workflowStatusId',
   ])
   if (Object.keys(parsed).some((key) => !allowedFields.has(key))) {
@@ -147,6 +148,7 @@ export function parseAutomationTemplatePayload(value: string):
     (parsed.customFieldValues !== undefined && !isRecord(parsed.customFieldValues)) ||
     (parsed.description !== undefined && typeof parsed.description !== 'string') ||
     (parsed.teamId !== undefined && typeof parsed.teamId !== 'string') ||
+    (parsed.workItemTypeId !== undefined && typeof parsed.workItemTypeId !== 'string') ||
     (parsed.workflowStatusId !== undefined && typeof parsed.workflowStatusId !== 'string')
   ) {
     return { error: 'invalid-value' }
@@ -173,6 +175,9 @@ export function parseAutomationTemplatePayload(value: string):
       ...(parsed.priority === undefined ? {} : { priority: parsed.priority }),
       schedule,
       ...(parsed.teamId === undefined ? {} : { teamId: parsed.teamId }),
+      ...(parsed.workItemTypeId === undefined
+        ? {}
+        : { workItemTypeId: parsed.workItemTypeId }),
       ...(parsed.workflowStatusId === undefined
         ? {}
         : { workflowStatusId: parsed.workflowStatusId }),

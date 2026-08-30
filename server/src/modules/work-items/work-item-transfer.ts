@@ -111,6 +111,7 @@ const supportedTargetFields = new Set([
   'description',
   'assignedProjectId',
   'workflowStatusId',
+  'workItemTypeId',
   'priority',
 ])
 
@@ -171,6 +172,7 @@ export function createWorkItemExport(
     'description',
     'assignedProjectId',
     'assigneeUserId',
+    'workItemTypeId',
     'workflowStatusId',
     'statusCategory',
     'dueDate',
@@ -209,6 +211,7 @@ function toExportWorkItem(workItem: WorkItem) {
       ? { assignedProjectId: workItem.assignedProjectId }
       : {}),
     assigneeUserId: workItem.assigneeUserId,
+    workItemTypeId: workItem.workItemTypeId,
     workflowStatusId: workItem.workflowStatusId,
     statusCategory: workItem.statusCategory,
     customFieldValues: structuredClone(workItem.customFieldValues),
@@ -344,6 +347,12 @@ function mapImportRow(
     'workflowStatusId',
     errors,
   )
+  const workItemTypeId = readOptionalImportString(
+    read('workItemTypeId'),
+    row,
+    'workItemTypeId',
+    errors,
+  )
   const customFieldValues: Record<string, CustomFieldValue> = {}
 
   for (const [targetField] of mapping) {
@@ -368,6 +377,7 @@ function mapImportRow(
       ...(description ? { description } : {}),
       ...(assignedProjectId ? { assignedProjectId } : {}),
       ...(workflowStatusId ? { workflowStatusId } : {}),
+      ...(workItemTypeId ? { workItemTypeId } : {}),
       ...(Object.keys(customFieldValues).length > 0 ? { customFieldValues } : {}),
     },
   }

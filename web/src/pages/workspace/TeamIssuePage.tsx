@@ -11,12 +11,15 @@ import type {
   WorkItemActionSelection,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
+  WorkItemDetailSectionId,
   WorkItemRelation,
   WorkItemDependencyEndpoint,
   WorkItemSchedule,
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
+  WorkItemTypeChangePreview,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import {
   Fragment,
   useCallback,
@@ -60,6 +63,7 @@ import {
 } from '../../shared/i18n/i18n'
 import {
   createTeamIssue,
+  previewTeamIssueWorkItemType,
   TeamIssuesApiError,
   type CreateTeamIssueInput,
   type TeamIssue,
@@ -113,6 +117,7 @@ import {
   formatTaskScheduleRange,
   taskScheduleModeLabelKeys,
 } from '../../tasks/model/taskSchedule'
+import { TaskWorkItemTypeBadge } from '../../tasks/ui/TaskViewPrimitives'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useOptionalWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -160,11 +165,18 @@ import {
   formatWorkItemCustomFieldValue,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
+  resolveConfiguredWorkflowStatuses,
   resolveCreateWorkflowStatuses,
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
   resolveWorkItemPersonOptions,
   resolveWorkItemTitle,
+  resolveWorkItemTypeLabel,
+  resolveWorkItemTypeCustomFields,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeFormFields,
+  resolveWorkItemTypes,
+  resolveWorkItemTypeWorkflow,
   resolveWorkItemWorkflowStatusId,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowCategoryToneClassName,
@@ -264,6 +276,7 @@ const taskViewBuiltInFields = [
   'assignee',
   'dueDate',
   'priority',
+  'workItemType',
   'project',
   'team',
 ]
@@ -312,6 +325,24 @@ type CreatedTeamIssueMutation = {
   issue: TeamIssue
   /** Application-relative route opened after creation, including retained view state. */
   navigationPath: string
+}
+
+/** Local state used to review a Team Issue Work Item Type change. */
+type TeamIssueTypeChangeState = {
+  /** Field IDs whose removal has been acknowledged by the operator. */
+  acknowledgedLostCustomFieldIds: string[]
+  /** Issue revision represented by this preview. */
+  revision: number
+  /** Whether the latest preview request is in flight. */
+  isPreviewing: boolean
+  /** Server-authoritative preview result. */
+  preview?: WorkItemTypeChangePreview
+  /** Replacement status selected for an invalid current status. */
+  replacementWorkflowStatusId?: string
+  /** Error from the latest preview request. */
+  errorMessage?: string
+  /** Type currently being reviewed. */
+  targetWorkItemTypeId: string
 }
 
 /**
@@ -724,7 +755,7 @@ export function TeamIssuePage() {
     ...taskViewBuiltInFields,
     ...taskViewCustomFields.map((field) => `custom:${field.id}`),
   ]
-  const taskViewWorkflowStatuses = (taskViewConfiguration?.workflow.statuses ?? []).map(
+  const taskViewWorkflowStatuses = resolveConfiguredWorkflowStatuses(taskViewConfiguration).map(
     (status) => ({ statusId: status.id, teamId }),
   )
   const taskViewController = useTaskViewController({
@@ -1008,6 +1039,7 @@ export function TeamIssuePage() {
     { id: 'assignee', label: t('tasks.column.assignee') },
     { id: 'dueDate', label: t('tasks.column.dueDate') },
     { id: 'priority', label: t('tasks.column.priority') },
+    { id: 'workItemType', label: t('tasks.column.workItemType') },
     { id: 'project', label: t('issues.column.project') },
     ...(taskViewCustomFields.length > 0
       ? [{ id: 'customFields', label: t('workItems.fields.title') }]
@@ -1219,6 +1251,7 @@ export function TeamIssueScreen({
   const [localViewMode, setLocalViewMode] = useState<IssueViewMode>(initialViewMode)
   const [localSearchQuery, setLocalSearchQuery] = useState('')
   const [localStatusFilter, setLocalStatusFilter] = useState<string>('all')
+  const [localWorkItemTypeFilter, setLocalWorkItemTypeFilter] = useState<string>('all')
   const [localDefinitionFilter, setLocalDefinitionFilter] = useState<WorkItemDefinitionFilter>({
     category: 'all',
     customFieldId: '',
@@ -1287,11 +1320,13 @@ export function TeamIssueScreen({
   const viewMode = viewState?.viewMode ?? localViewMode
   const searchQuery = viewState?.searchQuery ?? localSearchQuery
   const statusFilter = viewState?.statusFilter ?? localStatusFilter
+  const workItemTypeFilter = viewState?.workItemTypeFilter ?? localWorkItemTypeFilter
   const definitionFilter = viewState?.definitionFilter ?? localDefinitionFilter
   const currentViewState: TeamIssueViewState = {
     definitionFilter,
     searchQuery,
     statusFilter,
+    workItemTypeFilter,
     viewMode,
   }
 
@@ -1301,6 +1336,7 @@ export function TeamIssueScreen({
     setLocalDefinitionFilter(nextViewState.definitionFilter)
     setLocalSearchQuery(nextViewState.searchQuery)
     setLocalStatusFilter(nextViewState.statusFilter)
+    setLocalWorkItemTypeFilter(nextViewState.workItemTypeFilter)
     setLocalViewMode(nextViewState.viewMode)
     onViewStateChange?.(nextViewState)
   }
@@ -1319,7 +1355,7 @@ export function TeamIssueScreen({
 
   const configuration = resolvedConfiguration?.configuration
   const workflowStatuses = useMemo(
-    () => resolveCreateWorkflowStatuses(configuration),
+    () => resolveConfiguredWorkflowStatuses(configuration),
     [configuration],
   )
   const effectiveStatusFilter = statusFilter === 'all' ||
@@ -1382,6 +1418,8 @@ export function TeamIssueScreen({
       : issues.filter((issue) => {
         const matchesStatus = effectiveStatusFilter === 'all' ||
           resolveWorkItemWorkflowStatusId(issue) === effectiveStatusFilter
+        const matchesWorkItemType = workItemTypeFilter === 'all' ||
+          (issue.workItemTypeId ?? 'default') === workItemTypeFilter
         const matchesDefinition = matchesWorkItemDefinitionFilter(
           issue,
           configuration,
@@ -1389,7 +1427,7 @@ export function TeamIssueScreen({
         )
         const normalizedQuery = searchQuery.trim().toLowerCase()
 
-        if (!matchesStatus || !matchesDefinition) {
+        if (!matchesStatus || !matchesWorkItemType || !matchesDefinition) {
           return false
         }
 
@@ -1416,6 +1454,7 @@ export function TeamIssueScreen({
       locale,
       personLabels,
       searchQuery,
+      workItemTypeFilter,
       t,
       taskViewDefinition,
     ],
@@ -2259,6 +2298,10 @@ export function TeamIssueScreen({
                     ...currentViewState,
                     statusFilter: nextStatusFilter,
                   })}
+                  onWorkItemTypeFilterChange={(nextWorkItemTypeFilter) => commitViewState({
+                    ...currentViewState,
+                    workItemTypeFilter: nextWorkItemTypeFilter,
+                  })}
                   onViewModeChange={(nextViewMode) => commitViewState({
                     ...currentViewState,
                     viewMode: nextViewMode,
@@ -2267,6 +2310,8 @@ export function TeamIssueScreen({
                   statusFilter={effectiveStatusFilter}
                   t={t}
                   viewMode={viewMode}
+                  workItemTypeFilter={workItemTypeFilter}
+                  workItemTypes={resolveWorkItemTypes(configuration)}
                   workflowStatuses={workflowStatuses}
                 />
                 <div className="workbench-toolbar mt-3 px-3 py-2">
@@ -2436,11 +2481,14 @@ export function TeamIssueScreen({
 function IssueToolbar({
   onSearchQueryChange,
   onStatusFilterChange,
+  onWorkItemTypeFilterChange,
   onViewModeChange,
   searchQuery,
   statusFilter,
   t,
   viewMode,
+  workItemTypeFilter,
+  workItemTypes,
   workflowStatuses,
 }: {
   /**
@@ -2451,6 +2499,8 @@ function IssueToolbar({
    * Workflow status filter を更新する callback です。
    */
   onStatusFilterChange: (status: string) => void
+  /** Work Item Type filter callback. */
+  onWorkItemTypeFilterChange: (workItemTypeId: string) => void
   /**
    * Issue 表示 mode を更新する callback です。
    */
@@ -2463,6 +2513,8 @@ function IssueToolbar({
    * Status select の現在値です。
    */
   statusFilter: string
+  /** Work Item Type identifier or the all-type sentinel. */
+  workItemTypeFilter: string
   /**
    * 画面文言を解決する翻訳関数です。
    */
@@ -2471,6 +2523,8 @@ function IssueToolbar({
    * 現在表示中の Issue view mode です。
    */
   viewMode: IssueViewMode
+  /** Work Item Types available to the Team. */
+  workItemTypes: ReturnType<typeof resolveWorkItemTypes>
   /**
    * Status filter に表示する workflow status です。
    */
@@ -2501,6 +2555,17 @@ function IssueToolbar({
             <option key={status.id} value={status.id}>
               {status.name}
             </option>
+          ))}
+        </select>
+        <select
+          aria-label={t('tasks.filter.workItemType')}
+          className="workbench-input h-9 px-3"
+          onChange={(event) => onWorkItemTypeFilterChange(event.target.value)}
+          value={workItemTypeFilter}
+        >
+          <option value="all">{t('tasks.filter.workItemTypeAll')}</option>
+          {workItemTypes.map((type) => (
+            <option key={type.id} value={type.id}>{type.name}</option>
           ))}
         </select>
       </div>
@@ -2555,16 +2620,30 @@ function CreateIssuePanel({
     canCreateUnassignedIssue ? '' : projects[0]?.id ?? '',
   )
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
-  const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
+  const workItemTypes = resolveWorkItemTypes(configuration)
+  const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
+  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
+    creatableWorkItemTypes[0]?.id ?? 'default',
+  )
+  const selectedWorkItemType = resolveWorkItemTypeDefinition(configuration, selectedWorkItemTypeId) ??
+    creatableWorkItemTypes[0]
+  const effectiveWorkItemTypeId = selectedWorkItemType?.id ?? 'default'
+  const customFieldDefinitions = resolveWorkItemTypeFormFields(
+    configuration,
+    effectiveWorkItemTypeId,
+  )
+  const selectedWorkflow = resolveWorkItemTypeWorkflow(configuration, effectiveWorkItemTypeId)
+  const workflowStatuses = resolveCreateWorkflowStatuses(configuration, effectiveWorkItemTypeId)
   const contextualWorkflowStatusId = workflowStatusId && workflowStatuses.some((status) => status.id === workflowStatusId)
     ? workflowStatusId
     : undefined
-  const initialWorkflowStatusId = contextualWorkflowStatusId ?? configuration?.workflow.initialStatusId ?? workflowStatuses[0]?.id ?? ''
+  const initialWorkflowStatusId = contextualWorkflowStatusId ?? selectedWorkflow?.initialStatusId ??
+    workflowStatuses[0]?.id ?? ''
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
-    ? createDefaultCustomFieldValues(configuration.customFields, selectedProjectId || undefined)
+    ? createDefaultCustomFieldValues(customFieldDefinitions, selectedProjectId || undefined)
     : {}
-  const hasCustomFields = configuration?.customFields.some((definition) =>
+  const hasCustomFields = customFieldDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   ) ?? false
 
@@ -2589,7 +2668,7 @@ function CreateIssuePanel({
           ).trim()
           const workflowStatus = workflowStatuses.find((status) => status.id === workflowStatusId)
           const parsedCustomFields = configuration
-            ? parseCustomFieldFormData(formData, configuration.customFields, {
+            ? parseCustomFieldFormData(formData, customFieldDefinitions, {
                 applyDefaults: true,
                 projectId: assignedProjectId || undefined,
               })
@@ -2598,7 +2677,7 @@ function CreateIssuePanel({
           if (!workflowStatus || parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
-              configuration?.customFields ?? [],
+              customFieldDefinitions,
               locale,
             ))
             return
@@ -2614,6 +2693,7 @@ function CreateIssuePanel({
             customFieldValues: parsedCustomFields.values,
             priority: resolveIssuePriority(formData.get('priority')),
             schedule,
+            workItemTypeId: effectiveWorkItemTypeId,
             workflowStatusId,
           })
         }}
@@ -2628,6 +2708,29 @@ function CreateIssuePanel({
               required
             />
           </label>
+          {configuration ? (
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('tasks.create.workItemType')}
+              <select
+                className="workbench-input h-10 w-full min-w-0 px-3"
+                data-testid="create-issue-work-item-type"
+                name="workItemTypeId"
+                onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
+                value={effectiveWorkItemTypeId}
+              >
+                {workItemTypes.map((type) => (
+                  <option disabled={type.status === 'archived'} key={type.id} value={type.id}>
+                    {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
+                  </option>
+                ))}
+              </select>
+              {selectedWorkItemType?.description ? (
+                <span className="text-xs font-medium text-[var(--workbench-muted)]">
+                  {selectedWorkItemType.description}
+                </span>
+              ) : null}
+            </label>
+          ) : null}
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.create.project')}
             <select
@@ -2668,6 +2771,7 @@ function CreateIssuePanel({
             <select
               className="workbench-input h-10 w-full min-w-0 px-3"
               defaultValue={initialWorkflowStatusId}
+              key={effectiveWorkItemTypeId}
               name="workflowStatusId"
             >
               {workflowStatuses.map((status) => (
@@ -2699,7 +2803,7 @@ function CreateIssuePanel({
         {hasCustomFields ? (
           <div className="workbench-panel-muted p-4">
             <WorkItemFieldsEditor
-              definitions={configuration?.customFields ?? []}
+              definitions={customFieldDefinitions}
               errors={fieldErrors}
               locale={locale}
               personOptions={personOptions}
@@ -2894,6 +2998,11 @@ function IssueTable({
                 <IssueStatusBadge configuration={configuration} issue={issue} />
               </td>
             )
+            case 'workItemType': return (
+              <td {...columnCellProps} className={cellPadding} key={field}>
+                <TaskWorkItemTypeBadge configuration={configuration} task={issue} />
+              </td>
+            )
             case 'customFields': return (
               <td {...columnCellProps} className={`max-w-64 ${cellPadding}`} key={field}>
                 <IssueCustomFieldSummary
@@ -3053,6 +3162,7 @@ function isSupportedTeamIssueColumn(field: string): boolean {
     'customFields',
     'dueDate',
     'priority',
+    'workItemType',
     'team',
   ].includes(field) || field.startsWith('custom:')
 }
@@ -3071,6 +3181,7 @@ function resolveIssueTableColumnLabel(
     case 'customFields': return t('workItems.fields.title')
     case 'dueDate': return t('tasks.column.dueDate')
     case 'priority': return t('tasks.column.priority')
+    case 'workItemType': return t('tasks.column.workItemType')
     case 'team': return t('workspace.column.team')
     default: {
       const customFieldId = field.slice('custom:'.length)
@@ -3160,6 +3271,7 @@ function resolveTeamIssueGroupValue(
     case 'assignee': value = resolveWorkItemAssignee(issue); break
     case 'dueDate': value = issue.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${issue.priority}`); break
+    case 'workItemType': value = resolveWorkItemTypeLabel(issue, configuration); break
     case 'project': value = resolveAssignedProjectName(issue, activeTeam, t); break
     case 'team': value = activeTeam?.name ?? issue.teamId; break
     default: {
@@ -3541,6 +3653,11 @@ function IssueBoard({
                           )}
                           t={t}
                         />
+                        {visibleFields.has('workItemType') ? (
+                          <div className="mt-2 w-fit">
+                            <TaskWorkItemTypeBadge configuration={configuration} task={issue} />
+                          </div>
+                        ) : null}
                         {visibleFields.has('project') ? (
                           <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
                         ) : null}
@@ -3891,6 +4008,31 @@ function IssueDetailContent({
     value: issue.assignedProjectId ?? '',
   })
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const currentWorkItemTypeId = issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+  const workItemTypes = resolveWorkItemTypes(configuration)
+  const typeChangeRequestSequenceRef = useRef(0)
+  const [selectedWorkItemType, setSelectedWorkItemType] = useState({
+    revision: issue.revision,
+    value: currentWorkItemTypeId,
+  })
+  const selectedWorkItemTypeId = selectedWorkItemType.revision === issue.revision
+    ? selectedWorkItemType.value
+    : currentWorkItemTypeId
+  const [typeChangeState, setTypeChangeState] = useState<TeamIssueTypeChangeState>({
+    acknowledgedLostCustomFieldIds: [],
+    isPreviewing: false,
+    revision: issue.revision,
+    targetWorkItemTypeId: currentWorkItemTypeId,
+  })
+  const activeTypeChangeState = typeChangeState.revision === issue.revision &&
+      typeChangeState.targetWorkItemTypeId === selectedWorkItemTypeId
+    ? typeChangeState
+    : {
+        acknowledgedLostCustomFieldIds: [],
+        isPreviewing: false,
+        revision: issue.revision,
+        targetWorkItemTypeId: selectedWorkItemTypeId,
+      }
   const documentContextPromotion = useDocumentContextPromotion(
     Boolean(collaboration?.context.capabilities.canCreate && !isAiSummaryOperationPending),
     `${issue.teamId}:${issue.id}`,
@@ -3903,14 +4045,88 @@ function IssueDetailContent({
   const isIssueReadOnly = !onUpdateIssue
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
   const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue)
-  const workflowStatuses = resolveEditableWorkflowStatuses(
-    issue,
+  const selectedWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
     configuration,
+    selectedWorkItemTypeId,
   )
+  const visibleDetailSections = selectedWorkItemTypeDefinition
+    ? new Set(selectedWorkItemTypeDefinition.detailSections)
+    : undefined
+  /** Returns whether a configured detail-pane section should be rendered. */
+  const isDetailSectionVisible = (section: WorkItemDetailSectionId) =>
+    visibleDetailSections === undefined || section === 'overview' || visibleDetailSections.has(section)
+  const selectedTypeCustomFieldDefinitions = resolveWorkItemTypeFormFields(
+    configuration,
+    selectedWorkItemTypeId,
+  )
+  const selectedTypeWorkflow = resolveWorkItemTypeWorkflow(
+    configuration,
+    selectedWorkItemTypeId,
+  )
+  const workflowStatuses = selectedWorkItemTypeId === currentWorkItemTypeId
+    ? resolveEditableWorkflowStatuses(issue, configuration)
+    : resolveCreateWorkflowStatuses(configuration, selectedWorkItemTypeId)
+  const selectedTypeStatusFallback = workflowStatuses.some((status) => status.id === currentWorkflowStatusId)
+    ? currentWorkflowStatusId
+    : selectedTypeWorkflow?.initialStatusId ?? workflowStatuses[0]?.id ?? currentWorkflowStatusId
+  const typeChangePreview = activeTypeChangeState.preview
+  const isWorkItemTypeChangeRequested = selectedWorkItemTypeId !== currentWorkItemTypeId
+  const typeChangeLostFields = typeChangePreview?.lostCustomFieldIds.map((fieldId) =>
+    configuration?.customFields.find((definition) => definition.id === fieldId) ?? {
+      id: fieldId,
+      name: fieldId,
+    },
+  ) ?? []
+  const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
+    selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
-  const hasCustomFields = configuration?.customFields.some((definition) =>
+  const hasCustomFields = selectedTypeCustomFieldDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined)
-  ) ?? false
+  )
+
+  /** Requests a server-authoritative preview before saving a Team Issue type change. */
+  async function requestWorkItemTypePreview(targetWorkItemTypeId: string) {
+    typeChangeRequestSequenceRef.current += 1
+    const requestSequence = typeChangeRequestSequenceRef.current
+    if (!onUpdateIssue || !accessToken || targetWorkItemTypeId === currentWorkItemTypeId) return
+    setTypeChangeState({
+      acknowledgedLostCustomFieldIds: [],
+      isPreviewing: true,
+      revision: issue.revision,
+      targetWorkItemTypeId,
+    })
+    try {
+      const preview = await previewTeamIssueWorkItemType(
+        issue.teamId,
+        issue.id,
+        accessToken,
+        {
+          expectedRevision: issue.revision,
+          targetWorkItemTypeId,
+        },
+      )
+      if (typeChangeRequestSequenceRef.current !== requestSequence) return
+      setTypeChangeState({
+        acknowledgedLostCustomFieldIds: [],
+        isPreviewing: false,
+        preview,
+        replacementWorkflowStatusId: preview.invalidWorkflowStatusId === undefined
+          ? undefined
+          : preview.targetInitialWorkflowStatusId,
+        revision: issue.revision,
+        targetWorkItemTypeId,
+      })
+    } catch {
+      if (typeChangeRequestSequenceRef.current !== requestSequence) return
+      setTypeChangeState({
+        acknowledgedLostCustomFieldIds: [],
+        errorMessage: t('tasks.detail.typeChange.previewError'),
+        isPreviewing: false,
+        revision: issue.revision,
+        targetWorkItemTypeId,
+      })
+    }
+  }
 
   return (
     <aside
@@ -3927,14 +4143,26 @@ function IssueDetailContent({
             return
           }
 
+          if (isWorkItemTypeChangeRequested && !typeChangePreview) {
+            if (!activeTypeChangeState.isPreviewing) {
+              void requestWorkItemTypePreview(selectedWorkItemTypeId)
+            }
+            return
+          }
+
           const formData = new FormData(event.currentTarget)
           const assignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
           const selectedAssigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
-          const workflowStatusId = String(
+          const formWorkflowStatusId = String(
             formData.get('workflowStatusId') ?? currentWorkflowStatusId,
           ).trim()
+          const workflowStatusId = isWorkItemTypeChangeRequested && typeChangePreview?.invalidWorkflowStatusId
+            ? String(
+                formData.get('typeChangeWorkflowStatusId') ?? selectedTypeWorkflowStatusId,
+              ).trim()
+            : formWorkflowStatusId
           const parsedCustomFields = configuration
-            ? parseCustomFieldFormData(formData, configuration.customFields, {
+            ? parseCustomFieldFormData(formData, selectedTypeCustomFieldDefinitions, {
                 projectId: assignedProjectId || undefined,
               })
             : { errors: [], values: {} }
@@ -3942,17 +4170,30 @@ function IssueDetailContent({
           if (parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
-              configuration?.customFields ?? [],
+              selectedTypeCustomFieldDefinitions,
               locale,
             ))
             return
+          }
+
+          if (isWorkItemTypeChangeRequested && typeChangePreview) {
+            const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
+            const missingAcknowledgements = typeChangePreview.lostCustomFieldIds.filter((fieldId) =>
+              !acknowledgedIds.has(fieldId),
+            )
+            if (missingAcknowledgements.length > 0) {
+              setFieldErrors({
+                typeChange: t('tasks.detail.typeChange.acknowledge'),
+              })
+              return
+            }
           }
 
           setFieldErrors({})
           const nextIssueInput: UpdateTeamIssueInput = {
             assignedProjectId: assignedProjectId || null,
             customFieldValues: createCustomFieldValuePatch(
-              configuration?.customFields ?? [],
+              selectedTypeCustomFieldDefinitions,
               issue.customFieldValues,
               parsedCustomFields.values,
               assignedProjectId || undefined,
@@ -3961,6 +4202,16 @@ function IssueDetailContent({
             priority: resolveIssuePriority(formData.get('priority')),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
+          }
+
+          if (isWorkItemTypeChangeRequested && typeChangePreview) {
+            nextIssueInput.workItemTypeId = selectedWorkItemTypeId
+            nextIssueInput.typeChangeResolution = {
+              discardCustomFieldIds: [...activeTypeChangeState.acknowledgedLostCustomFieldIds].sort(),
+              ...(typeChangePreview.invalidWorkflowStatusId === undefined
+                ? {}
+                : { workflowStatusId }),
+            }
           }
 
           if (assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
@@ -3980,14 +4231,138 @@ function IssueDetailContent({
           <IssuePriorityBadge priority={issue.priority} t={t} />
         </div>
         <fieldset className="contents" disabled={isIssueReadOnly || isAiSummaryOperationPending}>
+          {configuration ? (
+            <section className="workbench-panel-muted grid min-w-0 gap-3 p-3" data-testid="team-issue-detail-work-item-type">
+              <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('tasks.create.workItemType')}
+                <select
+                  className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                  disabled={activeTypeChangeState.isPreviewing}
+                  name="workItemTypeId"
+                  onChange={(event) => {
+                    const nextWorkItemTypeId = event.target.value
+                    setSelectedWorkItemType({
+                      revision: issue.revision,
+                      value: nextWorkItemTypeId,
+                    })
+                    setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+                    if (nextWorkItemTypeId === currentWorkItemTypeId) {
+                      typeChangeRequestSequenceRef.current += 1
+                      setTypeChangeState({
+                        acknowledgedLostCustomFieldIds: [],
+                        isPreviewing: false,
+                        revision: issue.revision,
+                        targetWorkItemTypeId: nextWorkItemTypeId,
+                      })
+                      return
+                    }
+                    void requestWorkItemTypePreview(nextWorkItemTypeId)
+                  }}
+                  value={selectedWorkItemTypeId}
+                >
+                  {workItemTypes
+                    .filter((type) => type.status === 'active' || type.id === currentWorkItemTypeId)
+                    .map((type) => (
+                      <option key={type.id} value={type.id}>
+                        {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
+                      </option>
+                    ))}
+                </select>
+                {selectedWorkItemTypeDefinition?.description ? (
+                  <span className="text-xs font-medium text-[var(--workbench-muted)]">
+                    {selectedWorkItemTypeDefinition.description}
+                  </span>
+                ) : null}
+              </label>
+              {isWorkItemTypeChangeRequested ? (
+                <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="team-issue-detail-work-item-type-preview">
+                  <p className="font-semibold text-[var(--workbench-text)]">
+                    {t('tasks.detail.typeChange.title')}
+                  </p>
+                  {activeTypeChangeState.isPreviewing ? (
+                    <p className="text-[var(--workbench-muted)]">{t('tasks.detail.typeChange.previewing')}</p>
+                  ) : typeChangePreview ? (
+                    <>
+                      <p className="text-[var(--workbench-muted)]">
+                        {t('tasks.detail.typeChange.preview')}
+                      </p>
+                      {typeChangeLostFields.length > 0 ? (
+                        <div className="grid gap-2">
+                          <p className="font-semibold text-[var(--workbench-text)]">
+                            {t('tasks.detail.typeChange.lostFields')}
+                          </p>
+                          {typeChangeLostFields.map((field) => {
+                            const checked = activeTypeChangeState.acknowledgedLostCustomFieldIds.includes(field.id)
+                            return (
+                              <label className="flex items-start gap-2 font-medium text-[var(--workbench-muted)]" key={field.id}>
+                                <input
+                                  checked={checked}
+                                  className="mt-0.5"
+                                  onChange={(event) => {
+                                    const nextIds = event.target.checked
+                                      ? [...activeTypeChangeState.acknowledgedLostCustomFieldIds, field.id]
+                                      : activeTypeChangeState.acknowledgedLostCustomFieldIds.filter((id) => id !== field.id)
+                                    setTypeChangeState((current) => ({
+                                      ...current,
+                                      acknowledgedLostCustomFieldIds: [...new Set(nextIds)].sort(),
+                                    }))
+                                    setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+                                  }}
+                                  type="checkbox"
+                                />
+                                <span>{field.name}</span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      ) : null}
+                      {typeChangePreview.invalidWorkflowStatusId ? (
+                        <label className="grid gap-1.5 font-semibold text-[var(--workbench-text)]">
+                          {t('tasks.detail.typeChange.invalidStatus')}
+                          <select
+                            className="workbench-input h-9 px-3"
+                            name="typeChangeWorkflowStatusId"
+                            onChange={(event) => setTypeChangeState((current) => ({
+                              ...current,
+                              replacementWorkflowStatusId: event.target.value,
+                            }))}
+                            value={selectedTypeWorkflowStatusId}
+                          >
+                            {resolveCreateWorkflowStatuses(
+                              configuration,
+                              selectedWorkItemTypeId,
+                            ).map((status) => (
+                              <option key={status.id} value={status.id}>{status.name}</option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
+                      {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
+                        <p className="text-amber-700">
+                          {t('tasks.detail.typeChange.missingRequired')}
+                        </p>
+                      ) : null}
+                    </>
+                  ) : activeTypeChangeState.errorMessage ? (
+                    <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
+                  ) : null}
+                  {fieldErrors.typeChange ? (
+                    <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
+                  ) : null}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
             <input className="workbench-input w-full min-w-0 px-3 py-2 text-lg font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
           </label>
-          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {t('issues.create.description')}
-            <textarea className="workbench-input min-h-28 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.description} name="description" />
-          </label>
+          {isDetailSectionVisible('description') ? (
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('issues.create.description')}
+              <textarea className="workbench-input min-h-28 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.description} name="description" />
+            </label>
+          ) : null}
           <div className="workbench-panel-muted grid grid-cols-1 gap-3 p-3">
             <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('issues.create.project')}
@@ -4019,18 +4394,21 @@ function IssueDetailContent({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.column.status')}
-              <select
-                className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={currentWorkflowStatusId}
-                name="workflowStatusId"
-              >
-                {workflowStatuses.map((status) => (
-                  <option key={status.id} value={status.id}>{status.name}</option>
-                ))}
-              </select>
-            </label>
+            {isDetailSectionVisible('workflow') ? (
+              <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('tasks.column.status')}
+                <select
+                  className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                  defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
+                  key={`${issue.revision}:${selectedWorkItemTypeId}`}
+                  name="workflowStatusId"
+                >
+                  {workflowStatuses.map((status) => (
+                    <option key={status.id} value={status.id}>{status.name}</option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               {t('tasks.column.priority')}
               <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.priority} name="priority">
@@ -4039,22 +4417,25 @@ function IssueDetailContent({
                 ))}
               </select>
             </label>
-            <div className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              <span>{t('tasks.schedule.title')}</span>
-              <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
-                {describeTeamIssueSchedule(issue.schedule, t)}
-              </output>
-            </div>
+            {isDetailSectionVisible('schedule') ? (
+              <div className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                <span>{t('tasks.schedule.title')}</span>
+                <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
+                  {describeTeamIssueSchedule(issue.schedule, t)}
+                </output>
+              </div>
+            ) : null}
           </div>
-          {hasCustomFields ? (
+          {isDetailSectionVisible('custom-fields') && hasCustomFields ? (
             <div className="workbench-panel-muted p-4">
               <WorkItemFieldsEditor
-                definitions={configuration?.customFields ?? []}
+                definitions={selectedTypeCustomFieldDefinitions}
                 errors={fieldErrors}
                 locale={locale}
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue.customFieldValues}
+                key={`${issue.revision}:${selectedWorkItemTypeId}`}
               />
             </div>
           ) : null}
@@ -4069,7 +4450,7 @@ function IssueDetailContent({
         ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
-      {planningSnapshot ? (
+      {isDetailSectionVisible('relations') && planningSnapshot ? (
         <div className="border-t border-[var(--workbench-border)] bg-white px-6 py-6">
           <WorkItemDependencyPanel
             canManageEndpoint={canManageDependencyEndpoint}
@@ -4082,7 +4463,7 @@ function IssueDetailContent({
           />
         </div>
       ) : null}
-      {artifacts ? (
+      {isDetailSectionVisible('files') && artifacts ? (
         <IssueArtifactsPanel
           completionTransitions={workflowStatuses.filter(
             (status) => status.id !== currentWorkflowStatusId,
@@ -4093,7 +4474,7 @@ function IssueDetailContent({
           members={workspaceMembers}
         />
       ) : null}
-      {externalLinksAccessToken ? (
+      {isDetailSectionVisible('files') && externalLinksAccessToken ? (
         <WorkItemExternalLinksPanelContainer
           accessToken={externalLinksAccessToken}
           canManage={canManageExternalLinks && !isAiSummaryOperationPending}
@@ -4102,33 +4483,37 @@ function IssueDetailContent({
           workItemId={issue.id}
         />
       ) : null}
-      <div className="border-t border-[var(--workbench-border)] px-6 py-6">
-        <WorkItemRelationsEditor
-          candidates={relationCandidates.map((candidate) => ({
-            id: candidate.id,
-            title: resolveIssueTitle(candidate, t),
-          }))}
-          currentWorkItemId={issue.id}
-          isLoading={isRelationsLoading}
-          locale={locale}
-          onAddRelation={onAddRelation && !isAiSummaryOperationPending
-            ? (input) => onAddRelation(issue.id, input)
-            : undefined}
-          onDeleteRelation={onDeleteRelation && !isAiSummaryOperationPending
-            ? (relation) => onDeleteRelation(issue.id, relation)
-            : undefined}
-          readOnly={isAiSummaryOperationPending || (!onAddRelation && !onDeleteRelation)}
-          relations={relations}
+      {isDetailSectionVisible('relations') ? (
+        <div className="border-t border-[var(--workbench-border)] px-6 py-6">
+          <WorkItemRelationsEditor
+            candidates={relationCandidates.map((candidate) => ({
+              id: candidate.id,
+              title: resolveIssueTitle(candidate, t),
+            }))}
+            currentWorkItemId={issue.id}
+            isLoading={isRelationsLoading}
+            locale={locale}
+            onAddRelation={onAddRelation && !isAiSummaryOperationPending
+              ? (input) => onAddRelation(issue.id, input)
+              : undefined}
+            onDeleteRelation={onDeleteRelation && !isAiSummaryOperationPending
+              ? (relation) => onDeleteRelation(issue.id, relation)
+              : undefined}
+            readOnly={isAiSummaryOperationPending || (!onAddRelation && !onDeleteRelation)}
+            relations={relations}
+          />
+        </div>
+      ) : null}
+      {isDetailSectionVisible('files') ? (
+        <RelatedDocuments
+          accessToken={accessToken}
+          onPromoteToContext={documentContextPromotion.onPromoteToContext}
+          t={t}
+          targetId={`team/${issue.teamId}/issue/${issue.id}`}
+          targetKind="work-item"
         />
-      </div>
-      <RelatedDocuments
-        accessToken={accessToken}
-        onPromoteToContext={documentContextPromotion.onPromoteToContext}
-        t={t}
-        targetId={`team/${issue.teamId}/issue/${issue.id}`}
-        targetKind="work-item"
-      />
-      {collaboration ? (
+      ) : null}
+      {isDetailSectionVisible('activity') && collaboration ? (
         <IssueCollaborationPanel
           aiAssistance={collaborationAiAssistance}
           route={collaborationRoute}
@@ -4303,7 +4688,9 @@ function resolveIssueCustomFieldEntries(
 
   const t = createTranslator(locale)
 
-  return sortCustomFieldDefinitions(configuration.customFields).flatMap((definition) => {
+  return sortCustomFieldDefinitions(
+    resolveWorkItemTypeCustomFields(configuration, issue.workItemTypeId),
+  ).flatMap((definition) => {
     const value = issue.customFieldValues?.[definition.id]
 
     if (
@@ -4377,6 +4764,7 @@ function matchesTeamIssueKeyword(
     resolveWorkItemAssignee(issue),
     resolveAssignedProjectName(issue, team, t),
     resolveWorkItemWorkflowStatusLabel(issue, configuration),
+    resolveWorkItemTypeLabel(issue, configuration),
     t(`tasks.priority.${issue.priority}`),
     issue.dueDate,
     issue.schedule ? describeTeamIssueSchedule(issue.schedule, t) : '',

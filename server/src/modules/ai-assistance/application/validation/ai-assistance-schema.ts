@@ -301,6 +301,7 @@ const workspaceSearchFiltersSchema = z.object({
   ).optional(),
   projectIds: z.array(identifierSchema).max(100).optional(),
   teamIds: z.array(identifierSchema).max(100).optional(),
+  workItemTypeIds: z.array(identifierSchema).max(100).optional(),
 }).strict().superRefine((filters, context) => {
   if (!isSearchFilterTransportWithinGetBudget(filters)) {
     context.addIssue({
@@ -431,6 +432,7 @@ const draftSchema = z.discriminatedUnion('kind', [
         'status',
         'project',
         'team',
+        'workItemType',
       ]).optional(),
     }).strict().optional(),
     caveats: z.array(createSafeTextSchema(1_000)).max(20),

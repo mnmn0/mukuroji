@@ -65,6 +65,7 @@ import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDi
 import {
   TaskCustomFieldSummary,
   TaskStatusBadge,
+  TaskWorkItemTypeBadge,
   TaskViewFlagIcon,
   TaskViewPlusIcon,
 } from './TaskViewPrimitives'
@@ -263,6 +264,7 @@ export function TaskTableView({
     { field: 'status' },
     { field: 'dueDate' },
     { field: 'priority' },
+    { field: 'workItemType' },
   ]).filter((column) => isSupportedProjectTaskColumn(column.field))
   const renderedColumns = visibleColumns.some((column) => column.field === 'title')
     ? visibleColumns
@@ -888,6 +890,11 @@ function TaskTableRow({
               ) : <TaskStatusBadge configuration={configuration} task={task} />}
             </td>
           )
+          case 'workItemType': return (
+            <td {...columnCellProps} className={cellPadding} key={field}>
+              <TaskWorkItemTypeBadge configuration={configuration} task={task} />
+            </td>
+          )
           case 'dueDate': return (
             <td
               {...columnCellProps}
@@ -993,6 +1000,7 @@ function TaskTableRow({
               schedule,
               source: 'table',
               teamId: task.teamId,
+              workItemTypeId: task.workItemTypeId ?? 'default',
               workflowStatusId: task.workflowStatusId,
             })}
             type="button"
@@ -1041,6 +1049,7 @@ function isSupportedProjectTaskColumn(field: string): boolean {
     'status',
     'dueDate',
     'priority',
+    'workItemType',
     'project',
     'team',
     'customFields',
@@ -1060,6 +1069,7 @@ function resolveTaskTableColumnLabel(
     case 'status': return t('tasks.column.status')
     case 'dueDate': return t('tasks.column.dueDate')
     case 'priority': return t('tasks.column.priority')
+    case 'workItemType': return t('tasks.column.workItemType')
     case 'project': return t('workspace.column.project')
     case 'team': return t('workspace.column.team')
     case 'customFields': return t('workItems.fields.title')

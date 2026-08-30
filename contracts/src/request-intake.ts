@@ -655,6 +655,8 @@ export type ConvertRequestSubmissionAction = {
   action: 'convert'
   /** 読み込み時点の submission revision です。 */
   expectedRevision: number
+  /** Work Item creation に利用する active Work Item Type ID です。 */
+  workItemTypeId?: string
   /** 保存済み routing target を上書きする値です。 */
   target?: Partial<RequestFormRoutingTarget>
   /** Mapping から生成した title を上書きする値です。 */

@@ -822,6 +822,7 @@ test('uses the first matching routing rule and maps a submission into a canonica
       action: 'convert',
       expectedRevision: 1,
       title: 'Manual title',
+      workItemTypeId: 'incident',
       target: {
         projectId: 'project-manual',
         dueDateOffsetDays: 3,
@@ -831,6 +832,7 @@ test('uses the first matching routing rule and maps a submission into a canonica
   )
   expect(overridden.input).toMatchObject({
     title: 'Manual title',
+    workItemTypeId: 'incident',
     assignedProjectId: 'project-manual',
     schedule: { dueDate: '2026-07-19', mode: 'due-date' },
     priority: 'low',

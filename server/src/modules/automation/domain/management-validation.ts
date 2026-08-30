@@ -44,6 +44,7 @@ export function validateCreateAutomationTemplateInput(
         'schedule',
         'teamId',
         'title',
+        'workItemTypeId',
         'workflowStatusId',
       ], 'Work Item template payload')
       const title = requireBoundedText(payload.title, 'Work Item template title', 500)
@@ -75,6 +76,10 @@ export function validateCreateAutomationTemplateInput(
         payload.workflowStatusId,
         'Work Item template Workflow status ID',
       )
+      const workItemTypeId = readOptionalTemplateString(
+        payload.workItemTypeId,
+        'Work Item template Work Item Type ID',
+      )
       const customFieldValues = payload.customFieldValues === undefined
         ? undefined
         : validateAutomationValueRecord(
@@ -102,6 +107,7 @@ export function validateCreateAutomationTemplateInput(
           ...(payload.priority === undefined ? {} : { priority: payload.priority }),
           schedule,
           ...(teamId === undefined ? {} : { teamId }),
+          ...(workItemTypeId === undefined ? {} : { workItemTypeId }),
           ...(workflowStatusId === undefined ? {} : { workflowStatusId }),
         },
       }

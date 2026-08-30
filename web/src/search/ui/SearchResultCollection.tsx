@@ -1,4 +1,4 @@
-import type { SearchEntityType, SearchViewLayout, WorkspaceSearchResult } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE_ID, type SearchEntityType, type SearchViewLayout, type WorkspaceSearchResult } from '@mukuroji/contracts'
 import { useMemo, type ReactNode } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { resolveSearchResultPath } from '../api'
@@ -22,6 +22,8 @@ export type SearchResultCollectionProps = {
   isAiOperationPending?: boolean
   /** Configuration-derived display names for workflow status IDs. */
   statusLabels?: Readonly<Record<string, string>>
+  /** Configuration-derived display names for Work Item Type IDs. */
+  workItemTypeLabels?: Readonly<Record<string, string>>
 }
 
 const entityLabelKeys: Record<SearchEntityType, MessageKey> = {
@@ -70,9 +72,13 @@ export function SearchResultCollection({
   onNavigate,
   results,
   statusLabels = {},
+  workItemTypeLabels = {},
 }: SearchResultCollectionProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatStatus = (status: string) => formatSearchStatus(status, statusLabels, t)
+  const formatWorkItemType = (result: WorkspaceSearchResult) =>
+    formatSearchWorkItemType(result, workItemTypeLabels)
+  const formatWorkItemTypeId = (typeId: string) => workItemTypeLabels[typeId] ?? typeId
   const formatSubtitle = (result: WorkspaceSearchResult) => formatSearchSubtitle(result, t)
   const mode = getSearchLayoutMode(layout)
   const sortedResults = useMemo(
@@ -81,18 +87,18 @@ export function SearchResultCollection({
   )
 
   if (mode === 'board') {
-    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} formatWorkItemTypeId={formatWorkItemTypeId} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'calendar') {
-    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'timeline') {
-    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
-  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
 }
 
 /**
@@ -104,6 +110,7 @@ export function SearchResultCollection({
 function SearchTable({
   formatStatus,
   formatSubtitle,
+  formatWorkItemType,
   isAiOperationPending,
   layout,
   locale,
@@ -113,6 +120,7 @@ function SearchTable({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
   isAiOperationPending: boolean
   layout: SearchViewLayout
@@ -161,7 +169,7 @@ function SearchTable({
                   </td>
                   {columns.map((column) => (
                     <td className="px-4 py-4 text-sm font-medium text-[var(--workbench-muted)]" key={column}>
-                      {renderColumnValue(result, column, locale, formatStatus, t)}
+                      {renderColumnValue(result, column, locale, formatStatus, formatWorkItemType, t)}
                     </td>
                   ))}
                 </tr>
@@ -183,6 +191,8 @@ function SearchTable({
 function SearchBoard({
   formatStatus,
   formatSubtitle,
+  formatWorkItemType,
+  formatWorkItemTypeId,
   isAiOperationPending,
   layout,
   locale,
@@ -192,6 +202,8 @@ function SearchBoard({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
+  formatWorkItemTypeId: (typeId: string) => string
   /** Whether result navigation is fenced while an AI operation is pending. */
   isAiOperationPending: boolean
   layout: SearchViewLayout
@@ -216,13 +228,15 @@ function SearchBoard({
                 ? formatSearchDate(group.label, locale)
                 : groupBy === 'status'
                   ? formatStatus(group.label)
+                  : groupBy === 'workItemType'
+                    ? formatWorkItemTypeId(group.label)
                   : group.label}
             </h2>
             <span className="workbench-badge">{group.results.length}</span>
           </header>
           <div className="grid gap-2 p-3">
             {group.results.map((result) => (
-              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -240,6 +254,7 @@ function SearchBoard({
 function SearchCalendar({
   formatStatus,
   formatSubtitle,
+  formatWorkItemType,
   isAiOperationPending,
   locale,
   onNavigate,
@@ -248,6 +263,7 @@ function SearchCalendar({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
   isAiOperationPending: boolean
   locale: Locale
@@ -269,7 +285,7 @@ function SearchCalendar({
           </h2>
           <div className="mt-3 grid gap-2">
             {group.results.map((result) => (
-              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -287,6 +303,7 @@ function SearchCalendar({
 function SearchTimeline({
   formatStatus,
   formatSubtitle,
+  formatWorkItemType,
   isAiOperationPending,
   locale,
   onNavigate,
@@ -295,6 +312,7 @@ function SearchTimeline({
 }: {
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
   isAiOperationPending: boolean
   locale: Locale
@@ -333,8 +351,13 @@ function SearchTimeline({
                   </span>
                 ) : null}
               </span>
-              <span className="workbench-badge max-[680px]:col-start-2">
-                {result.status ? formatStatus(result.status) : t(entityLabelKeys[result.entityType])}
+              <span className="flex flex-wrap justify-end gap-2 max-[680px]:col-start-2">
+                {formatWorkItemType(result) ? (
+                  <span className="workbench-badge-primary">{formatWorkItemType(result)}</span>
+                ) : null}
+                <span className="workbench-badge">
+                  {result.status ? formatStatus(result.status) : t(entityLabelKeys[result.entityType])}
+                </span>
               </span>
             </button>
           )
@@ -354,6 +377,7 @@ function SearchResultCard({
   compact = false,
   formatStatus,
   formatSubtitle,
+  formatWorkItemType,
   isAiOperationPending,
   locale,
   onNavigate,
@@ -363,6 +387,7 @@ function SearchResultCard({
   compact?: boolean
   formatStatus: (status: string) => string
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
+  formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
   isAiOperationPending: boolean
   locale: Locale
@@ -390,8 +415,9 @@ function SearchResultCard({
           <HighlightedField field="body" result={result} fallback={result.body} />
         </span>
       ) : null}
-      {result.status || result.dueDate ? (
+      {formatWorkItemType(result) || result.status || result.dueDate ? (
         <span className="mt-3 flex flex-wrap gap-2">
+          {formatWorkItemType(result) ? <span className="workbench-badge-primary">{formatWorkItemType(result)}</span> : null}
           {result.status ? <span className="workbench-badge">{formatStatus(result.status)}</span> : null}
           {result.dueDate ? (
             <span className="text-xs font-semibold text-[var(--workbench-muted)]">
@@ -431,7 +457,9 @@ function groupResults(results: WorkspaceSearchResult[], field: string) {
 
   for (const result of results) {
     const value = formatResultFieldValue(
-      resolveWorkspaceSearchResultFieldValue(result, field),
+      field === 'workItemType' && result.entityType === 'work-item'
+        ? result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+        : resolveWorkspaceSearchResultFieldValue(result, field),
     ) ?? '—'
     groups.set(value, [...(groups.get(value) ?? []), result])
   }
@@ -454,6 +482,7 @@ function createResultKey(result: WorkspaceSearchResult) {
 function formatColumnLabel(column: string, t: (key: MessageKey) => string) {
   const labels: Record<string, string> = {
     type: t('search.filters.types'),
+    workItemType: t('search.columns.workItemType'),
     status: t('tasks.column.status'),
     assignee: t('tasks.column.assignee'),
     creator: t('search.filters.creator'),
@@ -471,6 +500,7 @@ function renderColumnValue(
   column: string,
   locale: Locale,
   formatStatus: (status: string) => string,
+  formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined,
   t: (key: MessageKey) => string,
 ) {
   if (column === 'type') {
@@ -481,6 +511,11 @@ function renderColumnValue(
     return result.status
       ? <span className="workbench-badge">{formatStatus(result.status)}</span>
       : '—'
+  }
+
+  if (column === 'workItemType') {
+    const label = formatWorkItemType(result)
+    return label ? <span className="workbench-badge-primary">{label}</span> : '—'
   }
 
   const value = resolveWorkspaceSearchResultFieldValue(result, column)
@@ -523,6 +558,16 @@ function formatSearchDate(value: string, locale: Locale) {
     year: 'numeric',
     ...(!dateOnlyMatch ? { hour: '2-digit', minute: '2-digit' } : {}),
   }).format(date)
+}
+
+/** Resolves a Search result's Work Item Type label, including legacy default rows. */
+function formatSearchWorkItemType(
+  result: WorkspaceSearchResult,
+  labels: Readonly<Record<string, string>>,
+): string | undefined {
+  if (result.entityType !== 'work-item') return undefined
+  const typeId = result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+  return labels[typeId] ?? typeId
 }
 
 function formatSearchStatus(

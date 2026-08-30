@@ -11,6 +11,7 @@ import {
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE_ID,
   type AnalyticsQueryInput,
   type AnalyticsSnapshotRecord,
   type CanonicalWorkItem,
@@ -902,6 +903,37 @@ describe('Analytics metric engine', () => {
 
     expect(result.series).toEqual([])
     expect(result.groups.map((group) => group.key)).toEqual(['project-a', 'project-b'])
+  })
+
+  test('rewinds a first Work Item Type assignment to the built-in type', () => {
+    const item = createWorkItem('historical-work-item-type', {
+      workItemTypeId: 'incident',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    })
+    const typeAssignment = createAuditEvent(
+      'assign-work-item-type',
+      item,
+      '2026-01-03T00:00:00.000Z',
+      [{ field: 'workItemTypeId', after: 'incident' }],
+    )
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [item],
+      events: [typeAssignment],
+      query: createQuery([{
+        id: 'wip-by-work-item-type',
+        title: 'WIP by Work Item Type',
+        type: 'metric',
+        metric: 'wip',
+        groupBy: { dimension: 'work-item-type' },
+      }], {
+        asOf: '2026-01-02T23:59:59.999Z',
+      }),
+    })
+
+    expect(snapshot.widgets[0]?.groups.map((group) => group.key)).toEqual([
+      DEFAULT_WORK_ITEM_TYPE_ID,
+    ])
   })
 
   test('rewinds a custom-field removal that also contains an empty container marker', () => {

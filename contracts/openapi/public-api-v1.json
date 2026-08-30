@@ -902,6 +902,9 @@
             "minLength": 1,
             "type": "string"
           },
+          "workItemTypeId": {
+            "type": "string"
+          },
           "workflowStatusId": {
             "type": "string"
           }
@@ -1666,6 +1669,27 @@
             "minLength": 1,
             "type": "string"
           },
+          "typeChangeResolution": {
+            "additionalProperties": false,
+            "properties": {
+              "discardCustomFieldIds": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "workflowStatusId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "discardCustomFieldIds"
+            ],
+            "type": "object"
+          },
+          "workItemTypeId": {
+            "type": "string"
+          },
           "workflowStatusId": {
             "type": "string"
           }
@@ -1984,6 +2008,9 @@
             "format": "date-time",
             "type": "string"
           },
+          "workItemTypeId": {
+            "type": "string"
+          },
           "workflowSchemaVersion": {
             "const": 1,
             "type": "integer"
@@ -2004,6 +2031,7 @@
           "priority",
           "creatorMemberKey",
           "workflowStatusId",
+          "workItemTypeId",
           "statusCategory",
           "workflowSchemaVersion",
           "customFieldValues",
@@ -6215,6 +6243,14 @@
             "description": "Workflow status ID filter です。",
             "in": "query",
             "name": "workflowStatusId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable Work Item Type ID filter です。",
+            "in": "query",
+            "name": "workItemTypeId",
             "schema": {
               "type": "string"
             }

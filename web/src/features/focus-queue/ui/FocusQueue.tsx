@@ -5,9 +5,14 @@ import type {
   FocusQueueResponse,
   FocusQueueSection,
   ResolvedWorkItemConfiguration,
+  WorkItemTypeDefinition,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
   WorkflowStatusDefinition,
+} from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_TYPE_ID,
 } from '@mukuroji/contracts'
 import {
   useRef,
@@ -40,6 +45,13 @@ import type {
   FocusQueueSnoozeFeedback,
 } from '../mutations/useFocusQueueActions'
 import { FocusPolicyPanel } from './FocusPolicyPanel'
+import {
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeLabel,
+  resolveWorkItemTypes,
+  resolveWorkItemTypeWorkflow,
+} from '../../../work-items/model/workItemDisplay'
+import { WorkItemTypeIcon } from '../../../work-items/ui/WorkItemTypeIcon'
 
 /** Props for the server-ranked Focus queue view. */
 export type FocusQueueProps = {
@@ -82,6 +94,8 @@ export type FocusQueueProps = {
   ) => Promise<WorkItemScheduleChangePreview>
   /** Changes the queue section represented in the URL. */
   onSectionChange: (section: FocusQueueSection) => void
+  /** Changes the canonical Work Item Type filter represented in the URL. */
+  onWorkItemTypeChange?: (workItemTypeId?: string) => void
   /** Snoozes or unsnoozes one Focus item. */
   onSnooze?: (item: FocusItem, snoozedUntil: string | null) => Promise<void>
   /** Changes one authorized Work Item workflow status. */
@@ -104,6 +118,8 @@ export type FocusQueueProps = {
   requestedItemId?: string
   /** Currently selected queue section. */
   section: FocusQueueSection
+  /** Optional canonical Work Item Type filter. */
+  workItemTypeId?: string
   /** Latest successful snooze available for Undo. */
   snoozeFeedback?: FocusQueueSnoozeFeedback
   /** Localized message resolver. */
@@ -133,6 +149,7 @@ export function FocusQueue({
   onPreviewSchedule,
   onRetry,
   onSectionChange,
+  onWorkItemTypeChange = () => undefined,
   onSnooze,
   onStatusChange,
   onUndoSnooze,
@@ -143,10 +160,14 @@ export function FocusQueue({
   response,
   section,
   snoozeFeedback,
+  workItemTypeId,
   t,
 }: FocusQueueProps) {
-  const items = getFocusQueueItems(response, section)
-  const counts = getFocusQueueSectionCounts(response)
+  const workItemTypes = resolveFocusWorkItemTypes(configurationsByTeam)
+  const items = getFocusQueueItems(response, section, workItemTypeId)
+  const counts = getFocusQueueSectionCounts(response, workItemTypeId)
+  const groups = groupFocusItems(items, workItemTypes)
+  const orderedItems = groups.flatMap((group) => group.items.map(({ item }) => item))
   const [selectedItemId, setSelectedItemId] = useState<string>()
   const [selectedPolicyTeamId, setSelectedPolicyTeamId] = useState<string>()
   const [overriddenRequestedItemId, setOverriddenRequestedItemId] = useState<string>()
@@ -191,7 +212,7 @@ export function FocusQueue({
     setOverriddenRequestedItemId(requestedItemId)
   }
 
-  /** Restores focus to the mutated row or the nearest remaining server-ordered row. */
+  /** Restores focus to the mutated row or the nearest remaining rendered row. */
   const restoreFocusAfterMutation = (itemId: string, previousIndex: number) => {
     globalThis.requestAnimationFrame(() => {
       const preferredRow = rowRefs.current.get(itemId)
@@ -208,9 +229,9 @@ export function FocusQueue({
   /** Moves selection and DOM focus together after one queue navigation key. */
   const moveFocus = (key: FocusQueueNavigationKey) => {
     if (!selectedItem) return
-    const currentIndex = items.findIndex((item) => item.id === selectedItem.id)
-    const nextIndex = resolveFocusQueueNavigationIndex(currentIndex, items.length, key)
-    const nextItem = items[nextIndex]
+    const currentIndex = orderedItems.findIndex((item) => item.id === selectedItem.id)
+    const nextIndex = resolveFocusQueueNavigationIndex(currentIndex, orderedItems.length, key)
+    const nextItem = orderedItems[nextIndex]
     if (!nextItem) return
     selectItem(nextItem.id)
     rowRefs.current.get(nextItem.id)?.focus({ preventScroll: true })
@@ -280,6 +301,21 @@ export function FocusQueue({
             <span className="hidden sm:inline">{t('workspace.focus.keyboardHint')}</span>
           </div>
         ) : null}
+        <div className="flex flex-wrap items-center justify-end gap-3 border-t border-[var(--workbench-border)] px-4 py-3">
+          <label className="inline-flex min-h-10 items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            <span>{t('workspace.focus.filter.workItemType')}</span>
+            <select
+              className="workbench-input min-h-10 min-w-40 px-2 text-sm"
+              value={workItemTypeId ?? ''}
+              onChange={(event) => onWorkItemTypeChange(event.target.value || undefined)}
+            >
+              <option value="">{t('workspace.focus.filter.allTypes')}</option>
+              {workItemTypes.map((type) => (
+                <option key={type.id} value={type.id}>{type.name}</option>
+              ))}
+            </select>
+          </label>
+        </div>
       </div>
 
       {mutationError ? (
@@ -350,32 +386,42 @@ export function FocusQueue({
         ) : null}
         {!isLoading && !hasError && items.length > 0 ? (
           <ol className="divide-y divide-[var(--workbench-border)]" onKeyDown={handleQueueKeyDown}>
-            {items.map((item, index) => (
-              <FocusQueueRow
-                configuration={configurationsByTeam[item.workItem.teamId]}
-                isPending={(action) => isActionPending(item.id, action)}
-                isSelected={selectedItem?.id === item.id}
-                item={item}
-                key={item.id}
-                locale={locale}
-                onAssignToViewer={onAssignToViewer}
-                onComplete={onComplete}
-                onConfirmSchedule={onConfirmSchedule}
-                onOpenItem={onOpenItem}
-                onOpenSource={onOpenSource}
-                onPreviewSchedule={onPreviewSchedule}
-                onActionSettled={() => restoreFocusAfterMutation(item.id, index)}
-                onPrimaryRef={(element) => {
-                  if (element) rowRefs.current.set(item.id, element)
-                  else rowRefs.current.delete(item.id)
-                }}
-                onSelect={() => selectItem(item.id)}
-                onSnooze={onSnooze}
-                onStatusChange={onStatusChange}
-                onWatchingChange={onWatchingChange}
-                rank={index + 1}
-                t={t}
-              />
+            {groups.map((group) => (
+              <li className="list-none" key={group.typeId}>
+                <div className="flex items-center justify-between gap-3 bg-[var(--workbench-surface-muted)] px-4 py-2 text-xs font-bold uppercase tracking-[0.06em] text-[var(--workbench-muted)]">
+                  <h3>{group.label}</h3>
+                  <span className="tabular-nums">{group.items.length}</span>
+                </div>
+                <ol className="divide-y divide-[var(--workbench-border)]">
+                  {group.items.map(({ item, position, rank }) => (
+                    <FocusQueueRow
+                      configuration={configurationsByTeam[item.workItem.teamId]}
+                      isPending={(action) => isActionPending(item.id, action)}
+                      isSelected={selectedItem?.id === item.id}
+                      item={item}
+                      key={item.id}
+                      locale={locale}
+                      onAssignToViewer={onAssignToViewer}
+                      onComplete={onComplete}
+                      onConfirmSchedule={onConfirmSchedule}
+                      onOpenItem={onOpenItem}
+                      onOpenSource={onOpenSource}
+                      onPreviewSchedule={onPreviewSchedule}
+                      onActionSettled={() => restoreFocusAfterMutation(item.id, position)}
+                      onPrimaryRef={(element) => {
+                        if (element) rowRefs.current.set(item.id, element)
+                        else rowRefs.current.delete(item.id)
+                      }}
+                      onSelect={() => selectItem(item.id)}
+                      onSnooze={onSnooze}
+                      onStatusChange={onStatusChange}
+                      onWatchingChange={onWatchingChange}
+                      rank={rank}
+                      t={t}
+                    />
+                  ))}
+                </ol>
+              </li>
             ))}
           </ol>
         ) : null}
@@ -395,6 +441,73 @@ export function FocusQueue({
       />
     </section>
   )
+}
+
+/** One Focus item grouped with its one-based server rank. */
+type FocusQueueTypeGroupEntry = {
+  /** Focus item rendered in the group. */
+  item: FocusItem
+  /** One-based rank from the server response. */
+  rank: number
+}
+
+/** A type group preserving server rank and rendered navigation position. */
+type FocusQueueTypeGroup = {
+  /** Stable Work Item Type identifier. */
+  typeId: string
+  /** Display name resolved from the visible Team configuration. */
+  label: string
+  /** Items in rendered order with their server rank and navigation position. */
+  items: Array<FocusQueueTypeGroupEntry & { position: number }>
+}
+
+/** Intermediate type group shape used before rendered positions are assigned. */
+type FocusQueueTypeGroupDraft = Omit<FocusQueueTypeGroup, 'items'> & {
+  items: FocusQueueTypeGroupEntry[]
+}
+
+/** Resolves the distinct Work Item Types available across the visible Focus Teams. */
+function resolveFocusWorkItemTypes(
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+): WorkItemTypeDefinition[] {
+  const definitions = new Map<string, WorkItemTypeDefinition>([
+    [DEFAULT_WORK_ITEM_TYPE_ID, DEFAULT_WORK_ITEM_TYPE],
+  ])
+  for (const configuration of Object.values(configurationsByTeam)) {
+    for (const definition of resolveWorkItemTypes(configuration.configuration)) {
+      if (!definitions.has(definition.id)) definitions.set(definition.id, definition)
+    }
+  }
+  return [...definitions.values()].sort(
+    (first, second) => first.sortOrder - second.sortOrder || first.name.localeCompare(second.name),
+  )
+}
+
+/** Groups Focus items by Work Item Type without changing item order within a group. */
+function groupFocusItems(
+  items: readonly FocusItem[],
+  definitions: readonly WorkItemTypeDefinition[],
+): FocusQueueTypeGroup[] {
+  const labels = new Map(definitions.map((definition) => [definition.id, definition.name]))
+  const groups = new Map<string, FocusQueueTypeGroupDraft>()
+  items.forEach((item, index) => {
+    const typeId = item.workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+    const group = groups.get(typeId) ?? {
+      items: [],
+      label: labels.get(typeId) ?? typeId,
+      typeId,
+    }
+    group.items.push({ item, rank: index + 1 })
+    groups.set(typeId, group)
+  })
+  let position = 0
+  return [...groups.values()].map((group) => ({
+    ...group,
+    items: group.items.map((entry) => ({
+      ...entry,
+      position: position++,
+    })),
+  }))
 }
 
 /** Internal props for one divider-based Focus queue row. */
@@ -461,7 +574,14 @@ function FocusQueueRow({
   rank,
   t,
 }: FocusQueueRowProps) {
-  const statuses = configuration?.configuration.workflow.statuses ?? []
+  const statuses = resolveWorkItemTypeWorkflow(
+    configuration?.configuration,
+    item.workItem.workItemTypeId,
+  )?.statuses ?? []
+  const workItemType = resolveWorkItemTypeDefinition(
+    configuration?.configuration,
+    item.workItem.workItemTypeId,
+  ) ?? DEFAULT_WORK_ITEM_TYPE
   const completedStatus = statuses.find((status) => status.category === 'completed')
   const busy = isAnyFocusActionPending(isPending)
   const assignee = item.workItem.assigneeName ||
@@ -492,7 +612,16 @@ function FocusQueueRow({
         <span className="text-center text-app-caption font-bold tabular-nums text-[var(--workbench-muted)]">
           {t('workspace.focus.metadata.rank').replace('{rank}', String(rank))}
         </span>
-        <span className="min-w-0">
+          <span className="min-w-0">
+          <span className="mb-1 block">
+            <span className="workbench-badge inline-flex items-center gap-1.5">
+              <WorkItemTypeIcon
+                className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
+                iconToken={workItemType.iconToken}
+              />
+              {resolveWorkItemTypeLabel(item.workItem, configuration?.configuration)}
+            </span>
+          </span>
           <span className="block truncate text-app-body font-semibold text-[var(--workbench-text)]">
             {item.workItem.title}
           </span>

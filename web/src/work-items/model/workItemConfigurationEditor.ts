@@ -21,6 +21,18 @@ export function cloneWorkItemConfiguration(
       statuses: configuration.workflow.statuses.map((status) => ({ ...status })),
       transitions: configuration.workflow.transitions.map((transition) => ({ ...transition })),
     },
+    workflows: configuration.workflows?.map((workflow) => ({
+      ...workflow,
+      statuses: workflow.statuses.map((status) => ({ ...status })),
+      transitions: workflow.transitions.map((transition) => ({ ...transition })),
+    })),
+    workItemTypes: configuration.workItemTypes?.map((type) => ({
+      ...type,
+      customFieldIds: [...type.customFieldIds],
+      requiredCustomFieldIds: [...type.requiredCustomFieldIds],
+      detailSections: [...type.detailSections],
+      allowedChildTypeIds: [...type.allowedChildTypeIds],
+    })),
     customFields: configuration.customFields.map((field) => ({
       ...field,
       defaultValue: Array.isArray(field.defaultValue) ? [...field.defaultValue] : field.defaultValue,
@@ -70,6 +82,19 @@ export function normalizeWorkItemConfigurationForSave(
           first.toStatusId.localeCompare(second.toStatusId),
       ),
     },
+    workflows: configuration.workflows?.map((workflow) => ({
+      ...workflow,
+      statuses: sortWorkflowStatuses(workflow.statuses).map((status, index) => ({
+        ...status,
+        name: status.name.trim(),
+        sortOrder: index,
+      })),
+      transitions: [...workflow.transitions].sort(
+        (first, second) =>
+          first.fromStatusId.localeCompare(second.fromStatusId) ||
+          first.toStatusId.localeCompare(second.toStatusId),
+      ),
+    })),
     customFields: sortCustomFieldDefinitions(configuration.customFields).map((field, index) => ({
       ...field,
       name: field.name.trim(),
@@ -78,6 +103,18 @@ export function normalizeWorkItemConfigurationForSave(
         name: option.name.trim(),
         sortOrder: optionIndex,
       })),
+      sortOrder: index,
+    })),
+    workItemTypes: configuration.workItemTypes?.map((type, index) => ({
+      ...type,
+      name: type.name.trim(),
+      iconToken: type.iconToken.trim(),
+      description: type.description?.trim() || undefined,
+      customFieldIds: [...new Set(type.customFieldIds)],
+      requiredCustomFieldIds: [...new Set(type.requiredCustomFieldIds)]
+        .filter((fieldId) => type.customFieldIds.includes(fieldId)),
+      detailSections: [...new Set(type.detailSections)],
+      allowedChildTypeIds: [...new Set(type.allowedChildTypeIds)],
       sortOrder: index,
     })),
   }

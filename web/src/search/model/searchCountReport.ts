@@ -1,4 +1,4 @@
-import type { WorkspaceSearchResult } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE_ID, type WorkspaceSearchResult } from '@mukuroji/contracts'
 import { resolveWorkspaceSearchResultFieldValue } from './sortResults'
 
 /** One count bucket derived from the currently loaded permission-filtered results. */
@@ -36,7 +36,11 @@ export function createLoadedSearchCountReport(
 
   if (groupBy) {
     for (const result of results) {
-      const value = formatGroupValue(resolveWorkspaceSearchResultFieldValue(result, groupBy))
+      const value = formatGroupValue(
+        groupBy === 'workItemType' && result.entityType === 'work-item'
+          ? result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+          : resolveWorkspaceSearchResultFieldValue(result, groupBy),
+      )
       counts.set(value, (counts.get(value) ?? 0) + 1)
     }
   }

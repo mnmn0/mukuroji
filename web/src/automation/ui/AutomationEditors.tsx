@@ -49,6 +49,7 @@ const automationTriggerTypes = [
   'assignee',
   'due',
   'custom-field',
+  'work-item-type',
   'comment',
   'form',
   'webhook',
@@ -106,6 +107,7 @@ const triggerLabelKeys: Record<AutomationTriggerType, MessageKey> = {
   assignee: 'automation.trigger.assigneeChange',
   due: 'automation.trigger.dueDate',
   'custom-field': 'automation.trigger.customFieldChange',
+  'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
   form: 'automation.trigger.formSubmission',
   webhook: 'automation.trigger.webhook',
@@ -1335,6 +1337,8 @@ function createAutomationTrigger(
       return { type, kind: 'any' }
     case 'custom-field':
       return { type, fieldId: value }
+    case 'work-item-type':
+      return { type, ...(value ? { toWorkItemTypeId: value } : {}) }
     case 'due':
       return { type, reason: value === 'changed' || value === 'overdue' ? value : 'due' }
     case 'form':

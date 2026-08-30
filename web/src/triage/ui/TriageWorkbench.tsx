@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import type { WorkItemConfiguration } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ShieldIcon } from '../../shared/ui/icons'
@@ -76,6 +77,8 @@ export type TriageWorkbenchProps = {
   readonly bulkResults?: readonly TriageBulkItemResult[]
   /** Loaded Team triage configuration. */
   readonly configuration?: TriageConfiguration
+  /** Loaded Work Item configuration used by type-aware queue surfaces. */
+  readonly workItemConfiguration?: WorkItemConfiguration
   /** Whether Team configuration is loading. */
   readonly isConfigurationLoading?: boolean
   /** Safe configuration load or save error. */
@@ -182,6 +185,7 @@ export function TriageWorkbench({
   teamName,
   eligibleAssigneeIdsByProject,
   visibleProjectIds,
+  workItemConfiguration,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
@@ -305,6 +309,7 @@ export function TriageWorkbench({
                   selectedEntryId={selectedEntry?.entry.id}
                   selectedEntryIds={selectedEntryIds}
                   t={t}
+                  workItemConfiguration={workItemConfiguration}
                 />
               </div>
               <div className={explicitEntryId ? '' : 'max-[860px]:hidden'}>
@@ -328,6 +333,7 @@ export function TriageWorkbench({
                   teamId={teamId}
                   eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
                   visibleProjectIds={visibleProjectIds}
+                  workItemConfiguration={workItemConfiguration}
                   view={selectedEntry}
                 />
               </div>

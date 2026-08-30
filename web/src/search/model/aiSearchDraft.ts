@@ -65,6 +65,7 @@ export function createEditableAiSearchFilters(
     date: filters.date ? { ...filters.date } : undefined,
     projectIds: filters.projectIds ? [...filters.projectIds] : undefined,
     teamIds: filters.teamIds ? [...filters.teamIds] : undefined,
+    workItemTypeIds: filters.workItemTypeIds ? [...filters.workItemTypeIds] : undefined,
   }
 }
 
@@ -97,6 +98,7 @@ export function normalizeAiSearchFilters(
     date,
     projectIds: cleanStringArray(filters.projectIds),
     teamIds: cleanStringArray(filters.teamIds),
+    workItemTypeIds: cleanStringArray(filters.workItemTypeIds),
   }
 }
 
@@ -143,6 +145,7 @@ export function hasReviewableAiSearchFilterBounds(
   if (!hasBoundedStringList(filters.relationIds)) return false
   if (!hasBoundedStringList(filters.projectIds)) return false
   if (!hasBoundedStringList(filters.teamIds)) return false
+  if (!hasBoundedStringList(filters.workItemTypeIds)) return false
   if (filters.entityTypes !== undefined && (
     !Array.isArray(filters.entityTypes) ||
     filters.entityTypes.length > aiSearchEntityTypes.length ||

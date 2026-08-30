@@ -53,6 +53,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   sourceTriageEntryId?: string
   /** Workflow 内の現在 status ID です。 */
   workflowStatusId: string
+  /** Stable Work Item Type identifier; legacy rows resolve to the built-in type. */
+  workItemTypeId?: string
   /** 横断集計に利用する標準 status category です。 */
   statusCategory: WorkflowStatusCategory
   /** Configuration に対して検証済みの custom field values です。 */
@@ -130,6 +132,7 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     hasCanonicalProjectAssignment(value) &&
     forbiddenCanonicalWorkItemFields.every((field) => value[field] === undefined) &&
     isNonEmptyString(value.workflowStatusId) &&
+    (value.workItemTypeId === undefined || isNonEmptyString(value.workItemTypeId)) &&
     isWorkflowStatusCategory(value.statusCategory) &&
     isCanonicalCustomFieldValues(value.customFieldValues) &&
     isCanonicalWorkItemRelationIds(value.relationIds) &&

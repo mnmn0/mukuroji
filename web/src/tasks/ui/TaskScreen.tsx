@@ -149,6 +149,7 @@ import {
   type StatusFilter,
   type TaskSortOrder,
   type TaskTab,
+  type WorkItemTypeFilter,
 } from '../model/taskView'
 import {
   formatTaskScheduleRange,
@@ -558,6 +559,7 @@ export function TaskScreen({
   })
   const [localAssigneeFilter, setLocalAssigneeFilter] = useState<AssigneeFilter>('all')
   const [localPriorityFilter, setLocalPriorityFilter] = useState<PriorityFilter>('all')
+  const [localWorkItemTypeFilter, setLocalWorkItemTypeFilter] = useState<WorkItemTypeFilter>('all')
   const [localDueDateFilter, setLocalDueDateFilter] = useState<DueDateFilter>('all')
   const [localSortOrder, setLocalSortOrder] = useState<TaskSortOrder>('due-date-asc')
   const [bulkSelection, setBulkSelection] = useState<TaskBulkSelectionState>({
@@ -661,6 +663,7 @@ export function TaskScreen({
   const definitionFilter = viewState?.definitionFilter ?? localDefinitionFilter
   const dueDateFilter = viewState?.dueDateFilter ?? localDueDateFilter
   const priorityFilter = viewState?.priorityFilter ?? localPriorityFilter
+  const workItemTypeFilter = viewState?.workItemTypeFilter ?? localWorkItemTypeFilter
   const searchQuery = viewState?.searchQuery ?? localSearchQuery
   const sortOrder = viewState?.sortOrder ?? localSortOrder
   const statusFilter = viewState?.statusFilter ?? localStatusFilter
@@ -670,6 +673,7 @@ export function TaskScreen({
     definitionFilter,
     dueDateFilter,
     priorityFilter,
+    workItemTypeFilter,
     searchQuery,
     sortOrder,
     statusFilter,
@@ -683,6 +687,7 @@ export function TaskScreen({
     setLocalDefinitionFilter(nextViewState.definitionFilter)
     setLocalDueDateFilter(nextViewState.dueDateFilter)
     setLocalPriorityFilter(nextViewState.priorityFilter)
+    setLocalWorkItemTypeFilter(nextViewState.workItemTypeFilter)
     setLocalSearchQuery(nextViewState.searchQuery)
     setLocalSortOrder(nextViewState.sortOrder)
     setLocalStatusFilter(nextViewState.statusFilter)
@@ -761,6 +766,7 @@ export function TaskScreen({
           locale,
           personLabels,
           priorityFilter,
+          workItemTypeFilter,
           searchQuery,
           sortOrder,
           statusColumns,
@@ -776,6 +782,7 @@ export function TaskScreen({
       locale,
       personLabels,
       priorityFilter,
+      workItemTypeFilter,
       resolvedConfigurationsByTeam,
       searchQuery,
       sortOrder,
@@ -1062,6 +1069,9 @@ export function TaskScreen({
         : {}),
       ...(context?.workflowStatusId
         ? { workflowStatusId: context.workflowStatusId }
+        : {}),
+      ...(context?.workItemTypeId
+        ? { workItemTypeId: context.workItemTypeId }
         : {}),
     }
     setCreateTaskError(undefined)
@@ -2684,12 +2694,17 @@ export function TaskScreen({
                   ...currentViewState,
                   priorityFilter: nextPriorityFilter,
                 })}
+                onWorkItemTypeFilterChange={(nextWorkItemTypeFilter) => commitViewState({
+                  ...currentViewState,
+                  workItemTypeFilter: nextWorkItemTypeFilter,
+                })}
                 onResetFilters={() => commitViewState({
                   ...currentViewState,
                   assigneeFilter: 'all',
                   definitionFilter: { category: 'all', customFieldId: '' },
                   dueDateFilter: 'all',
                   priorityFilter: 'all',
+                  workItemTypeFilter: 'all',
                   statusFilter: 'all',
                 })}
                 onProjectUserQueryChange={onProjectUserQueryChange}
@@ -2719,6 +2734,7 @@ export function TaskScreen({
                 personLabels={personLabels}
                 personOptions={personOptions}
                 priorityFilter={priorityFilter}
+                workItemTypeFilter={workItemTypeFilter}
                 projectFiles={projectFiles}
                 projectId={projectId}
                 projectMembers={projectMembers}

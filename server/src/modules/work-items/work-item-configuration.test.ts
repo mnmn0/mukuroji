@@ -6,12 +6,17 @@ import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   DynamoDbWorkItemConfigurationClient,
   WorkItemConfigurationError,
+  assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,
+  assertWorkItemTypeChangeResolution,
   createWorkItemConfigurationScopeKey,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
   isCanonicalWorkItemRelationIds,
   normalizeCustomFieldValues,
+  previewWorkItemTypeChange,
+  resolveWorkItemType,
+  resolveWorkItemTypeWorkflow,
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
 } from './work-item-configuration'
@@ -29,6 +34,26 @@ test('validates the built-in workflow and resolves configured statuses', () => {
     workflowStatusId: 'done',
     statusCategory: 'completed',
   })
+})
+
+test('resolves the implicit default type to a legacy configuration workflow', () => {
+  const configuration = createConfiguration({
+    workflow: {
+      ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow,
+      id: 'legacy-delivery-workflow',
+      initialStatusId: 'backlog',
+      statuses: [{
+        id: 'backlog',
+        name: 'Backlog',
+        category: 'backlog',
+        sortOrder: 10,
+      }],
+      transitions: [],
+    },
+  })
+
+  expect(resolveWorkItemTypeWorkflow(configuration).id).toBe('legacy-delivery-workflow')
+  expect(resolveWorkflowStatus(configuration).workflowStatusId).toBe('backlog')
 })
 
 test('encodes configuration scope key components before adding delimiters', () => {
@@ -58,6 +83,11 @@ test('rejects duplicate status IDs and broken transition references', () => {
       transitions: [{ fromStatusId: 'todo', toStatusId: 'missing' }],
     },
   })).toThrow('Workflow transition references an invalid status.')
+
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    workflows: [{ ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow }],
+  })).toThrow('Workflow ID must be unique.')
 })
 
 test('enforces allowed workflow transitions', () => {
@@ -71,6 +101,198 @@ test('enforces allowed workflow transitions', () => {
   expect(() => assertWorkflowTransitionAllowed(configuration, 'todo', 'in-progress')).not.toThrow()
   expect(() => assertWorkflowTransitionAllowed(configuration, 'todo', 'done')).toThrow(
     'Transition from "todo" to "done" is not allowed.',
+  )
+})
+
+test('validates and resolves type-specific workflows and custom fields', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('summary', 'text'),
+      field('severity', 'select', { options: options('low', 'high') }),
+    ],
+    workflows: [{
+      id: 'incident-workflow',
+      name: 'Incident workflow',
+      initialStatusId: 'investigating',
+      statuses: [{
+        id: 'investigating',
+        name: 'Investigating',
+        category: 'started',
+        sortOrder: 10,
+      }],
+      transitions: [],
+    }],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'alert-triangle',
+      status: 'active',
+      defaultWorkflowId: 'incident-workflow',
+      customFieldIds: ['summary', 'severity'],
+      requiredCustomFieldIds: ['severity'],
+      detailSections: ['overview', 'custom-fields', 'activity'],
+      allowedChildTypeIds: ['default', 'incident'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(resolveWorkItemType(configuration, 'incident').name).toBe('Incident')
+  expect(resolveWorkItemTypeWorkflow(configuration, 'incident').id).toBe('incident-workflow')
+  expect(normalizeCustomFieldValues(configuration, {
+    summary: 'Database outage',
+    severity: 'high',
+  }, { mode: 'create', workItemTypeId: 'incident' })).toEqual({
+    summary: 'Database outage',
+    severity: 'high',
+  })
+  expect(() => normalizeCustomFieldValues(configuration, {
+    summary: 'Database outage',
+  }, { mode: 'create', workItemTypeId: 'incident' })).toThrow(
+    'Custom field "severity" is required.',
+  )
+})
+
+test('validates type-specific formula dependencies and required fields', () => {
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [
+        field('amount', 'number'),
+        field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+      ],
+      workItemTypes: [{
+        id: 'computed',
+        name: 'Computed',
+        iconToken: 'calculator',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: ['total'],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['default'],
+        sortOrder: 10,
+      }],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Work Item Type "computed" formula field "total" references an unavailable field "amount".',
+  )
+
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [
+        field('amount', 'number'),
+        field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+      ],
+      workItemTypes: [{
+        id: 'computed',
+        name: 'Computed',
+        iconToken: 'calculator',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: ['amount', 'total'],
+        requiredCustomFieldIds: ['total'],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['default'],
+        sortOrder: 10,
+      }],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Work Item Type "computed" cannot require a formula field.',
+  )
+})
+
+test('requires explicit resolution for lost fields and invalid statuses on type change', () => {
+  const configuration = createConfiguration({
+    customFields: [field('severity', 'text'), field('owner', 'text')],
+    workItemTypes: [{
+      id: 'request',
+      name: 'Request',
+      iconToken: 'inbox',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['severity'],
+      requiredCustomFieldIds: [],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+  const preview = previewWorkItemTypeChange(
+    configuration,
+    'default',
+    'review',
+    { owner: 'platform' },
+    'request',
+    undefined,
+    7,
+  )
+
+  expect(preview).toMatchObject({
+    expectedRevision: 7,
+    lostCustomFieldIds: ['owner'],
+  })
+  expect(() => assertWorkItemTypeChangeResolution(preview, undefined)).toThrow(
+    'requires an explicit resolution',
+  )
+  expect(assertWorkItemTypeChangeResolution(preview, {
+    discardCustomFieldIds: ['owner'],
+  })).toBe('review')
+})
+
+test('does not allow archived types for new Work Items', () => {
+  const configuration = createConfiguration({
+    workItemTypes: [{
+      id: 'legacy',
+      name: 'Legacy',
+      iconToken: 'archive',
+      status: 'archived',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: [],
+      requiredCustomFieldIds: [],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(() => resolveWorkItemType(configuration, 'legacy')).toThrow(
+    'is archived and cannot be used',
+  )
+  expect(resolveWorkItemType(configuration, 'legacy', { allowArchived: true }).status).toBe('archived')
+})
+
+test('enforces allowed child Work Item Types', () => {
+  const configuration = createConfiguration({
+    workItemTypes: [
+      {
+        id: 'parent',
+        name: 'Parent',
+        iconToken: 'folder',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: [],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['child'],
+        sortOrder: 10,
+      },
+      {
+        id: 'child',
+        name: 'Child',
+        iconToken: 'check',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: [],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: [],
+        sortOrder: 20,
+      },
+    ],
+  })
+
+  expect(() => assertWorkItemChildTypeAllowed(configuration, 'parent', 'child')).not.toThrow()
+  expect(() => assertWorkItemChildTypeAllowed(configuration, 'child', 'parent')).toThrow(
+    'Work Item Type "parent" cannot be created as a child of "child".',
   )
 })
 

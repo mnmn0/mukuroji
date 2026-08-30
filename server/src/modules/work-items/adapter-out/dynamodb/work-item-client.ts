@@ -64,6 +64,7 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -482,6 +483,8 @@ type TeamIssueItem = {
    * 設定済み workflow 内の status ID です。
    */
   workflowStatusId: string
+  /** Stable Work Item Type identifier. Legacy rows are read as the built-in type. */
+  workItemTypeId?: string
   /**
    * 横断集計に使う workflow status category です。
    */
@@ -596,6 +599,8 @@ export type WorkItemListReadOptions = {
   consistentRead?: boolean
   /** Archive 済み Work Item を内部管理 read に含めます。 */
   includeArchived?: boolean
+  /** Stable Work Item Type filter. */
+  workItemTypeId?: string
 }
 
 /** Public Work Item の DynamoDB-backed bounded page read options です。 */
@@ -610,6 +615,8 @@ export type PublicWorkItemPageReadOptions = {
   assigneeUserId?: string
   /** 指定 workflow status の Work Item だけを返します。 */
   workflowStatusId?: string
+  /** 指定 Work Item Type の Work Item だけを返します。 */
+  workItemTypeId?: string
   /** この timestamp より新しく更新された Work Item だけを返します。 */
   updatedAfter?: string
   /** Current RBAC で参照できる assigned Project IDs です。 */
@@ -743,6 +750,8 @@ export type CreateTeamIssueRequestBody = {
    * 設定済み workflow 内の status ID です。
    */
   workflowStatusId?: unknown
+  /** Stable Work Item Type identifier. */
+  workItemTypeId?: unknown
   /**
    * Custom field ID ごとの型付き値です。
    */
@@ -893,10 +902,14 @@ export type PublicUpdateTeamIssueRequestBody = {
    * 設定済み workflow 内の status ID です。
    */
   workflowStatusId?: unknown
+  /** Stable Work Item Type identifier. */
+  workItemTypeId?: unknown
   /**
    * Custom field ID ごとの型付き値です。null は保存済み値の削除を表します。
    */
   customFieldValues?: unknown
+  /** Explicit acknowledgement for data affected by changing the Work Item Type. */
+  typeChangeResolution?: unknown
 }
 
 /**
@@ -1564,6 +1577,13 @@ export class DynamoDbTeamIssuesClient {
       expressionAttributeValues[':workflowStatusId'] = options.workflowStatusId
       filterExpressions.push('#workflowStatusId = :workflowStatusId')
     }
+    if (options.workItemTypeId) {
+      expressionAttributeNames['#workItemTypeId'] = 'workItemTypeId'
+      expressionAttributeValues[':workItemTypeId'] = options.workItemTypeId
+      filterExpressions.push(options.workItemTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+        ? '(attribute_not_exists(#workItemTypeId) OR #workItemTypeId = :workItemTypeId)'
+        : '#workItemTypeId = :workItemTypeId')
+    }
     if (options.updatedAfter) {
       expressionAttributeNames['#updatedAt'] = 'updatedAt'
       expressionAttributeValues[':updatedAfter'] = options.updatedAfter
@@ -1773,6 +1793,7 @@ export class DynamoDbTeamIssuesClient {
     const workflowSchemaVersion = readWorkflowSchemaVersion(input.workflowSchemaVersion)
     const workflowStatusId = readWorkflowStatusId(input.workflowStatusId)
     const statusCategory = readWorkflowStatusCategory(input.statusCategory)
+    const workItemTypeId = readWorkItemTypeId(input.workItemTypeId)
     const customFieldValues = readCustomFieldValues(input.customFieldValues)
     const idempotentIssueId = input.idempotentIssueId === undefined
       ? undefined
@@ -1879,6 +1900,7 @@ export class DynamoDbTeamIssuesClient {
         workflowSchemaVersion,
         workflowStatusId,
         statusCategory,
+        workItemTypeId,
         customFieldValues,
         relationIds: [],
         dueDate,
@@ -1923,6 +1945,7 @@ export class DynamoDbTeamIssuesClient {
           'assigneeUserId',
           'workflowStatusId',
           'statusCategory',
+          'workItemTypeId',
           'customFieldValues',
           'dueDate',
           'schedule',
@@ -2064,6 +2087,7 @@ export class DynamoDbTeamIssuesClient {
             priority,
             statusCategory,
             title,
+            workItemTypeId,
             workflowSchemaVersion,
             workflowStatusId,
           })) {
@@ -2479,6 +2503,12 @@ export class DynamoDbTeamIssuesClient {
       setExpressions.push('#workflowStatusId = :workflowStatusId')
     }
 
+    if ('workItemTypeId' in input) {
+      expressionAttributeNames['#workItemTypeId'] = 'workItemTypeId'
+      expressionAttributeValues[':workItemTypeId'] = readWorkItemTypeId(input.workItemTypeId)
+      setExpressions.push('#workItemTypeId = :workItemTypeId')
+    }
+
     if ('statusCategory' in input) {
       expressionAttributeNames['#statusCategory'] = 'statusCategory'
       expressionAttributeValues[':statusCategory'] = readWorkflowStatusCategory(input.statusCategory)
@@ -2615,6 +2645,7 @@ export class DynamoDbTeamIssuesClient {
           'assigneeUserId',
           'workflowStatusId',
           'statusCategory',
+          'workItemTypeId',
           'customFieldValues',
           'dueDate',
           'schedule',
@@ -2975,6 +3006,8 @@ export class DynamoDbTeamIssuesClient {
       const pageItems = (response.Items ?? [])
         .map(toTeamIssueItem)
         .filter((item) => options.includeArchived || item.archivedAt === undefined)
+        .filter((item) => !options.workItemTypeId ||
+          (item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === options.workItemTypeId)
       items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
@@ -3017,6 +3050,8 @@ export class DynamoDbTeamIssuesClient {
       const pageItems = (response.Items ?? [])
         .map(toTeamIssueItem)
         .filter((item) => options.includeArchived || item.archivedAt === undefined)
+        .filter((item) => !options.workItemTypeId ||
+          (item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === options.workItemTypeId)
       items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
@@ -4116,6 +4151,7 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     creatorMemberKey: item.creatorMemberKey,
     workflowSchemaVersion: item.workflowSchemaVersion,
     workflowStatusId: item.workflowStatusId,
+    workItemTypeId: item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     statusCategory: item.statusCategory,
     customFieldValues: item.customFieldValues,
     relationIds: item.relationIds,
@@ -4648,6 +4684,21 @@ function readWorkflowStatusId(value: unknown) {
   return value.trim()
 }
 
+/** Reads a stable Work Item Type identifier from trusted mutation output. */
+function readWorkItemTypeId(value: unknown): string {
+  if (value === undefined) {
+    return DEFAULT_WORK_ITEM_TYPE_ID
+  }
+  if (typeof value !== 'string' || !/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(value.trim())) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemType',
+      'Work Item Type ID is invalid.',
+    )
+  }
+  return value.trim()
+}
+
 function readWorkflowStatusCategory(value: unknown) {
   if (!isWorkflowStatusCategory(value)) {
     throw new ProjectDataError(
@@ -4824,6 +4875,7 @@ function isMatchingIdempotentWorkItemCreate(
     priority: WorkItemPriority
     statusCategory: WorkflowStatusCategory
     title: string
+    workItemTypeId: string
     workflowSchemaVersion: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
     workflowStatusId: string
   },
@@ -4838,6 +4890,7 @@ function isMatchingIdempotentWorkItemCreate(
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
     issue.title === expected.title &&
+    issue.workItemTypeId === expected.workItemTypeId &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
 }

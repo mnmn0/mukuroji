@@ -463,9 +463,10 @@ const listFilterFields = [
   ['creatorUserIds', 'search.filters.creator'],
   ['teamIds', 'search.filters.team'],
   ['projectIds', 'search.filters.project'],
+  ['workItemTypeIds', 'search.filters.workItemType'],
   ['relationIds', 'search.filters.relation'],
 ] as const satisfies readonly [
-  keyof Pick<WorkspaceSearchFilters, 'statuses' | 'assigneeUserIds' | 'creatorUserIds' | 'teamIds' | 'projectIds' | 'relationIds'>,
+  keyof Pick<WorkspaceSearchFilters, 'statuses' | 'assigneeUserIds' | 'creatorUserIds' | 'teamIds' | 'projectIds' | 'workItemTypeIds' | 'relationIds'>,
   MessageKey,
 ][]
 
@@ -694,6 +695,7 @@ function formatAiSearchReportGroupBy(
     case 'status': return t('search.filters.status')
     case 'project': return t('search.filters.project')
     case 'team': return t('search.filters.team')
+    case 'workItemType': return t('search.filters.workItemType')
   }
 }
 

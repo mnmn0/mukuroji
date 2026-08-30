@@ -65,6 +65,7 @@ import {
   type TaskSortOrder,
   type TaskTab,
 } from '../model/taskView'
+import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
 import { TaskBoardView } from './TaskBoardView'
 import { TaskCalendarView } from './TaskCalendarView'
 import { TaskFileView } from './TaskFileView'
@@ -123,6 +124,8 @@ export type TaskWorkspaceProps = {
   personOptions: WorkItemPersonOption[]
   /** Selected priority filter. */
   priorityFilter: PriorityFilter
+  /** Selected Work Item Type filter. */
+  workItemTypeFilter: string | 'all'
   /** Current project id. */
   projectId: string
   /** Authoritative canonical Work Item dependency graph. */
@@ -193,6 +196,8 @@ export type TaskWorkspaceProps = {
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Changes the selected priority filter. */
   onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
+  /** Changes the selected Work Item Type filter. */
+  onWorkItemTypeFilterChange: (workItemTypeFilter: string | 'all') => void
   /** Resets every task filter in one state transition. */
   onResetFilters?: () => void
   /** Changes the project user search query. */
@@ -289,6 +294,7 @@ export function TaskWorkspace({
   personLabels,
   personOptions,
   priorityFilter,
+  workItemTypeFilter,
   projectId,
   planningSnapshot,
   projectFiles,
@@ -319,6 +325,7 @@ export function TaskWorkspace({
   onCreateScheduleDependency,
   onDeleteScheduleDependency,
   onPriorityFilterChange,
+  onWorkItemTypeFilterChange,
   onResetFilters,
   onProjectUserQueryChange,
   onRemoveProjectMember,
@@ -350,9 +357,28 @@ export function TaskWorkspace({
   const [isStatusMenuOpen, setIsStatusMenuOpen] = useState(false)
   const [isAssigneeMenuOpen, setIsAssigneeMenuOpen] = useState(false)
   const [isPriorityMenuOpen, setIsPriorityMenuOpen] = useState(false)
+  const [isWorkItemTypeMenuOpen, setIsWorkItemTypeMenuOpen] = useState(false)
   const [isDueDateMenuOpen, setIsDueDateMenuOpen] = useState(false)
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
   const assigneeFilterOptions = createAssigneeFilterOptions(allTasks, t)
+  const workItemTypeOptions = useMemo(() => {
+    const typeById = new Map<string, { id: string; name: string }>()
+    for (const type of [
+      ...resolveWorkItemTypes(configuration),
+      ...Object.values(configurationsByTeam).flatMap((resolved) =>
+        resolveWorkItemTypes(resolved.configuration),
+      ),
+    ]) {
+      typeById.set(type.id, { id: type.id, name: type.name })
+    }
+    return [...typeById.values()].sort((first, second) =>
+      first.name.localeCompare(second.name),
+    )
+  }, [configuration, configurationsByTeam])
+  const workItemTypeFilterLabel = workItemTypeFilter === 'all'
+    ? t('tasks.filter.workItemType')
+    : workItemTypeOptions.find((type) => type.id === workItemTypeFilter)?.name ??
+      workItemTypeFilter
   const dependencySummaries = useMemo(
     () => createWorkItemDependencySummaries(planningSnapshot),
     [planningSnapshot],
@@ -461,6 +487,7 @@ export function TaskWorkspace({
               setIsAssigneeMenuOpen(false)
               setIsDueDateMenuOpen(false)
               setIsPriorityMenuOpen(false)
+              setIsWorkItemTypeMenuOpen(false)
               setIsSortMenuOpen(false)
               if (onResetFilters) {
                 onResetFilters()
@@ -468,6 +495,7 @@ export function TaskWorkspace({
                 onStatusFilterChange('all')
                 onAssigneeFilterChange('all')
                 onPriorityFilterChange('all')
+                onWorkItemTypeFilterChange('all')
                 onDueDateFilterChange('all')
                 onDefinitionFilterChange({ category: 'all', customFieldId: '' })
               }
@@ -559,6 +587,36 @@ export function TaskWorkspace({
                 onClick={() => {
                   onPriorityFilterChange(priority)
                   setIsPriorityMenuOpen(false)
+                }}
+              />
+            ))}
+          </FilterMenu>
+          <FilterMenu
+            active={workItemTypeFilter !== 'all'}
+            buttonId="work-item-type-filter-button"
+            icon={<FilterIcon />}
+            isOpen={isWorkItemTypeMenuOpen}
+            label={workItemTypeFilterLabel}
+            menuClassName="max-h-80 w-64 overflow-auto"
+            menuId="work-item-type-filter-menu"
+            onOpenChange={setIsWorkItemTypeMenuOpen}
+          >
+            <MenuOption
+              checked={workItemTypeFilter === 'all'}
+              label={t('tasks.filter.workItemTypeAll')}
+              onClick={() => {
+                onWorkItemTypeFilterChange('all')
+                setIsWorkItemTypeMenuOpen(false)
+              }}
+            />
+            {workItemTypeOptions.map((type) => (
+              <MenuOption
+                checked={workItemTypeFilter === type.id}
+                key={type.id}
+                label={type.name}
+                onClick={() => {
+                  onWorkItemTypeFilterChange(type.id)
+                  setIsWorkItemTypeMenuOpen(false)
                 }}
               />
             ))}
@@ -687,6 +745,8 @@ export function TaskWorkspace({
       ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? (
         <TaskCalendarView
+          configuration={configuration}
+          configurationsByTeam={configurationsByTeam}
           onCreateTaskOpen={onCreateTaskOpen}
           onRequestScheduleChange={onRequestScheduleChange}
           onSelectTask={onSelectTask}

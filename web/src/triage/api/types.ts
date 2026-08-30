@@ -57,6 +57,8 @@ export type TriageQueueFilters = {
   readonly owner?: 'all' | 'mine' | 'unowned'
   /** SLA condition applied to the visible queue projection. */
   readonly sla?: TriageSlaFilter
+  /** Canonical Work Item Type used to filter accepted or duplicate entries. */
+  readonly workItemTypeId?: string
 }
 
 /** Queue metrics derived from the visible permission-filtered projection. */

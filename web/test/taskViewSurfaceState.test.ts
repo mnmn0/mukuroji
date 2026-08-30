@@ -40,6 +40,7 @@ describe('task-view surface adapters', () => {
           { field: 'assignee' },
           { field: 'dueDate' },
           { field: 'priority' },
+          { field: 'workItemType' },
         ],
         density: 'comfortable',
         displayOptions: {
@@ -68,6 +69,7 @@ describe('task-view surface adapters', () => {
       'assignee',
       'dueDate',
       'priority',
+      'workItemType',
       'customFields',
     ])
   })
@@ -111,6 +113,7 @@ describe('task-view surface adapters', () => {
       searchQuery: 'launch',
       sortOrder: 'due-date-desc',
       statusFilter: 'core:team:active',
+      workItemTypeFilter: 'all',
     })
 
     const next = projectStateToTaskViewDefinition(definition, {
@@ -277,6 +280,7 @@ describe('task-view surface adapters', () => {
       searchQuery: 'launch',
       statusFilter: 'active',
       viewMode: 'table',
+      workItemTypeFilter: 'all',
     })
     const next = teamStateToTaskViewDefinition(definition, {
       ...state,

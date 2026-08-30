@@ -30,6 +30,7 @@ import {
   type RequestsView,
 } from '../shared/routing/paths'
 import {
+  useTeamWorkItemConfigurations,
   useWorkItemConfiguration,
 } from '../work-items/queries/useWorkItemConfigurations'
 import {
@@ -113,6 +114,23 @@ export function RequestIntakePage() {
     [teams],
   )
   const canManageForms = canManageWorkspaceStructure(user)
+  const activeView: RequestsView = requestedView === 'forms' && canManageForms
+    ? 'forms'
+    : 'queue'
+  const requestTeamIds = useMemo(() => teams.map((team) => team.id), [teams])
+  const {
+    data: requestWorkItemConfigurationResult,
+    error: requestWorkItemConfigurationError,
+  } = useTeamWorkItemConfigurations(
+    accessToken,
+    'request-intake',
+    requestTeamIds,
+    Boolean(user && !currentUserError && activeView === 'queue'),
+  )
+  const requestWorkItemConfigurations = useMemo(() => Object.fromEntries(
+    Object.entries(requestWorkItemConfigurationResult?.configurationsByTeam ?? {})
+      .map(([teamId, resolved]) => [teamId, resolved.configuration]),
+  ), [requestWorkItemConfigurationResult?.configurationsByTeam])
   // Request-level conversion capability is the source-of-truth gate for this assistant.
   // Policy-management permission must not hide it from operators who can convert a request.
   const canUseAiAssistance = Boolean(
@@ -132,9 +150,6 @@ export function RequestIntakePage() {
         .filter((memberKey) => memberKey.length > 0),
     )
   }, [workspaceAccess])
-  const activeView: RequestsView = requestedView === 'forms' && canManageForms
-    ? 'forms'
-    : 'queue'
   const {
     data: queuePages,
     error: queueError,
@@ -197,6 +212,7 @@ export function RequestIntakePage() {
       queueError,
       formsError,
       workspaceAccessError,
+      requestWorkItemConfigurationError,
       detailError,
       selectedFormError,
       authenticatedApiError,
@@ -353,6 +369,7 @@ export function RequestIntakePage() {
                 onSelectSubmission={selectSubmission}
                 assigneeDirectory={activeAssigneeDirectory}
                 projectDirectory={projectDirectory}
+                workItemConfigurations={requestWorkItemConfigurations}
               />
             ) : (
               <div className="grid grid-cols-[280px_minmax(0,1fr)] gap-5 max-[920px]:grid-cols-1">

@@ -1,4 +1,8 @@
 import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import {
+  resolveWorkItemTypeWorkflow,
+  resolveWorkItemTypes,
+} from '../../work-items/model/workItemDisplay'
 
 /**
  * Workspace 検索の status filter に表示する選択肢です。
@@ -25,7 +29,18 @@ export function createSearchStatusOptions(
 
   for (const [, resolvedConfiguration] of Object.entries(configurationsByTeam)
     .sort(([firstTeamId], [secondTeamId]) => firstTeamId.localeCompare(secondTeamId))) {
-    const statuses = [...resolvedConfiguration.configuration.workflow.statuses]
+    const workflows = new Map(
+      [
+        resolvedConfiguration.configuration.workflow,
+        ...(resolvedConfiguration.configuration.workflows ?? []),
+        ...resolveWorkItemTypes(resolvedConfiguration).flatMap((type) => {
+          const workflow = resolveWorkItemTypeWorkflow(resolvedConfiguration, type.id)
+          return workflow ? [workflow] : []
+        }),
+      ].map((workflow) => [workflow.id, workflow]),
+    )
+    const statuses = [...workflows.values()]
+      .flatMap((workflow) => workflow.statuses)
       .sort((first, second) =>
         first.sortOrder - second.sortOrder || first.name.localeCompare(second.name)
       )

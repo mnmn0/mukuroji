@@ -6,6 +6,7 @@ const resultFieldAliases: Record<string, string> = {
   project: 'projectId',
   team: 'teamId',
   type: 'entityType',
+  workItemType: 'workItemTypeId',
 }
 
 /**

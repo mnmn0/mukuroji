@@ -55,6 +55,7 @@ export const automationMessages = {
   'automation.trigger.assigneeChange': '担当者変更',
   'automation.trigger.dueDate': '期限変更・到来',
   'automation.trigger.customFieldChange': 'カスタムフィールド変更',
+  'automation.trigger.workItemTypeChange': 'Work Item Type 変更',
   'automation.trigger.comment': 'コメント',
   'automation.trigger.formSubmission': 'フォーム送信',
   'automation.trigger.webhook': 'Webhook 受信',

@@ -55,6 +55,7 @@ export const requestsMessages = {
   'requests.action.moreInfo': 'Request more information',
   'requests.action.duplicate': 'Mark duplicate',
   'requests.action.convert': 'Convert to Work Item',
+  'requests.action.workItemType': 'Work Item Type',
   'requests.action.assignee': 'Assignee user ID',
   'requests.action.message': 'Message to requester',
   'requests.action.reason': 'Rejection reason',

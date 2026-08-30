@@ -22,6 +22,7 @@ import {
   useTriageSettings,
 } from '../../triage/queries/useTriageQueries'
 import { TriageWorkbench } from '../../triage/ui/TriageWorkbench'
+import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -41,6 +42,11 @@ export function TeamTriagePage() {
   const aiEnabled = workspace.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled
   const routeState = useMemo(() => readTriageRouteState(searchParams), [searchParams])
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+  const workItemConfigurationQuery = useWorkItemConfiguration(
+    workspace.accessToken,
+    teamId,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam),
+  )
   const queue = useTriageQueue(
     workspace.accessToken,
     teamId,
@@ -137,6 +143,7 @@ export function TeamTriagePage() {
         queue.error,
         detail.error,
         settings.error,
+        workItemConfigurationQuery.error,
         mutation.error,
       ]}
     >
@@ -147,6 +154,7 @@ export function TeamTriagePage() {
         canManageConfiguration={canManageConfiguration}
         aiAssistanceEnabled={aiEnabled}
         configuration={settings.data}
+        workItemConfiguration={workItemConfigurationQuery.data?.configuration}
         configurationErrorMessage={configurationErrorMessage}
         counts={countTriageEntryViews(entryViews)}
         detailErrorMessage={detailErrorMessage}

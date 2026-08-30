@@ -304,10 +304,12 @@ function readSla(value: unknown): TriageSla {
 function readWorkItemReference(value: unknown): TriageWorkItemReference {
   const record = requireRecord(value)
   const projectId = readOptionalString(record.projectId)
+  const workItemTypeId = readOptionalString(record.workItemTypeId)
   return {
     teamId: requireString(record.teamId),
     workItemId: requireString(record.workItemId),
     ...(projectId ? { projectId } : {}),
+    ...(workItemTypeId ? { workItemTypeId } : {}),
   }
 }
 

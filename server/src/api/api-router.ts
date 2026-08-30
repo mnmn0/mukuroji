@@ -119,6 +119,7 @@ import {
   type TaskViewScope,
   type TaskViewSurface,
   type WorkItemConfiguration,
+  type WorkItemTypeChangeResolution,
   type WorkItemRelation,
   type WorkItemRelationType,
   type WorkItemDependencyEndpoint,
@@ -492,10 +493,15 @@ import {
 } from '../modules/enterprise-identity/enterprise-session-activity'
 import {
   WorkItemConfigurationError,
+  assertWorkItemChildTypeAllowed,
+  assertWorkItemTypeChangeResolution,
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
+  getWorkItemTypeCustomFieldDefinitions,
   normalizeCustomFieldValues,
+  previewWorkItemTypeChange,
+  resolveWorkItemType,
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
 } from '../modules/work-items/work-item-configuration'
@@ -6007,6 +6013,18 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
     ) {
       throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request action is invalid.')
     }
+    if (
+      body.action === 'convert' &&
+      body.workItemTypeId !== undefined &&
+      (typeof body.workItemTypeId !== 'string' ||
+        !/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(body.workItemTypeId.trim()))
+    ) {
+      throw new RequestIntakeError(
+        400,
+        'InvalidRequestIntakeInput',
+        'Work Item Type ID is invalid.',
+      )
+    }
     if (body.action !== 'convert') {
       if (body.action === 'assign') {
         if (
@@ -6088,6 +6106,9 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
           action: 'accept',
           mode: 'create',
           expectedRevision: triageEntry.revision,
+          ...(conversion.input.workItemTypeId
+            ? { workItemTypeId: conversion.input.workItemTypeId }
+            : {}),
         }
       : undefined
     const triageIdempotency = triageAction
@@ -6162,6 +6183,9 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
           canonicalWorkItem: {
             teamId: conversion.target.teamId,
             workItemId: deterministicIssueId,
+            ...(typeof configured.workItemTypeId === 'string'
+              ? { workItemTypeId: configured.workItemTypeId }
+              : {}),
             ...(conversion.target.projectId
               ? { projectId: conversion.target.projectId }
               : {}),
@@ -6268,6 +6292,17 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/relations', async (c) => {
       'Relation graph revision',
     )
     const endpoints = await authorizeRelationMutation(principal, teamId, issueId, targetWorkItemId)
+    if (relationType === 'parent') {
+      const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        teamId,
+      )
+      assertWorkItemChildTypeAllowed(
+        configuration.configuration,
+        endpoints.source.workItemTypeId,
+        endpoints.target.workItemTypeId,
+      )
+    }
     const response = await workItemDependencies.workItemConfigurations.createRelation(
       principal.directoryId,
       teamId,
@@ -8792,12 +8827,14 @@ routeApp.get('/api/teams/:teamId/issues', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
     const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
+    const workItemTypeId = readOptionalWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
 
     return c.json(await hydrateTeamIssuesResponse(await readTeamIssues(
       principal.directoryId,
       context,
       principal,
       includeArchived,
+      workItemTypeId,
     )))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
@@ -9192,6 +9229,61 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/confirm', async (c) =
       },
     )
     return c.json(response)
+  } catch (error) {
+    return toWorkItemConfigurationErrorResponse(c, error)
+  }
+})
+
+/**
+ * Work Item Type の変更による影響を計算する endpoint です。
+ */
+routeApp.post('/api/teams/:teamId/issues/:issueId/work-item-type-preview', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const context = await requireTeamPermission(principal, teamId, 'member')
+    const input = await readJson<Record<string, unknown>>(c.req) ?? {}
+    const expectedRevision = readWorkItemExpectedRevision(input.expectedRevision)
+    const targetWorkItemTypeId = readRequiredWorkItemTypeId(input.targetWorkItemTypeId)
+    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      issueId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    )
+    if (detail.issue.revision !== expectedRevision) {
+      throw new ProjectDataError(
+        409,
+        'WorkItemRevisionConflict',
+        'Work Item changed. Reload and try again.',
+      )
+    }
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+    const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+      principal.directoryId,
+      teamId,
+    )
+    const preview = previewWorkItemTypeChange(
+      resolvedConfiguration.configuration,
+      detail.issue.workItemTypeId,
+      detail.issue.workflowStatusId,
+      detail.issue.customFieldValues,
+      targetWorkItemTypeId,
+      detail.issue.assignedProjectId,
+      expectedRevision,
+    )
+    return c.json(preview)
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
@@ -11289,10 +11381,11 @@ routeApp.get('/api/projects/:projectId/issues', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     await requireProjectPermission(principal, projectId, 'viewer')
     const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
+    const workItemTypeId = readOptionalWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
 
     return c.json(
       await hydrateProjectIssuesResponse(
-        await readProjectIssues(principal.directoryId, projectId, includeArchived),
+        await readProjectIssues(principal.directoryId, projectId, includeArchived, workItemTypeId),
       ),
     )
   } catch (error) {
@@ -13457,6 +13550,12 @@ const bulkEditableWorkItemFields = new Set([
   'workflowStatusId',
 ])
 
+const automationEditableWorkItemFields = new Set([
+  ...bulkEditableWorkItemFields,
+  'typeChangeResolution',
+  'workItemTypeId',
+])
+
 /** Dependencies used while executing durable Automation actions. */
 export interface AutomationActionExecutorDependencies {
   /** Provides Cognito user and system-administrator lookups. */
@@ -13600,7 +13699,7 @@ async function executeAutomationWorkItemUpdate(
     target.workItemId,
     { consistentIssueRead: true, eventLimit: 0 },
   )
-  const unsafeFields = Object.keys(patch).filter((field) => !bulkEditableWorkItemFields.has(field))
+  const unsafeFields = Object.keys(patch).filter((field) => !automationEditableWorkItemFields.has(field))
   if (unsafeFields.length > 0) {
     throw new AutomationError(
       'invalid-input',
@@ -13859,6 +13958,7 @@ async function executeAutomationWorkItemCreate(
     priority: values.priority,
     schedule: values.schedule,
     title: values.title,
+    workItemTypeId: readAutomationText(values.workItemTypeId),
     workflowStatusId: values.workflowStatusId,
   }
   const team = await requireAutomationTeam(
@@ -14281,9 +14381,9 @@ function isAutomationPatchApplied(
   patch: Record<string, AutomationValue>,
 ) {
   const current = issue as unknown as Record<string, unknown>
-  return Object.entries(patch).every(([field, expected]) =>
-    automationValuesEqual(current[field] ?? null, expected)
-  )
+  return Object.entries(patch)
+    .filter(([field]) => field !== 'typeChangeResolution')
+    .every(([field, expected]) => automationValuesEqual(current[field] ?? null, expected))
 }
 
 function automationValuesEqual(first: unknown, second: unknown): boolean {
@@ -24099,12 +24199,15 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
         tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
         entry: currentEntry,
         action,
-        canonicalWorkItem: {
-          teamId: detail.issue.teamId,
-          workItemId: detail.issue.id,
-          ...(detail.issue.assignedProjectId
-            ? { projectId: detail.issue.assignedProjectId }
-            : {}),
+          canonicalWorkItem: {
+            teamId: detail.issue.teamId,
+            workItemId: detail.issue.id,
+            ...(detail.issue.workItemTypeId
+              ? { workItemTypeId: detail.issue.workItemTypeId }
+              : {}),
+            ...(detail.issue.assignedProjectId
+              ? { projectId: detail.issue.assignedProjectId }
+              : {}),
         },
         actorId: principal.userKey,
         now,
@@ -24722,6 +24825,8 @@ async function createLegacyRequestTriageContribution(
   let action: TriageActionInput
   let duplicateContext: TriageDuplicateContextTransactionContribution | undefined
   let duplicateMergedAt: string | undefined
+  let duplicateCanonicalTeamId: string | undefined
+  let duplicateCanonicalWorkItemTypeId: string | undefined
   if (input.action === 'assign') {
     action = {
       action: 'assign',
@@ -24758,6 +24863,8 @@ async function createLegacyRequestTriageContribution(
       duplicateTarget.workItem.workItemId,
       'member',
     )
+    duplicateCanonicalTeamId = detail.issue.teamId
+    duplicateCanonicalWorkItemTypeId = detail.issue.workItemTypeId
     action = {
       action: 'duplicate',
       expectedRevision: entry.revision,
@@ -24809,8 +24916,11 @@ async function createLegacyRequestTriageContribution(
       entry,
       action,
       canonicalWorkItem: {
-        teamId: entry.teamId,
+        teamId: duplicateCanonicalTeamId ?? entry.teamId,
         workItemId: action.canonicalWorkItemId,
+        ...(duplicateCanonicalWorkItemTypeId
+          ? { workItemTypeId: duplicateCanonicalWorkItemTypeId }
+          : {}),
       },
       actorId: principal.userKey,
       now: completedAt,
@@ -24997,6 +25107,9 @@ async function acceptTriageEntryAsNewWorkItem(
         })),
     assignedProjectId: assignedProjectId ?? null,
     assigneeUserId,
+    ...(request.action.workItemTypeId
+      ? { workItemTypeId: request.action.workItemTypeId }
+      : {}),
     idempotentIssueId: issueId,
     idempotentRequestDigest: request.idempotency.fingerprint,
   }, teamContext.team)
@@ -25025,6 +25138,9 @@ async function acceptTriageEntryAsNewWorkItem(
   const canonicalWorkItem = {
     teamId: request.teamId,
     workItemId: issueId,
+    ...(typeof configured.workItemTypeId === 'string'
+      ? { workItemTypeId: configured.workItemTypeId }
+      : {}),
     ...(assignedProjectId ? { projectId: assignedProjectId } : {}),
   }
   const acceptance = createTriageAcceptanceTransactionItems({
@@ -28310,6 +28426,34 @@ function readOptionalIncludeArchivedQuery(value: string | undefined) {
   )
 }
 
+/** Reads an optional stable Work Item Type query filter. */
+function readOptionalWorkItemTypeIdQuery(value: string | undefined): string | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  if (!/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(value.trim())) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemQuery',
+      'workItemTypeId is invalid.',
+    )
+  }
+  return value.trim()
+}
+
+/** Reads the required stable Work Item Type identifier from a type-change preview request. */
+function readRequiredWorkItemTypeId(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(value.trim())
+  ) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemType',
+      'targetWorkItemTypeId is invalid.',
+    )
+  }
+  return value.trim()
+}
+
 function readRequiredPositiveQueryInteger(value: string | undefined, label: string) {
   const parsed = value ? Number(value) : Number.NaN
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -30182,12 +30326,18 @@ async function resolveFileApprovalCompletionTransition(
     const currentStatus = resolveWorkflowStatus(
       resolved.configuration,
       workItem.workflowStatusId,
+      workItem.workItemTypeId,
     )
-    const nextStatus = resolveWorkflowStatus(resolved.configuration, completionTransition)
+    const nextStatus = resolveWorkflowStatus(
+      resolved.configuration,
+      completionTransition,
+      workItem.workItemTypeId,
+    )
     assertWorkflowTransitionAllowed(
       resolved.configuration,
       currentStatus.workflowStatusId,
       nextStatus.workflowStatusId,
+      workItem.workItemTypeId,
     )
     return {
       workflowStatusId: nextStatus.workflowStatusId,
@@ -32585,6 +32735,7 @@ function createWorkItemSearchDocument(
     ...(issue.assigneeUserId ? { assigneeUserId: issue.assigneeUserId } : {}),
     ...(issue.creatorMemberKey ? { creatorUserId: issue.creatorMemberKey } : {}),
     status: issue.workflowStatusId,
+    workItemTypeId: issue.workItemTypeId,
     customFields: issue.customFieldValues,
     relationIds: [...relationIds],
     dueDate: issue.dueDate,
@@ -32786,11 +32937,12 @@ async function readTeamIssues(
   context: TeamPermissionContext,
   principal: ProjectPrincipal,
   includeArchived = false,
+  workItemTypeId?: string,
 ) {
   const storedIssues = await workItemDependencies.teamIssues.getTeamIssues(
     directoryId,
     context.team.id,
-    { includeArchived },
+    { includeArchived, ...(workItemTypeId ? { workItemTypeId } : {}) },
   )
 
   return {
@@ -38137,11 +38289,12 @@ async function readProjectIssues(
   directoryId: string,
   projectId: string,
   includeArchived = false,
+  workItemTypeId?: string,
 ) {
   return workItemDependencies.teamIssues.getProjectIssues(
     directoryId,
     projectId,
-    { includeArchived },
+    { includeArchived, ...(workItemTypeId ? { workItemTypeId } : {}) },
   )
 }
 
@@ -38403,6 +38556,57 @@ function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBody | Upd
   }
 }
 
+/** Parses the explicit acknowledgement sent with a Work Item Type change. */
+function readWorkItemTypeChangeResolution(
+  value: unknown,
+): WorkItemTypeChangeResolution | undefined {
+  if (value === undefined) return undefined
+  if (!isRecord(value) || !Array.isArray(value.discardCustomFieldIds)) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemTypeChangeResolution',
+      'Work Item Type change resolution is invalid.',
+    )
+  }
+  if (value.discardCustomFieldIds.length > 100) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemTypeChangeResolution',
+      'Work Item Type change field acknowledgements are invalid.',
+    )
+  }
+  const discardCustomFieldIds: string[] = []
+  for (const fieldId of value.discardCustomFieldIds) {
+    if (
+      typeof fieldId !== 'string' ||
+      !/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(fieldId.trim())
+    ) {
+      throw new WorkItemConfigurationError(
+        400,
+        'InvalidWorkItemTypeChangeResolution',
+        'Work Item Type change field acknowledgements are invalid.',
+      )
+    }
+    discardCustomFieldIds.push(fieldId.trim())
+  }
+  if (
+    value.workflowStatusId !== undefined &&
+    (typeof value.workflowStatusId !== 'string' || !value.workflowStatusId.trim())
+  ) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemTypeChangeResolution',
+      'Replacement workflow status is invalid.',
+    )
+  }
+  return {
+    discardCustomFieldIds,
+    ...(value.workflowStatusId === undefined
+      ? {}
+      : { workflowStatusId: value.workflowStatusId.trim() }),
+  }
+}
+
 function rejectInternalWorkItemUpdateFields(input: PublicUpdateTeamIssueRequestBody) {
   rejectDerivedWorkItemScheduleFields(input)
   if ('archivedAt' in input || 'archivedBy' in input) {
@@ -38504,9 +38708,14 @@ async function prepareConfiguredCreateWorkItem(
       'Quick capture must be a boolean.',
     )
   }
+  const workItemType = resolveWorkItemType(
+    resolved.configuration,
+    input.workItemTypeId,
+  )
   const workflowStatus = resolveWorkflowStatus(
     resolved.configuration,
     input.workflowStatusId,
+    workItemType.id,
   )
   const isQuickCapture = quickCapture === true
 
@@ -38522,11 +38731,23 @@ async function prepareConfiguredCreateWorkItem(
   const customFieldValues = normalizeCustomFieldValues(
     resolved.configuration,
     input.customFieldValues,
-    { allowRequiredMissing: isQuickCapture, mode: 'create', projectId },
+    {
+      allowRequiredMissing: isQuickCapture,
+      mode: 'create',
+      projectId,
+      workItemTypeId: workItemType.id,
+    },
   )
-  await requireActiveCustomFieldPeople(directoryId, resolved.configuration, customFieldValues, projectId)
+  await requireActiveCustomFieldPeople(
+    directoryId,
+    resolved.configuration,
+    customFieldValues,
+    projectId,
+    workItemType.id,
+  )
   return {
     ...inputWithoutQuickCapture,
+    workItemTypeId: workItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: workflowStatus.workflowStatusId,
     statusCategory: workflowStatus.statusCategory,
@@ -38547,37 +38768,109 @@ async function prepareConfiguredUpdateWorkItem(
   input: UpdateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
 ): Promise<UpdateTeamIssueRequestBody> {
+  const currentWorkItemType = resolveWorkItemType(
+    resolved.configuration,
+    current.workItemTypeId,
+    { allowArchived: true },
+  )
+  const requestedWorkItemTypeId = 'workItemTypeId' in input
+    ? input.workItemTypeId
+    : currentWorkItemType.id
+  const targetWorkItemType = resolveWorkItemType(
+    resolved.configuration,
+    requestedWorkItemTypeId,
+    { allowArchived: true },
+  )
   const currentWorkflowStatus = resolveWorkflowStatus(
     resolved.configuration,
     current.workflowStatusId,
+    currentWorkItemType.id,
   )
+  const typeChanged = currentWorkItemType.id !== targetWorkItemType.id
+  if (typeChanged && targetWorkItemType.status === 'archived') {
+    resolveWorkItemType(resolved.configuration, targetWorkItemType.id)
+  }
+  const typeChangeResolution = readWorkItemTypeChangeResolution(input.typeChangeResolution)
+  const typeChangePreview = typeChanged
+    ? previewWorkItemTypeChange(
+        resolved.configuration,
+        currentWorkItemType.id,
+        current.workflowStatusId,
+        current.customFieldValues,
+        targetWorkItemType.id,
+        'assignedProjectId' in input
+          ? readAssignedProjectId(input.assignedProjectId) ?? undefined
+          : current.assignedProjectId,
+        current.revision,
+      )
+    : undefined
+  const requestedWorkflowStatusId = typeChangePreview
+    ? assertWorkItemTypeChangeResolution(
+        typeChangePreview,
+        typeChangeResolution,
+        input.workflowStatusId ?? (
+          typeChangePreview.invalidWorkflowStatusId === undefined
+            ? currentWorkflowStatus.workflowStatusId
+            : undefined
+        ),
+      )
+    : input.workflowStatusId ?? currentWorkflowStatus.workflowStatusId
   const nextWorkflowStatus = resolveWorkflowStatus(
     resolved.configuration,
-    input.workflowStatusId ?? currentWorkflowStatus.workflowStatusId,
+    requestedWorkflowStatusId,
+    targetWorkItemType.id,
   )
-  assertWorkflowTransitionAllowed(
-    resolved.configuration,
-    currentWorkflowStatus.workflowStatusId,
-    nextWorkflowStatus.workflowStatusId,
-  )
+  if (!typeChanged) {
+    assertWorkflowTransitionAllowed(
+      resolved.configuration,
+      currentWorkflowStatus.workflowStatusId,
+      nextWorkflowStatus.workflowStatusId,
+      targetWorkItemType.id,
+    )
+  }
   const projectId = 'assignedProjectId' in input
     ? readAssignedProjectId(input.assignedProjectId) ?? undefined
     : current.assignedProjectId
+  const existingValues = typeChangePreview
+    ? Object.fromEntries(Object.entries(current.customFieldValues).filter(([fieldId]) =>
+        !typeChangePreview.lostCustomFieldIds.includes(fieldId),
+      ))
+    : current.customFieldValues
+  const inputWithoutTypeChangeResolution = { ...input }
+  delete inputWithoutTypeChangeResolution.typeChangeResolution
+  if (
+    typeChangePreview &&
+    isRecord(inputWithoutTypeChangeResolution.customFieldValues)
+  ) {
+    inputWithoutTypeChangeResolution.customFieldValues = Object.fromEntries(
+      Object.entries(inputWithoutTypeChangeResolution.customFieldValues).filter(([fieldId]) =>
+        !typeChangePreview.lostCustomFieldIds.includes(fieldId),
+      ),
+    )
+  }
   const customFieldValues = normalizeCustomFieldValues(
     resolved.configuration,
-    input.customFieldValues,
+    inputWithoutTypeChangeResolution.customFieldValues,
     {
       allowRequiredMissing:
         currentWorkflowStatus.statusCategory === 'backlog' &&
         nextWorkflowStatus.statusCategory === 'backlog',
       mode: 'update',
-      existingValues: current.customFieldValues,
+      existingValues,
       projectId,
+      workItemTypeId: targetWorkItemType.id,
     },
   )
-  await requireActiveCustomFieldPeople(directoryId, resolved.configuration, customFieldValues, projectId)
+  await requireActiveCustomFieldPeople(
+    directoryId,
+    resolved.configuration,
+    customFieldValues,
+    projectId,
+    targetWorkItemType.id,
+  )
   return {
-    ...input,
+    ...inputWithoutTypeChangeResolution,
+    workItemTypeId: targetWorkItemType.id,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: nextWorkflowStatus.workflowStatusId,
     statusCategory: nextWorkflowStatus.statusCategory,
@@ -38596,16 +38889,23 @@ async function requireActiveCustomFieldPeople(
   configuration: WorkItemConfiguration,
   values: Readonly<Record<string, CustomFieldValue>>,
   projectId?: string,
+  workItemTypeId?: string,
 ) {
-  const personIds = configuration.customFields.flatMap((definition) =>
-    definition.type === 'person' &&
-    (!definition.projectIds || definition.projectIds.length === 0 || Boolean(
-      projectId && definition.projectIds.includes(projectId),
-    )) &&
-    typeof values[definition.id] === 'string'
-      ? [values[definition.id] as string]
-      : [],
+  const definitions = getWorkItemTypeCustomFieldDefinitions(
+    configuration,
+    workItemTypeId,
+    { allowArchived: true },
   )
+  const personIds = definitions.flatMap((definition) => {
+    const value = values[definition.id]
+    return definition.type === 'person' &&
+      (!definition.projectIds || definition.projectIds.length === 0 || Boolean(
+        projectId && definition.projectIds.includes(projectId),
+      )) &&
+      typeof value === 'string'
+      ? [value]
+      : []
+  })
   await Promise.all([...new Set(personIds)].map((personId) =>
     requireActiveWorkspaceAssignee(directoryId, personId),
   ))
@@ -38692,16 +38992,27 @@ function assertWorkItemConfigurationUsage(
   configuration: WorkItemConfiguration,
 ) {
   try {
+    const workItemType = resolveWorkItemType(
+      configuration,
+      workItem.workItemTypeId,
+      { allowArchived: true },
+    )
     const status = resolveWorkflowStatus(
       configuration,
       workItem.workflowStatusId,
+      workItemType.id,
     )
     if (status.statusCategory !== workItem.statusCategory) {
       throw new Error('the stored status category would become stale')
     }
 
     const storedValues = workItem.customFieldValues
-    const definitionIds = new Set(configuration.customFields.map((definition) => definition.id))
+    const typeDefinitions = getWorkItemTypeCustomFieldDefinitions(
+      configuration,
+      workItemType.id,
+      { allowArchived: true },
+    )
+    const definitionIds = new Set(typeDefinitions.map((definition) => definition.id))
     const removedValueId = Object.keys(storedValues).find((fieldId) => !definitionIds.has(fieldId))
     if (removedValueId) {
       throw new Error(`stored field "${removedValueId}" would lose its definition`)
@@ -38713,9 +39024,10 @@ function assertWorkItemConfigurationUsage(
         existingValues: storedValues,
         mode: 'update',
         projectId: workItem.assignedProjectId,
+        workItemTypeId: workItemType.id,
       },
     )
-    for (const definition of configuration.customFields) {
+    for (const definition of typeDefinitions) {
       if (
         definition.type === 'formula' &&
         (!definition.projectIds ||
@@ -39647,6 +39959,7 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'priority',
   'creatorMemberKey',
   'workflowStatusId',
+  'workItemTypeId',
   'statusCategory',
   'workflowSchemaVersion',
   'customFieldValues',
@@ -39683,6 +39996,7 @@ function projectPublicWorkItem(workItem: CanonicalWorkItem): CanonicalWorkItem {
     priority: workItem.priority,
     creatorMemberKey: workItem.creatorMemberKey,
     workflowStatusId: workItem.workflowStatusId,
+    workItemTypeId: workItem.workItemTypeId,
     statusCategory: workItem.statusCategory,
     workflowSchemaVersion: workItem.workflowSchemaVersion,
     customFieldValues: structuredClone(workItem.customFieldValues),
@@ -39956,6 +40270,9 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             : {}),
           ...(typeof filters.workflowStatusId === 'string'
             ? { workflowStatusId: filters.workflowStatusId }
+            : {}),
+          ...(typeof filters.workItemTypeId === 'string'
+            ? { workItemTypeId: filters.workItemTypeId }
             : {}),
           ...(typeof filters.updatedAfter === 'string'
             ? { updatedAfter: filters.updatedAfter }

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORK_ITEM_TYPE,
   SAVED_VIEW_SCHEMA_VERSION,
   type CreateSavedWorkspaceViewInput,
   type ResolvedWorkItemConfiguration,
@@ -12,6 +13,7 @@ import {
   type WorkspaceSearchDateField,
   type WorkspaceSearchFilters,
   type WorkspaceSearchResult,
+  type WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
@@ -35,6 +37,7 @@ import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
   useTeamWorkItemConfigurations,
 } from '../work-items/queries/useWorkItemConfigurations'
+import { resolveWorkItemTypes } from '../work-items/model/workItemDisplay'
 import {
   createSavedWorkspaceView,
   deleteSavedWorkspaceView,
@@ -108,7 +111,7 @@ const searchCustomFieldOperators = [
   'is-not-empty',
 ] as const satisfies readonly SearchCustomFieldFilter['operator'][]
 const savedViewVisibilities = ['personal', 'team', 'shared'] as const satisfies readonly SavedViewVisibility[]
-const selectableColumns = ['type', 'status', 'assignee', 'creator', 'project', 'team', 'dueDate', 'updatedAt'] as const
+const selectableColumns = ['type', 'workItemType', 'status', 'assignee', 'creator', 'project', 'team', 'dueDate', 'updatedAt'] as const
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 
@@ -217,6 +220,38 @@ export function SearchPage() {
   const statusLabels = useMemo(
     () => Object.fromEntries(statusOptions.map((status) => [status.id, status.label])),
     [statusOptions],
+  )
+  const workItemTypes = useMemo<WorkItemTypeDefinition[]>(() => {
+    const definitions = new Map<string, WorkItemTypeDefinition>([
+      [DEFAULT_WORK_ITEM_TYPE.id, DEFAULT_WORK_ITEM_TYPE],
+    ])
+    for (const resolvedConfiguration of Object.values(workItemConfigurationsByTeam)) {
+      for (const type of resolveWorkItemTypes(resolvedConfiguration)) {
+        if (!definitions.has(type.id)) definitions.set(type.id, type)
+      }
+    }
+    const visibleTypeIds = [
+      ...getSearchFilterValues(routeState.filters, 'workItemTypeIds'),
+      ...results
+        .filter((result) => result.entityType === 'work-item')
+        .map((result) => result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE.id),
+    ]
+    for (const typeId of visibleTypeIds) {
+      if (!typeId || definitions.has(typeId)) continue
+      definitions.set(typeId, {
+        ...DEFAULT_WORK_ITEM_TYPE,
+        id: typeId,
+        name: typeId,
+        sortOrder: Number.MAX_SAFE_INTEGER,
+      })
+    }
+    return [...definitions.values()].sort((left, right) =>
+      left.sortOrder - right.sortOrder || left.name.localeCompare(right.name),
+    )
+  }, [results, routeState.filters, workItemConfigurationsByTeam])
+  const workItemTypeLabels = useMemo(
+    () => Object.fromEntries(workItemTypes.map((type) => [type.id, type.name])),
+    [workItemTypes],
   )
   const visibleSearchErrorMessage = currentUserErrorAction?.kind === 'stay'
     ? t('search.error')
@@ -601,6 +636,7 @@ export function SearchPage() {
                   routeState={routeState}
                   selectedSavedView={selectedSavedView}
                   statusOptions={statusOptions}
+                  workItemTypes={workItemTypes}
                   t={t}
                 />
                 {migrationWarnings.map((warning) => (
@@ -634,6 +670,7 @@ export function SearchPage() {
                     hasMore={Boolean(nextCursor)}
                     results={results}
                     t={t}
+                    workItemTypeLabels={workItemTypeLabels}
                   />
                 ) : null}
                 {isSearchLoading ? (
@@ -646,6 +683,7 @@ export function SearchPage() {
                     onNavigate={navigateToSearchResult}
                     results={results}
                     statusLabels={statusLabels}
+                    workItemTypeLabels={workItemTypeLabels}
                   />
                 ) : !visibleSearchErrorMessage ? (
                   <section className="workbench-panel px-6 py-14 text-center">
@@ -701,6 +739,8 @@ type SearchToolbarProps = {
   selectedSavedView?: SavedWorkspaceView
   /** Server-authorized workflow status options. */
   statusOptions: readonly SearchStatusOption[]
+  /** Work Item Types available in the visible Team configurations. */
+  workItemTypes: readonly WorkItemTypeDefinition[]
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -726,10 +766,12 @@ function SearchToolbar({
   routeSignature,
   selectedSavedView,
   statusOptions,
+  workItemTypes,
   t,
 }: SearchToolbarProps) {
   const entityTypes = getSearchEntityTypes(routeState.filters)
   const statuses = getSearchStatuses(routeState.filters)
+  const selectedWorkItemTypeIds = getSearchFilterValues(routeState.filters, 'workItemTypeIds')
   const columns = getSearchColumns(routeState.layout)
   const routeDateField = getSearchDateField(routeState.filters)
   const [dateFieldOverride, setDateFieldOverride] = useState<{
@@ -848,6 +890,21 @@ function SearchToolbar({
               ))}
             </div>
           </div>
+          <div className="grid gap-2">
+            <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('search.filters.workItemType')}</span>
+            <div className="flex flex-wrap gap-2">
+              {workItemTypes.map((type) => (
+                <ToggleChip
+                  active={selectedWorkItemTypeIds.includes(type.id)}
+                  key={type.id}
+                  label={type.name}
+                  onToggle={() => onFiltersChange({
+                    workItemTypeIds: toggleValue(selectedWorkItemTypeIds, type.id),
+                  })}
+                />
+              ))}
+            </div>
+          </div>
           <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
             <CommaSeparatedInput filterKey="assigneeUserIds" label={t('search.filters.assignee')} routeState={routeState} onFiltersChange={onFiltersChange} />
             <CommaSeparatedInput filterKey="creatorUserIds" label={t('search.filters.creator')} routeState={routeState} onFiltersChange={onFiltersChange} />
@@ -897,6 +954,7 @@ function SearchToolbar({
               relationIds: [],
               statuses: [],
               teamIds: [],
+              workItemTypeIds: [],
             })}
             type="button"
           >

@@ -87,6 +87,7 @@ const taskViewFilterFields = [
   'priorities',
   'dueDatePreset',
   'includeArchived',
+  'workItemTypeIds',
 ]
 
 /**
@@ -458,6 +459,7 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
   if (!hasOptionalStringArray(value.relationIds)) return false
   if (!hasOptionalStringArray(value.projectIds)) return false
   if (!hasOptionalStringArray(value.teamIds)) return false
+  if (!hasOptionalStringArray(value.workItemTypeIds)) return false
   if (!hasOptionalStringArrayFrom(value.workflowCategories, workflowCategories)) return false
   if (!hasOptionalStringArrayFrom(value.priorities, priorities)) return false
   if (value.dueDatePreset !== undefined && !includesString(dueDatePresets, value.dueDatePreset)) {

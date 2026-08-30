@@ -13,7 +13,6 @@ import type { WorkspaceMember } from '../../workspace/api/access'
 import type { TaskViewGroupValue } from '../../task-views/model/taskViewPresentation'
 import {
   isCustomFieldApplicable,
-  sortCustomFieldDefinitions,
 } from '../../work-items/model/customFields'
 import {
   matchesWorkItemDefinitionFilter,
@@ -23,6 +22,8 @@ import {
   formatWorkItemCustomFieldValue,
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypeLabel,
+  resolveWorkItemTypeCustomFields,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
   sortWorkflowStatuses,
@@ -75,6 +76,9 @@ export type AssigneeFilter = string | 'all'
 /** Task priority filter value or the all-priority sentinel. */
 export type PriorityFilter = WorkItemPriority | 'all'
 
+/** Work Item Type filter value or the all-type sentinel. */
+export type WorkItemTypeFilter = string | 'all'
+
 /** Due-date bucket selected in the task list. */
 export type DueDateFilter = (typeof taskDueDateFilters)[number]
 
@@ -93,6 +97,8 @@ export type TaskScreenViewState = {
   dueDateFilter: DueDateFilter
   /** Priority filter or the all-priority sentinel. */
   priorityFilter: PriorityFilter
+  /** Work Item Type filter or the all-type sentinel. */
+  workItemTypeFilter: WorkItemTypeFilter
   /** Case-insensitive task search query. */
   searchQuery: string
   /** Due-date ordering applied after filtering. */
@@ -111,6 +117,8 @@ export type TaskCreateContext = {
   teamId?: string
   /** Workflow status inherited from a Board column or other status surface. */
   workflowStatusId?: string
+  /** Stable Work Item Type inherited from a type-aware create surface. */
+  workItemTypeId?: string
   /** Explicit schedule inherited from a Calendar range or planning surface. */
   schedule?: WorkItemSchedule
   /** Assignee inherited from an assignee-oriented surface. */
@@ -219,6 +227,7 @@ export function applyTaskPatchOptimistically(
         ? { assignedProjectId: undefined }
         : { assignedProjectId: patch.assignedProjectId }),
     ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: patch.assigneeUserId }),
+    ...(patch.workItemTypeId === undefined ? {} : { workItemTypeId: patch.workItemTypeId }),
     ...(patch.schedule === undefined
       ? {}
       : {
@@ -259,6 +268,7 @@ export function createTaskInversePatch(
       ? {}
       : { assignedProjectId: task.assignedProjectId ?? null }),
     ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: task.assigneeUserId }),
+    ...(patch.workItemTypeId === undefined ? {} : { workItemTypeId: task.workItemTypeId }),
     ...(patch.schedule === undefined
       ? {}
       : { schedule: task.schedule }),
@@ -296,6 +306,8 @@ export type FilterAndSortProjectTasksOptions = {
   personLabels: Readonly<Record<string, string>>
   /** Priority to retain, or all priorities. */
   priorityFilter: PriorityFilter
+  /** Work Item Type to retain, or all types; omitted for legacy callers. */
+  workItemTypeFilter?: WorkItemTypeFilter
   /** Free-text query matched against task display fields. */
   searchQuery: string
   /** Due-date order applied after filtering. */
@@ -668,6 +680,7 @@ export function resolveProjectTaskGroupValue(
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'workItemType': value = resolveWorkItemTypeLabel(task, configuration); break
     case 'project': value = task.assignedProjectId ?? '—'; break
     case 'team': value = task.teamId; break
     default: {
@@ -774,7 +787,10 @@ export function resolveTaskCustomFieldEntries(
     return []
   }
 
-  return sortCustomFieldDefinitions(configuration.customFields).flatMap((definition) => {
+  return resolveWorkItemTypeCustomFields(
+    configuration,
+    task.workItemTypeId,
+  ).flatMap((definition) => {
     const value = task.customFieldValues[definition.id]
 
     if (value === undefined || !isCustomFieldApplicable(definition, task.assignedProjectId)) {
@@ -925,6 +941,9 @@ export function filterAndSortProjectTasks(
       resolveTaskAssigneeFilterValue(task, options.t) === options.assigneeFilter
     const matchesPriority = options.priorityFilter === 'all' ||
       task.priority === options.priorityFilter
+    const matchesWorkItemType = options.workItemTypeFilter === undefined ||
+      options.workItemTypeFilter === 'all' ||
+      (task.workItemTypeId ?? 'default') === options.workItemTypeFilter
     const matchesDueDate = matchesTaskDueDateFilter(task, options.dueDateFilter, today)
     const matchesDefinition = matchesWorkItemDefinitionFilter(
       task,
@@ -936,6 +955,7 @@ export function filterAndSortProjectTasks(
       !matchesStatus ||
       !matchesAssignee ||
       !matchesPriority ||
+      !matchesWorkItemType ||
       !matchesDueDate ||
       !matchesDefinition
     ) {
@@ -986,6 +1006,8 @@ export function matchesProjectTaskKeyword(
     task.title,
     resolveTaskAssignee(task),
     resolveWorkItemWorkflowStatusLabel(task, configuration),
+    task.workItemTypeId ?? 'default',
+    resolveWorkItemTypeLabel(task, configuration),
     t(`tasks.priority.${task.priority}`),
     task.dueDate,
     deriveTaskScheduleDueDate(task.schedule),

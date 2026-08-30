@@ -2,12 +2,14 @@ import type {
   AiTriageDraft,
   RequestFormRoutingTarget,
   RequestSubmissionActionInput,
+  WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageDraftComposer'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
+import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
 import {
   type RequestSubmissionModel,
 } from '../model/requestForm'
@@ -38,6 +40,8 @@ export type RequestQueueProps = {
   projectDirectory?: RequestRoutingProjectDirectory
   /** Active non-guest Workspace member keys used to validate AI assignee proposals before adoption. */
   assigneeDirectory?: RequestRoutingAssigneeDirectory
+  /** Team-scoped Work Item configurations used by the conversion type picker. */
+  workItemConfigurations?: Readonly<Record<string, WorkItemConfiguration>>
   /**
    * 表示 locale です。
    */
@@ -118,6 +122,7 @@ export function RequestQueue({
   onSelectSubmission,
   projectDirectory,
   assigneeDirectory,
+  workItemConfigurations,
   selectedSubmission,
   submissions,
 }: RequestQueueProps) {
@@ -260,6 +265,9 @@ export function RequestQueue({
         onOpenAttachment={onOpenAttachment}
         assigneeDirectory={assigneeDirectory}
         projectDirectory={projectDirectory}
+        workItemConfiguration={selectedSubmission
+          ? workItemConfigurations?.[selectedSubmission.routing.teamId]
+          : undefined}
       />
     </div>
   )
@@ -277,6 +285,7 @@ function RequestSubmissionDetail({
   onOperationPendingChange,
   assigneeDirectory,
   projectDirectory,
+  workItemConfiguration,
   submission,
 }: {
   accessToken?: string
@@ -290,11 +299,22 @@ function RequestSubmissionDetail({
   locale: Locale
   projectDirectory?: RequestRoutingProjectDirectory
   assigneeDirectory?: RequestRoutingAssigneeDirectory
+  workItemConfiguration?: WorkItemConfiguration
   onAction?: RequestQueueProps['onAction']
   onOpenAttachment?: RequestQueueProps['onOpenAttachment']
   submission?: RequestSubmissionModel
 }) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const workItemTypes = useMemo(
+    () => resolveWorkItemTypes(workItemConfiguration).filter((type) => type.status === 'active'),
+    [workItemConfiguration],
+  )
+  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
+    () => workItemTypes[0]?.id ?? 'default',
+  )
+  const effectiveWorkItemTypeId = workItemTypes.some((type) => type.id === selectedWorkItemTypeId)
+    ? selectedWorkItemTypeId
+    : workItemTypes[0]?.id ?? 'default'
   const [actionMode, setActionMode] = useState<ActionMode>()
   const [actionValue, setActionValue] = useState('')
   const [titleOverride, setTitleOverride] = useState('')
@@ -393,6 +413,9 @@ function RequestSubmissionDetail({
             : {
                 action: 'convert',
                 ...common,
+                ...(effectiveWorkItemTypeId
+                  ? { workItemTypeId: effectiveWorkItemTypeId }
+                  : {}),
                 description: descriptionOverride.trim() || undefined,
                 ...(Object.keys(conversionTargetOverride).length > 0
                   ? { target: conversionTargetOverride }
@@ -600,6 +623,20 @@ function RequestSubmissionDetail({
             </h3>
             {actionMode === 'convert' ? (
               <>
+                <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('requests.action.workItemType')}
+                  <select
+                    aria-label={t('requests.action.workItemType')}
+                    className="workbench-input min-h-10 px-3"
+                    name="workItemTypeId"
+                    onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
+                    value={effectiveWorkItemTypeId}
+                  >
+                    {workItemTypes.map((type) => (
+                      <option key={type.id} value={type.id}>{type.name}</option>
+                    ))}
+                  </select>
+                </label>
                 <input aria-label={t('requests.action.titleOverride')} className="workbench-input min-h-10 px-3" disabled={actionIsPending} placeholder={t('requests.action.titleOverride')} value={titleOverride} onChange={(event) => {
                   setTitleOverride(event.target.value)
                   const nextDirtyState = { ...conversionOverrideDirtyRef.current, title: true }

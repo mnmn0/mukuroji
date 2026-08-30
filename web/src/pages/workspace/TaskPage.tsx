@@ -154,6 +154,7 @@ const standardTaskViewFields = [
   'assignee',
   'dueDate',
   'priority',
+  'workItemType',
   'project',
   'team',
 ]
@@ -475,6 +476,7 @@ export function TaskPage() {
       { id: 'assignee', label: t('tasks.filter.assignee') },
       { id: 'dueDate', label: t('tasks.filter.dueDate') },
       { id: 'priority', label: t('tasks.filter.priority') },
+      { id: 'workItemType', label: t('tasks.column.workItemType') },
       { id: 'project', label: t('workspace.column.project') },
       { id: 'team', label: t('workspace.column.team') },
       ...(taskViewCustomFields.length > 0

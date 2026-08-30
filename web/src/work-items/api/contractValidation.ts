@@ -11,6 +11,7 @@ import {
   type WorkItemScheduleChangePreview,
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyConflict,
+  type WorkItemTypeChangePreview,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import {
@@ -287,6 +288,31 @@ export function readWorkItemScheduleChangePreviewForEndpoint(
   return isWorkItemScheduleChangePreviewForEndpoint(value, teamId, workItemId)
     ? value
     : undefined
+}
+
+/**
+ * Returns whether a value is a complete Work Item Type change preview.
+ *
+ * @param value - Unknown type-change preview response candidate.
+ * @returns Whether the value contains revision, field, and workflow impact data.
+ */
+export function isWorkItemTypeChangePreview(
+  value: unknown,
+): value is WorkItemTypeChangePreview {
+  return isRecord(value) &&
+    isPositiveSafeInteger(value.expectedRevision) &&
+    typeof value.currentWorkItemTypeId === 'string' &&
+    value.currentWorkItemTypeId.length > 0 &&
+    typeof value.currentWorkflowStatusId === 'string' &&
+    value.currentWorkflowStatusId.length > 0 &&
+    typeof value.targetWorkItemTypeId === 'string' &&
+    value.targetWorkItemTypeId.length > 0 &&
+    isStringArray(value.lostCustomFieldIds) &&
+    isOptionalString(value.invalidWorkflowStatusId) &&
+    typeof value.targetInitialWorkflowStatusId === 'string' &&
+    value.targetInitialWorkflowStatusId.length > 0 &&
+    isStringArray(value.missingRequiredCustomFieldIds) &&
+    typeof value.requiresResolution === 'boolean'
 }
 
 /**

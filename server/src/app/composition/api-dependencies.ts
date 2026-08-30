@@ -992,6 +992,9 @@ function createTriageClient(
         canonicalWorkItem: {
           teamId: detail.issue.teamId,
           workItemId: detail.issue.id,
+          ...(detail.issue.workItemTypeId
+            ? { workItemTypeId: detail.issue.workItemTypeId }
+            : {}),
           ...(detail.issue.assignedProjectId
             ? { projectId: detail.issue.assignedProjectId }
             : {}),

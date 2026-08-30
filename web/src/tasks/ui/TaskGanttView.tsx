@@ -55,6 +55,7 @@ import {
 } from '../model/taskView'
 import {
   TaskStatusBadge,
+  TaskWorkItemTypeBadge,
   TaskViewHeading,
 } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
@@ -670,6 +671,7 @@ export function TaskGanttView({
                             schedule: row.schedule,
                             source: 'gantt',
                             teamId: row.task.teamId,
+                            workItemTypeId: row.task.workItemTypeId ?? 'default',
                             workflowStatusId: row.task.workflowStatusId,
                           })}
                           type="button"
@@ -678,6 +680,14 @@ export function TaskGanttView({
                         </button>
                       ) : null}
                       <TaskStatusBadge
+                        configuration={resolveProjectTaskConfiguration(
+                          row.task,
+                          configurationsByTeam,
+                          configuration,
+                        )}
+                        task={row.task}
+                      />
+                      <TaskWorkItemTypeBadge
                         configuration={resolveProjectTaskConfiguration(
                           row.task,
                           configurationsByTeam,
