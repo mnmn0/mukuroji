@@ -232,6 +232,7 @@ export type WorkItemConfigurationClient = {
     workspaceId: string,
     teamId: string,
     input: MutateWorkItemRelationInput,
+    configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<WorkItemRelationMutationResponse>
   /** Reciprocal relation を単一 transaction で削除します。 */
   deleteRelation(
@@ -901,7 +902,12 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   }
 
   /** Reciprocal relation を単一 transaction で作成します。 */
-  async createRelation(workspaceId: string, teamId: string, input: MutateWorkItemRelationInput) {
+  async createRelation(
+    workspaceId: string,
+    teamId: string,
+    input: MutateWorkItemRelationInput,
+    configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+  ) {
     await this.ensureTable()
     const normalized = normalizeRelationInput(input)
     const snapshot = await this.readStableRelationGraph(workspaceId, teamId)
@@ -956,6 +962,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       createWorkItemRelationIds(nextRelations, normalized.sourceWorkItemId),
       createWorkItemRelationIds(nextRelations, normalized.targetWorkItemId),
       'create',
+      configurationConditionChecks,
     )
     return { relation, reciprocalRelation, graphRevision: nextRevision }
   }
@@ -1252,9 +1259,11 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     sourceRelationIds: readonly string[],
     targetRelationIds: readonly string[],
     operation: 'create' | 'delete',
+    configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const scopeKey = createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId)
     const workItemPartitionKey = `${workspaceId}#team#${teamId}`
+    const configurationConditionStartIndex = 2 + 1 + edgeMutations.length
     const graphMutation = expectedRevision === 0
       ? {
           Put: {
@@ -1311,9 +1320,19 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           },
           graphMutation,
           ...edgeMutations,
+          ...configurationConditionChecks,
         ],
       }))
     } catch (error) {
+      if (configurationConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
+      )) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemConfigurationRevisionConflict',
+          'Work Item configuration changed during the relation mutation.',
+        )
+      }
       if (isNamedError(error, 'TransactionCanceledException')) {
         throw await this.classifyRelationTransactionCancellation(
           workspaceId,
@@ -2575,6 +2594,17 @@ function isConfigurationConditionalTransactionCancellation(error: unknown) {
   const reasonCodes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
   return reasonCodes.includes('ConditionalCheckFailed') &&
     reasonCodes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')
+}
+
+/** Returns whether a DynamoDB transaction cancellation identifies a conditional failure at an index. */
+function isTransactionConditionalFailureAt(error: unknown, index: number) {
+  if (!isNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  return Array.isArray(reasons) &&
+    isRecord(reasons[index]) &&
+    reasons[index].Code === 'ConditionalCheckFailed'
 }
 
 function invalidConfiguration(message: string) {

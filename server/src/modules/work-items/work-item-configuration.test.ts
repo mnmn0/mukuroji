@@ -1115,6 +1115,65 @@ test('creates reciprocal relation edges with endpoint and graph guards in one tr
   }))
 })
 
+test('fences relation creation against a concurrent configuration change', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const configurationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'configuration-table',
+      Key: { scopeKey: 'workspace-1#team#core-team#work-item-configuration', recordKey: 'CONFIG' },
+      ConditionExpression: '#revision = :revision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':revision': 3 },
+    },
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: [] }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactions.push(command.input)
+        throw {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  await expect(client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'parent',
+    targetWorkItemId: 'child',
+    type: 'parent',
+    expectedGraphRevision: 0,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 1,
+  }, [configurationConditionCheck])).rejects.toMatchObject({
+    code: 'WorkItemConfigurationRevisionConflict',
+    status: 409,
+  })
+  const transactionItems = transactions[0]?.TransactItems
+  expect(transactionItems).toEqual(expect.arrayContaining([
+    configurationConditionCheck,
+  ]))
+  expect(Array.isArray(transactionItems) ? transactionItems.at(-1) : undefined)
+    .toEqual(configurationConditionCheck)
+})
+
 test('derives complete sorted relation projections for create and delete transactions', async () => {
   const sentTransactions: Array<Record<string, unknown>> = []
   let relations = [

@@ -6292,13 +6292,15 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/relations', async (c) => {
       'Relation graph revision',
     )
     const endpoints = await authorizeRelationMutation(principal, teamId, issueId, targetWorkItemId)
-    if (relationType === 'parent') {
-      const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-        principal.directoryId,
-        teamId,
-      )
+    const resolvedConfiguration = relationType === 'parent'
+      ? await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+          principal.directoryId,
+          teamId,
+        )
+      : undefined
+    if (resolvedConfiguration) {
       assertWorkItemChildTypeAllowed(
-        configuration.configuration,
+        resolvedConfiguration.configuration,
         endpoints.source.workItemTypeId,
         endpoints.target.workItemTypeId,
       )
@@ -6316,6 +6318,14 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/relations', async (c) => {
         sourceAssignedProjectId: endpoints.source.assignedProjectId,
         targetAssignedProjectId: endpoints.target.assignedProjectId,
       },
+      resolvedConfiguration
+        ? createWorkItemConfigurationGuardConditionChecks(
+            getWorkItemConfigurationTableName(),
+            principal.directoryId,
+            teamId,
+            resolvedConfiguration,
+          )
+        : undefined,
     )
     await Promise.all([
       refreshWorkItemSearchDocumentBestEffort(
