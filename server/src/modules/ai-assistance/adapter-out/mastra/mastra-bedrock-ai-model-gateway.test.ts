@@ -116,21 +116,27 @@ describe('createMastraBedrockAiModelGateway', () => {
   })
 
   test('rejects non-finite or fractional provider usage before returning a draft', async () => {
-    for (const usage of [
-      { inputTokens: -1, outputTokens: 1 },
-      { inputTokens: 1.5, outputTokens: 1 },
-      { inputTokens: Number.NaN, outputTokens: 1 },
-      { inputTokens: 1, outputTokens: Number.POSITIVE_INFINITY },
-    ]) {
+    const invalidUsages: ReadonlyArray<[
+      { inputTokens: number; outputTokens: number },
+      string,
+    ]> = [
+      [{ inputTokens: -1, outputTokens: 1 }, 'invalid-usage-negative'],
+      [{ inputTokens: 1.5, outputTokens: 1 }, 'invalid-usage-fractional'],
+      [{ inputTokens: Number.NaN, outputTokens: 1 }, 'invalid-usage-nan'],
+      [{ inputTokens: 1, outputTokens: Number.POSITIVE_INFINITY }, 'invalid-usage-infinity'],
+    ]
+    for (const [usage, traceId] of invalidUsages) {
       const gateway = createMastraBedrockAiModelGateway({
         runStructuredGeneration: async () => ({
           object: createOutput(),
           ...usage,
+          traceId,
         }),
       })
 
       await expect(gateway.generate(createInput())).rejects.toMatchObject({
         code: 'InvalidAiAssistanceOutput',
+        providerTraceId: traceId,
       })
     }
   })

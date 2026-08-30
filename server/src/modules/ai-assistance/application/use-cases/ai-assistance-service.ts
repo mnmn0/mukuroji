@@ -42,6 +42,8 @@ import type {
   AiAssistanceActor,
   AiAssistanceAllowedValues,
   AiAssistanceCustomFieldDefinition,
+  AiAssistanceDecisionCommitFence,
+  AiAssistanceGenerationCommitFence,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
   AiAssistanceGenerationReservation,
@@ -58,6 +60,7 @@ import type {
   ResolvedAiAssistanceContext,
   StoredAiAssistanceGeneration,
 } from '../ports/ai-assistance-ports'
+import { hasSupportedCurrencyPrecision } from '../../../work-items'
 
 const DEFAULT_MAX_PROMPT_CONTEXT_CHARACTERS = 100_000
 const DEFAULT_MAX_OUTPUT_TOKENS = 4_096
@@ -583,6 +586,22 @@ export function createAiAssistanceService(
       if (!authorizationState.current) {
         throw authorizationChangedError(authorizationState.reason)
       }
+      // Re-read governance after the paid call. A policy or member opt-out can
+      // change while Bedrock is in flight, so the output must be discarded before
+      // it can be persisted or disclosed.
+      const [postProviderPolicy, postProviderPreference] = await Promise.all([
+        readPolicy(actor),
+        getPreference(actor),
+      ])
+      requireGenerationEnabled(postProviderPolicy, postProviderPreference, request.task)
+      if (!isGenerationConfigurationCurrent(
+        policy,
+        postProviderPolicy,
+        preference,
+        postProviderPreference,
+      )) {
+        throw authorizationChangedError('permission-changed')
+      }
       const safeDraft = redactAiAssistanceDraft(restorePrivateIdentifiers(
         aliasedDraft,
         privateIdentifierAliases,
@@ -627,6 +646,10 @@ export function createAiAssistanceService(
       // public generation after every transformation so the first persisted response obeys the
       // same bounds as later reads and replays.
       const validatedGeneration = parseAiAssistanceGeneration(generation)
+      const generationCommitFence: AiAssistanceGenerationCommitFence = {
+        policyRevision: postProviderPolicy.revision,
+        preferenceRevision: postProviderPreference.revision,
+      }
       const stored = await options.store.createGeneration({
         workspaceId: actor.workspaceId,
         memberId: actor.memberId,
@@ -634,7 +657,7 @@ export function createAiAssistanceService(
         request: providerRequest,
         authorizationToken: context.authorizationToken,
         auditedInput: context.promptContext,
-      })
+      }, generationCommitFence)
       generationPersisted = true
       await options.store.finalizeGenerationAttempt({
         ...completion,
@@ -730,7 +753,13 @@ export function createAiAssistanceService(
       return withholdGeneration(effectiveGeneration, 'retention-expired')
     }
     if (record.generation.decision?.outcome === request.outcome) {
-      return await projectStoredGeneration(actor, record, policy, authorization, now)
+      return await projectStoredGeneration(
+        actor,
+        record,
+        await readPolicy(actor),
+        authorization,
+        now,
+      )
     }
     if (record.generation.decision) {
       throw new AiAssistanceError(
@@ -747,11 +776,24 @@ export function createAiAssistanceService(
     if (!authorizationState.current) {
       throw authorizationChangedError(authorizationState.reason)
     }
+    // Re-read retention immediately before the write. The store also checks this
+    // revision atomically so a concurrent policy shortening cannot commit a stale
+    // decision between this read and DynamoDB's conditional write.
+    const decisionPolicy = await readPolicy(actor)
+    const decisionGeneration = applyEffectiveRetention(record.generation, decisionPolicy)
+    if (Date.parse(decisionGeneration.expiresAt) <= now().getTime()) {
+      return withholdGeneration(decisionGeneration, 'retention-expired')
+    }
+    const decisionCommitFence: AiAssistanceDecisionCommitFence = {
+      policyRevision: decisionPolicy.revision,
+      effectiveExpiresAt: decisionGeneration.expiresAt,
+    }
     const decided = await options.store.decideGeneration(
       actor.workspaceId,
       generationId,
       request,
       now().toISOString(),
+      decisionCommitFence,
     )
     return await projectStoredGeneration(
       actor,
@@ -1280,7 +1322,10 @@ function validateDraftForRequest(
 export function validateAiAssistanceDraftForApplication(
   draft: AiAssistanceDraft,
   request: GenerateAiAssistanceRequest,
-  context: Pick<ResolvedAiAssistanceContext, 'citations' | 'allowedValues'>,
+  context: Pick<
+    ResolvedAiAssistanceContext,
+    'citations' | 'allowedValues' | 'triageSourceRouting'
+  >,
 ): void {
   validateDraftForRequest(draft, request)
   validateDraftReferences(draft, context, request)
@@ -1289,7 +1334,10 @@ export function validateAiAssistanceDraftForApplication(
 /** Validates every citation and resource identifier emitted by the model. */
 function validateDraftReferences(
   draft: AiAssistanceDraft,
-  context: Pick<ResolvedAiAssistanceContext, 'citations' | 'allowedValues'>,
+  context: Pick<
+    ResolvedAiAssistanceContext,
+    'citations' | 'allowedValues' | 'triageSourceRouting'
+  >,
   request: GenerateAiAssistanceRequest,
 ): void {
   const citationIds = new Set(context.citations.map((citation) => citation.id))
@@ -1302,7 +1350,7 @@ function validateDraftReferences(
       )
     }
   }
-  validateDraftAllowedValues(draft, context.allowedValues, request)
+  validateDraftAllowedValues(draft, context.allowedValues, request, context.triageSourceRouting)
 }
 
 /** Collects all model-generated citation identifiers from a task draft. */
@@ -1344,6 +1392,7 @@ function validateDraftAllowedValues(
   draft: AiAssistanceDraft,
   allowed: AiAssistanceAllowedValues,
   request: GenerateAiAssistanceRequest,
+  triageSourceRouting: ResolvedAiAssistanceContext['triageSourceRouting'],
 ): void {
   if (draft.kind === 'triage') {
     requireAllowedOptional(draft.assigneeUserId?.value, allowed.assigneeUserIds, 'assignee')
@@ -1353,7 +1402,7 @@ function validateDraftAllowedValues(
     for (const field of draft.customFields) {
       requireAllowed(field.fieldId, allowed.customFieldIds, 'custom field')
     }
-    validateTriageCustomFields(draft, allowed, request)
+    validateTriageCustomFields(draft, allowed, request, triageSourceRouting)
     return
   }
   if (draft.kind === 'search') {
@@ -1383,14 +1432,15 @@ function validateTriageCustomFields(
   draft: Extract<AiAssistanceDraft, { kind: 'triage' }>,
   allowed: AiAssistanceAllowedValues,
   request: GenerateAiAssistanceRequest,
+  triageSourceRouting: ResolvedAiAssistanceContext['triageSourceRouting'],
 ): void {
   const definitions = allowed.customFieldDefinitions
   if (definitions === undefined || draft.customFields.length === 0) return
   const sourceTeamId = request.task === 'triage' && request.source.type === 'triage-entry'
     ? request.source.teamId
-    : undefined
+    : triageSourceRouting?.teamId
   const teamId = draft.teamId?.value ?? sourceTeamId
-  const projectId = draft.projectId?.value
+  const projectId = draft.projectId?.value ?? triageSourceRouting?.projectId
   for (const field of draft.customFields) {
     const matches = definitions.filter((definition) =>
       definition.fieldId === field.fieldId &&
@@ -1460,6 +1510,13 @@ function validateAiCustomFieldValue(
     (typeof value !== 'number' || !Number.isFinite(value))
   ) {
     rejectAiCustomFieldValue('The custom field value must be a finite number.')
+  }
+  if (
+    definition.type === 'currency' &&
+    typeof value === 'number' &&
+    !hasSupportedCurrencyPrecision(value, definition.currencyCode ?? '')
+  ) {
+    rejectAiCustomFieldValue('The currency custom field value uses unsupported precision.')
   }
   if (definition.type === 'duration' && typeof value === 'number' && value < 0) {
     rejectAiCustomFieldValue('A duration custom field cannot be negative.')

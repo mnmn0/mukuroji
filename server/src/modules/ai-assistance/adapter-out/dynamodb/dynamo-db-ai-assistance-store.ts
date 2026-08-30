@@ -19,6 +19,8 @@ import { z } from 'zod'
 import type {
   AiAssistanceStore,
   AiAssistanceGenerationAttemptAuditEnvelope,
+  AiAssistanceDecisionCommitFence,
+  AiAssistanceGenerationCommitFence,
   AiAssistanceGenerationReservation,
   AiAssistancePolicyAuthorizationFence,
   CompleteAiAssistanceGenerationReservationInput,
@@ -1059,19 +1061,59 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
   /** Creates one generation exactly once. */
   async createGeneration(
     record: StoredAiAssistanceGeneration,
+    commitFence?: AiAssistanceGenerationCommitFence,
   ): Promise<StoredAiAssistanceGeneration> {
     const recordKey = createGenerationRecordKey(record.generation.id)
     const item = createStoredGenerationItem(record, recordKey)
     requireStoredAiAssistanceItemSize(item)
+    if (commitFence !== undefined) validateGenerationCommitFence(commitFence)
     try {
-      await this.#documentClient.send(new PutCommand({
-        TableName: this.#tableName,
-        Item: item,
-        ConditionExpression:
-          'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
-      }))
+      if (commitFence === undefined) {
+        await this.#documentClient.send(new PutCommand({
+          TableName: this.#tableName,
+          Item: item,
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        }))
+      } else {
+        await this.#documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: this.#tableName,
+                Item: item,
+                ConditionExpression:
+                  'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+              },
+            },
+            createNestedRevisionConditionCheck(
+              this.#tableName,
+              record.workspaceId,
+              POLICY_RECORD_KEY,
+              'policy',
+              commitFence.policyRevision,
+            ),
+            createNestedRevisionConditionCheck(
+              this.#tableName,
+              record.workspaceId,
+              createPreferenceRecordKey(record.memberId),
+              'preference',
+              commitFence.preferenceRevision,
+            ),
+          ],
+        }))
+      }
       return record
     } catch (error) {
+      if (
+        commitFence !== undefined &&
+        (isTransactionConditionalFailureAt(error, 1) ||
+          isTransactionConditionalFailureAt(error, 2))
+      ) {
+        throw aiAssistanceAuthorizationChangedError(
+          'AI assistance policy or member preference changed during generation.',
+        )
+      }
       const mappedError = mapDynamoWriteError(error)
       try {
         const existing = await this.getGeneration(
@@ -1120,7 +1162,9 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     generationId: string,
     request: DecideAiAssistanceGenerationRequest,
     decidedAt: string,
+    commitFence?: AiAssistanceDecisionCommitFence,
   ): Promise<StoredAiAssistanceGeneration> {
+    if (commitFence !== undefined) validateDecisionCommitFence(commitFence)
     const current = await this.getGeneration(workspaceId, generationId)
     if (!current) {
       throw new AiAssistanceError(
@@ -1154,24 +1198,52 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     const item = createStoredGenerationItem(next, recordKey)
     requireStoredAiAssistanceItemSize(item)
     try {
-      await this.#documentClient.send(new PutCommand({
-        TableName: this.#tableName,
-        Item: item,
-        ConditionExpression:
-          '#generation.#revision = :expectedRevision AND ' +
-          'attribute_not_exists(#generation.#decision)',
-        ExpressionAttributeNames: {
-          '#generation': 'generation',
-          '#revision': 'revision',
-          '#decision': 'decision',
+      const generationPut = {
+        Put: {
+          TableName: this.#tableName,
+          Item: item,
+          ConditionExpression:
+            '#generation.#revision = :expectedRevision AND ' +
+            'attribute_not_exists(#generation.#decision)',
+          ExpressionAttributeNames: {
+            '#generation': 'generation',
+            '#revision': 'revision',
+            '#decision': 'decision',
+          },
+          ExpressionAttributeValues: {
+            ':expectedRevision': request.expectedRevision,
+          },
         },
-        ExpressionAttributeValues: {
-          ':expectedRevision': request.expectedRevision,
-        },
-      }))
+      }
+      if (commitFence === undefined) {
+        await this.#documentClient.send(new PutCommand(generationPut.Put))
+      } else {
+        await this.#documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            generationPut,
+            createNestedRevisionConditionCheck(
+              this.#tableName,
+              workspaceId,
+              POLICY_RECORD_KEY,
+              'policy',
+              commitFence.policyRevision,
+            ),
+          ],
+        }))
+      }
       return next
     } catch (error) {
-      if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
+      if (
+        commitFence !== undefined &&
+        isTransactionConditionalFailureAt(error, 1)
+      ) {
+        throw aiAssistanceAuthorizationChangedError(
+          'AI assistance retention policy changed during decision.',
+        )
+      }
+      const generationConditionFailed = isConditionalCheckFailed(error) ||
+        (commitFence !== undefined && isTransactionConditionalFailureAt(error, 0))
+      if (!generationConditionFailed) throw mapDynamoWriteError(error)
       try {
         const current = await this.getGeneration(workspaceId, generationId)
         if (current?.generation.decision?.outcome === request.outcome) return current
@@ -1666,6 +1738,83 @@ function mapDynamoWriteError(error: unknown): AiAssistanceError {
     'AI assistance persistence failed.',
     { cause: error },
   )
+}
+
+/** Creates the stable conflict returned when a generation commit fence is stale. */
+function aiAssistanceAuthorizationChangedError(message: string): AiAssistanceError {
+  return new AiAssistanceError(
+    'conflict',
+    'AiAssistanceAuthorizationChanged',
+    message,
+  )
+}
+
+/** Validates the policy and preference revisions used for generation persistence. */
+function validateGenerationCommitFence(
+  fence: AiAssistanceGenerationCommitFence,
+): void {
+  if (
+    !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
+    !Number.isSafeInteger(fence.preferenceRevision) || fence.preferenceRevision < 0
+  ) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance policy or member preference is no longer current.',
+    )
+  }
+}
+
+/** Validates the policy revision and deadline captured for a decision write. */
+function validateDecisionCommitFence(
+  fence: AiAssistanceDecisionCommitFence,
+): void {
+  const expiresAt = Date.parse(fence.effectiveExpiresAt)
+  if (
+    !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
+    !Number.isFinite(expiresAt)
+  ) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance retention policy is no longer current.',
+    )
+  }
+}
+
+/** Builds a condition check for one nested policy or preference revision. */
+function createNestedRevisionConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  recordKey: string,
+  valueAttribute: 'policy' | 'preference',
+  expectedRevision: number,
+): AiAssistanceBudgetTransactionItem {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance policy or member preference is no longer current.',
+    )
+  }
+  if (expectedRevision === 0) {
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: { workspaceId, recordKey },
+        ConditionExpression:
+          'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { workspaceId, recordKey },
+      ConditionExpression: '#value.#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#value': valueAttribute,
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':expectedRevision': expectedRevision,
+      },
+    },
+  }
 }
 
 /** Validates the server-owned policy authorization values before building conditions. */

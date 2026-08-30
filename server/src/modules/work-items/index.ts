@@ -46,6 +46,7 @@ export {
   createWorkItemRelationGraphRevisionConditionCheck,
   createWorkItemConfigurationScopeKey,
   createWorkItemRelationIds,
+  hasSupportedCurrencyPrecision,
   isWorkflowTransitionAllowed,
   normalizeCustomFieldValues,
   resolveWorkflowStatus,

@@ -434,6 +434,7 @@ import {
   type AiAssistanceCustomFieldDefinition,
   type AiAssistanceAuthorizationState,
   type AiAssistanceTriageRoutingTuple,
+  type AiAssistanceTriageSourceRouting,
   type AiAssistancePolicyAuthorizationFence,
   type AiAssistancePolicyAuthorization,
   type AiAssistanceService,
@@ -19891,6 +19892,8 @@ type ResolvedAiPromptSource = {
   workItemEndpoints: readonly WorkItemDependencyEndpoint[]
   /** Current or directly reachable workflow statuses for a Work Item source. */
   workflowStatusIds: readonly string[]
+  /** Current Team and Project routing for a triage source, when applicable. */
+  triageSourceRouting?: AiAssistanceTriageSourceRouting
 }
 
 /** Shared live authorization and configuration state used by one resolver pass. */
@@ -20135,6 +20138,8 @@ async function resolveAiAssistanceContext(
   )) {
     throw aiAssistanceAuthorizationChangedError()
   }
+  const triageSourceRouting = resolvedSources.find((source) =>
+    source.triageSourceRouting !== undefined)?.triageSourceRouting
   return {
     promptContext,
     citations: resolvedSources.map((source) => source.citation),
@@ -20144,6 +20149,7 @@ async function resolveAiAssistanceContext(
     }),
     allowedValues,
     privateMemberIdentifiers: state.privateMemberIdentifiers,
+    ...(triageSourceRouting === undefined ? {} : { triageSourceRouting }),
   }
 }
 
@@ -20646,6 +20652,15 @@ async function resolveAiTriageSource(
     throw aiAssistanceAuthorizationChangedError()
   }
   requireAiAssistanceSourceRevision(currentEntry.revision, source.expectedRevision)
+  const sourceRouting: AiAssistanceTriageSourceRouting = {
+    teamId: projected.teamId,
+    ...(projected.projectId === undefined ? {} : { projectId: projected.projectId }),
+  }
+  const safeOwnerUserId = projected.ownerUserId !== undefined &&
+    state.privateMemberIdentifiers.some((member) =>
+      member.memberId === projected.ownerUserId)
+    ? projected.ownerUserId
+    : undefined
   return {
     prompt: boundAiPromptPart({
       sourceType: source.type,
@@ -20655,7 +20670,7 @@ async function resolveAiTriageSource(
       state: projected.state,
       teamId: projected.teamId,
       projectId: projected.projectId,
-      ownerUserId: projected.ownerUserId,
+      ...(safeOwnerUserId === undefined ? {} : { ownerUserId: safeOwnerUserId }),
       receivedAt: projected.receivedAt,
       lastActivityAt: projected.lastActivityAt,
       routing: projected.routing,
@@ -20703,6 +20718,7 @@ async function resolveAiTriageSource(
     relationIds: [],
     workItemEndpoints: [],
     workflowStatusIds: [],
+    triageSourceRouting: sourceRouting,
   }
 }
 
@@ -20784,6 +20800,11 @@ async function resolveAiRequestSubmissionSource(
       'An AI assistance source changed. Reload before generating or reviewing the draft.',
     )
   }
+  const { assigneeUserId, ...routingTargetWithoutAssignee } = submission.routingTarget
+  const safeRoutingTarget = state.privateMemberIdentifiers.some((member) =>
+    member.memberId === assigneeUserId)
+    ? submission.routingTarget
+    : routingTargetWithoutAssignee
   return {
     prompt: boundAiPromptPart({
       sourceType: source.type,
@@ -20791,7 +20812,7 @@ async function resolveAiRequestSubmissionSource(
       status: submission.status,
       locale: submission.locale,
       answers,
-      routingTarget: submission.routingTarget,
+      routingTarget: safeRoutingTarget,
       workItemMapping: submission.workItemMapping,
       attachmentCount: submission.attachments.length,
       messages: submission.messages.slice(-AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT).map((message) => ({
@@ -20831,6 +20852,12 @@ async function resolveAiRequestSubmissionSource(
     relationIds: [],
     workItemEndpoints: [],
     workflowStatusIds: [],
+    triageSourceRouting: {
+      teamId: submission.routingTarget.teamId,
+      ...(submission.routingTarget.projectId === undefined
+        ? {}
+        : { projectId: submission.routingTarget.projectId }),
+    },
   }
 }
 
@@ -20983,6 +21010,11 @@ async function resolveAiWorkItemSource(
       .filter((transition) => transition.fromStatusId === detail.issue.workflowStatusId)
       .map((transition) => transition.toStatusId) ?? []),
   ], AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
+  const safeAssigneeUserId = detail.issue.assigneeUserId !== undefined &&
+    state.privateMemberIdentifiers.some((member) =>
+      member.memberId === detail.issue.assigneeUserId)
+    ? detail.issue.assigneeUserId
+    : undefined
   const prompt = boundAiPromptPart({
     sourceType: source.type,
     workItem: {
@@ -20991,7 +21023,9 @@ async function resolveAiWorkItemSource(
       projectId: detail.issue.assignedProjectId,
       title: detail.issue.title,
       priority: detail.issue.priority,
-      assigneeUserId: detail.issue.assigneeUserId,
+      ...(safeAssigneeUserId === undefined
+        ? {}
+        : { assigneeUserId: safeAssigneeUserId }),
       workflowStatusId: detail.issue.workflowStatusId,
       statusCategory: detail.issue.statusCategory,
       schedule: detail.issue.schedule,

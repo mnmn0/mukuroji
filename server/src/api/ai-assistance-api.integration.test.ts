@@ -2129,6 +2129,60 @@ describe('AI assistance API composition', () => {
     expect(responseText).not.toContain('Edited comment')
   })
 
+  test('omits a deactivated Work Item assignee from provider-bound context', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+      inactiveWorkspaceMemberKeys: ['sato@example.com'],
+    })
+    const issue = {
+      ...createBulkRecoveryIssue(),
+      assigneeUserId: 'sato@example.com',
+      priority: 'high',
+      statusCategory: 'started',
+      workflowSchemaVersion: 1,
+      source: 'dynamodb',
+    } satisfies TeamIssueResponseItem
+    const teamIssues = createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: issue.teamId, issues: [issue] }
+      },
+      async getTeamIssueDetail() {
+        return { issue, comments: [], activity: [] }
+      },
+    })
+    let promptContext = ''
+    setTestAppDependencies({
+      teamIssues,
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          promptContext = (await authorization.resolveContext({ actor, request })).promptContext
+          return createWithheldGeneration(request.task, 'source-changed')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-deactivated-assignee' },
+      body: JSON.stringify({
+        task: 'planning',
+        locale: 'en',
+        source: {
+          type: 'work-item',
+          teamId: issue.teamId,
+          workItemId: issue.id,
+          expectedRevision: issue.revision,
+        },
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(promptContext).not.toContain('sato@example.com')
+    expect(promptContext).not.toContain('assigneeUserId')
+  })
+
   test('withholds a stored generation after a Document comment timestamp changes', async () => {
     configureFakeProjectClients(true, {
       projectAccesses: [{ projectId: 'refero', role: 'viewer' }],

@@ -2030,7 +2030,17 @@ function getSupportedCurrencyCodes() {
   return supportedValuesOf ? new Set(supportedValuesOf('currency')) : undefined
 }
 
-function hasSupportedCurrencyPrecision(value: number, currencyCode: string) {
+/**
+ * Checks whether a currency value uses the precision supported by its currency.
+ *
+ * @param value - Finite numeric amount to validate.
+ * @param currencyCode - ISO 4217 currency code configured for the field.
+ * @returns Whether the value can be represented without unsupported fractional digits.
+ */
+export function hasSupportedCurrencyPrecision(
+  value: number,
+  currencyCode: string,
+): boolean {
   try {
     const fractionDigits = new Intl.NumberFormat('en', {
       currency: currencyCode,

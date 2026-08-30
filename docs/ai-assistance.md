@@ -70,6 +70,10 @@ deadlineです。一方、generation readとdecision/replayの公開期限は毎
 使い、`min(stored expiresAt, createdAt + current retentionDays)` として計算します。Policyを短縮した時点で
 この論理期限を過ぎたdraft/citationは `retention-expired` として即時withholdし、decisionも新規保存しません。
 
+Provider完了後にもpolicyとmember preferenceをstrongly consistentに再読し、無効化・opt-out・revision変更があれば
+出力を破棄します。Generation作成はpolicy/preference revisionを同じtransaction境界で再検証し、decisionは最新policy
+revisionとeffective期限を同じCAS境界へbindするため、再読直後の設定変更も古い出力を保存できません。
+
 Policy更新時のtable scan、TTL rewrite、同期delete、backup purgeは行いません。DynamoDB TTL削除は非同期なので、
 論理期限後も元rowが物理的に残る期間があります。また、短縮後にpolicyを再延長した場合、まだTTL削除されて
 いないrowはimmutableなstored deadlineまで再び現在policyの対象になり得ます。不可逆な短縮が必要な運用では、

@@ -46,6 +46,14 @@ export type AiAssistanceTriageRoutingTuple = {
   assigneeUserIds: readonly string[]
 }
 
+/** Current Team and Project routing resolved from the selected triage source. */
+export type AiAssistanceTriageSourceRouting = {
+  /** Team that currently owns the selected triage source. */
+  teamId: string
+  /** Project currently selected by the source routing, when present. */
+  projectId?: string
+}
+
 /** Current server-resolved identifiers that structured model output may reference. */
 export type AiAssistanceAllowedValues = {
   /** Workspace member identifiers visible to the current operator. */
@@ -112,6 +120,8 @@ export type ResolvedAiAssistanceContext = {
   allowedValues: AiAssistanceAllowedValues
   /** Private active-member names retained only long enough to create request-local aliases. */
   privateMemberIdentifiers: readonly AiAssistancePrivateMemberIdentifiers[]
+  /** Current source routing used to resolve Team- and Project-scoped fields. */
+  triageSourceRouting?: AiAssistanceTriageSourceRouting
 }
 
 /** Current state of a previously captured authorization snapshot. */
@@ -419,6 +429,22 @@ export type AiAssistanceGenerationAttemptAuditEnvelope = {
   citations: readonly AiAssistanceCitation[]
 }
 
+/** Policy and member-preference revisions fenced at generation persistence. */
+export type AiAssistanceGenerationCommitFence = {
+  /** Workspace AI policy revision observed after provider completion. */
+  policyRevision: number
+  /** Member AI preference revision observed after provider completion. */
+  preferenceRevision: number
+}
+
+/** Policy revision and effective retention deadline fenced at decision persistence. */
+export type AiAssistanceDecisionCommitFence = {
+  /** Workspace AI policy revision observed immediately before the decision write. */
+  policyRevision: number
+  /** Effective generation deadline computed from the current policy. */
+  effectiveExpiresAt: string
+}
+
 /** Provider attempt metadata persisted before any paid model call starts. */
 export type StartAiAssistanceGenerationAttemptInput =
   CompleteAiAssistanceGenerationReservationInput & {
@@ -513,6 +539,7 @@ export interface AiAssistanceStore {
   /** Creates one immutable generation record. */
   createGeneration(
     record: StoredAiAssistanceGeneration,
+    commitFence?: AiAssistanceGenerationCommitFence,
   ): Promise<StoredAiAssistanceGeneration>
   /** Strongly reads one generation by Workspace and identifier. */
   getGeneration(
@@ -525,6 +552,7 @@ export interface AiAssistanceStore {
     generationId: string,
     request: DecideAiAssistanceGenerationRequest,
     decidedAt: string,
+    commitFence?: AiAssistanceDecisionCommitFence,
   ): Promise<StoredAiAssistanceGeneration>
   /** Appends immutable bounded feedback. */
   putFeedback(record: StoredAiAssistanceFeedback): Promise<void>

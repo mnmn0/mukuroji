@@ -453,6 +453,50 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('fences generation persistence against policy and preference revisions', async () => {
+    const record = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.store.createGeneration(record, {
+        policyRevision: 3,
+        preferenceRevision: 2,
+      })).resolves.toEqual(record)
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+      ])
+      const items = harness.commands[0]?.input.TransactItems
+      if (!Array.isArray(items)) throw new TypeError('Expected transaction items.')
+      expect(items).toHaveLength(3)
+      expect(readRecord(readRecord(items[1]).ConditionCheck).ConditionExpression)
+        .toBe('#value.#revision = :expectedRevision')
+      expect(readRecord(readRecord(items[2]).ConditionCheck).ConditionExpression)
+        .toBe('#value.#revision = :expectedRevision')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects generation persistence when a governance fence changes', async () => {
+    const record = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([
+      transactionCancellation(['None', 'ConditionalCheckFailed', 'None']),
+    ])
+    try {
+      await expect(harness.store.createGeneration(record, {
+        policyRevision: 3,
+        preferenceRevision: 2,
+      })).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceAuthorizationChanged',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('atomically reserves one idempotency receipt and both fixed-window budgets', async () => {
     const harness = createHarness([{}])
     try {
@@ -1080,6 +1124,35 @@ describe('DynamoDbAiAssistanceStore', () => {
         'GetCommand',
         'PutCommand',
         'GetCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fences a decision against a concurrent retention policy change', async () => {
+    const current = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([
+      { Item: createPersistedGenerationItem(current) },
+      transactionCancellation(['None', 'ConditionalCheckFailed']),
+    ])
+    try {
+      await expect(harness.store.decideGeneration(
+        'workspace-1',
+        'generation-1',
+        { outcome: 'approved', expectedRevision: 1 },
+        '2026-08-25T00:02:00.000Z',
+        {
+          policyRevision: 3,
+          effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+        },
+      )).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceAuthorizationChanged',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'TransactWriteCommand',
       ])
     } finally {
       harness.restore()

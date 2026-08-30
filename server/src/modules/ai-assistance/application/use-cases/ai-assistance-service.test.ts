@@ -14,6 +14,7 @@ import type {
   AiAssistancePolicyAuditInput,
   AiAssistancePrivateMemberIdentifiers,
   AiAssistanceTriageRoutingTuple,
+  AiAssistanceTriageSourceRouting,
   AiAssistanceStore,
   AiModelGenerationInput,
   FailAiAssistanceGenerationReservationInput,
@@ -150,6 +151,14 @@ type HarnessConfiguration = {
   advanceBeforeProviderMs?: number
   /** Changes the policy revision while source context is being resolved. */
   changePolicyBeforeProvider?: boolean
+  /** Changes the policy revision after the provider returns. */
+  changePolicyAfterProvider?: boolean
+  /** Disables the Workspace policy after the provider returns. */
+  disablePolicyAfterProvider?: boolean
+  /** Disables the member preference after the provider returns. */
+  disablePreferenceAfterProvider?: boolean
+  /** Source Team and Project routing used when validating triage fields. */
+  triageSourceRouting?: AiAssistanceTriageSourceRouting
   /** Revokes source authorization after the generation record is persisted. */
   revokeAuthorizationAfterPersistence?: boolean
   /** Captures policy transitions sent to the optional audit boundary. */
@@ -160,6 +169,7 @@ type HarnessConfiguration = {
 function createHarness(configuration: HarnessConfiguration = {}) {
   let storedGeneration: StoredAiAssistanceGeneration | undefined
   let preferenceEnabled = true
+  let policyEnabled = true
   let policyRetentionDays = 30
   let policyRevision = 0
   let currentTime = NOW
@@ -186,6 +196,8 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   const feedbackRecords: StoredAiAssistanceFeedback[] = []
   const startedAttempts: StartAiAssistanceGenerationAttemptInput[] = []
   const finalizedAttempts: FinalizeAiAssistanceGenerationAttemptInput[] = []
+  const generationCommitFences: unknown[] = []
+  const decisionCommitFences: unknown[] = []
   const failedReservations: FailAiAssistanceGenerationReservationInput[] = []
   let attemptStarted = false
   let attemptStartError: unknown
@@ -325,6 +337,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     async getPolicy() {
       return {
         ...createPolicy(),
+        enabled: policyEnabled,
         retentionDays: policyRetentionDays,
         revision: policyRevision,
       }
@@ -346,8 +359,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     async putPreference(_workspaceId, _memberId, preference) {
       return preference
     },
-    async createGeneration(record) {
+    async createGeneration(record, commitFence) {
       if (generationPersistenceError !== undefined) throw generationPersistenceError
+      generationCommitFences.push(commitFence)
       storedGeneration = record
       if (configuration.revokeAuthorizationAfterPersistence) {
         authorizationState = { current: false, reason: 'permission-changed' }
@@ -357,8 +371,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     async getGeneration() {
       return storedGeneration
     },
-    async decideGeneration(_workspaceId, _generationId, request, decidedAt) {
+    async decideGeneration(_workspaceId, _generationId, request, decidedAt, commitFence) {
       if (!storedGeneration) throw new Error('Expected a stored generation.')
+      decisionCommitFences.push(commitFence)
       storedGeneration = {
         ...storedGeneration,
         generation: {
@@ -390,6 +405,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         signalGatewayStarted?.()
         if (gatewayBarrier) await gatewayBarrier
         if (gatewayError !== undefined) throw gatewayError
+        if (configuration.changePolicyAfterProvider) policyRevision = 1
+        if (configuration.disablePolicyAfterProvider) policyEnabled = false
+        if (configuration.disablePreferenceAfterProvider) preferenceEnabled = false
         return {
           draft: configuration.outputDraft ?? {
             kind: 'summary',
@@ -470,7 +488,10 @@ function createHarness(configuration: HarnessConfiguration = {}) {
           creatorUserIds: ['creator@example.com'],
           teamIds: configuration.teamIds ?? ['team-1'],
           projectIds: configuration.projectIds ?? ['project-1'],
-          customFieldIds: ['field-1'],
+          customFieldIds: configuration.customFieldDefinitions === undefined
+            ? ['field-1']
+            : [...new Set(configuration.customFieldDefinitions.map((definition) =>
+                definition.fieldId))],
           ...(configuration.customFieldDefinitions === undefined
             ? {}
             : { customFieldDefinitions: configuration.customFieldDefinitions }),
@@ -481,6 +502,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
             ? {}
             : { triageRoutingTuples: configuration.triageRoutingTuples }),
         },
+        ...(configuration.triageSourceRouting === undefined
+          ? {}
+          : { triageSourceRouting: configuration.triageSourceRouting }),
       }
     },
     async isAuthorizationCurrent() {
@@ -498,6 +522,8 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     finalizedAttempts,
     finalizeAttemptCallCount: () => finalizeAttemptCallCount,
     gatewayInputs,
+    generationCommitFences,
+    decisionCommitFences,
     budgetReservationCount: () => budgetReservationCount,
     lastBudget: () => lastBudget,
     policyPutCalls: () => policyPutCalls,
@@ -534,6 +560,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     },
     setPreferenceEnabled(value: boolean) {
       preferenceEnabled = value
+    },
+    setPolicyEnabled(value: boolean) {
+      policyEnabled = value
     },
     setPolicyRetentionDays(value: number) {
       policyRetentionDays = value
@@ -1531,6 +1560,31 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('discards provider output when governance changes after inference', async () => {
+    for (const [label, configuration, category] of [
+      ['policy-revision', { changePolicyAfterProvider: true }, 'conflict'],
+      ['policy-disabled', { disablePolicyAfterProvider: true }, 'authorization'],
+      ['member-opt-out', { disablePreferenceAfterProvider: true }, 'authorization'],
+    ] as const) {
+      const harness = createHarness(configuration)
+
+      await expect(harness.service.generate(
+        createActor(),
+        createSummaryRequest(),
+        harness.authorization,
+        `request-post-provider-${label}`,
+      )).rejects.toMatchObject({
+        category,
+        code: expect.any(String),
+      })
+      expect(harness.gatewayInputs).toHaveLength(1)
+      expect(harness.storedGeneration()).toBeUndefined()
+      expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+        outcome: 'failed',
+      })])
+    }
+  })
+
   test('rejects generated identifiers outside current allowlists', async () => {
     const gatewayInputs: AiModelGenerationInput[] = []
     const harness = createHarness()
@@ -1753,6 +1807,92 @@ describe('createAiAssistanceService', () => {
       })
       expect(harness.storedGeneration()).toBeUndefined()
     }
+  })
+
+  test('uses source routing to validate request-submission custom fields', async () => {
+    const harness = createHarness({
+      teamIds: ['team-a'],
+      projectIds: ['project-a'],
+      triageSourceRouting: { teamId: 'team-a', projectId: 'project-a' },
+      customFieldDefinitions: [{
+        teamId: 'team-a',
+        fieldId: 'project-field',
+        type: 'text',
+        required: false,
+        projectIds: ['project-a'],
+      }],
+      outputDraft: {
+        kind: 'triage',
+        customFields: [{
+          fieldId: 'project-field',
+          value: 'valid for the source Project',
+          reason: 'The source route selects this field.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        }],
+      },
+    })
+
+    const generation = await harness.service.generate(
+      createActor(),
+      {
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'request-submission',
+          formId: 'form-1',
+          submissionId: 'submission-1',
+          expectedRevision: 1,
+        },
+      },
+      harness.authorization,
+      'request-source-routing-field',
+    )
+
+    expect(generation.content.availability).toBe('available')
+    expect(harness.storedGeneration()).toBeDefined()
+  })
+
+  test('rejects currency values that exceed the configured precision', async () => {
+    const harness = createHarness({
+      customFieldDefinitions: [{
+        teamId: 'team-1',
+        fieldId: 'yen-budget',
+        type: 'currency',
+        required: false,
+        currencyCode: 'JPY',
+      }],
+      outputDraft: {
+        kind: 'triage',
+        customFields: [{
+          fieldId: 'yen-budget',
+          value: 1.5,
+          reason: 'Fractional yen is not supported.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        }],
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      {
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'triage-entry',
+          teamId: 'team-1',
+          triageEntryId: 'triage-1',
+          expectedRevision: 1,
+        },
+      },
+      harness.authorization,
+      'request-currency-precision',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'AiAssistanceOutputNotAllowed',
+    })
+    expect(harness.storedGeneration()).toBeUndefined()
   })
 
   test('rejects empty values for required custom fields', async () => {
