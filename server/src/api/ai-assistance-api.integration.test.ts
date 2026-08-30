@@ -120,6 +120,45 @@ async function createWorkspaceReadOnlyEnterpriseIdentity(): Promise<
 }
 
 /**
+ * Creates an Enterprise identity with AI and Workspace management access but no Request Intake permission.
+ *
+ * @returns In-memory Enterprise identity client for the authenticated test member.
+ */
+async function createWorkspaceManagerWithoutRequestPermissionIdentity(): Promise<
+  InMemoryEnterpriseIdentityClient
+> {
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:ai-workspace-manager-without-requests',
+    name: 'AI Workspace manager without Request Intake access',
+    permissions: ['workspace.read', 'workspace.manage'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: NOW,
+    updatedAt: NOW,
+  })
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => {
+    const snapshot = await readSnapshot(currentWorkspaceId)
+    return {
+      ...snapshot,
+      roleAssignments: [{
+        workspaceId,
+        assignmentId: 'ai-workspace-manager-without-requests-assignment',
+        principalKind: 'member',
+        principalId: 'demo@example.com',
+        roleId: 'custom:ai-workspace-manager-without-requests',
+        scope: { workspaceId, kind: 'workspace' },
+        source: 'direct',
+      }],
+    }
+  }
+  return identity
+}
+
+/**
  * Creates a rejected Request Intake operation for a source that authorization must not read.
  *
  * @param operation - Port method that must remain unreachable.
@@ -675,6 +714,62 @@ describe('AI assistance API composition', () => {
           Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
           'Idempotency-Key': 'ai-request-enterprise-reader',
+        },
+        body: JSON.stringify({
+          task: 'triage',
+          locale: 'ja',
+          source: {
+            type: 'request-submission',
+            formId: 'request-form-1',
+            submissionId: 'request-submission-1',
+            expectedRevision: 1,
+          },
+        }),
+      })
+
+      expect(response.status).toBe(403)
+      expect(serviceCalls).toBe(1)
+      expect(sourceReads).toBe(0)
+      expect(providerCalls).toBe(0)
+    })
+  })
+
+  test('requires Request Intake permission even when an Enterprise manager can manage AI policy', async () => {
+    await withTestEnvironment({
+      COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    }, async () => {
+      configureFakeProjectClients(true, {
+        projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+        workspaceRole: 'member',
+      })
+      let sourceReads = 0
+      let serviceCalls = 0
+      let providerCalls = 0
+      setTestAppDependencies({
+        enterpriseIdentity: await createWorkspaceManagerWithoutRequestPermissionIdentity(),
+        requestIntake: createUnreachableRequestIntakeClient(() => {
+          sourceReads += 1
+        }),
+        aiAssistanceService: createAiService({
+          async generate(actor, request, authorization) {
+            serviceCalls += 1
+            await authorization.resolveContext({ actor, request })
+            providerCalls += 1
+            throw new Error('Request Intake permission bypass reached the provider.')
+          },
+        }),
+      })
+      const accessToken = createAccessToken([], {
+        client_id: 'mukuroji-main-client',
+        token_use: 'access',
+      })
+
+      const response = await app.request('/api/ai-assistance/generations', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'ai-request-enterprise-manager-without-requests',
         },
         body: JSON.stringify({
           task: 'triage',

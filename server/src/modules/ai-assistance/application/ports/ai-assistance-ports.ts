@@ -423,6 +423,8 @@ export type AiAssistanceGenerationReservation =
       status: 'failed'
       /** Existing generation identifier whose attempt audit contains the failure. */
       generationId: string
+      /** ISO retention deadline copied from the durable idempotency receipt. */
+      expiresAt?: string
       /** Safe stable error category replayed without invoking the provider again. */
       failureCategory: AiAssistanceErrorCategory
       /** Safe stable error code replayed without invoking the provider again. */
@@ -433,12 +435,16 @@ export type AiAssistanceGenerationReservation =
       status: 'replay'
       /** Existing generation identifier. */
       generationId: string
+      /** ISO retention deadline copied from the durable idempotency receipt. */
+      expiresAt?: string
     }
   | {
       /** The same semantic generation is currently in progress. */
       status: 'pending'
       /** Reserved generation identifier, used for crash recovery checks. */
       generationId: string
+      /** ISO retention deadline copied from the durable idempotency receipt. */
+      expiresAt?: string
     }
 
 /** Stable identity used to update one owned generation reservation. */

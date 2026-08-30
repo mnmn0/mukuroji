@@ -436,7 +436,11 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       throw idempotencyConflictError()
     }
     if (parsed.data.status === 'completed') {
-      return { status: 'replay', generationId: parsed.data.generationId }
+      return {
+        status: 'replay',
+        generationId: parsed.data.generationId,
+        expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
+      }
     }
     if (parsed.data.status === 'failed') {
       if (parsed.data.failureCategory === undefined || parsed.data.failureCode === undefined) {
@@ -445,6 +449,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       return {
         status: 'failed',
         generationId: parsed.data.generationId,
+        expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
         failureCategory: parsed.data.failureCategory,
         failureCode: parsed.data.failureCode,
       }
@@ -457,7 +462,11 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     // over by reserveGeneration.
     return parsed.data.attempt === undefined
       ? undefined
-      : { status: 'pending', generationId: parsed.data.generationId }
+      : {
+          status: 'pending',
+          generationId: parsed.data.generationId,
+          expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
+        }
   }
 
   /** Atomically reserves a member and input-bound generation idempotency key. */
@@ -602,6 +611,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       return {
         status: 'failed',
         generationId: parsed.data.generationId,
+        expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
         failureCategory: parsed.data.failureCategory,
         failureCode: parsed.data.failureCode,
       }
@@ -609,6 +619,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     return {
       status: parsed.data.status === 'completed' ? 'replay' : 'pending',
       generationId: parsed.data.generationId,
+      expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
     }
   }
 
@@ -1851,6 +1862,14 @@ function toTtlEpochSeconds(value: string): number {
   const milliseconds = Date.parse(value)
   if (!Number.isFinite(milliseconds)) throw invalidRecordError()
   return Math.floor(milliseconds / 1_000)
+}
+
+/** Converts a validated DynamoDB TTL epoch value back to an ISO retention deadline. */
+function fromTtlEpochSeconds(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) throw invalidRecordError()
+  const date = new Date(value * 1_000)
+  if (!Number.isFinite(date.getTime())) throw invalidRecordError()
+  return date.toISOString()
 }
 
 /** Converts an ISO instant to an exact epoch-millisecond lease boundary. */

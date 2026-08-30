@@ -193,6 +193,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let reservationFingerprint: string | undefined
   let reservationGenerationId: string | undefined
   let reservationLeaseExpiresAt: string | undefined
+  let reservationExpiresAt: string | undefined
   let reservationStatus: 'pending' | 'completed' | 'failed' | undefined
   let reservationFailureCategory:
     FailAiAssistanceGenerationReservationInput['failureCategory'] | undefined
@@ -230,7 +231,11 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         reservationFingerprint !== input.inputFingerprint
       ) return undefined
       if (reservationStatus === 'completed') {
-        return { status: 'replay', generationId: reservationGenerationId ?? '' }
+        return {
+          status: 'replay',
+          generationId: reservationGenerationId ?? '',
+          expiresAt: reservationExpiresAt,
+        }
       }
       if (
         reservationStatus === 'failed' &&
@@ -240,12 +245,17 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         return {
           status: 'failed',
           generationId: reservationGenerationId ?? '',
+          expiresAt: reservationExpiresAt,
           failureCategory: reservationFailureCategory,
           failureCode: reservationFailureCode,
         }
       }
       if (reservationStatus === 'pending' && attemptStarted) {
-        return { status: 'pending', generationId: reservationGenerationId ?? '' }
+        return {
+          status: 'pending',
+          generationId: reservationGenerationId ?? '',
+          expiresAt: reservationExpiresAt,
+        }
       }
       return undefined
     },
@@ -264,6 +274,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         reservationFingerprint = input.inputFingerprint
         reservationGenerationId = input.generationId
         reservationLeaseExpiresAt = input.leaseExpiresAt
+        reservationExpiresAt = input.expiresAt
         reservationStatus = 'pending'
         attemptStarted = false
         return { status: 'reserved', generationId: input.generationId }
@@ -279,7 +290,11 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         )
       }
       if (reservationStatus === 'completed') {
-        return { status: 'replay', generationId: reservationGenerationId ?? '' }
+        return {
+          status: 'replay',
+          generationId: reservationGenerationId ?? '',
+          expiresAt: reservationExpiresAt,
+        }
       }
       if (
         reservationStatus === 'failed' &&
@@ -289,6 +304,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         return {
           status: 'failed',
           generationId: reservationGenerationId ?? '',
+          expiresAt: reservationExpiresAt,
           failureCategory: reservationFailureCategory,
           failureCode: reservationFailureCode,
         }
@@ -300,10 +316,15 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       ) {
         reservationGenerationId = input.generationId
         reservationLeaseExpiresAt = input.leaseExpiresAt
+        reservationExpiresAt = input.expiresAt
         attemptStarted = false
         return { status: 'reserved', generationId: input.generationId }
       }
-      return { status: 'pending', generationId: reservationGenerationId ?? '' }
+      return {
+        status: 'pending',
+        generationId: reservationGenerationId ?? '',
+        expiresAt: reservationExpiresAt,
+      }
     },
     async startGenerationAttempt(input) {
       if (
@@ -608,6 +629,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     setStoredGenerationMemberId(memberId: string) {
       if (!storedGeneration) throw new Error('Expected a stored generation.')
       storedGeneration = { ...storedGeneration, memberId }
+    },
+    deleteStoredGeneration() {
+      storedGeneration = undefined
     },
     setStoredGenerationExpiresAt(expiresAt: string) {
       if (!storedGeneration) throw new Error('Expected a stored generation.')
@@ -2329,6 +2353,29 @@ describe('createAiAssistanceService', () => {
       reasonCode: 'retention-expired',
     })
     expect(JSON.stringify(replay)).not.toContain('Safe summary.')
+  })
+
+  test('returns retention not-found when a completed receipt outlives its generation row', async () => {
+    const harness = createHarness()
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-generation-ttl-race',
+    )
+    harness.deleteStoredGeneration()
+    harness.setNow('2026-09-25T00:00:00.000Z')
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-generation-ttl-race',
+    )).rejects.toMatchObject({
+      category: 'not-found',
+      code: 'AiAssistanceGenerationNotFound',
+    })
+    expect(harness.gatewayInputs).toHaveLength(1)
   })
 
   test('rejects one generation key reused with different redacted input', async () => {

@@ -38,19 +38,23 @@ describe('AI assistance redaction', () => {
     const cases = [
       {
         input: 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==',
-        expected: 'Authorization: Basic [REDACTED_TOKEN]',
+        expected: 'Authorization: [REDACTED_TOKEN]',
       },
       {
         input: 'Proxy-Authorization: Basic dXNlcjpwYXNz',
-        expected: 'Proxy-Authorization: Basic [REDACTED_TOKEN]',
+        expected: 'Proxy-Authorization: [REDACTED_TOKEN]',
       },
       {
         input: 'Authorization: AWS4-HMAC-SHA256 Credential=access/2026 Signature=secret',
-        expected: 'Authorization: AWS4-HMAC-SHA256 [REDACTED_TOKEN]',
+        expected: 'Authorization: [REDACTED_TOKEN]',
       },
       {
         input: 'Proxy-Authorization: ApiKey opaque-secret; scope=private',
-        expected: 'Proxy-Authorization: ApiKey [REDACTED_TOKEN]',
+        expected: 'Proxy-Authorization: [REDACTED_TOKEN]',
+      },
+      {
+        input: 'Authorization: opaque-secret',
+        expected: 'Authorization: [REDACTED_TOKEN]',
       },
       {
         input: 'Cookie: session=opaque-session; theme=dark\nTrace: retained',
@@ -71,6 +75,10 @@ describe('AI assistance redaction', () => {
       {
         input: 'https://user@example.com:p@ssword@host.example.test/path',
         expected: 'https://[REDACTED_CREDENTIALS]@host.example.test/path',
+      },
+      {
+        input: 'https://opaque-token@10.0.0.1/path',
+        expected: 'https://[REDACTED_CREDENTIALS]@10.0.0.1/path',
       },
       {
         input: 'JSESSIONID=0123456789abcdef next-auth.session-token=opaque-session',
@@ -254,6 +262,14 @@ describe('AI assistance redaction', () => {
       fieldType: 'short-text',
       value: 'Jamie Jones',
     })).toBe('[REDACTED_PERSON]')
+    for (const label of ['firstName', 'lastName', 'givenName', 'surname']) {
+      expect(redactAiAssistancePromptFieldValue({
+        fieldId: `request-${label}`,
+        label,
+        fieldType: 'short-text',
+        value: 'Alex Smith',
+      })).toBe('[REDACTED_PERSON]')
+    }
     expect(redactAiAssistancePromptFieldValue({
       fieldId: 'feature-name',
       label: 'Feature name (optional)',

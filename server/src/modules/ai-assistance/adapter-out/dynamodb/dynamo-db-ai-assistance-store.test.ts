@@ -619,6 +619,7 @@ describe('DynamoDbAiAssistanceStore', () => {
       })).resolves.toEqual({
         status: 'replay',
         generationId: 'generation-1',
+        expiresAt: '2026-04-26T00:01:00.000Z',
       })
       expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
     } finally {
@@ -641,6 +642,7 @@ describe('DynamoDbAiAssistanceStore', () => {
       })).resolves.toEqual({
         status: 'pending',
         generationId: 'generation-1',
+        expiresAt: '2026-04-26T00:01:00.000Z',
       })
       expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
     } finally {
@@ -989,6 +991,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         .resolves.toEqual({
           status: 'failed',
           generationId: 'generation-2',
+          expiresAt: '2026-04-26T00:01:00.000Z',
           failureCategory: 'timeout',
           failureCode: 'AiAssistanceProviderTimeout',
         })
@@ -1026,7 +1029,11 @@ describe('DynamoDbAiAssistanceStore', () => {
       }))
 
       expect(takeover).toEqual({ status: 'reserved', generationId: 'generation-2' })
-      expect(concurrent).toEqual({ status: 'pending', generationId: 'generation-2' })
+      expect(concurrent).toEqual({
+        status: 'pending',
+        generationId: 'generation-2',
+        expiresAt: '2026-04-26T00:01:00.000Z',
+      })
       expect(harness.commands.map((command) => command.name)).toEqual([
         'TransactWriteCommand',
         'UpdateCommand',
@@ -1092,7 +1099,11 @@ describe('DynamoDbAiAssistanceStore', () => {
     ])
     try {
       await expect(harness.store.reserveGeneration(createReservation()))
-        .resolves.toEqual({ status: 'replay', generationId: 'generation-1' })
+        .resolves.toEqual({
+          status: 'replay',
+          generationId: 'generation-1',
+          expiresAt: '2026-04-26T00:01:00.000Z',
+        })
       expect(harness.commands.map((command) => command.name)).toEqual([
         'TransactWriteCommand',
         'UpdateCommand',

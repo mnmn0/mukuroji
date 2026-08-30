@@ -19796,13 +19796,14 @@ async function requireRequestAdministration(c: Context) {
 }
 
 /**
- * Requires exact Workspace management permission for an AI Request Intake source.
+ * Requires the canonical Request Intake read boundary for an AI source.
  *
- * The generation route itself only requires `workspace.read`, so its route-authorization boolean
- * cannot be reused as proof of Request Intake administration.
+ * Enterprise callers need a Workspace-scoped `requests.read` or `requests.manage` permission;
+ * legacy callers retain the existing owner/admin boundary. The generation route itself only
+ * requires `workspace.read`, so its route-authorization boolean cannot be reused here.
  *
  * @param context - Current Request Intake source request.
- * @returns Freshly authenticated principal with exact administration access.
+ * @returns Freshly authenticated principal with permission to read Request Intake data.
  */
 async function requireAiRequestSubmissionAdministration(
   context: Context,
@@ -19816,11 +19817,48 @@ async function requireAiRequestSubmissionAdministration(
     )
   }
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (
+    principal.enterprisePermissions !== undefined &&
+    hasEnterpriseWorkspaceRequestPermission(principal)
+  ) {
+    return principal
+  }
+  if (principal.enterprisePermissions !== undefined) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspacePermissionDenied',
+      'Request Intake read permission is required for this AI source.',
+    )
+  }
   if (canManageAiAssistanceWorkspace(principal)) return principal
   throw new WorkspaceAccessError(
     403,
     'WorkspaceRoleDenied',
     'Workspace owner or admin access is required.',
+  )
+}
+
+/** Checks Request Intake permissions at the current Enterprise Workspace resource. */
+function hasEnterpriseWorkspaceRequestPermission(principal: WorkspacePrincipal): boolean {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) return false
+  const resource: EnterpriseAuthorizationResource = {
+    workspaceId: principal.directoryId,
+    kind: 'workspace',
+  }
+  const requestPermissions: readonly EnterprisePermissionId[] = [
+    'requests.read',
+    'requests.manage',
+  ]
+  return requestPermissions.some((permission) =>
+    evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource,
+    }).allowed
   )
 }
 

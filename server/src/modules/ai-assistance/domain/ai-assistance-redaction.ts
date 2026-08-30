@@ -6,9 +6,9 @@ import type {
 } from '@mukuroji/contracts'
 
 const PRIVATE_KEY_PATTERN = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu
-const AUTHORIZATION_HEADER_PATTERN = /\b((?:proxy-)?authorization\s*:\s*)([^\s\r\n]+)(?:[^\r\n]*)/giu
+const AUTHORIZATION_HEADER_PATTERN = /\b((?:proxy-)?authorization\s*:\s*)(?:[^\r\n]*)/giu
 const COOKIE_HEADER_PATTERN = /\b((?:set-cookie|cookie)\s*:)\s*[^\r\n]*/giu
-const URL_USERINFO_PATTERN = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?=[^\s/?#]*:[^\s/?#]*@)[^\s/?#]*@(?=[^\s/?#])/gu
+const URL_USERINFO_PATTERN = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)(?=[^\s/?#]+@)[^\s/?#]*@(?=[^\s/?#])/gu
 const PRESIGNED_URL_QUERY_PATTERN = /([?&](?:x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential|security-token)|awsaccesskeyid|googleaccessid|signature|sig)=)(?!\[REDACTED_PRESIGNED_URL\])[^&#\s"'<>]+/giu
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]+/giu
 const JWT_PATTERN = /(^|[^A-Za-z0-9_-])(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})(?=$|[^A-Za-z0-9_-])/gu
@@ -75,8 +75,8 @@ export type AiAssistancePrivateIdentifierGroup = {
 export function redactAiAssistanceText(value: string): string {
   return value
     .replace(PRIVATE_KEY_PATTERN, '[REDACTED_PRIVATE_KEY]')
-    .replace(AUTHORIZATION_HEADER_PATTERN, (_match, prefix: string, scheme: string) =>
-      `${prefix}${scheme} [REDACTED_TOKEN]`)
+    .replace(AUTHORIZATION_HEADER_PATTERN, (_match, prefix: string) =>
+      `${prefix}[REDACTED_TOKEN]`)
     .replace(COOKIE_HEADER_PATTERN, (_match, header: string) =>
       `${header} [REDACTED_COOKIE]`)
     .replace(URL_USERINFO_PATTERN, (_match, scheme: string) =>
@@ -190,7 +190,7 @@ export function classifyAiAssistanceSensitivePromptField(
   if (
     /(?:氏名|お名前|姓名|担当者名|申請者名|連絡先氏名)/u.test(label) ||
     semanticCandidates.some((candidate) =>
-      /^(?:name|your name|your full name)$/u.test(candidate) ||
+      /^(?:name|your name|your full name|first name|last name|given name|surname|family name)$/u.test(candidate) ||
       /(?:^|\s)(?:full|contact|requester|applicant|person|customer|employee|user)\s+names?(?:\s|$)/u
         .test(candidate)
     )

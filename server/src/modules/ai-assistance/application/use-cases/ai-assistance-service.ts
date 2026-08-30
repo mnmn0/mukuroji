@@ -105,6 +105,17 @@ type GenerationBudgetValidationInput = GenerationBudgetConfiguration & {
   maxOutputTokens: number
 }
 
+/** Determines whether a durable idempotency receipt has crossed its retention deadline. */
+function isAiAssistanceReceiptExpired(
+  expiresAt: string | undefined,
+  currentTime: Date,
+): boolean {
+  if (expiresAt === undefined) return false
+  const expirationMilliseconds = Date.parse(expiresAt)
+  return Number.isFinite(expirationMilliseconds) &&
+    expirationMilliseconds <= currentTime.getTime()
+}
+
 /**
  * Creates the application service that owns AI generation policy and authorization fences.
  *
@@ -331,6 +342,16 @@ export function createAiAssistanceService(
       reservation.generationId,
     )
     if (!existing || existing.memberId !== actor.memberId) {
+      if (
+        !existing &&
+        isAiAssistanceReceiptExpired(reservation.expiresAt, now())
+      ) {
+        throw new AiAssistanceError(
+          'not-found',
+          'AiAssistanceGenerationNotFound',
+          'The AI assistance generation has expired.',
+        )
+      }
       if (reservation.status === 'pending' && !existing) {
         throw new AiAssistanceError(
           'conflict',
