@@ -23,6 +23,7 @@ import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyC
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypeDefinition,
   resolveWorkItemTypeLabel,
 } from '../../work-items/model/workItemDisplay'
 import {
@@ -247,6 +248,10 @@ export function TaskBoardView({
       {visibleStatusColumns.map((column) => {
         const statusTasks = tasks.filter((task) => isTaskInProjectStatusColumn(task, column))
         const columnConfiguration = configurationsByTeam[column.teamId]?.configuration ?? configuration
+        const canCreateInColumn = resolveWorkItemTypeDefinition(
+          columnConfiguration,
+          column.workItemTypeId,
+        )?.status === 'active'
         const subgroups = presentation?.subgroupBy
           ? groupTaskViewItems(
               statusTasks,
@@ -307,7 +312,7 @@ export function TaskBoardView({
                 </span>
               </span>
               <div className="flex items-center gap-2">
-                {onCreateTaskOpen ? (
+                {onCreateTaskOpen && canCreateInColumn ? (
                   <button
                     aria-label={`${t('tasks.board.addInColumn')}: ${column.label}`}
                     className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-white"

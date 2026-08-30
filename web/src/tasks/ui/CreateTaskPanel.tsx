@@ -97,7 +97,12 @@ export function CreateTaskPanel({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
-  const initialWorkItemTypeId = context?.workItemTypeId ??
+  const contextualWorkItemTypeId = context?.workItemTypeId && creatableWorkItemTypes.some((type) =>
+    type.id === context.workItemTypeId,
+  )
+    ? context.workItemTypeId
+    : undefined
+  const initialWorkItemTypeId = contextualWorkItemTypeId ??
     creatableWorkItemTypes[0]?.id ??
     'default'
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(initialWorkItemTypeId)

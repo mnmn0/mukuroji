@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { DEFAULT_WORK_ITEM_TYPE, type WorkItemConfiguration } from '@mukuroji/contracts'
 import { teamIssueFixtures } from '../src/issues/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { TeamIssueScreen } from '../src/pages/workspace/TeamIssuePage'
@@ -223,5 +224,87 @@ describe('Team Issue task-view presentation', () => {
     expect(html).toContain('<option value="refero" selected="">Refero</option>')
     expect(html).not.toContain('<option value="">未アサイン</option>')
     expect(html).not.toContain('<option value="product-roadmap">')
+  })
+
+  test('keeps Board columns and create actions scoped to each Work Item Type', () => {
+    const typeAwareConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      workflows: [{
+        id: 'incident-workflow',
+        name: 'Incident response',
+        initialStatusId: 'active',
+        statuses: [
+          { id: 'active', name: 'Investigating', category: 'started', sortOrder: 0 },
+          { id: 'done', name: 'Resolved', category: 'completed', sortOrder: 1 },
+        ],
+        transitions: [
+          { fromStatusId: 'active', toStatusId: 'done' },
+          { fromStatusId: 'done', toStatusId: 'active' },
+        ],
+      }],
+      workItemTypes: [
+        {
+          ...DEFAULT_WORK_ITEM_TYPE,
+          defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+        },
+        {
+          ...DEFAULT_WORK_ITEM_TYPE,
+          id: 'incident',
+          name: 'Incident',
+          iconToken: 'alert',
+          defaultWorkflowId: 'incident-workflow',
+          sortOrder: 1,
+        },
+        {
+          ...DEFAULT_WORK_ITEM_TYPE,
+          id: 'archived-incident',
+          name: 'Archived Incident',
+          iconToken: 'archive',
+          defaultWorkflowId: 'incident-workflow',
+          status: 'archived',
+          sortOrder: 2,
+        },
+      ],
+    } satisfies WorkItemConfiguration
+    const defaultIssue = teamIssueFixtures[0]
+    const incidentIssue = teamIssueFixtures[1]
+    if (!defaultIssue || !incidentIssue) throw new Error('Expected two Team Issue fixtures.')
+
+    const html = renderToStaticMarkup(
+      <TeamIssueScreen
+        initialViewMode="board"
+        issues={[
+          { ...defaultIssue, workflowStatusId: 'active', statusCategory: 'started' },
+          {
+            ...incidentIssue,
+            id: 'incident-issue',
+            statusCategory: 'started',
+            workItemTypeId: 'incident',
+            workflowStatusId: 'active',
+          },
+        ]}
+        locale="ja"
+        onCreateIssue={async () => undefined}
+        resolvedConfiguration={{ configuration: typeAwareConfiguration }}
+        teamId="core-team"
+        teams={projectDirectoryFixtures}
+        userInitial="J"
+        viewState={{
+          definitionFilter: { category: 'all', customFieldId: '' },
+          searchQuery: '',
+          statusFilter: 'all',
+          viewMode: 'board',
+          workItemTypeFilter: 'all',
+        }}
+      />,
+    )
+
+    expect(html).toContain('data-testid="team-issue-column-active"')
+    expect(html).toContain('data-testid="team-issue-column-incident-active"')
+    expect(html).toContain('Incident')
+    expect(html).toContain('data-testid="team-issue-add-active"')
+    expect(html).toContain('data-testid="team-issue-add-incident-active"')
+    expect(html).toContain('data-testid="team-issue-column-archived-incident-active"')
+    expect(html).not.toContain('data-testid="team-issue-add-archived-incident-active"')
   })
 })

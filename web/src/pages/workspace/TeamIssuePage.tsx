@@ -183,6 +183,7 @@ import {
   resolveWorkflowCategoryToneClassName,
   resolveWorkflowStatusCategory,
   resolveWorkflowStatusDefinition,
+  type WorkItemTypeWorkflowStatus,
 } from '../../work-items/model/workItemDisplay'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import {
@@ -326,6 +327,14 @@ type CreatedTeamIssueMutation = {
   issue: TeamIssue
   /** Application-relative route opened after creation, including retained view state. */
   navigationPath: string
+}
+
+/** Context retained while a canonical Team Create action is being accepted. */
+type TeamIssueCreateContext = {
+  /** Optional workflow status inherited from a Board column. */
+  workflowStatusId?: string
+  /** Optional Work Item Type inherited from a Board column. */
+  workItemTypeId?: string
 }
 
 /** Local state used to review a Team Issue Work Item Type change. */
@@ -1263,6 +1272,7 @@ export function TeamIssueScreen({
   })
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
+  const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const [taskViewSelection, setTaskViewSelection] = useState<TaskViewSelectionState>(
@@ -1276,7 +1286,7 @@ export function TeamIssueScreen({
   const directStatusMoveRequestSlotRef = useRef<TaskStatusMoveRequestSlot>({
     current: undefined,
   })
-  const pendingCreateWorkflowStatusIdRef = useRef<string | undefined>(undefined)
+  const pendingCreateContextRef = useRef<TeamIssueCreateContext | undefined>(undefined)
   const onSelectIssueRef = useRef(onSelectIssue)
   const [pendingAiSummaryIssueKey, setPendingAiSummaryIssueKey] = useState<string>()
   const isAiSummaryOperationPendingRef = useRef(false)
@@ -1359,12 +1369,16 @@ export function TeamIssueScreen({
   }, [defaultCreateIssueOpen])
 
   const configuration = resolvedConfiguration?.configuration
-  const workflowStatuses = useMemo(
+  const workflowStatusFilterOptions = useMemo(
     () => resolveConfiguredWorkflowStatuses(configuration),
     [configuration],
   )
+  const workflowStatuses = useMemo(
+    () => resolveWorkItemTypeWorkflowStatuses(configuration),
+    [configuration],
+  )
   const effectiveStatusFilter = statusFilter === 'all' ||
-    workflowStatuses.some((status) => status.id === statusFilter)
+    workflowStatusFilterOptions.some((status) => status.id === statusFilter)
     ? statusFilter
     : 'all'
   const effectiveDefinitionFilter = useMemo(() =>
@@ -1391,13 +1405,15 @@ export function TeamIssueScreen({
   const dismissCreateIssueEditor = useCallback(() => {
     setCreateErrorMessage(undefined)
     setCreateWorkflowStatusId(undefined)
+    setCreateWorkItemTypeId(undefined)
     setIsCreateOpen(false)
   }, [])
 
   /** Opens the Team create form for an already accepted canonical invocation. */
-  const showCreateIssueEditor = useCallback((workflowStatusId?: string) => {
+  const showCreateIssueEditor = useCallback((context?: TeamIssueCreateContext) => {
     setCreateErrorMessage(undefined)
-    setCreateWorkflowStatusId(workflowStatusId)
+    setCreateWorkflowStatusId(context?.workflowStatusId)
+    setCreateWorkItemTypeId(context?.workItemTypeId)
     setIsCreateOpen(true)
   }, [])
 
@@ -1631,10 +1647,10 @@ export function TeamIssueScreen({
     ...(canCreateIssueAction
       ? {
           create: (context) => {
-            const workflowStatusId = pendingCreateWorkflowStatusIdRef.current
-            pendingCreateWorkflowStatusIdRef.current = undefined
+            const createContext = pendingCreateContextRef.current
+            pendingCreateContextRef.current = undefined
             const completion = taskActionCompletion.begin(context, dismissCreateIssueEditor)
-            showCreateIssueEditor(workflowStatusId)
+            showCreateIssueEditor(createContext)
             return completion
           },
         }
@@ -1868,10 +1884,11 @@ export function TeamIssueScreen({
    * Routes header and Board-column Create clicks through the canonical Team registry.
    *
    * @param workflowStatusId - Optional Board-column status default for the create editor.
+   * @param workItemTypeId - Optional Board-column Work Item Type default for the create editor.
    */
-  const handleTeamCreateClick = useCallback((workflowStatusId?: string) => {
+  const handleTeamCreateClick = useCallback((workflowStatusId?: string, workItemTypeId?: string) => {
     if (isAiSummaryOperationPendingRef.current) return
-    pendingCreateWorkflowStatusIdRef.current = workflowStatusId
+    pendingCreateContextRef.current = { workflowStatusId, workItemTypeId }
     void teamActions.execute(
       'create',
       'click',
@@ -2220,11 +2237,12 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
-                    key={`create-issue-${createWorkflowStatusId ?? ''}`}
+                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}`}
                     assigneeOptions={assigneeOptions}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
                     errorMessage={createErrorMessage}
+                    workItemTypeId={createWorkItemTypeId}
                     workflowStatusId={createWorkflowStatusId}
                     locale={locale}
                     onCancel={() => {
@@ -2317,7 +2335,7 @@ export function TeamIssueScreen({
                   viewMode={viewMode}
                   workItemTypeFilter={workItemTypeFilter}
                   workItemTypes={resolveWorkItemTypes(configuration)}
-                  workflowStatuses={workflowStatuses}
+                  workflowStatuses={workflowStatusFilterOptions}
                 />
                 <div className="workbench-toolbar mt-3 px-3 py-2">
                   <WorkItemDefinitionFilters
@@ -2604,6 +2622,7 @@ function CreateIssuePanel({
   onSubmit,
   projects,
   t,
+  workItemTypeId,
   workflowStatusId,
   workspaceMembers,
 }: {
@@ -2617,6 +2636,8 @@ function CreateIssuePanel({
   onSubmit: (input: CreateTeamIssueInput) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
   t: (key: MessageKey) => string
+  /** Initial Work Item Type inherited from a Board column. */
+  workItemTypeId?: string
   workflowStatusId?: string
   workspaceMembers: WorkspaceMember[]
 }) {
@@ -2627,8 +2648,13 @@ function CreateIssuePanel({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
+  const contextualWorkItemTypeId = workItemTypeId && creatableWorkItemTypes.some((type) =>
+    type.id === workItemTypeId,
+  )
+    ? workItemTypeId
+    : undefined
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
-    creatableWorkItemTypes[0]?.id ?? 'default',
+    contextualWorkItemTypeId ?? creatableWorkItemTypes[0]?.id ?? 'default',
   )
   const selectedWorkItemType = resolveWorkItemTypeDefinition(configuration, selectedWorkItemTypeId) ??
     creatableWorkItemTypes[0]
@@ -3293,6 +3319,19 @@ function resolveTeamIssueGroupValue(
   return { key: value, label: value }
 }
 
+/** Creates a collision-safe identity for one Team Board workflow column. */
+function createTeamIssueStatusColumnKey(column: WorkItemTypeWorkflowStatus): string {
+  return [column.workItemTypeId, column.status.id].join('\u0000')
+}
+
+/** Creates a stable DOM token for one Team Board workflow column. */
+function createTeamIssueStatusTestToken(column: WorkItemTypeWorkflowStatus): string {
+  const value = column.workItemTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+    ? column.status.id
+    : `${column.workItemTypeId}-${column.status.id}`
+  return value.replaceAll(/[^a-z0-9-]+/giu, '-').toLowerCase()
+}
+
 function IssueBoard({
   activeTeam,
   canMoveIssueStatus,
@@ -3323,7 +3362,7 @@ function IssueBoard({
   /** Whether Team Issue navigation and board actions are fenced during an AI operation. */
   isAiOperationPending: boolean
   locale: Locale
-  onCreateIssueOpen?: (workflowStatusId: string) => void
+  onCreateIssueOpen?: (workflowStatusId: string, workItemTypeId: string) => void
   /** Opens the canonical action menu for one Team Issue card. */
   onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
   /** Routes one Board status selection or drop through the canonical Move action. */
@@ -3333,14 +3372,14 @@ function IssueBoard({
   selectedIssueKeys: readonly string[]
   selectedIssueId?: string
   t: (key: MessageKey) => string
-  workflowStatuses: readonly WorkflowStatusDefinition[]
+  workflowStatuses: readonly WorkItemTypeWorkflowStatus[]
   workspaceMembers: WorkspaceMember[]
 }) {
   const personLabels = Object.fromEntries(
     workspaceMembers.map((member) => [member.email, member.name ?? member.email]),
   )
   const [draggedIssueId, setDraggedIssueId] = useState<string>()
-  const [dropTargetStatusId, setDropTargetStatusId] = useState<string>()
+  const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string>()
   const [movingIssueIds, setMovingIssueIds] = useState<ReadonlySet<string>>(() => new Set())
   /** Checks the Board callback and the current issue-specific write scope together. */
   const canMoveIssue = (issue: TeamIssue) => Boolean(
@@ -3367,27 +3406,37 @@ function IssueBoard({
   const wrapText = presentation?.display.wrapTitles ?? false
   const showAssigneeAvatars = presentation?.display.showAssigneeAvatars ?? false
   const showEmptyGroups = presentation?.display.showEmptyGroups ?? true
+  const showTypeName = new Set(workflowStatuses.map(({ workItemTypeId }) => workItemTypeId)).size > 1
   const visibleWorkflowStatuses = showEmptyGroups
     ? workflowStatuses
-    : workflowStatuses.filter((status) =>
-        issues.some((issue) => resolveWorkItemWorkflowStatusId(issue) === status.id)
+    : workflowStatuses.filter(({ status, workItemTypeId }) =>
+        issues.some((issue) =>
+          (issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === workItemTypeId &&
+          resolveWorkItemWorkflowStatusId(issue) === status.id,
+        )
       )
 
   /** Validates and requests a Team workflow status change. */
-  const moveIssueToStatus = (issue: TeamIssue, workflowStatusId: string) => {
-    if (!onMoveIssueStatus || !canMoveIssue(issue) || issue.workflowStatusId === workflowStatusId) {
+  const moveIssueToStatus = (issue: TeamIssue, workflowStatus: WorkItemTypeWorkflowStatus) => {
+    const issueWorkItemTypeId = issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+    if (
+      !onMoveIssueStatus ||
+      !canMoveIssue(issue) ||
+      issueWorkItemTypeId !== workflowStatus.workItemTypeId ||
+      issue.workflowStatusId === workflowStatus.status.id
+    ) {
       return
     }
 
     const editableStatuses = resolveEditableWorkflowStatuses(issue, configuration)
 
-    if (!editableStatuses.some((status) => status.id === workflowStatusId)) {
+    if (!editableStatuses.some((status) => status.id === workflowStatus.status.id)) {
       return
     }
 
     const issueId = issue.id
     setMovingIssueIds((currentIds) => new Set(currentIds).add(issueId))
-    void onMoveIssueStatus(issue, workflowStatusId)
+    void onMoveIssueStatus(issue, workflowStatus.status.id)
       .catch(() => undefined)
       .finally(() => {
         setMovingIssueIds((currentIds) => {
@@ -3411,11 +3460,11 @@ function IssueBoard({
   }
 
   /** Resolves a dropped Team Work Item and requests a validated status change. */
-  const handleDrop = (event: DragEvent<HTMLElement>, status: WorkflowStatusDefinition) => {
+  const handleDrop = (event: DragEvent<HTMLElement>, workflowStatus: WorkItemTypeWorkflowStatus) => {
     event.preventDefault()
     if (isAiOperationPending) {
       setDraggedIssueId(undefined)
-      setDropTargetStatusId(undefined)
+      setDropTargetColumnKey(undefined)
       return
     }
     const issueId = event.dataTransfer.getData('application/x-mukuroji-team-issue-id') ||
@@ -3424,19 +3473,26 @@ function IssueBoard({
     const issue = issueId ? issues.find((candidate) => candidate.id === issueId) : undefined
 
     setDraggedIssueId(undefined)
-    setDropTargetStatusId(undefined)
+    setDropTargetColumnKey(undefined)
 
     if (issue) {
-      moveIssueToStatus(issue, status.id)
+      moveIssueToStatus(issue, workflowStatus)
     }
   }
 
   return (
     <section className="mt-5 grid min-w-0 gap-3">
       <div className="flex min-w-0 gap-4 overflow-x-auto pb-2">
-        {visibleWorkflowStatuses.map((status) => {
+        {visibleWorkflowStatuses.map((workflowStatus) => {
+          const { status, workItemTypeId } = workflowStatus
+          const columnKey = createTeamIssueStatusColumnKey(workflowStatus)
+          const statusTestToken = createTeamIssueStatusTestToken(workflowStatus)
+          const workItemTypeName = resolveWorkItemTypeDefinition(configuration, workItemTypeId)?.name ??
+            workItemTypeId
           const columnIssues = issues.filter(
-            (issue) => resolveWorkItemWorkflowStatusId(issue) === status.id,
+            (issue) =>
+              (issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === workItemTypeId &&
+              resolveWorkItemWorkflowStatusId(issue) === status.id,
           )
           const primaryCardGroupField = presentation?.groupBy === 'status'
             ? presentation.subgroupBy
@@ -3499,10 +3555,10 @@ function IssueBoard({
 
           return (
             <div
-              className={`workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none transition ${dropTargetStatusId === status.id ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40' : ''}`}
-              data-testid={`team-issue-column-${status.id}`}
-              key={status.id}
-              onDragLeave={() => setDropTargetStatusId(undefined)}
+              className={`workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none transition ${dropTargetColumnKey === columnKey ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40' : ''}`}
+              data-testid={`team-issue-column-${statusTestToken}`}
+              key={columnKey}
+              onDragLeave={() => setDropTargetColumnKey(undefined)}
               onDragOver={(event) => {
                 if (isAiOperationPending || !onMoveIssueStatus || !draggedIssueId) {
                   return
@@ -3513,6 +3569,7 @@ function IssueBoard({
                 if (
                   !issue ||
                   !canMoveIssue(issue) ||
+                  (issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) !== workItemTypeId ||
                   !resolveEditableWorkflowStatuses(issue, configuration).some(
                     (candidate) => candidate.id === status.id,
                   )
@@ -3522,21 +3579,28 @@ function IssueBoard({
 
                 event.preventDefault()
                 event.dataTransfer.dropEffect = 'move'
-                setDropTargetStatusId(status.id)
+                setDropTargetColumnKey(columnKey)
               }}
-              onDrop={(event) => handleDrop(event, status)}
+              onDrop={(event) => handleDrop(event, workflowStatus)}
             >
               <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
-                <IssueStatusBadge status={status} />
+                <span className="grid min-w-0 gap-0.5">
+                  <IssueStatusBadge status={status} />
+                  {showTypeName ? (
+                    <span className="truncate text-[11px] font-semibold text-[var(--workbench-muted)]">
+                      {workItemTypeName}
+                    </span>
+                  ) : null}
+                </span>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold text-[var(--workbench-muted)]">{columnIssues.length}</span>
-                  {onCreateIssueOpen ? (
+                  {onCreateIssueOpen && resolveWorkItemTypeDefinition(configuration, workItemTypeId)?.status === 'active' ? (
                     <button
-                      aria-label={`${t('tasks.board.addInColumn')}: ${status.name}`}
+                      aria-label={`${t('tasks.board.addInColumn')}: ${showTypeName ? `${workItemTypeName} · ` : ''}${status.name}`}
                       className="grid h-7 w-7 place-items-center rounded-md border border-[var(--workbench-border-strong)] bg-white text-lg leading-none text-[var(--workbench-primary)] hover:border-[#99d7cf] hover:bg-[#e5f7f4]"
-                      data-testid={`team-issue-add-${status.id}`}
+                      data-testid={`team-issue-add-${statusTestToken}`}
                       disabled={isAiOperationPending}
-                      onClick={() => onCreateIssueOpen(status.id)}
+                      onClick={() => onCreateIssueOpen(status.id, workItemTypeId)}
                       type="button"
                     >
                       +
@@ -3602,7 +3666,7 @@ function IssueBoard({
                         draggable={canMoveCurrentIssue && !isMoving}
                         onDragEnd={() => {
                           setDraggedIssueId(undefined)
-                          setDropTargetStatusId(undefined)
+                          setDropTargetColumnKey(undefined)
                         }}
                         onDragStart={(event) => handleDragStart(event, issue)}
                         onContextMenu={(event) => {
@@ -3708,7 +3772,14 @@ function IssueBoard({
                             aria-label={`${resolveIssueTitle(issue, t)}: ${t('tasks.column.status')}`}
                             className="workbench-input mt-3 h-8 w-full px-2 text-xs"
                             disabled={isAiOperationPending || isMoving}
-                            onChange={(event) => moveIssueToStatus(issue, event.target.value)}
+                            onChange={(event) => {
+                              const issueWorkItemTypeId = issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+                              const nextWorkflowStatus = workflowStatuses.find((candidate) =>
+                                candidate.workItemTypeId === issueWorkItemTypeId &&
+                                candidate.status.id === event.target.value,
+                              )
+                              if (nextWorkflowStatus) moveIssueToStatus(issue, nextWorkflowStatus)
+                            }}
                             value={issue.workflowStatusId}
                           >
                             {editableStatuses.map((editableStatus) => (
