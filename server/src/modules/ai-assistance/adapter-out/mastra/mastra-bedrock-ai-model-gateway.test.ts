@@ -115,6 +115,21 @@ describe('createMastraBedrockAiModelGateway', () => {
     }
   })
 
+  test('omits malformed provider trace identifiers before forwarding or persisting them', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: createOutput(),
+        inputTokens: 1,
+        outputTokens: 1,
+        traceId: `${'x'.repeat(257)}\nprovider-secret`,
+      }),
+    })
+
+    const result = await gateway.generate(createInput())
+
+    expect(result.providerTraceId).toBeUndefined()
+  })
+
   test('rejects non-finite or fractional provider usage before returning a draft', async () => {
     const invalidUsages: ReadonlyArray<[
       { inputTokens: number; outputTokens: number },

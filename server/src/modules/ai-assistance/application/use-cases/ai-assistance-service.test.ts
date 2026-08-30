@@ -1788,6 +1788,66 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
+  test('inherits the source Project when validating an assignee-only triage draft', async () => {
+    const harness = createHarness({
+      privateMemberIdentifiers: [{
+        memberId: 'assignee@example.com',
+        providerAlias: ASSIGNEE_PROVIDER_ALIAS,
+        identifiers: ['佐藤 花子', 'Sato Hanako'],
+      }, {
+        memberId: 'other@example.com',
+        providerAlias: 'U_other_member',
+        identifiers: [],
+      }, {
+        memberId: 'creator@example.com',
+        providerAlias: CREATOR_PROVIDER_ALIAS,
+        identifiers: [],
+      }],
+      teamIds: ['team-a'],
+      projectIds: ['project-a', 'project-b'],
+      triageSourceRouting: { teamId: 'team-a', projectId: 'project-a' },
+      triageRoutingTuples: [{
+        teamId: 'team-a',
+        projectId: 'project-a',
+        assigneeUserIds: ['other@example.com'],
+      }, {
+        teamId: 'team-a',
+        projectId: 'project-b',
+        assigneeUserIds: ['assignee@example.com'],
+      }],
+      outputDraft: {
+        kind: 'triage',
+        assigneeUserId: {
+          value: 'assignee@example.com',
+          reason: 'The suggested owner is available.',
+          confidence: 'high',
+          citationIds: ['S1'],
+        },
+        customFields: [],
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      {
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'request-submission',
+          formId: 'form-1',
+          submissionId: 'submission-1',
+          expectedRevision: 1,
+        },
+      },
+      harness.authorization,
+      'request-source-project-routing',
+    )).rejects.toMatchObject({
+      category: 'validation',
+      code: 'AiAssistanceOutputNotAllowed',
+    })
+    expect(harness.storedGeneration()).toBeUndefined()
+  })
+
   test('rejects an excluded sensitive custom field without auditing its model value', async () => {
     const harness = createHarness({
       outputDraft: {

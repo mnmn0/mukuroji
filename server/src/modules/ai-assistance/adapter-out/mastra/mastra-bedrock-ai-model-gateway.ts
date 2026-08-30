@@ -117,6 +117,7 @@ export function createMastraBedrockAiModelGateway(
           traceId: input.traceId,
           abortSignal: controller.signal,
         })
+        const providerTraceId = normalizeProviderTraceId(result.traceId)
         const latencyMs = Math.max(0, Math.round(nowMilliseconds() - startedAt))
         let usage: AiAssistanceUsage
         try {
@@ -135,7 +136,7 @@ export function createMastraBedrockAiModelGateway(
               error.message,
               { cause: error },
               undefined,
-              result.traceId,
+              providerTraceId,
             )
           }
           throw error
@@ -151,7 +152,7 @@ export function createMastraBedrockAiModelGateway(
               error.message,
               { cause: error },
               usage,
-              result.traceId,
+              providerTraceId,
             )
           }
           throw error
@@ -159,7 +160,7 @@ export function createMastraBedrockAiModelGateway(
         return {
           ...output,
           usage,
-          ...(result.traceId ? { providerTraceId: result.traceId } : {}),
+          ...(providerTraceId ? { providerTraceId } : {}),
         }
       } catch (error) {
         if (controller.signal.aborted) {
@@ -181,6 +182,13 @@ export function createMastraBedrockAiModelGateway(
       }
     },
   }
+}
+
+/** Accepts only bounded printable provider trace identifiers at the persistence boundary. */
+function normalizeProviderTraceId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return /^[\x20-\x7E]{1,256}$/u.test(trimmed) ? trimmed : undefined
 }
 
 /** Creates the production Mastra runner using the AWS AI SDK Bedrock provider. */

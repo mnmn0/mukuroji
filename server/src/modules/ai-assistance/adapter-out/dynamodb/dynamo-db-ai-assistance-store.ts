@@ -20,6 +20,7 @@ import type {
   AiAssistanceStore,
   AiAssistanceGenerationAttemptAuditEnvelope,
   AiAssistanceDecisionCommitFence,
+  AiAssistanceFeedbackCommitFence,
   AiAssistanceGenerationCommitFence,
   AiAssistanceGenerationReservation,
   AiAssistancePolicyAuthorizationFence,
@@ -215,6 +216,7 @@ const policyItemSchema = z.object({
   recordKey: z.literal(POLICY_RECORD_KEY),
   recordType: z.literal('ai-assistance-policy'),
   policy: z.unknown(),
+  mutationFingerprint: z.string().length(64).optional(),
 }).strict()
 
 const preferenceItemSchema = z.object({
@@ -857,13 +859,21 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
 
   /** Reads the current Workspace policy with a strongly consistent read. */
   async getPolicy(workspaceId: string): Promise<AiAssistancePolicy | undefined> {
+    const item = await this.#readPolicyItem(workspaceId)
+    return item === undefined ? undefined : parseAiAssistancePolicy(item.policy)
+  }
+
+  /** Reads and validates the raw Workspace policy row for replay identity checks. */
+  async #readPolicyItem(
+    workspaceId: string,
+  ): Promise<z.infer<typeof policyItemSchema> | undefined> {
     const response = await this.#readItem(workspaceId, POLICY_RECORD_KEY)
     if (!response.Item) return undefined
     const parsed = policyItemSchema.safeParse(response.Item)
     if (!parsed.success || parsed.data.workspaceId !== workspaceId) {
       throw invalidRecordError()
     }
-    return parseAiAssistancePolicy(parsed.data.policy)
+    return parsed.data
   }
 
   /** Writes a Workspace policy using revision-fenced compare-and-swap. */
@@ -920,11 +930,19 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       )
     }
     validatePolicyAuthorizationFence(authorizationFence)
+    const mutationFingerprint = createPolicyMutationFingerprint({
+      workspaceId,
+      memberId,
+      actorUserId: auditEvent.actorUserId,
+      expectedRevision,
+      policy,
+    })
     const policyItem = {
       workspaceId,
       recordKey: POLICY_RECORD_KEY,
       recordType: 'ai-assistance-policy',
       policy,
+      mutationFingerprint,
     }
     const policyPut = {
       Put: {
@@ -992,8 +1010,13 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       }
       if (isTransactionConditionalFailureAt(error, 0)) {
         try {
-          const current = await this.getPolicy(workspaceId)
-          if (current && isPolicyReplay(current, policy, expectedRevision)) return current
+          const currentItem = await this.#readPolicyItem(workspaceId)
+          if (currentItem === undefined) throw revisionConflictError()
+          const current = parseAiAssistancePolicy(currentItem.policy)
+          if (isPolicyReplay(current, policy, expectedRevision, {
+            expectedMutationFingerprint: mutationFingerprint,
+            actualMutationFingerprint: currentItem.mutationFingerprint,
+          })) return current
         } catch {
           // Preserve the compare-and-swap conflict when replay reconciliation is unavailable.
         }
@@ -1001,8 +1024,13 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       }
       const mappedError = mapDynamoWriteError(error)
       try {
-        const current = await this.getPolicy(workspaceId)
-        if (current && isPolicyReplay(current, policy, expectedRevision)) return current
+        const currentItem = await this.#readPolicyItem(workspaceId)
+        if (currentItem === undefined) throw mappedError
+        const current = parseAiAssistancePolicy(currentItem.policy)
+        if (isPolicyReplay(current, policy, expectedRevision, {
+          expectedMutationFingerprint: mutationFingerprint,
+          actualMutationFingerprint: currentItem.mutationFingerprint,
+        })) return current
       } catch {
         // Preserve the original transaction error when reconciliation is unavailable.
       }
@@ -1212,14 +1240,21 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
           Item: item,
           ConditionExpression:
             '#generation.#revision = :expectedRevision AND ' +
-            'attribute_not_exists(#generation.#decision)',
+            'attribute_not_exists(#generation.#decision)' +
+            (commitFence === undefined
+              ? ''
+              : ' AND #authorizationToken = :authorizationToken'),
           ExpressionAttributeNames: {
             '#generation': 'generation',
             '#revision': 'revision',
             '#decision': 'decision',
+            ...(commitFence === undefined ? {} : { '#authorizationToken': 'authorizationToken' }),
           },
           ExpressionAttributeValues: {
             ':expectedRevision': request.expectedRevision,
+            ...(commitFence === undefined
+              ? {}
+              : { ':authorizationToken': commitFence.authorizationToken }),
           },
         },
       }
@@ -1260,21 +1295,37 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       const generationConditionFailed = isConditionalCheckFailed(error) ||
         (commitFence !== undefined && isTransactionConditionalFailureAt(error, 0))
       if (!generationConditionFailed) throw mapDynamoWriteError(error)
+      let latest: StoredAiAssistanceGeneration | undefined
       try {
-        const current = await this.getGeneration(workspaceId, generationId)
-        if (current?.generation.decision?.outcome === request.outcome) return current
+        latest = await this.getGeneration(workspaceId, generationId)
       } catch {
         // Preserve the original conditional conflict when reconciliation fails.
       }
+      if (
+        commitFence !== undefined &&
+        latest !== undefined &&
+        latest.authorizationToken !== commitFence.authorizationToken
+      ) {
+        throw aiAssistanceAuthorizationChangedError(
+          'AI assistance source authorization changed during decision.',
+        )
+      }
+      if (latest?.generation.decision?.outcome === request.outcome) return latest
       throw revisionConflictError()
     }
   }
 
   /** Appends one immutable feedback item with inherited TTL. */
-  async putFeedback(record: StoredAiAssistanceFeedback): Promise<void> {
+  async putFeedback(
+    record: StoredAiAssistanceFeedback,
+    commitFence?: AiAssistanceFeedbackCommitFence,
+  ): Promise<void> {
+    if (commitFence !== undefined) {
+      validateFeedbackCommitFence(record, commitFence)
+    }
     const recordKey = createFeedbackRecordKey(record.generationId, record.feedbackId)
-    try {
-      await this.#documentClient.send(new PutCommand({
+    const feedbackPut = {
+      Put: {
         TableName: this.#tableName,
         Item: {
           workspaceId: record.workspaceId,
@@ -1290,9 +1341,37 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         },
         ConditionExpression:
           'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
-      }))
+      },
+    }
+    try {
+      if (commitFence === undefined) {
+        await this.#documentClient.send(new PutCommand(feedbackPut.Put))
+      } else {
+        await this.#documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            feedbackPut,
+            createNestedRevisionConditionCheck(
+              this.#tableName,
+              record.workspaceId,
+              POLICY_RECORD_KEY,
+              'policy',
+              commitFence.policyRevision,
+            ),
+          ],
+        }))
+      }
     } catch (error) {
-      if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
+      if (
+        commitFence !== undefined &&
+        isTransactionConditionalFailureAt(error, 1)
+      ) {
+        throw aiAssistanceAuthorizationChangedError(
+          'AI assistance retention policy changed during feedback.',
+        )
+      }
+      const feedbackConditionFailed = isConditionalCheckFailed(error) ||
+        (commitFence !== undefined && isTransactionConditionalFailureAt(error, 0))
+      if (!feedbackConditionFailed) throw mapDynamoWriteError(error)
       const response = await this.#readItem(record.workspaceId, recordKey)
       const parsed = feedbackItemSchema.safeParse(response.Item)
       if (
@@ -1788,7 +1867,25 @@ function validateDecisionCommitFence(
   if (
     !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
     !Number.isSafeInteger(fence.preferenceRevision) || fence.preferenceRevision < 0 ||
-    !Number.isFinite(expiresAt)
+    !Number.isFinite(expiresAt) ||
+    !fence.authorizationToken.trim() || fence.authorizationToken.length > 8_192
+  ) {
+    throw aiAssistanceAuthorizationChangedError(
+      'AI assistance retention policy is no longer current.',
+    )
+  }
+}
+
+/** Validates the policy revision and deadline captured for a feedback write. */
+function validateFeedbackCommitFence(
+  record: StoredAiAssistanceFeedback,
+  fence: AiAssistanceFeedbackCommitFence,
+): void {
+  const expiresAt = Date.parse(fence.effectiveExpiresAt)
+  if (
+    !Number.isSafeInteger(fence.policyRevision) || fence.policyRevision < 0 ||
+    !Number.isFinite(expiresAt) ||
+    record.expiresAt !== fence.effectiveExpiresAt
   ) {
     throw aiAssistanceAuthorizationChangedError(
       'AI assistance retention policy is no longer current.',
@@ -1964,13 +2061,46 @@ function isPolicyReplay(
   current: AiAssistancePolicy,
   desired: AiAssistancePolicy,
   expectedRevision: number,
+  identity?: {
+    expectedMutationFingerprint: string
+    actualMutationFingerprint?: string
+  },
 ): boolean {
+  if (
+    identity !== undefined &&
+    identity.actualMutationFingerprint !== identity.expectedMutationFingerprint
+  ) return false
   return current.revision === expectedRevision + 1 &&
     current.enabled === desired.enabled &&
     current.defaultModelId === desired.defaultModelId &&
     current.retentionDays === desired.retentionDays &&
     equalStrings(current.allowedModelIds, desired.allowedModelIds) &&
     equalStrings(current.enabledTasks, desired.enabledTasks)
+}
+
+/** Creates the actor-bound identity used to recognize an audited policy replay. */
+function createPolicyMutationFingerprint(input: {
+  workspaceId: string
+  memberId: string
+  actorUserId: string
+  expectedRevision: number
+  policy: AiAssistancePolicy
+}): string {
+  return createHash('sha256').update(JSON.stringify({
+    workspaceId: input.workspaceId,
+    memberId: input.memberId,
+    actorUserId: input.actorUserId,
+    expectedRevision: input.expectedRevision,
+    policy: {
+      schemaVersion: input.policy.schemaVersion,
+      enabled: input.policy.enabled,
+      allowedModelIds: input.policy.allowedModelIds,
+      defaultModelId: input.policy.defaultModelId,
+      enabledTasks: input.policy.enabledTasks,
+      retentionDays: input.policy.retentionDays,
+      revision: input.policy.revision,
+    },
+  })).digest('hex')
 }
 
 /** Returns whether a preference write is a response-loss replay of the previous mutation. */

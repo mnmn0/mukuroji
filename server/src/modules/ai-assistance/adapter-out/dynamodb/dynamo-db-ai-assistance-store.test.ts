@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, spyOn, test } from 'bun:test'
@@ -268,6 +269,25 @@ function createPolicy(updatedAt: string): AiAssistancePolicy {
     revision: 1,
     updatedAt,
   }
+}
+
+/** Creates the actor-bound policy mutation identity used by audited replay tests. */
+function createPolicyMutationFingerprint(policy: AiAssistancePolicy): string {
+  return createHash('sha256').update(JSON.stringify({
+    workspaceId: 'workspace-1',
+    memberId: 'member-1@example.com',
+    actorUserId: 'member-1@example.com',
+    expectedRevision: 0,
+    policy: {
+      schemaVersion: policy.schemaVersion,
+      enabled: policy.enabled,
+      allowedModelIds: policy.allowedModelIds,
+      defaultModelId: policy.defaultModelId,
+      enabledTasks: policy.enabledTasks,
+      retentionDays: policy.retentionDays,
+      revision: policy.revision,
+    },
+  })).digest('hex')
 }
 
 /** Creates one valid durable generation record with overridable audited context. */
@@ -1115,6 +1135,36 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('fences feedback retention against a concurrent policy change', async () => {
+    const feedback: StoredAiAssistanceFeedback = {
+      workspaceId: 'workspace-1',
+      feedbackId: 'feedback-1',
+      generationId: 'generation-1',
+      memberId: 'member-1',
+      feedback: { rating: 'helpful' },
+      inputFingerprint: FINGERPRINT,
+      createdAt: '2026-08-25T00:00:00.000Z',
+      expiresAt: '2026-09-24T00:00:00.000Z',
+    }
+    const harness = createHarness([
+      transactionCancellation(['None', 'ConditionalCheckFailed']),
+    ])
+    try {
+      await expect(harness.store.putFeedback(feedback, {
+        policyRevision: 1,
+        effectiveExpiresAt: feedback.expiresAt,
+      })).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceAuthorizationChanged',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('replays an identical decision after a concurrent conditional write', async () => {
     const current = createGenerationRecord('Permission-filtered source context.')
     const decided: StoredAiAssistanceGeneration = {
@@ -1166,6 +1216,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           policyRevision: 3,
           preferenceRevision: 0,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          authorizationToken: 'authorization-snapshot-1',
         },
       )).rejects.toMatchObject({
         category: 'conflict',
@@ -1196,6 +1247,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           policyRevision: 3,
           preferenceRevision: 2,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          authorizationToken: 'authorization-snapshot-1',
         },
       )).rejects.toMatchObject({
         category: 'conflict',
@@ -1227,10 +1279,50 @@ describe('DynamoDbAiAssistanceStore', () => {
           policyRevision: 3,
           preferenceRevision: 2,
           effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          authorizationToken: 'authorization-snapshot-1',
         },
       )).rejects.toMatchObject({
         category: 'conflict',
         code: 'AiAssistanceRevisionConflict',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'TransactWriteCommand',
+        'GetCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a source authorization condition cancellation to an authorization conflict', async () => {
+    const current = createGenerationRecord('Permission-filtered source context.')
+    const changed = {
+      ...createPersistedGenerationItem({
+        ...current,
+        authorizationToken: 'authorization-snapshot-2',
+      }),
+    }
+    const harness = createHarness([
+      { Item: createPersistedGenerationItem(current) },
+      transactionCancellation(['ConditionalCheckFailed', 'None', 'None']),
+      { Item: changed },
+    ])
+    try {
+      await expect(harness.store.decideGeneration(
+        'workspace-1',
+        'generation-1',
+        { outcome: 'approved', expectedRevision: 1 },
+        '2026-08-25T00:02:00.000Z',
+        {
+          policyRevision: 3,
+          preferenceRevision: 2,
+          effectiveExpiresAt: '2026-09-24T00:00:00.000Z',
+          authorizationToken: current.authorizationToken,
+        },
+      )).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceAuthorizationChanged',
       })
       expect(harness.commands.map((command) => command.name)).toEqual([
         'GetCommand',
@@ -1395,6 +1487,7 @@ describe('DynamoDbAiAssistanceStore', () => {
           recordKey: 'AI_POLICY#WORKSPACE',
           recordType: 'ai-assistance-policy',
           policy: current,
+          mutationFingerprint: createPolicyMutationFingerprint(desired),
         },
       },
     ], 'AuditTable')
@@ -1414,6 +1507,41 @@ describe('DynamoDbAiAssistanceStore', () => {
         'TransactWriteCommand',
         'GetCommand',
       ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('does not replay an audited policy mutation for a different member', async () => {
+    const current = createPolicy('2026-08-25T00:00:01.000Z')
+    const desired = createPolicy('2026-08-25T00:00:02.000Z')
+    const harness = createHarness([
+      transactionCancellation(['ConditionalCheckFailed', undefined, undefined]),
+      {
+        Item: {
+          workspaceId: 'workspace-1',
+          recordKey: 'AI_POLICY#WORKSPACE',
+          recordType: 'ai-assistance-policy',
+          policy: current,
+          mutationFingerprint: createPolicyMutationFingerprint(desired),
+        },
+      },
+    ], 'AuditTable')
+    try {
+      await expect(harness.store.putPolicyWithAudit(
+        'workspace-1',
+        'member-2@example.com',
+        desired,
+        0,
+        {
+          workspaceMemberVersion: 4,
+          workspaceRole: 'admin',
+        },
+        createPolicyAuditEvent(),
+      )).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceRevisionConflict',
+      })
     } finally {
       harness.restore()
     }

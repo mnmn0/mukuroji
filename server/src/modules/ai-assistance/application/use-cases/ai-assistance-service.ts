@@ -43,6 +43,7 @@ import type {
   AiAssistanceAllowedValues,
   AiAssistanceCustomFieldDefinition,
   AiAssistanceDecisionCommitFence,
+  AiAssistanceFeedbackCommitFence,
   AiAssistanceGenerationCommitFence,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
@@ -800,6 +801,14 @@ export function createAiAssistanceService(
       readPolicy(actor),
       getPreference(actor),
     ])
+    const decisionAuthorizationState = await authorization.isAuthorizationCurrent({
+      actor,
+      request: record.request,
+      authorizationToken: record.authorizationToken,
+    })
+    if (!decisionAuthorizationState.current) {
+      throw authorizationChangedError(decisionAuthorizationState.reason)
+    }
     const decisionGeneration = applyEffectiveRetention(record.generation, decisionPolicy)
     if (Date.parse(decisionGeneration.expiresAt) <= now().getTime()) {
       return withholdGeneration(decisionGeneration, 'retention-expired')
@@ -808,6 +817,7 @@ export function createAiAssistanceService(
       policyRevision: decisionPolicy.revision,
       preferenceRevision: decisionPreference.revision,
       effectiveExpiresAt: decisionGeneration.expiresAt,
+      authorizationToken: record.authorizationToken,
     }
     const decided = await options.store.decideGeneration(
       actor.workspaceId,
@@ -866,6 +876,22 @@ export function createAiAssistanceService(
         'The AI assistance generation is no longer available for feedback.',
       )
     }
+    // Re-read retention immediately before the write. The DynamoDB adapter fences
+    // this revision atomically so a concurrent policy shortening cannot persist a
+    // feedback row with a stale deadline.
+    const currentPolicy = await readPolicy(actor)
+    const currentGeneration = applyEffectiveRetention(record.generation, currentPolicy)
+    if (Date.parse(currentGeneration.expiresAt) <= now().getTime()) {
+      throw new AiAssistanceError(
+        'not-found',
+        'AiAssistanceGenerationNotFound',
+        'The AI assistance generation is no longer available for feedback.',
+      )
+    }
+    const feedbackCommitFence: AiAssistanceFeedbackCommitFence = {
+      policyRevision: currentPolicy.revision,
+      effectiveExpiresAt: currentGeneration.expiresAt,
+    }
     await options.store.putFeedback({
       workspaceId: actor.workspaceId,
       feedbackId: feedbackIdentity.feedbackId,
@@ -874,8 +900,8 @@ export function createAiAssistanceService(
       feedback,
       inputFingerprint: feedbackIdentity.inputFingerprint,
       createdAt: now().toISOString(),
-      expiresAt: effectiveGeneration.expiresAt,
-    })
+      expiresAt: currentGeneration.expiresAt,
+    }, feedbackCommitFence)
   }
 
   return {
@@ -1419,7 +1445,7 @@ function validateDraftAllowedValues(
     requireAllowedOptional(draft.assigneeUserId?.value, allowed.assigneeUserIds, 'assignee')
     requireAllowedOptional(draft.teamId?.value, allowed.teamIds, 'Team')
     requireAllowedOptional(draft.projectId?.value, allowed.projectIds, 'Project')
-    validateTriageRoutingTuple(draft, allowed.triageRoutingTuples)
+    validateTriageRoutingTuple(draft, allowed.triageRoutingTuples, triageSourceRouting)
     for (const field of draft.customFields) {
       requireAllowed(field.fieldId, allowed.customFieldIds, 'custom field')
     }
@@ -1622,10 +1648,11 @@ function rejectAiCustomFieldValue(message: string): never {
 function validateTriageRoutingTuple(
   draft: Extract<AiAssistanceDraft, { kind: 'triage' }>,
   tuples: readonly AiAssistanceTriageRoutingTuple[] | undefined,
+  sourceRouting: ResolvedAiAssistanceContext['triageSourceRouting'],
 ): void {
   if (tuples === undefined) return
-  const teamId = draft.teamId?.value
-  const projectId = draft.projectId?.value
+  const teamId = draft.teamId?.value ?? sourceRouting?.teamId
+  const projectId = draft.projectId?.value ?? sourceRouting?.projectId
   const assigneeUserId = draft.assigneeUserId?.value
   if (teamId === undefined && projectId === undefined && assigneeUserId === undefined) return
   if (tuples.some((tuple) =>

@@ -447,6 +447,16 @@ export type AiAssistanceDecisionCommitFence = {
   preferenceRevision: number
   /** Effective generation deadline computed from the current policy. */
   effectiveExpiresAt: string
+  /** Opaque source authorization snapshot rechecked immediately before the decision write. */
+  authorizationToken: string
+}
+
+/** Policy revision and effective retention deadline fenced at feedback persistence. */
+export type AiAssistanceFeedbackCommitFence = {
+  /** Workspace AI policy revision observed immediately before the feedback write. */
+  policyRevision: number
+  /** Effective generation deadline computed from the current policy. */
+  effectiveExpiresAt: string
 }
 
 /** Provider attempt metadata persisted before any paid model call starts. */
@@ -559,7 +569,10 @@ export interface AiAssistanceStore {
     commitFence?: AiAssistanceDecisionCommitFence,
   ): Promise<StoredAiAssistanceGeneration>
   /** Appends immutable bounded feedback. */
-  putFeedback(record: StoredAiAssistanceFeedback): Promise<void>
+  putFeedback(
+    record: StoredAiAssistanceFeedback,
+    commitFence?: AiAssistanceFeedbackCommitFence,
+  ): Promise<void>
 }
 
 /** Configuration required to construct the AI assistance application service. */
