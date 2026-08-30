@@ -220,6 +220,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
           failureCode: reservationFailureCode,
         }
       }
+      if (reservationStatus === 'pending' && attemptStarted) {
+        return { status: 'pending', generationId: reservationGenerationId ?? '' }
+      }
       return undefined
     },
     async reserveGeneration(input) {
@@ -1033,7 +1036,7 @@ describe('createAiAssistanceService', () => {
     expect(harness.budgetReservationCount()).toBe(1)
   })
 
-  test('repairs success finalization after generation storage without another provider call', async () => {
+  test('repairs success finalization before a changed preference gate without another provider call', async () => {
     const harness = createHarness()
     harness.setFinalizeAttemptFailures(1, new AiAssistanceError(
       'upstream',
@@ -1047,6 +1050,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-success-repair',
     )).rejects.toMatchObject({ code: 'AiAssistancePersistenceError' })
+    harness.setPreferenceEnabled(false)
     const repaired = await harness.service.generate(
       createActor(),
       createSummaryRequest(),
@@ -1152,6 +1156,30 @@ describe('createAiAssistanceService', () => {
       usage: expect.objectContaining({ inputTokens: 10, outputTokens: 20 }),
       failureCategory: 'upstream',
       failureCode: 'InvalidAiAssistanceOutput',
+    })])
+  })
+
+  test('retains a provider trace when invalid output reaches terminal attempt audit', async () => {
+    const harness = createHarness()
+    harness.setGatewayError(new AiAssistanceError(
+      'upstream',
+      'InvalidAiAssistanceOutput',
+      'Injected invalid structured output.',
+      undefined,
+      undefined,
+      'provider-invalid-output-trace',
+    ))
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-invalid-output-trace',
+    )).rejects.toMatchObject({ code: 'InvalidAiAssistanceOutput' })
+
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      providerTraceId: 'provider-invalid-output-trace',
     })])
   })
 
@@ -1719,6 +1747,62 @@ describe('createAiAssistanceService', () => {
         request,
         harness.authorization,
         `request-custom-field-${key}`,
+      )).rejects.toMatchObject({
+        category: 'validation',
+        code: 'AiAssistanceOutputNotAllowed',
+      })
+      expect(harness.storedGeneration()).toBeUndefined()
+    }
+  })
+
+  test('rejects empty values for required custom fields', async () => {
+    const request: GenerateAiAssistanceRequest = {
+      task: 'triage',
+      locale: 'en',
+      source: {
+        type: 'triage-entry',
+        teamId: 'team-1',
+        triageEntryId: 'triage-1',
+        expectedRevision: 1,
+      },
+    }
+    const cases: Array<{
+      label: string
+      value: string | string[]
+      type: AiAssistanceCustomFieldDefinition['type']
+      optionIds?: string[]
+    }> = [
+      { label: 'empty text', value: '', type: 'text' },
+      { label: 'whitespace text', value: ' \t\n', type: 'text' },
+      { label: 'empty multi-select', value: [], type: 'multi-select', optionIds: ['option-1'] },
+    ]
+
+    for (const testCase of cases) {
+      const harness = createHarness({
+        customFieldDefinitions: [{
+          teamId: 'team-1',
+          fieldId: 'required-field',
+          type: testCase.type,
+          required: true,
+          ...(testCase.optionIds === undefined ? {} : { optionIds: testCase.optionIds }),
+        }],
+        outputDraft: {
+          kind: 'triage',
+          customFields: [{
+            fieldId: 'required-field',
+            value: testCase.value,
+            reason: 'The source suggests this field.',
+            confidence: 'high',
+            citationIds: ['S1'],
+          }],
+        },
+      })
+
+      await expect(harness.service.generate(
+        createActor(),
+        request,
+        harness.authorization,
+        `request-required-custom-field-${testCase.label.replaceAll(' ', '-')}`,
       )).rejects.toMatchObject({
         category: 'validation',
         code: 'AiAssistanceOutputNotAllowed',

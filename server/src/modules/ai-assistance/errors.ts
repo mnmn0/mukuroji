@@ -48,6 +48,9 @@ export class AiAssistanceError extends Error {
   /** Provider-reported usage retained when structured output validation fails. */
   readonly usage?: AiAssistanceUsage
 
+  /** Provider trace retained for safe terminal-attempt accounting. */
+  readonly providerTraceId?: string
+
   /**
    * Creates a safe AI assistance application error.
    *
@@ -56,6 +59,7 @@ export class AiAssistanceError extends Error {
    * @param message - Non-sensitive diagnostic message.
    * @param options - Optional standard error options.
    * @param usage - Optional provider usage retained for failed-attempt accounting.
+   * @param providerTraceId - Optional provider trace retained for failed-attempt accounting.
    */
   constructor(
     category: AiAssistanceErrorCategory,
@@ -63,11 +67,13 @@ export class AiAssistanceError extends Error {
     message: string,
     options?: ErrorOptions,
     usage?: AiAssistanceUsage,
+    providerTraceId?: string,
   ) {
     super(message, options)
     this.name = 'AiAssistanceError'
     this.category = category
     this.code = code
     this.usage = usage
+    this.providerTraceId = providerTraceId
   }
 }

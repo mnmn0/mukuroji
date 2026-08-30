@@ -95,6 +95,7 @@ describe('createMastraBedrockAiModelGateway', () => {
         object: { ...createOutput(), unauthorized: 'field' },
         inputTokens: 12,
         outputTokens: 34,
+        traceId: 'provider-invalid-output-trace',
       }),
     })
 
@@ -109,6 +110,7 @@ describe('createMastraBedrockAiModelGateway', () => {
           outputTokens: 34,
           costUnavailableReason: 'pricing-not-configured',
         },
+        providerTraceId: 'provider-invalid-output-trace',
       })
     }
   })

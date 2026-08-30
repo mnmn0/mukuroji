@@ -372,10 +372,10 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
   }
 
   /**
-   * Reads a completed or failed receipt without charging a new generation budget.
+   * Reads an existing receipt without charging a new generation budget.
    *
    * @param input - Workspace, member, idempotency, and fingerprint identity.
-   * @returns A replayable or terminal failure reservation, or undefined for a pending/missing receipt.
+   * @returns A replayable, pending-attempt, or terminal failure reservation; undefined for a missing or not-yet-started receipt.
    * @throws A stable persistence or idempotency error when the receipt is malformed or mismatched.
    */
   async readGenerationReservation(
@@ -419,7 +419,15 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         failureCode: parsed.data.failureCode,
       }
     }
-    return undefined
+    // A started attempt has already consumed the durable budget and may have
+    // persisted its generation before the terminal receipt update. Return the
+    // pending state so the application can reconcile that generation before
+    // applying new-generation policy gates. Pending receipts without an
+    // attempt remain invisible here so an expired lease can still be taken
+    // over by reserveGeneration.
+    return parsed.data.attempt === undefined
+      ? undefined
+      : { status: 'pending', generationId: parsed.data.generationId }
   }
 
   /** Atomically reserves a member and input-bound generation idempotency key. */

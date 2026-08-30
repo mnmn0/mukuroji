@@ -243,6 +243,19 @@ function createSucceededAttempt() {
   }
 }
 
+/** Creates a started attempt that is waiting for terminal receipt reconciliation. */
+function createStartedAttempt() {
+  return {
+    task: 'summary',
+    modelId: 'model-1',
+    promptVersion: 'ai-assistance-v1',
+    traceId: 'trace-1',
+    startedAt: '2026-08-25T00:01:01.000Z',
+    audit: createAttemptAudit(),
+    status: 'started',
+  }
+}
+
 /** Creates the enabled policy used by natural replay tests. */
 function createPolicy(updatedAt: string): AiAssistancePolicy {
   return {
@@ -446,6 +459,28 @@ describe('DynamoDbAiAssistanceStore', () => {
         inputFingerprint: FINGERPRINT,
       })).resolves.toEqual({
         status: 'replay',
+        generationId: 'generation-1',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('reads a started pending receipt so the service can repair a durable generation', async () => {
+    const receipt = {
+      ...createPendingReceipt('generation-1', 1),
+      attempt: createStartedAttempt(),
+    }
+    const harness = createHarness([{ Item: receipt }])
+    try {
+      await expect(harness.store.readGenerationReservation({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+      })).resolves.toEqual({
+        status: 'pending',
         generationId: 'generation-1',
       })
       expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])

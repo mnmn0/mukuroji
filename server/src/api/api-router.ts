@@ -20028,6 +20028,9 @@ async function resolveAiAssistanceContext(
     sources.some((source) => source.type === 'document'),
     input.request.task,
     input.request.locale,
+    input.request.task === 'triage' && input.request.source.type === 'triage-entry'
+      ? input.request.source.teamId
+      : undefined,
   )
   const resolvedSources: ResolvedAiPromptSource[] = []
   for (
@@ -20187,6 +20190,7 @@ async function isAiAssistanceAuthorizationCurrent(
  * @param includeDocumentAuthorizationRevision - Whether document ACL revision is required.
  * @param task - Workflow used to minimize model-visible directory metadata.
  * @param locale - Locale used for the directory labels included in the prompt.
+ * @param triageSourceTeamId - Source Team that bounds triage-entry routing, when applicable.
  * @returns Shared resolver state with bounded output allowlists.
  */
 async function createAiAssistanceResolverState(
@@ -20194,6 +20198,7 @@ async function createAiAssistanceResolverState(
   includeDocumentAuthorizationRevision: boolean,
   task: ResolveAiAssistanceContextInput['request']['task'],
   locale: 'ja' | 'en',
+  triageSourceTeamId?: string,
 ): Promise<AiAssistanceResolverState> {
   const searchContext = await createWorkspaceSearchContext(principal, {
     includeDocumentAuthorizationRevision,
@@ -20264,7 +20269,10 @@ async function createAiAssistanceResolverState(
   const eligibleMemberIds = visibleMembers
     .filter((member) => member.role !== 'guest')
     .map((member) => member.id)
-  const triageRoutingTuples: AiAssistanceTriageRoutingTuple[] = visibleTeams.flatMap((team) => [
+  const routingTeams = triageSourceTeamId === undefined
+    ? visibleTeams
+    : visibleTeams.filter((team) => team.id === triageSourceTeamId)
+  const triageRoutingTuples: AiAssistanceTriageRoutingTuple[] = routingTeams.flatMap((team) => [
     {
       teamId: team.id,
       assigneeUserIds: eligibleMemberIds,

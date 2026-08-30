@@ -470,7 +470,7 @@ export type FailAiAssistanceGenerationReservationInput =
 
 /** DynamoDB-independent persistence port for AI policy, runs, and feedback. */
 export interface AiAssistanceStore {
-  /** Strongly reads a completed or failed receipt before policy gates for a new provider call. */
+  /** Strongly reads an existing receipt before policy gates for a new provider call or pending-attempt repair. */
   readGenerationReservation(
     input: ReadAiAssistanceGenerationReservationInput,
   ): Promise<AiAssistanceGenerationReservation | undefined>

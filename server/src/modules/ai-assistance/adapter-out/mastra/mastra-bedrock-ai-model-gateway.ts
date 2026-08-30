@@ -136,6 +136,7 @@ export function createMastraBedrockAiModelGateway(
               error.message,
               { cause: error },
               usage,
+              result.traceId,
             )
           }
           throw error

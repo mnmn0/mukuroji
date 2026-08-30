@@ -1147,6 +1147,72 @@ describe('AI assistance API composition', () => {
     }
   })
 
+  test('scopes triage-entry routing to the source Team when other Teams are visible', async () => {
+    const sourceProject = {
+      id: 'refero',
+      name: 'Refero',
+      tone: 'blue' as const,
+    }
+    const otherProject = {
+      id: 'later-project',
+      name: 'Later project',
+      tone: 'blue' as const,
+    }
+    configureFakeProjectClients(true, {
+      projectAccesses: [
+        { projectId: sourceProject.id, role: 'viewer', teamId: 'core-team' },
+        { projectId: otherProject.id, role: 'viewer', teamId: 'later-team' },
+      ],
+      teamProjects: [sourceProject],
+      additionalTeams: [{
+        id: 'later-team',
+        name: 'Later Team',
+        projects: [otherProject],
+      }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const entry = createTriageEntry('full')
+    let resolvedContext: ResolvedAiAssistanceContext | undefined
+    setTestAppDependencies({
+      triage: createTriageClient(entry),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          resolvedContext = await authorization.resolveContext({ actor, request })
+          return createWithheldGeneration(request.task, 'source-changed')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-triage-source-team-boundary' },
+      body: JSON.stringify({
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'triage-entry',
+          teamId: 'core-team',
+          triageEntryId: entry.id,
+          expectedRevision: entry.revision,
+        },
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    if (resolvedContext === undefined) {
+      throw new Error('Expected the AI resolver to return a triage context.')
+    }
+    expect(resolvedContext.allowedValues.teamIds).toEqual(['core-team'])
+    expect(resolvedContext.allowedValues.projectIds).toEqual(['refero'])
+    expect(resolvedContext.allowedValues.triageRoutingTuples?.every((tuple) =>
+      tuple.teamId === 'core-team' &&
+      (tuple.projectId === undefined || tuple.projectId === 'refero')
+    )).toBeTrue()
+    expect(JSON.stringify(resolvedContext.promptContext)).not.toContain('Later Team')
+    expect(JSON.stringify(resolvedContext.promptContext)).not.toContain('later-project')
+  })
+
   test('does not expose member candidates outside an Enterprise reader scope', async () => {
     await withTestEnvironment({
       COGNITO_CLIENT_ID: 'mukuroji-main-client',

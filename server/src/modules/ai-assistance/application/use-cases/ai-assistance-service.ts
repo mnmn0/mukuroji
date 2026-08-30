@@ -45,6 +45,7 @@ import type {
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
   AiAssistanceGenerationReservation,
+  CompleteAiAssistanceGenerationReservationInput,
   AiAssistancePolicyAuthorization,
   AiAssistancePolicyAuthorizationFence,
   AiAssistancePolicyAudit,
@@ -294,6 +295,7 @@ export function createAiAssistanceService(
    * @param reservation - Durable receipt classification returned by the store.
    * @param policy - Current policy used for retention projection.
    * @param authorization - Current source authorization used for disclosure.
+   * @param completionIdentity - Idempotency identity used to repair a pending attempt.
    * @returns The existing generation projected through current authorization.
    * @throws A stable error when the receipt is failed, malformed, or no longer accessible.
    */
@@ -302,6 +304,10 @@ export function createAiAssistanceService(
     reservation: AiAssistanceGenerationReservation,
     policy: AiAssistancePolicy,
     authorization: AiAssistanceAuthorizationCallbacks,
+    completionIdentity: Pick<
+      CompleteAiAssistanceGenerationReservationInput,
+      'idempotencyKey' | 'inputFingerprint'
+    >,
   ): Promise<AiAssistanceGeneration> {
     if (reservation.status === 'failed') {
       throw createSafeAttemptError(
@@ -309,7 +315,7 @@ export function createAiAssistanceService(
         reservation.failureCode,
       )
     }
-    if (reservation.status !== 'replay') {
+    if (reservation.status !== 'replay' && reservation.status !== 'pending') {
       throw new AiAssistanceError(
         'upstream',
         'InvalidAiAssistanceRecord',
@@ -321,11 +327,30 @@ export function createAiAssistanceService(
       reservation.generationId,
     )
     if (!existing || existing.memberId !== actor.memberId) {
+      if (reservation.status === 'pending' && !existing) {
+        throw new AiAssistanceError(
+          'conflict',
+          'AiAssistanceGenerationInProgress',
+          'An AI assistance generation with this idempotency key is in progress.',
+        )
+      }
       throw new AiAssistanceError(
         'upstream',
         'InvalidAiAssistanceRecord',
         'The AI assistance idempotency receipt references an invalid generation.',
       )
+    }
+    if (reservation.status === 'pending') {
+      await options.store.finalizeGenerationAttempt({
+        workspaceId: actor.workspaceId,
+        memberId: actor.memberId,
+        ...completionIdentity,
+        generationId: reservation.generationId,
+        outcome: 'succeeded',
+        endedAt: now().toISOString(),
+        latencyMs: existing.generation.details.usage.latencyMs,
+        usage: existing.generation.details.usage,
+      })
     }
     return await projectStoredGeneration(actor, existing, policy, authorization, now)
   }
@@ -360,6 +385,7 @@ export function createAiAssistanceService(
         existingReservation,
         policy,
         authorization,
+        { idempotencyKey, inputFingerprint },
       )
     }
     requireGenerationEnabled(policy, preference, request.task)
@@ -399,46 +425,15 @@ export function createAiAssistanceService(
       generationId: reservation.generationId,
     }
     if (reservation.status === 'failed') {
-      throw createSafeAttemptError(
-        reservation.failureCategory,
-        reservation.failureCode,
-      )
+      throw createSafeAttemptError(reservation.failureCategory, reservation.failureCode)
     }
     if (reservation.status !== 'reserved') {
-      const existing = await options.store.getGeneration(
-        actor.workspaceId,
-        reservation.generationId,
-      )
-      if (existing) {
-        if (existing.memberId !== actor.memberId) {
-          throw new AiAssistanceError(
-            'upstream',
-            'InvalidAiAssistanceRecord',
-            'The AI assistance idempotency receipt references an invalid generation.',
-          )
-        }
-        if (reservation.status === 'pending') {
-          await options.store.finalizeGenerationAttempt({
-            ...completion,
-            outcome: 'succeeded',
-            endedAt: now().toISOString(),
-            latencyMs: existing.generation.details.usage.latencyMs,
-            usage: existing.generation.details.usage,
-          })
-        }
-        return await projectStoredGeneration(actor, existing, policy, authorization, now)
-      }
-      if (reservation.status === 'pending') {
-        throw new AiAssistanceError(
-          'conflict',
-          'AiAssistanceGenerationInProgress',
-          'An AI assistance generation with this idempotency key is in progress.',
-        )
-      }
-      throw new AiAssistanceError(
-        'upstream',
-        'InvalidAiAssistanceRecord',
-        'The completed AI assistance receipt has no generation.',
+      return await replayGenerationReservation(
+        actor,
+        reservation,
+        policy,
+        authorization,
+        { idempotencyKey, inputFingerprint },
       )
     }
 
@@ -662,6 +657,8 @@ export function createAiAssistanceService(
       const safeError = toSafeAttemptError(error)
       const reportedUsage = modelResult?.usage ??
         (error instanceof AiAssistanceError ? error.usage : undefined)
+      const providerTraceId = modelResult?.providerTraceId ??
+        (error instanceof AiAssistanceError ? error.providerTraceId : undefined)
       if (!generationPersisted) {
         const failedAt = now()
         if (attemptStartedAt) {
@@ -676,9 +673,9 @@ export function createAiAssistanceService(
             ...(reportedUsage === undefined
               ? { usageUnavailableReason: 'provider-did-not-report' }
               : { usage: reportedUsage }),
-            ...(modelResult?.providerTraceId === undefined
+            ...(providerTraceId === undefined
               ? {}
-              : { providerTraceId: modelResult.providerTraceId }),
+              : { providerTraceId }),
             failureCategory: safeError.category,
             failureCode: safeError.code,
           })
@@ -1446,8 +1443,10 @@ function validateAiCustomFieldValue(
   value: string | number | boolean | string[] | null,
   definition: AiAssistanceCustomFieldDefinition,
 ): void {
+  if (definition.required && isMissingAiRequiredCustomFieldValue(value)) {
+    rejectAiCustomFieldValue('A required custom field cannot be empty.')
+  }
   if (value === null) {
-    if (definition.required) rejectAiCustomFieldValue('A required custom field cannot be cleared.')
     return
   }
   if (definition.type === 'formula') {
@@ -1514,6 +1513,15 @@ function validateAiCustomFieldValue(
   ) {
     rejectAiCustomFieldValue('The custom field value does not match its configured pattern.')
   }
+}
+
+/** Determines whether a typed custom-field value is empty for a required definition. */
+function isMissingAiRequiredCustomFieldValue(
+  value: string | number | boolean | string[] | null,
+): boolean {
+  return value === null ||
+    (typeof value === 'string' && value.trim().length === 0) ||
+    (Array.isArray(value) && value.length === 0)
 }
 
 /** Checks one strict Gregorian date used by date custom fields. */
