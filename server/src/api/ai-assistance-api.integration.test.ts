@@ -6,6 +6,7 @@ import {
   REQUEST_SUBMISSION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
   type AiAssistanceGeneration,
+  type AiAssistanceDraft,
   type AiAssistanceTask,
   type DocumentComment,
   type DocumentDetail,
@@ -1460,6 +1461,203 @@ describe('AI assistance API composition', () => {
 
     expect(response.status).toBe(201)
     expect(projectMemberReads).toBeGreaterThanOrEqual(2)
+  })
+
+  test('resolves triage routing with more than 90 Project memberships', async () => {
+    const projects: Array<{ id: string; name: string; tone: 'blue' }> = [
+      {
+        id: 'refero',
+        name: 'Refero',
+        tone: 'blue',
+      },
+      ...Array.from({ length: 99 }, (_, index) => ({
+        id: `triage-project-${String(index + 1).padStart(3, '0')}`,
+        name: `Triage project ${index + 1}`,
+        tone: 'blue',
+      } satisfies { id: string; name: string; tone: 'blue' })),
+    ]
+    configureFakeProjectClients(true, {
+      projectAccesses: projects.map((project) => ({
+        projectId: project.id,
+        role: 'viewer',
+        teamId: 'core-team',
+      })),
+      teamProjects: projects,
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const entry = createTriageEntry('full')
+    const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+    let projectMemberReads = 0
+    setTestAppDependencies({
+      projectDirectory: {
+        ...existingProjectDirectory,
+        async getProjectMembers(directoryId, projectId, teamId) {
+          projectMemberReads += 1
+          return {
+            directoryId,
+            projectId,
+            teamId,
+            members: [{
+              id: 'demo@example.com',
+              email: 'demo@example.com',
+              role: 'manager',
+              updatedAt: NOW,
+            }],
+          }
+        },
+      },
+      triage: createTriageClient(entry),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          const resolved = await authorization.resolveContext({ actor, request })
+          expect(resolved.allowedValues.triageRoutingTuples?.length).toBe(100)
+          return createWithheldGeneration(request.task, 'source-changed')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-triage-many-memberships' },
+      body: JSON.stringify({
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'triage-entry',
+          teamId: 'core-team',
+          triageEntryId: entry.id,
+          expectedRevision: entry.revision,
+        },
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(projectMemberReads).toBe(100)
+  })
+
+  test('fences selected triage configuration and destination memberships at commit time', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer', teamId: 'core-team' }],
+      role: 'viewer',
+      workspaceRole: 'owner',
+    })
+    const entry = createTriageEntry('full')
+    const baseConfigurationClient = createFakeWorkItemConfigurationClient()
+    const workItemConfigurations = createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(workspaceId, teamId) {
+        const resolved = await baseConfigurationClient.getTeamConfiguration(workspaceId, teamId)
+        return {
+          ...resolved,
+          inheritedFrom: undefined,
+          configuration: {
+            ...resolved.configuration,
+            revision: 3,
+            scopeType: 'team',
+            scopeId: teamId,
+          },
+        }
+      },
+    })
+    const request: GenerateAiAssistanceRequest = {
+      task: 'triage',
+      locale: 'en',
+      source: {
+        type: 'triage-entry',
+        teamId: 'core-team',
+        triageEntryId: entry.id,
+        expectedRevision: entry.revision,
+      },
+    }
+    const selectedDraft: AiAssistanceDraft = {
+      kind: 'triage',
+      teamId: {
+        value: 'core-team',
+        reason: 'The source Team remains the selected destination.',
+        confidence: 'high',
+        citationIds: [],
+      },
+      projectId: {
+        value: 'refero',
+        reason: 'The source Project remains the selected destination.',
+        confidence: 'high',
+        citationIds: [],
+      },
+      assigneeUserId: {
+        value: 'demo@example.com',
+        reason: 'The active Workspace member is eligible for assignment.',
+        confidence: 'high',
+        citationIds: [],
+      },
+      customFields: [],
+    }
+    let selectedConditions: ResolvedAiAssistanceContext['authorizationConditions'] = []
+    setTestAppDependencies({
+      workItemConfigurations,
+      triage: createTriageClient(entry),
+      aiAssistanceService: createAiService({
+        async generate(actor, currentRequest, authorization) {
+          const resolved = await authorization.resolveContext({
+            actor,
+            request: currentRequest,
+          })
+          const selected = await authorization.resolveContext({
+            actor,
+            request: currentRequest,
+            draft: selectedDraft,
+          })
+          selectedConditions = selected.authorizationConditions ?? []
+          expect(selected.authorizationToken).toBe(resolved.authorizationToken)
+          return createWithheldGeneration(currentRequest.task, 'source-changed')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-triage-selected-fences' },
+      body: JSON.stringify(request),
+    })
+
+    expect(response.status).toBe(201)
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'work-item-configuration',
+      key: {
+        scopeKey: 'user%23demo%40example.com#team#core-team#work-item-configuration',
+        recordKey: 'CONFIG',
+      },
+      expectedAttributes: {
+        scopeType: 'team',
+        scopeId: 'core-team',
+        schemaVersion: 1,
+        revision: 3,
+      },
+    }))
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'workspace-member',
+      key: {
+        workspaceId: 'user#demo@example.com',
+        recordKey: 'MEMBER#demo@example.com',
+      },
+      expectedAttributes: expect.objectContaining({
+        status: 'active',
+        memberKey: 'demo@example.com',
+      }),
+    }))
+    expect(selectedConditions).toContainEqual(expect.objectContaining({
+      kind: 'project-membership',
+      key: {
+        directoryId: 'user#demo@example.com',
+        entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+      },
+      expectedAttributes: {
+        entryType: 'project-member',
+        projectId: 'refero',
+        memberKey: 'demo@example.com',
+        role: 'manager',
+        updatedAt: '2026-06-08T00:00:00.000Z',
+      },
+    }))
   })
 
   test('does not expose member candidates outside an Enterprise reader scope', async () => {

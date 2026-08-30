@@ -682,6 +682,7 @@ export function createAiAssistanceService(
         actor,
         request: providerRequest,
         authorizationToken: context.authorizationToken,
+        draft: safeOutput.draft,
       })
       if (!commitAuthorizationState.current) {
         throw authorizationChangedError(commitAuthorizationState.reason)
@@ -832,6 +833,9 @@ export function createAiAssistanceService(
       actor,
       request: record.request,
       authorizationToken: record.authorizationToken,
+      ...(record.generation.content.availability === 'available'
+        ? { draft: record.generation.content.draft }
+        : {}),
     })
     if (!authorizationState.current) {
       throw authorizationChangedError(authorizationState.reason)
@@ -847,6 +851,9 @@ export function createAiAssistanceService(
       actor,
       request: record.request,
       authorizationToken: record.authorizationToken,
+      ...(record.generation.content.availability === 'available'
+        ? { draft: record.generation.content.draft }
+        : {}),
     })
     if (!decisionAuthorizationState.current) {
       throw authorizationChangedError(decisionAuthorizationState.reason)
@@ -2186,6 +2193,9 @@ async function projectStoredGeneration(
     actor,
     request: record.request,
     authorizationToken: record.authorizationToken,
+    ...(generation.content.availability === 'available'
+      ? { draft: generation.content.draft }
+      : {}),
   })
   return authorizationState.current
     ? generation

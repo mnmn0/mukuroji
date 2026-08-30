@@ -16,6 +16,7 @@ import {
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type AiAssistanceCitation,
+  type AiAssistanceDraft,
   type AiAssistanceSource,
   type AnalyticsQueryInput,
   type AnalyticsReport,
@@ -498,6 +499,7 @@ import {
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
 } from '../modules/work-items/work-item-configuration'
+import { createWorkItemConfigurationScopeKey } from '../modules/work-items'
 import {
   createWorkItemConfigurationRouter,
 } from '../modules/work-items/adapter-in/http/work-item-configuration-router'
@@ -19925,9 +19927,6 @@ const AI_ASSISTANCE_WORK_ITEM_CANDIDATE_LIMIT = 20
 /** Maximum number of AI prompt sources resolved concurrently in one request. */
 const AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY = 4
 
-/** Maximum Project membership rows included in one AI commit transaction. */
-const AI_ASSISTANCE_PROJECT_MEMBERSHIP_CONDITION_LIMIT = 90
-
 /** Maximum operations accepted by a DynamoDB transaction write. */
 const AI_ASSISTANCE_DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
 
@@ -19964,6 +19963,8 @@ type ResolvedAiPromptSource = {
   authorizationCondition: AiAssistanceAuthorizationCondition
   /** Additional source rows, such as the bounded Document comment window, fenced at commit time. */
   authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
+  /** Work Item configuration Teams whose resolved revisions authorize this source. */
+  configurationTeamIds?: readonly string[]
 }
 
 /** Current Project membership row used to bind a triage route to its source-of-truth revision. */
@@ -19994,8 +19995,21 @@ type AiAssistanceResolverState = {
   customFieldIdsByTeamId: ReadonlyMap<string, ReadonlySet<string>>
   /** Non-content authorization and configuration fences. */
   fence: unknown
-  /** Current Project membership rows used by triage routing and commit fencing. */
-  projectMembershipConditions: readonly AiAssistanceAuthorizationCondition[]
+  /** Current Project membership rows keyed by Team-qualified routing key. */
+  projectMembershipsByRoutingKey: ReadonlyMap<
+    string,
+    readonly AiAssistanceProjectMembership[]
+  >
+  /** Current active Workspace member rows keyed by canonical member identifier. */
+  workspaceMemberAuthorizationConditionsByMemberId: ReadonlyMap<
+    string,
+    AiAssistanceAuthorizationCondition
+  >
+  /** Resolved Work Item configuration rows keyed by Team identifier. */
+  configurationAuthorizationConditionsByTeamId: ReadonlyMap<
+    string,
+    readonly AiAssistanceAuthorizationCondition[]
+  >
   /** Current workflow definitions keyed by each visible Team. */
   workflowsByTeamId: ReadonlyMap<string, WorkItemConfiguration['workflow']>
 }
@@ -20172,6 +20186,8 @@ async function resolveAiAssistanceContext(
   requireWorkspaceBusinessRead(principal)
   const sources = getAiAssistanceRequestSources(input.request)
   const documentSourceCount = sources.filter((source) => source.type === 'document').length
+  const configurationSourceCount = sources.filter((source) => source.type !== 'document').length
+  const selectedOutputConditionReserve = input.request.task === 'triage' ? 3 : 0
   const documentCommentLimit = documentSourceCount === 0
     ? AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT
     : Math.max(
@@ -20179,7 +20195,8 @@ async function resolveAiAssistanceContext(
         Math.min(
           AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT,
           Math.floor((AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS -
-            sources.length - AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE) /
+            sources.length - AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE -
+            configurationSourceCount * 2 - selectedOutputConditionReserve) /
             documentSourceCount),
         ),
       )
@@ -20307,6 +20324,7 @@ async function resolveAiAssistanceContext(
     principal,
     state,
     resolvedSources,
+    input.draft,
   )
   return {
     promptContext,
@@ -20334,6 +20352,7 @@ function createAiAssistanceAuthorizationConditions(
   principal: WorkspacePrincipal,
   state: AiAssistanceResolverState,
   sources: readonly ResolvedAiPromptSource[],
+  selectedDraft?: AiAssistanceDraft,
 ): AiAssistanceAuthorizationCondition[] {
   const workspaceAccessTableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
     getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
@@ -20420,11 +20439,23 @@ function createAiAssistanceAuthorizationConditions(
   const seen = new Set<string>()
   const deduplicated = [
     ...conditions,
-    ...state.projectMembershipConditions,
+    ...sources.flatMap((source) => (source.configurationTeamIds ?? []).flatMap((teamId) => {
+      const configurationConditions = state.configurationAuthorizationConditionsByTeamId.get(teamId)
+      if (configurationConditions === undefined) {
+        throw aiAssistanceAuthorizationChangedError()
+      }
+      return configurationConditions
+    })),
     ...sources.flatMap((source) => [
       source.authorizationCondition,
       ...(source.authorizationConditions ?? []),
     ]),
+    ...createAiAssistanceSelectedDraftAuthorizationConditions(
+      principal,
+      state,
+      sources,
+      selectedDraft,
+    ),
   ]
     .filter((condition) => {
       const key = `${condition.tableName}:${JSON.stringify(condition.key)}`
@@ -20460,6 +20491,7 @@ async function isAiAssistanceAuthorizationCurrent(
     const current = await resolveAiAssistanceContext(principal, {
       actor: input.actor,
       request: input.request,
+      draft: input.draft,
     }, context)
     return current.authorizationToken === input.authorizationToken
       ? {
@@ -20581,26 +20613,13 @@ async function createAiAssistanceResolverState(
         .filter((project) => projectIds.includes(project.id))
         .map((project) => ({ teamId: team.id, projectId: project.id })))
     : []
-  const boundedRoutingProjects = routingProjects.slice(
-    0,
-    AI_ASSISTANCE_PROJECT_MEMBERSHIP_CONDITION_LIMIT,
-  )
-  const boundedRoutingProjectKeys = new Set(
-    boundedRoutingProjects.map((project) =>
-      createAiAssistanceProjectRoutingKey(project.teamId, project.projectId)
-    ),
-  )
   const projectMemberIdsByProjectRoutingKey = task === 'triage'
     ? await resolveAiAssistanceProjectMemberIds(
         principal.directoryId,
-        boundedRoutingProjects,
+        routingProjects,
         eligibleMemberIdSet,
       )
     : new Map<string, readonly AiAssistanceProjectMembership[]>()
-  const projectMembershipConditions = createAiAssistanceProjectMembershipConditions(
-    principal.directoryId,
-    projectMemberIdsByProjectRoutingKey,
-  )
   const allTriageRoutingTuples: AiAssistanceTriageRoutingTuple[] = routingTeams.flatMap((team) => [
     {
       teamId: team.id,
@@ -20608,9 +20627,6 @@ async function createAiAssistanceResolverState(
     },
     ...team.projects
       .filter((project) => projectIds.includes(project.id))
-      .filter((project) => task !== 'triage' || boundedRoutingProjectKeys.has(
-        createAiAssistanceProjectRoutingKey(team.id, project.id),
-      ))
       .map((project) => ({
         teamId: team.id,
         projectId: project.id,
@@ -20781,7 +20797,19 @@ async function createAiAssistanceResolverState(
     privacyAliases,
     sensitiveCustomFieldIds,
     customFieldIdsByTeamId,
-    projectMembershipConditions,
+    projectMembershipsByRoutingKey: projectMemberIdsByProjectRoutingKey,
+    workspaceMemberAuthorizationConditionsByMemberId: new Map(currentMembers.map((member) => [
+      member.id,
+      createAiAssistanceWorkspaceMemberAuthorizationCondition(principal.directoryId, member),
+    ])),
+    configurationAuthorizationConditionsByTeamId: new Map(configurations.map(({ team, resolved }) => [
+      team.id,
+      createAiWorkItemConfigurationAuthorizationConditions(
+        principal.directoryId,
+        team.id,
+        resolved,
+      ),
+    ])),
     workflowsByTeamId: new Map(configurations.map(({ team, resolved }) => [
       team.id,
       resolved.configuration.workflow,
@@ -20835,59 +20863,166 @@ async function createAiAssistanceResolverState(
   }
 }
 
-/** Builds exact DynamoDB conditions for every Project membership used by triage routing. */
-function createAiAssistanceProjectMembershipConditions(
+/**
+ * Creates the exact configuration rows that authorize one resolved Team configuration.
+ *
+ * A direct Team override is fenced by that row alone. Inherited configurations also fence
+ * the Team row's absence and the Workspace row (or its absence), matching the Work Items
+ * resolver's inheritance semantics.
+ *
+ * @param workspaceId - Workspace that owns the configuration table.
+ * @param teamId - Team whose effective configuration was resolved.
+ * @param resolved - Current effective configuration and inheritance source.
+ * @returns Exact configuration rows to check at an AI commit boundary.
+ */
+function createAiWorkItemConfigurationAuthorizationConditions(
   workspaceId: string,
-  membersByProjectRoutingKey: ReadonlyMap<
-    string,
-    readonly AiAssistanceProjectMembership[]
-  >,
+  teamId: string,
+  resolved: ResolvedWorkItemConfiguration,
 ): AiAssistanceAuthorizationCondition[] {
-  const memberships: Array<{
-    projectId: string
-    member: AiAssistanceProjectMembership
-  }> = []
-  for (const [routingKey, members] of membersByProjectRoutingKey) {
-    const separatorIndex = routingKey.indexOf('\u0000')
-    const projectId = separatorIndex < 0 ? undefined : routingKey.slice(separatorIndex + 1)
-    if (projectId === undefined || !projectId) {
-      throw new AiAssistanceError(
-        'validation',
-        'InvalidAiAssistanceRequest',
-        'Resolved AI Project membership routing is invalid.',
-      )
-    }
-    for (const member of members) memberships.push({ projectId, member })
+  const tableName = getWorkItemConfigurationTableName()
+  const createCondition = (
+    scopeType: 'workspace' | 'team',
+    scopeId: string,
+    revision: number,
+  ): AiAssistanceAuthorizationCondition => ({
+    kind: 'work-item-configuration',
+    tableName,
+    key: {
+      scopeKey: createWorkItemConfigurationScopeKey(workspaceId, scopeType, scopeId),
+      recordKey: 'CONFIG',
+    },
+    expectedAttributes: {
+      scopeType,
+      scopeId,
+      schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+      revision,
+    },
+    ...(revision === 0 ? { allowMissingWhenExpectedZero: true } : {}),
+  })
+  if (!resolved.inheritedFrom && resolved.configuration.scopeType === 'team') {
+    return [createCondition('team', teamId, resolved.configuration.revision)]
   }
-  if (memberships.length > AI_ASSISTANCE_PROJECT_MEMBERSHIP_CONDITION_LIMIT) {
-    throw new AiAssistanceError(
-      'upstream',
-      'AiAssistancePersistenceError',
-      'AI triage routing exceeds the safe Project membership fence limit.',
-    )
+  return [
+    createCondition('team', teamId, 0),
+    createCondition(
+      'workspace',
+      workspaceId,
+      resolved.inheritedFrom === 'workspace' ? resolved.configuration.revision : 0,
+    ),
+  ]
+}
+
+/** Creates the exact active Workspace membership row for one selected assignee. */
+function createAiAssistanceWorkspaceMemberAuthorizationCondition(
+  workspaceId: string,
+  member: { id: string; role: string; version: number },
+): AiAssistanceAuthorizationCondition {
+  const memberKey = normalizeProjectMemberKey(member.id)
+  const tableName = getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
+    getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+    'mukuroji-workspace-access-local'
+  return {
+    kind: 'workspace-member',
+    tableName,
+    key: {
+      workspaceId,
+      recordKey: `MEMBER#${memberKey}`,
+    },
+    expectedAttributes: {
+      entryType: 'workspace-member',
+      status: 'active',
+      memberKey,
+      role: member.role,
+      version: member.version,
+    },
   }
+}
+
+/** Creates the exact active Project membership row for one selected route. */
+function createAiAssistanceProjectMembershipAuthorizationCondition(
+  workspaceId: string,
+  projectId: string,
+  member: AiAssistanceProjectMembership,
+): AiAssistanceAuthorizationCondition {
+  const memberKey = normalizeProjectMemberKey(member.memberId)
   const tableName = getEnv('MUKUROJI_PROJECT_DIRECTORY_TABLE') ??
     getEnv('PROJECT_DIRECTORY_TABLE_NAME') ??
     'mukuroji-project-directory-local'
-  return memberships.map(({ projectId, member }) => {
-    const memberKey = normalizeProjectMemberKey(member.memberId)
-    return {
-      kind: 'project-membership',
-      tableName,
-      key: {
-        directoryId: workspaceId,
-        entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}`,
-      },
-      expectedAttributes: {
-        entryType: 'project-member',
-        projectId,
-        memberKey,
-        role: member.role,
-        updatedAt: member.updatedAt,
-      },
-      expectedAbsentAttributes: ['archivedAt'],
-    }
-  })
+  return {
+    kind: 'project-membership',
+    tableName,
+    key: {
+      directoryId: workspaceId,
+      entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}`,
+    },
+    expectedAttributes: {
+      entryType: 'project-member',
+      projectId,
+      memberKey,
+      role: member.role,
+      updatedAt: member.updatedAt,
+    },
+    expectedAbsentAttributes: ['archivedAt'],
+  }
+}
+
+/**
+ * Adds commit-time fences for identifiers retained by a triage draft.
+ *
+ * @param principal - Current Workspace principal.
+ * @param state - Fresh resolver state containing active member and route rows.
+ * @param sources - Sources used to infer the current triage destination.
+ * @param draft - Canonical draft being committed, when this is a final check.
+ * @returns Selected configuration, member, and Project membership conditions.
+ */
+function createAiAssistanceSelectedDraftAuthorizationConditions(
+  principal: WorkspacePrincipal,
+  state: AiAssistanceResolverState,
+  sources: readonly ResolvedAiPromptSource[],
+  draft: AiAssistanceDraft | undefined,
+): AiAssistanceAuthorizationCondition[] {
+  if (draft?.kind !== 'triage') return []
+  const sourceRouting = sources.find((source) => source.triageSourceRouting !== undefined)
+    ?.triageSourceRouting
+  const selectedTeamId = draft.teamId?.value ?? sourceRouting?.teamId
+  if (selectedTeamId === undefined) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  const selectedProjectId = draft.projectId?.value ?? (
+    draft.teamId?.value === undefined || draft.teamId.value === sourceRouting?.teamId
+      ? sourceRouting?.projectId
+      : undefined
+  )
+  const configurationConditions = state.configurationAuthorizationConditionsByTeamId.get(
+    selectedTeamId,
+  )
+  if (configurationConditions === undefined) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  const conditions: AiAssistanceAuthorizationCondition[] = [...configurationConditions]
+  const selectedAssigneeId = draft.assigneeUserId?.value
+  if (selectedAssigneeId === undefined) return conditions
+  const memberCondition = state.workspaceMemberAuthorizationConditionsByMemberId.get(
+    selectedAssigneeId,
+  )
+  if (memberCondition === undefined) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  conditions.push(memberCondition)
+  if (selectedProjectId === undefined) return conditions
+  const routingKey = createAiAssistanceProjectRoutingKey(selectedTeamId, selectedProjectId)
+  const memberships = state.projectMembershipsByRoutingKey.get(routingKey)
+  const membership = memberships?.find((candidate) => candidate.memberId === selectedAssigneeId)
+  if (membership === undefined) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
+  conditions.push(createAiAssistanceProjectMembershipAuthorizationCondition(
+    principal.directoryId,
+    selectedProjectId,
+    membership,
+  ))
+  return conditions
 }
 
 /** Creates one cryptographically random, provider-safe member alias. */
@@ -21113,6 +21248,7 @@ async function resolveAiTriageSource(
     workItemEndpoints: [],
     workflowStatusIds: [],
     triageSourceRouting: sourceRouting,
+    configurationTeamIds: [source.teamId],
     authorizationCondition: {
       kind: 'source',
       tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
@@ -21293,6 +21429,7 @@ async function resolveAiRequestSubmissionSource(
         ? {}
         : { projectId: submission.routingTarget.projectId }),
     },
+    configurationTeamIds: [submission.routingTarget.teamId],
     authorizationCondition: {
       kind: 'source',
       tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
@@ -21563,6 +21700,7 @@ async function resolveAiWorkItemSource(
       successor: dependency.successor,
     })),
     workflowStatusIds,
+    configurationTeamIds: [source.teamId],
     authorizationCondition: {
       kind: 'source',
       tableName: getTeamIssuesTableName(),
@@ -21926,6 +22064,7 @@ async function resolveAiPlanningTargetSource(
       successor: dependency.successor,
     })),
     workflowStatusIds: [],
+    ...(scope.teamId === undefined ? {} : { configurationTeamIds: [scope.teamId] }),
     authorizationCondition: {
       kind: 'source',
       tableName: getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',

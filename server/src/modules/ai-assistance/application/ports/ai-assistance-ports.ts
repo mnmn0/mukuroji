@@ -145,6 +145,7 @@ export type AiAssistanceAuthorizationCondition = {
     | 'document-authorization'
     | 'enterprise-control'
     | 'project-membership'
+    | 'work-item-configuration'
     | 'source'
   /** Physical persistence table resolved by the composition boundary. */
   tableName: string
@@ -249,6 +250,8 @@ export type ResolveAiAssistanceContextInput = {
   actor: AiAssistanceActor
   /** Strictly validated generation request. */
   request: GenerateAiAssistanceRequest
+  /** Optional canonical draft whose selected identifiers require commit-time fencing. */
+  draft?: AiAssistanceDraft
 }
 
 /** Input supplied when rechecking a captured authorization snapshot. */
@@ -259,6 +262,8 @@ export type CheckAiAssistanceAuthorizationInput = {
   request: GenerateAiAssistanceRequest
   /** Opaque authorization token returned by the resolver. */
   authorizationToken: string
+  /** Optional canonical draft whose selected identifiers require commit-time fencing. */
+  draft?: AiAssistanceDraft
 }
 
 /** Source authorization callbacks bound to the current authenticated request. */
