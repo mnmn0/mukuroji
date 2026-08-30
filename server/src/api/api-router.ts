@@ -20027,6 +20027,7 @@ async function resolveAiAssistanceContext(
     principal,
     sources.some((source) => source.type === 'document'),
     input.request.task,
+    input.request.locale,
   )
   const resolvedSources: ResolvedAiPromptSource[] = []
   for (
@@ -20185,15 +20186,18 @@ async function isAiAssistanceAuthorizationCurrent(
  * @param principal - Current authenticated Workspace principal.
  * @param includeDocumentAuthorizationRevision - Whether document ACL revision is required.
  * @param task - Workflow used to minimize model-visible directory metadata.
+ * @param locale - Locale used for the directory labels included in the prompt.
  * @returns Shared resolver state with bounded output allowlists.
  */
 async function createAiAssistanceResolverState(
   principal: WorkspacePrincipal,
   includeDocumentAuthorizationRevision: boolean,
   task: ResolveAiAssistanceContextInput['request']['task'],
+  locale: 'ja' | 'en',
 ): Promise<AiAssistanceResolverState> {
   const searchContext = await createWorkspaceSearchContext(principal, {
     includeDocumentAuthorizationRevision,
+    locale,
   })
   const visibleTeams = searchContext.directory.teams
     .filter((team) => searchContext.searchAccess.teamIds.has(team.id))
@@ -20273,6 +20277,18 @@ async function createAiAssistanceResolverState(
         assigneeUserIds: eligibleMemberIds,
       })),
   ]).slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
+  const triageTeamIds = uniqueAiAllowedValues(
+    triageRoutingTuples.map((tuple) => tuple.teamId),
+    AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
+  )
+  const triageProjectIds = uniqueAiAllowedValues(
+    triageRoutingTuples.flatMap((tuple) =>
+      tuple.projectId === undefined ? [] : [tuple.projectId]
+    ),
+    AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
+  )
+  const modelTeamIds = task === 'triage' ? triageTeamIds : teamIds
+  const modelProjectIds = task === 'triage' ? triageProjectIds : projectIds
   const statuses = uniqueAiAllowedValues(
     configurations.flatMap(({ resolved }) =>
       resolved.configuration.workflow.statuses.map((status) => status.id)
@@ -20343,8 +20359,8 @@ async function createAiAssistanceResolverState(
   const allowedValues: AiAssistanceAllowedValues = {
     assigneeUserIds: memberIds,
     creatorUserIds: memberIds,
-    teamIds,
-    projectIds,
+    teamIds: modelTeamIds,
+    projectIds: modelProjectIds,
     customFieldIds,
     customFieldDefinitions: providerCustomFieldDefinitions.filter((definition) =>
       customFieldIds.includes(definition.fieldId)
@@ -20360,43 +20376,45 @@ async function createAiAssistanceResolverState(
         ...(task === 'planning'
           ? {}
           : { members: visibleMembers.map((member) => ({ id: member.id })) }),
-        teams: configurations.map(({ team, resolved }) => ({
-          id: team.id,
-          ...(task === 'planning' ? {} : { name: team.name }),
-          ...(task === 'planning'
-            ? {}
-            : {
-                projects: team.projects.flatMap((project) =>
-                  projectIds.includes(project.id)
-                    ? [{ id: project.id, name: project.name }]
-                    : []
-                ),
-              }),
-          workflow: resolved.configuration.workflow.statuses.map((status) => ({
-            id: status.id,
-            name: status.name,
-            category: status.category,
+        teams: configurations
+          .filter(({ team }) => modelTeamIds.includes(team.id))
+          .map(({ team, resolved }) => ({
+            id: team.id,
+            ...(task === 'planning' ? {} : { name: team.name }),
+            ...(task === 'planning'
+              ? {}
+              : {
+                  projects: team.projects.flatMap((project) =>
+                    modelProjectIds.includes(project.id)
+                      ? [{ id: project.id, name: project.name }]
+                      : []
+                  ),
+                }),
+            workflow: resolved.configuration.workflow.statuses.map((status) => ({
+              id: status.id,
+              name: status.name,
+              category: status.category,
+            })),
+            ...(task === 'planning'
+              ? {}
+              : {
+                  customFields: resolved.configuration.customFields.flatMap((field) =>
+                    field.type === 'formula' || sensitiveCustomFieldIds.has(field.id) ||
+                      (task === 'search' && customFieldDefinitionCounts.get(field.id) !== 1)
+                      ? []
+                      : [{
+                          id: field.id,
+                          name: field.name,
+                          type: field.type,
+                          required: field.required,
+                          options: field.options?.map((option) => ({
+                            id: option.id,
+                            name: option.name,
+                          })),
+                        }]
+                  ),
+                }),
           })),
-          ...(task === 'planning'
-            ? {}
-            : {
-                customFields: resolved.configuration.customFields.flatMap((field) =>
-                  field.type === 'formula' || sensitiveCustomFieldIds.has(field.id) ||
-                    (task === 'search' && customFieldDefinitionCounts.get(field.id) !== 1)
-                    ? []
-                    : [{
-                        id: field.id,
-                        name: field.name,
-                        type: field.type,
-                        required: field.required,
-                        options: field.options?.map((option) => ({
-                          id: option.id,
-                          name: option.name,
-                        })),
-                      }]
-                ),
-              }),
-        })),
         ...(task === 'search'
           ? {
               supportedEntityTypes: [
@@ -20431,8 +20449,18 @@ async function createAiAssistanceResolverState(
       planningRevision: searchContext.planningRevision,
       documentAuthorizationRevision: searchContext.documentAuthorizationRevision,
       enterpriseControlRevision: principal.enterpriseIdentityControlRevision,
-      teamIds,
-      projectIds,
+      teamIds: modelTeamIds,
+      projectIds: modelProjectIds,
+      directoryLabels: configurations
+        .filter(({ team }) => modelTeamIds.includes(team.id))
+        .map(({ team }) => ({
+          teamId: team.id,
+          name: team.name,
+          projects: team.projects
+            .filter((project) => modelProjectIds.includes(project.id))
+            .map((project) => ({ projectId: project.id, name: project.name }))
+            .sort((left, right) => left.projectId.localeCompare(right.projectId)),
+        })),
       memberIds,
       memberDirectoryRevisions: currentMembers.map((member) => ({
         memberId: member.id,
@@ -25124,11 +25152,25 @@ async function readWorkspaceSearchAuthorizationSnapshot(
   }
 }
 
+/**
+ * Reads the current workspace directory and search authorization snapshot.
+ *
+ * @param principal - Authenticated Workspace principal used for scope resolution.
+ * @param options - Optional document revision and directory locale requirements.
+ * @returns Current directory, project access, and revision state for AI resolution.
+ */
 async function createWorkspaceSearchContext(
   principal: WorkspacePrincipal,
-  options: { includeDocumentAuthorizationRevision?: boolean } = {},
+  options: {
+    includeDocumentAuthorizationRevision?: boolean
+    locale?: 'ja' | 'en'
+  } = {},
 ): Promise<WorkspaceSearchContext> {
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    options.locale ?? 'ja',
+    true,
+  )
   const authorization = await readWorkspaceSearchAuthorizationSnapshot(principal, directory)
   const documentAuthorizationRevision = options.includeDocumentAuthorizationRevision
     ? await workItemDependencies.documents.getAuthorizationRevision(principal.directoryId)

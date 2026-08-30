@@ -75,6 +75,7 @@ export function createAiAssistanceRouter<Principal>(
     try {
       const { actor } = await authenticateRequest(context, dependencies)
       requireAiAssistancePolicyManager(actor)
+      context.header('Cache-Control', 'private, no-store')
       return context.json(await dependencies.service.getPolicy(actor))
     } catch (error) {
       return mapRouterError(context, error, dependencies.mapError)
@@ -100,6 +101,7 @@ export function createAiAssistanceRouter<Principal>(
   router.get('/api/ai-assistance/preferences/me', async (context) => {
     try {
       const { actor } = await authenticateRequest(context, dependencies)
+      context.header('Cache-Control', 'private, no-store')
       return context.json(await dependencies.service.getPreference(actor))
     } catch (error) {
       return mapRouterError(context, error, dependencies.mapError)

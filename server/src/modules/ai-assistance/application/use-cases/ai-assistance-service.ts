@@ -344,12 +344,9 @@ export function createAiAssistanceService(
       readPolicy(actor),
       getPreference(actor),
     ])
-    const modelIdForFingerprint = request.modelId ?? policy.defaultModelId
     const inputFingerprint = createGenerationInputFingerprint(
       actor,
       request,
-      modelIdForFingerprint,
-      options.promptVersion,
     )
     const existingReservation = await options.store.readGenerationReservation({
       workspaceId: actor.workspaceId,
@@ -1856,19 +1853,15 @@ function requireIdempotencyKey(value: string): string {
   return normalized
 }
 
-/** Creates an operation, actor, prompt, model, and validated-input-bound fingerprint. */
+/** Creates an operation, actor, and validated client-input-bound fingerprint. */
 function createGenerationInputFingerprint(
   actor: AiAssistanceActor,
   request: GenerateAiAssistanceRequest,
-  modelId: string,
-  promptVersion: string,
 ): string {
   return createHash('sha256').update(JSON.stringify({
     operation: 'ai-assistance.generate',
     workspaceId: actor.workspaceId,
     memberId: actor.memberId,
-    modelId,
-    promptVersion,
     request,
   })).digest('hex')
 }

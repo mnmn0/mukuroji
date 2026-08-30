@@ -112,10 +112,18 @@ function createService(): AiAssistanceService {
   }
 }
 
-/** Creates router dependencies while exposing authentication and current-check counts. */
+/**
+ * Creates router dependencies while exposing authentication and current-check counts.
+ *
+ * @param changeActorOnReauthentication - Whether the second authentication returns another actor.
+ * @param service - Service implementation exercised by the router request.
+ * @param canManagePolicy - Whether the authenticated actor may read or update policy.
+ * @returns Router and authentication counters used by adapter tests.
+ */
 function createHarness(
   changeActorOnReauthentication = false,
   service: AiAssistanceService = createService(),
+  canManagePolicy = false,
 ) {
   let authenticateCount = 0
   let currentCheckCount = 0
@@ -141,7 +149,7 @@ function createHarness(
         actorId: principal.memberId,
         auditActorKind: 'user',
         traceId: 'trace-1',
-        canManagePolicy: false,
+        canManagePolicy,
       }
     },
     async resolveContext() {
@@ -197,6 +205,22 @@ describe('createAiAssistanceRouter', () => {
 
     expect(response.status).toBe(403)
     expect(policyReadCount).toBe(0)
+  })
+
+  test('prevents caching authenticated policy and preference responses', async () => {
+    const harness = createHarness(false, createService(), true)
+
+    for (const path of [
+      '/api/ai-assistance/policy',
+      '/api/ai-assistance/preferences/me',
+    ]) {
+      const response = await harness.router.request(path, {
+        headers: { Authorization: 'Bearer token-1' },
+      })
+
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    }
   })
 
   test('passes a fresh management authorization callback to policy writes', async () => {

@@ -14,7 +14,10 @@ import {
   type TriageEntry,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
-import type { AiAssistanceService } from '../modules/ai-assistance'
+import type {
+  AiAssistanceService,
+  ResolvedAiAssistanceContext,
+} from '../modules/ai-assistance'
 import { AiAssistanceError } from '../modules/ai-assistance'
 import type { TriageCompositionClient } from '../app/composition/app-dependencies'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
@@ -1016,6 +1019,132 @@ describe('AI assistance API composition', () => {
     expect(promptContext).toContain('未完了のWork Itemを担当者別に数える')
     expect(authorizationToken).toMatch(/^ai-v1:[a-f0-9]{64}$/u)
     expect(authorizationToken).not.toContain('未完了')
+  })
+
+  test('uses the requested locale for AI directory labels', async () => {
+    const calls = configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    let promptContext = ''
+    setTestAppDependencies({
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          promptContext = (await authorization.resolveContext({ actor, request })).promptContext
+          return createSearchGeneration()
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-directory-locale-en' },
+      body: JSON.stringify({
+        task: 'search',
+        locale: 'en',
+        query: 'Show visible work items.',
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    expect(promptContext).toContain('Core Team')
+    expect(promptContext).not.toContain('コアチーム')
+    expect(calls.directoryReads.some((read) => read.locale === 'en')).toBeTrue()
+  })
+
+  test('keeps triage routing identifiers aligned with retained routing tuples', async () => {
+    const projectShape: { id: string; name: string; tone: 'blue' } = {
+      id: 'refero',
+      name: 'Refero',
+      tone: 'blue',
+    }
+    const coreProjects: Array<{ id: string; name: string; tone: 'blue' }> = [
+      projectShape,
+      ...Array.from({ length: 120 }, (_, index) => ({
+        id: `core-project-${String(index).padStart(3, '0')}`,
+        name: `Core project ${index}`,
+        tone: 'blue',
+      } satisfies { id: string; name: string; tone: 'blue' })),
+    ]
+    const laterProject: { id: string; name: string; tone: 'blue' } = {
+      id: 'later-project',
+      name: 'Later project',
+      tone: 'blue',
+    }
+    const projectAccesses = [
+      ...coreProjects.map((project) => ({
+        projectId: project.id,
+        role: 'viewer',
+        teamId: 'core-team',
+      } satisfies { projectId: string; role: 'viewer'; teamId: string })),
+      {
+        projectId: laterProject.id,
+        role: 'viewer',
+        teamId: 'later-team',
+      } satisfies { projectId: string; role: 'viewer'; teamId: string },
+    ]
+    configureFakeProjectClients(true, {
+      projectAccesses,
+      teamProjects: coreProjects,
+      additionalTeams: [{
+        id: 'later-team',
+        name: 'Later Team',
+        projects: [laterProject],
+      }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const entry = createTriageEntry('full')
+    let resolvedContext: ResolvedAiAssistanceContext | undefined
+    let observedPrompt = ''
+    setTestAppDependencies({
+      triage: createTriageClient(entry),
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          const resolved = await authorization.resolveContext({ actor, request })
+          resolvedContext = resolved
+          observedPrompt = resolved.promptContext
+          return createWithheldGeneration(request.task, 'source-changed')
+        },
+      }),
+    })
+
+    const response = await app.request('/api/ai-assistance/generations', {
+      method: 'POST',
+      headers: { ...createAiHeaders(), 'Idempotency-Key': 'ai-triage-routing-boundary' },
+      body: JSON.stringify({
+        task: 'triage',
+        locale: 'en',
+        source: {
+          type: 'triage-entry',
+          teamId: 'core-team',
+          triageEntryId: entry.id,
+          expectedRevision: entry.revision,
+        },
+      }),
+    })
+
+    expect(response.status).toBe(201)
+    // The service fake above captures the resolved context through the actual port.
+    if (resolvedContext === undefined) {
+      throw new Error('Expected the AI resolver to return a triage context.')
+    }
+    expect(observedPrompt).not.toContain('Later Team')
+    expect(observedPrompt).not.toContain('later-project')
+    expect(resolvedContext.allowedValues.teamIds).not.toContain('later-team')
+    expect(resolvedContext.allowedValues.projectIds).not.toContain('later-project')
+    const routingTuples = resolvedContext.allowedValues.triageRoutingTuples ?? []
+    const routingTeamIds = new Set(routingTuples.map((tuple) => tuple.teamId))
+    const routingProjectIds = new Set(
+      routingTuples.flatMap((tuple) => tuple.projectId === undefined ? [] : [tuple.projectId]),
+    )
+    for (const teamId of resolvedContext.allowedValues.teamIds) {
+      expect(routingTeamIds.has(teamId)).toBeTrue()
+    }
+    for (const projectId of resolvedContext.allowedValues.projectIds) {
+      expect(routingProjectIds.has(projectId)).toBeTrue()
+    }
   })
 
   test('does not expose member candidates outside an Enterprise reader scope', async () => {
