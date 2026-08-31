@@ -17,16 +17,19 @@ export type AiAssistanceEmfObservabilityOptions = {
   sink?: StructuredAiAssistanceLogSink
   /** Optional millisecond clock used for EMF timestamps. */
   nowMilliseconds?: () => number
+  /** Optional full deployed application commit SHA used for release evidence attribution. */
+  applicationCommitSha?: string
 }
 
 const AI_ASSISTANCE_METRIC_NAMESPACE = 'Mukuroji/AIAssistance'
 const AI_ASSISTANCE_SERVICE = 'mukuroji-ai-assistance'
+const UNAVAILABLE_APPLICATION_COMMIT_SHA = 'unavailable'
 const UNKNOWN_MODEL_DIMENSION = 'other'
 
 /**
  * Creates the content-free EMF adapter used by the AI assistance service.
  *
- * @param options - Optional sink and deterministic clock.
+ * @param options - Optional sink, deterministic clock, and deployment provenance.
  * @returns Observation callbacks for request, provider, decision, and projection metrics.
  */
 export function createAiAssistanceEmfObservability(
@@ -34,19 +37,42 @@ export function createAiAssistanceEmfObservability(
 ): AiAssistanceProjectionObservability {
   const sink = options.sink ?? writeStandardOutput
   const nowMilliseconds = options.nowMilliseconds ?? Date.now
+  const applicationCommitSha = readApplicationCommitSha(
+    options.applicationCommitSha,
+  )
 
   return {
     recordGenerationRequest(observation) {
-      recordGenerationRequest(observation, nowMilliseconds(), sink)
+      recordGenerationRequest(
+        observation,
+        applicationCommitSha,
+        nowMilliseconds(),
+        sink,
+      )
     },
     recordProviderAttempt(observation) {
-      recordProviderAttempt(observation, nowMilliseconds(), sink)
+      recordProviderAttempt(
+        observation,
+        applicationCommitSha,
+        nowMilliseconds(),
+        sink,
+      )
     },
     recordDecision(observation) {
-      recordDecision(observation, nowMilliseconds(), sink)
+      recordDecision(
+        observation,
+        applicationCommitSha,
+        nowMilliseconds(),
+        sink,
+      )
     },
     recordProjectionFailures(failureCount) {
-      recordProjectionFailures(failureCount, nowMilliseconds(), sink)
+      recordProjectionFailures(
+        failureCount,
+        applicationCommitSha,
+        nowMilliseconds(),
+        sink,
+      )
     },
   }
 }
@@ -54,6 +80,7 @@ export function createAiAssistanceEmfObservability(
 /** Writes one generation-request EMF record with bounded dimensions. */
 function recordGenerationRequest(
   observation: AiAssistanceGenerationRequestObservation,
+  applicationCommitSha: string,
   observedAtMilliseconds: number,
   sink: StructuredAiAssistanceLogSink,
 ): void {
@@ -65,6 +92,7 @@ function recordGenerationRequest(
         Namespace: AI_ASSISTANCE_METRIC_NAMESPACE,
         Dimensions: [
           ['Service'],
+          ['Service', 'ApplicationCommitSha'],
           ['Service', 'Task'],
           ['Service', 'Task', 'Outcome'],
         ],
@@ -80,6 +108,7 @@ function recordGenerationRequest(
     event: 'ai-assistance.generation.completed',
     service: AI_ASSISTANCE_SERVICE,
     Service: AI_ASSISTANCE_SERVICE,
+    ApplicationCommitSha: applicationCommitSha,
     task: observation.task,
     Task: observation.task,
     outcome: observation.outcome,
@@ -102,6 +131,7 @@ function recordGenerationRequest(
 /** Writes one durably finalized provider-attempt EMF record. */
 function recordProviderAttempt(
   observation: AiAssistanceProviderAttemptObservation,
+  applicationCommitSha: string,
   observedAtMilliseconds: number,
   sink: StructuredAiAssistanceLogSink,
 ): void {
@@ -124,6 +154,7 @@ function recordProviderAttempt(
         Namespace: AI_ASSISTANCE_METRIC_NAMESPACE,
         Dimensions: [
           ['Service'],
+          ['Service', 'ApplicationCommitSha'],
           ['Service', 'Task'],
           ['Service', 'Task', 'Outcome'],
           ['Service', 'Task', 'Outcome', 'Model'],
@@ -155,6 +186,7 @@ function recordProviderAttempt(
     event: 'ai-assistance.provider-attempt.finalized',
     service: AI_ASSISTANCE_SERVICE,
     Service: AI_ASSISTANCE_SERVICE,
+    ApplicationCommitSha: applicationCommitSha,
     task: observation.task,
     Task: observation.task,
     outcome: observation.outcome,
@@ -199,6 +231,7 @@ function recordProviderAttempt(
 /** Writes one newly persisted human-decision EMF record. */
 function recordDecision(
   observation: AiAssistanceDecisionObservation,
+  applicationCommitSha: string,
   observedAtMilliseconds: number,
   sink: StructuredAiAssistanceLogSink,
 ): void {
@@ -209,6 +242,7 @@ function recordDecision(
         Namespace: AI_ASSISTANCE_METRIC_NAMESPACE,
         Dimensions: [
           ['Service'],
+          ['Service', 'ApplicationCommitSha'],
           ['Service', 'Task'],
           ['Service', 'Task', 'Outcome'],
         ],
@@ -222,6 +256,7 @@ function recordDecision(
     event: 'ai-assistance.decision.recorded',
     service: AI_ASSISTANCE_SERVICE,
     Service: AI_ASSISTANCE_SERVICE,
+    ApplicationCommitSha: applicationCommitSha,
     task: observation.task,
     Task: observation.task,
     outcome: observation.outcome,
@@ -235,6 +270,7 @@ function recordDecision(
 /** Writes one aggregate count for records returned through partial-batch retry. */
 function recordProjectionFailures(
   failureCount: number,
+  applicationCommitSha: string,
   observedAtMilliseconds: number,
   sink: StructuredAiAssistanceLogSink,
 ): void {
@@ -243,15 +279,35 @@ function recordProjectionFailures(
       Timestamp: readTimestamp(observedAtMilliseconds),
       CloudWatchMetrics: [{
         Namespace: AI_ASSISTANCE_METRIC_NAMESPACE,
-        Dimensions: [['Service']],
+        Dimensions: [
+          ['Service'],
+          ['Service', 'ApplicationCommitSha'],
+        ],
         Metrics: [{ Name: 'ProjectionFailureCount', Unit: 'Count' }],
       }],
     },
     event: 'ai-assistance.observability.projection-failed',
     service: AI_ASSISTANCE_SERVICE,
     Service: AI_ASSISTANCE_SERVICE,
+    ApplicationCommitSha: applicationCommitSha,
     ProjectionFailureCount: readNonNegativeMetric(failureCount),
   }))
+}
+
+/**
+ * Returns one bounded release-attribution dimension or rejects malformed input.
+ *
+ * @param value - Optional full lowercase Git commit SHA.
+ * @returns Validated commit SHA or the bounded unavailable marker.
+ */
+function readApplicationCommitSha(value: string | undefined): string {
+  if (value === undefined) return UNAVAILABLE_APPLICATION_COMMIT_SHA
+  if (!/^[0-9a-f]{40}$/u.test(value)) {
+    throw new TypeError(
+      'applicationCommitSha must be one full lowercase 40-character Git commit SHA.',
+    )
+  }
+  return value
 }
 
 /** Returns a finite non-negative metric value or a safe zero fallback. */

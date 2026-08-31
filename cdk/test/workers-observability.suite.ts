@@ -1985,6 +1985,13 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
       Runtime: 'nodejs22.x',
       Timeout: 30,
       TracingConfig: { Mode: 'Active' },
+      Environment: {
+        Variables: expect.objectContaining({
+          MUKUROJI_APPLICATION_COMMIT_SHA: {
+            Ref: 'ApplicationCommitSha',
+          },
+        }),
+      },
     }),
   }));
 
@@ -1999,7 +2006,7 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
     FunctionResponseTypes: ['ReportBatchItemFailures'],
     MaximumRetryAttempts: 3,
     ParallelizationFactor: 1,
-    StartingPosition: 'TRIM_HORIZON',
+    StartingPosition: 'LATEST',
   }));
   expect(JSON.stringify(eventSource?.Properties?.EventSourceArn))
     .toContain('WorkspaceSearchTable2575AD6B');

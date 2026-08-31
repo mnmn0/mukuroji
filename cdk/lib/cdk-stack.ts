@@ -175,7 +175,11 @@ export class CdkStack extends cdk.Stack {
     });
     const aiAssistanceObservabilityWorker = buildAiAssistanceObservabilityWorker(
       this,
-      { dataStores, lambdaBuildPaths },
+      {
+        applicationCommitSha: parameters.applicationCommitSha.valueAsString,
+        dataStores,
+        lambdaBuildPaths,
+      },
     );
     const automationWorkers = buildAutomationWorkers(this, {
       dataStores,

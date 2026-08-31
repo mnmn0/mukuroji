@@ -11,6 +11,8 @@ import type { DataStoreResources } from '../data-stores';
 
 /** Inputs required by the durable AI assistance observation worker. */
 export type AiAssistanceObservabilityWorkerInput = {
+  /** Full reviewed application commit SHA attached to projected metrics. */
+  readonly applicationCommitSha: string;
   /** Shared table whose terminal AI rows drive operational metrics. */
   readonly dataStores: DataStoreResources;
   /** Stable build paths for Lambda bundling. */
@@ -79,6 +81,9 @@ export function buildAiAssistanceObservabilityWorker(
       description:
         'Projects terminal AI assistance records into content-free operational metrics.',
       logGroup: aiAssistanceObservabilityLogGroup,
+      environment: {
+        MUKUROJI_APPLICATION_COMMIT_SHA: input.applicationCommitSha,
+      },
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -90,7 +95,7 @@ export function buildAiAssistanceObservabilityWorker(
 
   aiAssistanceObservabilityFunction.addEventSource(
     new lambdaEventSources.DynamoEventSource(workspaceSearchTable, {
-      startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+      startingPosition: lambda.StartingPosition.LATEST,
       batchSize: 10,
       bisectBatchOnError: true,
       enabled: true,

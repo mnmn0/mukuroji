@@ -918,7 +918,11 @@ function createProductionAiAssistanceService(
     deploymentAllowedModelIds: allowedModelIds,
     promptVersion: AI_ASSISTANCE_PROMPT_VERSION,
     policyAudit: createAiAssistancePolicyAudit(auditEvents, store),
-    observability: createAiAssistanceEmfObservability(),
+    observability: createAiAssistanceEmfObservability(
+      config.applicationCommitSha === undefined
+        ? {}
+        : { applicationCommitSha: config.applicationCommitSha },
+    ),
     workspaceGenerationLimitPerMinute,
     memberGenerationLimitPerMinute,
     workspaceTokenLimitPerMinute,

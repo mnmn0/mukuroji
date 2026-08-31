@@ -624,9 +624,11 @@ environment variable `AI_ASSISTANCE_LIVE_METRIC_EVIDENCE_GATE=required-reviewers
 別値ならjobはfail closedになりますが、このsentinelはrequired reviewerとmain-only protectionの代用ではありません。
 Environment設定のscreenshot/export、reviewer roster revision、branch protectionをrelease evidenceへ残します。
 
-Required reviewerはlive reportの開始・終了に対応する同一runのUTC windowで、CloudWatch namespace
-`Mukuroji/AIAssistance`、dimensionをexactに`Service=mukuroji-ai-assistance`だけへ固定し、次のgeneration、provider、
-token/cost、decision metricが到着していることを確認してからjobを承認します。
+Required reviewerはlive reportの開始から後述のstream安定化確認までを同一runのUTC windowとし、CloudWatch namespace
+`Mukuroji/AIAssistance`、dimensionをexactに`Service=mukuroji-ai-assistance`と
+`ApplicationCommitSha=<workflowのfull GITHUB_SHA>`の2つだけへ固定します。次のgeneration、provider、token/cost、decision
+metricがすべてこのexact dimension setで到着していることを確認してからjobを承認します。`Service`だけのaggregateや別SHAの
+datapointは対象runの証拠として扱いません。
 
 - `GenerationRequestCount`、`GenerationSuccessCount`、`GenerationReplayCount`、`GenerationFailureCount`、
   `GenerationLatency`
@@ -636,13 +638,20 @@ token/cost、decision metricが到着していることを確認してからjob�
 - `DecisionCount`、`DecisionApprovedCount`、`DecisionRejectedCount`
 
 Failure-onlyの`ProjectionFailureCount`は正常runでdatapointが存在しないため到着必須metricには含めませんが、
-同じlive UTC windowに正のdatapointがないことを確認します。正のdatapointがあればpartial-batch retryが発生しており、
-live reportが成功していてもpromotionを停止して調査します。
+同じexact dimension setでlive開始からstream安定化確認まで正のdatapointがないことを確認します。正のdatapointがあれば
+partial-batch retryが発生しており、live reportが成功していてもpromotionを停止して調査します。正常runの合格条件は
+`ProjectionFailureCount`の到着ではなく正値がないことであり、`>= 1`はalarmとpromotion停止条件です。
 
-Evidence recordにはworkflow run URL/ID、対象full SHA、live UTC開始/終了、確認したfixed metric名と最終datapoint UTC、
-reviewerとapproval時刻を残します。Generation/Workspace/member/source ID、本文、model/trace、credential、raw CloudWatch
-responseは残しません。別run、別SHA、別windowのmetricや以前の承認を流用せず、このblocking jobが未承認ならworkflow
-全体を成功扱いにしません。
+Provider attemptとdecisionはstreamから非同期投影されるため、live job終了だけではwindowを閉じません。Expected metricの
+最終datapointを確認した後、最新5分periodが閉じてから再queryし、`IteratorAge`が低下して300,000 ms未満へ収束していること、
+同じwindowのworker `Errors` / `Throttles`が0であること、`AiAssistanceObservabilityDlq`のvisible / in-flight / delayed
+messageがすべて0であることを確認してwindowを閉じます。IteratorAgeが増加中または閾値以上、late datapoint、retry、DLQ、
+未解決のpending projectionが一つでもある場合は承認せず、drainと原因調査を完了してから新しい確認windowを取り直します。
+
+Evidence recordにはworkflow run URL/ID、対象full SHA、live UTC開始/終了、stream安定化時刻、確認したfixed metric名と
+最終datapoint UTC、IteratorAge、Errors / Throttles、DLQ depthの確認結果、reviewerとapproval時刻を残します。
+Generation/Workspace/member/source ID、本文、model/trace、credential、raw CloudWatch responseは残しません。別run、別SHA、
+別windowのmetricや以前の承認を流用せず、このblocking jobが未承認ならworkflow全体を成功扱いにしません。
 
 Generation completionのEMF/logは本文やidentifierを含めず、boundedな`failureCategory`/`failureCode`だけを持つため、
 失敗理由を安全にqueryできます。Provider throttle/timeout/model refusal/invalid outputはそれぞれ専用metricで集計し、
@@ -660,7 +669,9 @@ metric gap処理は[Operational readiness](./operational-readiness.md#ai-assista
 Partial batch response自体はLambda `Errors`を増やさないため、workerはpartial-batch failureとして返したrecord数を
 `ProjectionFailureCount`として集約し、専用alarmで検出します。DynamoDB Streamsが実際に再試行する範囲はlowest failed
 sequence以降を含み得るため、このmetricをretry総record数とは解釈しません。Content-free failure logとEMFは90日保持・
-Retainの明示LogGroupへ保存し、raw stream imageやidentifierは書きません。
+Retainの明示LogGroupへ保存し、raw stream imageやidentifierは書きません。Event-source mappingは初回作成時に`LATEST`から
+開始し、worker導入前のterminal rowを対象SHAのmetricとしてhistorical replayしません。`LATEST`は作成後のretryやDLQを
+drainした証拠にはならないため、上記のstream安定化確認を省略しません。
 
 Release rehearsalは上記の別provision read-only OIDC roleを使い、同じfull evaluator process内でsynthetic partitionの
 receipt/generation/attempt audit/feedbackを自動検証します。このreadはcanonical primary keyごとの`GetItem`だけであり、

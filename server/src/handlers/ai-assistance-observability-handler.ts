@@ -2,12 +2,15 @@ import type {
   BatchResponse,
   DynamoStreamEvent,
 } from '../infrastructure/aws/dynamodb-stream'
+import { createAiAssistanceEmfObservability } from '../modules/ai-assistance'
 import {
-  createAiAssistanceEmfObservability,
   processAiAssistanceObservabilityBatch,
-} from '../modules/ai-assistance'
+} from '../modules/ai-assistance/adapter-in/events/ai-assistance-observability-projection'
 
-const observability = createAiAssistanceEmfObservability()
+const applicationCommitSha = process.env.MUKUROJI_APPLICATION_COMMIT_SHA
+const observability = createAiAssistanceEmfObservability(
+  applicationCommitSha === undefined ? {} : { applicationCommitSha },
+)
 
 /**
  * Emits content-free AI assistance metrics from Workspace Search stream images.
@@ -20,7 +23,3 @@ const observability = createAiAssistanceEmfObservability()
 export async function handler(event: DynamoStreamEvent): Promise<BatchResponse> {
   return await processAiAssistanceObservabilityBatch(event, observability)
 }
-
-export {
-  processAiAssistanceObservabilityBatch,
-} from '../modules/ai-assistance'

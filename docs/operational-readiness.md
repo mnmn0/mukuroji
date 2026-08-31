@@ -330,7 +330,8 @@ event-source mappingのon-failure destinationです。SQS Bodyは`version`、`ti
 `requestContext`、`responseContext`と`DDBStreamBatchInfo`だけを持ち、元の`Records`、`NewImage`、
 record type、generation/receipt keyを持ちません。SQS envelopeをworkerへ直接invokeしたり、
 `StartMessageMoveTask`で盲目的にredriveしたりすると、workerはDynamoDB recordを一件も認識せず
-成功扱いになり、metric gapが残ります。
+成功扱いになり、metric gapが残ります。Event-source mappingは初回作成時に`LATEST`から開始し、導入前のterminal rowを
+historical replayしませんが、mapping作成後のretry、DLQ、pending projectionのdrain確認は別途必要です。
 
 復旧operatorはJITの専用roleを使います。通常時に必要な権限はexact DLQ ARNへの
 `sqs:ReceiveMessage`、`sqs:ChangeMessageVisibility`、成功確認後だけの`sqs:DeleteMessage`、
@@ -427,8 +428,12 @@ Production-like promotionでは、deployed `/api/health`の`applicationCommitSha
 stale revision、provider-start後のactive Work Item revision race、3種のwithheld、redaction、exact model/prompt、7 paid callの
 token/cost/latency budgetがすべて成功していることを要求します。
 さらにmain-only/required reviewer付きの`ai-assistance-live-metric-evidence-approval` Environmentとprovisioning sentinelを
-事前確認し、同run UTC windowのfixed Service-only metricを承認する後段`metric-evidence-approval` jobが成功するまでpromotionを
-止めます。別SHAや途中でaliasが切り替わったscheduled結果、別windowのmetric承認を流用しません。
+事前確認し、同run UTC windowのfixed metricをexact
+`Service=mukuroji-ai-assistance, ApplicationCommitSha=<full GITHUB_SHA>` dimension setで承認する後段
+`metric-evidence-approval` jobが成功するまでpromotionを止めます。Provider / decision metric到着後も最新5分periodが閉じるまで
+windowを閉じず、IteratorAgeが低下して閾値未満、worker Errors / Throttlesが0、DLQがemptyであることを再確認します。
+Late datapoint、retry、pending projectionが残る場合や、別SHA・途中でaliasが切り替わったscheduled結果、別windowのmetric承認は
+流用しません。
 
 `main quality gates` ruleset は上記6 context を strict mode で required にします。Workflow の
 job/context 名を変更する場合は ruleset も同じ release で更新し、対象 branch の effective rules
@@ -668,9 +673,11 @@ production では先に別 environment で同一 artifact を検証し、変更 
 5. API alarm、DLQ、queue age、destination failure が `OK` で、telemetry に no-data がない。
 6. Migration marker/checkpoint/integrity check が成功し、新旧 client の contract test が通る。
 7. AI assistanceを含むdeployでは同じfull SHAのmanual `production-like-live-eval`が成功し、namespace
-   `Mukuroji/AIAssistance`、`Service=mukuroji-ai-assistance`のgeneration/provider/token/cost/decision metricが
-   到着している。Schema v2 reportのHTTP replayとsynthetic partition限定DynamoDB durability count/booleanがexactに合格し、
-   Report、metric、HTTP replay markerに本文、credential、tenant/resource/table IDやraw AWS errorがない。
+   `Mukuroji/AIAssistance`、exact
+   `Service=mukuroji-ai-assistance, ApplicationCommitSha=<evaluated full SHA>` dimension setの
+   generation/provider/token/cost/decision metricが到着している。Schema v2 reportのHTTP replayとsynthetic partition限定
+   DynamoDB durability count/booleanがexactに合格し、Report、metric、HTTP replay markerに本文、credential、
+   tenant/resource/table IDやraw AWS errorがない。
 
 ### Rollback trigger と手順
 

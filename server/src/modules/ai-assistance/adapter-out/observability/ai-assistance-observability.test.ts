@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { createAiAssistanceEmfObservability } from './ai-assistance-observability'
 
+const APPLICATION_COMMIT_SHA = '0123456789abcdef0123456789abcdef01234567'
+
 describe('createAiAssistanceEmfObservability', () => {
   test('emits Service-aggregate and bounded provider dimensions with complete usage', () => {
     const records: string[] = []
     const observability = createAiAssistanceEmfObservability({
+      applicationCommitSha: APPLICATION_COMMIT_SHA,
       nowMilliseconds: () => 1_700_000_000_000,
       sink: (record) => records.push(record),
     })
@@ -30,6 +33,7 @@ describe('createAiAssistanceEmfObservability', () => {
           Namespace: 'Mukuroji/AIAssistance',
           Dimensions: [
             ['Service'],
+            ['Service', 'ApplicationCommitSha'],
             ['Service', 'Task'],
             ['Service', 'Task', 'Outcome'],
             ['Service', 'Task', 'Outcome', 'Model'],
@@ -37,6 +41,7 @@ describe('createAiAssistanceEmfObservability', () => {
         }],
       },
       Service: 'mukuroji-ai-assistance',
+      ApplicationCommitSha: APPLICATION_COMMIT_SHA,
       Task: 'summary',
       Outcome: 'succeeded',
       Model: 'anthropic.claude-model-v1:0',
@@ -59,6 +64,7 @@ describe('createAiAssistanceEmfObservability', () => {
     const records: string[] = []
     const customerContentMarker = 'customer-refusal-response-must-not-be-logged'
     const observability = createAiAssistanceEmfObservability({
+      applicationCommitSha: APPLICATION_COMMIT_SHA,
       sink: (record) => records.push(record),
     })
 
@@ -163,6 +169,7 @@ describe('createAiAssistanceEmfObservability', () => {
   test('emits request replay and durable human-decision counters', () => {
     const records: string[] = []
     const observability = createAiAssistanceEmfObservability({
+      applicationCommitSha: APPLICATION_COMMIT_SHA,
       sink: (record) => records.push(record),
     })
 
@@ -178,7 +185,18 @@ describe('createAiAssistanceEmfObservability', () => {
     })
 
     expect(JSON.parse(records[0] ?? '')).toMatchObject({
+      _aws: {
+        CloudWatchMetrics: [{
+          Dimensions: [
+            ['Service'],
+            ['Service', 'ApplicationCommitSha'],
+            ['Service', 'Task'],
+            ['Service', 'Task', 'Outcome'],
+          ],
+        }],
+      },
       Service: 'mukuroji-ai-assistance',
+      ApplicationCommitSha: APPLICATION_COMMIT_SHA,
       Task: 'planning',
       Outcome: 'replayed',
       GenerationRequestCount: 1,
@@ -187,6 +205,17 @@ describe('createAiAssistanceEmfObservability', () => {
       GenerationFailureCount: 0,
     })
     expect(JSON.parse(records[1] ?? '')).toMatchObject({
+      _aws: {
+        CloudWatchMetrics: [{
+          Dimensions: [
+            ['Service'],
+            ['Service', 'ApplicationCommitSha'],
+            ['Service', 'Task'],
+            ['Service', 'Task', 'Outcome'],
+          ],
+        }],
+      },
+      ApplicationCommitSha: APPLICATION_COMMIT_SHA,
       Service: 'mukuroji-ai-assistance',
       Task: 'planning',
       Outcome: 'rejected',
@@ -199,6 +228,7 @@ describe('createAiAssistanceEmfObservability', () => {
   test('emits a content-free aggregate for partial-batch projection failures', () => {
     const records: string[] = []
     const observability = createAiAssistanceEmfObservability({
+      applicationCommitSha: APPLICATION_COMMIT_SHA,
       nowMilliseconds: () => 1_700_000_000_000,
       sink: (record) => records.push(record),
     })
@@ -211,14 +241,49 @@ describe('createAiAssistanceEmfObservability', () => {
         Timestamp: 1_700_000_000_000,
         CloudWatchMetrics: [{
           Namespace: 'Mukuroji/AIAssistance',
-          Dimensions: [['Service']],
+          Dimensions: [
+            ['Service'],
+            ['Service', 'ApplicationCommitSha'],
+          ],
           Metrics: [{ Name: 'ProjectionFailureCount', Unit: 'Count' }],
         }],
       },
       event: 'ai-assistance.observability.projection-failed',
       service: 'mukuroji-ai-assistance',
       Service: 'mukuroji-ai-assistance',
+      ApplicationCommitSha: APPLICATION_COMMIT_SHA,
       ProjectionFailureCount: 3,
     })
+  })
+
+  test('uses one bounded unavailable dimension when commit provenance is omitted', () => {
+    const records: string[] = []
+    const observability = createAiAssistanceEmfObservability({
+      sink: (record) => records.push(record),
+    })
+
+    observability.recordDecision({ task: 'planning', outcome: 'approved' })
+
+    expect(JSON.parse(records[0] ?? '')).toMatchObject({
+      ApplicationCommitSha: 'unavailable',
+    })
+  })
+
+  test('rejects malformed provided commit provenance', () => {
+    expect(() => createAiAssistanceEmfObservability({
+      applicationCommitSha: '',
+    })).toThrow(
+      'applicationCommitSha must be one full lowercase 40-character Git commit SHA.',
+    )
+    expect(() => createAiAssistanceEmfObservability({
+      applicationCommitSha: 'not-a-full-lowercase-commit-sha',
+    })).toThrow(
+      'applicationCommitSha must be one full lowercase 40-character Git commit SHA.',
+    )
+    expect(() => createAiAssistanceEmfObservability({
+      applicationCommitSha: ` ${APPLICATION_COMMIT_SHA}`,
+    })).toThrow(
+      'applicationCommitSha must be one full lowercase 40-character Git commit SHA.',
+    )
   })
 })

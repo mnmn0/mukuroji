@@ -101,11 +101,6 @@ export {
   type AiAssistanceRouterDependencies,
 } from './adapter-in/http/ai-assistance-router'
 
-/** DynamoDB Stream projection for durable provider-attempt and decision metrics. */
-export {
-  processAiAssistanceObservabilityBatch,
-} from './adapter-in/events/ai-assistance-observability-projection'
-
 /** WorkspaceSearchTable persistence adapter. */
 export {
   createAiAssistanceFeedbackRecordKey,

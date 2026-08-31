@@ -76,7 +76,10 @@ AI assistance は `ProviderFailureCount`、`ProviderThrottledCount`、
 `WorkspaceSearchTable` のterminal rowを専用LambdaがDynamoDB Streamsから投影します。terminal
 mutation自体はtransaction/CASで一度だけcommitされますが、
 stream deliveryはat-least-onceであり、成功応答喪失、partial-batch retry、manual replayではmetricが
-稀に重複し得ます。Partial batch responseはLambda `Errors`を増やさないため、handlerがpartial-batch
+稀に重複し得ます。WorkerにはAPIと同じ`ApplicationCommitSha` parameterを
+`MUKUROJI_APPLICATION_COMMIT_SHA`として渡し、live evidenceは`Service`と`ApplicationCommitSha`のexact dimension setで
+対象deployへ帰属させます。Event-source mappingは初回作成時に`LATEST`から開始するため、worker導入前のterminal rowを
+historical replayしません。Partial batch responseはLambda `Errors`を増やさないため、handlerがpartial-batch
 failureとして返したrecord数を`ProjectionFailureCount`へ集約し、専用alarmで検出します。DynamoDB Streamsが
 実際に再試行する範囲はlowest failed sequence以降を含み得るため、このmetricをretry総record数とは解釈しません。
 Worker logは90日保持・Retainの明示LogGroupへ保存します。
@@ -84,6 +87,8 @@ retryを使い切ったrecordは14日保持・Retainの`AiAssistanceObservabilit
 visible messageを検出します。このqueueはraw DynamoDB recordではなく
 `DDBStreamBatchInfo`だけを受け取るため直接redriveせず、24時間以内のexact stream range復元と
 限定invoke、または期限超過時のmetric gap処理を`docs/operational-readiness.md`の専用手順で行います。
+`LATEST`はmapping作成後のretryやDLQをdrainした証拠ではないため、live promotionではIteratorAgeの低下、worker
+Errors / Throttles 0、DLQ empty、late datapointがないことを別途確認します。
 
 ### Alarm destination contract
 
