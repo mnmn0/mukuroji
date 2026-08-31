@@ -1,4 +1,5 @@
 import type {
+  AiAssistanceContent,
   AiAssistanceGeneration,
   AiAssistanceTask,
   CreateAiAssistanceFeedbackRequest,
@@ -28,6 +29,46 @@ export type GenerateAiAssistanceOptions = {
   mutationContext: MutationRequestContext
   /** Optional signal used to cancel a user-initiated generation. */
   signal?: AbortSignal
+}
+
+/** Options for re-reading one owner-scoped AI generation. */
+export type GetAiAssistanceGenerationOptions = {
+  /** Bearer access token for the active Workspace member. */
+  accessToken: string
+  /** Generation whose current disclosure state must be revalidated. */
+  generationId: string
+  /** Workflow expected by the product surface performing the read. */
+  expectedTask: AiAssistanceTask
+}
+
+/** Options for revalidating one approved generation immediately before local adoption. */
+export type RevalidateApprovedAiAssistanceGenerationOptions = {
+  /** Bearer access token for the active Workspace member. */
+  accessToken: string
+  /** Exact approved generation returned by the decision endpoint. */
+  expectedGeneration: AiAssistanceGeneration
+}
+
+/** Stable reason returned by a disclosure-safe withheld generation. */
+type AiAssistanceWithheldReason = Extract<
+  AiAssistanceContent,
+  { availability: 'withheld' }
+>['reasonCode']
+
+/**
+ * Failure raised after the decision endpoint returned successful JSON that cannot represent the
+ * reviewed decision safely.
+ */
+export class AiAssistanceDecisionResponseError extends AiAssistanceApiError {
+  /**
+   * Creates a provider-classified error that also proves a decision response was received.
+   *
+   * @param message - Safe explanation of the invalid decision response.
+   */
+  constructor(message: string) {
+    super(502, message, 'InvalidAiAssistanceResponse')
+    this.name = 'AiAssistanceDecisionResponseError'
+  }
 }
 
 /**
@@ -97,6 +138,58 @@ export async function generateAiAssistance(
 }
 
 /**
+ * Re-reads one generation through the server's current authorization and retention projection.
+ *
+ * @param options - Authentication, generation identity, and expected workflow.
+ * @returns The validated current generation projection.
+ */
+export async function getAiAssistanceGeneration(
+  options: GetAiAssistanceGenerationOptions,
+): Promise<AiAssistanceGeneration> {
+  const value = await requestJson(
+    `${aiAssistanceApiBaseUrl}/generations/${encodeURIComponent(options.generationId)}`,
+    options.accessToken,
+    {
+      cache: 'no-store',
+      method: 'GET',
+    },
+  )
+
+  return parseAiAssistanceGenerationResponse(value, options.expectedTask)
+}
+
+/**
+ * Revalidates an approved generation immediately before a workflow copies its content locally.
+ *
+ * @param options - Authentication and the exact approved decision response under review.
+ * @returns The matching currently available generation returned by the read boundary.
+ * @throws AiAssistanceApiError when disclosure is withheld or the read no longer matches.
+ */
+export async function revalidateApprovedAiAssistanceGeneration(
+  options: RevalidateApprovedAiAssistanceGenerationOptions,
+): Promise<AiAssistanceGeneration> {
+  const generation = await getAiAssistanceGeneration({
+    accessToken: options.accessToken,
+    expectedTask: options.expectedGeneration.task,
+    generationId: options.expectedGeneration.id,
+  })
+  if (generation.content.availability === 'withheld') {
+    throw createAiAssistanceWithheldError(generation.content.reasonCode)
+  }
+  if (!isApprovedAiAssistanceRevalidationConsistent(
+    generation,
+    options.expectedGeneration,
+  )) {
+    throw new AiAssistanceApiError(
+      502,
+      'AI assistance revalidation returned a generation different from the approved draft.',
+      'InvalidAiAssistanceResponse',
+    )
+  }
+  return generation
+}
+
+/**
  * Records approval or rejection without applying the draft to a domain resource.
  *
  * @param options - Authentication, generation identity, revision, and mutation context.
@@ -118,19 +211,28 @@ export async function decideAiAssistanceGeneration(
     },
   )
 
-  const generation = parseAiAssistanceGenerationResponse(value, options.expectedTask)
+  let generation: AiAssistanceGeneration
+  try {
+    generation = parseAiAssistanceGenerationResponse(value, options.expectedTask)
+  } catch (error) {
+    if (
+      error instanceof AiAssistanceApiError &&
+      error.code === 'InvalidAiAssistanceResponse'
+    ) {
+      throw new AiAssistanceDecisionResponseError(
+        'AI assistance decision returned an invalid generation.',
+      )
+    }
+    throw error
+  }
   if (generation.decision?.outcome !== options.expectedOutcome) {
-    throw new AiAssistanceApiError(
-      502,
+    throw new AiAssistanceDecisionResponseError(
       'AI assistance decision returned an unexpected outcome.',
-      'InvalidAiAssistanceResponse',
     )
   }
   if (!isDecisionGenerationEnvelopeConsistent(generation, options.expectedGeneration)) {
-    throw new AiAssistanceApiError(
-      502,
+    throw new AiAssistanceDecisionResponseError(
       'AI assistance decision returned a generation different from the reviewed generation.',
-      'InvalidAiAssistanceResponse',
     )
   }
   return generation
@@ -165,6 +267,62 @@ function isDecisionGenerationEnvelopeConsistent(
 
   return expectedGeneration.content.availability === 'available' &&
     generation.content.availability === 'withheld'
+}
+
+/**
+ * Checks that a fresh generation read is the exact available draft approved by the operator.
+ *
+ * @param generation - Current generation returned by the authorization-aware GET endpoint.
+ * @param expectedGeneration - Approved generation returned by the decision endpoint.
+ * @returns Whether adoption may continue with the freshly revalidated generation.
+ */
+export function isApprovedAiAssistanceRevalidationConsistent(
+  generation: AiAssistanceGeneration,
+  expectedGeneration: AiAssistanceGeneration,
+): boolean {
+  return generation.content.availability === 'available' &&
+    expectedGeneration.content.availability === 'available' &&
+    generation.schemaVersion === expectedGeneration.schemaVersion &&
+    generation.id === expectedGeneration.id &&
+    generation.task === expectedGeneration.task &&
+    generation.revision === expectedGeneration.revision &&
+    generation.decision?.outcome === 'approved' &&
+    expectedGeneration.decision?.outcome === 'approved' &&
+    generation.decision.decidedAt === expectedGeneration.decision.decidedAt &&
+    generation.createdAt === expectedGeneration.createdAt &&
+    Date.parse(generation.expiresAt) <= Date.parse(expectedGeneration.expiresAt) &&
+    stableSerialize(generation.details) === stableSerialize(expectedGeneration.details) &&
+    stableSerialize(generation.content) === stableSerialize(expectedGeneration.content)
+}
+
+/**
+ * Converts a withheld projection into a non-sensitive failure understood by the controller.
+ *
+ * @param reasonCode - Server-authoritative reason that content can no longer be disclosed.
+ * @returns An API error whose status maps to the existing permission or conflict UI.
+ */
+export function createAiAssistanceWithheldError(
+  reasonCode: AiAssistanceWithheldReason,
+): AiAssistanceApiError {
+  if (reasonCode === 'permission-changed') {
+    return new AiAssistanceApiError(
+      403,
+      'AI assistance content is no longer available because access changed.',
+      'AiAssistanceAuthorizationChanged',
+    )
+  }
+  if (reasonCode === 'source-changed') {
+    return new AiAssistanceApiError(
+      409,
+      'AI assistance content is no longer available because a source changed.',
+      'AiAssistanceSourceChanged',
+    )
+  }
+  return new AiAssistanceApiError(
+    409,
+    'AI assistance content is no longer available because its retention period ended.',
+    'AiAssistanceRetentionExpired',
+  )
 }
 
 /**

@@ -77,6 +77,9 @@ jobs:
       - name: Run Server unit and integration tests
         run: bun run server:test
 
+      - name: Run AI assistance offline release evaluation
+        run: bun run ai-assistance:eval
+
       - name: Run Web unit tests
         run: bun run web:test
 

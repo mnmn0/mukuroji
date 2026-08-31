@@ -38,6 +38,7 @@
     "server:build:lambda": "bun --filter server build:lambda",
     "server:test": "bun --filter server test",
     "ai-assistance:eval": "bun --filter server ai-assistance:eval",
+    "ai-assistance:eval:live": "bun server/scripts/ai-assistance/evaluate-ai-assistance-live.ts",
     "work-items:integrity": "bun server/scripts/data-integrity/verify-work-items-integrity.ts",
     "cross-domain:integrity": "bun server/scripts/data-integrity/verify-cross-domain-integrity.ts",
     "restore-drill:approve-cleanup": "bun --filter server restore-drill:approve-cleanup",

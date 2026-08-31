@@ -13,7 +13,7 @@ repository に固定せず、各実行の evidence record に残します。
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
 | Trace | CDK が管理する全28個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
-| Alarm | API、queue、DLQ、async destination、runtime control、restore drill の41 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な40件のtest evidenceを確認するまで unattended production とみなさないこと |
+| Alarm | API、queue、DLQ、async destination、runtime control、restore drill の50 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な49件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Shared API は revision-bound な Lambda Version と `live` Alias で code/configuration を揃えて切り替える | `read-only` mode、route/effect registry、weighted alias routing、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
@@ -261,6 +261,7 @@ Alarm 名は CloudFormation の physical name ではなく CDK construct ID で�
 | `ApiAvailabilityFastBurnAlarm` | 5分・1時間componentが同時に`ALARM` | SEV1 | 両componentのstate history、eligible bad/total、直前deploy/migration |
 | `ApiGatewayServerErrorAlarm` | HTTP API `5xx Sum >= 1` / 5分 | SEV2 | Stage/integration、UTC window。Lambda 到達時は API log、到達前 failure は correlation が unknown |
 | `RuntimeControlConfigurationFailureAlarm` | target固有`ControlId`の`ConfigurationFailureCount Sum >= 1` / 5分 | SEV2 | `runtime-control.evaluated` の ControlId、surface、status、revision、deployment number。Configuration 本文は記録しない |
+| `AiAssistanceObservabilityDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | `DDBStreamBatchInfo` のstream ARN、shard、start/end sequence、arrival window。SQS bodyにrow locatorや`NewImage`は含まれない |
 | `CollaborationProjectionDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit stream record の directory/event ID、correlation、actor/entity/target |
 | `AutomationEventDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit outbox stream record の directory/event ID と automation rule/execution locator |
 | `AutomationScheduleDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Async destination envelope の invocation time、recurring definition/execution locator |
@@ -278,11 +279,41 @@ Alarm 名は CloudFormation の physical name ではなく CDK construct ID で�
 | `WebhookDeliveryDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Delivery/subscription/event ID と attempt。URL、header、secret は記録しない |
 | `WorkItemImportDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Import job、source object version、row checkpoint/receipt locator |
 
+### AI assistance alarm catalog
+
+AI assistance alarmの調査証跡には下表のbounded metric / log fieldだけを保存し、prompt、生成本文、
+provider response、DynamoDB `NewImage`、user / tenant識別子を転記しません。Stream投影はat-least-onceのため、
+metric countがterminal mutation数と稀に重複し得ることも解釈へ含めます。
+
+`Outcome=indeterminate`は、provider runner invocation後のdispatch marker失敗またはstarted receiptのlease-expiry回復で、
+providerのterminal outcomeを断定できないことを示します。この行は`ProviderAttemptCount=1`、
+`ProviderFailureCount=1`、`UsageUnavailableCount=1`として扱い、`usageUnavailableReason`は
+`attempt-outcome-indeterminate`に固定します。未知の`ProviderLatency`、token、cost metricはemitせず、0として補完しません。
+Provider未呼び出しが確定した失敗はprovider outcomeを持たないため、この集計には含めません。
+
+`Outcome=refused`はAI SDKのexact `finishReason=content-filter`だけから導出し、
+`ProviderFailureCount=1`と`ProviderRefusedCount=1`をemitします。Content filterの自由文は保存せず、
+EMFの`refusalReason`はboundedな`content-filter`だけを許可します。Human rejectは別の
+`DecisionRejectedCount`であり、model refusalへ混在させません。
+
+| Alarm | 条件 | Severity | 解釈 | Content-free evidence |
+| --- | --- | --- | --- | --- |
+| `AiAssistanceProviderFailureAlarm` | `ProviderFailureCount Sum >= 1` / 5分 | SEV2 | Durable finalizationされたprovider attemptが成功以外で終了した。throttle、timeout、model refusal、invalid outputを含み、専用metricとも重複する | Alarm history、UTC window、`Service` / `Task` / `Outcome` / `Model`、`failureCategory`、`failureCode`、bounded `refusalReason`、token/costの有無、latency。Promptや生成本文は保存しない |
+| `AiAssistanceProviderThrottleAlarm` | `ProviderThrottledCount Sum >= 3` / 5分 | SEV2 | Local budget admissionではなくupstream provider throttleが短時間に反復した | Alarm history、UTC window、bounded `Task` / `Outcome` / `Model`、`failureCategory` / `failureCode`、attempt count。Provider error本文は保存しない |
+| `AiAssistanceInvalidOutputAlarm` | `ProviderInvalidOutputCount Sum >= 1` / 5分 | SEV2 | Provider responseがstrict structured-output boundaryを通過せず、結果を適用していない | Alarm history、UTC window、bounded `Task` / `Outcome` / `Model`、`failureCategory` / `failureCode`、latency。Rejected response本文は保存しない |
+| `AiAssistanceProviderLatencyAlarm` | p95 `ProviderLatency >= 12,000 ms`、5分 period の2/3 | SEV2 | Provider latencyがgeneration budget付近で持続し、timeoutまたはuser-visible delayのリスクがある | Alarm history、3 periodのp95、bounded `Task` / `Outcome` / `Model`別のcount/latency。Request、prompt、生成本文は保存しない |
+| `AiAssistanceUsageUnavailableAlarm` | `UsageUnavailableCount Sum >= 1` / 5分 | SEV2 | Durable provider attemptにtokenまたはcost accountingがなく、budget/cost evidenceが不完全 | Alarm history、UTC window、bounded `Task` / `Outcome` / `Model`、`usageUnavailableReason`、token/cost fieldの有無。Usageと本文を結び付けるIDは保存しない |
+| `AiAssistanceObservabilityFunctionErrorAlarm` | Lambda `Errors Sum >= 1` / 5分 | SEV2 | Terminal-row projection invocationが失敗し、retry中またはmetric gapへ進む可能性がある | Function名、event-source mapping UUID、UTC window、Lambda request ID、error class、`batchItemFailures`件数。Stream recordと`NewImage`は保存しない |
+| `AiAssistanceObservabilityFunctionThrottleAlarm` | Lambda `Throttles Sum >= 1` / 5分 | SEV2 | Projection workerのconcurrency不足またはaccount-level throttleでstream消費が遅延し得る | Function名、event-source mapping UUID、UTC window、throttle count、concurrency metric。Record key/imageは保存しない |
+| `AiAssistanceObservabilityIteratorAgeAlarm` | Lambda `IteratorAge Maximum >= 300,000 ms` / 5分 | SEV2 | 最新処理recordが5分以上遅れ、provider/decision metricの鮮度契約を満たしていない | Function名、event-source mapping UUID、stream ARN、UTC window、maximum iterator age、mappingのenabled state。Record key/imageは保存しない |
+
 DLQ alarm の共通初動は次です。
 
 1. Queue ARN/URL、message ID、sent/receive timestamp、receive count を記録する。Message を
    delete/redrive しない。
 2. Body は controlled viewer で確認し、上表の opaque locator だけを incident record へ転記する。
+   `AiAssistanceObservabilityDlq`は下記のmetadata-only専用手順を使い、row locatorをBodyから取得できると
+   仮定しない。
 3. Stream record は `directoryId` / `eventId`、application queue は job/execution/delivery ID から
    system of record を read-only で確認する。
 4. Audit event がある場合は correlation、source request、actor、entity/target を照合し、
@@ -291,17 +322,54 @@ DLQ alarm の共通初動は次です。
    redrive または新規 job を承認する。Terminal job を盲目的に再送しない。
 6. Queue が空、system of record が期待状態、重複 side effect がないことを確認して閉じる。
 
+### AI assistance observability failure destination
+
+`AiAssistanceObservabilityDlq`は通常のapplication queueではなく、Lambda DynamoDB Streams
+event-source mappingのon-failure destinationです。SQS Bodyは`version`、`timestamp`、
+`requestContext`、`responseContext`と`DDBStreamBatchInfo`だけを持ち、元の`Records`、`NewImage`、
+record type、generation/receipt keyを持ちません。SQS envelopeをworkerへ直接invokeしたり、
+`StartMessageMoveTask`で盲目的にredriveしたりすると、workerはDynamoDB recordを一件も認識せず
+成功扱いになり、metric gapが残ります。
+
+復旧operatorはJITの専用roleを使います。通常時に必要な権限はexact DLQ ARNへの
+`sqs:ReceiveMessage`、`sqs:ChangeMessageVisibility`、成功確認後だけの`sqs:DeleteMessage`、
+`sqs:GetQueueAttributes`、exact Workspace Search stream ARNへの`dynamodb:DescribeStream`、
+`dynamodb:GetShardIterator`、`dynamodb:GetRecords`、exact deployed worker ARNへの
+`lambda:InvokeFunction`だけです。Tableの`GetItem`/`Query`/`Scan`/write、queueのbulk redriveは
+この手順では許可しません。EMF到着確認はこの復旧roleへCloudWatch権限を足さず、既存のobservability
+read-only roleで行います。
+
+1. 一件だけ長いvisibility timeoutでreceiveし、削除しない。Bodyをstrictにparseし、expected queue、
+   worker `functionArn`、condition、account/region、Workspace Search `streamArn`、`shardId`、
+   `startSequenceNumber`、`endSequenceNumber`、arrival window、batch sizeを照合する。Incident recordには
+   このmetadataとmessage IDだけを残す。
+2. Stream recordの24時間保持内であることを確認し、`DescribeStream`でexact stream/shardを照合する。
+   `AT_SEQUENCE_NUMBER`でstartから`GetRecords`をpaginationし、endを含むまで取得する。Raw imageは
+   generation本文やattempt auditを含み得るため、`umask 077`の一時領域だけで扱い、shell trace、標準出力、
+   ticket、汎用artifactへ書かない。成功・失敗・operator中断のすべてでcleanupされるようにし、invoke確認後は
+   一時ファイルが残っていないことも確認する。
+3. CDK event-source mappingと同じfilterを適用し、terminal receipt、またはdecision済みgenerationだけを残す。
+   Filter後の件数が`batchSize`、first/last sequenceがstart/endとexact一致しない場合はinvokeしない。
+4. 原因となったcode/configを修正した後、復元したexact DynamoDB stream eventをdeployed workerへ同期invokeする。
+   `FunctionError`がなく、responseの`batchItemFailures`が空で、該当EMF metricが到着したことを確認してから
+   SQS messageを一件だけ削除する。Partial-batch retryやこのmanual replayは、すでに成功した後続recordを
+   再投影し得るため、metric重複の可能性とreplay時刻をincident evidenceへ残す。
+5. 24時間を超えた場合、sequenceが取得できない場合、件数・endpointが一致しない場合は、推測eventのinvoke、
+   message削除、table Scanを行わない。DLQ metadataを保全し、metric gapと重複不確実性を宣言して、data ownerが
+   承認した別のbounded base-table再投影/backfillへエスカレーションする。SQS metadata単独からrow locatorを
+   復元できないため、この状態を完全復旧として閉じない。
+
 CDK deploy は、異なる既存standard SNS topic名を `AlarmPrimaryTopicName` と
-`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全42 alarmの
+`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全51 alarmの
 `AlarmActions`へ設定します。Stackはtopic、subscription、Incident Manager、rosterを所有しません。
-Fast-burn component 2件は`ActionsEnabled=false`で、残る39 metric alarmと1 composite alarmの
+Fast-burn component 2件は`ActionsEnabled=false`で、残る48 metric alarmと1 composite alarmの
 遷移が両topicへ同時通知されます。Ack target未達時の段階escalationはsubscription先が管理します。
 Topic policyは`cloudwatch.amazonaws.com`の`sns:Publish`を同一account/regionのalarm ARNと
 SourceAccountで制限して許可します。SSEを使う場合はcustomer-managed KMS keyにも同principalの
 `kms:GenerateDataKey*`/`kms:Decrypt`と同じconfused-deputy条件を設定します。Operatorによる直接
 SNS publishだけをdelivery evidenceにせず、controlled CloudWatch alarmの実state transition、
 alarm history、両subscription receipt、OK復帰まで確認します。
-全42 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な40件の
+全51 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な49件の
 test notificationとfast-burn両component/compositeのstate history、UTC timestamp、受信者を
 environment evidenceに残すまで、上記ack targetは実効性を持ちません。
 
@@ -350,6 +418,16 @@ environment evidenceに残すまで、上記ack targetは実効性を持ちま�
    authorizationをdenyし、該当resourceのWebhook deliveryを抑止する。このbridge削除deployはone-time
    cleanupを実行せず、Project Directory authorization backfillも実行しないため、残存dataや不足projectionは
    別のreview済みcleanup計画で解消してから再検査する。
+
+AI assistanceを変更するrelease candidateは、`application-unit-tests`内の明示的offline evaluationに加え、
+[AI assistance protected live-evaluation runbook](./ai-assistance.md#protected-live-evaluation-environment)に従います。
+Production-like promotionでは、deployed `/api/health`の`applicationCommitSha`、trusted mainのfull commit SHA、
+`production-like-live-eval`の対象SHAが同一で、評価開始・終了の両health probe、6 journey、response-loss replay、
+stale revision、provider-start後のactive Work Item revision race、3種のwithheld、redaction、exact model/prompt、7 paid callの
+token/cost/latency budgetがすべて成功していることを要求します。
+さらにmain-only/required reviewer付きの`ai-assistance-live-metric-evidence-approval` Environmentとprovisioning sentinelを
+事前確認し、同run UTC windowのfixed Service-only metricを承認する後段`metric-evidence-approval` jobが成功するまでpromotionを
+止めます。別SHAや途中でaliasが切り替わったscheduled結果、別windowのmetric承認を流用しません。
 
 `main quality gates` ruleset は上記6 context を strict mode で required にします。Workflow の
 job/context 名を変更する場合は ruleset も同じ release で更新し、対象 branch の effective rules
@@ -588,6 +666,10 @@ production では先に別 environment で同一 artifact を検証し、変更 
 4. Response の request/correlation ID と JSON completion log が一致し、EMF metric が到着する。
 5. API alarm、DLQ、queue age、destination failure が `OK` で、telemetry に no-data がない。
 6. Migration marker/checkpoint/integrity check が成功し、新旧 client の contract test が通る。
+7. AI assistanceを含むdeployでは同じfull SHAのmanual `production-like-live-eval`が成功し、namespace
+   `Mukuroji/AIAssistance`、`Service=mukuroji-ai-assistance`のgeneration/provider/token/cost/decision metricが
+   到着している。Schema v2 reportのHTTP replayとsynthetic partition限定DynamoDB durability count/booleanがexactに合格し、
+   Report、metric、HTTP replay markerに本文、credential、tenant/resource/table IDやraw AWS errorがない。
 
 ### Rollback trigger と手順
 
@@ -618,6 +700,15 @@ failure destination error、security regression のいずれかは自動継続�
 
 Commit、parameter、stack event、開始/終了時刻、RTO、post-check、残差 data の reconciliation を
 rollback evidence に残します。
+
+AI assistance固有のrollbackでは、先にWorkspace policyまたはglobal runtime controlで新規generationを停止し、
+Lambda timeout以上in-flightをdrainします。直前のexact model/profile/destination ARN、region、input/output price、
+budgetを復元した新しいmain revert commitを、新しい`ApiRuntimeConfigurationRevision`とfull
+`ApplicationCommitSha`でforward deployします。Generation、receipt、attempt、counter、feedback、policy auditを
+削除・巻き戻さず、offline gate、同一SHAのmanual live evaluation、content-free metricを再確認してから再enableします。
+Deployment-wide AI専用kill switchは未実装なので、Workspace単位停止で足りない機密性incidentではglobal API停止か
+review済みforward deployが必要です。詳細は
+[AI-specific rollback](./ai-assistance.md#ai-specific-rollback)を参照してください。
 
 ## PITR restore drill
 
@@ -867,12 +958,14 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 
 ## Production readiness evidence checklist
 
-- [ ] Role/roster、primary/secondary notification、通知有効な40 alarmのtest delivery、
+- [ ] Role/roster、primary/secondary notification、通知有効な49 alarmのtest delivery、
   fast-burn両component/compositeのstate history
 - [ ] 30日 availability/latency report、transport failure coverage、burn alert test
 - [ ] External liveness/readiness probe と rollout stop の test
 - [ ] Correlation ID を request → log → event → actor/tenant へ追える sample
 - [ ] Required CI checks と repository ruleset / branch protection の確認
+- [ ] AI assistance offline gate、同一commitのprotected live evaluation、HTTP/DynamoDB replay、withheld、
+  redaction、usage/cost/latency、main-only/required reviewer付きblocking jobで承認した同run CloudWatch metricのcontent-free evidence
 - [ ] Deploy/rollback rehearsal と previous artifact/parameter inventory
 - [ ] Runtime control の canary/emergency disable、fail-closed、re-enable、DLQ redrive の drill
 - [ ] 90日以内の PITR restore drill、RPO/RTO、integrity evidence

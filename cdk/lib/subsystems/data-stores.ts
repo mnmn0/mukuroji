@@ -486,6 +486,7 @@ export function buildDataStores(
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    stream: dynamodb.StreamViewType.NEW_IMAGE,
     timeToLiveAttribute: 'expiresAt',
   });
 

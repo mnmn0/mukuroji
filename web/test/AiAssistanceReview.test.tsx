@@ -127,6 +127,21 @@ describe('AiAssistanceReview', () => {
     expect(html).not.toContain('Generating filters')
   })
 
+  test('shows the dedicated rate-limit guidance without rendering a successful draft', () => {
+    const html = renderToStaticMarkup(
+      <AiAssistanceReview
+        errorKind="rate-limit"
+        locale="en"
+        renderDraft={() => 'PROTECTED GENERATED TEXT'}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('AI assistance has reached its usage limit')
+    expect(html).not.toContain('PROTECTED GENERATED TEXT')
+    expect(html).not.toContain('Adopt draft')
+  })
+
   /** Verifies rejected decisions are visually distinct from accepted decisions. */
   test('renders a rejected decision with the danger treatment', () => {
     const rejectedGeneration = {

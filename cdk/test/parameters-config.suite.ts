@@ -43,6 +43,16 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     MinLength: 1,
     Type: 'String',
   });
+  expect(parameters.ApplicationCommitSha).toEqual({
+    AllowedPattern: '^[0-9a-f]{40}$',
+    ConstraintDescription:
+      'ApplicationCommitSha must be one full lowercase 40-character Git commit SHA.',
+    Description:
+      'Full reviewed Git commit SHA bundled into the deployed API and exposed by its liveness endpoint.',
+    MaxLength: 40,
+    MinLength: 40,
+    Type: 'String',
+  });
   expect(parameters.RestoreDrillCleanupApproverRoleArn).toEqual({
     AllowedPattern:
       '^arn:(?:aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$',
@@ -134,6 +144,7 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     'AlarmPrimaryTopicName',
     'AlarmSecondaryTopicName',
     'ApiRuntimeConfigurationRevision',
+    'ApplicationCommitSha',
     'AiBedrockInputPricePerMillionTokensUsd',
     'AiBedrockModelArn',
     'AiBedrockOutputPricePerMillionTokensUsd',

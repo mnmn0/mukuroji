@@ -978,6 +978,9 @@ test('workspace search persists documents views and preferences in one retained 
     PointInTimeRecoverySpecification: {
       PointInTimeRecoveryEnabled: true,
     },
+    StreamSpecification: {
+      StreamViewType: 'NEW_IMAGE',
+    },
     TimeToLiveSpecification: {
       AttributeName: 'expiresAt',
       Enabled: true,

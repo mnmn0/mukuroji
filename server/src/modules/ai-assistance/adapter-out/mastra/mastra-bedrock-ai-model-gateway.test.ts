@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { AiModelGenerationInput } from '../../application/ports/ai-assistance-ports'
 import type { AiAssistanceModelOutput } from '../../application/validation/ai-assistance-schema'
+import { AiAssistanceError } from '../../errors'
 import {
   AI_ASSISTANCE_SYSTEM_INSTRUCTIONS,
   createAiAssistanceGenerationPrompt,
@@ -30,6 +31,7 @@ function createInput(): AiModelGenerationInput {
     traceId: 'trace-1',
     maxOutputTokens: 1_000,
     timeoutMs: 100,
+    async onProviderDispatch() {},
   }
 }
 
@@ -89,6 +91,66 @@ describe('createMastraBedrockAiModelGateway', () => {
     })
   })
 
+  test('does not process a provider result before the dispatch marker completes', async () => {
+    let releaseDispatchMarker = () => {}
+    const dispatchMarkerBarrier = new Promise<void>((resolve) => {
+      releaseDispatchMarker = resolve
+    })
+    let dispatchMarkerStarted = false
+    let generationSettled = false
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: createOutput(),
+        inputTokens: 1,
+        outputTokens: 1,
+      }),
+    })
+
+    const generation = gateway.generate({
+      ...createInput(),
+      async onProviderDispatch() {
+        dispatchMarkerStarted = true
+        await dispatchMarkerBarrier
+      },
+    })
+    void generation.finally(() => {
+      generationSettled = true
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(dispatchMarkerStarted).toBe(true)
+    expect(generationSettled).toBe(false)
+
+    releaseDispatchMarker()
+    await expect(generation).resolves.toMatchObject({ draft: { kind: 'search' } })
+  })
+
+  test('preserves a dispatch marker failure while aborting the in-flight provider', async () => {
+    let providerAborted = false
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async (input) => await new Promise((_, reject) => {
+        input.abortSignal.addEventListener('abort', () => {
+          providerAborted = true
+          reject(new Error('provider aborted after marker failure'))
+        }, { once: true })
+      }),
+    })
+    const markerError = new AiAssistanceError(
+      'upstream',
+      'AiAssistancePersistenceError',
+      'Provider dispatch marker could not be persisted.',
+    )
+
+    await expect(gateway.generate({
+      ...createInput(),
+      async onProviderDispatch() {
+        throw markerError
+      },
+    })).rejects.toBe(markerError)
+    expect(providerAborted).toBe(true)
+  })
+
   test('retains provider usage when structured output validation fails', async () => {
     const gateway = createMastraBedrockAiModelGateway({
       runStructuredGeneration: async () => ({
@@ -113,6 +175,54 @@ describe('createMastraBedrockAiModelGateway', () => {
         providerTraceId: 'provider-invalid-output-trace',
       })
     }
+  })
+
+  test('maps a content-filter finish reason to a bounded model refusal', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {},
+        finishReason: 'content-filter',
+        inputTokens: 12,
+        outputTokens: 0,
+        traceId: 'provider-refusal-trace',
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      category: 'upstream',
+      code: 'AiAssistanceModelRefused',
+      usage: {
+        inputTokens: 12,
+        outputTokens: 0,
+        costUnavailableReason: 'pricing-not-configured',
+      },
+      providerTraceId: 'provider-refusal-trace',
+    })
+  })
+
+  test('maps a rejected structured result with a content-filter reason to model refusal', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => {
+        throw {
+          cause: {
+            finishReason: 'content-filter',
+            message: 'customer-controlled provider detail',
+            usage: { inputTokens: 8, outputTokens: 0 },
+          },
+        }
+      },
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      category: 'upstream',
+      code: 'AiAssistanceModelRefused',
+      message: 'Bedrock Runtime refused generation because its content filter was activated.',
+      usage: {
+        inputTokens: 8,
+        outputTokens: 0,
+        costUnavailableReason: 'pricing-not-configured',
+      },
+    })
   })
 
   test('omits malformed provider trace identifiers before forwarding or persisting them', async () => {
@@ -649,5 +759,53 @@ describe('createMastraBedrockAiModelGateway', () => {
 
     await expect(gateway.generate({ ...createInput(), timeoutMs: 1 }))
       .rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+  })
+
+  test('normalizes structural Bedrock and AI SDK throttling signals', async () => {
+    const providerErrors: unknown[] = [
+      { statusCode: 429 },
+      { status: 429 },
+      { $metadata: { httpStatusCode: 429 } },
+      { name: 'ThrottlingException' },
+      { cause: { name: 'TooManyRequestsException' } },
+    ]
+
+    for (const providerError of providerErrors) {
+      const gateway = createMastraBedrockAiModelGateway({
+        runStructuredGeneration: async () => {
+          throw providerError
+        },
+      })
+
+      await expect(gateway.generate(createInput())).rejects.toMatchObject({
+        category: 'rate-limit',
+        code: 'AiAssistanceProviderRateLimited',
+      })
+    }
+  })
+
+  test('does not infer throttling from an untrusted provider message', async () => {
+    const providerErrors: unknown[] = [
+      new Error('429 too many requests for customer-secret'),
+      new Proxy({}, {
+        get() {
+          throw new Error('Untrusted provider getter.')
+        },
+      }),
+    ]
+
+    for (const providerError of providerErrors) {
+      const gateway = createMastraBedrockAiModelGateway({
+        runStructuredGeneration: async () => {
+          throw providerError
+        },
+      })
+
+      await expect(gateway.generate(createInput())).rejects.toMatchObject({
+        category: 'upstream',
+        code: 'AiAssistanceProviderError',
+        message: 'Bedrock Runtime generation failed.',
+      })
+    }
   })
 })

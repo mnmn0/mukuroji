@@ -353,6 +353,7 @@ export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characte
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export MUKUROJI_APPLICATION_COMMIT_SHA="$(git rev-parse HEAD)"
 export AWS_REGION=ap-northeast-1
 export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6'
 export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
@@ -391,6 +392,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -418,6 +420,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -445,6 +448,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -458,6 +462,8 @@ bun --filter cdk cdk diff CdkStack \
 code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに
 新しい値へ進め、同じrevisionを異なる内容へ再利用しません。初回導入では物理Lambdaが`-api-v2`へ
 置換されるため、`ApiFunctionUrl`も変わります。
+`MUKUROJI_APPLICATION_COMMIT_SHA` はreview済みcheckoutのfull SHAに固定し、deploy後の
+`GET /api/health`とproduction-like AI evaluationで同じ値を照合します。
 Function URL利用者は新しいstack outputへの計画的な切替が必要です。
 `ApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけが新しい
 `live` Aliasへ切り替わります。以後のdeployは新しいimmutable configuration secretとLambda

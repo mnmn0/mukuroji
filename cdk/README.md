@@ -20,6 +20,7 @@
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
 | `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
 | `AiBedrockModelId` | no | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
 | `AiBedrockInputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |
 | `AiBedrockOutputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard output 100万token当たりUSD。 |
@@ -49,14 +50,14 @@ Fresh deploy は Workspace Search migration state table、journal bucket、acces
 
 ## API observability
 
-Application Lambda 23個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
+Application Lambda 24個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
 trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
 `AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
 持つ独立 policy を使います。
 
 Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
-application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。41 metric alarmと
-1 composite alarmの
+application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。50 metric alarmと
+1 composite alarmのうち、notification無効のfast-burn component 2件を除く49件の
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
 同一account/regionのstandard topicを用意し、managed rosterへのsubscription、暗号化key policy、
@@ -66,6 +67,19 @@ publishするため、ack target未達時の段階escalationはsubscription先�
 `DestinationDeliveryFailures` で別に検出します。Audit projection、Automation event/schedule、
 Analytics/Notification schedule、Enterprise SCIM group/identity maintenance の各 DLQ は14日保持し、
 stack replacement/delete 時にも Retain します。
+
+AI assistance は `ProviderFailureCount`、`ProviderThrottledCount`、
+`ProviderInvalidOutputCount`、p95 `ProviderLatency`、`UsageUnavailableCount` の5 provider alarmに加え、
+観測workerのLambda `Errors` / `Throttles`とDynamoDB stream `IteratorAge`の3 projection-health alarmを
+持ちます。provider attempt と user decision のEMFは、明示的に有効化したevent-source mappingで
+`WorkspaceSearchTable` のterminal rowを専用LambdaがDynamoDB Streamsから投影します。terminal
+mutation自体はtransaction/CASで一度だけcommitされますが、
+stream deliveryはat-least-onceであり、成功応答喪失、partial-batch retry、manual replayではmetricが
+稀に重複し得ます。
+retryを使い切ったrecordは14日保持・Retainの`AiAssistanceObservabilityDlq`へ隔離し、別のDLQ alarmが
+visible messageを検出します。このqueueはraw DynamoDB recordではなく
+`DDBStreamBatchInfo`だけを受け取るため直接redriveせず、24時間以内のexact stream range復元と
+限定invoke、または期限超過時のmetric gap処理を`docs/operational-readiness.md`の専用手順で行います。
 
 ### Alarm destination contract
 
@@ -84,7 +98,7 @@ environment evidenceへ保存します。
 
 Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
 同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
-history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全42 alarmの
+history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全51 alarmの
 `AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
 templateとdeployed configurationの両方で照合します。
 
@@ -112,6 +126,7 @@ templateとdeployed configurationの両方で照合します。
 - `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt、保持期限付きAI generation/idempotency/feedback/budget record。期限付きrowは `expiresAt` TTL で失効）
+- `AiAssistanceObservabilityDlqUrl`（terminal AI observability stream recordの最終失敗を14日保持するRetain DLQ）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
 - `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`
@@ -576,6 +591,7 @@ to the `comment` stage commands.
 
 ```sh
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export MUKUROJI_APPLICATION_COMMIT_SHA="$(git rev-parse HEAD)"
 export AWS_REGION=ap-northeast-1
 export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6'
 export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
@@ -605,6 +621,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -632,6 +649,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -641,6 +659,7 @@ bun --filter cdk cdk deploy CdkStack \
 
 ```sh
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export MUKUROJI_APPLICATION_COMMIT_SHA="$(git rev-parse HEAD)"
 export AWS_REGION=ap-northeast-1
 export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6'
 export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
@@ -670,6 +689,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -697,6 +717,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -707,6 +728,7 @@ bun --filter cdk cdk deploy CdkStack \
 
 `--outputs-file`はdeploy直後のoutput照合用スナップショットです。`/tmp`のファイルだけを
 永続的な変更証跡とはせず、stack ID、deploy時刻、change set、API runtime revision、
+application commit SHA、
 outputファイルのSHA-256をアクセス制御されたchange recordへ保存します。
 outputにはSecret ARNなどのresource metadataが含まれるため、access tokenやsecret値を追記せず、
 照合後のローカルファイルは削除します。
@@ -726,6 +748,8 @@ durable cursorを変換しません。
 `MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION`はAPIのcode、またはruntime configuration secretへ
 入るparameter/resource値が変わるdeployごとに新しい値へ進め、`cdk diff`とdeployへ同じ値を渡します。
 同じrevisionのsecret内容を更新するとimmutable rolloutの前提が崩れるため、revisionを再利用しません。
+`MUKUROJI_APPLICATION_COMMIT_SHA`はreview済みcheckoutの`git rev-parse HEAD`と一致させ、deploy後に
+`GET /api/health`が同じ`applicationCommitSha`を返すことをproduction-like evaluationで確認します。
 初回`-api-v2`置換時はFunction URL outputの切替計画をchange recordに含めます。HTTP API endpointは
 維持され、以後のtraffic切替は`live` Alias更新で行われます。
 
@@ -795,7 +819,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
 先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
-monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全42 alarmの
+monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全51 alarmの
 現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
 複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
 2つの必須parameter、相異rule、既存alarmの`AlarmActions`以外にalarm resourceの置換や

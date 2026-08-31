@@ -1,0 +1,175 @@
+name: AI assistance production-like live evaluation
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+concurrency:
+  group: ai-assistance-live-eval-production
+  cancel-in-progress: false
+
+jobs:
+  commit-preflight:
+    name: commit-preflight
+    if: github.repository == 'mnmn0/mukuroji' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ai-assistance-live-evaluation
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout trusted default-branch commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Verify exact trusted checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify deployed commit without credentials
+        env:
+          AI_ASSISTANCE_LIVE_EVAL_API_BASE_URL: ${{ vars.AI_ASSISTANCE_LIVE_EVAL_API_BASE_URL }}
+          AI_ASSISTANCE_LIVE_EVAL_EXPECTED_COMMIT_SHA: ${{ github.sha }}
+        run: bun server/scripts/ai-assistance/evaluate-ai-assistance-live.ts --commit-preflight
+
+  live-evaluation:
+    name: production-like-live-eval
+    needs: commit-preflight
+    if: github.repository == 'mnmn0/mukuroji' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ai-assistance-live-evaluation
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout trusted default-branch commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Verify exact trusted checkout
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Acquire synthetic-partition read credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AI_ASSISTANCE_LIVE_EVAL_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AI_ASSISTANCE_LIVE_EVAL_AWS_REGION }}
+          role-duration-seconds: 900
+          mask-aws-account-id: true
+
+      - name: Run content-free production-like evaluation
+        env:
+          AI_ASSISTANCE_LIVE_EVAL_API_BASE_URL: ${{ vars.AI_ASSISTANCE_LIVE_EVAL_API_BASE_URL }}
+          AI_ASSISTANCE_LIVE_EVAL_AWS_REGION: ${{ vars.AI_ASSISTANCE_LIVE_EVAL_AWS_REGION }}
+          AI_ASSISTANCE_LIVE_EVAL_EMAIL: ${{ secrets.AI_ASSISTANCE_LIVE_EVAL_EMAIL }}
+          AI_ASSISTANCE_LIVE_EVAL_EXPECTED_COMMIT_SHA: ${{ github.sha }}
+          AI_ASSISTANCE_LIVE_EVAL_FIXTURE_JSON: ${{ secrets.AI_ASSISTANCE_LIVE_EVAL_FIXTURE_JSON }}
+          AI_ASSISTANCE_LIVE_EVAL_PASSWORD: ${{ secrets.AI_ASSISTANCE_LIVE_EVAL_PASSWORD }}
+          AI_ASSISTANCE_LIVE_EVAL_TABLE_NAME: ${{ vars.AI_ASSISTANCE_LIVE_EVAL_TABLE_NAME }}
+        run: bun server/scripts/ai-assistance/evaluate-ai-assistance-live.ts > ai-assistance-live-eval-report.raw.json
+
+      - name: Validate content-free evidence schema
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ''
+          AWS_SECRET_ACCESS_KEY: ''
+          AWS_SESSION_TOKEN: ''
+          AWS_REGION: ''
+          AWS_DEFAULT_REGION: ''
+        run: |
+          jq -e '
+            if (
+              (keys | sort) == ["checks", "durability", "failures", "journeyCount", "journeys", "passed", "passedJourneyCount", "schemaVersion", "totals"] and
+              .schemaVersion == 2 and .passed == true and
+              .journeyCount == 6 and .passedJourneyCount == 6 and .failures == [] and
+              (.checks | keys | sort) == ["commitMatched", "decisionReplayPassed", "feedbackReplayPassed", "postProviderSourceFencePassed", "staleRevisionRejected", "withheldDisclosurePassed", "withheldPermissionChangedPassed", "withheldRetentionExpiredPassed", "withheldSourceChangedPassed"] and
+              (.checks | to_entries | all(.value == true)) and
+              [.journeys[].journey] == ["request", "triage", "work-item", "planning", "document", "search"] and
+              all(.journeys[];
+                (keys | sort) == ["failures", "journey", "metrics", "passed"] and
+                .passed == true and .failures == [] and
+                (.metrics | keys | sort) == ["citationCount", "costUsd", "inputTokens", "latencyMs", "outputTokens", "replayMatched", "uncertaintyPresent"] and
+                (.metrics.inputTokens | type == "number") and
+                (.metrics.inputTokens | floor == .) and .metrics.inputTokens > 0 and
+                (.metrics.outputTokens | type == "number") and
+                (.metrics.outputTokens | floor == .) and .metrics.outputTokens > 0 and
+                (.metrics.latencyMs | type == "number") and
+                (.metrics.latencyMs | floor == .) and .metrics.latencyMs > 0 and
+                (.metrics.citationCount | type == "number") and
+                (.metrics.citationCount | floor == .) and .metrics.citationCount >= 0 and
+                (.metrics.costUsd | type == "number") and .metrics.costUsd > 0 and
+                .metrics.replayMatched == true and .metrics.uncertaintyPresent == true
+              ) and
+              (.durability | keys | sort) == ["approvedDecisionPersisted", "auditEnvelopeCount", "feedbackCount", "generationCount", "passed", "postProviderAuditEnvelopeCount", "postProviderFailedAttemptCount", "postProviderFailedReceiptCount", "postProviderGenerationAbsent", "receiptCount", "staleAttemptAbsent", "staleGenerationAbsent", "successfulAttemptCount"] and
+              .durability == {
+                "passed": true,
+                "receiptCount": 7,
+                "successfulAttemptCount": 6,
+                "auditEnvelopeCount": 6,
+                "generationCount": 6,
+                "feedbackCount": 1,
+                "staleAttemptAbsent": true,
+                "staleGenerationAbsent": true,
+                "postProviderFailedReceiptCount": 1,
+                "postProviderFailedAttemptCount": 1,
+                "postProviderAuditEnvelopeCount": 1,
+                "postProviderGenerationAbsent": true,
+                "approvedDecisionPersisted": true
+              } and
+              (.totals | keys | sort) == ["costUsd", "inputTokens", "outputTokens"] and
+              (.totals.inputTokens | type == "number") and
+              (.totals.inputTokens | floor == .) and .totals.inputTokens > 0 and
+              (.totals.outputTokens | type == "number") and
+              (.totals.outputTokens | floor == .) and .totals.outputTokens > 0 and
+              (.totals.costUsd | type == "number") and .totals.costUsd > 0
+            ) then . else empty end
+          ' ai-assistance-live-eval-report.raw.json > ai-assistance-live-eval-report.validated.json
+
+      - name: Upload content-free evaluation evidence
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        env:
+          AWS_ACCESS_KEY_ID: ''
+          AWS_SECRET_ACCESS_KEY: ''
+          AWS_SESSION_TOKEN: ''
+          AWS_REGION: ''
+          AWS_DEFAULT_REGION: ''
+        with:
+          name: ai-assistance-live-eval-report
+          path: ai-assistance-live-eval-report.validated.json
+          if-no-files-found: error
+          retention-days: 30
+
+  metric-evidence-approval:
+    name: metric-evidence-approval
+    needs: live-evaluation
+    if: github.repository == 'mnmn0/mukuroji' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ai-assistance-live-metric-evidence-approval
+    permissions: {}
+    steps:
+      - name: Require provisioned metric-evidence gate
+        env:
+          AI_ASSISTANCE_LIVE_METRIC_EVIDENCE_GATE: ${{ vars.AI_ASSISTANCE_LIVE_METRIC_EVIDENCE_GATE }}
+        run: test "$AI_ASSISTANCE_LIVE_METRIC_EVIDENCE_GATE" = "required-reviewers-enabled"

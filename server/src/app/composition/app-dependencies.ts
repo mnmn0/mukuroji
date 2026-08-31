@@ -254,6 +254,8 @@ export interface AiAssistanceDependencies {
 
 /** Operational dependencies required by system routes. */
 export interface OperationalDependencies {
+  /** Full Git commit SHA identifying this deployed API runtime, when configured. */
+  readonly applicationCommitSha?: string
   /** Records bounded runtime-control decisions and metrics. */
   readonly recordRuntimeControl: RuntimeControlObservationRecorder
   /** Verifies the API's critical runtime dependencies. */
