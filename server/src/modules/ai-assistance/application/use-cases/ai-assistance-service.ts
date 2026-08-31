@@ -505,6 +505,7 @@ export function createAiAssistanceService(
       }
     }
 
+    let generationCommitAttempted = false
     let generationPersisted = false
     let attemptStartedAt: Date | undefined
     let providerStartedAt: Date | undefined
@@ -777,6 +778,7 @@ export function createAiAssistanceService(
       }
       const attemptEndedAt = now()
       const successfulUsage = modelResult.usage
+      generationCommitAttempted = true
       const stored = await options.store.commitGeneration({
         workspaceId: actor.workspaceId,
         memberId: actor.memberId,
@@ -851,13 +853,20 @@ export function createAiAssistanceService(
             // started receipt pending forever. Adapters may expose a separate
             // repair call that retries only this terminal marker; it never
             // invokes the provider or reserves budget again.
+            // If the generation commit itself was uncertain, terminalization
+            // cannot disprove a committed success. Preserve that retryable
+            // error so the client reuses this key and reconciles the receipt.
+            const surfacedError = generationCommitAttempted &&
+                safeError.code === 'AiAssistancePersistenceError'
+              ? safeError
+              : finalizationError
             if (options.store.recoverGenerationAttempt === undefined) {
-              throw finalizationError
+              throw surfacedError
             }
             try {
               await options.store.recoverGenerationAttempt(failedAttempt)
             } catch {
-              throw finalizationError
+              throw surfacedError
             }
           }
         } else {
