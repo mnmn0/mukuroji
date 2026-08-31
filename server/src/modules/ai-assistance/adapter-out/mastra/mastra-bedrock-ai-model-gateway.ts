@@ -117,7 +117,20 @@ export function createMastraBedrockAiModelGateway(
     async generate(input) {
       const prompt = createAiAssistanceGenerationPrompt(input)
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), input.timeoutMs)
+      let deadlineExpired = false
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const deadlinePromise = new Promise<never>((_resolve, reject) => {
+        const deadlineError = new AiAssistanceError(
+          'timeout',
+          'AiAssistanceProviderTimeout',
+          'Bedrock Runtime did not complete within the configured deadline.',
+        )
+        timeout = setTimeout(() => {
+          deadlineExpired = true
+          controller.abort()
+          reject(deadlineError)
+        }, input.timeoutMs)
+      })
       const startedAt = nowMilliseconds()
       let dispatchMarkerFailed = false
       try {
@@ -135,13 +148,16 @@ export function createMastraBedrockAiModelGateway(
         // not inspect the result until that callback has completed.
         void resultPromise.catch(() => undefined)
         try {
-          await input.onProviderDispatch()
+          const dispatchMarkerPromise = input.onProviderDispatch()
+          await Promise.race([dispatchMarkerPromise, deadlinePromise])
         } catch (error) {
-          dispatchMarkerFailed = true
-          controller.abort()
+          if (!deadlineExpired) {
+            dispatchMarkerFailed = true
+            controller.abort()
+          }
           throw error
         }
-        const result = await resultPromise
+        const result = await Promise.race([resultPromise, deadlinePromise])
         const providerTraceId = normalizeProviderTraceId(result.traceId)
         const latencyMs = Math.max(0, Math.round(nowMilliseconds() - startedAt))
         let usage: AiAssistanceUsage
@@ -198,7 +214,7 @@ export function createMastraBedrockAiModelGateway(
           ...(providerTraceId ? { providerTraceId } : {}),
         }
       } catch (error) {
-        const providerTimedOut = controller.signal.aborted && !dispatchMarkerFailed
+        const providerTimedOut = deadlineExpired && !dispatchMarkerFailed
         if (providerTimedOut) {
           throw new AiAssistanceError(
             'timeout',
@@ -237,7 +253,7 @@ export function createMastraBedrockAiModelGateway(
           { cause: error },
         )
       } finally {
-        clearTimeout(timeout)
+        if (timeout !== undefined) clearTimeout(timeout)
       }
     },
   }

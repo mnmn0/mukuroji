@@ -19,6 +19,14 @@ import { parseAiAssistanceGenerationResponse } from './generationResponse'
 const aiAssistanceApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
 const defaultErrorMessage = 'Unable to complete the AI assistance request.'
 
+/** Parsed JSON and trusted response metadata returned by the AI assistance transport. */
+type AiAssistanceJsonResponse = {
+  /** Untrusted JSON body returned by the endpoint. */
+  readonly body: unknown
+  /** Whether the server explicitly identified this response as an idempotency replay. */
+  readonly idempotencyReplayed: boolean
+}
+
 /** Options shared by explicit AI generation requests. */
 export type GenerateAiAssistanceOptions = {
   /** Bearer access token for the active Workspace member. */
@@ -120,7 +128,7 @@ export type CreateAiAssistanceFeedbackOptions = {
 export async function generateAiAssistance(
   options: GenerateAiAssistanceOptions,
 ): Promise<AiAssistanceGeneration> {
-  const value = await requestJson(
+  const response = await requestJson(
     `${aiAssistanceApiBaseUrl}/generations`,
     options.accessToken,
     {
@@ -134,7 +142,25 @@ export async function generateAiAssistance(
     },
   )
 
-  return parseAiAssistanceGenerationResponse(value, options.input.task)
+  try {
+    return parseAiAssistanceGenerationResponse(response.body, options.input.task)
+  } catch (error) {
+    if (
+      error instanceof AiAssistanceApiError &&
+      error.code === 'InvalidAiAssistanceResponse'
+    ) {
+      throw new AiAssistanceApiError(
+        error.status,
+        error.message,
+        error.code,
+        {
+          idempotencyReplayed: response.idempotencyReplayed,
+          successfulResponseReceived: true,
+        },
+      )
+    }
+    throw error
+  }
 }
 
 /**
@@ -146,7 +172,7 @@ export async function generateAiAssistance(
 export async function getAiAssistanceGeneration(
   options: GetAiAssistanceGenerationOptions,
 ): Promise<AiAssistanceGeneration> {
-  const value = await requestJson(
+  const response = await requestJson(
     `${aiAssistanceApiBaseUrl}/generations/${encodeURIComponent(options.generationId)}`,
     options.accessToken,
     {
@@ -155,7 +181,7 @@ export async function getAiAssistanceGeneration(
     },
   )
 
-  return parseAiAssistanceGenerationResponse(value, options.expectedTask)
+  return parseAiAssistanceGenerationResponse(response.body, options.expectedTask)
 }
 
 /**
@@ -198,7 +224,7 @@ export async function revalidateApprovedAiAssistanceGeneration(
 export async function decideAiAssistanceGeneration(
   options: DecideAiAssistanceOptions,
 ): Promise<AiAssistanceGeneration> {
-  const value = await requestJson(
+  const response = await requestJson(
     `${aiAssistanceApiBaseUrl}/generations/${encodeURIComponent(options.generationId)}/decision`,
     options.accessToken,
     {
@@ -213,7 +239,7 @@ export async function decideAiAssistanceGeneration(
 
   let generation: AiAssistanceGeneration
   try {
-    generation = parseAiAssistanceGenerationResponse(value, options.expectedTask)
+    generation = parseAiAssistanceGenerationResponse(response.body, options.expectedTask)
   } catch (error) {
     if (
       error instanceof AiAssistanceApiError &&
@@ -370,7 +396,7 @@ async function requestJson(
   accessToken: string,
   init: RequestInit,
   allowEmptyResponse = false,
-): Promise<unknown> {
+): Promise<AiAssistanceJsonResponse> {
   let response: Response
   try {
     response = await fetch(url, {
@@ -385,21 +411,30 @@ async function requestJson(
     throw new AiAssistanceApiError(0, defaultErrorMessage, 'AiAssistanceNetworkError')
   }
 
-  const value = await readJson(response, allowEmptyResponse)
+  const idempotencyReplayed = hasConfirmedIdempotencyReplay(response)
+  const value = await readJson(response, allowEmptyResponse, idempotencyReplayed)
   if (!response.ok) {
     const error = isRecord(value) ? value : {}
     throw new AiAssistanceApiError(
       response.status,
       typeof error.message === 'string' ? error.message : defaultErrorMessage,
       typeof error.code === 'string' ? error.code : undefined,
+      { idempotencyReplayed },
     )
   }
 
-  return value
+  return {
+    body: value,
+    idempotencyReplayed,
+  }
 }
 
 /** Reads JSON while accepting the feedback endpoint's empty success response. */
-async function readJson(response: Response, allowEmptyResponse: boolean): Promise<unknown> {
+async function readJson(
+  response: Response,
+  allowEmptyResponse: boolean,
+  idempotencyReplayed: boolean,
+): Promise<unknown> {
   let text: string
   try {
     text = await response.text()
@@ -408,6 +443,10 @@ async function readJson(response: Response, allowEmptyResponse: boolean): Promis
       0,
       defaultErrorMessage,
       'AiAssistanceNetworkError',
+      {
+        idempotencyReplayed,
+        successfulResponseReceived: response.ok,
+      },
     )
   }
   if (!text) {
@@ -416,6 +455,10 @@ async function readJson(response: Response, allowEmptyResponse: boolean): Promis
       response.status,
       'AI assistance API returned an empty response.',
       'InvalidAiAssistanceResponse',
+      {
+        idempotencyReplayed,
+        successfulResponseReceived: response.ok,
+      },
     )
   }
 
@@ -426,8 +469,22 @@ async function readJson(response: Response, allowEmptyResponse: boolean): Promis
       response.status,
       'AI assistance API returned invalid JSON.',
       'InvalidAiAssistanceResponse',
+      {
+        idempotencyReplayed,
+        successfulResponseReceived: response.ok,
+      },
     )
   }
+}
+
+/**
+ * Accepts only the canonical server replay marker and rejects malformed header values.
+ *
+ * @param response - HTTP response whose server-owned replay metadata is being inspected.
+ * @returns Whether the response contains the exact canonical replay marker.
+ */
+function hasConfirmedIdempotencyReplay(response: Response): boolean {
+  return response.headers.get('Idempotency-Replayed') === 'true'
 }
 
 /** Narrows an unknown JSON value to a record. */

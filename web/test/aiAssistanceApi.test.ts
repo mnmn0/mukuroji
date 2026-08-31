@@ -68,6 +68,60 @@ describe('AI assistance API', () => {
     expect(headers.get('X-Correlation-Id')).toBe('ai-correlation-1')
   })
 
+  test('marks an invalid generation envelope received through a successful response', async () => {
+    globalThis.fetch = async () => Response.json({
+      ...aiSearchGenerationFixture,
+      unexpectedField: 'must-fail-closed',
+    }, { status: 201 })
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'malformed success', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({
+      code: 'InvalidAiAssistanceResponse',
+      idempotencyReplayed: false,
+      status: 502,
+      successfulResponseReceived: true,
+    })
+  })
+
+  test('accepts only the canonical idempotency replay marker on API failures', async () => {
+    const replayMarkers = [
+      { expected: true, value: 'true' },
+      { expected: false, value: 'TRUE' },
+      { expected: false, value: 'false' },
+      { expected: false, value: 'true, false' },
+      { expected: false, value: '1' },
+    ]
+
+    for (const replayMarker of replayMarkers) {
+      globalThis.fetch = async () => Response.json({
+        code: 'AiAssistancePersistenceError',
+        message: 'Generation persistence is unavailable.',
+      }, {
+        headers: { 'Idempotency-Replayed': replayMarker.value },
+        status: 502,
+      })
+
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: { locale: 'en', query: 'persistence failure', task: 'search' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toBeInstanceOf(AiAssistanceApiError)
+      expect(error).toMatchObject({
+        code: 'AiAssistancePersistenceError',
+        idempotencyReplayed: replayMarker.expected,
+        status: 502,
+        successfulResponseReceived: false,
+      })
+    }
+  })
+
   test('re-reads one generation through the authenticated no-store GET boundary', async () => {
     const requests = installFetchRecorder([aiSearchGenerationFixture])
 

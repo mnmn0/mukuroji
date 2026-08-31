@@ -308,12 +308,17 @@ export function isAiAssistanceDecisionInvalidatingError(error: unknown): boolean
 export function shouldRetainAiAssistanceGenerationContext(error: unknown): boolean {
   if (isAbortError(error)) return true
   if (!(error instanceof AiAssistanceApiError)) return false
+  if (
+    error.code === 'AiAssistancePersistenceError' &&
+    error.idempotencyReplayed
+  ) return false
   if (error.status === 0) return true
-  if (error.code === 'AiAssistanceGenerationInProgress' ||
-    error.code === 'AiAssistancePersistenceError') return true
-  return error.code === 'InvalidAiAssistanceResponse' &&
-    error.status >= 200 &&
-    error.status < 300
+  if (error.code === 'AiAssistanceGenerationInProgress') return true
+  if (error.code === 'AiAssistancePersistenceError') return true
+  return error.code === 'InvalidAiAssistanceResponse' && (
+    error.successfulResponseReceived ||
+    (error.status >= 200 && error.status < 300)
+  )
 }
 
 /**

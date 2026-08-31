@@ -126,6 +126,52 @@ describe('createMastraBedrockAiModelGateway', () => {
     await expect(generation).resolves.toMatchObject({ draft: { kind: 'search' } })
   })
 
+  test('times out when a settled provider result waits on the dispatch marker past the deadline', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: createOutput(),
+        inputTokens: 1,
+        outputTokens: 1,
+      }),
+    })
+
+    await expect(gateway.generate({
+      ...createInput(),
+      timeoutMs: 1,
+      async onProviderDispatch() {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 20)
+        })
+      },
+    })).rejects.toMatchObject({
+      category: 'timeout',
+      code: 'AiAssistanceProviderTimeout',
+    })
+  })
+
+  test('accepts a dispatch marker that settles before the provider deadline', async () => {
+    let dispatchMarkerCompleted = false
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: createOutput(),
+        inputTokens: 1,
+        outputTokens: 1,
+      }),
+    })
+
+    const result = await gateway.generate({
+      ...createInput(),
+      timeoutMs: 1,
+      async onProviderDispatch() {
+        await Promise.resolve()
+        dispatchMarkerCompleted = true
+      },
+    })
+
+    expect(dispatchMarkerCompleted).toBe(true)
+    expect(result).toMatchObject({ draft: { kind: 'search' } })
+  })
+
   test('preserves a dispatch marker failure while aborting the in-flight provider', async () => {
     let providerAborted = false
     const gateway = createMastraBedrockAiModelGateway({

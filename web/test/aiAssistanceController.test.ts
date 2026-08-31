@@ -254,6 +254,138 @@ describe('AI assistance controller safety', () => {
     expect(providerContexts[0]).not.toBe(providerContexts[1])
   })
 
+  test('retains initial persistence uncertainty but replaces a durably replayed failure key', async () => {
+    let nextContextId = 0
+    const runner = createMutationRequestRunner(() => {
+      nextContextId += 1
+      return {
+        correlationId: `persistence-correlation-${nextContextId}`,
+        idempotencyKey: `persistence-request-${nextContextId}`,
+      }
+    })
+    const observedContexts: MutationRequestContext[] = []
+    let attempt = 0
+    const runAttempt = () => runner.run(
+      'ai-assistance:generate',
+      'same-input',
+      async (context) => {
+        observedContexts.push(context)
+        attempt += 1
+        if (attempt === 1) {
+          throw new AiAssistanceApiError(
+            502,
+            'generation persistence is uncertain',
+            'AiAssistancePersistenceError',
+          )
+        }
+        if (attempt === 2) {
+          throw new AiAssistanceApiError(
+            502,
+            'generation persistence failure replayed',
+            'AiAssistancePersistenceError',
+            { idempotencyReplayed: true },
+          )
+        }
+        return 'new-logical-generation'
+      },
+      shouldRetainAiAssistanceGenerationContext,
+    )
+
+    await expect(runAttempt()).rejects.toMatchObject({
+      code: 'AiAssistancePersistenceError',
+      idempotencyReplayed: false,
+    })
+    await expect(runAttempt()).rejects.toMatchObject({
+      code: 'AiAssistancePersistenceError',
+      idempotencyReplayed: true,
+    })
+    expect(await runAttempt()).toBe('new-logical-generation')
+    expect(observedContexts[0]).toBe(observedContexts[1])
+    expect(observedContexts[1]).not.toBe(observedContexts[2])
+  })
+
+  test('retains a generation key for an invalid successful response', async () => {
+    let nextContextId = 0
+    const runner = createMutationRequestRunner(() => {
+      nextContextId += 1
+      return {
+        correlationId: `success-response-correlation-${nextContextId}`,
+        idempotencyKey: `success-response-request-${nextContextId}`,
+      }
+    })
+    const observedContexts: MutationRequestContext[] = []
+    let attempt = 0
+    const runAttempt = () => runner.run(
+      'ai-assistance:generate',
+      'same-input',
+      async (context) => {
+        observedContexts.push(context)
+        attempt += 1
+        if (attempt === 1) {
+          throw new AiAssistanceApiError(
+            502,
+            'generation success response was malformed',
+            'InvalidAiAssistanceResponse',
+            { successfulResponseReceived: true },
+          )
+        }
+        return 'replayed-generation'
+      },
+      shouldRetainAiAssistanceGenerationContext,
+    )
+
+    await expect(runAttempt()).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceResponse',
+      status: 502,
+      successfulResponseReceived: true,
+    })
+    expect(await runAttempt()).toBe('replayed-generation')
+    expect(observedContexts[0]).toBe(observedContexts[1])
+  })
+
+  test('replaces generation keys after stable 502 validation and provider failures', async () => {
+    const stableFailures = [
+      new AiAssistanceApiError(
+        502,
+        'generation response was invalid',
+        'InvalidAiAssistanceResponse',
+      ),
+      new AiAssistanceApiError(
+        502,
+        'provider output was invalid',
+        'InvalidAiAssistanceOutput',
+      ),
+    ]
+
+    for (const stableFailure of stableFailures) {
+      let nextContextId = 0
+      const runner = createMutationRequestRunner(() => {
+        nextContextId += 1
+        return {
+          correlationId: `stable-failure-correlation-${nextContextId}`,
+          idempotencyKey: `stable-failure-request-${nextContextId}`,
+        }
+      })
+      const observedContexts: MutationRequestContext[] = []
+      let attempt = 0
+      const runAttempt = () => runner.run(
+        'ai-assistance:generate',
+        'same-input',
+        async (context) => {
+          observedContexts.push(context)
+          attempt += 1
+          if (attempt === 1) throw stableFailure
+          return 'new-generation'
+        },
+        shouldRetainAiAssistanceGenerationContext,
+      )
+
+      await expect(runAttempt()).rejects.toBe(stableFailure)
+      expect(await runAttempt()).toBe('new-generation')
+      expect(observedContexts[0]).not.toBe(observedContexts[1])
+    }
+  })
+
   test('retains an ambiguous decision failure and retries with the same mutation context', async () => {
     const requestContext: MutationRequestContext = {
       correlationId: 'decision-correlation-1',
