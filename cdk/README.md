@@ -56,8 +56,8 @@ trace/telemetry write action だけを追加します。API Lambda は readiness
 持つ独立 policy を使います。
 
 Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
-application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。50 metric alarmと
-1 composite alarmのうち、notification無効のfast-burn component 2件を除く49件の
+application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。51 metric alarmと
+1 composite alarmのうち、notification無効のfast-burn component 2件を除く50件の
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
 同一account/regionのstandard topicを用意し、managed rosterへのsubscription、暗号化key policy、
@@ -70,12 +70,16 @@ stack replacement/delete 時にも Retain します。
 
 AI assistance は `ProviderFailureCount`、`ProviderThrottledCount`、
 `ProviderInvalidOutputCount`、p95 `ProviderLatency`、`UsageUnavailableCount` の5 provider alarmに加え、
-観測workerのLambda `Errors` / `Throttles`とDynamoDB stream `IteratorAge`の3 projection-health alarmを
+観測workerの`ProjectionFailureCount`、Lambda `Errors` / `Throttles`とDynamoDB stream `IteratorAge`の
+4 projection-health alarmを
 持ちます。provider attempt と user decision のEMFは、明示的に有効化したevent-source mappingで
 `WorkspaceSearchTable` のterminal rowを専用LambdaがDynamoDB Streamsから投影します。terminal
 mutation自体はtransaction/CASで一度だけcommitされますが、
 stream deliveryはat-least-onceであり、成功応答喪失、partial-batch retry、manual replayではmetricが
-稀に重複し得ます。
+稀に重複し得ます。Partial batch responseはLambda `Errors`を増やさないため、handlerがpartial-batch
+failureとして返したrecord数を`ProjectionFailureCount`へ集約し、専用alarmで検出します。DynamoDB Streamsが
+実際に再試行する範囲はlowest failed sequence以降を含み得るため、このmetricをretry総record数とは解釈しません。
+Worker logは90日保持・Retainの明示LogGroupへ保存します。
 retryを使い切ったrecordは14日保持・Retainの`AiAssistanceObservabilityDlq`へ隔離し、別のDLQ alarmが
 visible messageを検出します。このqueueはraw DynamoDB recordではなく
 `DDBStreamBatchInfo`だけを受け取るため直接redriveせず、24時間以内のexact stream range復元と
@@ -98,7 +102,7 @@ environment evidenceへ保存します。
 
 Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
 同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
-history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全51 alarmの
+history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全52 alarmの
 `AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
 templateとdeployed configurationの両方で照合します。
 
@@ -819,7 +823,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
 先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
-monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全51 alarmの
+monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全52 alarmの
 現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
 複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
 2つの必須parameter、相異rule、既存alarmの`AlarmActions`以外にalarm resourceの置換や

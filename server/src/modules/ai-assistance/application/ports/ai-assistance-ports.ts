@@ -415,6 +415,17 @@ export interface AiAssistanceObservability {
   recordDecision(observation: AiAssistanceDecisionObservation): void
 }
 
+/** Operational observation boundary used by the terminal-row stream projection. */
+export interface AiAssistanceProjectionObservability
+  extends AiAssistanceObservability {
+  /**
+   * Records rows returned for partial-batch retry without identifiers or content.
+   *
+   * @param failureCount Number of failed records in the completed invocation batch.
+   */
+  recordProjectionFailures(failureCount: number): void
+}
+
 /** Generation response together with transport-safe idempotency metadata. */
 export type AiAssistanceGenerationExecution = {
   /** Generated or durably replayed draft. */

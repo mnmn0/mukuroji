@@ -11,7 +11,7 @@ import type {
 } from '../../../../infrastructure/aws/dynamodb-stream'
 import type {
   AiAssistanceDecisionObservation,
-  AiAssistanceObservability,
+  AiAssistanceProjectionObservability,
   AiAssistanceProviderAttemptObservation,
   AiAssistanceProviderAttemptOutcome,
 } from '../../application/ports/ai-assistance-ports'
@@ -173,7 +173,7 @@ class ProjectionFailure extends Error {
  */
 export async function processAiAssistanceObservabilityBatch(
   event: DynamoStreamEvent,
-  observability: AiAssistanceObservability,
+  observability: AiAssistanceProjectionObservability,
 ): Promise<BatchResponse> {
   const batchItemFailures: BatchItemFailure[] = []
 
@@ -183,6 +183,14 @@ export async function processAiAssistanceObservabilityBatch(
     } catch (error: unknown) {
       logProjectionFailure(readProjectionFailureCategory(error))
       batchItemFailures.push(createBatchItemFailure(record))
+    }
+  }
+
+  if (batchItemFailures.length > 0) {
+    try {
+      observability.recordProjectionFailures(batchItemFailures.length)
+    } catch {
+      throw new ProjectionFailure('observability-sink')
     }
   }
 
@@ -197,7 +205,7 @@ export async function processAiAssistanceObservabilityBatch(
  */
 function processAiAssistanceObservabilityRecord(
   record: DynamoStreamRecord,
-  observability: AiAssistanceObservability,
+  observability: AiAssistanceProjectionObservability,
 ): void {
   const providerAttempt = readProviderAttemptObservation(record)
   if (providerAttempt) {

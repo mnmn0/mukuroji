@@ -66,6 +66,7 @@ export type {
   AiAssistanceProviderAttemptObservation,
   AiAssistanceProviderAttemptOutcome,
   AiAssistanceObservability,
+  AiAssistanceProjectionObservability,
   AiAssistanceDecisionObservation,
   AiAssistanceTriageRoutingTuple,
   AiAssistanceTriageSourceRouting,

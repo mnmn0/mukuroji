@@ -769,7 +769,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   expect(outputs.WorkItemImportDlqUrl.Value).toEqual({ Ref: importDlqId });
 });
 
-test('public API workers use retained 90-day log groups', () => {
+test('operational workers use retained 90-day log groups', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const functionExpectations = [
     {
@@ -788,6 +788,11 @@ test('public API workers use retained 90-day log groups', () => {
     {
       description: 'Schedules bounded polling jobs for connected provider installations.',
       handler: 'index.pollHandler',
+    },
+    {
+      description:
+        'Projects terminal AI assistance records into content-free operational metrics.',
+      handler: 'index.handler',
     },
   ];
 
@@ -2065,6 +2070,24 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
   expect(serializedPolicies).not.toContain('dynamodb:PutItem');
   expect(serializedPolicies).not.toContain('dynamodb:UpdateItem');
   expect(serializedPolicies).not.toContain('dynamodb:DeleteItem');
+
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects terminal AI records returned for partial-batch observability retry.',
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    DatapointsToAlarm: 1,
+    Dimensions: [{
+      Name: 'Service',
+      Value: 'mukuroji-ai-assistance',
+    }],
+    EvaluationPeriods: 1,
+    MetricName: 'ProjectionFailureCount',
+    Namespace: 'Mukuroji/AIAssistance',
+    Period: 300,
+    Statistic: 'Sum',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
 
   for (const alarm of [
     {

@@ -635,6 +635,10 @@ token/cost、decision metricが到着していることを確認してからjob�
 - `InputTokenCount`、`OutputTokenCount`、`EstimatedCostUsd`、`UsageUnavailableCount`
 - `DecisionCount`、`DecisionApprovedCount`、`DecisionRejectedCount`
 
+Failure-onlyの`ProjectionFailureCount`は正常runでdatapointが存在しないため到着必須metricには含めませんが、
+同じlive UTC windowに正のdatapointがないことを確認します。正のdatapointがあればpartial-batch retryが発生しており、
+live reportが成功していてもpromotionを停止して調査します。
+
 Evidence recordにはworkflow run URL/ID、対象full SHA、live UTC開始/終了、確認したfixed metric名と最終datapoint UTC、
 reviewerとapproval時刻を残します。Generation/Workspace/member/source ID、本文、model/trace、credential、raw CloudWatch
 responseは残しません。別run、別SHA、別windowのmetricや以前の承認を流用せず、このblocking jobが未承認ならworkflow
@@ -653,6 +657,10 @@ partial-batch retry、承認済みmanual replayでmetricが稀に重複し得ま
 `DDBStreamBatchInfo`だけなので、queueやenvelopeをworkerへ直接redriveしません。24時間以内にexact
 stream/shard/sequence範囲を復元し、filter件数とendpointを照合してから限定invokeする手順と、期限超過時の
 metric gap処理は[Operational readiness](./operational-readiness.md#ai-assistance-observability-failure-destination)に従います。
+Partial batch response自体はLambda `Errors`を増やさないため、workerはpartial-batch failureとして返したrecord数を
+`ProjectionFailureCount`として集約し、専用alarmで検出します。DynamoDB Streamsが実際に再試行する範囲はlowest failed
+sequence以降を含み得るため、このmetricをretry総record数とは解釈しません。Content-free failure logとEMFは90日保持・
+Retainの明示LogGroupへ保存し、raw stream imageやidentifierは書きません。
 
 Release rehearsalは上記の別provision read-only OIDC roleを使い、同じfull evaluator process内でsynthetic partitionの
 receipt/generation/attempt audit/feedbackを自動検証します。このreadはcanonical primary keyごとの`GetItem`だけであり、
@@ -662,7 +670,7 @@ fail closedとし、HTTP replayだけのrunを完全なdurability evidenceとし
 
 ### AI-specific rollback
 
-`GenerationFailureCount`、`ProviderFailureCount`、`ProviderTimeoutCount`、`ProviderRefusedCount`、
+`GenerationFailureCount`、`ProjectionFailureCount`、`ProviderFailureCount`、`ProviderTimeoutCount`、`ProviderRefusedCount`、
 `ProviderInvalidOutputCount`の増加、
 latency/cost budget超過、citation/redaction/withheld/replay failure、commit不一致のいずれかでpromotionを停止します。
 

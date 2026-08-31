@@ -5,7 +5,7 @@ import type {
 } from '../../../../infrastructure/aws/dynamodb-stream'
 import type {
   AiAssistanceDecisionObservation,
-  AiAssistanceObservability,
+  AiAssistanceProjectionObservability,
   AiAssistanceProviderAttemptObservation,
   AiAssistanceProviderAttemptOutcome,
 } from '../../application/ports/ai-assistance-ports'
@@ -180,7 +180,8 @@ function createGenerationRecord(
 function createCollectingObservability(
   providerAttempts: AiAssistanceProviderAttemptObservation[],
   decisions: AiAssistanceDecisionObservation[],
-): AiAssistanceObservability {
+  projectionFailureCounts: number[] = [],
+): AiAssistanceProjectionObservability {
   return {
     recordGenerationRequest() {},
     recordProviderAttempt(observation) {
@@ -189,19 +190,27 @@ function createCollectingObservability(
     recordDecision(observation) {
       decisions.push(observation)
     },
+    recordProjectionFailures(failureCount) {
+      projectionFailureCounts.push(failureCount)
+    },
   }
 }
 
 test('projects succeeded provider attempts and durable human decisions', async () => {
   const providerAttempts: AiAssistanceProviderAttemptObservation[] = []
   const decisions: AiAssistanceDecisionObservation[] = []
+  const projectionFailureCounts: number[] = []
 
   const result = await processAiAssistanceObservabilityBatch({
     Records: [
       createSucceededProviderRecord('provider-success'),
       createGenerationRecord('decision-approved', 'approved'),
     ],
-  }, createCollectingObservability(providerAttempts, decisions))
+  }, createCollectingObservability(
+    providerAttempts,
+    decisions,
+    projectionFailureCounts,
+  ))
 
   expect(result).toEqual({ batchItemFailures: [] })
   expect(providerAttempts).toEqual([{
@@ -217,6 +226,7 @@ test('projects succeeded provider attempts and durable human decisions', async (
     },
   }])
   expect(decisions).toEqual([{ task: 'planning', outcome: 'approved' }])
+  expect(projectionFailureCounts).toEqual([])
 })
 
 test('maps failed provider metadata and documents at-least-once redelivery behavior', async () => {
@@ -347,6 +357,7 @@ test('returns isolated failures for malformed matching rows without logging cont
   const decisions: AiAssistanceDecisionObservation[] = []
   const errorLog = spyOn(console, 'error').mockImplementation(() => undefined)
   const customerContentMarker = 'customer-content-must-not-be-logged'
+  const projectionFailureCounts: number[] = []
 
   try {
     const malformedReceipt = createSucceededProviderRecord(
@@ -371,7 +382,11 @@ test('returns isolated failures for malformed matching rows without logging cont
         createGenerationRecord('valid-decision', 'rejected'),
         malformedDecision,
       ],
-    }, createCollectingObservability(providerAttempts, decisions))
+    }, createCollectingObservability(
+      providerAttempts,
+      decisions,
+      projectionFailureCounts,
+    ))
 
     expect(result).toEqual({
       batchItemFailures: [
@@ -382,6 +397,7 @@ test('returns isolated failures for malformed matching rows without logging cont
     })
     expect(providerAttempts).toEqual([])
     expect(decisions).toEqual([{ task: 'planning', outcome: 'rejected' }])
+    expect(projectionFailureCounts).toEqual([3])
     expect(errorLog).toHaveBeenCalledTimes(3)
     expect(errorLog.mock.calls).toEqual(Array.from({ length: 3 }, () => [
       'AI assistance observability projection failed.',
@@ -398,14 +414,18 @@ test('returns isolated failures for malformed matching rows without logging cont
 
 test('isolates observability sink failures and continues later records', async () => {
   const decisions: AiAssistanceDecisionObservation[] = []
+  const projectionFailureCounts: number[] = []
   const errorLog = spyOn(console, 'error').mockImplementation(() => undefined)
-  const observability: AiAssistanceObservability = {
+  const observability: AiAssistanceProjectionObservability = {
     recordGenerationRequest() {},
     recordProviderAttempt() {
       throw new Error('sink payload must not be logged')
     },
     recordDecision(observation) {
       decisions.push(observation)
+    },
+    recordProjectionFailures(failureCount) {
+      projectionFailureCounts.push(failureCount)
     },
   }
 
@@ -421,6 +441,7 @@ test('isolates observability sink failures and continues later records', async (
       batchItemFailures: [{ itemIdentifier: 'failed-sink' }],
     })
     expect(decisions).toEqual([{ task: 'planning', outcome: 'approved' }])
+    expect(projectionFailureCounts).toEqual([1])
     expect(errorLog).toHaveBeenCalledWith(
       'AI assistance observability projection failed.',
       {
@@ -444,6 +465,43 @@ test('rejects a failed record that cannot be identified for partial retry', asyn
       { Records: [record] },
       createCollectingObservability([], []),
     )).rejects.toThrow('missing its sequence number')
+  } finally {
+    errorLog.mockRestore()
+  }
+})
+
+test('fails the invocation safely when the projection failure metric sink fails', async () => {
+  const customerContentMarker = 'projection-metric-sink-secret-must-not-leak'
+  const errorLog = spyOn(console, 'error').mockImplementation(() => undefined)
+  const record = createSucceededProviderRecord('metric-sink-failure', '-1')
+  const image = record.dynamodb?.NewImage
+  if (!image) {
+    throw new Error('Projection metric sink fixture requires a NEW_IMAGE value.')
+  }
+  image.customerContent = stringAttribute(customerContentMarker)
+  const observability: AiAssistanceProjectionObservability = {
+    ...createCollectingObservability([], []),
+    recordProjectionFailures() {
+      throw new Error(customerContentMarker)
+    },
+  }
+
+  try {
+    await expect(processAiAssistanceObservabilityBatch(
+      { Records: [record] },
+      observability,
+    )).rejects.toMatchObject({
+      name: 'AiAssistanceObservabilityProjectionError',
+      message: 'AI assistance observability projection failed.',
+    })
+    expect(errorLog).toHaveBeenCalledWith(
+      'AI assistance observability projection failed.',
+      {
+        code: 'AiAssistanceObservabilityProjectionFailed',
+        category: 'malformed-record',
+      },
+    )
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(customerContentMarker)
   } finally {
     errorLog.mockRestore()
   }

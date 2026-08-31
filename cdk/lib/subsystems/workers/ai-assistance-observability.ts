@@ -4,6 +4,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { DataStoreResources } from '../data-stores';
@@ -52,6 +53,14 @@ export function buildAiAssistanceObservabilityWorker(
       retentionPeriod: cdk.Duration.days(14),
     },
   );
+  const aiAssistanceObservabilityLogGroup = new logs.LogGroup(
+    scope,
+    'AiAssistanceObservabilityLogGroup',
+    {
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      retention: logs.RetentionDays.THREE_MONTHS,
+    },
+  );
   const aiAssistanceObservabilityFunction = new lambdaNodejs.NodejsFunction(
     scope,
     'AiAssistanceObservabilityFunction',
@@ -69,6 +78,7 @@ export function buildAiAssistanceObservabilityWorker(
       memorySize: 256,
       description:
         'Projects terminal AI assistance records into content-free operational metrics.',
+      logGroup: aiAssistanceObservabilityLogGroup,
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -129,6 +139,30 @@ export function buildAiAssistanceObservabilityWorker(
     }),
   );
   workspaceSearchTable.grantStreamRead(aiAssistanceObservabilityFunction);
+
+  new cloudwatch.Alarm(
+    scope,
+    'AiAssistanceObservabilityProjectionFailureAlarm',
+    {
+      alarmDescription:
+        'Detects terminal AI records returned for partial-batch observability retry.',
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metric: new cloudwatch.Metric({
+        namespace: 'Mukuroji/AIAssistance',
+        metricName: 'ProjectionFailureCount',
+        dimensionsMap: {
+          Service: 'mukuroji-ai-assistance',
+        },
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    },
+  );
 
   new cloudwatch.Alarm(
     scope,

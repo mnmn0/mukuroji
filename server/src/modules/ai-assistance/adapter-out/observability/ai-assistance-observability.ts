@@ -1,6 +1,6 @@
 import type {
   AiAssistanceGenerationRequestObservation,
-  AiAssistanceObservability,
+  AiAssistanceProjectionObservability,
   AiAssistanceProviderAttemptObservation,
   AiAssistanceDecisionObservation,
 } from '../../application/ports/ai-assistance-ports'
@@ -27,11 +27,11 @@ const UNKNOWN_MODEL_DIMENSION = 'other'
  * Creates the content-free EMF adapter used by the AI assistance service.
  *
  * @param options - Optional sink and deterministic clock.
- * @returns Failure-independent observation callbacks for request, provider, and decision metrics.
+ * @returns Observation callbacks for request, provider, decision, and projection metrics.
  */
 export function createAiAssistanceEmfObservability(
   options: AiAssistanceEmfObservabilityOptions = {},
-): AiAssistanceObservability {
+): AiAssistanceProjectionObservability {
   const sink = options.sink ?? writeStandardOutput
   const nowMilliseconds = options.nowMilliseconds ?? Date.now
 
@@ -44,6 +44,9 @@ export function createAiAssistanceEmfObservability(
     },
     recordDecision(observation) {
       recordDecision(observation, nowMilliseconds(), sink)
+    },
+    recordProjectionFailures(failureCount) {
+      recordProjectionFailures(failureCount, nowMilliseconds(), sink)
     },
   }
 }
@@ -226,6 +229,28 @@ function recordDecision(
     DecisionCount: 1,
     DecisionApprovedCount: observation.outcome === 'approved' ? 1 : 0,
     DecisionRejectedCount: observation.outcome === 'rejected' ? 1 : 0,
+  }))
+}
+
+/** Writes one aggregate count for records returned through partial-batch retry. */
+function recordProjectionFailures(
+  failureCount: number,
+  observedAtMilliseconds: number,
+  sink: StructuredAiAssistanceLogSink,
+): void {
+  sink(JSON.stringify({
+    _aws: {
+      Timestamp: readTimestamp(observedAtMilliseconds),
+      CloudWatchMetrics: [{
+        Namespace: AI_ASSISTANCE_METRIC_NAMESPACE,
+        Dimensions: [['Service']],
+        Metrics: [{ Name: 'ProjectionFailureCount', Unit: 'Count' }],
+      }],
+    },
+    event: 'ai-assistance.observability.projection-failed',
+    service: AI_ASSISTANCE_SERVICE,
+    Service: AI_ASSISTANCE_SERVICE,
+    ProjectionFailureCount: readNonNegativeMetric(failureCount),
   }))
 }
 

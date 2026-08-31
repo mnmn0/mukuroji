@@ -13,7 +13,7 @@ repository に固定せず、各実行の evidence record に残します。
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
 | Trace | CDK が管理する全28個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する | Correlation ID 自体の X-Ray annotation は未実装 |
-| Alarm | API、queue、DLQ、async destination、runtime control、restore drill の50 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な49件のtest evidenceを確認するまで unattended production とみなさないこと |
+| Alarm | API、queue、DLQ、async destination、runtime control、restore drill の51 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な50件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Shared API は revision-bound な Lambda Version と `live` Alias で code/configuration を揃えて切り替える | `read-only` mode、route/effect registry、weighted alias routing、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
@@ -303,7 +303,8 @@ EMFの`refusalReason`はboundedな`content-filter`だけを許可します。Hum
 | `AiAssistanceInvalidOutputAlarm` | `ProviderInvalidOutputCount Sum >= 1` / 5分 | SEV2 | Provider responseがstrict structured-output boundaryを通過せず、結果を適用していない | Alarm history、UTC window、bounded `Task` / `Outcome` / `Model`、`failureCategory` / `failureCode`、latency。Rejected response本文は保存しない |
 | `AiAssistanceProviderLatencyAlarm` | p95 `ProviderLatency >= 12,000 ms`、5分 period の2/3 | SEV2 | Provider latencyがgeneration budget付近で持続し、timeoutまたはuser-visible delayのリスクがある | Alarm history、3 periodのp95、bounded `Task` / `Outcome` / `Model`別のcount/latency。Request、prompt、生成本文は保存しない |
 | `AiAssistanceUsageUnavailableAlarm` | `UsageUnavailableCount Sum >= 1` / 5分 | SEV2 | Durable provider attemptにtokenまたはcost accountingがなく、budget/cost evidenceが不完全 | Alarm history、UTC window、bounded `Task` / `Outcome` / `Model`、`usageUnavailableReason`、token/cost fieldの有無。Usageと本文を結び付けるIDは保存しない |
-| `AiAssistanceObservabilityFunctionErrorAlarm` | Lambda `Errors Sum >= 1` / 5分 | SEV2 | Terminal-row projection invocationが失敗し、retry中またはmetric gapへ進む可能性がある | Function名、event-source mapping UUID、UTC window、Lambda request ID、error class、`batchItemFailures`件数。Stream recordと`NewImage`は保存しない |
+| `AiAssistanceObservabilityProjectionFailureAlarm` | `ProjectionFailureCount Sum >= 1` / 5分 | SEV2 | 一件以上をpartial-batch failureとして返した。成功responseのためLambda `Errors`には加算されない。Metricは返却件数であり、lowest failed sequence以降を含み得る実retry総record数ではない | Alarm history、UTC window、Lambda request ID、content-free failure logのbounded `category`、`batchItemFailures`件数。Stream recordと`NewImage`は保存しない |
+| `AiAssistanceObservabilityFunctionErrorAlarm` | Lambda `Errors Sum >= 1` / 5分 | SEV2 | Terminal-row projection invocation全体が失敗し、retry中またはmetric gapへ進む可能性がある | Function名、event-source mapping UUID、UTC window、Lambda request ID、safe error class。Stream recordと`NewImage`は保存しない |
 | `AiAssistanceObservabilityFunctionThrottleAlarm` | Lambda `Throttles Sum >= 1` / 5分 | SEV2 | Projection workerのconcurrency不足またはaccount-level throttleでstream消費が遅延し得る | Function名、event-source mapping UUID、UTC window、throttle count、concurrency metric。Record key/imageは保存しない |
 | `AiAssistanceObservabilityIteratorAgeAlarm` | Lambda `IteratorAge Maximum >= 300,000 ms` / 5分 | SEV2 | 最新処理recordが5分以上遅れ、provider/decision metricの鮮度契約を満たしていない | Function名、event-source mapping UUID、stream ARN、UTC window、maximum iterator age、mappingのenabled state。Record key/imageは保存しない |
 
@@ -360,16 +361,16 @@ read-only roleで行います。
    復元できないため、この状態を完全復旧として閉じない。
 
 CDK deploy は、異なる既存standard SNS topic名を `AlarmPrimaryTopicName` と
-`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全51 alarmの
+`AlarmSecondaryTopicName` に必須指定し、同一account/regionのARNへ変換して全52 alarmの
 `AlarmActions`へ設定します。Stackはtopic、subscription、Incident Manager、rosterを所有しません。
-Fast-burn component 2件は`ActionsEnabled=false`で、残る48 metric alarmと1 composite alarmの
+Fast-burn component 2件は`ActionsEnabled=false`で、残る49 metric alarmと1 composite alarmの
 遷移が両topicへ同時通知されます。Ack target未達時の段階escalationはsubscription先が管理します。
 Topic policyは`cloudwatch.amazonaws.com`の`sns:Publish`を同一account/regionのalarm ARNと
 SourceAccountで制限して許可します。SSEを使う場合はcustomer-managed KMS keyにも同principalの
 `kms:GenerateDataKey*`/`kms:Decrypt`と同じconfused-deputy条件を設定します。Operatorによる直接
 SNS publishだけをdelivery evidenceにせず、controlled CloudWatch alarmの実state transition、
 alarm history、両subscription receipt、OK復帰まで確認します。
-全51 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な49件の
+全52 alarmのARN、primary/secondary destination、subscription/roster revision、通知有効な50件の
 test notificationとfast-burn両component/compositeのstate history、UTC timestamp、受信者を
 environment evidenceに残すまで、上記ack targetは実効性を持ちません。
 
@@ -958,7 +959,7 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 
 ## Production readiness evidence checklist
 
-- [ ] Role/roster、primary/secondary notification、通知有効な49 alarmのtest delivery、
+- [ ] Role/roster、primary/secondary notification、通知有効な50 alarmのtest delivery、
   fast-burn両component/compositeのstate history
 - [ ] 30日 availability/latency report、transport failure coverage、burn alert test
 - [ ] External liveness/readiness probe と rollout stop の test

@@ -195,4 +195,30 @@ describe('createAiAssistanceEmfObservability', () => {
       DecisionRejectedCount: 1,
     })
   })
+
+  test('emits a content-free aggregate for partial-batch projection failures', () => {
+    const records: string[] = []
+    const observability = createAiAssistanceEmfObservability({
+      nowMilliseconds: () => 1_700_000_000_000,
+      sink: (record) => records.push(record),
+    })
+
+    observability.recordProjectionFailures(3)
+
+    expect(records).toHaveLength(1)
+    expect(JSON.parse(records[0] ?? '')).toEqual({
+      _aws: {
+        Timestamp: 1_700_000_000_000,
+        CloudWatchMetrics: [{
+          Namespace: 'Mukuroji/AIAssistance',
+          Dimensions: [['Service']],
+          Metrics: [{ Name: 'ProjectionFailureCount', Unit: 'Count' }],
+        }],
+      },
+      event: 'ai-assistance.observability.projection-failed',
+      service: 'mukuroji-ai-assistance',
+      Service: 'mukuroji-ai-assistance',
+      ProjectionFailureCount: 3,
+    })
+  })
 })
