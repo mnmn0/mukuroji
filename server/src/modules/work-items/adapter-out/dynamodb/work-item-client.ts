@@ -2621,6 +2621,14 @@ export class DynamoDbTeamIssuesClient {
           delete (afterIssue as unknown as Record<string, unknown>)[field]
         }
       }
+      const auditBeforeIssue = {
+        ...beforeIssue,
+        workItemTypeId: beforeIssue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      }
+      const auditAfterIssue = {
+        ...afterIssue,
+        workItemTypeId: afterIssue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      }
       const eventItem = this.createIssueEventItem({
         directoryId,
         teamId,
@@ -2638,7 +2646,7 @@ export class DynamoDbTeamIssuesClient {
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
         summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
-        changes: createAuditFieldChanges(beforeIssue, afterIssue, [
+        changes: createAuditFieldChanges(auditBeforeIssue, auditAfterIssue, [
           'title',
           'description',
           'assignedProjectId',

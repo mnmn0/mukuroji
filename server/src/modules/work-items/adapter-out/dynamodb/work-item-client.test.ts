@@ -3713,6 +3713,7 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
       workflowSchemaVersion: 1,
       workflowStatusId: 'review',
       statusCategory: 'started',
+      workItemTypeId: 'incident',
       customFieldValues: {},
       expectedRevision: 1,
     },
@@ -3742,6 +3743,9 @@ test('DynamoDB Work Item update emits render-ready notification candidates', asy
       ],
     },
   })
+  expect(auditItem?.changes).toEqual(expect.arrayContaining([
+    { field: 'workItemTypeId', before: 'default', after: 'incident' },
+  ]))
 })
 
 test('DynamoDB Work Item client classifies revision CAS transaction conditions', async () => {
