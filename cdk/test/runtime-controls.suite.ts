@@ -64,6 +64,10 @@ const fileStorageInfrastructureFunctionIds = new Set([
   'FileBucketIncarnationMarkerFunctionBCDA95D8',
 ]);
 
+const observabilityInfrastructureFunctionIds = new Set([
+  'AiAssistanceObservabilityFunction304A2391',
+]);
+
 /**
  * Narrows an unknown synthesized value to a string-keyed record.
  *
@@ -602,6 +606,7 @@ test('binds exact runtime-control settings through API config and twenty-one dir
       return runtimeControlPlaneFunctionIds.has(logicalId) ||
         restoreDrillFunctionIds.has(logicalId) ||
         fileStorageInfrastructureFunctionIds.has(logicalId) ||
+        observabilityInfrastructureFunctionIds.has(logicalId) ||
         logicalId.startsWith('AWS679f53fac002430cb0da5b7982bd2287') ||
         (
           typeof description === 'string' &&

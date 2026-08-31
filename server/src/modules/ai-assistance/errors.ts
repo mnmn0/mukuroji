@@ -33,7 +33,9 @@ export type AiAssistanceErrorCode =
   | 'AiAssistanceDecisionAlreadyRecorded'
   | 'AiAssistanceAttemptFailed'
   | 'AiAssistancePersistenceError'
+  | 'AiAssistanceModelRefused'
   | 'AiAssistanceProviderError'
+  | 'AiAssistanceProviderRateLimited'
   | 'AiAssistanceProviderTimeout'
   | 'InvalidAiAssistanceRecord'
 
@@ -51,6 +53,9 @@ export class AiAssistanceError extends Error {
   /** Provider trace retained for safe terminal-attempt accounting. */
   readonly providerTraceId?: string
 
+  /** Whether this stable response came from an existing durable idempotency receipt. */
+  readonly idempotencyReplayed: boolean
+
   /**
    * Creates a safe AI assistance application error.
    *
@@ -60,6 +65,7 @@ export class AiAssistanceError extends Error {
    * @param options - Optional standard error options.
    * @param usage - Optional provider usage retained for failed-attempt accounting.
    * @param providerTraceId - Optional provider trace retained for failed-attempt accounting.
+   * @param idempotencyReplayed - Whether the error is a terminal idempotency replay.
    */
   constructor(
     category: AiAssistanceErrorCategory,
@@ -68,6 +74,7 @@ export class AiAssistanceError extends Error {
     options?: ErrorOptions,
     usage?: AiAssistanceUsage,
     providerTraceId?: string,
+    idempotencyReplayed = false,
   ) {
     super(message, options)
     this.name = 'AiAssistanceError'
@@ -75,5 +82,6 @@ export class AiAssistanceError extends Error {
     this.code = code
     this.usage = usage
     this.providerTraceId = providerTraceId
+    this.idempotencyReplayed = idempotencyReplayed
   }
 }

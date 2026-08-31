@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import type {
   AiAssistanceGeneration,
   AiPlanningStatusUpdateDraft,
@@ -6,9 +6,12 @@ import type {
 } from '@mukuroji/contracts'
 import {
   AiAssistanceApiError,
+  AiAssistanceDecisionResponseError,
   createAiAssistanceFeedback,
   decideAiAssistanceGeneration,
   generateAiAssistance,
+  getAiAssistanceGeneration,
+  revalidateApprovedAiAssistanceGeneration,
   updateAiAssistancePolicy,
   updateAiAssistancePreference,
 } from '../src/features/ai-assistance/api'
@@ -27,7 +30,12 @@ const mutationContext = {
   idempotencyKey: 'ai-idempotency-1',
 }
 
+beforeEach(() => {
+  setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+})
+
 afterEach(() => {
+  setSystemTime()
   globalThis.fetch = originalFetch
 })
 
@@ -58,6 +66,146 @@ describe('AI assistance API', () => {
     expect(headers.get('Authorization')).toBe('Bearer access-token')
     expect(headers.get('Idempotency-Key')).toBe('ai-idempotency-1')
     expect(headers.get('X-Correlation-Id')).toBe('ai-correlation-1')
+  })
+
+  test('marks an invalid generation envelope received through a successful response', async () => {
+    globalThis.fetch = async () => Response.json({
+      ...aiSearchGenerationFixture,
+      unexpectedField: 'must-fail-closed',
+    }, { status: 201 })
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'malformed success', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({
+      code: 'InvalidAiAssistanceResponse',
+      idempotencyReplayed: false,
+      status: 502,
+      successfulResponseReceived: true,
+    })
+  })
+
+  test('accepts only the canonical idempotency replay marker on API failures', async () => {
+    const replayMarkers = [
+      { expected: true, value: 'true' },
+      { expected: false, value: 'TRUE' },
+      { expected: false, value: 'false' },
+      { expected: false, value: 'true, false' },
+      { expected: false, value: '1' },
+    ]
+
+    for (const replayMarker of replayMarkers) {
+      globalThis.fetch = async () => Response.json({
+        code: 'AiAssistancePersistenceError',
+        message: 'Generation persistence is unavailable.',
+      }, {
+        headers: { 'Idempotency-Replayed': replayMarker.value },
+        status: 502,
+      })
+
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: { locale: 'en', query: 'persistence failure', task: 'search' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toBeInstanceOf(AiAssistanceApiError)
+      expect(error).toMatchObject({
+        code: 'AiAssistancePersistenceError',
+        idempotencyReplayed: replayMarker.expected,
+        status: 502,
+        successfulResponseReceived: false,
+      })
+    }
+  })
+
+  test('re-reads one generation through the authenticated no-store GET boundary', async () => {
+    const requests = installFetchRecorder([aiSearchGenerationFixture])
+
+    const generation = await getAiAssistanceGeneration({
+      accessToken: 'access-token',
+      expectedTask: 'search',
+      generationId: 'generation/with slash',
+    })
+
+    expect(generation.id).toBe(aiSearchGenerationFixture.id)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe(
+      '/api/ai-assistance/generations/generation%2Fwith%20slash',
+    )
+    expect(requests[0]?.init.method).toBe('GET')
+    expect(requests[0]?.init.cache).toBe('no-store')
+    expect(new Headers(requests[0]?.init.headers).get('Authorization')).toBe(
+      'Bearer access-token',
+    )
+  })
+
+  test('returns an approved generation only when its fresh projection matches exactly', async () => {
+    const approvedGeneration = {
+      ...aiSearchGenerationFixture,
+      revision: 4,
+      decision: {
+        outcome: 'approved',
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    } satisfies AiAssistanceGeneration
+    installFetchRecorder([approvedGeneration])
+
+    await expect(revalidateApprovedAiAssistanceGeneration({
+      accessToken: 'access-token',
+      expectedGeneration: approvedGeneration,
+    })).resolves.toEqual(approvedGeneration)
+
+    const withheldGeneration = {
+      ...approvedGeneration,
+      content: {
+        availability: 'withheld',
+        reasonCode: 'permission-changed',
+      },
+    } satisfies AiAssistanceGeneration
+    installFetchRecorder([withheldGeneration])
+    const withheldError = await revalidateApprovedAiAssistanceGeneration({
+      accessToken: 'access-token',
+      expectedGeneration: approvedGeneration,
+    }).catch((caught: unknown) => caught)
+
+    expect(withheldError).toMatchObject({
+      code: 'AiAssistanceAuthorizationChanged',
+      status: 403,
+    })
+
+    const expiredGeneration = {
+      ...approvedGeneration,
+      content: {
+        availability: 'withheld',
+        reasonCode: 'retention-expired',
+      },
+      expiresAt: '2026-08-30T02:00:00.000Z',
+    } satisfies AiAssistanceGeneration
+    installFetchRecorder([expiredGeneration])
+    const retentionError = await revalidateApprovedAiAssistanceGeneration({
+      accessToken: 'access-token',
+      expectedGeneration: approvedGeneration,
+    }).catch((caught: unknown) => caught)
+
+    expect(retentionError).toMatchObject({
+      code: 'AiAssistanceRetentionExpired',
+      status: 409,
+    })
+
+    installFetchRecorder([{ ...approvedGeneration, revision: 5 }])
+    const mismatchError = await revalidateApprovedAiAssistanceGeneration({
+      accessToken: 'access-token',
+      expectedGeneration: approvedGeneration,
+    }).catch((caught: unknown) => caught)
+
+    expect(mismatchError).toMatchObject({
+      code: 'InvalidAiAssistanceResponse',
+      status: 502,
+    })
   })
 
   /** Converts a response-body transport failure into the stable network error category. */
@@ -149,6 +297,7 @@ describe('AI assistance API', () => {
       }).catch((caught: unknown) => caught)
 
       expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+      expect(error).toBeInstanceOf(AiAssistanceDecisionResponseError)
     }
   })
 

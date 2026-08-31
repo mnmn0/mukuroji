@@ -769,7 +769,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   expect(outputs.WorkItemImportDlqUrl.Value).toEqual({ Ref: importDlqId });
 });
 
-test('public API workers use retained 90-day log groups', () => {
+test('operational workers use retained 90-day log groups', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const functionExpectations = [
     {
@@ -788,6 +788,11 @@ test('public API workers use retained 90-day log groups', () => {
     {
       description: 'Schedules bounded polling jobs for connected provider installations.',
       handler: 'index.pollHandler',
+    },
+    {
+      description:
+        'Projects terminal AI assistance records into content-free operational metrics.',
+      handler: 'index.handler',
     },
   ];
 
@@ -1845,7 +1850,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 24);
+  template.resourceCountIs('AWS::SQS::Queue', 25);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1929,10 +1934,11 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 27);
+  }, 28);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
+    'AiAssistanceObservabilityDlq',
     'AutomationEventDlq',
     'AutomationScheduleDlq',
     'AnalyticsScheduleDlq',
@@ -1958,6 +1964,187 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
       }),
     }));
   }
+});
+
+test('AI observability consumes only terminal AI rows with bounded stream retries', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const functionEntry = Object.entries(resources).find(([, resource]) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Projects terminal AI assistance records into content-free operational metrics.'
+  );
+  expect(functionEntry).toBeDefined();
+  if (functionEntry === undefined) {
+    throw new Error('AI assistance observability function was not synthesized.');
+  }
+  const [functionLogicalId, workerFunction] = functionEntry;
+  expect(workerFunction).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      Handler: 'index.handler',
+      MemorySize: 256,
+      Runtime: 'nodejs22.x',
+      Timeout: 30,
+      TracingConfig: { Mode: 'Active' },
+      Environment: {
+        Variables: expect.objectContaining({
+          MUKUROJI_APPLICATION_COMMIT_SHA: {
+            Ref: 'ApplicationCommitSha',
+          },
+        }),
+      },
+    }),
+  }));
+
+  const eventSource = Object.values(resources).find((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource).includes(functionLogicalId)
+  ) as { Properties?: Record<string, unknown> } | undefined;
+  expect(eventSource?.Properties).toEqual(expect.objectContaining({
+    BatchSize: 10,
+    BisectBatchOnFunctionError: true,
+    Enabled: true,
+    FunctionResponseTypes: ['ReportBatchItemFailures'],
+    MaximumRetryAttempts: 3,
+    ParallelizationFactor: 1,
+    StartingPosition: 'LATEST',
+  }));
+  expect(JSON.stringify(eventSource?.Properties?.EventSourceArn))
+    .toContain('WorkspaceSearchTable2575AD6B');
+  expect(JSON.stringify(eventSource?.Properties?.DestinationConfig))
+    .toContain('AiAssistanceObservabilityDlq');
+  const filterCriteria = eventSource?.Properties?.FilterCriteria;
+  if (
+    typeof filterCriteria !== 'object' || filterCriteria === null ||
+    !('Filters' in filterCriteria) || !Array.isArray(filterCriteria.Filters)
+  ) {
+    throw new Error('AI assistance observability filters were not synthesized.');
+  }
+  const filterPatterns = filterCriteria.Filters.map((filter) => {
+    if (
+      typeof filter !== 'object' || filter === null ||
+      !('Pattern' in filter) || typeof filter.Pattern !== 'string'
+    ) {
+      throw new Error('AI assistance observability filter pattern is malformed.');
+    }
+    const parsedPattern: unknown = JSON.parse(filter.Pattern);
+    return parsedPattern;
+  });
+  expect(filterPatterns).toEqual([
+    {
+      eventName: ['INSERT', 'MODIFY'],
+      dynamodb: {
+        NewImage: {
+          recordType: { S: ['ai-assistance-generation-idempotency'] },
+          status: { S: ['completed', 'failed'] },
+        },
+      },
+    },
+    {
+      eventName: ['INSERT', 'MODIFY'],
+      dynamodb: {
+        NewImage: {
+          recordType: { S: ['ai-assistance-generation'] },
+          generation: {
+            M: {
+              decision: {
+                M: {
+                  outcome: { S: ['approved', 'rejected'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  ]);
+
+  const functionRoleLogicalId = (
+    (workerFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }
+    }).Properties?.Role?.['Fn::GetAtt'] ?? []
+  )[0];
+  const rolePolicies = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy' &&
+    JSON.stringify(resource).includes(String(functionRoleLogicalId))
+  );
+  const serializedPolicies = JSON.stringify(rolePolicies);
+  expect(serializedPolicies).toContain('dynamodb:DescribeStream');
+  expect(serializedPolicies).toContain('dynamodb:GetRecords');
+  expect(serializedPolicies).toContain('dynamodb:GetShardIterator');
+  expect(serializedPolicies).toContain('dynamodb:ListStreams');
+  expect(serializedPolicies).toContain('sqs:SendMessage');
+  expect(serializedPolicies).not.toContain('dynamodb:GetItem');
+  expect(serializedPolicies).not.toContain('dynamodb:PutItem');
+  expect(serializedPolicies).not.toContain('dynamodb:UpdateItem');
+  expect(serializedPolicies).not.toContain('dynamodb:DeleteItem');
+
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects terminal AI records returned for partial-batch observability retry.',
+    ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+    DatapointsToAlarm: 1,
+    Dimensions: [{
+      Name: 'Service',
+      Value: 'mukuroji-ai-assistance',
+    }],
+    EvaluationPeriods: 1,
+    MetricName: 'ProjectionFailureCount',
+    Namespace: 'Mukuroji/AIAssistance',
+    Period: 300,
+    Statistic: 'Sum',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+
+  for (const alarm of [
+    {
+      description:
+        'Detects AI assistance observability worker invocation failures.',
+      metricName: 'Errors',
+      statistic: 'Sum',
+      threshold: 1,
+    },
+    {
+      description:
+        'Detects throttled AI assistance observability worker invocations.',
+      metricName: 'Throttles',
+      statistic: 'Sum',
+      threshold: 1,
+    },
+    {
+      description:
+        'Detects AI assistance observability stream projection lag of five minutes or more.',
+      metricName: 'IteratorAge',
+      statistic: 'Maximum',
+      threshold: 5 * 60 * 1_000,
+    },
+  ]) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmDescription: alarm.description,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      DatapointsToAlarm: 1,
+      Dimensions: [{
+        Name: 'FunctionName',
+        Value: { Ref: functionLogicalId },
+      }],
+      EvaluationPeriods: 1,
+      MetricName: alarm.metricName,
+      Namespace: 'AWS/Lambda',
+      Period: 300,
+      Statistic: alarm.statistic,
+      Threshold: alarm.threshold,
+      TreatMissingData: 'notBreaching',
+    });
+  }
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects terminal AI assistance records that exhausted observability stream retries.',
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Namespace: 'AWS/SQS',
+    Threshold: 1,
+  });
+  expectQueueRequiresSsl(template, 'AiAssistanceObservabilityDlq');
+  template.hasOutput('AiAssistanceObservabilityDlqUrl', {});
 });
 
 test('tenant retention worker can query and reconcile only tenant and audit stores', () => {

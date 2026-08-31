@@ -19,6 +19,27 @@ test('keeps liveness independent from dependency readiness', async () => {
   expect(await response.json()).toEqual({ ok: true, status: 'alive' })
 })
 
+test('exposes only validated deployment provenance with liveness', async () => {
+  const router = createSystemRouter({
+    applicationCommitSha: '0123456789abcdef0123456789abcdef01234567',
+    readiness: {
+      async check() {
+        return { checks: [], ready: true }
+      },
+    },
+  })
+
+  const response = await router.request('/api/health')
+
+  expect(response.status).toBe(200)
+  expect(response.headers.get('Cache-Control')).toBe('no-store')
+  expect(await response.json()).toEqual({
+    applicationCommitSha: '0123456789abcdef0123456789abcdef01234567',
+    ok: true,
+    status: 'alive',
+  })
+})
+
 test('returns a dependency-aware ready response only after successful checks', async () => {
   const router = createSystemRouter({
     readiness: {

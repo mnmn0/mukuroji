@@ -11,6 +11,8 @@ import {
  * Dependencies required by liveness and readiness system routes.
  */
 export interface SystemRouterDependencies {
+  /** Full Git commit SHA identifying this deployed API runtime, when configured. */
+  readonly applicationCommitSha?: string
   /**
    * Generates a server-controlled correlation identifier when middleware
    * context is unavailable or invalid.
@@ -40,8 +42,16 @@ export function createSystemRouter(
     dependencies.recordFailure ?? recordReadinessFailure
 
   router.get('/', (context) => context.text('mukuroji API'))
-  router.get('/api/health', (context) =>
-    context.json({ ok: true, status: 'alive' }))
+  router.get('/api/health', (context) => {
+    context.header('Cache-Control', 'no-store')
+    return context.json({
+      ok: true,
+      status: 'alive',
+      ...(dependencies.applicationCommitSha === undefined
+        ? {}
+        : { applicationCommitSha: dependencies.applicationCommitSha }),
+    })
+  })
   router.get('/api/ready', async (context) => {
     const correlationId = resolveReadinessCorrelationId(
       context.req.header('X-Correlation-Id'),

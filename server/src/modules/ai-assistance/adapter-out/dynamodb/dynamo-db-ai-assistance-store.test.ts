@@ -14,8 +14,11 @@ import {
 } from '../../../audit'
 import type { AuditEventV1 } from '../../../audit'
 import type {
+  AiAssistanceAuthorizationCondition,
   AiAssistanceGenerationAttemptAuditEnvelope,
+  AiAssistanceGenerationCommitFence,
   FailAiAssistanceGenerationReservationInput,
+  FinalizeAiAssistanceGenerationAttemptInput,
   ReserveAiAssistanceGenerationInput,
   StartAiAssistanceGenerationAttemptInput,
   StoredAiAssistanceFeedback,
@@ -233,6 +236,7 @@ function createSucceededAttempt() {
     startedAt: '2026-08-25T00:01:01.000Z',
     audit: createAttemptAudit(),
     status: 'succeeded',
+    providerOutcome: 'succeeded',
     endedAt: '2026-08-25T00:01:01.030Z',
     latencyMs: 30,
     usage: {
@@ -362,6 +366,71 @@ function createPersistedGenerationItem(
     authorizationToken: record.authorizationToken,
     auditedInput: record.auditedInput,
     expiresAt: Math.floor(Date.parse(record.generation.expiresAt) / 1_000),
+  }
+}
+
+/** Creates a generation record whose identity matches the reservation fixtures. */
+function createCommittedGenerationRecord(): StoredAiAssistanceGeneration {
+  const record = createGenerationRecord('Permission-filtered source context.')
+  return {
+    ...record,
+    generation: {
+      ...record.generation,
+      id: 'generation-2',
+    },
+  }
+}
+
+/** Creates the successful provider completion committed with a generation row. */
+function createSuccessfulCompletion(): FinalizeAiAssistanceGenerationAttemptInput {
+  return {
+    workspaceId: 'workspace-1',
+    memberId: 'member-1',
+    idempotencyKey: 'client-secret-key',
+    inputFingerprint: FINGERPRINT,
+    generationId: 'generation-2',
+    outcome: 'succeeded',
+    providerOutcome: 'succeeded',
+    endedAt: '2026-08-25T00:01:01.030Z',
+    latencyMs: 30,
+    usage: {
+      inputTokens: 10,
+      outputTokens: 20,
+      latencyMs: 30,
+      costUnavailableReason: 'pricing-not-configured',
+    },
+  }
+}
+
+/** Creates the revision fence used by atomic generation commit tests. */
+function createGenerationCommitFence(): AiAssistanceGenerationCommitFence {
+  return {
+    policyRevision: 3,
+    preferenceRevision: 2,
+    authorizationToken: 'authorization-snapshot-1',
+  }
+}
+
+/** Creates a terminal receipt written by expired-attempt recovery. */
+function createExpiredFailedReceipt() {
+  return {
+    ...createPendingReceipt(
+      'generation-2',
+      Date.parse('2026-08-25T00:01:30.000Z'),
+    ),
+    status: 'failed',
+    failedAt: '2026-08-25T00:01:31.000Z',
+    failureCategory: 'upstream',
+    failureCode: 'AiAssistanceAttemptFailed',
+    attempt: {
+      ...createStartedAttempt(),
+      status: 'failed',
+      endedAt: '2026-08-25T00:01:31.000Z',
+      usageUnavailableReason: 'attempt-outcome-indeterminate',
+      providerOutcome: 'indeterminate',
+      failureCategory: 'upstream',
+      failureCode: 'AiAssistanceAttemptFailed',
+    },
   }
 }
 
@@ -570,6 +639,135 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('atomically commits a generation and its terminal provider receipt', async () => {
+    const record = createCommittedGenerationRecord()
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.store.commitGeneration(
+        record,
+        createSuccessfulCompletion(),
+        createGenerationCommitFence(),
+      )).resolves.toEqual(record)
+
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+      ])
+      const transactionItems = harness.commands[0]?.input.TransactItems
+      if (!Array.isArray(transactionItems)) {
+        throw new TypeError('Expected transaction items.')
+      }
+      expect(transactionItems).toHaveLength(4)
+      const generationPut = readRecord(readRecord(transactionItems[0]).Put)
+      expect(readRecord(generationPut.Item)).toMatchObject({
+        recordType: 'ai-assistance-generation',
+        memberId: 'member-1',
+      })
+      const receiptUpdate = readRecord(readRecord(transactionItems[1]).Update)
+      expect(receiptUpdate.ConditionExpression).toContain(
+        '#attempt.#attemptStatus = :started',
+      )
+      expect(receiptUpdate.UpdateExpression).toContain(
+        '#attempt.#providerOutcome = :providerOutcome',
+      )
+      expect(readRecord(receiptUpdate.ExpressionAttributeValues)).toMatchObject({
+        ':receiptStatus': 'completed',
+        ':attemptStatus': 'succeeded',
+        ':providerOutcome': 'succeeded',
+      })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects a generation transaction that would exceed one hundred items', async () => {
+    const record = createCommittedGenerationRecord()
+    const harness = createHarness([])
+    try {
+      await expect(harness.store.commitGeneration(
+        record,
+        createSuccessfulCompletion(),
+        {
+          ...createGenerationCommitFence(),
+          authorizationConditions: Array.from(
+            { length: 97 },
+            (_, index): AiAssistanceAuthorizationCondition => ({
+              kind: 'source',
+              tableName: 'SourceTable',
+              key: { workspaceId: 'workspace-1', recordKey: `SOURCE#${index}` },
+              expectedAttributes: { revision: index },
+            }),
+          ),
+        },
+      )).rejects.toMatchObject({ code: 'InvalidAiAssistanceRecord' })
+      expect(harness.commands).toHaveLength(0)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('reconciles response loss after the atomic generation commit', async () => {
+    const record = createCommittedGenerationRecord()
+    const completedReceipt = {
+      ...createPendingReceipt(
+        'generation-2',
+        Date.parse('2026-08-25T00:01:30.000Z'),
+      ),
+      status: 'completed',
+      attempt: createSucceededAttempt(),
+    }
+    const harness = createHarness([
+      new Error('connection closed after transaction committed'),
+      { Item: completedReceipt },
+      { Item: createPersistedGenerationItem(record) },
+    ])
+    try {
+      await expect(harness.store.commitGeneration(
+        record,
+        createSuccessfulCompletion(),
+        createGenerationCommitFence(),
+      )).resolves.toEqual(record)
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+        'GetCommand',
+        'GetCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('does not create an orphan generation when expired recovery wins the receipt race', async () => {
+    const record = createCommittedGenerationRecord()
+    const harness = createHarness([
+      transactionCancellation([
+        undefined,
+        'ConditionalCheckFailed',
+        undefined,
+        undefined,
+      ]),
+      { Item: createExpiredFailedReceipt() },
+      {},
+    ])
+    try {
+      await expect(harness.store.commitGeneration(
+        record,
+        createSuccessfulCompletion(),
+        createGenerationCommitFence(),
+      )).rejects.toMatchObject({
+        category: 'upstream',
+        code: 'AiAssistanceAttemptFailed',
+        idempotencyReplayed: true,
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'TransactWriteCommand',
+        'GetCommand',
+        'GetCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('atomically reserves one idempotency receipt and both fixed-window budgets', async () => {
     const harness = createHarness([{}])
     try {
@@ -648,9 +846,192 @@ describe('DynamoDbAiAssistanceStore', () => {
       })).resolves.toEqual({
         status: 'pending',
         generationId: 'generation-1',
+        leaseExpiresAt: '1970-01-01T00:00:00.001Z',
         expiresAt: '2026-04-26T00:01:00.000Z',
       })
       expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('keeps a started receipt pending before its recovery lease expires', async () => {
+    const pendingReceipt = {
+      ...createPendingReceipt(
+        'generation-2',
+        Date.parse('2026-08-25T00:01:30.000Z'),
+      ),
+      attempt: createStartedAttempt(),
+    }
+    const harness = createHarness([
+      conditionalFailure(),
+      { Item: pendingReceipt },
+    ])
+    try {
+      await expect(harness.store.expireGenerationAttempt({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+        generationId: 'generation-2',
+        failedAt: '2026-08-25T00:01:29.999Z',
+      })).resolves.toEqual({
+        status: 'pending',
+        generationId: 'generation-2',
+        leaseExpiresAt: '2026-08-25T00:01:30.000Z',
+        expiresAt: '2026-04-26T00:01:00.000Z',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'UpdateCommand',
+        'GetCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('marks provider dispatch through an exact idempotent receipt CAS', async () => {
+    const markedReceipt = {
+      ...createPendingReceipt(
+        'generation-2',
+        Date.parse('2026-08-25T00:01:30.000Z'),
+      ),
+      attempt: {
+        ...createStartedAttempt(),
+        providerStartedAt: '2026-08-25T00:01:02.000Z',
+      },
+    }
+    const harness = createHarness([
+      new Error('connection closed after provider marker committed'),
+      { Item: markedReceipt },
+      conditionalFailure(),
+      { Item: markedReceipt },
+    ])
+    const input = {
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      idempotencyKey: 'client-secret-key',
+      inputFingerprint: FINGERPRINT,
+      generationId: 'generation-2',
+      attemptStartedAt: '2026-08-25T00:01:01.000Z',
+      providerStartedAt: '2026-08-25T00:01:02.000Z',
+    }
+    try {
+      await expect(harness.store.markGenerationProviderStarted(input))
+        .resolves.toBeUndefined()
+      await expect(harness.store.markGenerationProviderStarted(input))
+        .resolves.toBeUndefined()
+
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'UpdateCommand',
+        'GetCommand',
+        'UpdateCommand',
+        'GetCommand',
+      ])
+      expect(harness.commands[0]?.input.UpdateExpression).toBe(
+        'SET #attempt.#providerStartedAt = :providerStartedAt',
+      )
+      expect(harness.commands[0]?.input.ConditionExpression).toContain(
+        'attribute_not_exists(#attempt.#providerStartedAt)',
+      )
+      expect(harness.commands[0]?.input.ExpressionAttributeValues).toMatchObject({
+        ':attemptStartedAt': input.attemptStartedAt,
+        ':providerStartedAt': input.providerStartedAt,
+      })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects a provider dispatch timestamp before its admission marker', async () => {
+    const harness = createHarness([])
+    try {
+      await expect(harness.store.markGenerationProviderStarted({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+        generationId: 'generation-2',
+        attemptStartedAt: '2026-08-25T00:01:01.000Z',
+        providerStartedAt: '2026-08-25T00:01:00.999Z',
+      })).rejects.toMatchObject({ code: 'InvalidAiAssistanceRecord' })
+      expect(harness.commands).toHaveLength(0)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('terminalizes an expired attempt once across competing recovery calls', async () => {
+    const harness = createHarness([
+      {},
+      conditionalFailure(),
+      { Item: createExpiredFailedReceipt() },
+    ])
+    const input = {
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      idempotencyKey: 'client-secret-key',
+      inputFingerprint: FINGERPRINT,
+      generationId: 'generation-2',
+      failedAt: '2026-08-25T00:01:31.000Z',
+    }
+    try {
+      await expect(harness.store.expireGenerationAttempt(input)).resolves.toMatchObject({
+        status: 'failed',
+        generationId: 'generation-2',
+        failureCategory: 'upstream',
+        failureCode: 'AiAssistanceAttemptFailed',
+      })
+      await expect(harness.store.expireGenerationAttempt(input)).resolves.toMatchObject({
+        status: 'failed',
+        generationId: 'generation-2',
+        failureCategory: 'upstream',
+        failureCode: 'AiAssistanceAttemptFailed',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'UpdateCommand',
+        'UpdateCommand',
+        'GetCommand',
+      ])
+      expect(harness.commands[0]?.input.ConditionExpression).toContain(
+        '#attempt.#attemptStatus = :started AND #leaseExpiresAt <= :failedAtEpoch',
+      )
+      expect(harness.commands[0]?.input.UpdateExpression).toContain(
+        '#attempt.#providerOutcome = :providerOutcome',
+      )
+      expect(harness.commands[0]?.input.UpdateExpression).not.toContain(
+        '#attempt.#latencyMs',
+      )
+      expect(harness.commands[0]?.input.ExpressionAttributeValues).toMatchObject({
+        ':providerOutcome': 'indeterminate',
+        ':usageUnavailableReason': 'attempt-outcome-indeterminate',
+      })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('reconciles response loss after expired-attempt recovery', async () => {
+    const harness = createHarness([
+      new Error('connection closed after expired recovery committed'),
+      { Item: createExpiredFailedReceipt() },
+    ])
+    try {
+      await expect(harness.store.expireGenerationAttempt({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+        generationId: 'generation-2',
+        failedAt: '2026-08-25T00:01:31.000Z',
+      })).resolves.toMatchObject({
+        status: 'failed',
+        failureCode: 'AiAssistanceAttemptFailed',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'UpdateCommand',
+        'GetCommand',
+      ])
     } finally {
       harness.restore()
     }
@@ -712,6 +1093,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         endedAt: '2026-08-25T00:01:13.000Z',
         latencyMs: 12_000,
         usageUnavailableReason: 'provider-did-not-report',
+        providerOutcome: 'timeout',
         failureCategory: 'timeout',
         failureCode: 'AiAssistanceProviderTimeout',
       })
@@ -771,6 +1153,63 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('rejects provider outcomes that contradict the stable failure code', async () => {
+    const harness = createHarness([])
+    try {
+      await expect(harness.store.finalizeGenerationAttempt({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+        generationId: 'generation-2',
+        outcome: 'failed',
+        endedAt: '2026-08-25T00:01:13.000Z',
+        latencyMs: 12_000,
+        usageUnavailableReason: 'provider-did-not-report',
+        providerOutcome: 'timeout',
+        failureCategory: 'rate-limit',
+        failureCode: 'AiAssistanceProviderRateLimited',
+      })).rejects.toMatchObject({ code: 'InvalidAiAssistanceRecord' })
+      expect(harness.commands).toHaveLength(0)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('accepts a bounded model-refusal outcome with retained usage', async () => {
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.store.finalizeGenerationAttempt({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+        generationId: 'generation-2',
+        outcome: 'failed',
+        endedAt: '2026-08-25T00:01:13.000Z',
+        latencyMs: 12_000,
+        usage: {
+          inputTokens: 42,
+          outputTokens: 0,
+          latencyMs: 12_000,
+          costUnavailableReason: 'pricing-not-configured',
+        },
+        providerOutcome: 'refused',
+        failureCategory: 'upstream',
+        failureCode: 'AiAssistanceModelRefused',
+      })).resolves.toBeUndefined()
+
+      expect(readRecord(
+        harness.commands[0]?.input.ExpressionAttributeValues,
+      )).toEqual(expect.objectContaining({
+        ':providerOutcome': 'refused',
+        ':failureCode': 'AiAssistanceModelRefused',
+      }))
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('accepts response-loss replays of identical attempt start and finalization writes', async () => {
     const startedReceipt = {
       ...createPendingReceipt('generation-2', 1_777_161_690_000),
@@ -796,6 +1235,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         endedAt: '2026-08-25T00:01:13.000Z',
         latencyMs: 12_000,
         usageUnavailableReason: 'provider-did-not-report',
+        providerOutcome: 'timeout',
         failureCategory: 'timeout',
         failureCode: 'AiAssistanceProviderTimeout',
       },
@@ -817,6 +1257,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         endedAt: '2026-08-25T00:01:13.000Z',
         latencyMs: 12_000,
         usageUnavailableReason: 'provider-did-not-report',
+        providerOutcome: 'timeout',
         failureCategory: 'timeout',
         failureCode: 'AiAssistanceProviderTimeout',
       })).resolves.toBeUndefined()
@@ -924,6 +1365,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         endedAt: '2026-08-25T00:01:13.000Z',
         latencyMs: 12_000,
         usageUnavailableReason: 'provider-did-not-report',
+        providerOutcome: 'timeout',
         failureCategory: 'timeout',
         failureCode: 'AiAssistanceProviderTimeout',
       })).resolves.toBeUndefined()
@@ -995,6 +1437,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         endedAt: '2026-08-25T00:01:13.000Z',
         latencyMs: 12_000,
         usageUnavailableReason: 'provider-did-not-report',
+        providerOutcome: 'timeout',
         failureCategory: 'timeout',
         failureCode: 'AiAssistanceProviderTimeout',
       },
@@ -1054,6 +1497,7 @@ describe('DynamoDbAiAssistanceStore', () => {
       expect(concurrent).toEqual({
         status: 'pending',
         generationId: 'generation-2',
+        leaseExpiresAt: '2026-08-25T00:01:30.000Z',
         expiresAt: '2026-04-26T00:01:00.000Z',
       })
       expect(harness.commands.map((command) => command.name)).toEqual([
@@ -1184,7 +1628,9 @@ describe('DynamoDbAiAssistanceStore', () => {
       { Item: persisted },
     ])
     try {
-      await expect(replayHarness.store.putFeedback(feedback)).resolves.toBeUndefined()
+      await expect(replayHarness.store.putFeedback(feedback)).resolves.toEqual({
+        replayed: true,
+      })
     } finally {
       replayHarness.restore()
     }
@@ -1341,7 +1787,7 @@ describe('DynamoDbAiAssistanceStore', () => {
         'generation-1',
         { outcome: 'approved', expectedRevision: 1 },
         '2026-08-25T00:02:00.000Z',
-      )).resolves.toEqual(decided)
+      )).resolves.toEqual({ record: decided, replayed: true })
       expect(harness.commands.map((command) => command.name)).toEqual([
         'GetCommand',
         'PutCommand',

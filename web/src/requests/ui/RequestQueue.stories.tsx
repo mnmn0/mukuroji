@@ -221,7 +221,7 @@ export const StaleAiDraft: Story = {
     await userEvent.click(canvas.getByRole('button', { name: 'Simulate source update' }))
 
     await expect(canvas.getByRole('alert')).toHaveTextContent(
-      'A source changed. Review the latest state before generating again.',
+      'The source or AI draft availability changed. Review the latest state before generating again.',
     )
     await expect(canvas.queryByText('Unblock customer Workspace provisioning')).not.toBeInTheDocument()
     await expect(canvas.queryByRole('button', { name: 'Use in conversion form' })).not.toBeInTheDocument()
@@ -268,6 +268,7 @@ function AiRequestQueueStory({
     isFeedbackPending: false,
     isGenerating: false,
     reset: () => setGeneration(undefined),
+    revalidateGeneration: async () => generation,
     sendFeedback: async () => undefined,
   }
 
@@ -311,6 +312,7 @@ function StaleAiRequestQueueStory(props: AiRequestQueueStoryProps) {
     isFeedbackPending: false,
     isGenerating: false,
     reset: () => setGeneration(undefined),
+    revalidateGeneration: async () => undefined,
     sendFeedback: async () => undefined,
   }
   const selectedSubmission = { ...normalizedSubmission, revision: sourceRevision }

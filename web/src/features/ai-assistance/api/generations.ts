@@ -1,4 +1,5 @@
 import type {
+  AiAssistanceContent,
   AiAssistanceGeneration,
   AiAssistanceTask,
   CreateAiAssistanceFeedbackRequest,
@@ -18,6 +19,14 @@ import { parseAiAssistanceGenerationResponse } from './generationResponse'
 const aiAssistanceApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
 const defaultErrorMessage = 'Unable to complete the AI assistance request.'
 
+/** Parsed JSON and trusted response metadata returned by the AI assistance transport. */
+type AiAssistanceJsonResponse = {
+  /** Untrusted JSON body returned by the endpoint. */
+  readonly body: unknown
+  /** Whether the server explicitly identified this response as an idempotency replay. */
+  readonly idempotencyReplayed: boolean
+}
+
 /** Options shared by explicit AI generation requests. */
 export type GenerateAiAssistanceOptions = {
   /** Bearer access token for the active Workspace member. */
@@ -28,6 +37,46 @@ export type GenerateAiAssistanceOptions = {
   mutationContext: MutationRequestContext
   /** Optional signal used to cancel a user-initiated generation. */
   signal?: AbortSignal
+}
+
+/** Options for re-reading one owner-scoped AI generation. */
+export type GetAiAssistanceGenerationOptions = {
+  /** Bearer access token for the active Workspace member. */
+  accessToken: string
+  /** Generation whose current disclosure state must be revalidated. */
+  generationId: string
+  /** Workflow expected by the product surface performing the read. */
+  expectedTask: AiAssistanceTask
+}
+
+/** Options for revalidating one approved generation immediately before local adoption. */
+export type RevalidateApprovedAiAssistanceGenerationOptions = {
+  /** Bearer access token for the active Workspace member. */
+  accessToken: string
+  /** Exact approved generation returned by the decision endpoint. */
+  expectedGeneration: AiAssistanceGeneration
+}
+
+/** Stable reason returned by a disclosure-safe withheld generation. */
+type AiAssistanceWithheldReason = Extract<
+  AiAssistanceContent,
+  { availability: 'withheld' }
+>['reasonCode']
+
+/**
+ * Failure raised after the decision endpoint returned successful JSON that cannot represent the
+ * reviewed decision safely.
+ */
+export class AiAssistanceDecisionResponseError extends AiAssistanceApiError {
+  /**
+   * Creates a provider-classified error that also proves a decision response was received.
+   *
+   * @param message - Safe explanation of the invalid decision response.
+   */
+  constructor(message: string) {
+    super(502, message, 'InvalidAiAssistanceResponse')
+    this.name = 'AiAssistanceDecisionResponseError'
+  }
 }
 
 /**
@@ -79,7 +128,7 @@ export type CreateAiAssistanceFeedbackOptions = {
 export async function generateAiAssistance(
   options: GenerateAiAssistanceOptions,
 ): Promise<AiAssistanceGeneration> {
-  const value = await requestJson(
+  const response = await requestJson(
     `${aiAssistanceApiBaseUrl}/generations`,
     options.accessToken,
     {
@@ -93,7 +142,77 @@ export async function generateAiAssistance(
     },
   )
 
-  return parseAiAssistanceGenerationResponse(value, options.input.task)
+  try {
+    return parseAiAssistanceGenerationResponse(response.body, options.input.task)
+  } catch (error) {
+    if (
+      error instanceof AiAssistanceApiError &&
+      error.code === 'InvalidAiAssistanceResponse'
+    ) {
+      throw new AiAssistanceApiError(
+        error.status,
+        error.message,
+        error.code,
+        {
+          idempotencyReplayed: response.idempotencyReplayed,
+          successfulResponseReceived: true,
+        },
+      )
+    }
+    throw error
+  }
+}
+
+/**
+ * Re-reads one generation through the server's current authorization and retention projection.
+ *
+ * @param options - Authentication, generation identity, and expected workflow.
+ * @returns The validated current generation projection.
+ */
+export async function getAiAssistanceGeneration(
+  options: GetAiAssistanceGenerationOptions,
+): Promise<AiAssistanceGeneration> {
+  const response = await requestJson(
+    `${aiAssistanceApiBaseUrl}/generations/${encodeURIComponent(options.generationId)}`,
+    options.accessToken,
+    {
+      cache: 'no-store',
+      method: 'GET',
+    },
+  )
+
+  return parseAiAssistanceGenerationResponse(response.body, options.expectedTask)
+}
+
+/**
+ * Revalidates an approved generation immediately before a workflow copies its content locally.
+ *
+ * @param options - Authentication and the exact approved decision response under review.
+ * @returns The matching currently available generation returned by the read boundary.
+ * @throws AiAssistanceApiError when disclosure is withheld or the read no longer matches.
+ */
+export async function revalidateApprovedAiAssistanceGeneration(
+  options: RevalidateApprovedAiAssistanceGenerationOptions,
+): Promise<AiAssistanceGeneration> {
+  const generation = await getAiAssistanceGeneration({
+    accessToken: options.accessToken,
+    expectedTask: options.expectedGeneration.task,
+    generationId: options.expectedGeneration.id,
+  })
+  if (generation.content.availability === 'withheld') {
+    throw createAiAssistanceWithheldError(generation.content.reasonCode)
+  }
+  if (!isApprovedAiAssistanceRevalidationConsistent(
+    generation,
+    options.expectedGeneration,
+  )) {
+    throw new AiAssistanceApiError(
+      502,
+      'AI assistance revalidation returned a generation different from the approved draft.',
+      'InvalidAiAssistanceResponse',
+    )
+  }
+  return generation
 }
 
 /**
@@ -105,7 +224,7 @@ export async function generateAiAssistance(
 export async function decideAiAssistanceGeneration(
   options: DecideAiAssistanceOptions,
 ): Promise<AiAssistanceGeneration> {
-  const value = await requestJson(
+  const response = await requestJson(
     `${aiAssistanceApiBaseUrl}/generations/${encodeURIComponent(options.generationId)}/decision`,
     options.accessToken,
     {
@@ -118,19 +237,28 @@ export async function decideAiAssistanceGeneration(
     },
   )
 
-  const generation = parseAiAssistanceGenerationResponse(value, options.expectedTask)
+  let generation: AiAssistanceGeneration
+  try {
+    generation = parseAiAssistanceGenerationResponse(response.body, options.expectedTask)
+  } catch (error) {
+    if (
+      error instanceof AiAssistanceApiError &&
+      error.code === 'InvalidAiAssistanceResponse'
+    ) {
+      throw new AiAssistanceDecisionResponseError(
+        'AI assistance decision returned an invalid generation.',
+      )
+    }
+    throw error
+  }
   if (generation.decision?.outcome !== options.expectedOutcome) {
-    throw new AiAssistanceApiError(
-      502,
+    throw new AiAssistanceDecisionResponseError(
       'AI assistance decision returned an unexpected outcome.',
-      'InvalidAiAssistanceResponse',
     )
   }
   if (!isDecisionGenerationEnvelopeConsistent(generation, options.expectedGeneration)) {
-    throw new AiAssistanceApiError(
-      502,
+    throw new AiAssistanceDecisionResponseError(
       'AI assistance decision returned a generation different from the reviewed generation.',
-      'InvalidAiAssistanceResponse',
     )
   }
   return generation
@@ -165,6 +293,62 @@ function isDecisionGenerationEnvelopeConsistent(
 
   return expectedGeneration.content.availability === 'available' &&
     generation.content.availability === 'withheld'
+}
+
+/**
+ * Checks that a fresh generation read is the exact available draft approved by the operator.
+ *
+ * @param generation - Current generation returned by the authorization-aware GET endpoint.
+ * @param expectedGeneration - Approved generation returned by the decision endpoint.
+ * @returns Whether adoption may continue with the freshly revalidated generation.
+ */
+export function isApprovedAiAssistanceRevalidationConsistent(
+  generation: AiAssistanceGeneration,
+  expectedGeneration: AiAssistanceGeneration,
+): boolean {
+  return generation.content.availability === 'available' &&
+    expectedGeneration.content.availability === 'available' &&
+    generation.schemaVersion === expectedGeneration.schemaVersion &&
+    generation.id === expectedGeneration.id &&
+    generation.task === expectedGeneration.task &&
+    generation.revision === expectedGeneration.revision &&
+    generation.decision?.outcome === 'approved' &&
+    expectedGeneration.decision?.outcome === 'approved' &&
+    generation.decision.decidedAt === expectedGeneration.decision.decidedAt &&
+    generation.createdAt === expectedGeneration.createdAt &&
+    Date.parse(generation.expiresAt) <= Date.parse(expectedGeneration.expiresAt) &&
+    stableSerialize(generation.details) === stableSerialize(expectedGeneration.details) &&
+    stableSerialize(generation.content) === stableSerialize(expectedGeneration.content)
+}
+
+/**
+ * Converts a withheld projection into a non-sensitive failure understood by the controller.
+ *
+ * @param reasonCode - Server-authoritative reason that content can no longer be disclosed.
+ * @returns An API error whose status maps to the existing permission or conflict UI.
+ */
+export function createAiAssistanceWithheldError(
+  reasonCode: AiAssistanceWithheldReason,
+): AiAssistanceApiError {
+  if (reasonCode === 'permission-changed') {
+    return new AiAssistanceApiError(
+      403,
+      'AI assistance content is no longer available because access changed.',
+      'AiAssistanceAuthorizationChanged',
+    )
+  }
+  if (reasonCode === 'source-changed') {
+    return new AiAssistanceApiError(
+      409,
+      'AI assistance content is no longer available because a source changed.',
+      'AiAssistanceSourceChanged',
+    )
+  }
+  return new AiAssistanceApiError(
+    409,
+    'AI assistance content is no longer available because its retention period ended.',
+    'AiAssistanceRetentionExpired',
+  )
 }
 
 /**
@@ -212,7 +396,7 @@ async function requestJson(
   accessToken: string,
   init: RequestInit,
   allowEmptyResponse = false,
-): Promise<unknown> {
+): Promise<AiAssistanceJsonResponse> {
   let response: Response
   try {
     response = await fetch(url, {
@@ -227,21 +411,30 @@ async function requestJson(
     throw new AiAssistanceApiError(0, defaultErrorMessage, 'AiAssistanceNetworkError')
   }
 
-  const value = await readJson(response, allowEmptyResponse)
+  const idempotencyReplayed = hasConfirmedIdempotencyReplay(response)
+  const value = await readJson(response, allowEmptyResponse, idempotencyReplayed)
   if (!response.ok) {
     const error = isRecord(value) ? value : {}
     throw new AiAssistanceApiError(
       response.status,
       typeof error.message === 'string' ? error.message : defaultErrorMessage,
       typeof error.code === 'string' ? error.code : undefined,
+      { idempotencyReplayed },
     )
   }
 
-  return value
+  return {
+    body: value,
+    idempotencyReplayed,
+  }
 }
 
 /** Reads JSON while accepting the feedback endpoint's empty success response. */
-async function readJson(response: Response, allowEmptyResponse: boolean): Promise<unknown> {
+async function readJson(
+  response: Response,
+  allowEmptyResponse: boolean,
+  idempotencyReplayed: boolean,
+): Promise<unknown> {
   let text: string
   try {
     text = await response.text()
@@ -250,6 +443,10 @@ async function readJson(response: Response, allowEmptyResponse: boolean): Promis
       0,
       defaultErrorMessage,
       'AiAssistanceNetworkError',
+      {
+        idempotencyReplayed,
+        successfulResponseReceived: response.ok,
+      },
     )
   }
   if (!text) {
@@ -258,6 +455,10 @@ async function readJson(response: Response, allowEmptyResponse: boolean): Promis
       response.status,
       'AI assistance API returned an empty response.',
       'InvalidAiAssistanceResponse',
+      {
+        idempotencyReplayed,
+        successfulResponseReceived: response.ok,
+      },
     )
   }
 
@@ -268,8 +469,22 @@ async function readJson(response: Response, allowEmptyResponse: boolean): Promis
       response.status,
       'AI assistance API returned invalid JSON.',
       'InvalidAiAssistanceResponse',
+      {
+        idempotencyReplayed,
+        successfulResponseReceived: response.ok,
+      },
     )
   }
+}
+
+/**
+ * Accepts only the canonical server replay marker and rejects malformed header values.
+ *
+ * @param response - HTTP response whose server-owned replay metadata is being inspected.
+ * @returns Whether the response contains the exact canonical replay marker.
+ */
+function hasConfirmedIdempotencyReplay(response: Response): boolean {
+  return response.headers.get('Idempotency-Replayed') === 'true'
 }
 
 /** Narrows an unknown JSON value to a record. */

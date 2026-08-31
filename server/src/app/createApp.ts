@@ -49,6 +49,9 @@ export function createApp(dependencies: AppDependencies): Hono {
     auditRejectedEnterpriseSecurityMutation,
   )
   app.route('/', createSystemRouter({
+    ...(dependencies.operational.applicationCommitSha === undefined
+      ? {}
+      : { applicationCommitSha: dependencies.operational.applicationCommitSha }),
     readiness: createRuntimeControlAwareReadinessProbe(
       dependencies.operational.readiness,
       dependencies.operational.runtimeControl,

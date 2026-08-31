@@ -125,6 +125,24 @@ test('keeps liveness independent from the runtime-control provider', async () =>
   expect(readinessCalls).toBe(0)
 })
 
+test('wires deployment commit provenance into liveness', async () => {
+  const app = createApp(overrideAppDependencies(
+    createTestAppDependencies(),
+    {
+      applicationCommitSha: '0123456789abcdef0123456789abcdef01234567',
+    },
+  ))
+
+  const response = await app.request('/api/health')
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({
+    applicationCommitSha: '0123456789abcdef0123456789abcdef01234567',
+    ok: true,
+    status: 'alive',
+  })
+})
+
 test('fails readiness before dependency probes unless runtime control is current and enabled', async () => {
   const blockedSnapshots: RuntimeControlSnapshot[] = [
     {

@@ -8,6 +8,7 @@ test('loads stable local server defaults without mutating the environment', () =
   const config = loadServerConfig(environment, { localBun: true })
 
   expect(config).toMatchObject({
+    applicationCommitSha: undefined,
     awsRegion: 'us-east-1',
     cognitoEndpoint: 'http://localhost:4566',
     dynamoDbEndpoint: 'http://localhost:4566',
@@ -20,6 +21,27 @@ test('loads stable local server defaults without mutating the environment', () =
   })
   expect(config.allowedOrigins).toContain('http://localhost:5173')
   expect(environment).toEqual({ NODE_ENV: 'test' })
+})
+
+test('validates optional deployment commit provenance', () => {
+  const applicationCommitSha = '0123456789abcdef0123456789abcdef01234567'
+
+  expect(loadServerConfig({
+    MUKUROJI_APPLICATION_COMMIT_SHA: applicationCommitSha,
+  }, { localBun: true }).applicationCommitSha).toBe(applicationCommitSha)
+
+  for (const invalid of [
+    '',
+    '0123456789abcdef0123456789abcdef0123456',
+    '0123456789ABCDEF0123456789ABCDEF01234567',
+    'not-a-commit-sha',
+  ]) {
+    expect(() => loadServerConfig({
+      MUKUROJI_APPLICATION_COMMIT_SHA: invalid,
+    }, { localBun: true })).toThrow(
+      'MUKUROJI_APPLICATION_COMMIT_SHA must be one full lowercase 40-character Git commit SHA.',
+    )
+  }
 })
 
 for (const legacyName of [

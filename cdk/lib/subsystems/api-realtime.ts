@@ -605,6 +605,8 @@ export function buildApiRuntime(
         description: cdk.Fn.join(' ', [
           'API runtime configuration revision',
           input.parameters.apiRuntimeConfigurationRevision.valueAsString,
+          'application commit',
+          input.parameters.applicationCommitSha.valueAsString,
         ]),
       },
       bundling: {
@@ -618,6 +620,10 @@ export function buildApiRuntime(
   apiFunction.addEnvironment(
     'AI_ASSISTANCE_ALLOWED_MODEL_IDS',
     aiBedrockModelId.valueAsString,
+  );
+  apiFunction.addEnvironment(
+    'MUKUROJI_APPLICATION_COMMIT_SHA',
+    input.parameters.applicationCommitSha.valueAsString,
   );
   apiFunction.addEnvironment(
     'AI_ASSISTANCE_BEDROCK_REGION',
@@ -1108,6 +1114,88 @@ export function buildApiRuntime(
         Service: 'mukuroji-api',
       },
       period: cdk.Duration.minutes(5),
+      statistic: 'Sum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  const aiMetricConfiguration = {
+    namespace: 'Mukuroji/AIAssistance',
+    dimensionsMap: {
+      Service: 'mukuroji-ai-assistance',
+    },
+    period: cdk.Duration.minutes(5),
+  };
+  new cloudwatch.Alarm(scope, 'AiAssistanceProviderFailureAlarm', {
+    alarmDescription:
+      'Detects failed AI assistance provider attempts after durable attempt finalization.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: new cloudwatch.Metric({
+      ...aiMetricConfiguration,
+      metricName: 'ProviderFailureCount',
+      statistic: 'Sum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'AiAssistanceProviderThrottleAlarm', {
+    alarmDescription:
+      'Detects repeated upstream AI provider throttling separately from local budget admission.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: new cloudwatch.Metric({
+      ...aiMetricConfiguration,
+      metricName: 'ProviderThrottledCount',
+      statistic: 'Sum',
+    }),
+    threshold: 3,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'AiAssistanceInvalidOutputAlarm', {
+    alarmDescription:
+      'Detects AI provider responses rejected by the strict structured-output boundary.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: new cloudwatch.Metric({
+      ...aiMetricConfiguration,
+      metricName: 'ProviderInvalidOutputCount',
+      statistic: 'Sum',
+    }),
+    threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'AiAssistanceProviderLatencyAlarm', {
+    alarmDescription:
+      'Detects sustained p95 AI provider latency above the generation budget.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 2,
+    evaluationPeriods: 3,
+    metric: new cloudwatch.Metric({
+      ...aiMetricConfiguration,
+      metricName: 'ProviderLatency',
+      statistic: 'p95',
+    }),
+    threshold: cdk.Duration.seconds(12).toMilliseconds(),
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'AiAssistanceUsageUnavailableAlarm', {
+    alarmDescription:
+      'Detects provider attempts without complete token or cost accounting.',
+    comparisonOperator:
+      cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: new cloudwatch.Metric({
+      ...aiMetricConfiguration,
+      metricName: 'UsageUnavailableCount',
       statistic: 'Sum',
     }),
     threshold: 1,

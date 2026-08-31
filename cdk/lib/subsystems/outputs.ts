@@ -86,6 +86,8 @@ export type StackOutputResources = {
   readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
   /** Dead-letter queue for collaboration projection failures. */
   readonly collaborationProjectionDlq: sqs.IQueue;
+  /** Dead-letter queue for terminal AI observability projection failures. */
+  readonly aiAssistanceObservabilityDlq: sqs.IQueue;
   /** Dead-letter queue for enterprise identity maintenance failures. */
   readonly enterpriseIdentityMaintenanceDlq: sqs.IQueue;
   /** Lambda function that processes enterprise SCIM group jobs. */
@@ -297,6 +299,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'CollaborationProjectionDlqUrl', {
     value: resources.collaborationProjectionDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'AiAssistanceObservabilityDlqUrl', {
+    value: resources.aiAssistanceObservabilityDlq.queueUrl,
   });
   new cdk.CfnOutput(scope, 'EnterpriseIdentityMaintenanceDlqUrl', {
     value: resources.enterpriseIdentityMaintenanceDlq.queueUrl,

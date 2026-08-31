@@ -16,23 +16,29 @@ import type {
   GenerateAiAssistanceRequest,
 } from '@mukuroji/contracts'
 import { z } from 'zod'
-import type {
-  AiAssistanceStore,
-  AiAssistanceGenerationAttemptAuditEnvelope,
-  AiAssistanceAuthorizationCondition,
-  AiAssistanceDecisionCommitFence,
-  AiAssistanceFeedbackCommitFence,
-  AiAssistanceGenerationCommitFence,
-  AiAssistanceGenerationReservation,
-  AiAssistancePolicyAuthorizationFence,
-  CompleteAiAssistanceGenerationReservationInput,
-  FailAiAssistanceGenerationReservationInput,
-  FinalizeAiAssistanceGenerationAttemptInput,
-  ReadAiAssistanceGenerationReservationInput,
-  ReserveAiAssistanceGenerationInput,
-  StartAiAssistanceGenerationAttemptInput,
-  StoredAiAssistanceFeedback,
-  StoredAiAssistanceGeneration,
+import {
+  AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS,
+  type AiAssistanceStore,
+  type AiAssistanceGenerationAttemptAuditEnvelope,
+  type AiAssistanceAuthorizationCondition,
+  type AiAssistanceDecisionCommitFence,
+  type AiAssistanceDecisionStoreResult,
+  type AiAssistanceFeedbackCommitFence,
+  type AiAssistanceFeedbackWriteResult,
+  type AiAssistanceGenerationCommitFence,
+  type AiAssistanceGenerationReservation,
+  type AiAssistanceProviderAttemptOutcome,
+  type AiAssistancePolicyAuthorizationFence,
+  type CompleteAiAssistanceGenerationReservationInput,
+  type ExpireAiAssistanceGenerationAttemptInput,
+  type FailAiAssistanceGenerationReservationInput,
+  type FinalizeAiAssistanceGenerationAttemptInput,
+  type MarkAiAssistanceGenerationProviderStartedInput,
+  type ReadAiAssistanceGenerationReservationInput,
+  type ReserveAiAssistanceGenerationInput,
+  type StartAiAssistanceGenerationAttemptInput,
+  type StoredAiAssistanceFeedback,
+  type StoredAiAssistanceGeneration,
 } from '../../application/ports/ai-assistance-ports'
 import {
   createAuditTransactPut,
@@ -94,7 +100,9 @@ const aiAssistanceErrorCodeSchema = z.enum([
   'AiAssistanceDecisionAlreadyRecorded',
   'AiAssistanceAttemptFailed',
   'AiAssistancePersistenceError',
+  'AiAssistanceModelRefused',
   'AiAssistanceProviderError',
+  'AiAssistanceProviderRateLimited',
   'AiAssistanceProviderTimeout',
   'InvalidAiAssistanceRecord',
 ])
@@ -162,13 +170,26 @@ const generationAttemptSchema = z.object({
   promptVersion: z.string().min(1).max(256),
   traceId: z.string().min(1).max(256),
   startedAt: z.string().datetime({ offset: true }),
+  providerStartedAt: z.string().datetime({ offset: true }).optional(),
   audit: generationAttemptAuditSchema,
   status: z.enum(['started', 'succeeded', 'failed']),
   endedAt: z.string().datetime({ offset: true }).optional(),
   latencyMs: z.number().int().min(0).optional(),
   usage: aiAssistanceUsageSchema.optional(),
-  usageUnavailableReason: z.literal('provider-did-not-report').optional(),
+  usageUnavailableReason: z.enum([
+    'provider-did-not-report',
+    'attempt-outcome-indeterminate',
+  ]).optional(),
   providerTraceId: z.string().min(1).max(256).optional(),
+  providerOutcome: z.enum([
+    'succeeded',
+    'failed',
+    'throttled',
+    'timeout',
+    'refused',
+    'invalid-output',
+    'indeterminate',
+  ]).optional(),
   failureCategory: aiAssistanceErrorCategorySchema.optional(),
   failureCode: aiAssistanceErrorCodeSchema.optional(),
 }).strict()
@@ -281,14 +302,30 @@ const idempotencyItemSchema = z.object({
   if (attempt === undefined) return
   const hasUsage = attempt.usage !== undefined
   const hasUsageUnavailableReason = attempt.usageUnavailableReason !== undefined
+  const hasIndeterminateOutcome = attempt.providerOutcome === 'indeterminate'
   const hasAttemptFailure = attempt.failureCategory !== undefined &&
     attempt.failureCode !== undefined
+  const attemptStartedAt = Date.parse(attempt.startedAt)
+  const providerStartedAt = attempt.providerStartedAt === undefined
+    ? undefined
+    : Date.parse(attempt.providerStartedAt)
+  const attemptEndedAt = attempt.endedAt === undefined
+    ? undefined
+    : Date.parse(attempt.endedAt)
+  if (
+    providerStartedAt !== undefined &&
+    (providerStartedAt < attemptStartedAt ||
+      (attemptEndedAt !== undefined && providerStartedAt > attemptEndedAt))
+  ) {
+    context.addIssue({ code: 'custom', message: 'Provider dispatch time is inconsistent.' })
+  }
   if (
     (attempt.status === 'started' && (
       attempt.endedAt !== undefined ||
       attempt.latencyMs !== undefined ||
       hasUsage ||
       hasUsageUnavailableReason ||
+      attempt.providerOutcome !== undefined ||
       hasAttemptFailure
     )) ||
     (attempt.status === 'succeeded' && (
@@ -296,13 +333,23 @@ const idempotencyItemSchema = z.object({
       attempt.latencyMs === undefined ||
       !hasUsage ||
       hasUsageUnavailableReason ||
+      attempt.providerOutcome !== 'succeeded' ||
       hasAttemptFailure
     )) ||
     (attempt.status === 'failed' && (
       attempt.endedAt === undefined ||
-      attempt.latencyMs === undefined ||
+      (hasIndeterminateOutcome
+        ? attempt.latencyMs !== undefined
+        : attempt.latencyMs === undefined) ||
       hasUsage === hasUsageUnavailableReason ||
-      !hasAttemptFailure
+      (hasIndeterminateOutcome
+        ? attempt.usageUnavailableReason !== 'attempt-outcome-indeterminate'
+        : attempt.usageUnavailableReason === 'attempt-outcome-indeterminate') ||
+      !hasAttemptFailure ||
+      !isProviderOutcomeCompatibleWithFailure(
+        attempt.providerOutcome,
+        attempt.failureCode,
+      )
     ))
   ) {
     context.addIssue({ code: 'custom', message: 'Attempt outcome is inconsistent.' })
@@ -454,17 +501,16 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         failureCode: parsed.data.failureCode,
       }
     }
-    // A started attempt has already consumed the durable budget and may have
-    // persisted its generation before the terminal receipt update. Return the
-    // pending state so the application can reconcile that generation before
-    // applying new-generation policy gates. Pending receipts without an
-    // attempt remain invisible here so an expired lease can still be taken
-    // over by reserveGeneration.
+    // A started attempt has already consumed the durable budget. Return its
+    // lease so the application can fail it closed after a process crash without
+    // invoking the provider or charging the budget again. Pending receipts
+    // without an attempt remain available for provider-free lease takeover.
     return parsed.data.attempt === undefined
       ? undefined
       : {
           status: 'pending',
           generationId: parsed.data.generationId,
+          leaseExpiresAt: fromEpochMilliseconds(parsed.data.leaseExpiresAt),
           expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
         }
   }
@@ -616,9 +662,17 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         failureCode: parsed.data.failureCode,
       }
     }
+    if (parsed.data.status === 'completed') {
+      return {
+        status: 'replay',
+        generationId: parsed.data.generationId,
+        expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
+      }
+    }
     return {
-      status: parsed.data.status === 'completed' ? 'replay' : 'pending',
+      status: 'pending',
       generationId: parsed.data.generationId,
+      leaseExpiresAt: fromEpochMilliseconds(parsed.data.leaseExpiresAt),
       expiresAt: fromTtlEpochSeconds(parsed.data.expiresAt),
     }
   }
@@ -705,6 +759,62 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     }
   }
 
+  /** Marks exact provider dispatch before any provider result is processed. */
+  async markGenerationProviderStarted(
+    input: MarkAiAssistanceGenerationProviderStartedInput,
+  ): Promise<void> {
+    const attemptStartedAt = toEpochMilliseconds(input.attemptStartedAt)
+    const providerStartedAt = toEpochMilliseconds(input.providerStartedAt)
+    if (providerStartedAt < attemptStartedAt) throw invalidRecordError()
+    const recordKey = createIdempotencyRecordKey(input.memberId, input.idempotencyKey)
+    const updateInput = {
+      TableName: this.#tableName,
+      Key: { workspaceId: input.workspaceId, recordKey },
+      UpdateExpression: 'SET #attempt.#providerStartedAt = :providerStartedAt',
+      ConditionExpression:
+        '#recordType = :recordType AND #memberId = :memberId AND ' +
+        '#inputFingerprint = :inputFingerprint AND ' +
+        '#generationId = :generationId AND #status = :pending AND ' +
+        '#attempt.#attemptStatus = :started AND ' +
+        '#attempt.#startedAt = :attemptStartedAt AND ' +
+        'attribute_not_exists(#attempt.#providerStartedAt)',
+      ExpressionAttributeNames: {
+        '#recordType': 'recordType',
+        '#memberId': 'memberId',
+        '#inputFingerprint': 'inputFingerprint',
+        '#generationId': 'generationId',
+        '#status': 'status',
+        '#attempt': 'attempt',
+        '#attemptStatus': 'status',
+        '#startedAt': 'startedAt',
+        '#providerStartedAt': 'providerStartedAt',
+      },
+      ExpressionAttributeValues: {
+        ':recordType': 'ai-assistance-generation-idempotency',
+        ':memberId': input.memberId,
+        ':inputFingerprint': input.inputFingerprint,
+        ':generationId': input.generationId,
+        ':pending': 'pending',
+        ':started': 'started',
+        ':attemptStartedAt': input.attemptStartedAt,
+        ':providerStartedAt': input.providerStartedAt,
+      },
+    }
+    try {
+      await this.#documentClient.send(new UpdateCommand(updateInput))
+    } catch (error) {
+      let response: GetCommandOutput
+      try {
+        response = await this.#readItem(input.workspaceId, recordKey)
+      } catch {
+        throw mapDynamoWriteError(error)
+      }
+      if (isMarkedProviderStartedReceipt(response.Item, input, recordKey)) return
+      if (isConditionalCheckFailed(error)) throw idempotencyConflictError()
+      throw mapDynamoWriteError(error)
+    }
+  }
+
   /** Finalizes the provider attempt and the owning receipt in one conditional update. */
   async finalizeGenerationAttempt(
     input: FinalizeAiAssistanceGenerationAttemptInput,
@@ -712,73 +822,11 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     validateGenerationAttemptCompletion(input)
     const recordKey = createIdempotencyRecordKey(input.memberId, input.idempotencyKey)
     const receiptStatus = input.outcome === 'succeeded' ? 'completed' : 'failed'
-    const updateParts = [
-      '#status = :receiptStatus',
-      '#attempt.#attemptStatus = :attemptStatus',
-      '#attempt.#endedAt = :endedAt',
-      '#attempt.#latencyMs = :latencyMs',
-    ]
-    const expressionAttributeNames: Record<string, string> = {
-      '#memberId': 'memberId',
-      '#inputFingerprint': 'inputFingerprint',
-      '#generationId': 'generationId',
-      '#status': 'status',
-      '#attempt': 'attempt',
-      '#attemptStatus': 'status',
-      '#endedAt': 'endedAt',
-      '#latencyMs': 'latencyMs',
-    }
-    const expressionAttributeValues: Record<string, unknown> = {
-      ':memberId': input.memberId,
-      ':inputFingerprint': input.inputFingerprint,
-      ':generationId': input.generationId,
-      ':pending': 'pending',
-      ':started': 'started',
-      ':receiptStatus': receiptStatus,
-      ':attemptStatus': input.outcome,
-      ':endedAt': input.endedAt,
-      ':latencyMs': input.latencyMs,
-    }
-    if (input.usage) {
-      updateParts.push('#attempt.#usage = :usage')
-      expressionAttributeNames['#usage'] = 'usage'
-      expressionAttributeValues[':usage'] = input.usage
-    }
-    if (input.usageUnavailableReason) {
-      updateParts.push('#attempt.#usageUnavailableReason = :usageUnavailableReason')
-      expressionAttributeNames['#usageUnavailableReason'] = 'usageUnavailableReason'
-      expressionAttributeValues[':usageUnavailableReason'] = input.usageUnavailableReason
-    }
-    if (input.providerTraceId) {
-      updateParts.push('#attempt.#providerTraceId = :providerTraceId')
-      expressionAttributeNames['#providerTraceId'] = 'providerTraceId'
-      expressionAttributeValues[':providerTraceId'] = requireIdentifier(input.providerTraceId)
-    }
-    if (input.outcome === 'failed') {
-      updateParts.push(
-        '#failedAt = :endedAt',
-        '#failureCategory = :failureCategory',
-        '#failureCode = :failureCode',
-        '#attempt.#failureCategory = :failureCategory',
-        '#attempt.#failureCode = :failureCode',
-      )
-      expressionAttributeNames['#failedAt'] = 'failedAt'
-      expressionAttributeNames['#failureCategory'] = 'failureCategory'
-      expressionAttributeNames['#failureCode'] = 'failureCode'
-      expressionAttributeValues[':failureCategory'] = input.failureCategory
-      expressionAttributeValues[':failureCode'] = input.failureCode
-    }
-    const updateInput = {
-      TableName: this.#tableName,
-      Key: { workspaceId: input.workspaceId, recordKey },
-      UpdateExpression: `SET ${updateParts.join(', ')}`,
-      ConditionExpression:
-        '#memberId = :memberId AND #inputFingerprint = :inputFingerprint AND ' +
-        '#generationId = :generationId AND #status = :pending AND ' +
-        '#attempt.#attemptStatus = :started',
-      ExpressionAttributeNames: expressionAttributeNames,
-      ExpressionAttributeValues: expressionAttributeValues,
-    }
+    const updateInput = createGenerationAttemptFinalizationUpdate(
+      this.#tableName,
+      input,
+      recordKey,
+    )
     try {
       await this.#documentClient.send(new UpdateCommand(updateInput))
     } catch (error) {
@@ -841,6 +889,81 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     // deliberately provider-free and budget-free; a response-loss replay is
     // reconciled by the strong read in finalizeGenerationAttempt.
     await this.finalizeGenerationAttempt(input)
+  }
+
+  /** Fails one expired started attempt without recalling the provider or charging budget. */
+  async expireGenerationAttempt(
+    input: ExpireAiAssistanceGenerationAttemptInput,
+  ): Promise<AiAssistanceGenerationReservation> {
+    const failedAtEpoch = toEpochMilliseconds(input.failedAt)
+    const recordKey = createIdempotencyRecordKey(input.memberId, input.idempotencyKey)
+    const updateInput = {
+      TableName: this.#tableName,
+      Key: { workspaceId: input.workspaceId, recordKey },
+      UpdateExpression:
+        'SET #status = :failed, #failedAt = :failedAt, ' +
+        '#failureCategory = :failureCategory, #failureCode = :failureCode, ' +
+        '#attempt.#attemptStatus = :failed, #attempt.#endedAt = :failedAt, ' +
+        '#attempt.#usageUnavailableReason = :usageUnavailableReason, ' +
+        '#attempt.#providerOutcome = :providerOutcome, ' +
+        '#attempt.#failureCategory = :failureCategory, ' +
+        '#attempt.#failureCode = :failureCode',
+      ConditionExpression:
+        '#recordType = :recordType AND #memberId = :memberId AND ' +
+        '#inputFingerprint = :inputFingerprint AND ' +
+        '#generationId = :generationId AND #status = :pending AND ' +
+        '#attempt.#attemptStatus = :started AND #leaseExpiresAt <= :failedAtEpoch',
+      ExpressionAttributeNames: {
+        '#recordType': 'recordType',
+        '#memberId': 'memberId',
+        '#inputFingerprint': 'inputFingerprint',
+        '#generationId': 'generationId',
+        '#status': 'status',
+        '#failedAt': 'failedAt',
+        '#failureCategory': 'failureCategory',
+        '#failureCode': 'failureCode',
+        '#attempt': 'attempt',
+        '#attemptStatus': 'status',
+        '#endedAt': 'endedAt',
+        '#usageUnavailableReason': 'usageUnavailableReason',
+        '#providerOutcome': 'providerOutcome',
+        '#leaseExpiresAt': 'leaseExpiresAt',
+      },
+      ExpressionAttributeValues: {
+        ':recordType': 'ai-assistance-generation-idempotency',
+        ':memberId': input.memberId,
+        ':inputFingerprint': input.inputFingerprint,
+        ':generationId': input.generationId,
+        ':pending': 'pending',
+        ':started': 'started',
+        ':failed': 'failed',
+        ':failedAt': input.failedAt,
+        ':failedAtEpoch': failedAtEpoch,
+        ':usageUnavailableReason': 'attempt-outcome-indeterminate',
+        ':providerOutcome': 'indeterminate',
+        ':failureCategory': 'upstream',
+        ':failureCode': 'AiAssistanceAttemptFailed',
+      },
+    }
+    try {
+      await this.#documentClient.send(new UpdateCommand(updateInput))
+      return createExpiredAttemptFailureReservation(input)
+    } catch (error) {
+      let response: GetCommandOutput
+      try {
+        response = await this.#readItem(input.workspaceId, recordKey)
+      } catch {
+        throw mapDynamoWriteError(error)
+      }
+      const reconciled = classifyExpiredAttemptRecovery(
+        response.Item,
+        input,
+        recordKey,
+      )
+      if (reconciled !== undefined) return reconciled
+      if (isConditionalCheckFailed(error)) throw idempotencyConflictError()
+      throw mapDynamoWriteError(error)
+    }
   }
 
   /** Finalizes a reservation that stopped before any provider attempt began. */
@@ -1210,6 +1333,116 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     }
   }
 
+  /** Atomically creates a generation and marks its started provider receipt successful. */
+  async commitGeneration(
+    record: StoredAiAssistanceGeneration,
+    completion: FinalizeAiAssistanceGenerationAttemptInput,
+    commitFence: AiAssistanceGenerationCommitFence,
+  ): Promise<StoredAiAssistanceGeneration> {
+    validateGenerationAttemptCompletion(completion)
+    validateGenerationCommitFence(commitFence)
+    if (
+      completion.outcome !== 'succeeded' ||
+      completion.workspaceId !== record.workspaceId ||
+      completion.memberId !== record.memberId ||
+      completion.generationId !== record.generation.id
+    ) throw invalidRecordError()
+    if (commitFence.authorizationToken !== record.authorizationToken) {
+      throw aiAssistanceAuthorizationChangedError(
+        'AI assistance source authorization changed during generation.',
+      )
+    }
+    const generationRecordKey = createGenerationRecordKey(record.generation.id)
+    const receiptRecordKey = createIdempotencyRecordKey(
+      completion.memberId,
+      completion.idempotencyKey,
+    )
+    const item = createStoredGenerationItem(record, generationRecordKey)
+    requireStoredAiAssistanceItemSize(item)
+    const authorizationConditionItems = createAiAssistanceAuthorizationConditionChecks(
+      commitFence.authorizationConditions,
+    )
+    if (
+      authorizationConditionItems.length >
+        AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS
+    ) throw invalidRecordError()
+    try {
+      await this.#documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.#tableName,
+              Item: item,
+              ConditionExpression:
+                'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+            },
+          },
+          {
+            Update: createGenerationAttemptFinalizationUpdate(
+              this.#tableName,
+              completion,
+              receiptRecordKey,
+            ),
+          },
+          createNestedRevisionConditionCheck(
+            this.#tableName,
+            record.workspaceId,
+            POLICY_RECORD_KEY,
+            'policy',
+            commitFence.policyRevision,
+          ),
+          createNestedRevisionConditionCheck(
+            this.#tableName,
+            record.workspaceId,
+            createPreferenceRecordKey(record.memberId),
+            'preference',
+            commitFence.preferenceRevision,
+          ),
+          ...authorizationConditionItems,
+        ],
+      }))
+      return record
+    } catch (error) {
+      let receiptResponse: GetCommandOutput
+      let existing: StoredAiAssistanceGeneration | undefined
+      try {
+        receiptResponse = await this.#readItem(record.workspaceId, receiptRecordKey)
+        existing = await this.getGeneration(record.workspaceId, record.generation.id)
+      } catch {
+        throw mapDynamoWriteError(error)
+      }
+      if (isFinalizedAttemptReceipt(
+        receiptResponse.Item,
+        completion,
+        receiptRecordKey,
+        'completed',
+      )) {
+        if (existing && isGenerationReplay(existing, record)) return existing
+        throw invalidRecordError()
+      }
+      const terminalError = readTerminalReceiptReplayError(
+        receiptResponse.Item,
+        completion,
+        receiptRecordKey,
+      )
+      if (terminalError !== undefined) throw terminalError
+      if (
+        isTransactionConditionalFailureAt(error, 2) ||
+        isTransactionConditionalFailureAt(error, 3) ||
+        isTransactionConditionalFailureAtOrAfter(error, 4)
+      ) {
+        throw aiAssistanceAuthorizationChangedError(
+          'AI assistance policy or member preference changed during generation.',
+        )
+      }
+      if (
+        isTransactionConditionalFailureAt(error, 0) ||
+        isTransactionConditionalFailureAt(error, 1)
+      ) throw idempotencyConflictError()
+      throw mapDynamoWriteError(error)
+    }
+  }
+
   /** Strongly reads one generation and fails closed on malformed rows. */
   async getGeneration(
     workspaceId: string,
@@ -1245,7 +1478,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     request: DecideAiAssistanceGenerationRequest,
     decidedAt: string,
     commitFence?: AiAssistanceDecisionCommitFence,
-  ): Promise<StoredAiAssistanceGeneration> {
+  ): Promise<AiAssistanceDecisionStoreResult> {
     if (commitFence !== undefined) validateDecisionCommitFence(commitFence, decidedAt)
     const current = await this.getGeneration(workspaceId, generationId)
     if (!current) {
@@ -1256,7 +1489,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       )
     }
     if (current.generation.decision?.outcome === request.outcome) {
-      return current
+      return { record: current, replayed: true }
     }
     if (current.generation.decision) {
       throw new AiAssistanceError(
@@ -1340,7 +1573,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
           ],
         }))
       }
-      return next
+      return { record: next, replayed: false }
     } catch (error) {
       if (
         commitFence !== undefined &&
@@ -1381,7 +1614,9 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
           'AI assistance source authorization changed during decision.',
         )
       }
-      if (latest?.generation.decision?.outcome === request.outcome) return latest
+      if (latest?.generation.decision?.outcome === request.outcome) {
+        return { record: latest, replayed: true }
+      }
       throw revisionConflictError()
     }
   }
@@ -1390,7 +1625,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
   async putFeedback(
     record: StoredAiAssistanceFeedback,
     commitFence?: AiAssistanceFeedbackCommitFence,
-  ): Promise<void> {
+  ): Promise<AiAssistanceFeedbackWriteResult> {
     if (commitFence !== undefined) {
       validateFeedbackCommitFence(record, commitFence)
     }
@@ -1443,6 +1678,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
           ],
         }))
       }
+      return { replayed: false }
     } catch (error) {
       if (
         commitFence !== undefined &&
@@ -1485,7 +1721,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         parsed.data.inputFingerprint === record.inputFingerprint
       ) {
         parseCreateAiAssistanceFeedbackRequest(parsed.data.feedback)
-        return
+        return { replayed: true }
       }
       throw idempotencyConflictError()
     }
@@ -1593,6 +1829,20 @@ export function createAiAssistanceIdempotencyRecordKey(
   idempotencyKey: string,
 ): string {
   return createIdempotencyRecordKey(memberId, idempotencyKey)
+}
+
+/**
+ * Creates the physical immutable feedback key from server-owned identifiers.
+ *
+ * @param generationId - Canonical generation identifier.
+ * @param feedbackId - Deterministic feedback identifier.
+ * @returns The Workspace Search table record key for the feedback row.
+ */
+export function createAiAssistanceFeedbackRecordKey(
+  generationId: string,
+  feedbackId: string,
+): string {
+  return createFeedbackRecordKey(generationId, feedbackId)
 }
 
 /** Creates a canonical preference record key. */
@@ -1744,25 +1994,179 @@ function validateGenerationAttemptCompletion(
 ): void {
   const hasUsage = input.usage !== undefined
   const hasUsageUnavailableReason = input.usageUnavailableReason !== undefined
+  const hasIndeterminateOutcome = input.providerOutcome === 'indeterminate'
   const hasFailure = input.failureCategory !== undefined && input.failureCode !== undefined
   const hasPartialFailure =
     (input.failureCategory === undefined) !== (input.failureCode === undefined)
   if (
-    !Number.isSafeInteger(input.latencyMs) ||
-    input.latencyMs < 0 ||
+    (hasIndeterminateOutcome
+      ? input.latencyMs !== undefined
+      : input.latencyMs === undefined ||
+        !Number.isSafeInteger(input.latencyMs) || input.latencyMs < 0) ||
     !Number.isFinite(toEpochMilliseconds(input.endedAt)) ||
     hasUsage === hasUsageUnavailableReason ||
+    (hasIndeterminateOutcome
+      ? input.usageUnavailableReason !== 'attempt-outcome-indeterminate'
+      : input.usageUnavailableReason === 'attempt-outcome-indeterminate') ||
     (input.usage !== undefined && !aiAssistanceUsageSchema.safeParse(input.usage).success) ||
     (input.providerTraceId !== undefined && !input.providerTraceId.trim()) ||
+    (input.providerOutcome !== undefined && ![
+      'succeeded',
+      'failed',
+      'throttled',
+      'timeout',
+      'refused',
+      'invalid-output',
+      'indeterminate',
+    ].includes(input.providerOutcome)) ||
     hasPartialFailure ||
-    (input.outcome === 'succeeded' && (!hasUsage || hasFailure)) ||
+    (input.outcome === 'succeeded' && (
+      !hasUsage || hasFailure || input.providerOutcome !== 'succeeded'
+    )) ||
     (input.outcome === 'failed' && !hasFailure) ||
+    (input.outcome === 'failed' && !isProviderOutcomeCompatibleWithFailure(
+      input.providerOutcome,
+      input.failureCode,
+    )) ||
     (input.failureCategory !== undefined &&
       !aiAssistanceErrorCategorySchema.safeParse(input.failureCategory).success) ||
     (input.failureCode !== undefined &&
       !aiAssistanceErrorCodeSchema.safeParse(input.failureCode).success)
   ) {
     throw invalidRecordError()
+  }
+}
+
+/** Checks that a persisted provider outcome agrees with its stable failure code. */
+function isProviderOutcomeCompatibleWithFailure(
+  providerOutcome: AiAssistanceProviderAttemptOutcome | undefined,
+  failureCode: FinalizeAiAssistanceGenerationAttemptInput['failureCode'],
+): boolean {
+  if (failureCode === undefined) return providerOutcome === undefined
+  if (
+    failureCode === 'InvalidAiAssistanceOutput' ||
+    failureCode === 'AiAssistanceCitationInvalid' ||
+    failureCode === 'AiAssistanceOutputNotAllowed'
+  ) return providerOutcome === 'invalid-output'
+  if (failureCode === 'AiAssistanceProviderRateLimited') {
+    return providerOutcome === 'throttled'
+  }
+  if (failureCode === 'AiAssistanceModelRefused') {
+    return providerOutcome === 'refused'
+  }
+  if (failureCode === 'AiAssistanceProviderTimeout') {
+    return providerOutcome === undefined || providerOutcome === 'timeout'
+  }
+  if (failureCode === 'AiAssistanceProviderError') {
+    return providerOutcome === 'failed'
+  }
+  if (
+    failureCode === 'AiAssistanceAttemptFailed' ||
+    failureCode === 'AiAssistancePersistenceError' ||
+    failureCode === 'AiAssistanceIdempotencyConflict' ||
+    failureCode === 'InvalidAiAssistanceRecord'
+  ) {
+    return providerOutcome === undefined ||
+      providerOutcome === 'succeeded' ||
+      providerOutcome === 'failed' ||
+      providerOutcome === 'indeterminate'
+  }
+  return providerOutcome === undefined ||
+    providerOutcome === 'succeeded' ||
+    providerOutcome === 'failed'
+}
+
+/**
+ * Creates the exact receipt update shared by standalone failure finalization
+ * and the atomic successful generation commit.
+ *
+ * @param tableName - Workspace Search table name.
+ * @param input - Validated terminal attempt metadata.
+ * @param recordKey - Hashed idempotency receipt key.
+ * @returns Conditional DynamoDB update for the owning started receipt.
+ */
+function createGenerationAttemptFinalizationUpdate(
+  tableName: string,
+  input: FinalizeAiAssistanceGenerationAttemptInput,
+  recordKey: string,
+) {
+  const receiptStatus = input.outcome === 'succeeded' ? 'completed' : 'failed'
+  const updateParts = [
+    '#status = :receiptStatus',
+    '#attempt.#attemptStatus = :attemptStatus',
+    '#attempt.#endedAt = :endedAt',
+  ]
+  const expressionAttributeNames: Record<string, string> = {
+    '#recordType': 'recordType',
+    '#memberId': 'memberId',
+    '#inputFingerprint': 'inputFingerprint',
+    '#generationId': 'generationId',
+    '#status': 'status',
+    '#attempt': 'attempt',
+    '#attemptStatus': 'status',
+    '#endedAt': 'endedAt',
+  }
+  const expressionAttributeValues: Record<string, unknown> = {
+    ':recordType': 'ai-assistance-generation-idempotency',
+    ':memberId': input.memberId,
+    ':inputFingerprint': input.inputFingerprint,
+    ':generationId': input.generationId,
+    ':pending': 'pending',
+    ':started': 'started',
+    ':receiptStatus': receiptStatus,
+    ':attemptStatus': input.outcome,
+    ':endedAt': input.endedAt,
+  }
+  if (input.latencyMs !== undefined) {
+    updateParts.push('#attempt.#latencyMs = :latencyMs')
+    expressionAttributeNames['#latencyMs'] = 'latencyMs'
+    expressionAttributeValues[':latencyMs'] = input.latencyMs
+  }
+  if (input.usage) {
+    updateParts.push('#attempt.#usage = :usage')
+    expressionAttributeNames['#usage'] = 'usage'
+    expressionAttributeValues[':usage'] = input.usage
+  }
+  if (input.usageUnavailableReason) {
+    updateParts.push('#attempt.#usageUnavailableReason = :usageUnavailableReason')
+    expressionAttributeNames['#usageUnavailableReason'] = 'usageUnavailableReason'
+    expressionAttributeValues[':usageUnavailableReason'] = input.usageUnavailableReason
+  }
+  if (input.providerTraceId) {
+    updateParts.push('#attempt.#providerTraceId = :providerTraceId')
+    expressionAttributeNames['#providerTraceId'] = 'providerTraceId'
+    expressionAttributeValues[':providerTraceId'] = requireIdentifier(input.providerTraceId)
+  }
+  if (input.providerOutcome) {
+    updateParts.push('#attempt.#providerOutcome = :providerOutcome')
+    expressionAttributeNames['#providerOutcome'] = 'providerOutcome'
+    expressionAttributeValues[':providerOutcome'] = input.providerOutcome
+  }
+  if (input.outcome === 'failed') {
+    updateParts.push(
+      '#failedAt = :endedAt',
+      '#failureCategory = :failureCategory',
+      '#failureCode = :failureCode',
+      '#attempt.#failureCategory = :failureCategory',
+      '#attempt.#failureCode = :failureCode',
+    )
+    expressionAttributeNames['#failedAt'] = 'failedAt'
+    expressionAttributeNames['#failureCategory'] = 'failureCategory'
+    expressionAttributeNames['#failureCode'] = 'failureCode'
+    expressionAttributeValues[':failureCategory'] = input.failureCategory
+    expressionAttributeValues[':failureCode'] = input.failureCode
+  }
+  return {
+    TableName: tableName,
+    Key: { workspaceId: input.workspaceId, recordKey },
+    UpdateExpression: `SET ${updateParts.join(', ')}`,
+    ConditionExpression:
+      '#recordType = :recordType AND #memberId = :memberId AND ' +
+      '#inputFingerprint = :inputFingerprint AND ' +
+      '#generationId = :generationId AND #status = :pending AND ' +
+      '#attempt.#attemptStatus = :started',
+    ExpressionAttributeNames: expressionAttributeNames,
+    ExpressionAttributeValues: expressionAttributeValues,
   }
 }
 
@@ -1833,6 +2237,21 @@ function generationAttemptStartMatches(
     equalJsonValues(parsed.data.audit, expected.audit)
 }
 
+/** Returns whether a receipt contains the exact reconciled provider dispatch marker. */
+function isMarkedProviderStartedReceipt(
+  value: unknown,
+  input: MarkAiAssistanceGenerationProviderStartedInput,
+  recordKey: string,
+): boolean {
+  const parsed = idempotencyItemSchema.safeParse(value)
+  return parsed.success &&
+    receiptIdentityMatches(parsed.data, input, recordKey) &&
+    parsed.data.status === 'pending' &&
+    parsed.data.attempt?.status === 'started' &&
+    parsed.data.attempt.startedAt === input.attemptStartedAt &&
+    parsed.data.attempt.providerStartedAt === input.providerStartedAt
+}
+
 /** Returns whether a receipt is the exact terminal outcome being finalized. */
 function isFinalizedAttemptReceipt(
   value: unknown,
@@ -1841,10 +2260,19 @@ function isFinalizedAttemptReceipt(
   receiptStatus: 'completed' | 'failed',
 ): boolean {
   const parsed = idempotencyItemSchema.safeParse(value)
+  const expectedProviderTraceId = input.providerTraceId === undefined
+    ? undefined
+    : requireIdentifier(input.providerTraceId)
   return parsed.success &&
     receiptIdentityMatches(parsed.data, input, recordKey) &&
     parsed.data.status === receiptStatus &&
     parsed.data.attempt?.status === input.outcome &&
+    parsed.data.attempt?.endedAt === input.endedAt &&
+    parsed.data.attempt?.latencyMs === input.latencyMs &&
+    equalJsonValues(parsed.data.attempt?.usage, input.usage) &&
+    parsed.data.attempt?.usageUnavailableReason === input.usageUnavailableReason &&
+    parsed.data.attempt?.providerTraceId === expectedProviderTraceId &&
+    parsed.data.attempt?.providerOutcome === input.providerOutcome &&
     (input.outcome === 'succeeded' || (
       parsed.data.failureCategory === input.failureCategory &&
       parsed.data.failureCode === input.failureCode
@@ -1862,6 +2290,88 @@ function isPendingAttemptReceipt(
     receiptIdentityMatches(parsed.data, input, recordKey) &&
     parsed.data.status === 'pending' &&
     parsed.data.attempt?.status === 'started'
+}
+
+/** Returns the safe terminal replay error when another receipt CAS won the race. */
+function readTerminalReceiptReplayError(
+  value: unknown,
+  input: FinalizeAiAssistanceGenerationAttemptInput,
+  recordKey: string,
+): AiAssistanceError | undefined {
+  const parsed = idempotencyItemSchema.safeParse(value)
+  if (!parsed.success) return undefined
+  if (!receiptIdentityMatches(parsed.data, input, recordKey)) {
+    throw idempotencyConflictError()
+  }
+  if (parsed.data.status !== 'failed') return undefined
+  if (
+    parsed.data.failureCategory === undefined ||
+    parsed.data.failureCode === undefined
+  ) throw invalidRecordError()
+  return new AiAssistanceError(
+    parsed.data.failureCategory,
+    parsed.data.failureCode,
+    'The AI assistance generation attempt already failed durably.',
+    undefined,
+    undefined,
+    undefined,
+    true,
+  )
+}
+
+/** Creates the stable failed receipt returned after an expired-attempt CAS. */
+function createExpiredAttemptFailureReservation(
+  input: ExpireAiAssistanceGenerationAttemptInput,
+): AiAssistanceGenerationReservation {
+  return {
+    status: 'failed',
+    generationId: input.generationId,
+    failureCategory: 'upstream',
+    failureCode: 'AiAssistanceAttemptFailed',
+  }
+}
+
+/** Classifies the current receipt after an expired-attempt CAS race or response loss. */
+function classifyExpiredAttemptRecovery(
+  value: unknown,
+  input: ExpireAiAssistanceGenerationAttemptInput,
+  recordKey: string,
+): AiAssistanceGenerationReservation | undefined {
+  if (value === undefined) return undefined
+  const parsed = idempotencyItemSchema.safeParse(value)
+  if (
+    !parsed.success ||
+    parsed.data.workspaceId !== input.workspaceId ||
+    parsed.data.recordKey !== recordKey ||
+    parsed.data.memberId !== input.memberId ||
+    parsed.data.generationId !== input.generationId
+  ) throw invalidRecordError()
+  if (parsed.data.inputFingerprint !== input.inputFingerprint) {
+    throw idempotencyConflictError()
+  }
+  const expiresAt = fromTtlEpochSeconds(parsed.data.expiresAt)
+  if (parsed.data.status === 'completed') {
+    return { status: 'replay', generationId: parsed.data.generationId, expiresAt }
+  }
+  if (parsed.data.status === 'failed') {
+    if (
+      parsed.data.failureCategory === undefined ||
+      parsed.data.failureCode === undefined
+    ) throw invalidRecordError()
+    return {
+      status: 'failed',
+      generationId: parsed.data.generationId,
+      expiresAt,
+      failureCategory: parsed.data.failureCategory,
+      failureCode: parsed.data.failureCode,
+    }
+  }
+  return {
+    status: 'pending',
+    generationId: parsed.data.generationId,
+    leaseExpiresAt: fromEpochMilliseconds(parsed.data.leaseExpiresAt),
+    expiresAt,
+  }
 }
 
 /** Returns whether two JSON-compatible values contain the same fields and values. */
@@ -1946,6 +2456,14 @@ function toEpochMilliseconds(value: string): number {
   const milliseconds = Date.parse(value)
   if (!Number.isFinite(milliseconds)) throw invalidRecordError()
   return milliseconds
+}
+
+/** Converts an exact epoch-millisecond lease boundary to an ISO instant. */
+function fromEpochMilliseconds(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) throw invalidRecordError()
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) throw invalidRecordError()
+  return date.toISOString()
 }
 
 /** Requires a bounded logical identifier before physical-key encoding. */

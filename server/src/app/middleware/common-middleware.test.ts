@@ -87,6 +87,9 @@ test('replaces client identifiers with canonical server identifiers', async () =
   expect(response.headers.get('Access-Control-Expose-Headers')).toContain(
     'X-Correlation-Id',
   )
+  expect(response.headers.get('Access-Control-Expose-Headers')).toContain(
+    'Idempotency-Replayed',
+  )
   expect(captured.errors).toEqual([])
   expect(captured.access).toEqual([{
     correlationId: 'generated-correlation',
