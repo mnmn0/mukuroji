@@ -343,6 +343,12 @@ export function validateWorkItemConfiguration(
   if (workflows !== undefined) {
     assertUnique([workflow.id, ...workflows.map((candidate) => candidate.id)], 'Workflow ID')
   }
+  assertUnique(
+    [workflow, ...(workflows ?? [])].flatMap((candidate) =>
+      candidate.statuses.map((status) => status.id),
+    ),
+    'Workflow status ID',
+  )
   const customFields = readCustomFieldDefinitions(value.customFields)
   validateFormulaDefinitions(customFields)
   const workItemTypes = value.workItemTypes === undefined

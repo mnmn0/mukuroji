@@ -312,6 +312,9 @@ export function WorkflowConfigurationSection({
   const selectedWorkflow = workflows.find((workflow) => workflow.id === selectedWorkflowId) ??
     configuration.workflow
   const statuses = sortWorkflowStatuses(selectedWorkflow.statuses)
+  const workflowStatusIds = workflows.flatMap((workflow) =>
+    workflow.statuses.map((status) => status.id),
+  )
   const isPrimaryWorkflow = selectedWorkflow.id === configuration.workflow.id
   const updateWorkflow = (workflow: WorkItemConfiguration['workflow']) => {
     if (workflow.id === configuration.workflow.id) {
@@ -353,7 +356,7 @@ export function WorkflowConfigurationSection({
     })
   }
   const addStatus = () => {
-    const id = createUniqueDefinitionId('status', statuses.map((status) => status.id))
+    const id = createUniqueDefinitionId('status', workflowStatusIds)
     const nextStatus: WorkflowStatusDefinition = {
       category: 'started',
       id,
@@ -406,7 +409,7 @@ export function WorkflowConfigurationSection({
   const addWorkflow = () => {
     if (!allowMultipleWorkflows) return
     const id = createUniqueDefinitionId('workflow', workflows.map((workflow) => workflow.id))
-    const initialStatusId = createUniqueDefinitionId('status', [])
+    const initialStatusId = createUniqueDefinitionId('status', workflowStatusIds)
     const workflow: WorkItemConfiguration['workflow'] = {
       id,
       name: t('workItems.configuration.newWorkflow'),

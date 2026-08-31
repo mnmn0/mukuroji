@@ -88,6 +88,14 @@ test('rejects duplicate status IDs and broken transition references', () => {
     ...DEFAULT_WORK_ITEM_CONFIGURATION,
     workflows: [{ ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow }],
   })).toThrow('Workflow ID must be unique.')
+
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    workflows: [{
+      ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow,
+      id: 'incident-workflow',
+    }],
+  })).toThrow('Workflow status ID must be unique.')
 })
 
 test('enforces allowed workflow transitions', () => {
