@@ -194,7 +194,8 @@ export function AiAssistanceReview({
           </p>
         ) : null}
 
-        {!isGenerating && generation && content?.availability === 'available' && !hasUnsafeCitation ? (
+        {!isGenerating && errorKind !== 'rate-limit' && generation &&
+        content?.availability === 'available' && !hasUnsafeCitation ? (
           <>
             <p className="text-app-caption font-medium text-[var(--workbench-muted)]">
               {t('ai.review.draftNotice')}

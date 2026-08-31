@@ -137,6 +137,29 @@ const decidedGenerationImageSchema = z.object({
   }).strict(),
 }).passthrough()
 
+/** Stable, content-free classification for one projection failure. */
+type ProjectionFailureCategory =
+  | 'malformed-record'
+  | 'observability-sink'
+  | 'unexpected'
+
+/** Internal projection error that carries only a bounded failure category. */
+class ProjectionFailure extends Error {
+  /** Bounded failure category that is safe to include in operational logs. */
+  readonly category: ProjectionFailureCategory
+
+  /**
+   * Creates one content-free projection failure.
+   *
+   * @param category - Stable category describing the failed projection stage.
+   */
+  constructor(category: ProjectionFailureCategory) {
+    super('AI assistance observability projection failed.')
+    this.name = 'AiAssistanceObservabilityProjectionError'
+    this.category = category
+  }
+}
+
 /**
  * Projects durable terminal AI metadata into content-free operational metrics.
  *
@@ -157,8 +180,8 @@ export async function processAiAssistanceObservabilityBatch(
   for (const record of event.Records ?? []) {
     try {
       processAiAssistanceObservabilityRecord(record, observability)
-    } catch {
-      logProjectionFailure()
+    } catch (error: unknown) {
+      logProjectionFailure(readProjectionFailureCategory(error))
       batchItemFailures.push(createBatchItemFailure(record))
     }
   }
@@ -178,12 +201,22 @@ function processAiAssistanceObservabilityRecord(
 ): void {
   const providerAttempt = readProviderAttemptObservation(record)
   if (providerAttempt) {
-    observability.recordProviderAttempt(providerAttempt)
+    try {
+      observability.recordProviderAttempt(providerAttempt)
+    } catch {
+      throw new ProjectionFailure('observability-sink')
+    }
     return
   }
 
   const decision = readDecisionObservation(record)
-  if (decision) observability.recordDecision(decision)
+  if (decision) {
+    try {
+      observability.recordDecision(decision)
+    } catch {
+      throw new ProjectionFailure('observability-sink')
+    }
+  }
 }
 
 /**
@@ -447,7 +480,7 @@ function readNonNegativeNumber(value: string): number {
 
 /** Creates a content-free error for one matching malformed durable row. */
 function malformedProjectionRecord(): Error {
-  return new Error('Malformed AI assistance observability record.')
+  return new ProjectionFailure('malformed-record')
 }
 
 /** Creates the partial batch failure identity without exposing record content. */
@@ -459,9 +492,26 @@ function createBatchItemFailure(record: DynamoStreamRecord): BatchItemFailure {
   return { itemIdentifier: sequenceNumber }
 }
 
-/** Logs only a stable projection code and never the raw image or caught error. */
-function logProjectionFailure(): void {
+/**
+ * Returns a bounded category without exposing an unknown caught value.
+ *
+ * @param error - Unknown failure caught at the per-record boundary.
+ * @returns Stable category safe for operational logs.
+ */
+function readProjectionFailureCategory(
+  error: unknown,
+): ProjectionFailureCategory {
+  return error instanceof ProjectionFailure ? error.category : 'unexpected'
+}
+
+/**
+ * Logs only stable projection metadata and never the raw image or caught error.
+ *
+ * @param category - Bounded stage classification for the failed projection.
+ */
+function logProjectionFailure(category: ProjectionFailureCategory): void {
   console.error('AI assistance observability projection failed.', {
     code: 'AiAssistanceObservabilityProjectionFailed',
+    category,
   })
 }

@@ -57,13 +57,14 @@ describe('createAiAssistanceEmfObservability', () => {
 
   test('counts model refusal with only its bounded content-filter reason', () => {
     const records: string[] = []
+    const customerContentMarker = 'customer-refusal-response-must-not-be-logged'
     const observability = createAiAssistanceEmfObservability({
       sink: (record) => records.push(record),
     })
 
     observability.recordProviderAttempt({
       task: 'summary',
-      modelId: 'anthropic.claude-model-v1:0',
+      modelId: `invalid model\n${customerContentMarker}`,
       outcome: 'refused',
       latencyMs: 42,
       usage: {
@@ -79,6 +80,7 @@ describe('createAiAssistanceEmfObservability', () => {
     const record = JSON.parse(records[0] ?? '')
     expect(record).toMatchObject({
       Outcome: 'refused',
+      Model: 'other',
       refusalReason: 'content-filter',
       ProviderAttemptCount: 1,
       ProviderSuccessCount: 0,
@@ -87,7 +89,7 @@ describe('createAiAssistanceEmfObservability', () => {
       failureCategory: 'upstream',
       failureCode: 'AiAssistanceModelRefused',
     })
-    expect(records[0]).not.toContain('response')
+    expect(records[0]).not.toContain(customerContentMarker)
   })
 
   test('counts throttling and incomplete token or cost usage without logging content', () => {

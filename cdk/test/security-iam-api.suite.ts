@@ -1202,6 +1202,9 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     {
       description:
         'Detects failed AI assistance provider attempts after durable attempt finalization.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
       metricName: 'ProviderFailureCount',
       statistic: 'Sum',
       threshold: 1,
@@ -1209,6 +1212,9 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     {
       description:
         'Detects repeated upstream AI provider throttling separately from local budget admission.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
       metricName: 'ProviderThrottledCount',
       statistic: 'Sum',
       threshold: 3,
@@ -1216,6 +1222,9 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     {
       description:
         'Detects AI provider responses rejected by the strict structured-output boundary.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
       metricName: 'ProviderInvalidOutputCount',
       statistic: 'Sum',
       threshold: 1,
@@ -1223,6 +1232,9 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     {
       description:
         'Detects sustained p95 AI provider latency above the generation budget.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 2,
+      evaluationPeriods: 3,
       extendedStatistic: 'p95',
       metricName: 'ProviderLatency',
       threshold: 12000,
@@ -1230,6 +1242,9 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     {
       description:
         'Detects provider attempts without complete token or cost accounting.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
       metricName: 'UsageUnavailableCount',
       statistic: 'Sum',
       threshold: 1,
@@ -1237,10 +1252,13 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
   ]) {
     template.hasResourceProperties('AWS::CloudWatch::Alarm', {
       AlarmDescription: alarm.description,
+      ComparisonOperator: alarm.comparisonOperator,
+      DatapointsToAlarm: alarm.datapointsToAlarm,
       Dimensions: [{
         Name: 'Service',
         Value: 'mukuroji-ai-assistance',
       }],
+      EvaluationPeriods: alarm.evaluationPeriods,
       ...(alarm.extendedStatistic === undefined
         ? { Statistic: alarm.statistic }
         : { ExtendedStatistic: alarm.extendedStatistic }),

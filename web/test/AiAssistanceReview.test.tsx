@@ -131,7 +131,9 @@ describe('AiAssistanceReview', () => {
     const html = renderToStaticMarkup(
       <AiAssistanceReview
         errorKind="rate-limit"
+        generation={aiSummaryGenerationFixture}
         locale="en"
+        onAdopt={() => undefined}
         renderDraft={() => 'PROTECTED GENERATED TEXT'}
         t={t}
       />,
@@ -140,6 +142,23 @@ describe('AiAssistanceReview', () => {
     expect(html).toContain('AI assistance has reached its usage limit')
     expect(html).not.toContain('PROTECTED GENERATED TEXT')
     expect(html).not.toContain('Adopt draft')
+  })
+
+  test('keeps a reviewed draft actionable after an ambiguous retryable failure', () => {
+    const html = renderToStaticMarkup(
+      <AiAssistanceReview
+        errorKind="generic"
+        generation={aiSummaryGenerationFixture}
+        locale="en"
+        onAdopt={() => undefined}
+        renderDraft={() => 'RETRYABLE GENERATED TEXT'}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('The AI draft could not be generated. Try again.')
+    expect(html).toContain('RETRYABLE GENERATED TEXT')
+    expect(html).toContain('Adopt draft')
   })
 
   /** Verifies rejected decisions are visually distinct from accepted decisions. */

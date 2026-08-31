@@ -331,7 +331,7 @@ Access token、AWS access key、Bedrock API keyはsecretへ保存しません。
 processでunauthenticated `GET /api/health`を行い、HTTPS responseの`applicationCommitSha`とworkflowのfull
 `GITHUB_SHA`が一致しなければ終了します。その後だけ`needs: commit-preflight`のprotected
 `production-like-live-eval` jobを開始します。このjobもcheckout SHAを再確認し、
-ここだけが`contents: read`と`id-token: write`を持ち、SHA確認後に900秒のSTS sessionを取得します。Full CLIも
+ここだけが`contents: read`と`id-token: write`を持ち、SHA確認後に1800秒のSTS sessionを取得します。Full CLIも
 DynamoDB readやlogin requestの前に同じcommit probeを繰り返し、commit一致後だけ
 `POST /api/auth/login`へemail/passwordを送り、login responseはmemory内でstrictに検証し、
 10分以上24時間以下有効なBearer access tokenだけを後続requestに使います。Health不一致、login challenge、期限不一致、

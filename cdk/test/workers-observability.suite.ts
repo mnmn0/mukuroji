@@ -2000,13 +2000,51 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
     .toContain('WorkspaceSearchTable2575AD6B');
   expect(JSON.stringify(eventSource?.Properties?.DestinationConfig))
     .toContain('AiAssistanceObservabilityDlq');
-  const filters = JSON.stringify(eventSource?.Properties?.FilterCriteria);
-  expect(filters).toContain('ai-assistance-generation-idempotency');
-  expect(filters).toContain('ai-assistance-generation');
-  expect(filters).toContain('completed');
-  expect(filters).toContain('failed');
-  expect(filters).toContain('approved');
-  expect(filters).toContain('rejected');
+  const filterCriteria = eventSource?.Properties?.FilterCriteria;
+  if (
+    typeof filterCriteria !== 'object' || filterCriteria === null ||
+    !('Filters' in filterCriteria) || !Array.isArray(filterCriteria.Filters)
+  ) {
+    throw new Error('AI assistance observability filters were not synthesized.');
+  }
+  const filterPatterns = filterCriteria.Filters.map((filter) => {
+    if (
+      typeof filter !== 'object' || filter === null ||
+      !('Pattern' in filter) || typeof filter.Pattern !== 'string'
+    ) {
+      throw new Error('AI assistance observability filter pattern is malformed.');
+    }
+    const parsedPattern: unknown = JSON.parse(filter.Pattern);
+    return parsedPattern;
+  });
+  expect(filterPatterns).toEqual([
+    {
+      eventName: ['INSERT', 'MODIFY'],
+      dynamodb: {
+        NewImage: {
+          recordType: { S: ['ai-assistance-generation-idempotency'] },
+          status: { S: ['completed', 'failed'] },
+        },
+      },
+    },
+    {
+      eventName: ['INSERT', 'MODIFY'],
+      dynamodb: {
+        NewImage: {
+          recordType: { S: ['ai-assistance-generation'] },
+          generation: {
+            M: {
+              decision: {
+                M: {
+                  outcome: { S: ['approved', 'rejected'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  ]);
 
   const functionRoleLogicalId = (
     (workerFunction as {

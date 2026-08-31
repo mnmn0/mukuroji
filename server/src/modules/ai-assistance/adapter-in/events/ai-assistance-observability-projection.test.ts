@@ -346,16 +346,24 @@ test('returns isolated failures for malformed matching rows without logging cont
   const providerAttempts: AiAssistanceProviderAttemptObservation[] = []
   const decisions: AiAssistanceDecisionObservation[] = []
   const errorLog = spyOn(console, 'error').mockImplementation(() => undefined)
+  const customerContentMarker = 'customer-content-must-not-be-logged'
 
   try {
     const malformedReceipt = createSucceededProviderRecord(
-      'malformed-provider-secret-value',
+      'malformed-provider',
       '-1',
     )
     const malformedDecision = createGenerationRecord(
-      'malformed-decision-secret-value',
+      'malformed-decision',
       'maybe',
     )
+    const malformedReceiptImage = malformedReceipt.dynamodb?.NewImage
+    const malformedDecisionImage = malformedDecision.dynamodb?.NewImage
+    if (!malformedReceiptImage || !malformedDecisionImage) {
+      throw new Error('Malformed projection fixtures require NEW_IMAGE values.')
+    }
+    malformedReceiptImage.customerContent = stringAttribute(customerContentMarker)
+    malformedDecisionImage.customerContent = stringAttribute(customerContentMarker)
     const result = await processAiAssistanceObservabilityBatch({
       Records: [
         malformedReceipt,
@@ -367,15 +375,22 @@ test('returns isolated failures for malformed matching rows without logging cont
 
     expect(result).toEqual({
       batchItemFailures: [
-        { itemIdentifier: 'malformed-provider-secret-value' },
+        { itemIdentifier: 'malformed-provider' },
         { itemIdentifier: 'mismatched-provider-outcome' },
-        { itemIdentifier: 'malformed-decision-secret-value' },
+        { itemIdentifier: 'malformed-decision' },
       ],
     })
     expect(providerAttempts).toEqual([])
     expect(decisions).toEqual([{ task: 'planning', outcome: 'rejected' }])
     expect(errorLog).toHaveBeenCalledTimes(3)
-    expect(JSON.stringify(errorLog.mock.calls)).not.toContain('secret-value')
+    expect(errorLog.mock.calls).toEqual(Array.from({ length: 3 }, () => [
+      'AI assistance observability projection failed.',
+      {
+        code: 'AiAssistanceObservabilityProjectionFailed',
+        category: 'malformed-record',
+      },
+    ]))
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain(customerContentMarker)
   } finally {
     errorLog.mockRestore()
   }
@@ -406,6 +421,13 @@ test('isolates observability sink failures and continues later records', async (
       batchItemFailures: [{ itemIdentifier: 'failed-sink' }],
     })
     expect(decisions).toEqual([{ task: 'planning', outcome: 'approved' }])
+    expect(errorLog).toHaveBeenCalledWith(
+      'AI assistance observability projection failed.',
+      {
+        code: 'AiAssistanceObservabilityProjectionFailed',
+        category: 'observability-sink',
+      },
+    )
     expect(JSON.stringify(errorLog.mock.calls)).not.toContain('sink payload')
   } finally {
     errorLog.mockRestore()

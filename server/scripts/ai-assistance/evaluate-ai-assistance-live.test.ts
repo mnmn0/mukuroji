@@ -1624,7 +1624,7 @@ describe('evaluateAiAssistanceLive', () => {
     expect(configureStep.uses).toBe(
       'aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c',
     )
-    expect(configureStep.with['role-duration-seconds']).toBe(900)
+    expect(configureStep.with['role-duration-seconds']).toBe(1800)
     expect(configureStep.with['mask-aws-account-id']).toBe(true)
     const evaluationIndex = live.steps.indexOf(evaluationStep)
     const validationIndex = live.steps.indexOf(validationStep)

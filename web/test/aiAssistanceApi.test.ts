@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import type {
   AiAssistanceGeneration,
   AiPlanningStatusUpdateDraft,
@@ -30,7 +30,12 @@ const mutationContext = {
   idempotencyKey: 'ai-idempotency-1',
 }
 
+beforeEach(() => {
+  setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+})
+
 afterEach(() => {
+  setSystemTime()
   globalThis.fetch = originalFetch
 })
 
