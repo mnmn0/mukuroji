@@ -473,6 +473,33 @@ test('rejects an oversized Contact deletion before fencing the graph', async () 
   }
 })
 
+test('counts the Customer root when rejecting a Contact deletion at the transaction boundary', async () => {
+  const contactRow = createContactRow('customer-1', 'contact-1')
+  const requestRows = Array.from({ length: 98 }, (_, index) => createRequestRow({
+    ...createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z'),
+    contactId: contactRow.contact.id,
+  }))
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation', { contactCount: 1, requestCount: 98, openRequestCount: 98 }),
+    contactRow,
+    ...requestRows,
+  ])
+  try {
+    await expect(harness.client.beginCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).rejects.toMatchObject({ code: 'CustomerTransactionTooLarge', status: 409 })
+    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
 test('classifies mixed authorization and revision cancellations as a retryable Customer conflict', async () => {
   const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
   const authorizationConditionCheck = {

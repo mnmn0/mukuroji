@@ -10,7 +10,12 @@ export type CustomerImpactPanelProps = {
   t: (key: MessageKey) => string
 }
 
-/** Renders an explainable Customer impact signal without mutating Work Item priority. */
+/**
+ * Renders an explainable Customer impact signal without mutating Work Item priority.
+ *
+ * @param props - Impact signal and localized label dependencies.
+ * @returns Accessible Customer impact summary markup.
+ */
 export function CustomerImpactPanel({ signal, t }: CustomerImpactPanelProps) {
   const headingId = useId()
   const signalClassName = signal.prioritySignal === 'critical'

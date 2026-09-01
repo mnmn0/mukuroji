@@ -628,6 +628,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
     const probe = new InMemoryCustomerClient({ now: this.now, id: this.id })
     probe.replaceWorkspaceState(workspaceId, loaded.state)
     await probe.deleteContact(workspaceId, customerId, contactId, actorId, expectedRevision)
+    probe.synchronizeCustomerCounts(workspaceId)
     this.assertContactMutationFitsTransaction(
       workspaceId,
       loaded.state,

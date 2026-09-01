@@ -852,21 +852,24 @@ export class DynamoDbTriageClient implements TriageClient {
     const customerIdValues = sourceCustomerId === undefined
       ? { ':customerId': entry.customerId }
       : { ':customerId': entry.customerId, ':sourceCustomerId': sourceCustomerId }
+    const contactStatusCondition = operation === undefined
+      ? ' AND #contact.#status = :activeStatus'
+      : ''
     if (entry.contactId !== undefined) {
       checks.push({
         ConditionCheck: {
           TableName: this.customerTableName,
           Key: { workspaceId, recordKey: 'CONTACT#' + entry.contactId },
           ConditionExpression:
-            `attribute_exists(#contact) AND ${contactCustomerIdExpression} AND #contact.#status = :activeStatus`,
+            `attribute_exists(#contact) AND ${contactCustomerIdExpression}${contactStatusCondition}`,
           ExpressionAttributeNames: {
             '#contact': 'contact',
             '#customerId': 'customerId',
-            '#status': 'status',
+            ...(operation === undefined ? { '#status': 'status' } : {}),
           },
           ExpressionAttributeValues: {
             ...customerIdValues,
-            ':activeStatus': 'active',
+            ...(operation === undefined ? { ':activeStatus': 'active' } : {}),
           },
         },
       })

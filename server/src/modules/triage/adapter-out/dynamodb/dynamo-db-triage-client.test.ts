@@ -784,15 +784,61 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
         expect.objectContaining({
           ConditionCheck: expect.objectContaining({
             Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#contact-1' },
-            ConditionExpression: 'attribute_exists(#contact) AND (#contact.#customerId = :customerId OR #contact.#customerId = :sourceCustomerId) AND #contact.#status = :activeStatus',
+            ConditionExpression: 'attribute_exists(#contact) AND (#contact.#customerId = :customerId OR #contact.#customerId = :sourceCustomerId)',
             ExpressionAttributeValues: {
               ':customerId': 'customer-target',
               ':sourceCustomerId': 'customer-source',
-              ':activeStatus': 'active',
             },
           }),
         }),
       ]))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('does not require an active Contact while clearing a Customer deletion association', async () => {
+    const entry = createEntry()
+    entry.customerId = 'customer-1'
+    entry.contactId = 'contact-1'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Item: storedEntry },
+      {},
+    ], { customerTableName: 'CustomersTable' })
+
+    try {
+      await harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        {
+          expectedRevision: entry.revision,
+          customerId: null,
+          contactId: null,
+          customerRequestId: null,
+        },
+        undefined,
+        { kind: 'deletion', customerId: 'customer-1' },
+      )
+
+      const contactCheck = harness.commands[1]?.input.TransactItems?.find((item) =>
+        item.ConditionCheck?.Key?.recordKey === 'CONTACT#contact-1'
+      )
+      expect(contactCheck?.ConditionCheck).toMatchObject({
+        ConditionExpression: 'attribute_exists(#contact) AND #contact.#customerId = :customerId',
+        ExpressionAttributeNames: {
+          '#contact': 'contact',
+          '#customerId': 'customerId',
+        },
+      })
+      expect(contactCheck?.ConditionCheck).not.toHaveProperty('ExpressionAttributeValues.:activeStatus')
     } finally {
       harness.restore()
     }
