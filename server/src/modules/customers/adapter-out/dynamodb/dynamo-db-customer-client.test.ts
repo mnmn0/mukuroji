@@ -86,6 +86,8 @@ function createContactRow(customerId: string, contactId: string) {
 type HarnessOptions = {
   /** Transaction number that should fail once, counted from one. */
   failTransactionAt?: number
+  /** Transaction number that should fail with a conditional conflict once. */
+  failConditionalTransactionAt?: number
 }
 
 /** Creates a real DocumentClient whose commands are captured without contacting AWS. */
@@ -149,6 +151,12 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
         failedTransaction = true
         throw new Error('Injected Customer transaction failure.')
       }
+      if (!failedTransaction && options.failConditionalTransactionAt === transactionCount) {
+        failedTransaction = true
+        const error = new Error('Injected Customer conditional conflict.')
+        error.name = 'ConditionalCheckFailedException'
+        throw error
+      }
       const items = normalizedInput.TransactItems
       if (!Array.isArray(items)) throw new TypeError('Customer transaction items are missing.')
       for (const item of items) {
@@ -180,6 +188,29 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
   }
 }
 
+/** Finds a metadata Put whose condition contains the requested marker expression. */
+function findMetadataPut(
+  commands: readonly { name: string; input: Record<string, unknown> }[],
+  conditionFragment: string,
+): Record<string, unknown> | undefined {
+  for (const command of commands) {
+    if (command.name !== 'TransactWriteCommand') continue
+    const items = command.input.TransactItems
+    if (!Array.isArray(items)) continue
+    for (const item of items) {
+      if (!isRecord(item) || !isRecord(item.Put)) continue
+      const put = item.Put
+      const putItem = put.Item
+      if (isRecord(putItem) && putItem.recordKey === 'META' &&
+        typeof put.ConditionExpression === 'string' &&
+        put.ConditionExpression.includes(conditionFragment)) {
+        return put
+      }
+    }
+  }
+  return undefined
+}
+
 test('uses a focused record-prefix query for a Customer Request read', async () => {
   const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
   const harness = createHarness([createRequestRow(request)])
@@ -195,6 +226,20 @@ test('uses a focused record-prefix query for a Customer Request read', async () 
         ':recordPrefix': 'REQUEST#',
       },
     })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not expose a notification cleanup conflict as a read failure', async () => {
+  const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
+  const harness = createHarness([createRequestRow(request)], { failConditionalTransactionAt: 1 })
+  try {
+    await expect(harness.client.listCompletionNotifications(
+      'workspace-1',
+      'support',
+      'work-item-1',
+    )).resolves.toEqual([])
   } finally {
     harness.restore()
   }
@@ -222,6 +267,13 @@ test('keeps a Customer hidden until cross-store deletion cleanup completes', asy
       customer.id,
       'member-1',
     )).resolves.toBeUndefined()
+    expect(findMetadataPut(harness.commands, '#deletion.#deletionCustomerId')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#deletion': 'deletion',
+        '#retention': 'retention',
+        '#merge': 'merge',
+      },
+    })
     expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
     expect(harness.rows.get('META')).not.toHaveProperty('deletion')
   } finally {
@@ -261,6 +313,13 @@ test('repoints a Customer Triage merge before retiring the source graph', async 
     })
     await expect(harness.client.completeCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toMatchObject({
       customer: { id: target.id },
+    })
+    expect(findMetadataPut(harness.commands, '#merge.#mergeSource')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#deletion': 'deletion',
+        '#retention': 'retention',
+        '#merge': 'merge',
+      },
     })
     expect(harness.rows.has(`CUSTOMER#${source.id}`)).toBeFalse()
     expect(harness.rows.get(`CUSTOMER#${target.id}`)).toMatchObject({
@@ -383,6 +442,13 @@ test('resumes Customer retention after a later transaction fails', async () => {
 
     await expect(harness.client.redactExpired('workspace-1')).resolves.toMatchObject({
       requestsRedacted: 0,
+    })
+    expect(findMetadataPut(harness.commands, '#retention.#retentionEvaluatedAt')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#deletion': 'deletion',
+        '#retention': 'retention',
+        '#merge': 'merge',
+      },
     })
     expect(harness.rows.get('META')).toMatchObject({ revision: 6 })
     expect(harness.rows.get('META')).not.toHaveProperty('retention')

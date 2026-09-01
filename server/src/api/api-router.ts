@@ -33054,7 +33054,12 @@ async function prepareCustomerCompletionNotificationsBestEffort(
       actorId,
     )
   } catch (error) {
-    console.error(`Customer completion notification preparation failed after ${operation}.`, error)
+    console.error(`Customer completion notification preparation failed after ${operation}.`, {
+      workspaceId,
+      teamId,
+      workItemId,
+      errorCode: error instanceof CustomerError ? error.code : 'CustomerCompletionNotificationUnavailable',
+    })
   }
 }
 

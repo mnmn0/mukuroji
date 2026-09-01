@@ -14,7 +14,9 @@ import type { TriageClient } from '../../../triage'
 /** Stable instant shared by Customer Router fixtures. */
 const NOW = '2026-08-01T00:00:00.000Z'
 
-/** Triage operations used by Customer Router integration tests. */
+/**
+ * Triage operations used by Customer Router integration tests.
+ */
 type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'listCustomerAssociations' | 'clearCustomerAssociations'>
 
 /** Optional live-resource authorization replacements used by router tests. */

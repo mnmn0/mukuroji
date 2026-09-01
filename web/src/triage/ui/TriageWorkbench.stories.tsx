@@ -54,6 +54,7 @@ const onCreateCustomerRequest = fn(async (
   workItemLinks: [],
   workspaceId: 'workspace-demo',
 }))
+const onRetryCustomerOptions = fn()
 
 const meta = {
   title: 'Application/Triage/Team Workbench',
@@ -219,13 +220,15 @@ export const CustomerRequestAssociationError: Story = {
     customerOptionsErrorMessage: 'Customers could not be loaded.',
     explicitEntryId: 'triage-form-1',
     onCreateCustomerRequest,
-    onRetryCustomerOptions: fn(),
+    onRetryCustomerOptions,
     selectedEntry: entryViews[2],
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    onRetryCustomerOptions.mockClear()
     await expect(canvas.getByRole('alert')).toHaveTextContent('Customers could not be loaded.')
     await userEvent.click(canvas.getByRole('button', { name: 'Reload' }))
+    await expect(onRetryCustomerOptions).toHaveBeenCalledTimes(1)
   },
 }
 

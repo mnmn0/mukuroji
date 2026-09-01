@@ -737,12 +737,17 @@ export class DynamoDbCustomerClient implements CustomerClient {
       result.retentionResult.contactsRedacted > 0 ||
       result.retentionResult.requestsRedacted > 0
     if (!hasExternalCustomerOperation(result.loaded)) {
-      await this.persist(
-        workspaceId,
-        result.loaded,
-        result.memory.readWorkspaceState(workspaceId),
-        hasRetentionChanges ? { retention: { evaluatedAt: result.retentionAt } } : {},
-      )
+      try {
+        await this.persist(
+          workspaceId,
+          result.loaded,
+          result.memory.readWorkspaceState(workspaceId),
+          hasRetentionChanges ? { retention: { evaluatedAt: result.retentionAt } } : {},
+        )
+      } catch (error) {
+        if (!(error instanceof CustomerError && error.code === 'CustomerRevisionConflict')) throw error
+        // Opportunistic retention and notification cleanup can be retried by the next read.
+      }
     }
     return notifications
   }
@@ -1225,6 +1230,11 @@ export class DynamoDbCustomerClient implements CustomerClient {
     const expressionAttributeValues: Record<string, unknown> = expectedRevision === 0
       ? {}
       : { ':revision': expectedRevision }
+    if (expectedRevision !== 0 || options.expectedDeletion || options.expectedRetention || options.expectedMerge) {
+      expressionAttributeNames['#deletion'] = 'deletion'
+      expressionAttributeNames['#retention'] = 'retention'
+      expressionAttributeNames['#merge'] = 'merge'
+    }
     if (options.expectedDeletion) {
       conditionParts.push(
         '#deletion.#deletionCustomerId = :deletionCustomerId',
@@ -1291,9 +1301,6 @@ export class DynamoDbCustomerClient implements CustomerClient {
         'attribute_not_exists(#retention)',
         'attribute_not_exists(#merge)',
       )
-      expressionAttributeNames['#deletion'] = 'deletion'
-      expressionAttributeNames['#retention'] = 'retention'
-      expressionAttributeNames['#merge'] = 'merge'
     }
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       ...recordItems,
@@ -1404,6 +1411,7 @@ type CustomerPersistOptions = {
   }
   /** Customer merge whose graph changes must commit behind its marker. */
   merge?: {
+    /** Merge marker that must still be present before the commit. */
     expected: CustomerMergeOperation
   }
 }
