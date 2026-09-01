@@ -113,7 +113,11 @@ export function useProjectIssues(
               ? (current: ProjectIssuesPage, key: Arguments) => revalidate(current.issues, key)
               : revalidate,
           }
-    const response = await query.mutate(responseData, responseOptions)
+    // SWR treats an explicit `undefined` data argument as a cache replacement,
+    // so preserve the no-argument revalidation semantics used by callers.
+    const response = data === undefined && options === undefined
+      ? await query.mutate()
+      : await query.mutate(responseData, responseOptions)
     return response?.issues
   }
 
