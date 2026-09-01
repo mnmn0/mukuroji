@@ -108,7 +108,9 @@ export function CustomerPage() {
           errorMessage={errorMessage}
           filters={filters}
           groupBy={groupBy}
+          hasMoreCustomers={customers.hasMore}
           isLoading={isLoading}
+          isLoadingMoreCustomers={customers.isLoadingMore}
           locale={workspace.locale}
           onOpenWorkItem={(workItem) => navigate(
             workItem.projectId
@@ -119,6 +121,7 @@ export function CustomerPage() {
           onApplySavedView={applySavedView}
           onFiltersChange={replaceFilters}
           onGroupByChange={replaceGroupBy}
+          onLoadMoreCustomers={customers.loadMore}
           onRetry={() => {
             void customers.mutate()
             if (customerId) void detail.mutate()

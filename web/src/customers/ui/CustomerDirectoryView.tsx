@@ -29,6 +29,10 @@ export type CustomerDirectoryViewProps = {
   savedViews: readonly CustomerSavedView[]
   /** Whether the directory or detail request is loading. */
   isLoading: boolean
+  /** Whether another Customer page is available. */
+  hasMoreCustomers: boolean
+  /** Whether the next Customer page is loading. */
+  isLoadingMoreCustomers: boolean
   /** User-facing load failure, when present. */
   errorMessage?: string
   /** Translator for all visible Customer copy. */
@@ -53,6 +57,8 @@ export type CustomerDirectoryViewProps = {
   onSelectCustomer: (customerId: string) => void
   /** Retries the failed query. */
   onRetry: () => void
+  /** Loads exactly one additional Customer page. */
+  onLoadMoreCustomers: () => void
   /** Opens one related Work Item. */
   onOpenWorkItem: (workItem: CustomerWorkItemSummary) => void
   /** Opens one related Project in searchable Project context. */
@@ -74,6 +80,8 @@ export function CustomerDirectoryView({
   groupBy,
   savedViews,
   isLoading,
+  hasMoreCustomers,
+  isLoadingMoreCustomers,
   errorMessage,
   t,
   locale,
@@ -86,6 +94,7 @@ export function CustomerDirectoryView({
   saveViewError,
   onSelectCustomer,
   onRetry,
+  onLoadMoreCustomers,
   onOpenWorkItem,
   onOpenProject,
 }: CustomerDirectoryViewProps) {
@@ -276,6 +285,18 @@ export function CustomerDirectoryView({
                 ))}
               </div>
             )}
+            {hasMoreCustomers ? (
+              <div className="flex justify-center border-t border-[var(--workbench-border)] px-5 py-4">
+                <button
+                  className="workbench-button-secondary min-h-10 px-4"
+                  disabled={isLoadingMoreCustomers}
+                  onClick={onLoadMoreCustomers}
+                  type="button"
+                >
+                  {isLoadingMoreCustomers ? t('customers.loadingMore') : t('customers.loadMore')}
+                </button>
+              </div>
+            ) : null}
           </section>
 
           <CustomerDetailPanel

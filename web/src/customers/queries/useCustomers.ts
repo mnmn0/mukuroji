@@ -1,7 +1,7 @@
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import type { CustomerListInput, CustomerPage } from '@mukuroji/contracts'
-import { useEffect } from 'react'
+import { useCallback } from 'react'
 import {
   getCustomer,
   getCustomerSavedViews,
@@ -45,7 +45,7 @@ export function useCustomers(
     customerQueryConfig,
   )
   const { data: pageData, error, isValidating, setSize, size } = query
-  useEffect(() => {
+  const loadMore = useCallback(() => {
     if (!enabled || !pageData || error || isValidating) return
     if (pageData.length !== size || pageData.some((page) => page === undefined)) return
     if (!pageData.at(-1)?.nextCursor) return
@@ -60,6 +60,8 @@ export function useCustomers(
       ? { customers, ...(nextCursor ? { nextCursor } : {}) }
       : undefined,
     isLoadingMore: Boolean(query.data && query.data.length < query.size && query.isValidating),
+    hasMore: Boolean(nextCursor),
+    loadMore,
     key: accessToken && enabled ? ['customers', accessToken, input] as const : null,
   }
 }
