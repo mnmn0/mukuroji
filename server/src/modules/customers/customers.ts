@@ -137,6 +137,15 @@ export interface CustomerClient {
    * @returns A promise that resolves after the merge marker is durable.
    */
   beginCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void>
+  /** Cancels a cross-store Customer merge before the source graph is retired.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor cancelling the merge.
+   * @param input Target Customer and revision fences.
+   * @returns A promise that resolves after the durable merge marker is removed.
+   */
+  cancelCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void>
   /** Completes a cross-store Customer merge after external links are repointed.
    *
    * @param workspaceId Workspace containing both Customers.
@@ -781,6 +790,17 @@ export class InMemoryCustomerClient implements CustomerClient {
       sourceExpectedRevision: input.sourceExpectedRevision,
       targetExpectedRevision: input.targetExpectedRevision,
     })
+  }
+
+  /** Cancels a cross-store Customer merge without changing either Customer graph. */
+  async cancelCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void> {
+    requireActor(actorId)
+    const pendingMerge = this.pendingMerges.get(workspaceId)
+    if (!pendingMerge) return
+    if (!sameCustomerMergeMarker(pendingMerge, sourceCustomerId, input)) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'Another Customer merge is still being completed.')
+    }
+    this.pendingMerges.delete(workspaceId)
   }
 
   /** Completes a cross-store Customer merge after external links are repointed.

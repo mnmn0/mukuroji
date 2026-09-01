@@ -332,29 +332,65 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association repointing is unavailable.')
       }
       const customers = dependencies.getCustomers()
+      const listCustomerAssociations = triage.listCustomerAssociations
       const sourceCustomerId = context.req.param('customerId') ?? ''
       const input = readMergeCustomerInput(await dependencies.readJson(context.req))
-      const associations = await triage.listCustomerAssociations(principal.directoryId, sourceCustomerId)
-      const authorizedAssociations: Array<{
+      /** Reads and authorizes the complete source-side Triage association snapshot. */
+      const readAuthorizedAssociations = async (): Promise<Array<{
         entry: TriageEntry
         authorizationConditionChecks?: TriageAuthorizationConditionChecks
-      }> = []
-      for (const entry of associations) {
-        const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
-          ? await dependencies.createTriageAuthorizationConditionChecks(
-              principal,
-              entry.teamId,
-              [entry.projectId],
-            )
-          : undefined
-        authorizedAssociations.push({ entry, authorizationConditionChecks })
+      }>> => {
+        const associations = await listCustomerAssociations(
+          principal.directoryId,
+          sourceCustomerId,
+        )
+        const authorizedAssociations: Array<{
+          entry: TriageEntry
+          authorizationConditionChecks?: TriageAuthorizationConditionChecks
+        }> = []
+        for (const entry of associations) {
+          const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
+            ? await dependencies.createTriageAuthorizationConditionChecks(
+                principal,
+                entry.teamId,
+                [entry.projectId],
+              )
+            : undefined
+          authorizedAssociations.push({ entry, authorizationConditionChecks })
+        }
+        return authorizedAssociations
       }
+      await readAuthorizedAssociations()
       await customers.beginCustomerMerge(
         principal.directoryId,
         sourceCustomerId,
         principal.userKey,
         input,
       )
+      let authorizedAssociations: Array<{
+        entry: TriageEntry
+        authorizationConditionChecks?: TriageAuthorizationConditionChecks
+      }>
+      try {
+        authorizedAssociations = await readAuthorizedAssociations()
+      } catch (error) {
+        try {
+          await customers.cancelCustomerMerge(
+            principal.directoryId,
+            sourceCustomerId,
+            principal.userKey,
+            input,
+          )
+        } catch (cancelError) {
+          throw new CustomerError(
+            503,
+            'CustomerMergeCancellationFailed',
+            'The Customer merge could not be safely prepared. Retry the operation.',
+            { cause: cancelError },
+          )
+        }
+        throw error
+      }
       for (const { entry, authorizationConditionChecks } of authorizedAssociations) {
         await triage.associateCustomer(
           principal.directoryId,

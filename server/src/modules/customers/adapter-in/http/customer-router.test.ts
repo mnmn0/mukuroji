@@ -616,6 +616,96 @@ test('preflights every Triage scope before starting a Customer merge', async () 
   expect(beginCustomerMerge).not.toHaveBeenCalled()
 })
 
+test('rescans Triage associations after locking a Customer merge', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const source = await createCustomer(client)
+  const target = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Globex Industries',
+    tier: 'growth',
+    size: 'mid-market',
+    status: 'active',
+    health: 'healthy',
+  })
+  const entry = createCustomerAssociationEntry(source.id)
+  let listCalls = 0
+  let associationCalls = 0
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    listCustomerAssociations: async () => {
+      listCalls += 1
+      return listCalls === 1 ? [] : [entry]
+    },
+    associateCustomer: async () => {
+      associationCalls += 1
+      return { ...entry, customerId: target.id, revision: entry.revision + 1 }
+    },
+  })
+
+  const response = await app.request(`/api/customers/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(listCalls).toBe(2)
+  expect(associationCalls).toBe(1)
+  await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
+})
+
+test('cancels a Customer merge when the locked Triage rescan loses authorization', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const source = await createCustomer(client)
+  const target = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Globex Industries',
+    tier: 'growth',
+    size: 'mid-market',
+    status: 'active',
+    health: 'healthy',
+  })
+  const entry = createCustomerAssociationEntry(source.id)
+  let authorizationCalls = 0
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    listCustomerAssociations: async () => [entry],
+    associateCustomer: async () => entry,
+  }, undefined, {
+    createTriageAuthorizationConditionChecks: async () => {
+      authorizationCalls += 1
+      if (authorizationCalls === 2) {
+        throw new CustomerError(403, 'CustomerTriageAuthorizationChanged', 'Triage access is no longer available.')
+      }
+      return []
+    },
+  })
+
+  const response = await app.request(`/api/customers/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(authorizationCalls).toBe(2)
+  await expect(client.getCustomer('workspace-1', source.id)).resolves.toMatchObject({ customer: { id: source.id } })
+})
+
 test('rejects deletion of a Customer Request that still points to Triage', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const customer = await createCustomer(client)

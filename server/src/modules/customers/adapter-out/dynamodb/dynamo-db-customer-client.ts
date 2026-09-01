@@ -452,6 +452,18 @@ export class DynamoDbCustomerClient implements CustomerClient {
     })
   }
 
+  /** Cancels a cross-store Customer merge without changing either Customer graph. */
+  async cancelCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void> {
+    requireText(actorId, 'Customer actor ID')
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    const pendingMerge = metadata.pendingMerge
+    if (!pendingMerge) return
+    if (!sameCustomerMergeOperation(pendingMerge, sourceCustomerId, input)) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'Another Customer merge is still being completed.')
+    }
+    await this.writeTransaction(workspaceId, metadata.revision, [], { expectedMerge: pendingMerge })
+  }
+
   /** Completes a cross-store Customer merge after external links are repointed.
    *
    * @param workspaceId Workspace containing both Customers.

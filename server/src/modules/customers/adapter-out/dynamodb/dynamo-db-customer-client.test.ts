@@ -497,6 +497,39 @@ test('repoints a Customer Triage merge before retiring the source graph', async 
   }
 })
 
+test('cancels a matching Customer merge marker without changing the graph', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const harness = createHarness([
+    {
+      workspaceId: source.workspaceId,
+      recordKey: `CUSTOMER#${source.id}`,
+      entityType: 'customer',
+      customer: source,
+    },
+    {
+      workspaceId: target.workspaceId,
+      recordKey: `CUSTOMER#${target.id}`,
+      entityType: 'customer',
+      customer: target,
+    },
+  ])
+  try {
+    const input = {
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }
+    await harness.client.beginCustomerMerge('workspace-1', source.id, 'member-1', input)
+    await expect(harness.client.cancelCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toBeUndefined()
+    expect(harness.rows.has(`CUSTOMER#${source.id}`)).toBe(true)
+    expect(harness.rows.has(`CUSTOMER#${target.id}`)).toBe(true)
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
+  } finally {
+    harness.restore()
+  }
+})
+
 test('splits a large Customer merge while retaining a resumable merge marker', async () => {
   const source = createCustomerRow('customer-source', 'Acme duplicate').customer
   const target = createCustomerRow('customer-target', 'Acme Corporation').customer
