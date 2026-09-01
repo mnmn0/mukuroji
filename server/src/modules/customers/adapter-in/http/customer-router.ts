@@ -855,6 +855,9 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       }
       const contactId = input.contactId ?? entry.contactId
       const requestInput = createRequestInputFromTriage(entry, { ...input, ...(contactId ? { contactId } : {}) })
+      if (entry.customerId && entry.customerId !== input.customerId) {
+        throw new CustomerError(409, 'CustomerAlreadyAssociated', 'This Triage Entry is already associated with another Customer.')
+      }
       if (entry.customerRequestId) {
         const existing = await dependencies.getCustomers().getRequest(principal.directoryId, entry.customerRequestId)
         if (existing.customerId !== input.customerId) {
@@ -871,9 +874,6 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
           )
         }
         return context.json(await projectRequestForResponse(principal, existing, dependencies))
-      }
-      if (entry.customerId && entry.customerId !== input.customerId) {
-        throw new CustomerError(409, 'CustomerAlreadyAssociated', 'This Triage Entry is already associated with another Customer.')
       }
       const canonicalWorkItem = entry.canonicalWorkItem
       if (canonicalWorkItem && canonicalWorkItem.teamId !== teamId) {

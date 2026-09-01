@@ -1480,6 +1480,43 @@ test('rejects an accepted Triage retry when its existing request points to anoth
   expect(await response.json()).toMatchObject({ code: 'CustomerRequestTriageMismatch' })
 })
 
+test('rejects an accepted Triage retry when its existing association points to another Customer', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const entry: TriageEntry = {
+    ...createCustomerAssociationEntry('another-customer'),
+    id: 'triage-customer-mismatch',
+    revision: 1,
+    customerRequestId: 'orphaned-request',
+  }
+  let associationCalls = 0
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    associateCustomer: async () => {
+      associationCalls += 1
+      return entry
+    },
+  })
+
+  const response = await app.request('/api/teams/support/triage-entries/triage-customer-mismatch/customer-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: entry.revision,
+      customerId: customer.id,
+      importance: 'normal',
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'CustomerAlreadyAssociated' })
+  expect(associationCalls).toBe(0)
+})
+
 test('validates partial Triage Customer associations against the current Customer', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const customer = await createCustomer(client)
