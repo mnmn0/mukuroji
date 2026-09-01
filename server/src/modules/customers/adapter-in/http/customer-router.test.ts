@@ -1348,6 +1348,65 @@ test('resumes a Triage Customer Request after the association commit fails', asy
   expect(entry.customerRequestId).toBe(savedRequests.requests[0]?.id)
 })
 
+test('rejects an accepted Triage retry when its existing request input conflicts', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  let entry: TriageEntry = {
+    ...createCustomerAssociationEntry(customer.id),
+    id: 'triage-conflict-1',
+    revision: 1,
+    customerRequestId: undefined,
+  }
+  let associationCalls = 0
+  const triage: CustomerTestTriage = {
+    getEntry: async () => entry,
+    associateCustomer: async (_workspaceId, _teamId, _entryId, _actor, input) => {
+      associationCalls += 1
+      entry = {
+        ...entry,
+        customerId: input.customerId ?? undefined,
+        contactId: input.contactId ?? undefined,
+        customerRequestId: input.customerRequestId ?? undefined,
+        revision: entry.revision + 1,
+      }
+      return entry
+    },
+  }
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, triage)
+
+  const firstResponse = await app.request('/api/teams/support/triage-entries/triage-conflict-1/customer-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: 1,
+      customerId: customer.id,
+      importance: 'normal',
+    }),
+  })
+  expect(firstResponse.status).toBe(201)
+
+  const retryResponse = await app.request('/api/teams/support/triage-entries/triage-conflict-1/customer-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: entry.revision,
+      customerId: customer.id,
+      importance: 'urgent',
+    }),
+  })
+
+  expect(retryResponse.status).toBe(409)
+  expect(await retryResponse.json()).toMatchObject({ code: 'CustomerRequestAssociationRecoveryRequired' })
+  expect(associationCalls).toBe(1)
+  const requests = await client.listRequests('workspace-1', { customerId: customer.id })
+  expect(requests.requests).toHaveLength(1)
+  expect(requests.requests[0]?.importance).toBe('normal')
+})
+
 test('rejects an accepted Triage retry when its existing request points to another Triage Entry', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const customer = await createCustomer(client)

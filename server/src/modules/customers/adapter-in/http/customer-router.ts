@@ -853,6 +853,8 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       if (entry.revision !== input.expectedRevision) {
         throw new CustomerError(409, 'TriageRevisionConflict', 'The Triage Entry changed. Reload and try again.')
       }
+      const contactId = input.contactId ?? entry.contactId
+      const requestInput = createRequestInputFromTriage(entry, { ...input, ...(contactId ? { contactId } : {}) })
       if (entry.customerRequestId) {
         const existing = await dependencies.getCustomers().getRequest(principal.directoryId, entry.customerRequestId)
         if (existing.customerId !== input.customerId) {
@@ -860,6 +862,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         }
         if (existing.triageEntryId !== entryId) {
           throw new CustomerError(409, 'CustomerRequestTriageMismatch', 'The Customer Request is not linked to this Triage Entry.')
+        }
+        if (!isSameTriageRequestOrigin(existing, requestInput)) {
+          throw new CustomerError(
+            409,
+            'CustomerRequestAssociationRecoveryRequired',
+            'The existing Triage Customer Request no longer matches this Entry. Delete the orphaned Request after verifying the Triage association, then retry.',
+          )
         }
         return context.json(await projectRequestForResponse(principal, existing, dependencies))
       }
@@ -883,8 +892,6 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         teamId,
         [entry.projectId, workItemAuthorization?.projectId],
       )
-      const contactId = input.contactId ?? entry.contactId
-      const requestInput = createRequestInputFromTriage(entry, { ...input, ...(contactId ? { contactId } : {}) })
       let request = await dependencies.getCustomers().createRequest(
         principal.directoryId,
         principal.userKey,
