@@ -57,6 +57,20 @@ export type CustomerWorkspaceState = {
   notifications: Map<string, CustomerCompletionNotification>
 }
 
+/** Result of one bounded Customer retention sweep. */
+export type CustomerRetentionSweepResult = {
+  /** Number of due-index pages read. */
+  scannedPages: number
+  /** Number of distinct Workspaces handed to retention redaction. */
+  workspacesProcessed: number
+  /** Customer roots redacted during the sweep. */
+  customersRedacted: number
+  /** Contacts redacted during the sweep. */
+  contactsRedacted: number
+  /** Customer Requests redacted during the sweep. */
+  requestsRedacted: number
+}
+
 /** DynamoDB conditions supplied by an already-authorized live-resource boundary. */
 export type CustomerAuthorizationConditionChecks = TriageAuthorizationConditionChecks
 
@@ -90,6 +104,17 @@ export type CustomerContactMergeOperation = {
 
 /** Durable marker for either kind of Contact operation. */
 export type CustomerContactOperation = CustomerContactDeletionOperation | CustomerContactMergeOperation
+
+/** Application port for time-driven Customer retention processing. */
+export interface CustomerRetentionClient {
+  /** Redacts due Customer data without requiring a read request.
+   *
+   * @param now Evaluation timestamp used for the due-index query and redaction.
+   * @param maxPages Maximum number of index pages accepted for one invocation.
+   * @returns Counts collected from all processed Workspace redactions.
+   */
+  sweepExpiredRetention(now?: string, maxPages?: number): Promise<CustomerRetentionSweepResult>
+}
 
 /** Public Customer persistence and application surface. */
 export interface CustomerClient {

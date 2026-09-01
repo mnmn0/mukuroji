@@ -53,6 +53,8 @@ import {
   type CustomerContactDeletionOperation,
   type CustomerContactMergeOperation,
   type CustomerContactOperation,
+  type CustomerRetentionClient,
+  type CustomerRetentionSweepResult,
   type CustomerWorkspaceState,
 } from '../../customers'
 import { createDynamoDbClient } from '../../../../infrastructure/aws/dynamodb-client'
@@ -62,7 +64,7 @@ import { loadServerConfig } from '../../../../infrastructure/config/server-confi
 const CUSTOMER_TRANSACTION_RECORD_LIMIT = 99
 
 /** GSI used to wake retention processing for records whose expiry is due. */
-export const CUSTOMER_RETENTION_INDEX_NAME = 'CustomerRetentionIndex'
+const CUSTOMER_RETENTION_INDEX_NAME = 'CustomerRetentionIndex'
 
 /** Sparse partition value shared by all Customer retention index rows. */
 const CUSTOMER_RETENTION_INDEX_PARTITION = 'CUSTOMER_RETENTION'
@@ -101,20 +103,6 @@ export type DynamoDbCustomerClientOptions = {
   id?: () => string
 }
 
-/** Result of one bounded Customer retention index sweep. */
-export type CustomerRetentionSweepResult = {
-  /** Number of due-index pages read. */
-  scannedPages: number
-  /** Number of distinct Workspaces handed to retention redaction. */
-  workspacesProcessed: number
-  /** Customer roots redacted during the sweep. */
-  customersRedacted: number
-  /** Contacts redacted during the sweep. */
-  contactsRedacted: number
-  /** Customer Requests redacted during the sweep. */
-  requestsRedacted: number
-}
-
 /**
  * CustomerClient implementation backed by the Customer single-table DynamoDB store.
  *
@@ -123,7 +111,7 @@ export type CustomerRetentionSweepResult = {
  *
  * @implements CustomerClient
  */
-export class DynamoDbCustomerClient implements CustomerClient {
+export class DynamoDbCustomerClient implements CustomerClient, CustomerRetentionClient {
   /** Durable Customer table name. */
   private readonly tableName: string
 

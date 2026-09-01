@@ -214,7 +214,10 @@ export const CustomerRequestAssociation: Story = {
   },
 }
 
-/** Accepted Triage Entry keeps an explicit retry state when Customer options fail to load. */
+/** Accepted Triage Entry keeps an explicit retry state when Customer options fail to load.
+ *
+ * The play function verifies the safe alert and the explicit reload callback.
+ */
 export const CustomerRequestAssociationError: Story = {
   args: {
     customerOptionsErrorMessage: 'Customers could not be loaded.',

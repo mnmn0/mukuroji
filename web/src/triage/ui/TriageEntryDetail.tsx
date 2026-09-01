@@ -29,7 +29,7 @@ import {
 import type { TriageEntryView } from '../model/triageView'
 import { TriageSourceIcon } from './TriageSourceIcon'
 
-/** Props accepted by the permission-aware triage entry detail pane. */
+/** Props accepted by the permission-aware triage entry detail pane, including source context and action state. */
 export type TriageEntryDetailProps = {
   /** Active Workspace member bearer token used only for explicit AI generation. */
   readonly accessToken?: string

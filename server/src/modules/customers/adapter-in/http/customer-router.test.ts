@@ -777,6 +777,60 @@ test('cancels a Customer merge when the locked Triage rescan loses authorization
   await expect(client.getCustomer('workspace-1', source.id)).resolves.toMatchObject({ customer: { id: source.id } })
 })
 
+test('cancels a Customer merge when repointing a Triage association fails', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const source = await createCustomer(client)
+  const target = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Globex Industries',
+    tier: 'growth',
+    size: 'mid-market',
+    status: 'active',
+    health: 'healthy',
+  })
+  const entry = createCustomerAssociationEntry(source.id)
+  let associationCalls = 0
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    listCustomerAssociations: async () => [entry],
+    associateCustomer: async () => {
+      associationCalls += 1
+      if (associationCalls === 1) {
+        throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage association update failed.')
+      }
+      return { ...entry, customerId: target.id, revision: entry.revision + 1 }
+    },
+  })
+  const input = {
+    targetCustomerId: target.id,
+    sourceExpectedRevision: source.revision,
+    targetExpectedRevision: target.revision,
+  }
+
+  const firstResponse = await app.request(`/api/customers/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+
+  expect(firstResponse.status).toBe(503)
+  expect(await firstResponse.json()).toMatchObject({ code: 'TriageCustomerAssociationUnavailable' })
+  await expect(client.getCustomer('workspace-1', source.id)).resolves.toMatchObject({ customer: { id: source.id } })
+
+  const retryResponse = await app.request(`/api/customers/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+
+  expect(retryResponse.status).toBe(200)
+  expect(associationCalls).toBe(2)
+  await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
+})
+
 test('rejects deletion of a Customer Request that still points to Triage', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const customer = await createCustomer(client)

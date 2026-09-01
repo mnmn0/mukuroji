@@ -2570,6 +2570,8 @@ export class DynamoDbTeamIssuesClient {
         : readWorkflowStatusCategory(expressionAttributeValues[':statusCategory'])
       const completionTransition =
         beforeIssue.statusCategory !== 'completed' && nextStatusCategory === 'completed'
+      const leavesCompletion =
+        beforeIssue.statusCategory === 'completed' && nextStatusCategory !== 'completed'
       if (completionTransition) {
         expressionAttributeNames['#customerCompletionPreparationAt'] =
           'customerCompletionPreparationAt'
@@ -2580,6 +2582,16 @@ export class DynamoDbTeamIssuesClient {
         setExpressions.push(
           '#customerCompletionPreparationAt = :customerCompletionPreparationAt',
           '#customerCompletionPreparationRevision = :customerCompletionPreparationRevision',
+        )
+      }
+      if (leavesCompletion) {
+        expressionAttributeNames['#customerCompletionPreparationAt'] =
+          'customerCompletionPreparationAt'
+        expressionAttributeNames['#customerCompletionPreparationRevision'] =
+          'customerCompletionPreparationRevision'
+        removeExpressions.push(
+          '#customerCompletionPreparationAt',
+          '#customerCompletionPreparationRevision',
         )
       }
       const updateExpression = [

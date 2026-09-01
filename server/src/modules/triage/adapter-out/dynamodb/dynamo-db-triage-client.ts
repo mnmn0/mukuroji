@@ -812,6 +812,9 @@ export class DynamoDbTriageClient implements TriageClient {
    *
    * @param workspaceId Workspace containing the Customer graph.
    * @param entry Triage Entry whose next association must remain valid.
+   * @param operation Cross-store Customer operation that owns the mutation, when any. A merge
+   *   also accepts source-owned Contact and Request rows, and any operation skips the active
+   *   Contact status requirement.
    * @returns Customer row conditions, or an empty list when Customer storage is not configured.
    */
   private createCustomerAssociationConditionChecks(

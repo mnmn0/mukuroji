@@ -20,13 +20,13 @@ export {
   InMemoryCustomerClient,
   type CustomerAuthorizationConditionChecks,
   type CustomerClient,
+  type CustomerRetentionClient,
+  type CustomerRetentionSweepResult,
   type CustomerWorkspaceState,
 } from './customers'
 export {
-  CUSTOMER_RETENTION_INDEX_NAME,
   DynamoDbCustomerClient,
   type DynamoDbCustomerClientOptions,
-  type CustomerRetentionSweepResult,
 } from './adapter-out/dynamodb/dynamo-db-customer-client'
 export {
   createCustomerRouter,

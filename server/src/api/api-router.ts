@@ -25586,10 +25586,7 @@ function hasCustomerManagementAccess(
 /** Checks whether the principal may create or update Customer saved views. */
 function canManageCustomerViews(principal: WorkspacePrincipal): boolean {
   if (principal.workspaceRole === 'guest') return false
-  if (principal.enterprisePermissions === undefined) {
-    return hasCustomerManagementAccess(principal)
-  }
-  return canWorkspaceBusinessWrite(principal) && hasCustomerReadAccess(principal)
+  return canWorkspaceBusinessWrite(principal) && hasCustomerManagementAccess(principal)
 }
 
 /**

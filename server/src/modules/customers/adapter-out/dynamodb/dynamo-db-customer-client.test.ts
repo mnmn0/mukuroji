@@ -8,10 +8,7 @@ import {
   createCustomerRecord,
   createCustomerRequestRecord,
 } from '../../domain/customer'
-import {
-  CUSTOMER_RETENTION_INDEX_NAME,
-  DynamoDbCustomerClient,
-} from './dynamo-db-customer-client'
+import { DynamoDbCustomerClient } from './dynamo-db-customer-client'
 
 /** Stable DynamoDB adapter test instant. */
 const NOW = '2026-08-01T00:00:00.000Z'
@@ -138,7 +135,7 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
     const normalizedInput = Object.fromEntries(Object.entries(input))
     commands.push({ name, input: normalizedInput })
     if (name === 'QueryCommand') {
-      if (normalizedInput.IndexName === CUSTOMER_RETENTION_INDEX_NAME) {
+      if (normalizedInput.IndexName === 'CustomerRetentionIndex') {
         return { Items: options.retentionIndexRows ?? [] }
       }
       const expression = normalizedInput.KeyConditionExpression
@@ -547,7 +544,7 @@ test('sweeps due retention workspaces through the production-safe index path', a
     })
     expect(harness.commands.find((command) => command.name === 'QueryCommand')).toMatchObject({
       input: {
-        IndexName: CUSTOMER_RETENTION_INDEX_NAME,
+        IndexName: 'CustomerRetentionIndex',
         KeyConditionExpression: '#retentionPartition = :retentionPartition AND #retentionDueAt <= :retentionDueAt',
       },
     })

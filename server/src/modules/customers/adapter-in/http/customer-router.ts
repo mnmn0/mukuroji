@@ -367,12 +367,35 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         input,
       )
-      let authorizedAssociations: Array<{
-        entry: TriageEntry
-        authorizationConditionChecks?: TriageAuthorizationConditionChecks
-      }>
       try {
-        authorizedAssociations = await readAuthorizedAssociations()
+        const authorizedAssociations = await readAuthorizedAssociations()
+        for (const { entry, authorizationConditionChecks } of authorizedAssociations) {
+          await triage.associateCustomer(
+            principal.directoryId,
+            entry.teamId,
+            entry.id,
+            { id: principal.userKey },
+            {
+              expectedRevision: entry.revision,
+              customerId: input.targetCustomerId,
+              contactId: entry.contactId ?? null,
+              customerRequestId: entry.customerRequestId ?? null,
+            },
+            authorizationConditionChecks,
+            {
+              kind: 'merge',
+              sourceCustomerId,
+              targetCustomerId: input.targetCustomerId,
+            },
+          )
+        }
+        const detail = await customers.completeCustomerMerge(
+          principal.directoryId,
+          sourceCustomerId,
+          principal.userKey,
+          input,
+        )
+        return context.json(await projectCustomerDetail(principal, detail, dependencies))
       } catch (error) {
         try {
           await customers.cancelCustomerMerge(
@@ -391,33 +414,6 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         }
         throw error
       }
-      for (const { entry, authorizationConditionChecks } of authorizedAssociations) {
-        await triage.associateCustomer(
-          principal.directoryId,
-          entry.teamId,
-          entry.id,
-          { id: principal.userKey },
-          {
-            expectedRevision: entry.revision,
-            customerId: input.targetCustomerId,
-            contactId: entry.contactId ?? null,
-            customerRequestId: entry.customerRequestId ?? null,
-          },
-          authorizationConditionChecks,
-          {
-            kind: 'merge',
-            sourceCustomerId,
-            targetCustomerId: input.targetCustomerId,
-          },
-        )
-      }
-      const detail = await customers.completeCustomerMerge(
-        principal.directoryId,
-        sourceCustomerId,
-        principal.userKey,
-        input,
-      )
-      return context.json(await projectCustomerDetail(principal, detail, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }

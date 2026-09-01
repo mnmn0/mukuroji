@@ -25,7 +25,7 @@ import { TriageEntryDetail } from './TriageEntryDetail'
 import { TriageQueue } from './TriageQueue'
 import { TriageSettingsPanel } from './TriageSettingsPanel'
 
-/** Props accepted by the complete Team triage workbench. */
+/** Props accepted by the complete Team triage workbench, including queue, detail, and mutation state. */
 export type TriageWorkbenchProps = {
   /** Active Workspace member bearer token used only for explicit AI generation. */
   readonly accessToken?: string
