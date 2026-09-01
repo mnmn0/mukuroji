@@ -828,17 +828,25 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
         { kind: 'deletion', customerId: 'customer-1' },
       )
 
-      const contactCheck = harness.commands[1]?.input.TransactItems?.find((item) =>
-        item.ConditionCheck?.Key?.recordKey === 'CONTACT#contact-1'
-      )
-      expect(contactCheck?.ConditionCheck).toMatchObject({
+      const transaction = harness.commands.find((command) => command.name === 'TransactWriteCommand')
+      const transactionItems = isUnknownArray(transaction?.input.TransactItems)
+        ? transaction.input.TransactItems
+        : []
+      const contactCheck = transactionItems.find((item) => {
+        if (!isRecord(item) || !isRecord(item.ConditionCheck) || !isRecord(item.ConditionCheck.Key)) return false
+        return item.ConditionCheck.Key.recordKey === 'CONTACT#contact-1'
+      })
+      if (!isRecord(contactCheck) || !isRecord(contactCheck.ConditionCheck)) {
+        throw new TypeError('Expected a Contact condition check.')
+      }
+      expect(contactCheck.ConditionCheck).toMatchObject({
         ConditionExpression: 'attribute_exists(#contact) AND #contact.#customerId = :customerId',
         ExpressionAttributeNames: {
           '#contact': 'contact',
           '#customerId': 'customerId',
         },
       })
-      expect(contactCheck?.ConditionCheck).not.toHaveProperty('ExpressionAttributeValues.:activeStatus')
+      expect(contactCheck.ConditionCheck).not.toHaveProperty('ExpressionAttributeValues.:activeStatus')
     } finally {
       harness.restore()
     }
@@ -952,6 +960,16 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
     }
   })
 })
+
+/** Narrows unknown values to plain object records for command assertions. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Narrows unknown values to read-only arrays without introducing an unsafe cast. */
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value)
+}
 
 describe('DynamoDbTriageClient configuration receipts', () => {
   test('commits and replays an initial revision-zero replacement', async () => {
