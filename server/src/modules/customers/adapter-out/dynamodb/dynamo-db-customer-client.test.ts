@@ -341,6 +341,35 @@ test('joins live authorization conditions to a Customer link transaction', async
   }
 })
 
+test('rejects an oversized ordinary Customer graph mutation before writing', async () => {
+  const contact = createContactRow('customer-1', 'contact-1').contact
+  const requestRows = Array.from({ length: 100 }, (_, index) => {
+    const request = {
+      ...createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z'),
+      contactId: contact.id,
+    }
+    return createRequestRow(request)
+  })
+  const harness = createHarness([createCustomerRow(), createContactRow('customer-1', contact.id), ...requestRows])
+  try {
+    await expect(harness.client.deleteContact(
+      'workspace-1',
+      'customer-1',
+      contact.id,
+      'member-1',
+      contact.revision,
+    )).rejects.toMatchObject({
+      code: 'CustomerTransactionTooLarge',
+      status: 409,
+    })
+    expect(harness.rows.has(`CONTACT#${contact.id}`)).toBeTrue()
+    expect([...harness.rows.keys()].filter((recordKey) => recordKey.startsWith('REQUEST#'))).toHaveLength(100)
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
 test('classifies mixed authorization and revision cancellations as a retryable Customer conflict', async () => {
   const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
   const authorizationConditionCheck = {

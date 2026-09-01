@@ -1309,7 +1309,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
     return startingRevision + 1
   }
 
-  /** Persists ordinary graph records in bounded revision-fenced transactions. */
+  /** Persists ordinary graph records in one atomic revision-fenced transaction. */
   private async persistRecordItems(
     workspaceId: string,
     startingRevision: number,
@@ -1324,13 +1324,9 @@ export class DynamoDbCustomerClient implements CustomerClient {
         'The Customer mutation is too large to commit atomically. Retry with a smaller graph.',
       )
     }
-    let revision = startingRevision
-    for (const [batchIndex, batch] of chunk(recordItems, CUSTOMER_TRANSACTION_RECORD_LIMIT).entries()) {
-      revision = await this.writeTransaction(workspaceId, revision, batch, batchIndex === 0
-        ? { authorizationConditionChecks: authorizationItems }
-        : {})
-    }
-    return revision
+    return await this.writeTransaction(workspaceId, startingRevision, recordItems, {
+      authorizationConditionChecks: authorizationItems,
+    })
   }
 
   /** Persists retention changes through a cursor-bearing metadata operation. */
