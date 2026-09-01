@@ -619,6 +619,14 @@ test('rejects deleting a Contact that still has a Triage reverse link', async ()
     name: 'Ada Lovelace',
   }, 'delete-contact')
   const entry = createCustomerAssociationEntry(customer.id, contact.id)
+  const triage = {
+    listCalls: 0,
+    getEntry: async () => entry,
+    async listCustomerAssociations(this: { listCalls: number }, _workspaceId: string, customerId: string) {
+      this.listCalls += 1
+      return customerId === customer.id ? [entry] : []
+    },
+  }
   const app = createTestApp(
     client,
     {
@@ -626,10 +634,7 @@ test('rejects deleting a Contact that still has a Triage reverse link', async ()
       userKey: 'member-1',
       canViewSensitiveData: true,
     },
-    {
-      getEntry: async () => entry,
-      listCustomerAssociations: async (_workspaceId, customerId) => customerId === customer.id ? [entry] : [],
-    },
+    triage,
   )
 
   const response = await app.request(
@@ -639,6 +644,7 @@ test('rejects deleting a Contact that still has a Triage reverse link', async ()
 
   expect(response.status).toBe(409)
   expect(await response.json()).toMatchObject({ code: 'CustomerContactTriageAssociation' })
+  expect(triage.listCalls).toBe(1)
   await expect(client.getContact('workspace-1', customer.id, contact.id)).resolves.toMatchObject({ id: contact.id })
 })
 
@@ -764,14 +770,14 @@ test('repoints Triage Customer associations before merging Customers', async () 
   const entry = createCustomerAssociationEntry(source.id)
   const associations: Array<{ customerId: string | null; contactId: string | null; customerRequestId: string | null }> = []
   const operations: unknown[] = []
-  const app = createTestApp(client, {
-    directoryId: 'workspace-1',
-    userKey: 'member-1',
-    canViewSensitiveData: true,
-  }, {
+  const triage = {
+    listCalls: 0,
     getEntry: async () => entry,
-    listCustomerAssociations: async () => [entry],
-    associateCustomer: async (_workspaceId, _teamId, _entryId, _actor, input, _authorization, operation) => {
+    async listCustomerAssociations(this: { listCalls: number }) {
+      this.listCalls += 1
+      return [entry]
+    },
+    associateCustomer: async (_workspaceId: string, _teamId: string, _entryId: string, _actor: { id: string }, input: { customerId?: string | null; contactId?: string | null; customerRequestId?: string | null }, _authorization: unknown, operation: unknown) => {
       associations.push({
         customerId: input.customerId ?? null,
         contactId: input.contactId ?? null,
@@ -780,7 +786,12 @@ test('repoints Triage Customer associations before merging Customers', async () 
       operations.push(operation)
       return { ...entry, customerId: input.customerId ?? undefined, revision: entry.revision + 1 }
     },
-  })
+  }
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, triage)
 
   const response = await app.request(`/api/customers/${source.id}/merge`, {
     method: 'POST',
@@ -793,6 +804,7 @@ test('repoints Triage Customer associations before merging Customers', async () 
   })
 
   expect(response.status).toBe(200)
+  expect(triage.listCalls).toBe(2)
   expect(associations).toEqual([{ customerId: target.id, contactId: null, customerRequestId: null }])
   expect(operations).toEqual([{
     kind: 'merge',
@@ -1049,23 +1061,29 @@ test('deletes a Triage Request orphan after its reverse association is gone', as
     receivedAt: NOW,
     importance: 'normal',
   })
+  const triage = {
+    listCalls: 0,
+    getEntry: async () => {
+      throw new Error('The orphaned Triage Entry should not be read by team.')
+    },
+    async listCustomerAssociations(this: { listCalls: number }) {
+      this.listCalls += 1
+      return []
+    },
+    clearCustomerAssociations: async () => undefined,
+  }
   const app = createTestApp(client, {
     directoryId: 'workspace-1',
     userKey: 'member-1',
     canViewSensitiveData: true,
-  }, {
-    getEntry: async () => {
-      throw new Error('The orphaned Triage Entry should not be read by team.')
-    },
-    listCustomerAssociations: async () => [],
-    clearCustomerAssociations: async () => undefined,
-  })
+  }, triage)
 
   const response = await app.request(`/api/customer-requests/${request.id}?expectedRevision=${request.revision}`, {
     method: 'DELETE',
   })
 
   expect(response.status).toBe(204)
+  expect(triage.listCalls).toBe(1)
   await expect(client.getRequest('workspace-1', request.id)).rejects.toMatchObject({ code: 'CustomerRequestNotFound' })
 })
 

@@ -372,7 +372,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association repointing is unavailable.')
       }
       const customers = dependencies.getCustomers()
-      const listCustomerAssociations = triage.listCustomerAssociations
+      const listCustomerAssociations = triage.listCustomerAssociations.bind(triage)
       const sourceCustomerId = context.req.param('customerId') ?? ''
       const input = readMergeCustomerInput(await dependencies.readJson(context.req))
       /** Reads and authorizes the complete source-side Triage association snapshot. */
@@ -638,15 +638,15 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       )
       try {
         if (request.triageEntryId !== undefined) {
-          const listCustomerAssociations = dependencies.getTriage().listCustomerAssociations
-          if (!listCustomerAssociations) {
+          const triage = dependencies.getTriage()
+          if (!triage.listCustomerAssociations) {
             throw new CustomerError(
               503,
               'TriageCustomerAssociationUnavailable',
               'Triage Customer association is unavailable. Retry the request.',
             )
           }
-          const associations = await listCustomerAssociations(principal.directoryId, request.customerId)
+          const associations = await triage.listCustomerAssociations(principal.directoryId, request.customerId)
           if (associations.some((entry) => entry.id === request.triageEntryId && entry.customerRequestId === request.id)) {
             throw new CustomerError(
               409,
@@ -1002,15 +1002,15 @@ async function assertContactMutationAllowed<Principal extends CustomerPrincipal>
   contactId: string,
   dependencies: Pick<CustomerRouterDependencies<Principal>, 'getTriage'>,
 ): Promise<void> {
-  const listCustomerAssociations = dependencies.getTriage().listCustomerAssociations
-  if (!listCustomerAssociations) {
+  const triage = dependencies.getTriage()
+  if (!triage.listCustomerAssociations) {
     throw new CustomerError(
       503,
       'TriageCustomerAssociationUnavailable',
       'Triage Customer association is unavailable. Retry the request.',
     )
   }
-  const entries = await listCustomerAssociations(workspaceId, customerId)
+  const entries = await triage.listCustomerAssociations(workspaceId, customerId)
   if (entries.some((entry) => entry.contactId === contactId)) {
     throw new CustomerError(
       409,
