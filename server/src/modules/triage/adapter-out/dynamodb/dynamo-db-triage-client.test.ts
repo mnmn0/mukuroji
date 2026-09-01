@@ -786,20 +786,20 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
         }),
         expect.objectContaining({
           ConditionCheck: expect.objectContaining({
-            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#customer-target#contact-1' },
+            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#customer-source#contact-1' },
             ConditionExpression: 'attribute_exists(#contact) AND (#contact.#customerId = :customerId OR #contact.#customerId = :sourceCustomerId)',
             ExpressionAttributeValues: {
-              ':customerId': 'customer-target',
+              ':customerId': 'customer-source',
               ':sourceCustomerId': 'customer-source',
             },
           }),
         }),
         expect.objectContaining({
           ConditionCheck: expect.objectContaining({
-            Key: { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-target#request-1' },
+            Key: { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-source#request-1' },
             ConditionExpression: 'attribute_exists(#request) AND (#request.#customerId = :customerId OR #request.#customerId = :sourceCustomerId) AND #request.#triageEntryId = :entryId',
             ExpressionAttributeValues: {
-              ':customerId': 'customer-target',
+              ':customerId': 'customer-source',
               ':sourceCustomerId': 'customer-source',
               ':entryId': 'triage-1',
             },

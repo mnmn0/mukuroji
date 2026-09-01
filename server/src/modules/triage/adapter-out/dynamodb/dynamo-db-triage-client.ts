@@ -562,7 +562,7 @@ export class DynamoDbTriageClient implements TriageClient {
     )
     const customerAssociationConditionChecks = this.createCustomerAssociationConditionChecks(
       workspaceId,
-      customerOperation?.kind === 'deletion' ? current : next,
+      customerOperation === undefined ? next : current,
       customerOperation,
     )
     const combinedAuthorizationConditionChecks = [
@@ -832,9 +832,26 @@ export class DynamoDbTriageClient implements TriageClient {
   ): TriageAuthorizationConditionChecks {
     if (!this.customerTableName || entry.customerId === undefined) return []
     const checks: TriageAuthorizationConditionChecks = []
+    if (operation?.kind === 'deletion' && entry.customerId !== operation.customerId) {
+      throw new TriageError(
+        400,
+        'InvalidTriageInput',
+        'The deletion operation does not own this Customer association.',
+      )
+    }
+    if (operation?.kind === 'merge' && entry.customerId !== operation.sourceCustomerId) {
+      throw new TriageError(
+        400,
+        'InvalidTriageInput',
+        'The merge operation does not own this Customer association.',
+      )
+    }
+    const associationCustomerId = operation?.kind === 'merge'
+      ? operation.sourceCustomerId
+      : entry.customerId
     const customerRootIds = operation?.kind === 'merge'
-      ? [...new Set([entry.customerId, operation.sourceCustomerId])]
-      : [entry.customerId]
+      ? [...new Set([operation.sourceCustomerId, operation.targetCustomerId])]
+      : [associationCustomerId]
     for (const customerId of customerRootIds) {
       checks.push({
         ConditionCheck: {
@@ -861,8 +878,8 @@ export class DynamoDbTriageClient implements TriageClient {
       ? '#request.#customerId = :customerId'
       : '(#request.#customerId = :customerId OR #request.#customerId = :sourceCustomerId)'
     const customerIdValues = sourceCustomerId === undefined
-      ? { ':customerId': entry.customerId }
-      : { ':customerId': entry.customerId, ':sourceCustomerId': sourceCustomerId }
+      ? { ':customerId': associationCustomerId }
+      : { ':customerId': associationCustomerId, ':sourceCustomerId': sourceCustomerId }
     const contactStatusCondition = operation === undefined
       ? ' AND #contact.#status = :activeStatus'
       : ''
@@ -870,7 +887,7 @@ export class DynamoDbTriageClient implements TriageClient {
       checks.push({
         ConditionCheck: {
           TableName: this.customerTableName,
-          Key: { workspaceId, recordKey: `CONTACT#${entry.customerId}#${entry.contactId}` },
+          Key: { workspaceId, recordKey: `CONTACT#${associationCustomerId}#${entry.contactId}` },
           ConditionExpression:
             `attribute_exists(#contact) AND ${contactCustomerIdExpression}${contactStatusCondition}`,
           ExpressionAttributeNames: {
@@ -889,7 +906,7 @@ export class DynamoDbTriageClient implements TriageClient {
       checks.push({
         ConditionCheck: {
           TableName: this.customerTableName,
-          Key: { workspaceId, recordKey: `REQUEST#${entry.customerId}#${entry.customerRequestId}` },
+          Key: { workspaceId, recordKey: `REQUEST#${associationCustomerId}#${entry.customerRequestId}` },
           ConditionExpression:
             `attribute_exists(#request) AND ${requestCustomerIdExpression} AND #request.#triageEntryId = :entryId`,
           ExpressionAttributeNames: {
