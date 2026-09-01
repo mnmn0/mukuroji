@@ -109,6 +109,7 @@ const meta = {
   },
 } satisfies Meta<typeof CustomerDirectoryView>
 
+/** Storybook metadata for the Customer directory view. */
 export default meta
 
 /** Story type for the Customer directory view. */
