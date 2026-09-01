@@ -1820,7 +1820,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
 
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description:
-      'Emits deterministic Work Item and Planning health update notification events.',
+      'Emits deterministic notifications and applies due Customer retention redaction.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Timeout: 300,
@@ -1828,6 +1828,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
       Variables: Match.objectLike({
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
         AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
+        CUSTOMERS_TABLE_NAME: { Ref: 'CustomersTableB554B793' },
         NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
         NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
         PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
@@ -1897,12 +1898,18 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5') &&
     JSON.stringify(statement.Action).includes('dynamodb:UpdateItem')
   );
+  const completionMarkerStatement = scheduleStatements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('TeamIssuesTable189D851D') &&
+    JSON.stringify(statement.Action).includes('dynamodb:UpdateItem')
+  );
 
   expect(serializedSchedulePolicy).toContain('TeamIssuesTable189D851D');
   expect(serializedSchedulePolicy).toContain('PlanningTable2A0D4CC5');
   expect(serializedSchedulePolicy).toContain('UpdateScheduleDueIndex');
   expect(serializedSchedulePolicy).toContain('ProjectDirectoryTable9ED01C01');
   expect(serializedSchedulePolicy).toContain('AuditEventsTable0723963E');
+  expect(serializedSchedulePolicy).toContain('CustomersTableB554B793');
+  expect(serializedSchedulePolicy).toContain('CustomerRetentionIndex');
   expect(serializedSchedulePolicy).toContain('dynamodb:Scan');
   expect(serializedSchedulePolicy).toContain('dynamodb:GetItem');
   expect(serializedSchedulePolicy).toContain('dynamodb:Query');
@@ -1917,6 +1924,16 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
         'nextNotificationAtRecordKey',
         'updateScheduleShard',
         'updatedAt',
+      ],
+    },
+  });
+  expect(completionMarkerStatement?.Condition).toEqual({
+    'ForAllValues:StringEquals': {
+      'dynamodb:Attributes': [
+        'directoryTeamId',
+        'issueId',
+        'customerCompletionPreparationAt',
+        'customerCompletionPreparationRevision',
       ],
     },
   });

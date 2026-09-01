@@ -85,6 +85,7 @@ const meta = {
   parameters: { layout: 'fullscreen' },
   decorators: [(Story) => <div className="min-h-screen bg-[var(--workbench-bg)] p-6"><Story /></div>],
   args: {
+    canManageCustomerViews: true,
     canViewSensitiveData: true,
     customers: [customer],
     detail,
@@ -126,6 +127,7 @@ export const Empty: Story = {
 /** Renders the directory for a member without sensitive-data access. */
 export const Restricted: Story = {
   args: {
+    canManageCustomerViews: false,
     canViewSensitiveData: false,
     search: '',
   },

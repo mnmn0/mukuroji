@@ -63,6 +63,14 @@ export type CustomerAuthorizationScope =
 export type CustomerWorkItemAuthorization = {
   /** Project assigned to the Work Item, when available. */
   projectId?: string
+  /** Live Work Item, Team, Project, and actor fences for the Customer write. */
+  authorizationConditionChecks?: TriageAuthorizationConditionChecks
+}
+
+/** Result of resolving and authorizing a Project for a Customer write. */
+export type CustomerProjectAuthorization = {
+  /** Live Team, Project, and actor fences for the Customer write. */
+  authorizationConditionChecks?: TriageAuthorizationConditionChecks
 }
 
 /** Dependencies injected into the Customer HTTP adapter. */
@@ -82,7 +90,7 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   /** Resolves and authorizes a Work Item before creating a customer link. */
   verifyWorkItemAccess(principal: Principal, teamId: string, workItemId: string, minimum: 'viewer' | 'member'): Promise<CustomerWorkItemAuthorization>
   /** Resolves and authorizes a Project before reading or mutating its associations. */
-  verifyProjectAccess(principal: Principal, projectId: string, minimum: 'viewer' | 'member'): Promise<void>
+  verifyProjectAccess(principal: Principal, projectId: string, minimum: 'viewer' | 'member'): Promise<CustomerProjectAuthorization>
   /** Returns the Triage operations used for Customer associations. */
   getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'listCustomerAssociations' | 'clearCustomerAssociations'>
   /** Safely parses a JSON request body. */
@@ -326,13 +334,11 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const customers = dependencies.getCustomers()
       const sourceCustomerId = context.req.param('customerId') ?? ''
       const input = readMergeCustomerInput(await dependencies.readJson(context.req))
-      await customers.beginCustomerMerge(
-        principal.directoryId,
-        sourceCustomerId,
-        principal.userKey,
-        input,
-      )
       const associations = await triage.listCustomerAssociations(principal.directoryId, sourceCustomerId)
+      const authorizedAssociations: Array<{
+        entry: TriageEntry
+        authorizationConditionChecks?: TriageAuthorizationConditionChecks
+      }> = []
       for (const entry of associations) {
         const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
           ? await dependencies.createTriageAuthorizationConditionChecks(
@@ -341,6 +347,15 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
               [entry.projectId],
             )
           : undefined
+        authorizedAssociations.push({ entry, authorizationConditionChecks })
+      }
+      await customers.beginCustomerMerge(
+        principal.directoryId,
+        sourceCustomerId,
+        principal.userKey,
+        input,
+      )
+      for (const { entry, authorizationConditionChecks } of authorizedAssociations) {
         await triage.associateCustomer(
           principal.directoryId,
           entry.teamId,
@@ -391,10 +406,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.delete('/api/customers/:customerId/contacts/:contactId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
+      const customerId = context.req.param('customerId') ?? ''
+      const contactId = context.req.param('contactId') ?? ''
+      await assertContactMutationAllowed(principal.directoryId, customerId, contactId, dependencies)
       await dependencies.getCustomers().deleteContact(
         principal.directoryId,
-        context.req.param('customerId') ?? '',
-        context.req.param('contactId') ?? '',
+        customerId,
+        contactId,
         principal.userKey,
         readExpectedRevision(context.req.query('expectedRevision')),
       )
@@ -407,11 +425,23 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customer-contacts/:contactId/merge', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
+      const input = readMergeContactInput(await dependencies.readJson(context.req))
+      const sourceContactId = context.req.param('contactId') ?? ''
+      const sourceContact = await dependencies.getCustomers().getContactById(
+        principal.directoryId,
+        sourceContactId,
+      )
+      await assertContactMutationAllowed(
+        principal.directoryId,
+        sourceContact.customerId,
+        sourceContactId,
+        dependencies,
+      )
       const contact = await dependencies.getCustomers().mergeContact(
         principal.directoryId,
-        context.req.param('contactId') ?? '',
+        sourceContactId,
         principal.userKey,
-        readMergeContactInput(await dependencies.readJson(context.req)),
+        input,
       )
       return context.json(projectContact(principal, contact))
     } catch (error) {
@@ -526,6 +556,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         context.req.param('requestId') ?? '',
         principal.userKey,
         { ...body, ...(access.projectId ? { projectId: access.projectId } : {}) },
+        access.authorizationConditionChecks,
       )
       return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
@@ -537,12 +568,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const body = readUnlinkInput(await dependencies.readJson(context.req))
-      await dependencies.verifyWorkItemAccess(principal, body.teamId, body.workItemId, 'member')
+      const access = await dependencies.verifyWorkItemAccess(principal, body.teamId, body.workItemId, 'member')
       const request = await dependencies.getCustomers().unlinkRequestFromWorkItem(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
         body,
+        access.authorizationConditionChecks,
       )
       return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
@@ -554,12 +586,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const body = readProjectLinkInput(await dependencies.readJson(context.req))
-      await dependencies.verifyProjectAccess(principal, body.projectId, 'member')
+      const access = await dependencies.verifyProjectAccess(principal, body.projectId, 'member')
       const request = await dependencies.getCustomers().linkRequestToProject(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
         body,
+        access.authorizationConditionChecks,
       )
       return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
@@ -571,12 +604,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const body = readProjectUnlinkInput(await dependencies.readJson(context.req))
-      await dependencies.verifyProjectAccess(principal, body.projectId, 'member')
+      const access = await dependencies.verifyProjectAccess(principal, body.projectId, 'member')
       const request = await dependencies.getCustomers().unlinkRequestFromProject(
         principal.directoryId,
         context.req.param('requestId') ?? '',
         principal.userKey,
         body,
+        access.authorizationConditionChecks,
       )
       return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
@@ -714,6 +748,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
             workItemId: canonicalWorkItem.workItemId,
             ...(workItemAuthorization.projectId ? { projectId: workItemAuthorization.projectId } : {}),
           },
+          workItemAuthorization.authorizationConditionChecks,
         )
       }
       // The deterministic Triage-originated Request remains available for a safe retry if
@@ -778,6 +813,38 @@ function projectCustomer(principal: CustomerPrincipal, customer: Customer): Cust
 /** Projects a Customer impact signal according to the current principal. */
 function projectCustomerImpact(principal: CustomerPrincipal, signal: CustomerImpactSignal): CustomerImpactSignal {
   return projectCustomerImpactSignal(signal, principal.canViewSensitiveData)
+}
+
+/** Rejects a Contact mutation while a Triage Entry still points at that Contact.
+ *
+ * @param workspaceId Workspace containing the Customer and Triage entries.
+ * @param customerId Customer owning the Contact.
+ * @param contactId Contact whose reverse links must be checked.
+ * @param dependencies Triage dependency used to read reverse associations.
+ * @returns A promise that resolves when the Contact has no Triage reverse link.
+ */
+async function assertContactMutationAllowed<Principal extends CustomerPrincipal>(
+  workspaceId: string,
+  customerId: string,
+  contactId: string,
+  dependencies: Pick<CustomerRouterDependencies<Principal>, 'getTriage'>,
+): Promise<void> {
+  const listCustomerAssociations = dependencies.getTriage().listCustomerAssociations
+  if (!listCustomerAssociations) {
+    throw new CustomerError(
+      503,
+      'TriageCustomerAssociationUnavailable',
+      'Triage Customer association is unavailable. Retry the request.',
+    )
+  }
+  const entries = await listCustomerAssociations(workspaceId, customerId)
+  if (entries.some((entry) => entry.contactId === contactId)) {
+    throw new CustomerError(
+      409,
+      'CustomerContactTriageAssociation',
+      'A Contact associated with a Triage Entry cannot be deleted or merged.',
+    )
+  }
 }
 
 /** Projects a saved Customer directory view according to the current principal. */

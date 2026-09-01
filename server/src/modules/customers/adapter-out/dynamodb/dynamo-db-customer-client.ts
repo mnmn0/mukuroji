@@ -28,6 +28,7 @@ import type {
   CustomerRequest,
   CustomerRequestListInput,
   CustomerRequestPage,
+  CustomerRetention,
   CustomerRetentionResult,
   CustomerSavedView,
   CustomerWorkspaceExport,
@@ -46,6 +47,7 @@ import {
 } from '../../domain/customer'
 import {
   InMemoryCustomerClient,
+  type CustomerAuthorizationConditionChecks,
   type CustomerClient,
   type CustomerWorkspaceState,
 } from '../../customers'
@@ -54,6 +56,15 @@ import { loadServerConfig } from '../../../../infrastructure/config/server-confi
 
 /** Maximum number of Customer records written alongside one metadata fence. */
 const CUSTOMER_TRANSACTION_RECORD_LIMIT = 99
+
+/** GSI used to wake retention processing for records whose expiry is due. */
+export const CUSTOMER_RETENTION_INDEX_NAME = 'CustomerRetentionIndex'
+
+/** Sparse partition value shared by all Customer retention index rows. */
+const CUSTOMER_RETENTION_INDEX_PARTITION = 'CUSTOMER_RETENTION'
+
+/** Maximum number of retention index pages processed by one scheduled invocation. */
+const CUSTOMER_RETENTION_MAX_PAGES = 1_000
 
 /** Physical prefixes used to select one Customer record category. */
 const CUSTOMER_RECORD_PREFIX = 'CUSTOMER#'
@@ -81,6 +92,20 @@ export type DynamoDbCustomerClientOptions = {
   now?: () => Date
   /** Test-replaceable ID generator. */
   id?: () => string
+}
+
+/** Result of one bounded Customer retention index sweep. */
+export type CustomerRetentionSweepResult = {
+  /** Number of due-index pages read. */
+  scannedPages: number
+  /** Number of distinct Workspaces handed to retention redaction. */
+  workspacesProcessed: number
+  /** Customer roots redacted during the sweep. */
+  customersRedacted: number
+  /** Contacts redacted during the sweep. */
+  contactsRedacted: number
+  /** Customer Requests redacted during the sweep. */
+  requestsRedacted: number
 }
 
 /**
@@ -143,12 +168,84 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @returns The filtered customer page.
    */
   async listCustomers(workspaceId: string, input?: CustomerListInput): Promise<CustomerPage> {
-    const { memory } = await this.readMemoryForRead(workspaceId, [
-      CUSTOMER_RECORD_PREFIX,
-      CONTACT_RECORD_PREFIX,
-      REQUEST_RECORD_PREFIX,
-    ])
-    return await memory.listCustomers(workspaceId, input)
+    const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX])
+    return await memory.listCustomersUsingStoredCounts(workspaceId, input)
+  }
+
+  /** Redacts every due Customer record found by the sparse retention index.
+   *
+   * The index is eventually consistent, but each workspace is strongly read and
+   * redacted through the normal revision-fenced path. A failed invocation is
+   * intentionally propagated so the schedule retry can resume from the first page.
+   *
+   * @param now Evaluation timestamp used for the due-index query and redaction.
+   * @param maxPages Maximum number of index pages accepted for one invocation.
+   * @returns Counts collected from all processed Workspace redactions.
+   */
+  async sweepExpiredRetention(
+    now = this.now().toISOString(),
+    maxPages = CUSTOMER_RETENTION_MAX_PAGES,
+  ): Promise<CustomerRetentionSweepResult> {
+    const evaluatedAt = normalizeTimestamp(now, 'Customer retention schedule time')
+    const pageLimit = normalizeBoundedInteger(maxPages, 'Customer retention maximum pages', 1, 10_000)
+    await this.ensureTable()
+    const workspaceIds = new Set<string>()
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    let scannedPages = 0
+    do {
+      if (scannedPages >= pageLimit) {
+        throw new CustomerError(
+          503,
+          'CustomerRetentionSweepIncomplete',
+          'Customer retention exceeded the configured page limit.',
+        )
+      }
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        IndexName: CUSTOMER_RETENTION_INDEX_NAME,
+        KeyConditionExpression: '#retentionPartition = :retentionPartition AND #retentionDueAt <= :retentionDueAt',
+        ExpressionAttributeNames: {
+          '#retentionDueAt': 'retentionDueAt',
+          '#retentionPartition': 'retentionPartition',
+          '#workspaceId': 'workspaceId',
+        },
+        ExpressionAttributeValues: {
+          ':retentionDueAt': evaluatedAt,
+          ':retentionPartition': CUSTOMER_RETENTION_INDEX_PARTITION,
+        },
+        ProjectionExpression: '#workspaceId',
+        Limit: 100,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      scannedPages += 1
+      for (const item of response.Items ?? []) {
+        if (!isRecord(item) || !isString(item.workspaceId)) {
+          throw new CustomerError(
+            503,
+            'CustomerPersistenceCorrupt',
+            'A Customer retention index row is malformed.',
+          )
+        }
+        workspaceIds.add(item.workspaceId)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+
+    const result: CustomerRetentionSweepResult = {
+      scannedPages,
+      workspacesProcessed: 0,
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 0,
+    }
+    for (const workspaceId of workspaceIds) {
+      const retention = await this.redactExpired(workspaceId, evaluatedAt)
+      result.workspacesProcessed += 1
+      result.customersRedacted += retention.customersRedacted
+      result.contactsRedacted += retention.contactsRedacted
+      result.requestsRedacted += retention.requestsRedacted
+    }
+    return result
   }
 
   /** Reads a customer and its related graph.
@@ -309,7 +406,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
-    ])
+    ], true)
   }
 
   /** Records a resumable cross-store Customer merge.
@@ -375,6 +472,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
     memory.replaceWorkspaceState(workspaceId, loaded.state)
     const detail = await memory.mergeCustomer(workspaceId, sourceCustomerId, actorId, input)
+    memory.synchronizeCustomerCounts(workspaceId)
     let currentLoaded = loaded
     let currentDetail = detail
     let currentMerge = pendingMerge
@@ -394,6 +492,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       const nextMemory = new InMemoryCustomerClient({ now: this.now, id: this.id })
       nextMemory.replaceWorkspaceState(workspaceId, currentLoaded.state)
       currentDetail = await nextMemory.mergeCustomer(workspaceId, sourceCustomerId, actorId, input)
+      nextMemory.synchronizeCustomerCounts(workspaceId)
       memory.replaceWorkspaceState(workspaceId, nextMemory.readWorkspaceStateWithoutRetention(workspaceId))
     }
   }
@@ -421,6 +520,17 @@ export class DynamoDbCustomerClient implements CustomerClient {
     return await memory.getContact(workspaceId, customerId, contactId)
   }
 
+  /** Reads one contact by ID before its owning Customer is known.
+   *
+   * @param workspaceId Workspace containing the contact.
+   * @param contactId Contact to read.
+   * @returns The requested contact.
+   */
+  async getContactById(workspaceId: string, contactId: string): Promise<CustomerContact> {
+    const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
+    return await memory.getContactById(workspaceId, contactId)
+  }
+
   /** Creates a customer contact.
    *
    * @param workspaceId Workspace containing the Customer.
@@ -430,7 +540,11 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @returns The created contact.
    */
   async createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact> {
-    return await this.mutate(workspaceId, (memory) => memory.createContact(workspaceId, customerId, actorId, input), [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
+    return await this.mutate(workspaceId, (memory) => memory.createContact(workspaceId, customerId, actorId, input), [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+    ], true)
   }
 
   /** Updates a customer contact under an optimistic revision fence.
@@ -443,7 +557,11 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @returns The updated contact.
    */
   async updateContact(workspaceId: string, customerId: string, contactId: string, actorId: string, input: UpdateCustomerContactInput): Promise<CustomerContact> {
-    return await this.mutate(workspaceId, (memory) => memory.updateContact(workspaceId, customerId, contactId, actorId, input), [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
+    return await this.mutate(workspaceId, (memory) => memory.updateContact(workspaceId, customerId, contactId, actorId, input), [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+    ], true)
   }
 
   /** Deletes a customer contact.
@@ -453,14 +571,22 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @param contactId Contact to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Contact revision required for deletion.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns A promise that resolves after deletion completes.
    */
-  async deleteContact(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void> {
+  async deleteContact(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<void> {
     await this.mutate(workspaceId, async (memory) => await memory.deleteContact(workspaceId, customerId, contactId, actorId, expectedRevision), [
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
-    ])
+    ], true, authorizationConditionChecks)
   }
 
   /** Merges a source contact into a retained contact.
@@ -469,10 +595,21 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @param sourceContactId Contact being merged away.
    * @param actorId Authenticated actor performing the merge.
    * @param input Target contact and revision fences.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The retained contact.
    */
-  async mergeContact(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<CustomerContact> {
-    return await this.mutate(workspaceId, (memory) => memory.mergeContact(workspaceId, sourceContactId, actorId, input), [CONTACT_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
+  async mergeContact(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerContact> {
+    return await this.mutate(workspaceId, (memory) => memory.mergeContact(workspaceId, sourceContactId, actorId, input), [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+    ], true, authorizationConditionChecks)
   }
 
   /** Lists customer requests within a Workspace boundary.
@@ -509,7 +646,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
-    ])
+    ], true)
   }
 
   /** Updates a Customer Request under an optimistic revision fence.
@@ -521,7 +658,11 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @returns The updated Customer Request.
    */
   async updateRequest(workspaceId: string, requestId: string, actorId: string, input: UpdateCustomerRequestInput): Promise<CustomerRequest> {
-    return await this.mutate(workspaceId, (memory) => memory.updateRequest(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
+    return await this.mutate(workspaceId, (memory) => memory.updateRequest(workspaceId, requestId, actorId, input), [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+    ], true)
   }
 
   /** Deletes a Customer Request.
@@ -533,7 +674,12 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @returns A promise that resolves after deletion completes.
    */
   async deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void> {
-    await this.mutate(workspaceId, async (memory) => await memory.deleteRequest(workspaceId, requestId, actorId, expectedRevision), [REQUEST_RECORD_PREFIX, NOTIFICATION_RECORD_PREFIX])
+    await this.mutate(workspaceId, async (memory) => await memory.deleteRequest(workspaceId, requestId, actorId, expectedRevision), [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+      NOTIFICATION_RECORD_PREFIX,
+    ], true)
   }
 
   /** Merges a source request into a retained request.
@@ -545,7 +691,12 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @returns The retained request.
    */
   async mergeRequest(workspaceId: string, sourceRequestId: string, actorId: string, input: MergeCustomerRequestInput): Promise<CustomerRequest> {
-    return await this.mutate(workspaceId, (memory) => memory.mergeRequest(workspaceId, sourceRequestId, actorId, input), [REQUEST_RECORD_PREFIX, NOTIFICATION_RECORD_PREFIX])
+    return await this.mutate(workspaceId, (memory) => memory.mergeRequest(workspaceId, sourceRequestId, actorId, input), [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+      NOTIFICATION_RECORD_PREFIX,
+    ], true)
   }
 
   /** Links a request to a Work Item, allowing many requests per Work Item.
@@ -554,10 +705,19 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @param requestId Request to link.
    * @param actorId Authenticated actor creating the link.
    * @param input Work Item link fields.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  async linkRequestToWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput): Promise<CustomerRequest> {
-    return await this.mutate(workspaceId, (memory) => memory.linkRequestToWorkItem(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
+  async linkRequestToWorkItem(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestWorkItemInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
+    return await this.mutate(workspaceId, (memory) => memory.linkRequestToWorkItem(workspaceId, requestId, actorId, input), [
+      REQUEST_RECORD_PREFIX,
+    ], false, authorizationConditionChecks)
   }
 
   /** Removes a request-to-Work-Item link under a revision fence.
@@ -566,10 +726,19 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @param requestId Request to unlink.
    * @param actorId Authenticated actor removing the link.
    * @param input Work Item link and expected request revision.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  async unlinkRequestFromWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput & { expectedRevision: number }): Promise<CustomerRequest> {
-    return await this.mutate(workspaceId, (memory) => memory.unlinkRequestFromWorkItem(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
+  async unlinkRequestFromWorkItem(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestWorkItemInput & { expectedRevision: number },
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
+    return await this.mutate(workspaceId, (memory) => memory.unlinkRequestFromWorkItem(workspaceId, requestId, actorId, input), [
+      REQUEST_RECORD_PREFIX,
+    ], false, authorizationConditionChecks)
   }
 
   /** Links a request directly to a Project, idempotently.
@@ -578,10 +747,19 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @param requestId Request to link.
    * @param actorId Authenticated actor creating the link.
    * @param input Project link fields.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  async linkRequestToProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput): Promise<CustomerRequest> {
-    return await this.mutate(workspaceId, (memory) => memory.linkRequestToProject(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
+  async linkRequestToProject(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestProjectInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
+    return await this.mutate(workspaceId, (memory) => memory.linkRequestToProject(workspaceId, requestId, actorId, input), [
+      REQUEST_RECORD_PREFIX,
+    ], false, authorizationConditionChecks)
   }
 
   /** Removes a request-to-Project link under a revision fence.
@@ -590,10 +768,19 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @param requestId Request to unlink.
    * @param actorId Authenticated actor removing the link.
    * @param input Project link and expected request revision.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  async unlinkRequestFromProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput & { expectedRevision: number }): Promise<CustomerRequest> {
-    return await this.mutate(workspaceId, (memory) => memory.unlinkRequestFromProject(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
+  async unlinkRequestFromProject(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestProjectInput & { expectedRevision: number },
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
+    return await this.mutate(workspaceId, (memory) => memory.unlinkRequestFromProject(workspaceId, requestId, actorId, input), [
+      REQUEST_RECORD_PREFIX,
+    ], false, authorizationConditionChecks)
   }
 
   /** Returns customer impact for one canonical Work Item.
@@ -949,20 +1136,30 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @param workspaceId Workspace partition to mutate.
    * @param operation Application operation executed against the selected state.
    * @param recordPrefixes Physical prefixes required by the operation.
+   * @param synchronizeCounts Whether the complete graph should refresh denormalized Customer counts.
+   * @param authorizationConditionChecks Live resource conditions joined to the write transaction.
    * @returns The operation result after the durable commit.
    */
   private async mutate<T>(
     workspaceId: string,
     operation: (memory: InMemoryCustomerClient) => Promise<T>,
     recordPrefixes: readonly string[],
+    synchronizeCounts = false,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<T> {
     const { memory, loaded } = await this.readMemory(workspaceId, recordPrefixes)
     if (hasExternalCustomerOperation(loaded)) {
       throw new CustomerError(409, 'CustomerOperationInProgress', 'A cross-store Customer operation is still being completed.')
     }
     const result = await operation(memory)
+    if (synchronizeCounts) memory.synchronizeCustomerCounts(workspaceId)
     const nextState = memory.readWorkspaceState(workspaceId)
-    await this.persist(workspaceId, loaded, nextState)
+    await this.persist(
+      workspaceId,
+      loaded,
+      nextState,
+      authorizationConditionChecks ? { authorizationConditionChecks } : {},
+    )
     return result
   }
 
@@ -1014,7 +1211,12 @@ export class DynamoDbCustomerClient implements CustomerClient {
       return
     }
     if (recordItems.length === 0) return
-    await this.persistRecordItems(workspaceId, loaded.revision, recordItems)
+    await this.persistRecordItems(
+      workspaceId,
+      loaded.revision,
+      recordItems,
+      options.authorizationConditionChecks,
+    )
   }
 
   /** Persists one bounded Customer merge step and leaves a cursor for the next step. */
@@ -1057,8 +1259,10 @@ export class DynamoDbCustomerClient implements CustomerClient {
     workspaceId: string,
     startingRevision: number,
     recordItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<number> {
-    if (recordItems.length > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
+    const authorizationItems = authorizationConditionChecks ?? []
+    if (recordItems.length + authorizationItems.length > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
       throw new CustomerError(
         409,
         'CustomerTransactionTooLarge',
@@ -1066,8 +1270,10 @@ export class DynamoDbCustomerClient implements CustomerClient {
       )
     }
     let revision = startingRevision
-    for (const batch of chunk(recordItems, CUSTOMER_TRANSACTION_RECORD_LIMIT)) {
-      revision = await this.writeTransaction(workspaceId, revision, batch)
+    for (const [batchIndex, batch] of chunk(recordItems, CUSTOMER_TRANSACTION_RECORD_LIMIT).entries()) {
+      revision = await this.writeTransaction(workspaceId, revision, batch, batchIndex === 0
+        ? { authorizationConditionChecks: authorizationItems }
+        : {})
     }
     return revision
   }
@@ -1220,6 +1426,14 @@ export class DynamoDbCustomerClient implements CustomerClient {
     recordItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
     options: CustomerTransactionOptions = {},
   ): Promise<number> {
+    const authorizationConditionChecks = options.authorizationConditionChecks ?? []
+    if (recordItems.length + authorizationConditionChecks.length + 1 > 100) {
+      throw new CustomerError(
+        409,
+        'CustomerTransactionTooLarge',
+        'The Customer transaction exceeds DynamoDB limits.',
+      )
+    }
     const nextRevision = expectedRevision + 1
     const conditionParts = expectedRevision === 0
       ? ['attribute_not_exists(recordKey)']
@@ -1303,6 +1517,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       )
     }
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      ...authorizationConditionChecks,
       ...recordItems,
       {
         Put: {
@@ -1329,8 +1544,26 @@ export class DynamoDbCustomerClient implements CustomerClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
-      if (isConditionalConflict(error)) {
+      const metadataIndex = authorizationConditionChecks.length + recordItems.length
+      if (isAwsNamedError(error, 'ConditionalCheckFailedException') ||
+        isConditionalFailureAtOnly(error, metadataIndex)) {
         throw new CustomerError(409, 'CustomerRevisionConflict', 'Customer data changed. Reload and try again.', { cause: error })
+      }
+      if (isOnlyConditionalFailureBefore(error, authorizationConditionChecks.length)) {
+        throw new CustomerError(
+          409,
+          'CustomerAuthorizationChanged',
+          'Customer authorization changed during the mutation. Reload and try again.',
+          { cause: error },
+        )
+      }
+      if (readConditionalFailureIndexes(error)?.length) {
+        throw new CustomerError(
+          409,
+          'CustomerRevisionConflict',
+          'Customer data changed during the mutation. Reload and try again.',
+          { cause: error },
+        )
       }
       throw error
     }
@@ -1359,11 +1592,21 @@ export class DynamoDbCustomerClient implements CustomerClient {
         AttributeDefinitions: [
           { AttributeName: 'workspaceId', AttributeType: 'S' },
           { AttributeName: 'recordKey', AttributeType: 'S' },
+          { AttributeName: 'retentionPartition', AttributeType: 'S' },
+          { AttributeName: 'retentionDueAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'workspaceId', KeyType: 'HASH' },
           { AttributeName: 'recordKey', KeyType: 'RANGE' },
         ],
+        GlobalSecondaryIndexes: [{
+          IndexName: CUSTOMER_RETENTION_INDEX_NAME,
+          KeySchema: [
+            { AttributeName: 'retentionPartition', KeyType: 'HASH' },
+            { AttributeName: 'retentionDueAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }],
       }))
     } catch (error) {
       if (!isAwsNamedError(error, 'ResourceInUseException')) throw error
@@ -1400,6 +1643,8 @@ type LoadedCustomerMetadata = {
 
 /** Optional mutation behavior selected by a Customer adapter operation. */
 type CustomerPersistOptions = {
+  /** Live resource authorization conditions that must remain true at commit time. */
+  authorizationConditionChecks?: CustomerAuthorizationConditionChecks
   /** Customer deletion that must be committed through a resumable cursor. */
   deletion?: { customerId: string }
   /** Retention evaluation that must be committed through a resumable cursor. */
@@ -1450,6 +1695,8 @@ type CustomerRetentionOperation = {
 
 /** Options for one metadata-fenced DynamoDB transaction. */
 type CustomerTransactionOptions = {
+  /** Live resource authorization conditions joined to this transaction. */
+  authorizationConditionChecks?: CustomerAuthorizationConditionChecks
   /** Marker that must still be present before the transaction may commit. */
   expectedDeletion?: CustomerDeletionOperation
   /** Marker to store with the next metadata revision. */
@@ -1464,9 +1711,17 @@ type CustomerTransactionOptions = {
   nextMerge?: CustomerMergeOperation
 }
 
+/** Optional sparse-index attributes carried by unredacted Customer-owned rows. */
+type StoredRetentionIndexFields = {
+  /** Constant sparse-index partition value. */
+  retentionPartition?: typeof CUSTOMER_RETENTION_INDEX_PARTITION
+  /** Expiry instant used as the sparse-index sort key. */
+  retentionDueAt?: string
+}
+
 /** Stored row variants used by the Customer single-table adapter. */
 type StoredCustomerRow =
-  | {
+  | ({
       /** Workspace partition key. */
       workspaceId: string
       /** Metadata sort key. */
@@ -1491,8 +1746,8 @@ type StoredCustomerRow =
       entityType: 'customer'
       /** Persisted Customer value. */
       customer: Customer
-    }
-  | {
+    } & StoredRetentionIndexFields)
+  | ({
       /** Workspace partition key. */
       workspaceId: string
       /** Contact sort key. */
@@ -1501,8 +1756,8 @@ type StoredCustomerRow =
       entityType: 'contact'
       /** Persisted Contact value. */
       contact: CustomerContact
-    }
-  | {
+    } & StoredRetentionIndexFields)
+  | ({
       /** Workspace partition key. */
       workspaceId: string
       /** Customer Request sort key. */
@@ -1511,7 +1766,7 @@ type StoredCustomerRow =
       entityType: 'request'
       /** Persisted Customer Request value. */
       request: CustomerRequest
-    }
+    } & StoredRetentionIndexFields)
   | {
       /** Workspace partition key. */
       workspaceId: string
@@ -1592,12 +1847,45 @@ function createEmptyState(): CustomerWorkspaceState {
 /** Serializes all graph records into deterministic Customer rows. */
 function serializeState(workspaceId: string, state: CustomerWorkspaceState): StoredCustomerRow[] {
   return [
-    ...[...state.customers.values()].map((customer): StoredCustomerRow => ({ workspaceId, recordKey: `CUSTOMER#${customer.id}`, entityType: 'customer', customer })),
-    ...[...state.contacts.values()].map((contact): StoredCustomerRow => ({ workspaceId, recordKey: `CONTACT#${contact.id}`, entityType: 'contact', contact })),
-    ...[...state.requests.values()].map((request): StoredCustomerRow => ({ workspaceId, recordKey: `REQUEST#${request.id}`, entityType: 'request', request })),
+    ...[...state.customers.values()].map((customer): StoredCustomerRow => ({
+      workspaceId,
+      recordKey: `CUSTOMER#${customer.id}`,
+      entityType: 'customer',
+      customer,
+      ...createRetentionIndexFields(customer.retention),
+    })),
+    ...[...state.contacts.values()].map((contact): StoredCustomerRow => ({
+      workspaceId,
+      recordKey: `CONTACT#${contact.id}`,
+      entityType: 'contact',
+      contact,
+      ...createRetentionIndexFields(contact.retention),
+    })),
+    ...[...state.requests.values()].map((request): StoredCustomerRow => ({
+      workspaceId,
+      recordKey: `REQUEST#${request.id}`,
+      entityType: 'request',
+      request,
+      ...createRetentionIndexFields(request.retention),
+    })),
     ...[...state.views.values()].map((view): StoredCustomerRow => ({ workspaceId, recordKey: `VIEW#${view.id}`, entityType: 'view', view })),
     ...[...state.notifications.values()].map((notification): StoredCustomerRow => ({ workspaceId, recordKey: `NOTIFICATION#${notification.id}`, entityType: 'completion-notification', notification })),
   ]
+}
+
+/** Creates sparse retention-index attributes for one unredacted record.
+ *
+ * @param retention Retention metadata attached to the Customer-owned record.
+ * @returns Sparse index attributes, or an empty object for records that are not due.
+ */
+function createRetentionIndexFields(
+  retention: CustomerRetention | undefined,
+): StoredRetentionIndexFields {
+  if (retention?.expiresAt === undefined || retention.redactedAt !== undefined) return {}
+  return {
+    retentionPartition: CUSTOMER_RETENTION_INDEX_PARTITION,
+    retentionDueAt: retention.expiresAt,
+  }
 }
 
 /** Strictly decodes one untrusted DynamoDB row. */
@@ -1752,6 +2040,39 @@ function isSafeNonnegativeInteger(value: unknown): value is number {
 /** Validates an ISO instant stored at a persistence boundary. */
 function isIsoInstant(value: unknown): value is string {
   return isString(value) && Number.isFinite(Date.parse(value))
+}
+
+/** Normalizes one schedule timestamp to the canonical ISO representation.
+ *
+ * @param value Timestamp supplied by the schedule event.
+ * @param label Human-readable field name used in validation errors.
+ * @returns The normalized ISO instant.
+ */
+function normalizeTimestamp(value: string, label: string): string {
+  if (!isIsoInstant(value)) {
+    throw new CustomerError(400, 'InvalidCustomerInput', `${label} is invalid.`)
+  }
+  return new Date(value).toISOString()
+}
+
+/** Validates one bounded positive integer used by scheduled processing.
+ *
+ * @param value Integer to validate.
+ * @param label Human-readable field name used in validation errors.
+ * @param minimum Inclusive lower bound.
+ * @param maximum Inclusive upper bound.
+ * @returns The validated integer.
+ */
+function normalizeBoundedInteger(
+  value: number,
+  label: string,
+  minimum: number,
+  maximum: number,
+): number {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new CustomerError(500, 'InvalidCustomerConfiguration', `${label} is invalid.`)
+  }
+  return value
 }
 
 /** Checks whether a stored revision is safe. */
@@ -1911,26 +2232,50 @@ function isLocalEndpoint(endpoint: string | undefined): boolean {
   }
 }
 
-/** Classifies a conditional DynamoDB failure.
+/** Reads conditional-failure positions from a transaction cancellation.
  *
- * @param error Untrusted DynamoDB failure.
- * @returns Whether the failure contains a failed conditional check and can be mapped to a revision conflict.
+ * @param error Untrusted DynamoDB transaction failure.
+ * @returns Conditional-failure item indexes, or undefined when the failure is not safely classifiable.
  */
-function isConditionalConflict(error: unknown): boolean {
-  if (isAwsNamedError(error, 'ConditionalCheckFailedException')) return true
-  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error) || !Array.isArray(error.CancellationReasons)) {
-    return false
+function readConditionalFailureIndexes(error: unknown): number[] | undefined {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') ||
+    !isRecord(error) || !Array.isArray(error.CancellationReasons) ||
+    error.CancellationReasons.length === 0) {
+    return undefined
   }
-  let hasConditionalFailure = false
-  for (const reason of error.CancellationReasons) {
-    if (!isRecord(reason) || typeof reason.Code !== 'string') return false
+  const indexes: number[] = []
+  for (const [index, reason] of error.CancellationReasons.entries()) {
+    if (!isRecord(reason) || typeof reason.Code !== 'string') return undefined
     if (reason.Code === 'ConditionalCheckFailed') {
-      hasConditionalFailure = true
+      indexes.push(index)
     } else if (reason.Code !== 'None') {
-      return false
+      return undefined
     }
   }
-  return hasConditionalFailure
+  return indexes
+}
+
+/** Checks whether exactly one transaction condition failed at a known item position.
+ *
+ * @param error Untrusted DynamoDB transaction failure.
+ * @param itemIndex Expected failing item position.
+ * @returns Whether only the expected condition failed.
+ */
+function isConditionalFailureAtOnly(error: unknown, itemIndex: number): boolean {
+  const indexes = readConditionalFailureIndexes(error)
+  return indexes?.length === 1 && indexes[0] === itemIndex
+}
+
+/** Checks whether all transaction conditional failures belong to caller authorization guards.
+ *
+ * @param error Untrusted DynamoDB transaction failure.
+ * @param authorizationCount Number of authorization items at the transaction start.
+ * @returns Whether one or more authorization conditions failed and no other item did.
+ */
+function isOnlyConditionalFailureBefore(error: unknown, authorizationCount: number): boolean {
+  if (!Number.isSafeInteger(authorizationCount) || authorizationCount < 1) return false
+  const indexes = readConditionalFailureIndexes(error)
+  return indexes !== undefined && indexes.length > 0 && indexes.every((index) => index < authorizationCount)
 }
 
 /** Checks an AWS error name without trusting an unknown value. */

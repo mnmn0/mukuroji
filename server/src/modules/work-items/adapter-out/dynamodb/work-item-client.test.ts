@@ -1375,6 +1375,50 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
   })
 })
 
+test('DynamoDB Work Item creation persists a Customer preparation marker for completed items', async () => {
+  let workItemTransaction: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'TransactWriteCommand') {
+        workItemTransaction = command.input
+      }
+      return command.constructor.name === 'QueryCommand' ? { Items: [] } : {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Already completed',
+      assigneeUserId: 'demo@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'done',
+      statusCategory: 'completed',
+      customFieldValues: {},
+      schedule: createDueDateSchedule('2026-07-20'),
+      priority: 'medium',
+    },
+    'demo@example.com',
+  )
+
+  const item = workItemTransaction
+    ? readTransactionPutItem(workItemTransaction, 'WorkItemsTable')
+    : undefined
+  expect(item).toMatchObject({
+    statusCategory: 'completed',
+    customerCompletionPreparationAt: expect.any(String),
+    customerCompletionPreparationRevision: 1,
+  })
+})
+
 test('duplicate Triage context is atomically guarded and de-identified on the Work Item', () => {
   const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
   const contribution = client.createTriageDuplicateContextTransactionItems({
@@ -2266,7 +2310,16 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
           mode: 'due-date',
           dueDate: '2026-06-05',
         },
+        ':customerCompletionPreparationRevision': 2,
+        ':customerCompletionPreparationAt': expect.any(String),
       },
+      ExpressionAttributeNames: expect.objectContaining({
+        '#customerCompletionPreparationAt': 'customerCompletionPreparationAt',
+        '#customerCompletionPreparationRevision': 'customerCompletionPreparationRevision',
+      }),
+      UpdateExpression: expect.stringContaining(
+        '#customerCompletionPreparationRevision = :customerCompletionPreparationRevision',
+      ),
       ConditionExpression:
         'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
         '#revision = :expectedRevision',

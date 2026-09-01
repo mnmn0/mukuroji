@@ -66,6 +66,23 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
   }));
   expect(resources.ProjectTasksTableE21F6637.Properties.GlobalSecondaryIndexes).toBeUndefined();
 
+  expect(resources.CustomersTableB554B793.Properties).toEqual(expect.objectContaining({
+    AttributeDefinitions: expect.arrayContaining([
+      { AttributeName: 'retentionPartition', AttributeType: 'S' },
+      { AttributeName: 'retentionDueAt', AttributeType: 'S' },
+    ]),
+    GlobalSecondaryIndexes: expect.arrayContaining([
+      expect.objectContaining({
+        IndexName: 'CustomerRetentionIndex',
+        KeySchema: [
+          { AttributeName: 'retentionPartition', KeyType: 'HASH' },
+          { AttributeName: 'retentionDueAt', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }),
+    ]),
+  }));
+
   expect(resources.CapacityPlanningTable0EECD517.Properties)
     .toEqual(expect.objectContaining({
       SSESpecification: {

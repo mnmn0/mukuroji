@@ -44,12 +44,13 @@ export function useCustomers(
     }),
     customerQueryConfig,
   )
-  const { data: pageData, isValidating, setSize, size } = query
+  const { data: pageData, error, isValidating, setSize, size } = query
   useEffect(() => {
-    if (!enabled || !pageData || isValidating) return
+    if (!enabled || !pageData || error || isValidating) return
+    if (pageData.length !== size || pageData.some((page) => page === undefined)) return
     if (!pageData.at(-1)?.nextCursor) return
     void setSize(size + 1)
-  }, [enabled, isValidating, pageData, setSize, size])
+  }, [enabled, error, isValidating, pageData, setSize, size])
   const pages = pageData ?? []
   const customers = pages.flatMap((page) => page.customers)
   const nextCursor = pages.at(-1)?.nextCursor

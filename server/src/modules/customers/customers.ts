@@ -41,6 +41,7 @@ import {
   updateCustomerRequestRecord,
 } from './domain/customer'
 import { CustomerError } from './domain/customer'
+import type { TriageAuthorizationConditionChecks } from '../triage'
 
 /** Complete mutable Customer state for one Workspace. */
 export type CustomerWorkspaceState = {
@@ -55,6 +56,9 @@ export type CustomerWorkspaceState = {
   /** Prepared completion notification candidates keyed by deterministic ID. */
   notifications: Map<string, CustomerCompletionNotification>
 }
+
+/** DynamoDB conditions supplied by an already-authorized live-resource boundary. */
+export type CustomerAuthorizationConditionChecks = TriageAuthorizationConditionChecks
 
 /** Public Customer persistence and application surface. */
 export interface CustomerClient {
@@ -157,6 +161,13 @@ export interface CustomerClient {
    * @returns The requested contact.
    */
   getContact(workspaceId: string, customerId: string, contactId: string): Promise<CustomerContact>
+  /** Reads one contact by ID before its owning Customer is known.
+   *
+   * @param workspaceId Workspace containing the contact.
+   * @param contactId Contact to read.
+   * @returns The requested contact.
+   */
+  getContactById(workspaceId: string, contactId: string): Promise<CustomerContact>
   /** Creates a customer contact.
    *
    * @param workspaceId Workspace containing the Customer.
@@ -183,18 +194,33 @@ export interface CustomerClient {
    * @param contactId Contact to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Contact revision required for deletion.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns A promise that resolves after deletion completes.
    */
-  deleteContact(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void>
+  deleteContact(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<void>
   /** Merges a source contact into a retained contact.
    *
    * @param workspaceId Workspace containing both contacts.
    * @param sourceContactId Contact being merged away.
    * @param actorId Authenticated actor performing the merge.
    * @param input Target contact and revision fences.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The retained contact.
    */
-  mergeContact(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<CustomerContact>
+  mergeContact(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerContact>
   /** Lists customer requests within a Workspace boundary.
    *
    * @param workspaceId Workspace containing the requests.
@@ -250,36 +276,64 @@ export interface CustomerClient {
    * @param requestId Request to link.
    * @param actorId Authenticated actor creating the link.
    * @param input Work Item link fields.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  linkRequestToWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput): Promise<CustomerRequest>
+  linkRequestToWorkItem(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestWorkItemInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest>
   /** Removes a request-to-Work-Item link under a revision fence.
    *
    * @param workspaceId Workspace containing the request.
    * @param requestId Request to unlink.
    * @param actorId Authenticated actor removing the link.
    * @param input Work Item link and expected request revision.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  unlinkRequestFromWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput & { expectedRevision: number }): Promise<CustomerRequest>
+  unlinkRequestFromWorkItem(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestWorkItemInput & { expectedRevision: number },
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest>
   /** Links a request directly to a Project, allowing many requests per Project.
    *
    * @param workspaceId Workspace containing the request.
    * @param requestId Request to link.
    * @param actorId Authenticated actor creating the link.
    * @param input Project link fields.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  linkRequestToProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput): Promise<CustomerRequest>
+  linkRequestToProject(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestProjectInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest>
   /** Removes a request-to-Project link under a revision fence.
    *
    * @param workspaceId Workspace containing the request.
    * @param requestId Request to unlink.
    * @param actorId Authenticated actor removing the link.
    * @param input Project link and expected request revision.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer Request.
    */
-  unlinkRequestFromProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput & { expectedRevision: number }): Promise<CustomerRequest>
+  unlinkRequestFromProject(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestProjectInput & { expectedRevision: number },
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest>
   /** Returns customer impact for one canonical Work Item.
    *
    * @param workspaceId Workspace containing the Work Item links.
@@ -473,14 +527,62 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @returns The filtered customer page.
    */
   async listCustomers(workspaceId: string, input: CustomerListInput = {}): Promise<CustomerPage> {
-    const state = this.state(workspaceId)
+    return await this.listCustomersFromState(workspaceId, this.state(workspaceId), input, false)
+  }
+
+  /** Lists customers using denormalized counts from a Customer-only persistence read.
+   *
+   * @param workspaceId Workspace containing the customers.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered customer page.
+   */
+  async listCustomersUsingStoredCounts(workspaceId: string, input: CustomerListInput = {}): Promise<CustomerPage> {
+    return await this.listCustomersFromState(workspaceId, this.state(workspaceId), input, true)
+  }
+
+  /** Recomputes Customer list counts in a complete mutable Workspace graph.
+   *
+   * @param workspaceId Workspace whose Customer roots should be synchronized.
+   * @returns Nothing; changed roots are updated in place without advancing their revisions.
+   */
+  synchronizeCustomerCounts(workspaceId: string): void {
+    const state = this.rawState(workspaceId)
+    for (const customer of state.customers.values()) {
+      const nextCounts = {
+        contactCount: [...state.contacts.values()].filter((contact) => contact.customerId === customer.id).length,
+        requestCount: [...state.requests.values()].filter((request) => request.customerId === customer.id && request.status !== 'merged').length,
+        openRequestCount: [...state.requests.values()].filter((request) => request.customerId === customer.id && isOpenRequest(request.status)).length,
+      }
+      if (
+        customer.contactCount === nextCounts.contactCount &&
+        customer.requestCount === nextCounts.requestCount &&
+        customer.openRequestCount === nextCounts.openRequestCount
+      ) continue
+      state.customers.set(customer.id, { ...customer, ...nextCounts })
+    }
+  }
+
+  /** Applies one customer list query to a supplied state snapshot.
+   *
+   * @param workspaceId Workspace containing the supplied state.
+   * @param state State snapshot to query.
+   * @param input Optional filters and a query-bound cursor.
+   * @param useStoredCounts Whether persisted root counts are already authoritative.
+   * @returns The filtered customer page.
+   */
+  private async listCustomersFromState(
+    workspaceId: string,
+    state: CustomerWorkspaceState,
+    input: CustomerListInput,
+    useStoredCounts: boolean,
+  ): Promise<CustomerPage> {
     const limit = normalizeLimit(input.limit)
     const normalizedInput = { ...input, limit }
     const queryFingerprint = createListQueryFingerprint(normalizedInput)
     const datasetRevision = createCustomerDatasetRevision(state)
     const filtered = [...state.customers.values()]
       .filter((customer) => !this.isCustomerUnavailable(workspaceId, customer.id))
-      .map((customer) => this.withCustomerCounts(state, customer))
+      .map((customer) => useStoredCounts ? clone(customer) : this.withCustomerCounts(state, customer))
       .filter((customer) => matchesCustomer(customer, normalizedInput))
       .sort((left, right) => compareCustomers(left, right, normalizedInput))
     const offset = decodeOffset(
@@ -732,6 +834,21 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(contact)
   }
 
+  /** Reads one contact by ID before its owning Customer is known.
+   *
+   * @param workspaceId Workspace containing the contact.
+   * @param contactId Contact to read.
+   * @returns The requested contact.
+   */
+  async getContactById(workspaceId: string, contactId: string): Promise<CustomerContact> {
+    const state = this.state(workspaceId)
+    const contact = state.contacts.get(contactId)
+    if (!contact || this.isCustomerUnavailable(workspaceId, contact.customerId)) {
+      throw notFound('CustomerContactNotFound', 'The customer contact was not found.')
+    }
+    return clone(contact)
+  }
+
   /** Creates a customer contact.
    *
    * @param workspaceId Workspace containing the customer.
@@ -788,9 +905,17 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param contactId Contact to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Contact revision required for deletion.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns A promise that resolves after deletion completes.
    */
-  async deleteContact(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void> {
+  async deleteContact(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<void> {
     requireActor(actorId)
     const current = await this.getContact(workspaceId, customerId, contactId)
     assertRevision(current.revision, expectedRevision, 'Customer contact')
@@ -813,9 +938,16 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param sourceContactId Contact being merged away.
    * @param actorId Authenticated actor performing the merge.
    * @param input Target contact and revision fences.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns The retained contact.
    */
-  async mergeContact(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<CustomerContact> {
+  async mergeContact(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerContact> {
     requireActor(actorId)
     if (sourceContactId === input.targetContactId) throw new CustomerError(400, 'InvalidCustomerMerge', 'A contact cannot be merged into itself.')
     const state = this.state(workspaceId)
@@ -983,6 +1115,13 @@ export class InMemoryCustomerClient implements CustomerClient {
         'A Customer Request associated with a Triage Entry cannot be deleted.',
       )
     }
+    if ([...state.requests.values()].some((candidate) => candidate.mergedIntoRequestId === requestId)) {
+      throw new CustomerError(
+        409,
+        'CustomerRequestMergeDependency',
+        'A Customer Request retained by a merge cannot be deleted.',
+      )
+    }
     state.requests.delete(requestId)
     this.deleteRequestNotifications(state, requestId)
   }
@@ -1041,9 +1180,16 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param requestId Request to link.
    * @param actorId Authenticated actor creating the link.
    * @param input Work Item link fields.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns The updated Customer Request.
    */
-  async linkRequestToWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput): Promise<CustomerRequest> {
+  async linkRequestToWorkItem(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestWorkItemInput,
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
@@ -1071,9 +1217,16 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param requestId Request to unlink.
    * @param actorId Authenticated actor removing the link.
    * @param input Work Item link and expected request revision.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns The updated Customer Request.
    */
-  async unlinkRequestFromWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput & { expectedRevision: number }): Promise<CustomerRequest> {
+  async unlinkRequestFromWorkItem(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestWorkItemInput & { expectedRevision: number },
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
@@ -1096,9 +1249,16 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param requestId Request to link.
    * @param actorId Authenticated actor creating the link.
    * @param input Project link fields.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns The updated Customer Request.
    */
-  async linkRequestToProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput): Promise<CustomerRequest> {
+  async linkRequestToProject(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestProjectInput,
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
@@ -1121,9 +1281,16 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param requestId Request to unlink.
    * @param actorId Authenticated actor removing the link.
    * @param input Project link and expected request revision.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns The updated Customer Request.
    */
-  async unlinkRequestFromProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput & { expectedRevision: number }): Promise<CustomerRequest> {
+  async unlinkRequestFromProject(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    input: LinkCustomerRequestProjectInput & { expectedRevision: number },
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)

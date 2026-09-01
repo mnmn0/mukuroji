@@ -15,6 +15,8 @@ export type CustomerDirectoryViewProps = {
   customers: readonly Customer[]
   /** Whether sensitive Customer search and business-value controls are allowed. */
   canViewSensitiveData: boolean
+  /** Whether Customer saved-view mutations are allowed. */
+  canManageCustomerViews: boolean
   /** Selected Customer detail graph, when a route Customer is selected. */
   detail?: CustomerDetail
   /** Current URL-backed search value. */
@@ -63,6 +65,7 @@ export type CustomerDirectoryViewProps = {
  * @returns The Customer directory and selected detail view.
  */
 export function CustomerDirectoryView({
+  canManageCustomerViews,
   canViewSensitiveData,
   customers,
   detail,
@@ -206,7 +209,9 @@ export function CustomerDirectoryView({
               {savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}
             </select>
           </label>
-          <SaveViewControl isSaving={isSavingView} onSave={onSaveView} t={t} />
+          {canManageCustomerViews ? (
+            <SaveViewControl isSaving={isSavingView} onSave={onSaveView} t={t} />
+          ) : null}
           {saveViewError ? <span className="text-sm font-semibold text-red-700" role="alert">{saveViewError}</span> : null}
           <span className="ml-auto text-sm font-semibold text-[var(--workbench-muted)]">
             {t('customers.requestCount').replace('{count}', String(customers.reduce((sum, customer) => sum + customer.requestCount, 0)))}

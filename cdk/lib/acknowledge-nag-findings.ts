@@ -214,6 +214,14 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
+    [
+      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     [
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
@@ -391,6 +399,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
     'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',

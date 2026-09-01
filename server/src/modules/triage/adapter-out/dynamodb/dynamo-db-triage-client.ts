@@ -559,24 +559,104 @@ export class DynamoDbTriageClient implements TriageClient {
       nextCustomerId,
       customerOperation,
     )
+    const customerAssociationConditionChecks = this.createCustomerAssociationConditionChecks(
+      workspaceId,
+      customerOperation?.kind === 'deletion' ? current : next,
+      customerOperation,
+    )
+    const combinedAuthorizationConditionChecks = [
+      ...(authorizationConditionChecks ?? []),
+      ...customerAssociationConditionChecks,
+    ]
     const transactItems = createTriageCustomerAssociationTransactionItems({
       tableName: this.tableName,
       current,
       next,
       event: associationEvent,
-      authorizationConditionChecks,
+      authorizationConditionChecks: combinedAuthorizationConditionChecks,
       customerOperationConditionCheck,
     })
     if (transactItems.length > 100) {
       throw new TriageError(409, 'TriageTransactionTooLarge', 'The Customer association is too large.')
     }
+    const customerOperationIndex = customerOperationConditionCheck
+      ? combinedAuthorizationConditionChecks.length
+      : undefined
+    const triageEntryRevisionIndex = findTriageEntryRevisionConditionIndex(
+      transactItems,
+      this.tableName,
+      workspaceId,
+      entryId,
+    )
+    if (triageEntryRevisionIndex === undefined) {
+      throw new TriageError(
+        500,
+        'TriageAssociationTransactionInvalid',
+        'The Triage association transaction is missing its revision fence.',
+      )
+    }
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
-      if (isConditionalConflict(error)) {
+      const conditionalFailureIndexes = readConditionalFailureIndexes(error)
+      if (conditionalFailureIndexes === undefined) throw error
+      const knownFailureCategories = new Set(
+        conditionalFailureIndexes.map((itemIndex) =>
+          classifyTriageAssociationConditionFailure(
+            itemIndex,
+            authorizationConditionChecks?.length ?? 0,
+            customerAssociationConditionChecks.length,
+            customerOperationIndex,
+            triageEntryRevisionIndex,
+          )
+        ),
+      )
+      knownFailureCategories.delete(undefined)
+      const hasUnknownFailure = conditionalFailureIndexes.some((itemIndex) =>
+        classifyTriageAssociationConditionFailure(
+          itemIndex,
+          authorizationConditionChecks?.length ?? 0,
+          customerAssociationConditionChecks.length,
+          customerOperationIndex,
+          triageEntryRevisionIndex,
+        ) === undefined
+      )
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('revision')) {
         throw new TriageError(409, 'TriageRevisionConflict', 'The triage entry changed.', {
           cause: error,
         })
+      }
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('authorization')) {
+        throw new TriageError(
+          409,
+          'TriageAuthorizationChanged',
+          'Triage authorization changed during the association.',
+          { cause: error },
+        )
+      }
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('customer-operation')) {
+        throw new TriageError(
+          409,
+          'TriageCustomerOperationConflict',
+          'The Customer operation changed during the association.',
+          { cause: error },
+        )
+      }
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('customer-graph')) {
+        throw new TriageError(
+          409,
+          'TriageCustomerAssociationConflict',
+          'The Customer association changed during the mutation.',
+          { cause: error },
+        )
+      }
+      if (isConditionalConflict(error)) {
+        throw new TriageError(
+          409,
+          'TriageAssociationConflict',
+          'The Customer association transaction could not be applied safely.',
+          { cause: error },
+        )
       }
       throw error
     }
@@ -723,6 +803,91 @@ export class DynamoDbTriageClient implements TriageClient {
         ...(Object.keys(values).length > 0 ? { ExpressionAttributeValues: values } : {}),
       },
     }
+  }
+
+  /** Builds live Customer graph row conditions for an association.
+   *
+   * @param workspaceId Workspace containing the Customer graph.
+   * @param entry Triage Entry whose next association must remain valid.
+   * @returns Customer row conditions, or an empty list when Customer storage is not configured.
+   */
+  private createCustomerAssociationConditionChecks(
+    workspaceId: string,
+    entry: TriageEntry,
+    operation?: TriageCustomerAssociationOperation,
+  ): TriageAuthorizationConditionChecks {
+    if (!this.customerTableName || entry.customerId === undefined) return []
+    const checks: TriageAuthorizationConditionChecks = []
+    const customerRootIds = operation?.kind === 'merge'
+      ? [...new Set([entry.customerId, operation.sourceCustomerId])]
+      : [entry.customerId]
+    for (const customerId of customerRootIds) {
+      checks.push({
+        ConditionCheck: {
+          TableName: this.customerTableName,
+          Key: { workspaceId, recordKey: 'CUSTOMER#' + customerId },
+          ConditionExpression: 'attribute_exists(#customer) AND #customer.#id = :customerId',
+          ExpressionAttributeNames: {
+            '#customer': 'customer',
+            '#id': 'id',
+          },
+          ExpressionAttributeValues: {
+            ':customerId': customerId,
+          },
+        },
+      })
+    }
+    const sourceCustomerId = operation?.kind === 'merge'
+      ? operation.sourceCustomerId
+      : undefined
+    const contactCustomerIdExpression = sourceCustomerId === undefined
+      ? '#contact.#customerId = :customerId'
+      : '(#contact.#customerId = :customerId OR #contact.#customerId = :sourceCustomerId)'
+    const requestCustomerIdExpression = sourceCustomerId === undefined
+      ? '#request.#customerId = :customerId'
+      : '(#request.#customerId = :customerId OR #request.#customerId = :sourceCustomerId)'
+    const customerIdValues = sourceCustomerId === undefined
+      ? { ':customerId': entry.customerId }
+      : { ':customerId': entry.customerId, ':sourceCustomerId': sourceCustomerId }
+    if (entry.contactId !== undefined) {
+      checks.push({
+        ConditionCheck: {
+          TableName: this.customerTableName,
+          Key: { workspaceId, recordKey: 'CONTACT#' + entry.contactId },
+          ConditionExpression:
+            `attribute_exists(#contact) AND ${contactCustomerIdExpression} AND #contact.#status = :activeStatus`,
+          ExpressionAttributeNames: {
+            '#contact': 'contact',
+            '#customerId': 'customerId',
+            '#status': 'status',
+          },
+          ExpressionAttributeValues: {
+            ...customerIdValues,
+            ':activeStatus': 'active',
+          },
+        },
+      })
+    }
+    if (entry.customerRequestId !== undefined) {
+      checks.push({
+        ConditionCheck: {
+          TableName: this.customerTableName,
+          Key: { workspaceId, recordKey: 'REQUEST#' + entry.customerRequestId },
+          ConditionExpression:
+            `attribute_exists(#request) AND ${requestCustomerIdExpression} AND #request.#triageEntryId = :entryId`,
+          ExpressionAttributeNames: {
+            '#request': 'request',
+            '#customerId': 'customerId',
+            '#triageEntryId': 'triageEntryId',
+          },
+          ExpressionAttributeValues: {
+            ...customerIdValues,
+            ':entryId': entry.id,
+          },
+        },
+      })
+    }
+    return checks
   }
 
   /** Strongly reads one canonical stored entry without applying a response projection. */
@@ -2689,6 +2854,30 @@ function readPrimaryKey(value: unknown): { scopeKey: string; recordKey: string }
   return { scopeKey: value.scopeKey, recordKey: value.recordKey }
 }
 
+/** Finds the revision-fenced canonical Triage Entry update in an association transaction.
+ *
+ * @param items Transaction actions composed for the association.
+ * @param tableName Request Intake table name.
+ * @param workspaceId Workspace containing the entry.
+ * @param entryId Entry whose revision is being advanced.
+ * @returns The transaction position of the entry update, or undefined for an invalid composition.
+ */
+function findTriageEntryRevisionConditionIndex(
+  items: TriageTransactionItems,
+  tableName: string,
+  workspaceId: string,
+  entryId: string,
+): number | undefined {
+  const key = createTriageEntryKey(workspaceId, entryId)
+  const index = items.findIndex((item) => {
+    const update = item.Update
+    return update?.TableName === tableName &&
+      update.Key?.scopeKey === key.scopeKey &&
+      update.Key?.recordKey === key.recordKey
+  })
+  return index >= 0 ? index : undefined
+}
+
 /** Reads an entry ID from a reverse source association. */
 function readAssociationEntryId(value: unknown): string | undefined {
   return isRecord(value) && value.entryType === 'triage-work-item-source' &&
@@ -2699,19 +2888,53 @@ function readAssociationEntryId(value: unknown): string | undefined {
 function isConditionalConflict(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   if (error.name === 'ConditionalCheckFailedException') return true
-  if (error.name !== 'TransactionCanceledException') return false
+  const conditionalFailureIndexes = readConditionalFailureIndexes(error)
+  return conditionalFailureIndexes !== undefined && conditionalFailureIndexes.length > 0
+}
+
+/** Reads conditional-failure transaction positions while rejecting mixed infrastructure failures.
+ *
+ * @param error Untrusted DynamoDB transaction failure.
+ * @returns Conditional-failure item indexes, or undefined when the cancellation is not safely classifiable.
+ */
+function readConditionalFailureIndexes(error: unknown): number[] | undefined {
+  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') return undefined
   const cancellationReasons = Reflect.get(error, 'CancellationReasons')
-  if (!Array.isArray(cancellationReasons) || cancellationReasons.length === 0) return false
-  let hasConditionalFailure = false
-  for (const reason of cancellationReasons) {
+  if (!Array.isArray(cancellationReasons) || cancellationReasons.length === 0) return undefined
+  const indexes: number[] = []
+  for (const [index, reason] of cancellationReasons.entries()) {
     const code = isRecord(reason) ? reason.Code : undefined
     if (code === 'ConditionalCheckFailed') {
-      hasConditionalFailure = true
+      indexes.push(index)
       continue
     }
-    if (code !== 'None') return false
+    if (code !== 'None') return undefined
   }
-  return hasConditionalFailure
+  return indexes
+}
+
+/** Maps one association transaction position to its semantic condition category.
+ *
+ * @param itemIndex Transaction position reported by DynamoDB.
+ * @param callerAuthorizationCount Number of caller-supplied authorization conditions.
+ * @param customerGraphCount Number of generated Customer root/child conditions.
+ * @param customerOperationIndex Optional Customer operation marker position.
+ * @param triageEntryRevisionIndex Triage root revision condition position.
+ * @returns The condition category, or undefined for an unrecognized transaction item.
+ */
+function classifyTriageAssociationConditionFailure(
+  itemIndex: number,
+  callerAuthorizationCount: number,
+  customerGraphCount: number,
+  customerOperationIndex: number | undefined,
+  triageEntryRevisionIndex: number,
+): 'authorization' | 'customer-graph' | 'customer-operation' | 'revision' | undefined {
+  if (itemIndex < callerAuthorizationCount) return 'authorization'
+  const customerGraphStartIndex = callerAuthorizationCount
+  if (itemIndex < customerGraphStartIndex + customerGraphCount) return 'customer-graph'
+  if (customerOperationIndex === itemIndex) return 'customer-operation'
+  if (triageEntryRevisionIndex === itemIndex) return 'revision'
+  return undefined
 }
 
 /** Classifies a transaction cancellation caused only by expected admission guards.

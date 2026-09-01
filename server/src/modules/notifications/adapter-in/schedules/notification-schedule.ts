@@ -42,6 +42,31 @@ export type NotificationScheduleEvent = {
 /** Notification schedule から利用する DynamoDB DocumentClient です。 */
 export type NotificationScheduleDocumentClient = Pick<DynamoDBDocumentClient, 'send'>
 
+/** Durable Work Item marker handed to Customer completion preparation. */
+export type CustomerCompletionPreparation = {
+  /** Workspace containing the completed Work Item. */
+  workspaceId: string
+  /** Team owning the completed Work Item. */
+  teamId: string
+  /** Completed Work Item identifier. */
+  workItemId: string
+  /** Work Item revision that created the marker. */
+  revision: number
+  /** Physical Work Item partition key. */
+  directoryTeamId: string
+  /** Physical Work Item sort key. */
+  issueId: string
+}
+
+/** Handler that prepares idempotent Customer completion notification candidates.
+ *
+ * @param preparation Durable Work Item marker handed to the Customer adapter.
+ * @returns A promise that resolves after candidates are durably prepared.
+ */
+export type CustomerCompletionPreparationHandler = (
+  preparation: CustomerCompletionPreparation,
+) => Promise<void>
+
 /** 期限通知 schedule の実行設定です。 */
 export type NotificationScheduleRunOptions = {
   /** Canonical source reads と audit event put に使う DocumentClient です。 */
@@ -66,6 +91,8 @@ export type NotificationScheduleRunOptions = {
   auditRetentionDays?: number
   /** EventBridge event ID などの schedule 実行 ID です。 */
   requestId?: string
+  /** Prepares Customer completion candidates for a durable Work Item marker. */
+  prepareCustomerCompletionNotifications?: CustomerCompletionPreparationHandler
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -204,10 +231,15 @@ const defaultAuditRetentionDays = 2_555
 const maximumPlanningNotificationOffsetHours = 24 * 365
 
 /**
- * 注入された client に束縛された EventBridge schedule adapter を作成します。
+ * Creates an EventBridge schedule adapter bound to an injected DocumentClient.
+ *
+ * @param documentClient DocumentClient used by the schedule.
+ * @param prepareCustomerCompletionNotifications Optional durable Customer preparation handler.
+ * @returns An EventBridge-compatible notification schedule handler.
  */
 export function createNotificationScheduleHandler(
   documentClient: NotificationScheduleDocumentClient,
+  prepareCustomerCompletionNotifications?: CustomerCompletionPreparationHandler,
 ) {
   return async (
     event: NotificationScheduleEvent = {},
@@ -239,6 +271,9 @@ export function createNotificationScheduleHandler(
         'MUKUROJI_AUDIT_RETENTION_DAYS',
       ),
       ...(readText(event.id) ? { requestId: readText(event.id) } : {}),
+      ...(prepareCustomerCompletionNotifications
+        ? { prepareCustomerCompletionNotifications }
+        : {}),
     })
 }
 
@@ -295,6 +330,37 @@ export async function runNotificationSchedule(
     result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
 
     for (const item of response.Items ?? []) {
+      const completionPreparation = readCustomerCompletionPreparation(item)
+      if (completionPreparation) {
+        const prepare = options.prepareCustomerCompletionNotifications
+        if (!prepare) {
+          throw new Error(
+            'Customer completion preparation is required for a durable Work Item marker.',
+          )
+        }
+        await prepare(completionPreparation)
+        try {
+          await options.documentClient.send(new UpdateCommand({
+            TableName: workItemsTableName,
+            Key: {
+              directoryTeamId: completionPreparation.directoryTeamId,
+              issueId: completionPreparation.issueId,
+            },
+            UpdateExpression: 'REMOVE #preparationAt, #preparationRevision',
+            ConditionExpression: '#preparationRevision = :revision',
+            ExpressionAttributeNames: {
+              '#preparationAt': 'customerCompletionPreparationAt',
+              '#preparationRevision': 'customerCompletionPreparationRevision',
+            },
+            ExpressionAttributeValues: {
+              ':revision': completionPreparation.revision,
+            },
+          }))
+        } catch (error) {
+          if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+          // A newer completion marker won the race; leave it for the next scan.
+        }
+      }
       const candidate = createScheduledNotificationCandidate(item, now)
 
       if (!candidate) {
@@ -352,6 +418,40 @@ export async function runNotificationSchedule(
   }
 
   return result
+}
+
+/** Reads and validates the durable Customer completion marker on a Work Item row.
+ *
+ * @param value - Untrusted Work Item row returned by DynamoDB.
+ * @returns The normalized preparation input, or undefined when no marker is present.
+ */
+function readCustomerCompletionPreparation(
+  value: Record<string, unknown>,
+): CustomerCompletionPreparation | undefined {
+  const preparationAt = value.customerCompletionPreparationAt
+  const preparationRevision = value.customerCompletionPreparationRevision
+  if (preparationAt === undefined && preparationRevision === undefined) return undefined
+  if (!isCanonicalWorkItemRecord(value)) {
+    throw new TypeError(
+      'Notification schedule encountered an invalid Work Item completion marker row.',
+    )
+  }
+  requireTimestamp(
+    preparationAt,
+    'Customer completion preparation timestamp',
+  )
+  const revision = readPositiveInteger(preparationRevision)
+  if (revision === undefined) {
+    throw new TypeError('Customer completion preparation revision must be a positive integer.')
+  }
+  return {
+    workspaceId: value.directoryId,
+    teamId: value.teamId,
+    workItemId: value.issueId,
+    revision,
+    directoryTeamId: value.directoryTeamId,
+    issueId: value.issueId,
+  }
 }
 
 /** Planning update target due-index query の正規化済み実行入力です。 */

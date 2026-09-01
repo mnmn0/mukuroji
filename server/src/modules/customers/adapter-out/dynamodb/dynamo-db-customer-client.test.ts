@@ -1,13 +1,16 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { expect, spyOn, test } from 'bun:test'
-import type { CustomerRequest } from '@mukuroji/contracts'
+import type { Customer, CustomerRequest } from '@mukuroji/contracts'
 import {
   createCustomerContactRecord,
   createCustomerRecord,
   createCustomerRequestRecord,
 } from '../../domain/customer'
-import { DynamoDbCustomerClient } from './dynamo-db-customer-client'
+import {
+  CUSTOMER_RETENTION_INDEX_NAME,
+  DynamoDbCustomerClient,
+} from './dynamo-db-customer-client'
 
 /** Stable DynamoDB adapter test instant. */
 const NOW = '2026-08-01T00:00:00.000Z'
@@ -44,7 +47,11 @@ function createRequestRow(request: CustomerRequest) {
 }
 
 /** Creates a persisted row for one Customer root. */
-function createCustomerRow(customerId = 'customer-1', name = 'Acme Corporation') {
+function createCustomerRow(
+  customerId = 'customer-1',
+  name = 'Acme Corporation',
+  counts: Partial<Pick<Customer, 'contactCount' | 'requestCount' | 'openRequestCount'>> = {},
+) {
   const customer = createCustomerRecord(
     'workspace-1',
     customerId,
@@ -61,7 +68,7 @@ function createCustomerRow(customerId = 'customer-1', name = 'Acme Corporation')
     workspaceId: customer.workspaceId,
     recordKey: `CUSTOMER#${customer.id}`,
     entityType: 'customer',
-    customer,
+    customer: { ...customer, ...counts },
   }
 }
 
@@ -88,6 +95,10 @@ type HarnessOptions = {
   failTransactionAt?: number
   /** Transaction number that should fail with a conditional conflict once. */
   failConditionalTransactionAt?: number
+  /** Cancellation reasons for a transaction conditional conflict, when injected. */
+  failConditionalTransactionReasons?: readonly { Code: 'ConditionalCheckFailed' | 'None' }[]
+  /** Rows returned by the sparse Customer retention index. */
+  retentionIndexRows?: readonly unknown[]
 }
 
 /** Creates a real DocumentClient whose commands are captured without contacting AWS. */
@@ -124,6 +135,9 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
     const normalizedInput = Object.fromEntries(Object.entries(input))
     commands.push({ name, input: normalizedInput })
     if (name === 'QueryCommand') {
+      if (normalizedInput.IndexName === CUSTOMER_RETENTION_INDEX_NAME) {
+        return { Items: options.retentionIndexRows ?? [] }
+      }
       const expression = normalizedInput.KeyConditionExpression
       if (typeof expression !== 'string' || !expression.includes('begins_with(recordKey')) {
         throw new Error('The Customer adapter issued an unscoped partition query.')
@@ -153,6 +167,12 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
       }
       if (!failedTransaction && options.failConditionalTransactionAt === transactionCount) {
         failedTransaction = true
+        if (options.failConditionalTransactionReasons) {
+          throw Object.assign(new Error('Injected Customer conditional conflict.'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: options.failConditionalTransactionReasons,
+          })
+        }
         const error = new Error('Injected Customer conditional conflict.')
         error.name = 'ConditionalCheckFailedException'
         throw error
@@ -224,6 +244,119 @@ test('uses a focused record-prefix query for a Customer Request read', async () 
       KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
       ExpressionAttributeValues: {
         ':recordPrefix': 'REQUEST#',
+      },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('lists Customer roots with persisted counts without loading child records', async () => {
+  const customerRow = createCustomerRow('customer-1', 'Acme Corporation', {
+    contactCount: 2,
+    requestCount: 3,
+    openRequestCount: 1,
+  })
+  const harness = createHarness([
+    customerRow,
+    createContactRow('customer-1', 'contact-1'),
+    createRequestRow(createRequest('request-1')),
+  ])
+  try {
+    await expect(harness.client.listCustomers('workspace-1', { limit: 1 })).resolves.toMatchObject({
+      customers: [{
+        id: 'customer-1',
+        contactCount: 2,
+        requestCount: 3,
+        openRequestCount: 1,
+      }],
+    })
+    const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
+    expect(queryCommands).toHaveLength(1)
+    expect(queryCommands[0]?.input).toMatchObject({
+      ExpressionAttributeValues: { ':recordPrefix': 'CUSTOMER#' },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('joins live authorization conditions to a Customer link transaction', async () => {
+  const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
+  const authorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'TeamIssuesTable',
+      Key: { directoryId: 'workspace-1', teamId: 'team-1', workItemId: 'work-item-1' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 7 },
+    },
+  }
+  const harness = createHarness([createRequestRow(request)])
+  try {
+    await harness.client.linkRequestToWorkItem(
+      'workspace-1',
+      request.id,
+      'member-1',
+      { teamId: 'team-1', workItemId: 'work-item-1' },
+      [authorizationConditionCheck],
+    )
+    const transaction = harness.commands.find((command) => command.name === 'TransactWriteCommand')
+    expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([authorizationConditionCheck]))
+  } finally {
+    harness.restore()
+  }
+})
+
+test('classifies mixed authorization and revision cancellations as a retryable Customer conflict', async () => {
+  const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
+  const authorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'TeamIssuesTable',
+      Key: { directoryId: 'workspace-1', teamId: 'team-1', workItemId: 'work-item-1' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 7 },
+    },
+  }
+  const harness = createHarness([createRequestRow(request)], {
+    failConditionalTransactionAt: 1,
+    failConditionalTransactionReasons: [
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'None' },
+      { Code: 'ConditionalCheckFailed' },
+    ],
+  })
+  try {
+    await expect(harness.client.linkRequestToWorkItem(
+      'workspace-1',
+      request.id,
+      'member-1',
+      { teamId: 'team-1', workItemId: 'work-item-1' },
+      [authorizationConditionCheck],
+    )).rejects.toMatchObject({ code: 'CustomerRevisionConflict', status: 409 })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('sweeps due retention workspaces through the production-safe index path', async () => {
+  const request = createRequest('request-1')
+  const harness = createHarness([createRequestRow(request)], {
+    retentionIndexRows: [{ workspaceId: 'workspace-1' }],
+  })
+  try {
+    await expect(harness.client.sweepExpiredRetention()).resolves.toEqual({
+      scannedPages: 1,
+      workspacesProcessed: 1,
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 1,
+    })
+    expect(harness.commands.find((command) => command.name === 'QueryCommand')).toMatchObject({
+      input: {
+        IndexName: CUSTOMER_RETENTION_INDEX_NAME,
+        KeyConditionExpression: '#retentionPartition = :retentionPartition AND #retentionDueAt <= :retentionDueAt',
       },
     })
   } finally {

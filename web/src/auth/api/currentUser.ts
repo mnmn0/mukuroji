@@ -33,6 +33,8 @@ export type CurrentUser = {
   canManageAiAssistance?: boolean
   /** Whether the current user may use Customer sensitive search and business-value filters. */
   canViewCustomerSensitiveData?: boolean
+  /** Whether the current user may create or update Customer saved views. */
+  canManageCustomerViews?: boolean
 }
 
 /**

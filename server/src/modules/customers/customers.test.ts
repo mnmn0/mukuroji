@@ -608,6 +608,34 @@ test('retains Customer Request provenance when duplicate requests are merged', a
   })).rejects.toMatchObject({ code: 'CustomerRequestMerged' })
 })
 
+test('does not delete a Customer Request retained by another Request merge', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const target = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  const source = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+
+  await client.mergeRequest('workspace-1', source.id, 'member-1', {
+    targetRequestId: target.id,
+    sourceExpectedRevision: source.revision,
+    targetExpectedRevision: target.revision,
+  })
+  const retainedTarget = await client.getRequest('workspace-1', target.id)
+
+  await expect(client.deleteRequest(
+    'workspace-1',
+    target.id,
+    'member-1',
+    retainedTarget.revision,
+  )).rejects.toMatchObject({ code: 'CustomerRequestMergeDependency' })
+  await expect(client.getRequest('workspace-1', target.id)).resolves.toMatchObject({ id: target.id })
+})
+
 test('applies retention before returning Customer-owned records', async () => {
   const client = createClient()
   const customer = await client.createCustomer('workspace-1', 'member-1', {

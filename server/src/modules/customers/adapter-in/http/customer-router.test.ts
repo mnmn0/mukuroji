@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
 import { Hono } from 'hono'
 import type { TriageEntry } from '@mukuroji/contracts'
 import type {
@@ -22,7 +22,7 @@ type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer' | 
 /** Optional live-resource authorization replacements used by router tests. */
 type CustomerTestAuthorization = Partial<Pick<
   CustomerRouterDependencies,
-  'verifyWorkItemAccess' | 'verifyProjectAccess'
+  'verifyWorkItemAccess' | 'verifyProjectAccess' | 'createTriageAuthorizationConditionChecks'
 >>
 
 /** Creates a router with an in-memory Customer client and deterministic authorization. */
@@ -44,7 +44,10 @@ function createTestApp(
     requireWorkspaceAccess,
     verifyTriageAccess: async () => undefined,
     verifyWorkItemAccess: authorization.verifyWorkItemAccess ?? (async () => ({ projectId: 'project-1' })),
-    verifyProjectAccess: authorization.verifyProjectAccess ?? (async () => undefined),
+    verifyProjectAccess: authorization.verifyProjectAccess ?? (async () => ({})),
+    ...(authorization.createTriageAuthorizationConditionChecks
+      ? { createTriageAuthorizationConditionChecks: authorization.createTriageAuthorizationConditionChecks }
+      : {}),
     getTriage: () => triage,
     readJson: async (request) => await request.json(),
     mapError: (_context, error) => {
@@ -85,7 +88,7 @@ async function createRequest(client: InMemoryCustomerClient, customerId: string)
 }
 
 /** Creates a minimal accepted Triage Entry with a Customer reverse link. */
-function createCustomerAssociationEntry(customerId: string): TriageEntry {
+function createCustomerAssociationEntry(customerId: string, contactId?: string): TriageEntry {
   return {
     schemaVersion: 1,
     id: 'triage-customer-1',
@@ -109,6 +112,7 @@ function createCustomerAssociationEntry(customerId: string): TriageEntry {
     permission: { visibility: 'full', canReply: true, guestVisible: true, checkedAt: NOW },
     retention: { expiresAt: '2027-08-01T00:00:00.000Z' },
     customerId,
+    ...(contactId === undefined ? {} : { contactId }),
     revision: 1,
     createdAt: NOW,
     updatedAt: NOW,
@@ -389,6 +393,7 @@ test('filters Customer relationships through live Team and Project access', asyn
       },
       verifyProjectAccess: async (_principal, projectId) => {
         if (projectId === 'hidden-project') throw { status: 403 }
+        return {}
       },
     },
   )
@@ -444,6 +449,74 @@ test('clears Triage Customer associations before deleting a Customer', async () 
   })
 })
 
+test('rejects deleting a Contact that still has a Triage reverse link', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Ada Lovelace',
+  })
+  const entry = createCustomerAssociationEntry(customer.id, contact.id)
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    {
+      getEntry: async () => entry,
+      listCustomerAssociations: async (_workspaceId, customerId) => customerId === customer.id ? [entry] : [],
+    },
+  )
+
+  const response = await app.request(
+    `/api/customers/${customer.id}/contacts/${contact.id}?expectedRevision=${contact.revision}`,
+    { method: 'DELETE' },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'CustomerContactTriageAssociation' })
+  await expect(client.getContact('workspace-1', customer.id, contact.id)).resolves.toMatchObject({ id: contact.id })
+})
+
+test('rejects merging a Contact that still has a Triage reverse link', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const source = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Ada Lovelace',
+  })
+  const target = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Grace Hopper',
+  })
+  const entry = createCustomerAssociationEntry(customer.id, source.id)
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    {
+      getEntry: async () => entry,
+      listCustomerAssociations: async (_workspaceId, customerId) => customerId === customer.id ? [entry] : [],
+    },
+  )
+
+  const response = await app.request(`/api/customer-contacts/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetContactId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'CustomerContactTriageAssociation' })
+  await expect(client.getContact('workspace-1', customer.id, source.id)).resolves.toMatchObject({ id: source.id })
+})
+
 test('repoints Triage Customer associations before merging Customers', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const source = await createCustomer(client)
@@ -495,6 +568,52 @@ test('repoints Triage Customer associations before merging Customers', async () 
   }])
   await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
   await expect(client.getCustomer('workspace-1', target.id)).resolves.toMatchObject({ customer: { id: target.id } })
+})
+
+test('preflights every Triage scope before starting a Customer merge', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const source = await createCustomer(client)
+  const target = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Globex Industries',
+    tier: 'growth',
+    size: 'mid-market',
+    status: 'active',
+    health: 'healthy',
+  })
+  const entry = createCustomerAssociationEntry(source.id)
+  const beginCustomerMerge = spyOn(client, 'beginCustomerMerge')
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    {
+      getEntry: async () => entry,
+      listCustomerAssociations: async () => [entry],
+      associateCustomer: async () => entry,
+    },
+    undefined,
+    {
+      createTriageAuthorizationConditionChecks: async () => {
+        throw new CustomerError(403, 'CustomerTriageAuthorizationChanged', 'Triage access is no longer available.')
+      },
+    },
+  )
+
+  const response = await app.request(`/api/customers/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }),
+  })
+
+  expect(response.status).toBe(403)
+  expect(beginCustomerMerge).not.toHaveBeenCalled()
 })
 
 test('rejects deletion of a Customer Request that still points to Triage', async () => {

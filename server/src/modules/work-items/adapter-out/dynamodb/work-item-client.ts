@@ -515,6 +515,10 @@ type TeamIssueItem = {
   archivedAt?: string
   /** Archive mutation を実行した Workspace member key です。 */
   archivedBy?: string
+  /** Durable marker timestamp for Customer completion notification preparation. */
+  customerCompletionPreparationAt?: string
+  /** Work Item revision captured by the Customer completion preparation marker. */
+  customerCompletionPreparationRevision?: number
 }
 
 /**
@@ -1901,6 +1905,10 @@ export class DynamoDbTeamIssuesClient {
         item.assignedProjectId = assignedProjectId
         item.directoryProjectId = createDirectoryProjectId(directoryId, assignedProjectId)
       }
+      if (statusCategory === 'completed') {
+        item.customerCompletionPreparationAt = now
+        item.customerCompletionPreparationRevision = item.revision
+      }
 
       const eventItem = this.createIssueEventItem({
         directoryId,
@@ -2557,6 +2565,23 @@ export class DynamoDbTeamIssuesClient {
         expressionAttributeValues[':priorityUpdatedAt'] = expressionAttributeValues[':updatedAt']
         setExpressions.push('#priorityUpdatedAt = :priorityUpdatedAt')
       }
+      const nextStatusCategory = expressionAttributeValues[':statusCategory'] === undefined
+        ? beforeIssue.statusCategory
+        : readWorkflowStatusCategory(expressionAttributeValues[':statusCategory'])
+      const completionTransition =
+        beforeIssue.statusCategory !== 'completed' && nextStatusCategory === 'completed'
+      if (completionTransition) {
+        expressionAttributeNames['#customerCompletionPreparationAt'] =
+          'customerCompletionPreparationAt'
+        expressionAttributeNames['#customerCompletionPreparationRevision'] =
+          'customerCompletionPreparationRevision'
+        expressionAttributeValues[':customerCompletionPreparationAt'] = updatedAt
+        expressionAttributeValues[':customerCompletionPreparationRevision'] = nextRevision
+        setExpressions.push(
+          '#customerCompletionPreparationAt = :customerCompletionPreparationAt',
+          '#customerCompletionPreparationRevision = :customerCompletionPreparationRevision',
+        )
+      }
       const updateExpression = [
         `SET ${setExpressions.join(', ')}`,
         removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
@@ -2636,9 +2661,7 @@ export class DynamoDbTeamIssuesClient {
           notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
-          ...(beforeIssue.statusCategory !== 'completed' && afterIssue.statusCategory === 'completed'
-            ? { completionTransition: true }
-            : {}),
+          ...(completionTransition ? { completionTransition: true } : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({

@@ -43,7 +43,7 @@ export function CustomerPage() {
   )
   const savedViewMutations = useCustomerSavedViewMutations({
     accessToken: workspace.accessToken,
-    enabled: workspace.canLoadWorkspaceData,
+    enabled: workspace.canLoadWorkspaceData && workspace.canManageCustomerViews,
     refresh: () => savedViews.mutate(),
   })
   const detail = useCustomer(
@@ -101,6 +101,7 @@ export function CustomerPage() {
         sessionErrors={[customers.error, detail.error, savedViews.error]}
       >
         <CustomerDirectoryView
+          canManageCustomerViews={workspace.canManageCustomerViews}
           canViewSensitiveData={workspace.canViewCustomerSensitiveData}
           customers={customers.data?.customers ?? []}
           detail={detail.data}

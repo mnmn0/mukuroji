@@ -251,6 +251,13 @@ export function buildDataStores(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
 
+  customersTable.addGlobalSecondaryIndex({
+    indexName: 'CustomerRetentionIndex',
+    partitionKey: { name: 'retentionPartition', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'retentionDueAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
   developerPlatformTable.addGlobalSecondaryIndex({
     indexName: 'LookupKeyIndex',
     partitionKey: { name: 'lookupKey', type: dynamodb.AttributeType.STRING },

@@ -2910,6 +2910,7 @@ routeApp.get('/api/auth/me', async (c) => {
       workspaceMemberStatus: principal.workspaceMemberStatus,
       canManageAiAssistance: canManageAiAssistanceWorkspace(principal),
       canViewCustomerSensitiveData: hasCustomerManagementAccess(principal),
+      canManageCustomerViews: canManageCustomerViews(principal),
     })
   } catch (error) {
     if (error instanceof WorkspaceAccessError) {
@@ -6038,56 +6039,69 @@ routeApp.route('/', createTriageRouter({
   mapError: toTriageErrorResponse,
 }))
 
+/** Builds commit-time Team, Project, and actor fences for Customer mutations.
+ *
+ * @param principal Authenticated Workspace principal performing the mutation.
+ * @param teamId Team whose live authorization must remain valid.
+ * @param projectIds Projects whose live ownership and authorization must remain valid.
+ * @returns DynamoDB condition checks to join to the Customer transaction.
+ */
+const createCustomerTriageAuthorizationConditionChecks = async (
+  principal: WorkspacePrincipal & CustomerPrincipal,
+  teamId: string,
+  projectIds: readonly (string | undefined)[],
+): Promise<TriageAuthorizationConditionChecks> => {
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  const createActiveReferenceConditionChecks = workspaceDependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  if (!createActiveReferenceConditionChecks) {
+    throw new TriageError(
+      503,
+      'TriageAuthorizationFenceUnavailable',
+      'Triage authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const checks: TriageAuthorizationConditionChecks = []
+  const uniqueProjectIds = new Set(projectIds.filter((projectId): projectId is string => projectId !== undefined))
+  for (const projectId of uniqueProjectIds) {
+    checks.push(...await createActiveReferenceConditionChecks.call(
+      workspaceDependencies.projectDirectory,
+      principal.directoryId,
+      teamId,
+      projectId,
+    ))
+    checks.push(...await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      teamId,
+      projectId,
+    ))
+  }
+  if (uniqueProjectIds.size === 0) {
+    checks.push(...await createActiveReferenceConditionChecks.call(
+      workspaceDependencies.projectDirectory,
+      principal.directoryId,
+      teamId,
+    ))
+    checks.push(...await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      teamId,
+      undefined,
+    ))
+  }
+  return mergeTriageConditionChecks(checks)
+}
+
 routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>({
   getCustomers: () => workspaceDependencies.customers,
   requireWorkspaceAccess: requireCustomerWorkspaceAccess,
   verifyTriageAccess: async (principal, teamId, minimum) => {
     await requireTeamPermission(principal, teamId, minimum)
   },
-  createTriageAuthorizationConditionChecks: async (principal, teamId, projectIds) => {
-    const teamContext = await requireTeamPermission(principal, teamId, 'member')
-    const createActiveReferenceConditionChecks = workspaceDependencies.projectDirectory
-      .createActiveReferenceConditionChecks
-    if (!createActiveReferenceConditionChecks) {
-      throw new TriageError(
-        503,
-        'TriageAuthorizationFenceUnavailable',
-        'Triage authorization fencing is unavailable. Retry the request.',
-      )
-    }
-    const checks: TriageAuthorizationConditionChecks = []
-    const uniqueProjectIds = new Set(projectIds.filter((projectId): projectId is string => projectId !== undefined))
-    for (const projectId of uniqueProjectIds) {
-      checks.push(...await createActiveReferenceConditionChecks.call(
-        workspaceDependencies.projectDirectory,
-        principal.directoryId,
-        teamId,
-        projectId,
-      ))
-      checks.push(...await createTriageProjectAuthorizationConditionChecks(
-        principal,
-        teamContext,
-        principal.directoryId,
-        teamId,
-        projectId,
-      ))
-    }
-    if (uniqueProjectIds.size === 0) {
-      checks.push(...await createActiveReferenceConditionChecks.call(
-        workspaceDependencies.projectDirectory,
-        principal.directoryId,
-        teamId,
-      ))
-      checks.push(...await createTriageProjectAuthorizationConditionChecks(
-        principal,
-        teamContext,
-        principal.directoryId,
-        teamId,
-        undefined,
-      ))
-    }
-    return mergeTriageConditionChecks(checks)
-  },
+  createTriageAuthorizationConditionChecks: createCustomerTriageAuthorizationConditionChecks,
   verifyWorkItemAccess: async (principal, teamId, workItemId, minimum) => {
     const context = await requireTeamPermission(principal, teamId, minimum)
     const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
@@ -6097,12 +6111,61 @@ routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>
       { consistentIssueRead: true, eventLimit: 0 },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, minimum)
+    const authorizationConditionChecks = minimum === 'member'
+      ? [
+          ...await createCustomerTriageAuthorizationConditionChecks(
+            principal,
+            teamId,
+            [detail.issue.assignedProjectId],
+          ),
+          createWorkItemRevisionConditionCheck(
+            getTeamIssuesTableName(),
+            principal.directoryId,
+            teamId,
+            workItemId,
+            detail.issue.revision,
+          ),
+        ]
+      : undefined
     return detail.issue.assignedProjectId
-      ? { projectId: detail.issue.assignedProjectId }
-      : {}
+      ? {
+          projectId: detail.issue.assignedProjectId,
+          ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
+        }
+      : authorizationConditionChecks ? { authorizationConditionChecks } : {}
   },
   verifyProjectAccess: async (principal, projectId, minimum) => {
     await requireProjectPermission(principal, projectId, minimum)
+    if (minimum === 'viewer') return {}
+    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+      principal.directoryId,
+      'ja',
+      true,
+    )
+    const ownerTeams = directory.teams.filter((team) =>
+      team.projects.some((project) => project.id === projectId)
+    )
+    if (ownerTeams.length === 0) {
+      throw new ProjectDataError(404, 'ProjectNotFound', 'The Project was not found.')
+    }
+    if (ownerTeams.length > 1) {
+      throw new ProjectDataError(
+        409,
+        'AmbiguousProjectOwnerTeam',
+        'The Project has multiple active owner Teams.',
+      )
+    }
+    const ownerTeam = ownerTeams[0]
+    if (!ownerTeam) {
+      throw new ProjectDataError(404, 'ProjectNotFound', 'The Project was not found.')
+    }
+    return {
+      authorizationConditionChecks: await createCustomerTriageAuthorizationConditionChecks(
+        principal,
+        ownerTeam.id,
+        [projectId],
+      ),
+    }
   },
   getTriage: () => workItemDependencies.triage,
   readJson,
@@ -9474,19 +9537,6 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       response.issue,
       'Work Item update',
     )
-    if (
-      detail.issue.statusCategory !== 'completed' &&
-      response.issue.statusCategory === 'completed'
-    ) {
-      await prepareCustomerCompletionNotificationsBestEffort(
-        workspaceDependencies.customers,
-        principal.directoryId,
-        teamId,
-        issueId,
-        principal.userKey,
-        'Work Item update',
-      )
-    }
     return c.json(response)
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
@@ -13357,19 +13407,6 @@ function createApiBulkOperationAdapter(
         response.issue,
         'bulk Work Item update',
       )
-      if (
-        prepared.detail.issue.statusCategory !== 'completed' &&
-        response.issue.statusCategory === 'completed'
-      ) {
-        await prepareCustomerCompletionNotificationsBestEffort(
-          workspaceDependencies.customers,
-          principal.directoryId,
-          prepared.item.teamId,
-          prepared.item.workItemId,
-          principal.userKey,
-          'bulk Work Item update',
-        )
-      }
       return {
         resultingRevision: response.issue.revision,
         undoPayload: structuredClone(checkpoint.undoPayload),
@@ -13888,19 +13925,6 @@ async function executeAutomationWorkItemUpdate(
     undefined,
     dependencies,
   )
-  if (
-    detail.issue.statusCategory !== 'completed' &&
-    updatedIssue.statusCategory === 'completed'
-  ) {
-    await prepareCustomerCompletionNotificationsBestEffort(
-      dependencies.customers,
-      context.execution.workspaceId,
-      target.teamId,
-      target.workItemId,
-      `automation:${context.execution.ruleId}`,
-      'automation Work Item update',
-    )
-  }
 }
 
 /**
@@ -25559,6 +25583,15 @@ function hasCustomerManagementAccess(
   return false
 }
 
+/** Checks whether the principal may create or update Customer saved views. */
+function canManageCustomerViews(principal: WorkspacePrincipal): boolean {
+  if (principal.workspaceRole === 'guest') return false
+  if (principal.enterprisePermissions === undefined) {
+    return hasCustomerManagementAccess(principal)
+  }
+  return canWorkspaceBusinessWrite(principal) && hasCustomerReadAccess(principal)
+}
+
 /**
  * Requires a current Workspace-scoped route for Workspace-scoped Planning data.
  *
@@ -33023,43 +33056,6 @@ async function projectWorkspaceSearchDocumentBestEffort(
     await workItemDependencies.workspaceSearch.upsertDocument(createDocument())
   } catch (error) {
     console.error(`Workspace search projection failed after ${operation}.`, error)
-  }
-}
-
-/**
- * Prepares Customer Request completion candidates without changing the outcome of a committed
- * Work Item mutation when the separate Customer store is temporarily unavailable.
- *
- * @param customers - Customer persistence port.
- * @param workspaceId - Workspace containing the completed Work Item.
- * @param teamId - Team owning the Work Item.
- * @param workItemId - Completed Work Item identifier.
- * @param actorId - Actor or service identity preparing the candidates.
- * @param operation - Safe operation label used for error logging.
- * @returns A promise that resolves after preparation succeeds or the failure is recorded.
- */
-async function prepareCustomerCompletionNotificationsBestEffort(
-  customers: WorkspaceDependencies['customers'],
-  workspaceId: string,
-  teamId: string,
-  workItemId: string,
-  actorId: string,
-  operation: string,
-): Promise<void> {
-  try {
-    await customers.prepareCompletionNotifications(
-      workspaceId,
-      teamId,
-      workItemId,
-      actorId,
-    )
-  } catch (error) {
-    console.error(`Customer completion notification preparation failed after ${operation}.`, {
-      workspaceId,
-      teamId,
-      workItemId,
-      errorCode: error instanceof CustomerError ? error.code : 'CustomerCompletionNotificationUnavailable',
-    })
   }
 }
 
@@ -40585,19 +40581,6 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         response.issue,
         'Public Work Item update',
       )
-      if (
-        detail.issue.statusCategory !== 'completed' &&
-        response.issue.statusCategory === 'completed'
-      ) {
-        await prepareCustomerCompletionNotificationsBestEffort(
-          workspaceDependencies.customers,
-          principal.directoryId,
-          teamId,
-          workItemId,
-          principal.userKey,
-          'Public Work Item update',
-        )
-      }
       return projectPublicWorkItem(response.issue)
     },
 
@@ -41185,19 +41168,6 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
           response.issue,
           'Connector Work Item synchronization',
         )
-        if (
-          detail.issue.statusCategory !== 'completed' &&
-          response.issue.statusCategory === 'completed'
-        ) {
-          await prepareCustomerCompletionNotificationsBestEffort(
-            workspaceDependencies.customers,
-            input.workspaceId,
-            input.teamId,
-            input.workItemId,
-            principal.userKey,
-            'Connector Work Item synchronization',
-          )
-        }
         return {
           kind: 'applied',
           workItem: toConnectorWorkItemSnapshot(response.issue),
