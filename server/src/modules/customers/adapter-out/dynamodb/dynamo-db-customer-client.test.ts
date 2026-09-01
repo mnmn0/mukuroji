@@ -240,6 +240,14 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
         }
       }
       const expression = normalizedInput.KeyConditionExpression
+      if (expression === 'workspaceId = :workspaceId AND recordKey = :recordKey') {
+        const values = normalizedInput.ExpressionAttributeValues
+        const recordKey = values && typeof values === 'object' && !Array.isArray(values)
+          ? Reflect.get(values, ':recordKey')
+          : undefined
+        const item = typeof recordKey === 'string' ? rows.get(recordKey) : undefined
+        return { Items: item === undefined ? [] : [item] }
+      }
       if (typeof expression !== 'string' || !expression.includes('begins_with(recordKey')) {
         throw new Error('The Customer adapter issued an unscoped partition query.')
       }
@@ -459,10 +467,34 @@ test('loads only the selected Customer graph for a Customer detail read', async 
     })
     const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
     expect(queryCommands.map((command) => command.input.ExpressionAttributeValues)).toEqual([
-      { ':workspaceId': 'workspace-1', ':recordPrefix': 'CUSTOMER#customer-1' },
+      { ':workspaceId': 'workspace-1', ':recordKey': 'CUSTOMER#customer-1' },
       { ':workspaceId': 'workspace-1', ':recordPrefix': 'CONTACT#customer-1#' },
       { ':workspaceId': 'workspace-1', ':recordPrefix': 'REQUEST#customer-1#' },
     ])
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not expand a Customer detail read from a prefix-like ID', async () => {
+  const customerRows = Array.from(
+    { length: CUSTOMER_MAX_OPERATION_ROWS + 1 },
+    (_, index) => createCustomerRow(`customer-${index + 1}`, `Customer ${index + 1}`),
+  )
+  const harness = createHarness(customerRows)
+  try {
+    await expect(harness.client.getCustomer('workspace-1', 'customer-')).rejects.toMatchObject({
+      code: 'CustomerNotFound',
+      status: 404,
+    })
+    const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
+    expect(queryCommands[0]?.input).toMatchObject({
+      KeyConditionExpression: 'workspaceId = :workspaceId AND recordKey = :recordKey',
+      ExpressionAttributeValues: {
+        ':workspaceId': 'workspace-1',
+        ':recordKey': 'CUSTOMER#customer-',
+      },
+    })
   } finally {
     harness.restore()
   }

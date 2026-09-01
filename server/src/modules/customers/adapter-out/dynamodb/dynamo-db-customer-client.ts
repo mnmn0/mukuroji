@@ -434,10 +434,9 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    */
   async getCustomer(workspaceId: string, customerId: string): Promise<CustomerDetail> {
     const { memory } = await this.readMemoryForRead(workspaceId, [
-      customerRecordPrefix(customerId),
       customerContactRecordPrefix(customerId),
       customerRequestRecordPrefix(customerId),
-    ])
+    ], CUSTOMER_MAX_OPERATION_ROWS, [customerRecordKey(customerId)])
     return await memory.getCustomer(workspaceId, customerId)
   }
 
@@ -1677,24 +1676,29 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId Workspace partition to query.
    * @param recordPrefix Optional physical record prefix to keep the read focused.
    * @param maxRows Maximum number of rows to retain in memory for this read.
+   * @param exactRecordKey Optional physical record key to read with an equality condition.
    * @returns Untrusted DynamoDB rows for the selected scope.
    */
   private async queryRows(
     workspaceId: string,
     recordPrefix?: string,
     maxRows = CUSTOMER_MAX_OPERATION_ROWS,
+    exactRecordKey?: string,
   ): Promise<unknown[]> {
     const rows: unknown[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
-        KeyConditionExpression: recordPrefix === undefined
-          ? 'workspaceId = :workspaceId'
-          : 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+        KeyConditionExpression: exactRecordKey === undefined
+          ? recordPrefix === undefined
+            ? 'workspaceId = :workspaceId'
+            : 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)'
+          : 'workspaceId = :workspaceId AND recordKey = :recordKey',
         ExpressionAttributeValues: {
           ':workspaceId': workspaceId,
           ...(recordPrefix === undefined ? {} : { ':recordPrefix': recordPrefix }),
+          ...(exactRecordKey === undefined ? {} : { ':recordKey': exactRecordKey }),
         },
         ConsistentRead: true,
         Limit: 250,
@@ -1746,22 +1750,29 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes; omitted loads the full graph.
    * @param maxRows Maximum number of rows to retain in memory for this read.
+   * @param exactRecordKeys Optional physical record keys to read with equality conditions.
    * @returns The selected state, revision, and durable operation marker.
    */
   private async loadWithoutRecovery(
     workspaceId: string,
     recordPrefixes?: readonly string[],
     maxRows = CUSTOMER_MAX_OPERATION_ROWS,
+    exactRecordKeys?: readonly string[],
   ): Promise<LoadedCustomerWorkspace> {
     const state = createEmptyState()
     const metadata = await this.readWorkspaceMetadata(workspaceId)
     let rows: unknown[]
-    if (recordPrefixes === undefined) {
+    if (recordPrefixes === undefined && exactRecordKeys === undefined) {
       rows = await this.queryRows(workspaceId, undefined, maxRows)
     } else {
       rows = []
       let remainingRows = maxRows
-      for (const prefix of recordPrefixes) {
+      for (const recordKey of exactRecordKeys ?? []) {
+        const exactRows = await this.queryRows(workspaceId, undefined, remainingRows, recordKey)
+        rows.push(...exactRows)
+        if (Number.isFinite(remainingRows)) remainingRows -= exactRows.length
+      }
+      for (const prefix of recordPrefixes ?? []) {
         const prefixRows = await this.queryRows(workspaceId, prefix, remainingRows)
         rows.push(...prefixRows)
         if (Number.isFinite(remainingRows)) remainingRows -= prefixRows.length
@@ -1814,12 +1825,14 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes for a focused load.
    * @param maxRows Maximum number of rows to retain in memory for this read.
+   * @param exactRecordKeys Optional physical record keys to read with equality conditions.
    * @returns The selected state, revision, and durable operation markers.
    */
   private async load(
     workspaceId: string,
     recordPrefixes?: readonly string[],
     maxRows = CUSTOMER_MAX_OPERATION_ROWS,
+    exactRecordKeys?: readonly string[],
   ): Promise<LoadedCustomerWorkspace> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
@@ -1832,7 +1845,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
           await this.resumePendingRetention(workspaceId, metadata.pendingRetention)
           continue
         }
-        const loaded = await this.loadWithoutRecovery(workspaceId, recordPrefixes, maxRows)
+        const loaded = await this.loadWithoutRecovery(workspaceId, recordPrefixes, maxRows, exactRecordKeys)
         if (loaded.pendingDeletion?.phase === 'customer') {
           await this.resumePendingDeletion(workspaceId, loaded.pendingDeletion)
           continue
@@ -1859,19 +1872,21 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes for a focused load.
    * @param maxRows Maximum number of rows to retain in memory for this read.
+   * @param exactRecordKeys Optional physical record keys to read with equality conditions.
    * @returns The in-memory client, loaded revision, and retention changes.
    */
   private async readMemory(
     workspaceId: string,
     recordPrefixes?: readonly string[],
     maxRows = CUSTOMER_MAX_OPERATION_ROWS,
+    exactRecordKeys?: readonly string[],
   ): Promise<{
     memory: InMemoryCustomerClient
     loaded: LoadedCustomerWorkspace
     retentionResult: CustomerRetentionResult
     retentionAt: string
   }> {
-    const loaded = await this.load(workspaceId, recordPrefixes, maxRows)
+    const loaded = await this.load(workspaceId, recordPrefixes, maxRows, exactRecordKeys)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
     memory.replaceWorkspaceState(workspaceId, loaded.state)
     if (loaded.pendingDeletion?.phase === 'triage') {
@@ -1890,17 +1905,19 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes for a focused load.
    * @param maxRows Maximum number of rows to retain in memory for this read.
+   * @param exactRecordKeys Optional physical record keys to read with equality conditions.
    * @returns The in-memory client and loaded revision.
    */
   private async readMemoryForRead(
     workspaceId: string,
     recordPrefixes?: readonly string[],
     maxRows = CUSTOMER_MAX_OPERATION_ROWS,
+    exactRecordKeys?: readonly string[],
   ): Promise<{
     memory: InMemoryCustomerClient
     loaded: LoadedCustomerWorkspace
   }> {
-    const result = await this.readMemory(workspaceId, recordPrefixes, maxRows)
+    const result = await this.readMemory(workspaceId, recordPrefixes, maxRows, exactRecordKeys)
     if (!hasExternalCustomerOperation(result.loaded) && (
       result.retentionResult.customersRedacted > 0 ||
       result.retentionResult.contactsRedacted > 0 ||
@@ -2951,8 +2968,8 @@ function customerContactRecordKey(customerId: string, contactId: string): string
   return `${CONTACT_RECORD_PREFIX}${customerId}#${contactId}`
 }
 
-/** Builds the exact physical Customer root prefix used by a focused detail read. */
-function customerRecordPrefix(customerId: string): string {
+/** Builds the exact physical Customer root key used by a focused detail read. */
+function customerRecordKey(customerId: string): string {
   return `${CUSTOMER_RECORD_PREFIX}${customerId}`
 }
 
