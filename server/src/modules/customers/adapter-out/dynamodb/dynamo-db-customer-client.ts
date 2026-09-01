@@ -55,6 +55,9 @@ import {
   type CustomerContactOperation,
   type CustomerRetentionClient,
   type CustomerRetentionSweepResult,
+  type CustomerRequestIdempotencyReceipt,
+  type CustomerWorkItemCompletionResolver,
+  type CustomerWorkItemProjectResolver,
   type CustomerWorkspaceState,
 } from '../../customers'
 import { createDynamoDbClient } from '../../../../infrastructure/aws/dynamodb-client'
@@ -79,6 +82,7 @@ const CUSTOMER_UNBOUNDED_READ_LIMIT = Number.POSITIVE_INFINITY
 const CUSTOMER_RECORD_PREFIX = 'CUSTOMER#'
 const CONTACT_RECORD_PREFIX = 'CONTACT#'
 const REQUEST_RECORD_PREFIX = 'REQUEST#'
+const REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX = 'REQUEST_RECEIPT#'
 const VIEW_RECORD_PREFIX = 'VIEW#'
 const NOTIFICATION_RECORD_PREFIX = 'NOTIFICATION#'
 
@@ -170,8 +174,9 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
   /** Redacts every due Customer record found by the sparse retention index.
    *
    * The index is eventually consistent, but each workspace is strongly read and
-   * redacted through the normal revision-fenced path. A failed invocation is
-   * intentionally propagated so the schedule retry can resume from the first page.
+   * redacted through the normal revision-fenced path. Each page is processed before
+   * the page limit is enforced, so a bounded invocation makes durable progress and
+   * the next retry can safely resume from the first remaining page.
    *
    * @param now Evaluation timestamp used for the due-index query and redaction.
    * @param maxPages Maximum number of index pages accepted for one invocation.
@@ -185,6 +190,14 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     const pageLimit = normalizeBoundedInteger(maxPages, 'Customer retention maximum pages', 1, 10_000)
     await this.ensureTable()
     const workspaceIds = new Set<string>()
+    const processedWorkspaceIds = new Set<string>()
+    const result: CustomerRetentionSweepResult = {
+      scannedPages: 0,
+      workspacesProcessed: 0,
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 0,
+    }
     let exclusiveStartKey: Record<string, unknown> | undefined
     let scannedPages = 0
     do {
@@ -213,6 +226,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
       scannedPages += 1
+      workspaceIds.clear()
       for (const item of response.Items ?? []) {
         if (!isRecord(item) || !isString(item.workspaceId)) {
           throw new CustomerError(
@@ -223,23 +237,25 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         }
         workspaceIds.add(item.workspaceId)
       }
+      for (const workspaceId of workspaceIds) {
+        if (processedWorkspaceIds.has(workspaceId)) continue
+        const retention = await this.redactExpired(workspaceId, evaluatedAt)
+        processedWorkspaceIds.add(workspaceId)
+        result.workspacesProcessed += 1
+        result.customersRedacted += retention.customersRedacted
+        result.contactsRedacted += retention.contactsRedacted
+        result.requestsRedacted += retention.requestsRedacted
+      }
       exclusiveStartKey = response.LastEvaluatedKey
+      if (exclusiveStartKey !== undefined && scannedPages >= pageLimit) {
+        throw new CustomerError(
+          503,
+          'CustomerRetentionSweepIncomplete',
+          'Customer retention exceeded the configured page limit after processing the current page.',
+        )
+      }
     } while (exclusiveStartKey !== undefined)
-
-    const result: CustomerRetentionSweepResult = {
-      scannedPages,
-      workspacesProcessed: 0,
-      customersRedacted: 0,
-      contactsRedacted: 0,
-      requestsRedacted: 0,
-    }
-    for (const workspaceId of workspaceIds) {
-      const retention = await this.redactExpired(workspaceId, evaluatedAt)
-      result.workspacesProcessed += 1
-      result.customersRedacted += retention.customersRedacted
-      result.contactsRedacted += retention.contactsRedacted
-      result.requestsRedacted += retention.requestsRedacted
-    }
+    result.scannedPages = scannedPages
     return result
   }
 
@@ -319,6 +335,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -409,6 +426,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], true)
   }
@@ -440,6 +458,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const probe = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -486,6 +505,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -506,6 +526,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         CUSTOMER_RECORD_PREFIX,
         CONTACT_RECORD_PREFIX,
         REQUEST_RECORD_PREFIX,
+        REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
         NOTIFICATION_RECORD_PREFIX,
       ], CUSTOMER_UNBOUNDED_READ_LIMIT)
       const nextMemory = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -884,6 +905,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
     ], true)
   }
 
@@ -916,6 +938,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], true)
   }
@@ -1037,11 +1060,16 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    *
    * @param workspaceId Workspace containing the Project links.
    * @param projectId Project to aggregate.
+   * @param resolveWorkItemProject Resolves each linked Work Item's current Project.
    * @returns The aggregate Customer impact signal.
    */
-  async getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal> {
+  async getProjectImpact(
+    workspaceId: string,
+    projectId: string,
+    resolveWorkItemProject: CustomerWorkItemProjectResolver,
+  ): Promise<CustomerImpactSignal> {
     const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
-    return await memory.getProjectImpact(workspaceId, projectId)
+    return await memory.getProjectImpact(workspaceId, projectId, resolveWorkItemProject)
   }
 
   /** Returns Work Items associated with a Customer.
@@ -1156,11 +1184,22 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId Workspace containing the candidates.
    * @param teamId Work Item Team.
    * @param workItemId Work Item whose candidates should be listed.
+   * @param resolveWorkItemCompletion Resolves whether the canonical Work Item is completed.
    * @returns Previously prepared notification candidates.
    */
-  async listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]> {
+  async listCompletionNotifications(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    resolveWorkItemCompletion: CustomerWorkItemCompletionResolver,
+  ): Promise<CustomerCompletionNotification[]> {
     const result = await this.readMemory(workspaceId, [REQUEST_RECORD_PREFIX, NOTIFICATION_RECORD_PREFIX])
-    const notifications = await result.memory.listCompletionNotifications(workspaceId, teamId, workItemId)
+    const notifications = await result.memory.listCompletionNotifications(
+      workspaceId,
+      teamId,
+      workItemId,
+      resolveWorkItemCompletion,
+    )
     const hasRetentionChanges = result.retentionResult.customersRedacted > 0 ||
       result.retentionResult.contactsRedacted > 0 ||
       result.retentionResult.requestsRedacted > 0
@@ -1178,6 +1217,22 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       }
     }
     return notifications
+  }
+
+  /** Invalidates completion candidates after a Work Item leaves the completed state.
+   *
+   * @param workspaceId Workspace containing the candidates.
+   * @param teamId Work Item Team.
+   * @param workItemId Reopened Work Item.
+   * @param actorId Authenticated or service actor invalidating the candidates.
+   * @returns A promise that resolves after matching candidates are removed.
+   */
+  async invalidateCompletionNotifications(workspaceId: string, teamId: string, workItemId: string, actorId: string): Promise<void> {
+    await this.mutate(
+      workspaceId,
+      async (memory) => await memory.invalidateCompletionNotifications(workspaceId, teamId, workItemId, actorId),
+      [NOTIFICATION_RECORD_PREFIX],
+    )
   }
 
   /** Rejects a new cross-store operation while another Customer operation is pending.
@@ -1329,6 +1384,8 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         state.contacts.set(decoded.value.id, decoded.value)
       } else if (decoded.kind === 'request') {
         state.requests.set(decoded.value.id, decoded.value)
+      } else if (decoded.kind === 'request-receipt') {
+        state.requestIdempotencyReceipts.set(decoded.value.requestId, decoded.value)
       } else if (decoded.kind === 'view') {
         state.views.set(decoded.value.id, decoded.value)
       } else {
@@ -1705,6 +1762,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const recordKeys = serializeState(workspaceId, loaded.state)
@@ -2154,6 +2212,16 @@ type StoredCustomerRow =
   | {
       /** Workspace partition key. */
       workspaceId: string
+      /** Deleted Customer Request receipt sort key. */
+      recordKey: string
+      /** Row discriminator. */
+      entityType: 'request-idempotency-receipt'
+      /** Content-free receipt for a deleted keyed Customer Request. */
+      receipt: CustomerRequestIdempotencyReceipt
+    }
+  | {
+      /** Workspace partition key. */
+      workspaceId: string
       /** Saved view sort key. */
       recordKey: string
       /** Row discriminator. */
@@ -2208,6 +2276,12 @@ type DecodedCustomerRow =
     }
   | {
       /** Narrowed row discriminator. */
+      kind: 'request-receipt'
+      /** Decoded receipt for a deleted keyed Customer Request. */
+      value: CustomerRequestIdempotencyReceipt
+    }
+  | {
+      /** Narrowed row discriminator. */
       kind: 'view'
       /** Decoded saved view value. */
       value: CustomerSavedView
@@ -2225,6 +2299,7 @@ function createEmptyState(): CustomerWorkspaceState {
     customers: new Map(),
     contacts: new Map(),
     requests: new Map(),
+    requestIdempotencyReceipts: new Map(),
     views: new Map(),
     notifications: new Map(),
   }
@@ -2253,6 +2328,12 @@ function serializeState(workspaceId: string, state: CustomerWorkspaceState): Sto
       entityType: 'request',
       request,
       ...createRetentionIndexFields(request.retention),
+    })),
+    ...[...state.requestIdempotencyReceipts.values()].map((receipt): StoredCustomerRow => ({
+      workspaceId,
+      recordKey: `${REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${receipt.requestId}`,
+      entityType: 'request-idempotency-receipt',
+      receipt,
     })),
     ...[...state.views.values()].map((view): StoredCustomerRow => ({ workspaceId, recordKey: `VIEW#${view.id}`, entityType: 'view', view })),
     ...[...state.notifications.values()].map((notification): StoredCustomerRow => ({ workspaceId, recordKey: `NOTIFICATION#${notification.id}`, entityType: 'completion-notification', notification })),
@@ -2304,6 +2385,7 @@ function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRo
   if (value.entityType === 'customer' && isCustomer(value.customer) && value.customer.workspaceId === workspaceId && value.recordKey === `CUSTOMER#${value.customer.id}`) return { kind: 'customer', value: value.customer }
   if (value.entityType === 'contact' && isContact(value.contact) && value.contact.workspaceId === workspaceId && value.recordKey === `CONTACT#${value.contact.id}`) return { kind: 'contact', value: value.contact }
   if (value.entityType === 'request' && isRequest(value.request) && value.request.workspaceId === workspaceId && value.recordKey === `REQUEST#${value.request.id}`) return { kind: 'request', value: value.request }
+  if (value.entityType === 'request-idempotency-receipt' && isRequestIdempotencyReceipt(value.receipt) && value.recordKey === `${REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${value.receipt.requestId}`) return { kind: 'request-receipt', value: value.receipt }
   if (value.entityType === 'view' && isSavedView(value.view) && value.view.workspaceId === workspaceId && value.recordKey === `VIEW#${value.view.id}`) return { kind: 'view', value: value.view }
   if (value.entityType === 'completion-notification' && isNotification(value.notification) && value.notification.workspaceId === workspaceId && value.recordKey === `NOTIFICATION#${value.notification.id}`) return { kind: 'notification', value: value.notification }
   return undefined
@@ -2347,6 +2429,12 @@ function isRequest(value: unknown): value is CustomerRequest {
     Array.isArray(value.projectLinks) && value.projectLinks.every(isProjectLink) &&
     isOptionalRetention(value.retention) && isSafeRevision(value.revision) &&
     isIsoInstant(value.createdAt) && isIsoInstant(value.updatedAt)
+}
+
+/** Performs a small structural receipt validation at the persistence boundary. */
+function isRequestIdempotencyReceipt(value: unknown): value is CustomerRequestIdempotencyReceipt {
+  return isRecord(value) && isString(value.requestId) && isString(value.customerId) &&
+    isString(value.fingerprint) && /^[a-f0-9]{64}$/.test(value.fingerprint)
 }
 
 /** Performs a small structural saved-view validation at the persistence boundary. */
@@ -2654,6 +2742,7 @@ function isOwnedByCustomer(row: StoredCustomerRow, customerId: string): boolean 
   if (row.entityType === 'customer') return row.customer.id === customerId
   if (row.entityType === 'contact') return row.contact.customerId === customerId
   if (row.entityType === 'request') return row.request.customerId === customerId
+  if (row.entityType === 'request-idempotency-receipt') return row.receipt.customerId === customerId
   if (row.entityType === 'completion-notification') return row.notification.customerId === customerId
   return false
 }

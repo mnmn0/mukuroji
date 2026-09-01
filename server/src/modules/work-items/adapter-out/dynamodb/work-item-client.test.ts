@@ -2344,6 +2344,14 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
     customerCompletionPreparationAt: '2026-07-20T00:00:00.000Z',
     customerCompletionPreparationRevision: 3,
   }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'reopen-customer-notifications',
+    occurredAt: '2026-07-20T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/reopened' },
+    source: { kind: 'api', requestId: 'reopen-customer-notifications' },
+  })
   const documentClient = {
     async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
       sentCommands.push({ input: command.input, name: command.constructor.name })
@@ -2357,6 +2365,7 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
     documentClient,
     {} as DynamoDBClient,
     false,
+    'AuditTable',
   )
 
   const updated = await client.updateTeamIssue(
@@ -2370,6 +2379,7 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
       statusCategory: 'started',
     },
     'demo@example.com',
+    auditContext,
   )
 
   expect(updated.issue).toMatchObject({
@@ -2391,6 +2401,18 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
       UpdateExpression: expect.stringContaining(
         'REMOVE #customerCompletionPreparationAt, #customerCompletionPreparationRevision',
       ),
+    },
+  })
+  expect(Array.isArray(transactItems)
+    ? transactItems.find((item) => {
+        if (!isUnknownRecord(item) || !isUnknownRecord(item.Put)) return false
+        return item.Put.TableName === 'AuditTable'
+      })
+    : undefined).toMatchObject({
+    Put: {
+      Item: {
+        metadata: { completionReopened: true },
+      },
     },
   })
 })

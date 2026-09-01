@@ -136,7 +136,24 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
     commands.push({ name, input: normalizedInput })
     if (name === 'QueryCommand') {
       if (normalizedInput.IndexName === 'CustomerRetentionIndex') {
-        return { Items: options.retentionIndexRows ?? [] }
+        const retentionRows = options.retentionIndexRows ?? []
+        const exclusiveStartKey = normalizedInput.ExclusiveStartKey
+        const startRecordKey = isRecord(exclusiveStartKey) && typeof exclusiveStartKey.recordKey === 'string'
+          ? exclusiveStartKey.recordKey
+          : undefined
+        const matchedStartIndex = startRecordKey === undefined
+          ? -1
+          : retentionRows.findIndex((row) => isRecord(row) && row.recordKey === startRecordKey)
+        const startIndex = matchedStartIndex < 0 ? 0 : matchedStartIndex + 1
+        const pageSize = options.queryPageSize ?? retentionRows.length
+        const items = retentionRows.slice(startIndex, startIndex + pageSize)
+        const lastItem = items.at(-1)
+        return {
+          Items: items,
+          ...(startIndex + items.length < retentionRows.length && isRecord(lastItem) && typeof lastItem.recordKey === 'string'
+            ? { LastEvaluatedKey: { workspaceId: 'workspace-1', recordKey: lastItem.recordKey } }
+            : {}),
+        }
       }
       const expression = normalizedInput.KeyConditionExpression
       if (typeof expression !== 'string' || !expression.includes('begins_with(recordKey')) {
@@ -553,6 +570,62 @@ test('sweeps due retention workspaces through the production-safe index path', a
   }
 })
 
+test('processes a retention page before failing on the configured page limit', async () => {
+  const request = createRequest('request-1')
+  const harness = createHarness([createRequestRow(request)], {
+    retentionIndexRows: [
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#request-1' },
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#request-2' },
+    ],
+    queryPageSize: 1,
+  })
+  try {
+    await expect(harness.client.sweepExpiredRetention(NOW, 1)).rejects.toMatchObject({
+      code: 'CustomerRetentionSweepIncomplete',
+      status: 503,
+    })
+    expect(harness.rows.get('REQUEST#request-1')).toMatchObject({
+      request: { retention: { redactedAt: NOW } },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('persists a deleted keyed Customer Request retry receipt', async () => {
+  const customerRow = createCustomerRow()
+  const harness = createHarness([customerRow])
+  const input = {
+    customerId: customerRow.customer.id,
+    source: { kind: 'email' as const, provider: 'mail', canNotify: true },
+    originalMessage: 'Please support SSO.',
+    receivedAt: NOW,
+    importance: 'normal' as const,
+    idempotencyKey: 'deleted-request-durable-receipt',
+  }
+  try {
+    const request = await harness.client.createRequest('workspace-1', 'member-1', input)
+    await harness.client.deleteRequest('workspace-1', request.id, 'member-1', request.revision)
+
+    expect(harness.rows.has(`REQUEST#${request.id}`)).toBeFalse()
+    const receiptRow = harness.rows.get(`REQUEST_RECEIPT#${request.id}`)
+    expect(receiptRow).toMatchObject({ entityType: 'request-idempotency-receipt' })
+    if (!isRecord(receiptRow) || !isRecord(receiptRow.receipt)) throw new Error('The Customer receipt row is malformed.')
+    expect(receiptRow.receipt).toMatchObject({
+      requestId: request.id,
+      customerId: customerRow.customer.id,
+    })
+    expect(typeof receiptRow.receipt.fingerprint).toBe('string')
+    expect(receiptRow.receipt.fingerprint).toMatch(/^[a-f0-9]{64}$/)
+    await expect(harness.client.createRequest('workspace-1', 'member-1', input)).rejects.toMatchObject({
+      code: 'CustomerRequestDeleted',
+      status: 409,
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
 test('does not expose a notification cleanup conflict as a read failure', async () => {
   const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
   const harness = createHarness([createRequestRow(request)], { failConditionalTransactionAt: 1 })
@@ -561,6 +634,7 @@ test('does not expose a notification cleanup conflict as a read failure', async 
       'workspace-1',
       'support',
       'work-item-1',
+      async () => true,
     )).resolves.toEqual([])
   } finally {
     harness.restore()

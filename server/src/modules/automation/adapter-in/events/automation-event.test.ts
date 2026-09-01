@@ -139,6 +139,53 @@ describe('automation event handler', () => {
     ]])
   })
 
+  test('invalidates Customer completion candidates when a Work Item reopens', async () => {
+    const client = createAutomationEventPort({
+      async listRules() {
+        throw new Error('Disabled Automation must not read rules.')
+      },
+    })
+    const invalidated: Array<[string, string, string, string]> = []
+    const processor = createAutomationEventProcessor(
+      client,
+      {
+        async isAutomationEnabled() {
+          return false
+        },
+      },
+      undefined,
+      undefined,
+      {
+        async prepareCompletionNotifications() {
+          throw new Error('A reopened Work Item must not prepare candidates.')
+        },
+        async invalidateCompletionNotifications(workspaceId, teamId, workItemId, actorId) {
+          invalidated.push([workspaceId, teamId, workItemId, actorId])
+        },
+      },
+    )
+
+    await processor.process({
+      eventId: 'event-customer-reopen',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: {
+        completionReopened: true,
+        teamId: 'support',
+        issueId: 'work-item-1',
+      },
+    })
+
+    expect(invalidated).toEqual([[
+      'workspace-1',
+      'support',
+      'work-item-1',
+      'automation-customer-completion-invalidation',
+    ]])
+  })
+
   test('normalizes audit metadata, changes, and automation lineage', () => {
     const event = parseAutomationStreamRecord({
       eventName: 'INSERT',

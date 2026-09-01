@@ -51,10 +51,22 @@ export type CustomerWorkspaceState = {
   contacts: Map<string, CustomerContact>
   /** Customer Request records keyed by ID. */
   requests: Map<string, CustomerRequest>
+  /** Deletion receipts for keyed Customer Requests, keyed by request ID. */
+  requestIdempotencyReceipts: Map<string, CustomerRequestIdempotencyReceipt>
   /** Saved Customer views keyed by ID. */
   views: Map<string, CustomerSavedView>
   /** Prepared completion notification candidates keyed by deterministic ID. */
   notifications: Map<string, CustomerCompletionNotification>
+}
+
+/** Durable, content-free receipt that prevents a deleted keyed Request from being recreated. */
+export type CustomerRequestIdempotencyReceipt = {
+  /** Request ID derived from the original idempotency key. */
+  requestId: string
+  /** Customer that owned the deleted Request. */
+  customerId: string
+  /** Hash of the immutable Request creation fields. */
+  fingerprint: string
 }
 
 /** Result of one bounded Customer retention sweep. */
@@ -73,6 +85,28 @@ export type CustomerRetentionSweepResult = {
 
 /** DynamoDB conditions supplied by an already-authorized live-resource boundary. */
 export type CustomerAuthorizationConditionChecks = TriageAuthorizationConditionChecks
+
+/** Resolves the current canonical Project assignment for a linked Work Item.
+ *
+ * @param teamId Team owning the linked Work Item.
+ * @param workItemId Linked Work Item identifier.
+ * @returns The current Project identifier, or undefined when it has no Project.
+ */
+export type CustomerWorkItemProjectResolver = (
+  teamId: string,
+  workItemId: string,
+) => Promise<string | undefined>
+
+/** Resolves whether a canonical Work Item is currently completed.
+ *
+ * @param teamId Team owning the linked Work Item.
+ * @param workItemId Linked Work Item identifier.
+ * @returns Whether the canonical Work Item is in the completed status category.
+ */
+export type CustomerWorkItemCompletionResolver = (
+  teamId: string,
+  workItemId: string,
+) => Promise<boolean>
 
 /** Durable marker for a Contact deletion that is being checked against Triage. */
 export type CustomerContactDeletionOperation = {
@@ -468,9 +502,14 @@ export interface CustomerClient {
    *
    * @param workspaceId Workspace containing the Project links.
    * @param projectId Project to aggregate.
+   * @param resolveWorkItemProject Resolves each linked Work Item's current Project.
    * @returns The aggregate Customer impact signal.
    */
-  getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal>
+  getProjectImpact(
+    workspaceId: string,
+    projectId: string,
+    resolveWorkItemProject: CustomerWorkItemProjectResolver,
+  ): Promise<CustomerImpactSignal>
   /** Returns Work Items associated with a Customer.
    *
    * @param workspaceId Workspace containing the Customer.
@@ -539,9 +578,24 @@ export interface CustomerClient {
    * @param workspaceId Workspace containing the candidates.
    * @param teamId Work Item Team.
    * @param workItemId Work Item whose candidates should be listed.
+   * @param resolveWorkItemCompletion Resolves whether the canonical Work Item is completed.
    * @returns Previously prepared notification candidates.
    */
-  listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]>
+  listCompletionNotifications(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    resolveWorkItemCompletion: CustomerWorkItemCompletionResolver,
+  ): Promise<CustomerCompletionNotification[]>
+  /** Invalidates completion candidates after a Work Item leaves the completed state.
+   *
+   * @param workspaceId Workspace containing the candidates.
+   * @param teamId Work Item Team.
+   * @param workItemId Reopened Work Item.
+   * @param actorId Authenticated or service actor invalidating the candidates.
+   * @returns A promise that resolves after matching candidates are removed.
+   */
+  invalidateCompletionNotifications(workspaceId: string, teamId: string, workItemId: string, actorId: string): Promise<void>
 }
 
 /** In-memory Customer client used by API tests and local isolated composition. */
@@ -604,6 +658,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       customers: new Map([...state.customers].map(([id, customer]) => [id, clone(customer)])),
       contacts: new Map([...state.contacts].map(([id, contact]) => [id, clone(contact)])),
       requests: new Map([...state.requests].map(([id, request]) => [id, clone(request)])),
+      requestIdempotencyReceipts: new Map([...state.requestIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       views: new Map([...state.views].map(([id, view]) => [id, clone(view)])),
       notifications: new Map([...state.notifications].map(([id, notification]) => [id, clone(notification)])),
     }
@@ -619,6 +674,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       customers: new Map([...state.customers].map(([id, customer]) => [id, clone(customer)])),
       contacts: new Map([...state.contacts].map(([id, contact]) => [id, clone(contact)])),
       requests: new Map([...state.requests].map(([id, request]) => [id, clone(request)])),
+      requestIdempotencyReceipts: new Map([...state.requestIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       views: new Map([...state.views].map(([id, view]) => [id, clone(view)])),
       notifications: new Map([...state.notifications].map(([id, notification]) => [id, clone(notification)])),
     })
@@ -1361,6 +1417,20 @@ export class InMemoryCustomerClient implements CustomerClient {
       }
       return clone(existing)
     }
+    const idempotencyFingerprint = input.triageEntryId === undefined && input.idempotencyKey !== undefined
+      ? createRequestIdempotencyFingerprint(input)
+      : undefined
+    const receipt = state.requestIdempotencyReceipts.get(request.id)
+    if (receipt) {
+      if (
+        idempotencyFingerprint === undefined ||
+        receipt.customerId !== input.customerId ||
+        receipt.fingerprint !== idempotencyFingerprint
+      ) {
+        throw new CustomerError(409, 'CustomerRequestAlreadyExists', 'A Customer Request already exists for this retry key.')
+      }
+      throw new CustomerError(409, 'CustomerRequestDeleted', 'A deleted Customer Request cannot be recreated with the same retry key.')
+    }
     if (input.contactId) {
       const contact = this.requireContactForCustomer(state, input.contactId, input.customerId)
       if (contact.status !== 'active') {
@@ -1368,6 +1438,13 @@ export class InMemoryCustomerClient implements CustomerClient {
       }
     }
     state.requests.set(request.id, request)
+    if (idempotencyFingerprint !== undefined) {
+      state.requestIdempotencyReceipts.set(request.id, {
+        requestId: request.id,
+        customerId: request.customerId,
+        fingerprint: idempotencyFingerprint,
+      })
+    }
     return clone(this.state(workspaceId).requests.get(request.id) ?? request)
   }
 
@@ -1653,19 +1730,37 @@ export class InMemoryCustomerClient implements CustomerClient {
    *
    * @param workspaceId Workspace containing the Project links.
    * @param projectId Project to aggregate.
+   * @param resolveWorkItemProject Resolves each linked Work Item's current Project.
    * @returns The aggregate Customer impact signal.
    */
-  async getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal> {
+  async getProjectImpact(
+    workspaceId: string,
+    projectId: string,
+    resolveWorkItemProject: CustomerWorkItemProjectResolver,
+  ): Promise<CustomerImpactSignal> {
     const state = this.state(workspaceId)
-    const requests = [...state.requests.values()].filter((request) =>
-      !this.isCustomerUnavailable(workspaceId, request.customerId) &&
-      (request.projectLinks.some((link) => link.projectId === projectId) || request.workItemLinks.some((link) => link.projectId === projectId))
+    const requests = [...state.requests.values()].filter((request) => !this.isCustomerUnavailable(workspaceId, request.customerId))
+    const workItemLinks = new Map<string, { teamId: string; workItemId: string }>()
+    for (const request of requests) {
+      for (const link of request.workItemLinks) {
+        const key = `${link.teamId}\u0000${link.workItemId}`
+        workItemLinks.set(key, { teamId: link.teamId, workItemId: link.workItemId })
+      }
+    }
+    const resolvedProjects = await Promise.all([...workItemLinks.entries()].map(async ([key, link]) => ({
+      key,
+      projectId: await resolveWorkItemProject(link.teamId, link.workItemId),
+    })))
+    const workItemProjects = new Map(resolvedProjects.map(({ key, projectId: resolvedProjectId }) => [key, resolvedProjectId]))
+    const impactedRequests = requests.filter((request) =>
+      request.projectLinks.some((link) => link.projectId === projectId) ||
+      request.workItemLinks.some((link) => workItemProjects.get(`${link.teamId}\u0000${link.workItemId}`) === projectId)
     )
     return calculateCustomerImpactSignal(
       [...state.customers.values()]
         .filter((customer) => !this.isCustomerUnavailable(workspaceId, customer.id))
         .map((customer) => this.withCustomerCounts(state, customer)),
-      requests,
+      impactedRequests,
     )
   }
 
@@ -1845,13 +1940,24 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param workspaceId Workspace containing the candidates.
    * @param teamId Work Item Team.
    * @param workItemId Work Item whose candidates should be listed.
+   * @param resolveWorkItemCompletion Resolves whether the canonical Work Item is completed.
    * @returns Previously prepared notification candidates.
    */
-  async listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]> {
+  async listCompletionNotifications(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    resolveWorkItemCompletion: CustomerWorkItemCompletionResolver,
+  ): Promise<CustomerCompletionNotification[]> {
     const state = this.state(workspaceId)
     const candidates: CustomerCompletionNotification[] = []
+    const workItemIsCompleted = await resolveWorkItemCompletion(teamId, workItemId)
     for (const [notificationId, existing] of state.notifications) {
       if (existing.teamId !== teamId || existing.workItemId !== workItemId) continue
+      if (!workItemIsCompleted) {
+        state.notifications.delete(notificationId)
+        continue
+      }
       const request = state.requests.get(existing.requestId)
       if (!request || request.status === 'merged' || !request.workItemLinks.some((link) => link.teamId === teamId && link.workItemId === workItemId)) {
         state.notifications.delete(notificationId)
@@ -1870,6 +1976,23 @@ export class InMemoryCustomerClient implements CustomerClient {
       candidates.push(clone(notification))
     }
     return candidates
+  }
+
+  /** Invalidates completion candidates after a Work Item leaves the completed state.
+   *
+   * @param workspaceId Workspace containing the candidates.
+   * @param teamId Work Item Team.
+   * @param workItemId Reopened Work Item.
+   * @param actorId Authenticated or service actor invalidating the candidates.
+   * @returns A promise that resolves after matching candidates are removed.
+   */
+  async invalidateCompletionNotifications(workspaceId: string, teamId: string, workItemId: string, actorId: string): Promise<void> {
+    requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
+    const state = this.state(workspaceId)
+    for (const [notificationId, notification] of state.notifications) {
+      if (notification.teamId === teamId && notification.workItemId === workItemId) state.notifications.delete(notificationId)
+    }
   }
 
   /** Returns or creates one isolated Workspace state container. */
@@ -1895,6 +2018,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       customers: new Map(),
       contacts: new Map(),
       requests: new Map(),
+      requestIdempotencyReceipts: new Map(),
       views: new Map(),
       notifications: new Map(),
     }
@@ -2001,6 +2125,10 @@ export class InMemoryCustomerClient implements CustomerClient {
       if (request.customerId !== source.id) continue
       state.requests.set(request.id, { ...request, customerId: target.id, revision: request.revision + 1, updatedAt: mergedAt })
     }
+    for (const receipt of state.requestIdempotencyReceipts.values()) {
+      if (receipt.customerId !== source.id) continue
+      state.requestIdempotencyReceipts.set(receipt.requestId, { ...receipt, customerId: target.id })
+    }
     const retainedPrimaryContact = [...state.contacts.values()]
       .find((contact) => contact.customerId === target.id && contact.primary)
     if (retainedPrimaryContact) this.clearPrimaryContacts(state, target.id, retainedPrimaryContact.id)
@@ -2073,6 +2201,9 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     for (const [notificationId, notification] of state.notifications) {
       if (notification.customerId === customerId) state.notifications.delete(notificationId)
+    }
+    for (const [requestId, receipt] of state.requestIdempotencyReceipts) {
+      if (receipt.customerId === customerId) state.requestIdempotencyReceipts.delete(requestId)
     }
   }
 
@@ -2425,6 +2556,25 @@ function createIdempotentRequestId(workspaceId: string, idempotencyKey: string):
   return `request-${createHash('sha256').update(`${workspaceId}\u0000${normalizedKey}`, 'utf8').digest('hex')}`
 }
 
+/** Hashes the immutable creation fields used to validate a deleted Request retry.
+ *
+ * @param input Request creation input whose retry identity is being recorded.
+ * @returns A content-free SHA-256 fingerprint of the request origin.
+ */
+function createRequestIdempotencyFingerprint(input: CreateCustomerRequestInput): string {
+  return createHash('sha256').update(stableSerialize({
+    customerId: input.customerId,
+    contactId: input.contactId,
+    triageEntryId: input.triageEntryId,
+    source: input.source,
+    originalMessage: input.originalMessage,
+    receivedAt: input.receivedAt,
+    importance: input.importance,
+    externalReference: input.externalReference,
+    retentionExpiresAt: input.retentionExpiresAt,
+  }), 'utf8').digest('hex')
+}
+
 /** Creates the deterministic ID used to make saved Customer view retries safe. */
 function createIdempotentSavedViewId(workspaceId: string, idempotencyKey: string): string {
   const normalizedKey = idempotencyKey.trim()
@@ -2455,6 +2605,25 @@ function sameRequestOrigin(left: CustomerRequest, right: CustomerRequest, input:
     left.importance === right.importance &&
     retentionMatches &&
     JSON.stringify(left.externalReference) === JSON.stringify(right.externalReference)
+}
+
+/** Serializes JSON-compatible values with deterministic object-key ordering.
+ *
+ * @param value JSON-compatible value to serialize.
+ * @returns A deterministic serialization used only for hashing.
+ */
+function stableSerialize(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+    return JSON.stringify(value)
+  }
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`
+  if (!isRecord(value)) return JSON.stringify(String(value))
+  return `{${Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableSerialize(entry)}`)
+    .join(',')}}`
 }
 
 /** Computes the retention deadline that an omitted Customer Request input would have produced. */

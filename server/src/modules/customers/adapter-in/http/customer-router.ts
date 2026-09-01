@@ -31,7 +31,7 @@ import {
   CustomerError,
   projectCustomerImpactSignal,
 } from '../../domain/customer'
-import type { CustomerClient } from '../../customers'
+import type { CustomerClient, CustomerWorkItemProjectResolver } from '../../customers'
 import type { TriageAuthorizationConditionChecks, TriageClient } from '../../../triage'
 
 /** Minimum authenticated Workspace identity required by Customer routes. */
@@ -883,7 +883,19 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const projectId = requirePathValue(context.req.param('projectId'), 'Project ID')
       const principal = await dependencies.requireWorkspaceAccess(context, 'read', { projectId })
       await dependencies.verifyProjectAccess(principal, projectId, 'viewer')
-      return context.json(projectCustomerImpact(principal, await dependencies.getCustomers().getProjectImpact(principal.directoryId, projectId)))
+      /** Resolves a linked Work Item's current Project without exposing hidden relationships. */
+      const resolveWorkItemProject: CustomerWorkItemProjectResolver = async (teamId, workItemId) => {
+        try {
+          return (await dependencies.verifyWorkItemAccess(principal, teamId, workItemId, 'viewer')).projectId
+        } catch (error) {
+          if (isHiddenCustomerRelationshipError(error)) return undefined
+          throw error
+        }
+      }
+      return context.json(projectCustomerImpact(
+        principal,
+        await dependencies.getCustomers().getProjectImpact(principal.directoryId, projectId, resolveWorkItemProject),
+      ))
     } catch (error) {
       return dependencies.mapError(context, error)
     }

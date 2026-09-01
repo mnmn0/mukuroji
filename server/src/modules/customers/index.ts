@@ -22,6 +22,9 @@ export {
   type CustomerClient,
   type CustomerRetentionClient,
   type CustomerRetentionSweepResult,
+  type CustomerRequestIdempotencyReceipt,
+  type CustomerWorkItemCompletionResolver,
+  type CustomerWorkItemProjectResolver,
   type CustomerWorkspaceState,
 } from './customers'
 export {

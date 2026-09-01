@@ -62,6 +62,20 @@ export interface CustomerCompletionNotificationPreparation {
     workItemId: string,
     actorId: string,
   ): Promise<unknown>
+  /** Removes stale completion candidates after a Work Item leaves completed status.
+   *
+   * @param workspaceId Workspace containing the reopened Work Item.
+   * @param teamId Team owning the reopened Work Item.
+   * @param workItemId Reopened Work Item identifier.
+   * @param actorId Stable actor or service identity used for the invalidation.
+   * @returns A promise that resolves after the candidates are removed.
+   */
+  invalidateCompletionNotifications?(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    actorId: string,
+  ): Promise<unknown>
 }
 
 /** Focused Rule-read and execution capabilities required by event delivery. */
@@ -180,19 +194,39 @@ async function prepareCustomerCompletionNotificationsFromAudit(
   event: AutomationEvent,
   dependencies: CustomerCompletionNotificationPreparation | undefined,
 ): Promise<void> {
+  const metadata = event.metadata
+  const completionTransition = metadata?.completionTransition === true
+  const completionReopened = metadata?.completionReopened === true
   if (
     dependencies === undefined ||
     event.eventType !== 'work-item.updated' ||
-    event.metadata?.completionTransition !== true
+    (!completionTransition && !completionReopened)
   ) return
-  const teamId = readText(event.metadata.teamId)
-  const workItemId = readText(event.metadata.issueId) ?? readText(event.metadata.workItemId)
+  const teamId = readText(metadata?.teamId)
+  const workItemId = readText(metadata?.issueId) ?? readText(metadata?.workItemId)
   if (!teamId || !workItemId) {
     throw new AutomationError(
       'invalid-input',
       'AutomationOutboxEventMalformed',
-      'Completed Work Item audit event is missing Customer notification scope.',
+      'Work Item completion audit event is missing Customer notification scope.',
     )
+  }
+  if (completionReopened) {
+    if (dependencies.invalidateCompletionNotifications === undefined) {
+      throw new AutomationError(
+        'unavailable',
+        'CustomerCompletionInvalidationUnavailable',
+        'Customer completion invalidation is not configured.',
+        true,
+      )
+    }
+    await dependencies.invalidateCompletionNotifications(
+      event.workspaceId,
+      teamId,
+      workItemId,
+      'automation-customer-completion-invalidation',
+    )
+    return
   }
   await dependencies.prepareCompletionNotifications(
     event.workspaceId,

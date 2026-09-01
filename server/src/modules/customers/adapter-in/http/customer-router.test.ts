@@ -151,7 +151,7 @@ test('links a Customer Request directly to a Project through the authorized rout
 
   expect(response.status).toBe(200)
   expect(body.projectLinks).toEqual([{ projectId: 'project-1', linkedAt: NOW, linkedBy: 'member-1' }])
-  expect((await client.getProjectImpact('workspace-1', 'project-1')).requestCount).toBe(1)
+  expect((await client.getProjectImpact('workspace-1', 'project-1', async () => 'project-1')).requestCount).toBe(1)
 })
 
 test('accepts zero as the minimum Customer Request count filter', async () => {
@@ -882,6 +882,38 @@ test('passes the Project scope into Customer impact authorization', async () => 
 
   expect(response.status).toBe(200)
   expect(scope).toEqual({ projectId: 'project-1' })
+})
+
+test('uses the live Work Item Project assignment for Project impact', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const request = await createRequest(client, customer.id)
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+    projectId: 'project-old',
+  })
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    undefined,
+    undefined,
+    { verifyWorkItemAccess: async () => ({ projectId: 'project-new' }) },
+  )
+
+  const currentProjectResponse = await app.request('/api/projects/project-new/customer-impact')
+  const oldProjectResponse = await app.request('/api/projects/project-old/customer-impact')
+  const currentProjectBody: { requestCount: number } = await currentProjectResponse.json()
+  const oldProjectBody: { requestCount: number } = await oldProjectResponse.json()
+
+  expect(currentProjectResponse.status).toBe(200)
+  expect(currentProjectBody.requestCount).toBe(1)
+  expect(oldProjectResponse.status).toBe(200)
+  expect(oldProjectBody.requestCount).toBe(0)
 })
 
 test('replays saved Customer view creation with the same idempotency key', async () => {

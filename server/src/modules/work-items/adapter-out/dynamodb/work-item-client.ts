@@ -2674,6 +2674,7 @@ export class DynamoDbTeamIssuesClient {
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
           ...(completionTransition ? { completionTransition: true } : {}),
+          ...(leavesCompletion ? { completionReopened: true } : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({

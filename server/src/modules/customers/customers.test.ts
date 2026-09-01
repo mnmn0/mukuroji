@@ -59,7 +59,7 @@ test('links many Customer Requests to one Work Item and aggregates Project impac
   })
 
   const workItemImpact = await client.getWorkItemImpact('workspace-1', 'support', 'work-item-1')
-  const projectImpact = await client.getProjectImpact('workspace-1', 'project-1')
+  const projectImpact = await client.getProjectImpact('workspace-1', 'project-1', async () => 'project-1')
 
   expect(linkedFirst.workItemLinks).toHaveLength(1)
   expect(workItemImpact).toMatchObject({
@@ -69,7 +69,7 @@ test('links many Customer Requests to one Work Item and aggregates Project impac
     prioritySignal: 'critical',
   })
   expect(projectImpact).toEqual(workItemImpact)
-  expect((await client.getProjectImpact('workspace-1', 'project-2')).customerCount).toBe(1)
+  expect((await client.getProjectImpact('workspace-1', 'project-2', async () => 'project-1')).customerCount).toBe(1)
   expect((await client.getCustomer('workspace-1', second.customerId)).projects).toEqual([
     { projectId: 'project-1', requestCount: 1, requestStates: ['requested'] },
     { projectId: 'project-2', requestCount: 1, requestStates: ['requested'] },
@@ -131,6 +131,62 @@ test('makes generic Customer Request retries idempotent when the caller supplies
     ...input,
     originalMessage: 'A different request must not reuse the retry key.',
   })).rejects.toMatchObject({ code: 'CustomerRequestAlreadyExists' })
+})
+
+test('keeps a deleted keyed Customer Request from being recreated by retry', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const input = {
+    ...requestInput(customer.id),
+    idempotencyKey: 'deleted-request-1',
+  }
+
+  const request = await client.createRequest('workspace-1', 'member-1', input)
+  await client.deleteRequest('workspace-1', request.id, 'member-1', request.revision)
+
+  await expect(client.createRequest('workspace-1', 'member-1', input)).rejects.toMatchObject({
+    code: 'CustomerRequestDeleted',
+    status: 409,
+  })
+  await expect(client.createRequest('workspace-1', 'member-1', {
+    ...input,
+    originalMessage: 'A changed request must not reuse a deleted retry key.',
+  })).rejects.toMatchObject({
+    code: 'CustomerRequestAlreadyExists',
+    status: 409,
+  })
+})
+
+test('uses the current Work Item Project assignment when calculating Project impact', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+    projectId: 'project-old',
+  })
+
+  await expect(client.getProjectImpact('workspace-1', 'project-new', async () => 'project-new')).resolves.toMatchObject({
+    customerCount: 1,
+    requestCount: 1,
+  })
+  await expect(client.getProjectImpact('workspace-1', 'project-old', async () => 'project-new')).resolves.toMatchObject({
+    customerCount: 0,
+    requestCount: 0,
+  })
 })
 
 test('does not let an omitted retention deadline reuse a key created with an explicit deadline', async () => {
@@ -362,7 +418,7 @@ test('removes a Work Item-derived Project from Customer navigation when its Work
 
   expect(unlinked.projectLinks).toEqual([])
   expect((await client.getCustomer('workspace-1', customer.id)).projects).toEqual([])
-  expect((await client.getProjectImpact('workspace-1', 'project-1')).requestCount).toBe(0)
+  expect((await client.getProjectImpact('workspace-1', 'project-1', async () => undefined)).requestCount).toBe(0)
 })
 
 test('merges Customer identity and prepares idempotent source-capable completion candidates', async () => {
@@ -468,6 +524,46 @@ test('does not close a Customer Request when one of several linked Work Items co
   expect((await client.getRequest('workspace-1', request.id)).status).toBe('requested')
 })
 
+test('invalidates completion candidates when a Work Item reopens', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+  })
+  await client.prepareCompletionNotifications('workspace-1', 'support', 'work-item-1', 'member-1')
+
+  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1', async () => true)).resolves.toHaveLength(1)
+  await client.invalidateCompletionNotifications('workspace-1', 'support', 'work-item-1', 'member-1')
+  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1', async () => true)).resolves.toEqual([])
+})
+
+test('does not expose completion candidates when the canonical Work Item is no longer completed', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+  })
+  await client.prepareCompletionNotifications('workspace-1', 'support', 'work-item-1', 'member-1')
+
+  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1', async () => false)).resolves.toEqual([])
+})
+
 test('refreshes completion notification capability after a Request source changes', async () => {
   const client = createClient()
   const customer = await client.createCustomer('workspace-1', 'member-1', {
@@ -490,7 +586,7 @@ test('refreshes completion notification capability after a Request source change
     expectedRevision: request.revision + 1,
     source: { kind: 'portal', canNotify: false },
   })
-  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1')).resolves.toMatchObject([{
+  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1', async () => true)).resolves.toMatchObject([{
     requestId: updated.id,
     canNotify: false,
     skipReason: 'source-not-capable',
@@ -527,7 +623,7 @@ test('keeps Customer references and notification candidates consistent across de
 
   const requestAfterContactDelete = await client.getRequest('workspace-1', request.id)
   await client.deleteRequest('workspace-1', request.id, 'member-1', requestAfterContactDelete.revision)
-  expect(await client.listCompletionNotifications('workspace-1', 'support', 'work-item-1')).toEqual([])
+  expect(await client.listCompletionNotifications('workspace-1', 'support', 'work-item-1', async () => true)).toEqual([])
 
   const duplicate = await client.createCustomer('workspace-1', 'member-1', {
     name: 'Other',
@@ -580,6 +676,7 @@ test('retains Customer Request provenance when duplicate requests are merged', a
     'workspace-1',
     'support',
     'work-item-1',
+    async () => true,
   )
 
   expect(merged.workItemLinks).toEqual([
