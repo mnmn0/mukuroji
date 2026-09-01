@@ -164,6 +164,21 @@ export type CustomerContactMergeOperation = {
 /** Durable marker for either kind of Contact operation. */
 export type CustomerContactOperation = CustomerContactDeletionOperation | CustomerContactMergeOperation
 
+/** Durable marker for a Customer Request deletion that is being checked against Triage. */
+export type CustomerRequestDeletionOperation = {
+  /** Discriminator for a Customer Request deletion. */
+  kind: 'deletion'
+  /** Customer that owns the Request. */
+  customerId: string
+  /** Request that is about to be deleted. */
+  requestId: string
+  /** Request revision captured before the operation started. */
+  expectedRevision: number
+}
+
+/** Durable marker for a Customer Request operation. */
+export type CustomerRequestOperation = CustomerRequestDeletionOperation
+
 /** Application port for time-driven Customer retention processing. */
 export interface CustomerRetentionClient {
   /** Redacts due Customer data without requiring a read request.
@@ -439,7 +454,12 @@ export interface CustomerClient {
    * @param input Request creation fields.
    * @returns The created or idempotently replayed request.
    */
-  createRequest(workspaceId: string, actorId: string, input: CreateCustomerRequestInput): Promise<CustomerRequest>
+  createRequest(
+    workspaceId: string,
+    actorId: string,
+    input: CreateCustomerRequestInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest>
   /** Updates a Customer Request under an optimistic revision fence.
    *
    * @param workspaceId Workspace containing the request.
@@ -455,17 +475,36 @@ export interface CustomerClient {
    * @param requestId Request to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Request revision required for deletion.
-   * @param allowOrphanedTriageAssociation Whether a caller that verified the
-   * reverse Triage association is gone may remove an orphaned Triage Request.
    * @returns A promise that resolves after deletion completes.
    */
-  deleteRequest(
-    workspaceId: string,
-    requestId: string,
-    actorId: string,
-    expectedRevision: number,
-    allowOrphanedTriageAssociation?: boolean,
-  ): Promise<void>
+  deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Records a Customer Request deletion before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing the Request.
+   * @param requestId Request whose reverse association will be checked.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Request revision required to start deletion.
+   * @returns A promise that resolves after the durable operation marker is written.
+   */
+  beginCustomerRequestDeletion(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Cancels a prepared Customer Request deletion without changing the Request graph.
+   *
+   * @param workspaceId Workspace containing the Request.
+   * @param requestId Request whose deletion marker should be removed.
+   * @param actorId Authenticated actor cancelling the deletion.
+   * @param expectedRevision Request revision captured when deletion began.
+   * @returns A promise that resolves after the durable operation marker is removed.
+   */
+  cancelCustomerRequestDeletion(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Completes a prepared Customer Request deletion after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing the Request.
+   * @param requestId Request being deleted.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Request revision captured when deletion began.
+   * @returns A promise that resolves after the Request graph is deleted.
+   */
+  completeCustomerRequestDeletion(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void>
   /** Merges a source request into a retained request.
    *
    * @param workspaceId Workspace containing both requests.
@@ -662,6 +701,9 @@ export class InMemoryCustomerClient implements CustomerClient {
 
   /** Contact mutations waiting for Triage reverse-association checks. */
   private readonly pendingContactOperations = new Map<string, CustomerContactOperation>()
+
+  /** Customer Request deletions waiting for Triage reverse-association checks. */
+  private readonly pendingRequestOperations = new Map<string, CustomerRequestDeletionOperation>()
 
   /** Test-replaceable clock. */
   private readonly now: () => Date
@@ -955,6 +997,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
+    if (this.pendingRequestOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'A Customer Request deletion is still being completed.')
+    }
     if (this.pendingContactOperations.has(workspaceId)) {
       throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
     }
@@ -984,6 +1029,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async beginCustomerDeletion(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
+    if (this.pendingRequestOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'A Customer Request deletion is still being completed.')
+    }
     if (this.pendingContactOperations.has(workspaceId)) {
       throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
     }
@@ -1032,6 +1080,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail> {
     requireActor(actorId)
+    if (this.pendingRequestOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'A Customer Request deletion is still being completed.')
+    }
     if (this.pendingContactOperations.has(workspaceId)) {
       throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
     }
@@ -1055,6 +1106,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async beginCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void> {
     requireActor(actorId)
+    if (this.pendingRequestOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'A Customer Request deletion is still being completed.')
+    }
     if (this.pendingContactOperations.has(workspaceId)) {
       throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
     }
@@ -1524,7 +1578,12 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param input Request source, customer association, and retry identity.
    * @returns The created or idempotently replayed request.
    */
-  async createRequest(workspaceId: string, actorId: string, input: CreateCustomerRequestInput): Promise<CustomerRequest> {
+  async createRequest(
+    workspaceId: string,
+    actorId: string,
+    input: CreateCustomerRequestInput,
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<CustomerRequest> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
     this.assertCustomerAvailable(workspaceId, input.customerId)
@@ -1620,16 +1679,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param requestId Request to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Request revision required for deletion.
-   * @param allowOrphanedTriageAssociation Whether a verified orphan may be removed.
    * @returns A promise that resolves after deletion completes.
    */
-  async deleteRequest(
-    workspaceId: string,
-    requestId: string,
-    actorId: string,
-    expectedRevision: number,
-    allowOrphanedTriageAssociation = false,
-  ): Promise<void> {
+  async deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
@@ -1637,6 +1689,103 @@ export class InMemoryCustomerClient implements CustomerClient {
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
     this.assertCustomerAvailable(workspaceId, request.customerId)
     assertRevision(request.revision, expectedRevision, 'Customer Request')
+    this.deleteRequestState(state, requestId, false)
+  }
+
+  /** Records a Customer Request deletion before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing the Request.
+   * @param requestId Request whose reverse association will be checked.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Request revision required to start deletion.
+   * @returns A promise that resolves after the operation marker is stored.
+   */
+  async beginCustomerRequestDeletion(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireActor(actorId)
+    const pending = this.pendingRequestOperations.get(workspaceId)
+    if (pending) {
+      if (pending.requestId === requestId && pending.expectedRevision === expectedRevision) return
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'Another Customer Request deletion is still being completed.')
+    }
+    this.assertNoCustomerOperation(workspaceId)
+    const state = this.state(workspaceId)
+    const request = state.requests.get(requestId)
+    if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
+    this.assertCustomerAvailable(workspaceId, request.customerId)
+    assertRevision(request.revision, expectedRevision, 'Customer Request')
+    this.pendingRequestOperations.set(workspaceId, {
+      kind: 'deletion',
+      customerId: request.customerId,
+      requestId,
+      expectedRevision,
+    })
+  }
+
+  /** Cancels a prepared Customer Request deletion without changing the Request graph.
+   *
+   * @param workspaceId Workspace containing the Request.
+   * @param requestId Request whose deletion marker should be removed.
+   * @param actorId Authenticated actor cancelling the deletion.
+   * @param expectedRevision Request revision captured when deletion began.
+   * @returns A promise that resolves after the operation marker is removed.
+   */
+  async cancelCustomerRequestDeletion(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireActor(actorId)
+    const pending = this.pendingRequestOperations.get(workspaceId)
+    if (!pending) return
+    if (pending.requestId !== requestId || pending.expectedRevision !== expectedRevision) {
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'Another Customer Request deletion is still being completed.')
+    }
+    this.pendingRequestOperations.delete(workspaceId)
+  }
+
+  /** Completes a prepared Customer Request deletion after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing the Request.
+   * @param requestId Request being deleted.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Request revision captured when deletion began.
+   * @returns A promise that resolves after the Request graph is deleted.
+   */
+  async completeCustomerRequestDeletion(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireActor(actorId)
+    const pending = this.pendingRequestOperations.get(workspaceId)
+    if (!pending || pending.requestId !== requestId || pending.expectedRevision !== expectedRevision) {
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'The Customer Request deletion marker is missing or does not match.')
+    }
+    const state = this.rawState(workspaceId)
+    const request = state.requests.get(requestId)
+    if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
+    this.assertCustomerAvailable(workspaceId, request.customerId)
+    assertRevision(request.revision, expectedRevision, 'Customer Request')
+    this.deleteRequestState(state, requestId, true)
+    this.synchronizeCustomerCounts(workspaceId)
+    this.pendingRequestOperations.delete(workspaceId)
+  }
+
+  /** Deletes a Request after its caller has completed any external association check. */
+  private deleteRequestState(
+    state: CustomerWorkspaceState,
+    requestId: string,
+    allowOrphanedTriageAssociation: boolean,
+  ): void {
+    const request = state.requests.get(requestId)
+    if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
     if (request.triageEntryId !== undefined && !allowOrphanedTriageAssociation) {
       throw new CustomerError(
         409,
@@ -2438,6 +2587,9 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     if (this.pendingContactOperations.has(workspaceId)) {
       throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
+    if (this.pendingRequestOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerRequestMutationInProgress', 'A Customer Request deletion is still being completed.')
     }
   }
 

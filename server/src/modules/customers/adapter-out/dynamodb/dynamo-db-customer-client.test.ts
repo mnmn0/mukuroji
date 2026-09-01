@@ -121,6 +121,8 @@ type HarnessOptions = {
   failConditionalTransactionReasons?: readonly { Code: 'ConditionalCheckFailed' | 'None' }[]
   /** Rows returned by the sparse Customer retention index. */
   retentionIndexRows?: readonly unknown[]
+  /** Rows returned by a Customer directory index, independent of current base rows. */
+  directoryIndexRows?: readonly unknown[]
   /** Maximum number of rows returned by one test Query response. */
   queryPageSize?: number
 }
@@ -193,7 +195,8 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
         }
         const sortAttribute = directorySortAttributes[normalizedInput.IndexName]
         if (!sortAttribute) throw new Error('The Customer adapter issued an unknown directory index query.')
-        const matchingRows = [...rows.values()]
+        const directoryRows = options.directoryIndexRows ?? [...rows.values()]
+        const matchingRows = directoryRows
           .filter((row) => isRecord(row) && row.entityType === 'customer' && typeof row[sortAttribute] === 'string')
           .filter((row) => {
             const values = normalizedInput.ExpressionAttributeValues
@@ -481,6 +484,18 @@ test('pages a large Customer directory without accumulating the full dataset', a
   }
 })
 
+test('does not return a Customer left behind by an eventually consistent directory index', async () => {
+  const staleDirectoryRow = createCustomerRow('customer-deleted', 'Deleted Customer')
+  const harness = createHarness([], { directoryIndexRows: [staleDirectoryRow] })
+  try {
+    await expect(harness.client.listCustomers('workspace-1')).resolves.toEqual({ customers: [] })
+    expect(harness.commands.some((command) => command.name === 'GetCommand' && command.input.ConsistentRead === true &&
+      command.input.Key && isRecord(command.input.Key) && command.input.Key.recordKey === 'CUSTOMER#customer-deleted')).toBeTrue()
+  } finally {
+    harness.restore()
+  }
+})
+
 test('binds Customer directory cursors to the DynamoDB index boundary', async () => {
   const harness = createHarness([
     createCustomerRow('customer-1', 'Acme Corporation'),
@@ -615,6 +630,46 @@ test('keeps a Contact deletion fenced until the cross-store check completes', as
         '#contactOperationKind': 'kind',
       },
     })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('keeps a Triage Customer Request deletion fenced until the reverse check completes', async () => {
+  const request = {
+    ...createRequest('request-1', '2027-08-01T00:00:00.000Z'),
+    triageEntryId: 'triage-1',
+  }
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation', { requestCount: 1, openRequestCount: 1 }),
+    createRequestRow(request),
+  ])
+  try {
+    await expect(harness.client.beginCustomerRequestDeletion(
+      'workspace-1',
+      request.id,
+      'member-1',
+      request.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      requestOperation: {
+        kind: 'deletion',
+        customerId: 'customer-1',
+        requestId: request.id,
+        expectedRevision: request.revision,
+      },
+    })
+    expect(harness.rows.has(`REQUEST#customer-1#${request.id}`)).toBeTrue()
+
+    await expect(harness.client.completeCustomerRequestDeletion(
+      'workspace-1',
+      request.id,
+      'member-1',
+      request.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.has(`REQUEST#customer-1#${request.id}`)).toBeFalse()
+    expect(harness.rows.get('CUSTOMER#customer-1')).toMatchObject({ customer: { requestCount: 0, openRequestCount: 0 } })
+    expect(harness.rows.get('META')).not.toHaveProperty('requestOperation')
   } finally {
     harness.restore()
   }

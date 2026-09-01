@@ -653,8 +653,11 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
           ConditionCheck: expect.objectContaining({
             TableName: 'CustomersTable',
             Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-            ConditionExpression: expect.stringContaining('attribute_not_exists(#contactOperation)'),
-            ExpressionAttributeNames: expect.objectContaining({ '#contactOperation': 'contactOperation' }),
+            ConditionExpression: expect.stringContaining('attribute_not_exists(#requestOperation)'),
+            ExpressionAttributeNames: expect.objectContaining({
+              '#contactOperation': 'contactOperation',
+              '#requestOperation': 'requestOperation',
+            }),
           }),
         }),
       ]))

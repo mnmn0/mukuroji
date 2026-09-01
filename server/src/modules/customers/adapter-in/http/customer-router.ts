@@ -629,32 +629,55 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const customers = dependencies.getCustomers()
       const requestId = context.req.param('requestId') ?? ''
       const request = await customers.getRequest(principal.directoryId, requestId)
-      let allowOrphanedTriageAssociation = false
-      if (request.triageEntryId !== undefined) {
-        const listCustomerAssociations = dependencies.getTriage().listCustomerAssociations
-        if (!listCustomerAssociations) {
-          throw new CustomerError(
-            503,
-            'TriageCustomerAssociationUnavailable',
-            'Triage Customer association is unavailable. Retry the request.',
-          )
-        }
-        const associations = await listCustomerAssociations(principal.directoryId, request.customerId)
-        if (associations.some((entry) => entry.id === request.triageEntryId && entry.customerRequestId === request.id)) {
-          throw new CustomerError(
-            409,
-            'CustomerRequestTriageAssociation',
-            'A Customer Request associated with a Triage Entry cannot be deleted.',
-          )
-        }
-        allowOrphanedTriageAssociation = true
-      }
-      await customers.deleteRequest(
+      const expectedRevision = readExpectedRevision(context.req.query('expectedRevision'))
+      await customers.beginCustomerRequestDeletion(
         principal.directoryId,
         requestId,
         principal.userKey,
-        readExpectedRevision(context.req.query('expectedRevision')),
-        allowOrphanedTriageAssociation,
+        expectedRevision,
+      )
+      try {
+        if (request.triageEntryId !== undefined) {
+          const listCustomerAssociations = dependencies.getTriage().listCustomerAssociations
+          if (!listCustomerAssociations) {
+            throw new CustomerError(
+              503,
+              'TriageCustomerAssociationUnavailable',
+              'Triage Customer association is unavailable. Retry the request.',
+            )
+          }
+          const associations = await listCustomerAssociations(principal.directoryId, request.customerId)
+          if (associations.some((entry) => entry.id === request.triageEntryId && entry.customerRequestId === request.id)) {
+            throw new CustomerError(
+              409,
+              'CustomerRequestTriageAssociation',
+              'A Customer Request associated with a Triage Entry cannot be deleted.',
+            )
+          }
+        }
+      } catch (error) {
+        try {
+          await customers.cancelCustomerRequestDeletion(
+            principal.directoryId,
+            requestId,
+            principal.userKey,
+            expectedRevision,
+          )
+        } catch (cancelError) {
+          throw new CustomerError(
+            503,
+            'CustomerRequestMutationCancellationFailed',
+            'The Customer Request deletion could not be safely prepared. Retry the operation.',
+            { cause: cancelError },
+          )
+        }
+        throw error
+      }
+      await customers.completeCustomerRequestDeletion(
+        principal.directoryId,
+        requestId,
+        principal.userKey,
+        expectedRevision,
       )
       return context.body(null, 204)
     } catch (error) {
@@ -866,6 +889,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.directoryId,
         principal.userKey,
         requestInput,
+        authorizationConditionChecks,
       )
       if (!isSameTriageRequestOrigin(request, requestInput)) {
         throw new CustomerError(
