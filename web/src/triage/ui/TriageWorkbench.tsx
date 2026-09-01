@@ -1,4 +1,9 @@
 import { useRef, useState } from 'react'
+import type {
+  CreateCustomerRequestFromTriageInput,
+  Customer,
+  CustomerRequest,
+} from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ShieldIcon } from '../../shared/ui/icons'
@@ -20,7 +25,7 @@ import { TriageEntryDetail } from './TriageEntryDetail'
 import { TriageQueue } from './TriageQueue'
 import { TriageSettingsPanel } from './TriageSettingsPanel'
 
-/** Props accepted by the complete Team triage workbench. */
+/** Props accepted by the complete Team triage workbench, including queue, detail, and mutation state. */
 export type TriageWorkbenchProps = {
   /** Active Workspace member bearer token used only for explicit AI generation. */
   readonly accessToken?: string
@@ -117,6 +122,25 @@ export type TriageWorkbenchProps = {
     entryId: string,
     input: TriageActionInput,
   ) => Promise<TriageEntry>
+  /** Saves one accepted Triage Entry as a Customer Request. */
+  readonly onCreateCustomerRequest?: (
+    entryId: string,
+    input: CreateCustomerRequestFromTriageInput,
+  ) => Promise<CustomerRequest>
+  /** Customers currently visible to the current Workspace member. */
+  readonly customerOptions?: readonly Pick<Customer, 'id' | 'name'>[]
+  /** Whether the Customer picker is still loading. */
+  readonly isCustomerOptionsLoading?: boolean
+  /** Whether another Customer picker page is available. */
+  readonly hasMoreCustomerOptions?: boolean
+  /** Whether another Customer picker page is loading. */
+  readonly isLoadingMoreCustomerOptions?: boolean
+  /** Safe error message when the Customer picker cannot load its options. */
+  readonly customerOptionsErrorMessage?: string
+  /** Retries loading Customer picker options. */
+  readonly onRetryCustomerOptions?: () => void
+  /** Loads exactly one additional Customer picker page. */
+  readonly onLoadMoreCustomerOptions?: () => void
   /** Applies one explicit bounded bulk action. */
   readonly onBulkAction?: (
     input: TriageBulkActionInput,
@@ -149,7 +173,11 @@ export function TriageWorkbench({
   explicitEntryId,
   filters,
   hasMore = false,
+  hasMoreCustomerOptions = false,
   isBulkPending = false,
+  isCustomerOptionsLoading = false,
+  isLoadingMoreCustomerOptions = false,
+  customerOptionsErrorMessage,
   isConfigurationLoading = false,
   isDetailLoading = false,
   isQueueLoading = false,
@@ -161,6 +189,7 @@ export function TriageWorkbench({
   onAction,
   onBackToQueue,
   onBulkAction,
+  onCreateCustomerRequest,
   onClearSelection,
   onEntrySelectionChange,
   onFiltersChange,
@@ -168,6 +197,8 @@ export function TriageWorkbench({
   onRetryConfiguration,
   onRetryDetail,
   onRetryQueue,
+  onRetryCustomerOptions,
+  onLoadMoreCustomerOptions,
   onSaveConfiguration,
   onSelectEntry,
   onViewChange,
@@ -180,6 +211,7 @@ export function TriageWorkbench({
   t,
   teamId,
   teamName,
+  customerOptions,
   eligibleAssigneeIdsByProject,
   visibleProjectIds,
 }: TriageWorkbenchProps) {
@@ -323,7 +355,15 @@ export function TriageWorkbench({
                   onAction={onAction}
                   onActionComplete={restoreQueueFocus}
                   onBack={backToQueue}
+                  onCreateCustomerRequest={onCreateCustomerRequest}
+                  customerOptions={customerOptions}
+                  customerOptionsErrorMessage={customerOptionsErrorMessage}
+                  hasMoreCustomerOptions={hasMoreCustomerOptions}
+                  isCustomerOptionsLoading={isCustomerOptionsLoading}
+                  isLoadingMoreCustomerOptions={isLoadingMoreCustomerOptions}
+                  onLoadMoreCustomerOptions={onLoadMoreCustomerOptions}
                   onRetry={onRetryDetail}
+                  onRetryCustomerOptions={onRetryCustomerOptions}
                   t={t}
                   teamId={teamId}
                   eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}

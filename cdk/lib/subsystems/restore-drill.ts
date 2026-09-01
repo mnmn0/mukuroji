@@ -97,7 +97,7 @@ const cleanupControlMutableAttributeNames = [
 export interface RestoreDrillInput {
   /** Existing data-owner IAM role exclusively authorized to approve cleanup. */
   readonly cleanupApproverRoleArn: cdk.CfnParameter;
-  /** Existing application tables, of which exactly six are eligible restore sources. */
+  /** Existing application tables, of which exactly seven are eligible restore sources. */
   readonly dataStores: DataStoreResources;
   /** Existing versioned file storage inspected only through exact object versions. */
   readonly fileStorage: FileStorageResources;
@@ -378,6 +378,7 @@ export function buildRestoreDrill(
     input.dataStores.workspaceAccessTable,
     input.dataStores.auditEventsTable,
     input.dataStores.fileProofingTable,
+    input.dataStores.customersTable,
   ];
   const sourceTableArns = sourceTables.map((table) => table.tableArn);
   const sourceExportArns = sourceTables.map((table) => scope.formatArn({
@@ -767,6 +768,7 @@ export function buildRestoreDrill(
         EVIDENCE_KEY_ARN: evidenceKey.keyArn,
         FILE_BUCKET_NAME: input.fileStorage.fileBucket.bucketName,
         FILE_PROOFING_TABLE_NAME: input.dataStores.fileProofingTable.tableName,
+        CUSTOMERS_TABLE_NAME: input.dataStores.customersTable.tableName,
         METRIC_NAMESPACE: metricNamespace,
         PROJECT_DIRECTORY_TABLE_NAME:
           input.dataStores.projectDirectoryTable.tableName,

@@ -113,6 +113,7 @@ function createProjectScopedTriagePrincipal(): TriagePrincipal {
     userId: 'member-1',
     auditActor: { id: 'actor-1', kind: 'user' },
     teamAccess: 'write',
+    canReadCustomerAssociations: true,
     visibleProjectIds: ['project-visible'],
   }
 }
@@ -165,6 +166,7 @@ function createDependencies(
     userId: 'member-1',
     auditActor: { id: 'actor-1', kind: 'user' },
     teamAccess: 'write',
+    canReadCustomerAssociations: true,
   },
   entries: TriageEntry[] = [entry],
   overrides: Partial<TriageRouterDependencies> = {},
@@ -286,6 +288,7 @@ describe('triage HTTP router', () => {
       userId: 'member-1',
       auditActor: { id: 'service-account-1', kind: 'service' },
       teamAccess: 'write',
+      canReadCustomerAssociations: true,
     }
     const serviceDependencies = createDependencies(createEntry(), servicePrincipal)
     const serviceResponse = await serviceDependencies.router.request(
@@ -316,6 +319,7 @@ describe('triage HTTP router', () => {
       auditActor: { id: 'break-glass-actor-1', kind: 'break-glass' },
       auditCorrelationId: 'break-glass-activation-1',
       teamAccess: 'write',
+      canReadCustomerAssociations: true,
     }
     const { actions, router } = createDependencies(createEntry(), principal)
     const response = await router.request(
@@ -419,6 +423,36 @@ describe('triage HTTP router', () => {
     expect(JSON.stringify(actionBody)).not.toContain('chat.example.com')
   })
 
+  test('redacts Customer association identifiers for principals without Customer read access', async () => {
+    const entry: TriageEntry = {
+      ...createEntry(),
+      customerId: 'customer-secret',
+      contactId: 'contact-secret',
+      customerRequestId: 'request-secret',
+    }
+    const { router } = createDependencies(entry, {
+      workspaceId: 'workspace-1',
+      userId: 'viewer-1',
+      auditActor: { id: 'viewer-actor-1', kind: 'user' },
+      teamAccess: 'read',
+      canReadCustomerAssociations: false,
+    })
+
+    const queueResponse = await router.request('/api/teams/support/triage-entries')
+    const detailResponse = await router.request('/api/teams/support/triage-entries/triage-1')
+    const queueBody: unknown = await queueResponse.json()
+    const detailBody: unknown = await detailResponse.json()
+
+    expect(queueResponse.status).toBe(200)
+    expect(detailResponse.status).toBe(200)
+    expect(JSON.stringify(queueBody)).not.toContain('customer-secret')
+    expect(JSON.stringify(queueBody)).not.toContain('contact-secret')
+    expect(JSON.stringify(queueBody)).not.toContain('request-secret')
+    expect(JSON.stringify(detailBody)).not.toContain('customer-secret')
+    expect(JSON.stringify(detailBody)).not.toContain('contact-secret')
+    expect(JSON.stringify(detailBody)).not.toContain('request-secret')
+  })
+
   test('projects read-only Team access to non-mutating response capabilities', async () => {
     const entry = createEntry()
     const { router: viewerRouter } = createDependencies(entry, {
@@ -426,12 +460,14 @@ describe('triage HTTP router', () => {
       userId: 'viewer-1',
       auditActor: { id: 'viewer-actor-1', kind: 'user' },
       teamAccess: 'read',
+      canReadCustomerAssociations: true,
     })
     const { router: managerRouter } = createDependencies(entry, {
       workspaceId: 'workspace-1',
       userId: 'manager-1',
       auditActor: { id: 'manager-actor-1', kind: 'user' },
       teamAccess: 'manage',
+      canReadCustomerAssociations: true,
     })
 
     const viewerResponse = await viewerRouter.request(
@@ -472,6 +508,7 @@ describe('triage HTTP router', () => {
       userId: 'mixed-member-1',
       auditActor: { id: 'mixed-actor-1', kind: 'user' },
       teamAccess: 'write',
+      canReadCustomerAssociations: true,
       writableProjectIds: ['project-writable'],
     }, [writable, readOnly, unassigned])
 

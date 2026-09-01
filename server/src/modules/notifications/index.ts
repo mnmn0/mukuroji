@@ -28,6 +28,8 @@ export {
 export {
   createNotificationScheduleHandler,
   parsePlanningUpdateTargetScheduleProjection,
+  type CustomerCompletionPreparation,
+  type CustomerCompletionPreparationHandler,
   type PlanningScheduledNotificationKind,
   type PlanningUpdateNotificationCadence,
   type PlanningUpdateTargetReference,

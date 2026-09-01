@@ -1,0 +1,1302 @@
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { expect, spyOn, test } from 'bun:test'
+import type { Customer, CustomerRequest } from '@mukuroji/contracts'
+import {
+  CUSTOMER_MAX_OPERATION_ROWS,
+  CustomerError,
+  createCustomerContactRecord,
+  createCustomerRecord,
+  createCustomerRequestRecord,
+} from '../../domain/customer'
+import { DynamoDbCustomerClient } from './dynamo-db-customer-client'
+
+/** Stable DynamoDB adapter test instant. */
+const NOW = '2026-08-01T00:00:00.000Z'
+
+/** Creates a valid request row for adapter read and retention tests. */
+function createRequest(
+  id: string,
+  retentionExpiresAt = '2026-07-01T00:00:00.000Z',
+  customerId = 'customer-1',
+): CustomerRequest {
+  return createCustomerRequestRecord(
+    'workspace-1',
+    id,
+    {
+      customerId,
+      source: { kind: 'email', provider: 'mail', canNotify: true },
+      originalMessage: 'Please support SSO.',
+      receivedAt: NOW,
+      importance: 'normal',
+      retentionExpiresAt,
+    },
+    NOW,
+  )
+}
+
+/** Creates a persisted row for one Customer entity category. */
+function createRequestRow(request: CustomerRequest) {
+  return {
+    workspaceId: request.workspaceId,
+    recordKey: `REQUEST#${request.customerId}#${request.id}`,
+    entityType: 'request',
+    request,
+  }
+}
+
+/** Creates the directory index fields expected on a persisted Customer root. */
+function createCustomerDirectoryFields(customer: Customer) {
+  const tieBreaker = `\u0000${customer.id}`
+  const encodeNumber = (value: number, width: number) => String(Math.max(0, Math.round(value * (width === 9 ? 1_000_000 : 1)))).padStart(width, '0')
+  return {
+    customerDirectoryName: `${customer.name.toLocaleLowerCase('en-US')}${tieBreaker}`,
+    customerDirectoryTier: `${customer.tier}${tieBreaker}`,
+    customerDirectorySize: `${customer.size}${tieBreaker}`,
+    customerDirectoryStatus: `${customer.status}${tieBreaker}`,
+    customerDirectoryHealth: `${customer.health}${tieBreaker}`,
+    customerDirectoryBusinessValue: `${encodeNumber(customer.businessValue ?? -1, 9)}${tieBreaker}`,
+    customerDirectoryRequestCount: `${encodeNumber(customer.requestCount, 12)}${tieBreaker}`,
+    customerDirectoryOpenRequestCount: `${encodeNumber(customer.openRequestCount, 12)}${tieBreaker}`,
+    customerDirectoryUpdatedAt: `${customer.updatedAt}${tieBreaker}`,
+  }
+}
+
+/** Creates a persisted row for one Customer root. */
+function createCustomerRow(
+  customerId = 'customer-1',
+  name = 'Acme Corporation',
+  counts: Partial<Pick<Customer, 'contactCount' | 'requestCount' | 'openRequestCount'>> = {},
+  retentionExpiresAt = '2027-08-01T00:00:00.000Z',
+) {
+  const customer = createCustomerRecord(
+    'workspace-1',
+    customerId,
+    {
+      name,
+      tier: 'enterprise',
+      size: 'enterprise',
+      status: 'active',
+      health: 'healthy',
+      retentionExpiresAt,
+    },
+    NOW,
+  )
+  const storedCustomer = { ...customer, ...counts }
+  return {
+    workspaceId: customer.workspaceId,
+    recordKey: `CUSTOMER#${customer.id}`,
+    entityType: 'customer',
+    customer: storedCustomer,
+    ...createCustomerDirectoryFields(storedCustomer),
+    retentionPartition: 'CUSTOMER_RETENTION',
+    retentionDueAt: retentionExpiresAt,
+  }
+}
+
+/** Creates a persisted row for one Customer contact. */
+function createContactRow(customerId: string, contactId: string) {
+  const contact = createCustomerContactRecord(
+    'workspace-1',
+    customerId,
+    contactId,
+    { name: `Contact ${contactId}` },
+    NOW,
+  )
+  return {
+    workspaceId: contact.workspaceId,
+    recordKey: `CONTACT#${customerId}#${contact.id}`,
+    entityType: 'contact',
+    contact,
+  }
+}
+
+/** Optional fault injection for the transactional Customer adapter harness. */
+type HarnessOptions = {
+  /** Transaction number that should fail once, counted from one. */
+  failTransactionAt?: number
+  /** Transaction number that should fail with a conditional conflict once. */
+  failConditionalTransactionAt?: number
+  /** Cancellation reasons for a transaction conditional conflict, when injected. */
+  failConditionalTransactionReasons?: readonly { Code: 'ConditionalCheckFailed' | 'None' }[]
+  /** Rows returned by the sparse Customer retention index. */
+  retentionIndexRows?: readonly unknown[]
+  /** Rows returned by a Customer directory index, independent of current base rows. */
+  directoryIndexRows?: readonly unknown[]
+  /** Maximum number of rows returned by one test Query response. */
+  queryPageSize?: number
+}
+
+/** Creates a real DocumentClient whose commands are captured without contacting AWS. */
+function createHarness(requestRows: readonly unknown[], options: HarnessOptions = {}) {
+  const lowLevelClient = new DynamoDBClient({
+    region: 'us-east-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  })
+  const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+  const commands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const rows = new Map<string, unknown>([['META', {
+    workspaceId: 'workspace-1',
+    recordKey: 'META',
+    entityType: 'meta',
+    revision: 4,
+  }]])
+  for (const row of requestRows) {
+    if (!isRecord(row) || typeof row.recordKey !== 'string') {
+      throw new TypeError('The Customer test row is missing a record key.')
+    }
+    rows.set(row.recordKey, row)
+  }
+  let transactionCount = 0
+  let failedTransaction = false
+  const sendSpy = spyOn(documentClient, 'send')
+  sendSpy.mockImplementation(async (command) => {
+    const constructorValue = Reflect.get(command, 'constructor')
+    const input = Reflect.get(command, 'input')
+    if (typeof constructorValue !== 'function' || typeof constructorValue.name !== 'string' ||
+      typeof input !== 'object' || input === null || Array.isArray(input)) {
+      throw new TypeError('Expected an AWS DocumentClient command.')
+    }
+    const name = constructorValue.name
+    const normalizedInput = Object.fromEntries(Object.entries(input))
+    commands.push({ name, input: normalizedInput })
+    if (name === 'QueryCommand') {
+      if (normalizedInput.IndexName === 'CustomerRetentionIndex') {
+        const retentionRows = options.retentionIndexRows ?? []
+        const exclusiveStartKey = normalizedInput.ExclusiveStartKey
+        const startRecordKey = isRecord(exclusiveStartKey) && typeof exclusiveStartKey.recordKey === 'string'
+          ? exclusiveStartKey.recordKey
+          : undefined
+        const matchedStartIndex = startRecordKey === undefined
+          ? -1
+          : retentionRows.findIndex((row) => isRecord(row) && row.recordKey === startRecordKey)
+        const startIndex = matchedStartIndex < 0 ? 0 : matchedStartIndex + 1
+        const pageSize = options.queryPageSize ?? retentionRows.length
+        const items = retentionRows.slice(startIndex, startIndex + pageSize)
+        const lastItem = items.at(-1)
+        return {
+          Items: items,
+          ...(startIndex + items.length < retentionRows.length && isRecord(lastItem) && typeof lastItem.recordKey === 'string'
+            ? { LastEvaluatedKey: { workspaceId: 'workspace-1', recordKey: lastItem.recordKey } }
+            : {}),
+        }
+      }
+      if (typeof normalizedInput.IndexName === 'string') {
+        const directorySortAttributes: Record<string, string> = {
+          CustomerDirectoryNameIndex: 'customerDirectoryName',
+          CustomerDirectoryTierIndex: 'customerDirectoryTier',
+          CustomerDirectorySizeIndex: 'customerDirectorySize',
+          CustomerDirectoryStatusIndex: 'customerDirectoryStatus',
+          CustomerDirectoryHealthIndex: 'customerDirectoryHealth',
+          CustomerDirectoryBusinessValueIndex: 'customerDirectoryBusinessValue',
+          CustomerDirectoryRequestCountIndex: 'customerDirectoryRequestCount',
+          CustomerDirectoryOpenRequestCountIndex: 'customerDirectoryOpenRequestCount',
+          CustomerDirectoryUpdatedAtIndex: 'customerDirectoryUpdatedAt',
+        }
+        const sortAttribute = directorySortAttributes[normalizedInput.IndexName]
+        if (!sortAttribute) throw new Error('The Customer adapter issued an unknown directory index query.')
+        const directoryRows = options.directoryIndexRows ?? [...rows.values()]
+        const matchingRows = directoryRows
+          .filter((row) => isRecord(row) && row.entityType === 'customer' && typeof row[sortAttribute] === 'string')
+          .filter((row) => {
+            const values = normalizedInput.ExpressionAttributeValues
+            const cutoff = values && typeof values === 'object' && !Array.isArray(values)
+              ? Reflect.get(values, ':retentionCutoff')
+              : undefined
+            const dueAt = isRecord(row) ? row.retentionDueAt : undefined
+            return typeof cutoff !== 'string' || typeof dueAt !== 'string' || dueAt > cutoff
+          })
+          .sort((left, right) => {
+            if (!isRecord(left) || !isRecord(right)) return 0
+            const leftValue = left[sortAttribute]
+            const rightValue = right[sortAttribute]
+            if (typeof leftValue !== 'string' || typeof rightValue !== 'string') return 0
+            const comparison = leftValue.localeCompare(rightValue)
+            return normalizedInput.ScanIndexForward === false ? -comparison : comparison
+          })
+        const exclusiveStartKey = normalizedInput.ExclusiveStartKey
+        const startRecordKey = isRecord(exclusiveStartKey) && typeof exclusiveStartKey.recordKey === 'string'
+          ? exclusiveStartKey.recordKey
+          : undefined
+        const startIndex = startRecordKey === undefined
+          ? 0
+          : matchingRows.findIndex((row) => isRecord(row) && row.recordKey === startRecordKey) + 1
+        const requestedLimit = typeof normalizedInput.Limit === 'number' ? normalizedInput.Limit : matchingRows.length
+        const pageSize = Math.min(options.queryPageSize ?? requestedLimit, requestedLimit)
+        const items = matchingRows.slice(startIndex, startIndex + pageSize)
+        const lastItem = items.at(-1)
+        return {
+          Items: items,
+          ...(startIndex + items.length < matchingRows.length && isRecord(lastItem) &&
+            typeof lastItem.recordKey === 'string' && typeof lastItem[sortAttribute] === 'string'
+            ? {
+                LastEvaluatedKey: {
+                  workspaceId: 'workspace-1',
+                  recordKey: lastItem.recordKey,
+                  [sortAttribute]: lastItem[sortAttribute],
+                },
+              }
+            : {}),
+        }
+      }
+      const expression = normalizedInput.KeyConditionExpression
+      if (expression === 'workspaceId = :workspaceId AND recordKey = :recordKey') {
+        const values = normalizedInput.ExpressionAttributeValues
+        const recordKey = values && typeof values === 'object' && !Array.isArray(values)
+          ? Reflect.get(values, ':recordKey')
+          : undefined
+        const item = typeof recordKey === 'string' ? rows.get(recordKey) : undefined
+        return { Items: item === undefined ? [] : [item] }
+      }
+      if (typeof expression !== 'string' || !expression.includes('begins_with(recordKey')) {
+        throw new Error('The Customer adapter issued an unscoped partition query.')
+      }
+      const values = normalizedInput.ExpressionAttributeValues
+      const prefix = values && typeof values === 'object' && !Array.isArray(values)
+        ? Reflect.get(values, ':recordPrefix')
+        : undefined
+      const matchingRows = typeof prefix === 'string'
+        ? [...rows.values()].filter((row) => isRecord(row) && typeof row.recordKey === 'string' && row.recordKey.startsWith(prefix))
+        : []
+      const exclusiveStartKey = normalizedInput.ExclusiveStartKey
+      const startRecordKey = isRecord(exclusiveStartKey) && typeof exclusiveStartKey.recordKey === 'string'
+        ? exclusiveStartKey.recordKey
+        : undefined
+      const startIndex = startRecordKey === undefined
+        ? 0
+        : matchingRows.findIndex((row) => isRecord(row) && row.recordKey === startRecordKey) + 1
+      const pageSize = options.queryPageSize ?? matchingRows.length
+      const items = matchingRows.slice(startIndex, startIndex + pageSize)
+      const lastItem = items.at(-1)
+      return {
+        Items: items,
+        ...(startIndex + items.length < matchingRows.length && isRecord(lastItem) && typeof lastItem.recordKey === 'string'
+          ? { LastEvaluatedKey: { workspaceId: 'workspace-1', recordKey: lastItem.recordKey } }
+          : {}),
+      }
+    }
+    if (name === 'GetCommand') {
+      const key = normalizedInput.Key
+      const recordKey = isRecord(key) && typeof key.recordKey === 'string'
+        ? key.recordKey
+        : undefined
+      return { Item: recordKey ? rows.get(recordKey) : undefined }
+    }
+    if (name === 'TransactWriteCommand') {
+      transactionCount += 1
+      if (!failedTransaction && options.failTransactionAt === transactionCount) {
+        failedTransaction = true
+        throw new Error('Injected Customer transaction failure.')
+      }
+      if (!failedTransaction && options.failConditionalTransactionAt === transactionCount) {
+        failedTransaction = true
+        if (options.failConditionalTransactionReasons) {
+          throw Object.assign(new Error('Injected Customer conditional conflict.'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: options.failConditionalTransactionReasons,
+          })
+        }
+        const error = new Error('Injected Customer conditional conflict.')
+        error.name = 'ConditionalCheckFailedException'
+        throw error
+      }
+      const items = normalizedInput.TransactItems
+      if (!Array.isArray(items)) throw new TypeError('Customer transaction items are missing.')
+      for (const item of items) {
+        if (!isRecord(item)) continue
+        const put = item.Put
+        if (isRecord(put) && isRecord(put.Item) && typeof put.Item.recordKey === 'string') {
+          rows.set(put.Item.recordKey, put.Item)
+          continue
+        }
+        const deletion = item.Delete
+        const key = isRecord(deletion) ? deletion.Key : undefined
+        if (isRecord(key) && typeof key.recordKey === 'string') rows.delete(key.recordKey)
+      }
+      return {}
+    }
+    return {}
+  })
+  return {
+    client: new DynamoDbCustomerClient({
+      tableName: 'CustomersTable',
+      documentClient,
+      bootstrapLocalTable: false,
+      now: () => new Date(NOW),
+      id: () => 'generated-id',
+    }),
+    commands,
+    rows,
+    restore: () => sendSpy.mockRestore(),
+  }
+}
+
+/** Finds a metadata Put whose condition contains the requested marker expression. */
+function findMetadataPut(
+  commands: readonly { name: string; input: Record<string, unknown> }[],
+  conditionFragment: string,
+): Record<string, unknown> | undefined {
+  for (const command of commands) {
+    if (command.name !== 'TransactWriteCommand') continue
+    const items = command.input.TransactItems
+    if (!Array.isArray(items)) continue
+    for (const item of items) {
+      if (!isRecord(item) || !isRecord(item.Put)) continue
+      const put = item.Put
+      const putItem = put.Item
+      if (isRecord(putItem) && putItem.recordKey === 'META' &&
+        typeof put.ConditionExpression === 'string' &&
+        put.ConditionExpression.includes(conditionFragment)) {
+        return put
+      }
+    }
+  }
+  return undefined
+}
+
+test('uses a focused record-prefix query for a Customer Request read', async () => {
+  const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
+  const harness = createHarness([createRequestRow(request)])
+  try {
+    await expect(harness.client.getRequest('workspace-1', request.id)).resolves.toEqual(request)
+
+    const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
+    expect(queryCommands).toHaveLength(1)
+    expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand', 'GetCommand', 'QueryCommand', 'GetCommand'])
+    expect(queryCommands[0]?.input).toMatchObject({
+      KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+      ExpressionAttributeValues: {
+        ':recordPrefix': 'REQUEST#',
+      },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('lists Customer roots with persisted counts without loading child records', async () => {
+  const customerRow = createCustomerRow('customer-1', 'Acme Corporation', {
+    contactCount: 2,
+    requestCount: 3,
+    openRequestCount: 1,
+  })
+  const harness = createHarness([
+    customerRow,
+    createContactRow('customer-1', 'contact-1'),
+    createRequestRow(createRequest('request-1')),
+  ])
+  try {
+    await expect(harness.client.listCustomers('workspace-1', { limit: 1 })).resolves.toMatchObject({
+      customers: [{
+        id: 'customer-1',
+        contactCount: 2,
+        requestCount: 3,
+        openRequestCount: 1,
+      }],
+    })
+    const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
+    expect(queryCommands).toHaveLength(1)
+    expect(queryCommands[0]?.input).toMatchObject({
+      IndexName: 'CustomerDirectoryUpdatedAtIndex',
+      KeyConditionExpression: 'workspaceId = :workspaceId',
+      ExpressionAttributeValues: { ':workspaceId': 'workspace-1' },
+      Limit: 1,
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not expose an expired Customer root before the retention sweep redacts it', async () => {
+  const harness = createHarness([
+    createCustomerRow('customer-expired', 'Expired Customer', {}, '2026-07-01T00:00:00.000Z'),
+    createCustomerRow('customer-current', 'Current Customer'),
+  ])
+  try {
+    await expect(harness.client.listCustomers('workspace-1', { limit: 100 })).resolves.toMatchObject({
+      customers: [{ id: 'customer-current', name: 'Current Customer' }],
+    })
+    const query = harness.commands.find((command) => command.name === 'QueryCommand')
+    expect(query?.input).toMatchObject({
+      FilterExpression: 'attribute_not_exists(#retentionDueAt) OR #retentionDueAt > :retentionCutoff',
+      ExpressionAttributeValues: { ':retentionCutoff': NOW },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('persists and replays a keyed Customer creation', async () => {
+  const harness = createHarness([])
+  const input = {
+    name: 'Idempotent Customer',
+    tier: 'enterprise' as const,
+    size: 'enterprise' as const,
+    status: 'active' as const,
+    health: 'healthy' as const,
+  }
+  try {
+    const first = await harness.client.createCustomer('workspace-1', 'member-1', input, undefined, 'customer-create-1')
+    const repeated = await harness.client.createCustomer('workspace-1', 'member-1', input, undefined, 'customer-create-1')
+
+    expect(repeated).toEqual(first)
+    expect([...harness.rows.values()].filter((row) => isRecord(row) && row.entityType === 'customer')).toHaveLength(1)
+    expect([...harness.rows.values()].filter((row) => isRecord(row) && row.entityType === 'customer-idempotency-receipt')).toHaveLength(1)
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(1)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('loads only the selected Customer graph for a Customer detail read', async () => {
+  const targetRequest = createRequest('request-target', '2027-08-01T00:00:00.000Z', 'customer-1')
+  const unrelatedRequest = createRequest('request-unrelated', '2027-08-01T00:00:00.000Z', 'customer-2')
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation'),
+    createCustomerRow('customer-2', 'Globex Industries'),
+    createContactRow('customer-1', 'contact-target'),
+    createContactRow('customer-2', 'contact-unrelated'),
+    createRequestRow(targetRequest),
+    createRequestRow(unrelatedRequest),
+  ])
+  try {
+    await expect(harness.client.getCustomer('workspace-1', 'customer-1')).resolves.toMatchObject({
+      customer: { id: 'customer-1' },
+      contacts: [{ id: 'contact-target' }],
+      requests: [{ id: 'request-target' }],
+    })
+    const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
+    expect(queryCommands.map((command) => command.input.ExpressionAttributeValues)).toEqual([
+      { ':workspaceId': 'workspace-1', ':recordKey': 'CUSTOMER#customer-1' },
+      { ':workspaceId': 'workspace-1', ':recordPrefix': 'CONTACT#customer-1#' },
+      { ':workspaceId': 'workspace-1', ':recordPrefix': 'REQUEST#customer-1#' },
+    ])
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not expand a Customer detail read from a prefix-like ID', async () => {
+  const customerRows = Array.from(
+    { length: CUSTOMER_MAX_OPERATION_ROWS + 1 },
+    (_, index) => createCustomerRow(`customer-${index + 1}`, `Customer ${index + 1}`),
+  )
+  const harness = createHarness(customerRows)
+  try {
+    await expect(harness.client.getCustomer('workspace-1', 'customer-')).rejects.toMatchObject({
+      code: 'CustomerNotFound',
+      status: 404,
+    })
+    const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
+    expect(queryCommands[0]?.input).toMatchObject({
+      KeyConditionExpression: 'workspaceId = :workspaceId AND recordKey = :recordKey',
+      ExpressionAttributeValues: {
+        ':workspaceId': 'workspace-1',
+        ':recordKey': 'CUSTOMER#customer-',
+      },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('pages a large Customer directory without accumulating the full dataset', async () => {
+  const customerRows = Array.from(
+    { length: CUSTOMER_MAX_OPERATION_ROWS + 1 },
+    (_, index) => createCustomerRow(`customer-${index + 1}`, `Customer ${index + 1}`),
+  )
+  const harness = createHarness(customerRows, { queryPageSize: 250 })
+  try {
+    await expect(harness.client.listCustomers('workspace-1')).resolves.toMatchObject({
+      customers: expect.any(Array),
+    })
+    expect(harness.commands.filter((command) => command.name === 'QueryCommand')).toHaveLength(1)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not return a Customer left behind by an eventually consistent directory index', async () => {
+  const staleDirectoryRow = createCustomerRow('customer-deleted', 'Deleted Customer')
+  const harness = createHarness([], { directoryIndexRows: [staleDirectoryRow] })
+  try {
+    await expect(harness.client.listCustomers('workspace-1')).resolves.toEqual({ customers: [] })
+    expect(harness.commands.some((command) => command.name === 'GetCommand' && command.input.ConsistentRead === true &&
+      command.input.Key && isRecord(command.input.Key) && command.input.Key.recordKey === 'CUSTOMER#customer-deleted')).toBeTrue()
+  } finally {
+    harness.restore()
+  }
+})
+
+test('binds Customer directory cursors to the DynamoDB index boundary', async () => {
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation'),
+    createCustomerRow('customer-2', 'Globex Industries'),
+    createCustomerRow('customer-3', 'Initech'),
+  ])
+  try {
+    const first = await harness.client.listCustomers('workspace-1', {
+      limit: 1,
+      sortBy: 'name',
+      sortDirection: 'ascending',
+    })
+    expect(first.customers.map((customer) => customer.id)).toEqual(['customer-1'])
+    expect(first.nextCursor).toBeString()
+
+    const second = await harness.client.listCustomers('workspace-1', {
+      limit: 1,
+      sortBy: 'name',
+      sortDirection: 'ascending',
+      cursor: first.nextCursor,
+    })
+    expect(second.customers.map((customer) => customer.id)).toEqual(['customer-2'])
+    const directoryQueries = harness.commands.filter((command) => command.name === 'QueryCommand' && command.input.IndexName === 'CustomerDirectoryNameIndex')
+    expect(directoryQueries).toHaveLength(2)
+    expect(directoryQueries[1]?.input.ExclusiveStartKey).toMatchObject({
+      workspaceId: 'workspace-1',
+      recordKey: 'CUSTOMER#customer-1',
+      customerDirectoryName: expect.any(String),
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('joins live authorization conditions to a Customer link transaction', async () => {
+  const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
+  const authorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'TeamIssuesTable',
+      Key: { directoryId: 'workspace-1', teamId: 'team-1', workItemId: 'work-item-1' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 7 },
+    },
+  }
+  const harness = createHarness([createRequestRow(request)])
+  try {
+    await harness.client.linkRequestToWorkItem(
+      'workspace-1',
+      request.id,
+      'member-1',
+      { teamId: 'team-1', workItemId: 'work-item-1' },
+      [authorizationConditionCheck],
+    )
+    const transaction = harness.commands.find((command) => command.name === 'TransactWriteCommand')
+    expect(transaction?.input.TransactItems).toEqual(expect.arrayContaining([authorizationConditionCheck]))
+  } finally {
+    harness.restore()
+  }
+})
+
+test('rejects an oversized ordinary Customer graph mutation before writing', async () => {
+  const contact = createContactRow('customer-1', 'contact-1').contact
+  const requestRows = Array.from({ length: 100 }, (_, index) => {
+    const request = {
+      ...createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z'),
+      contactId: contact.id,
+    }
+    return createRequestRow(request)
+  })
+  const harness = createHarness([createCustomerRow(), createContactRow('customer-1', contact.id), ...requestRows])
+  try {
+    await expect(harness.client.deleteContact(
+      'workspace-1',
+      'customer-1',
+      contact.id,
+      'member-1',
+      contact.revision,
+    )).rejects.toMatchObject({
+      code: 'CustomerTransactionTooLarge',
+      status: 409,
+    })
+    expect(harness.rows.has(`CONTACT#customer-1#${contact.id}`)).toBeTrue()
+    expect([...harness.rows.keys()].filter((recordKey) => recordKey.startsWith('REQUEST#'))).toHaveLength(100)
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('keeps a Contact deletion fenced until the cross-store check completes', async () => {
+  const contactRow = createContactRow('customer-1', 'contact-1')
+  const request = { ...createRequest('request-1', '2027-08-01T00:00:00.000Z'), contactId: contactRow.contact.id }
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation', { contactCount: 1, requestCount: 1, openRequestCount: 1 }),
+    contactRow,
+    createRequestRow(request),
+  ])
+  try {
+    await expect(harness.client.beginCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      contactOperation: {
+        kind: 'deletion',
+        customerId: 'customer-1',
+        contactId: contactRow.contact.id,
+        expectedRevision: contactRow.contact.revision,
+      },
+    })
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeTrue()
+
+    await expect(harness.client.completeCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).resolves.toBeUndefined()
+
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeFalse()
+    expect(harness.rows.get('REQUEST#customer-1#request-1')).toMatchObject({ request: { contactId: undefined } })
+    expect(harness.rows.get('CUSTOMER#customer-1')).toMatchObject({ customer: { contactCount: 0 } })
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+    expect(findMetadataPut(harness.commands, '#contactOperation.#contactOperationKind')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#contactOperation': 'contactOperation',
+        '#contactOperationKind': 'kind',
+      },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('keeps a Triage Customer Request deletion fenced until the reverse check completes', async () => {
+  const request = {
+    ...createRequest('request-1', '2027-08-01T00:00:00.000Z'),
+    triageEntryId: 'triage-1',
+  }
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation', { requestCount: 1, openRequestCount: 1 }),
+    createRequestRow(request),
+  ])
+  try {
+    await expect(harness.client.beginCustomerRequestDeletion(
+      'workspace-1',
+      request.id,
+      'member-1',
+      request.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      requestOperation: {
+        kind: 'deletion',
+        customerId: 'customer-1',
+        requestId: request.id,
+        expectedRevision: request.revision,
+      },
+    })
+    expect(harness.rows.has(`REQUEST#customer-1#${request.id}`)).toBeTrue()
+
+    await expect(harness.client.completeCustomerRequestDeletion(
+      'workspace-1',
+      request.id,
+      'member-1',
+      request.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.has(`REQUEST#customer-1#${request.id}`)).toBeFalse()
+    expect(harness.rows.get('CUSTOMER#customer-1')).toMatchObject({ customer: { requestCount: 0, openRequestCount: 0 } })
+    expect(harness.rows.get('META')).not.toHaveProperty('requestOperation')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('cancels a matching Contact merge marker without changing the graph', async () => {
+  const sourceRow = createContactRow('customer-1', 'contact-source')
+  const targetRow = createContactRow('customer-1', 'contact-target')
+  const harness = createHarness([createCustomerRow(), sourceRow, targetRow])
+  try {
+    const input = {
+      targetContactId: targetRow.contact.id,
+      sourceExpectedRevision: sourceRow.contact.revision,
+      targetExpectedRevision: targetRow.contact.revision,
+    }
+    await expect(harness.client.beginCustomerContactMerge(
+      'workspace-1',
+      sourceRow.contact.id,
+      'member-1',
+      input,
+    )).resolves.toBeUndefined()
+    await expect(harness.client.cancelCustomerContactMerge(
+      'workspace-1',
+      sourceRow.contact.id,
+      'member-1',
+      input,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.has(`CONTACT#customer-1#${sourceRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#customer-1#${targetRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('rejects an oversized Contact deletion before fencing the graph', async () => {
+  const contactRow = createContactRow('customer-1', 'contact-1')
+  const requestRows = Array.from({ length: 100 }, (_, index) => createRequestRow({
+    ...createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z'),
+    contactId: contactRow.contact.id,
+  }))
+  const harness = createHarness([createCustomerRow(), contactRow, ...requestRows])
+  try {
+    await expect(harness.client.beginCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).rejects.toMatchObject({ code: 'CustomerTransactionTooLarge', status: 409 })
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeTrue()
+    expect([...harness.rows.keys()].filter((recordKey) => recordKey.startsWith('REQUEST#'))).toHaveLength(100)
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('counts the Customer root when rejecting a Contact deletion at the transaction boundary', async () => {
+  const contactRow = createContactRow('customer-1', 'contact-1')
+  const requestRows = Array.from({ length: 98 }, (_, index) => createRequestRow({
+    ...createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z'),
+    contactId: contactRow.contact.id,
+  }))
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation', { contactCount: 1, requestCount: 98, openRequestCount: 98 }),
+    contactRow,
+    ...requestRows,
+  ])
+  try {
+    await expect(harness.client.beginCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).rejects.toMatchObject({ code: 'CustomerTransactionTooLarge', status: 409 })
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('classifies mixed authorization and revision cancellations as a retryable Customer conflict', async () => {
+  const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
+  const authorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'TeamIssuesTable',
+      Key: { directoryId: 'workspace-1', teamId: 'team-1', workItemId: 'work-item-1' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 7 },
+    },
+  }
+  const harness = createHarness([createRequestRow(request)], {
+    failConditionalTransactionAt: 1,
+    failConditionalTransactionReasons: [
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'None' },
+      { Code: 'ConditionalCheckFailed' },
+    ],
+  })
+  try {
+    await expect(harness.client.linkRequestToWorkItem(
+      'workspace-1',
+      request.id,
+      'member-1',
+      { teamId: 'team-1', workItemId: 'work-item-1' },
+      [authorizationConditionCheck],
+    )).rejects.toMatchObject({ code: 'CustomerRevisionConflict', status: 409 })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('sweeps due retention workspaces through the production-safe index path', async () => {
+  const request = createRequest('request-1')
+  const harness = createHarness([createRequestRow(request)], {
+    retentionIndexRows: [{ workspaceId: 'workspace-1' }],
+  })
+  try {
+    await expect(harness.client.sweepExpiredRetention()).resolves.toEqual({
+      scannedPages: 1,
+      workspacesProcessed: 1,
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 1,
+    })
+    expect(harness.commands.find((command) => command.name === 'QueryCommand')).toMatchObject({
+      input: {
+        IndexName: 'CustomerRetentionIndex',
+        KeyConditionExpression: '#retentionPartition = :retentionPartition AND #retentionDueAt <= :retentionDueAt',
+      },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('processes a retention page before failing on the configured page limit', async () => {
+  const request = createRequest('request-1')
+  const harness = createHarness([createRequestRow(request)], {
+    retentionIndexRows: [
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-1#request-1' },
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-1#request-2' },
+    ],
+    queryPageSize: 1,
+  })
+  try {
+    await expect(harness.client.sweepExpiredRetention(NOW, 1)).rejects.toMatchObject({
+      code: 'CustomerRetentionSweepIncomplete',
+      status: 503,
+    })
+    expect(harness.rows.get('REQUEST#customer-1#request-1')).toMatchObject({
+      request: { retention: { redactedAt: NOW } },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('continues retention processing for later Workspaces after one redaction fails', async () => {
+  const harness = createHarness([], {
+    retentionIndexRows: [
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#request-1' },
+      { workspaceId: 'workspace-2', recordKey: 'REQUEST#request-2' },
+    ],
+  })
+  const redactedWorkspaceIds: string[] = []
+  const redactExpired = spyOn(harness.client, 'redactExpired').mockImplementation(async (workspaceId) => {
+    redactedWorkspaceIds.push(workspaceId)
+    if (workspaceId === 'workspace-1') {
+      throw new CustomerError(409, 'CustomerOperationInProgress', 'Customer operation is still being completed.')
+    }
+    return {
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 1,
+    }
+  })
+  try {
+    await expect(harness.client.sweepExpiredRetention(NOW)).rejects.toMatchObject({
+      code: 'CustomerRetentionWorkspaceFailed',
+      status: 503,
+    })
+    expect(redactedWorkspaceIds).toEqual(['workspace-1', 'workspace-2'])
+  } finally {
+    redactExpired.mockRestore()
+    harness.restore()
+  }
+})
+
+test('persists a deleted keyed Customer Request retry receipt', async () => {
+  const customerRow = createCustomerRow()
+  const harness = createHarness([customerRow])
+  const input = {
+    customerId: customerRow.customer.id,
+    source: { kind: 'email' as const, provider: 'mail', canNotify: true },
+    originalMessage: 'Please support SSO.',
+    receivedAt: NOW,
+    importance: 'normal' as const,
+    idempotencyKey: 'deleted-request-durable-receipt',
+  }
+  try {
+    const request = await harness.client.createRequest('workspace-1', 'member-1', input)
+    await harness.client.deleteRequest('workspace-1', request.id, 'member-1', request.revision)
+
+    expect(harness.rows.has(`REQUEST#${request.customerId}#${request.id}`)).toBeFalse()
+    const receiptRow = harness.rows.get(`REQUEST_RECEIPT#${request.id}`)
+    expect(receiptRow).toMatchObject({ entityType: 'request-idempotency-receipt' })
+    if (!isRecord(receiptRow) || !isRecord(receiptRow.receipt)) throw new Error('The Customer receipt row is malformed.')
+    expect(receiptRow.receipt).toMatchObject({
+      requestId: request.id,
+      customerId: customerRow.customer.id,
+    })
+    expect(typeof receiptRow.receipt.fingerprint).toBe('string')
+    expect(receiptRow.receipt.fingerprint).toMatch(/^[a-f0-9]{64}$/)
+    await expect(harness.client.createRequest('workspace-1', 'member-1', input)).rejects.toMatchObject({
+      code: 'CustomerRequestDeleted',
+      status: 409,
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('persists a deleted keyed Customer Contact retry receipt', async () => {
+  const customerRow = createCustomerRow()
+  const harness = createHarness([customerRow])
+  const input = {
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+  }
+  try {
+    const contact = await harness.client.createContact(
+      'workspace-1',
+      customerRow.customer.id,
+      'member-1',
+      input,
+      'deleted-contact-durable-receipt',
+    )
+    await harness.client.deleteContact(
+      'workspace-1',
+      customerRow.customer.id,
+      contact.id,
+      'member-1',
+      contact.revision,
+    )
+
+    expect(harness.rows.has(`CONTACT#customer-1#${contact.id}`)).toBeFalse()
+    const receiptRow = harness.rows.get(`CONTACT_RECEIPT#${contact.id}`)
+    expect(receiptRow).toMatchObject({ entityType: 'contact-idempotency-receipt' })
+    if (!isRecord(receiptRow) || !isRecord(receiptRow.receipt)) throw new Error('The Customer Contact receipt row is malformed.')
+    expect(receiptRow.receipt).toMatchObject({
+      contactId: contact.id,
+      customerId: customerRow.customer.id,
+    })
+    expect(typeof receiptRow.receipt.fingerprint).toBe('string')
+    expect(receiptRow.receipt.fingerprint).toMatch(/^[a-f0-9]{64}$/)
+    await expect(harness.client.createContact(
+      'workspace-1',
+      customerRow.customer.id,
+      'member-1',
+      input,
+      'deleted-contact-durable-receipt',
+    )).rejects.toMatchObject({
+      code: 'CustomerContactDeleted',
+      status: 409,
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not expose a notification cleanup conflict as a read failure', async () => {
+  const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
+  const harness = createHarness([createRequestRow(request)], { failConditionalTransactionAt: 1 })
+  try {
+    await expect(harness.client.listCompletionNotifications(
+      'workspace-1',
+      'support',
+      'work-item-1',
+      async () => true,
+    )).resolves.toEqual([])
+  } finally {
+    harness.restore()
+  }
+})
+
+test('keeps a Customer hidden until cross-store deletion cleanup completes', async () => {
+  const customer = createCustomerRow().customer
+  const harness = createHarness([createCustomerRow()])
+  try {
+    await expect(harness.client.beginCustomerDeletion(
+      'workspace-1',
+      customer.id,
+      'member-1',
+      customer.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      deletion: { customerId: customer.id, phase: 'triage' },
+    })
+    await expect(harness.client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({
+      code: 'CustomerNotFound',
+    })
+
+    await expect(harness.client.completeCustomerDeletion(
+      'workspace-1',
+      customer.id,
+      'member-1',
+    )).resolves.toBeUndefined()
+    expect(findMetadataPut(harness.commands, '#deletion.#deletionCustomerId')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#deletion': 'deletion',
+        '#retention': 'retention',
+        '#merge': 'merge',
+      },
+    })
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+    expect(harness.rows.get('META')).not.toHaveProperty('deletion')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('repoints a Customer Triage merge before retiring the source graph', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const harness = createHarness([
+    {
+      workspaceId: source.workspaceId,
+      recordKey: `CUSTOMER#${source.id}`,
+      entityType: 'customer',
+      customer: source,
+    },
+    {
+      workspaceId: target.workspaceId,
+      recordKey: `CUSTOMER#${target.id}`,
+      entityType: 'customer',
+      customer: target,
+    },
+  ])
+  try {
+    const input = {
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }
+    await expect(harness.client.beginCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      merge: {
+        sourceCustomerId: source.id,
+        targetCustomerId: target.id,
+      },
+    })
+    await expect(harness.client.completeCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toMatchObject({
+      customer: { id: target.id },
+    })
+    expect(findMetadataPut(harness.commands, '#merge.#mergeSource')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#deletion': 'deletion',
+        '#retention': 'retention',
+        '#merge': 'merge',
+      },
+    })
+    expect(harness.rows.has(`CUSTOMER#${source.id}`)).toBeFalse()
+    expect(harness.rows.get(`CUSTOMER#${target.id}`)).toMatchObject({
+      customer: { id: target.id, revision: target.revision + 1 },
+    })
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('cancels a matching Customer merge marker without changing the graph', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const harness = createHarness([
+    {
+      workspaceId: source.workspaceId,
+      recordKey: `CUSTOMER#${source.id}`,
+      entityType: 'customer',
+      customer: source,
+    },
+    {
+      workspaceId: target.workspaceId,
+      recordKey: `CUSTOMER#${target.id}`,
+      entityType: 'customer',
+      customer: target,
+    },
+  ])
+  try {
+    const input = {
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }
+    await harness.client.beginCustomerMerge('workspace-1', source.id, 'member-1', input)
+    await expect(harness.client.cancelCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toBeUndefined()
+    expect(harness.rows.has(`CUSTOMER#${source.id}`)).toBe(true)
+    expect(harness.rows.has(`CUSTOMER#${target.id}`)).toBe(true)
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('splits a large Customer merge while retaining a resumable merge marker', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const contactRows = Array.from({ length: 100 }, (_, index) => createContactRow(source.id, `contact-${index + 1}`))
+  const harness = createHarness([
+    {
+      workspaceId: source.workspaceId,
+      recordKey: `CUSTOMER#${source.id}`,
+      entityType: 'customer',
+      customer: source,
+    },
+    {
+      workspaceId: target.workspaceId,
+      recordKey: `CUSTOMER#${target.id}`,
+      entityType: 'customer',
+      customer: target,
+    },
+    ...contactRows,
+  ])
+  try {
+    const input = {
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }
+    await harness.client.beginCustomerMerge('workspace-1', source.id, 'member-1', input)
+    await expect(harness.client.completeCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toMatchObject({
+      customer: { id: target.id },
+    })
+    expect(harness.rows.has(`CUSTOMER#${source.id}`)).toBeFalse()
+    expect([...harness.rows.values()].filter((row) => isRecord(row) && typeof row.recordKey === 'string' && row.recordKey.startsWith('CONTACT#'))).toHaveLength(100)
+    expect([...harness.commands].filter((command) => command.name === 'TransactWriteCommand').length).toBeGreaterThan(2)
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('splits retention writes into resumable DynamoDB-sized batches', async () => {
+  const requestRows = Array.from({ length: 105 }, (_, index) =>
+    createRequestRow(createRequest(`request-${index + 1}`)),
+  )
+  const harness = createHarness(requestRows)
+  try {
+    await expect(harness.client.redactExpired('workspace-1')).resolves.toMatchObject({
+      requestsRedacted: 105,
+    })
+
+    const transactions = harness.commands.filter((command) => command.name === 'TransactWriteCommand')
+    expect(transactions).toHaveLength(2)
+    const transactionSizes = transactions.map((command) => {
+      const items = command.input.TransactItems
+      return Array.isArray(items) ? items.length : -1
+    })
+    expect(transactionSizes).toEqual([100, 7])
+    expect(transactions[0]?.input.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({ recordKey: 'META', revision: 5 }),
+        }),
+      }),
+    ]))
+    expect(transactions[1]?.input.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({ recordKey: 'META', revision: 6 }),
+        }),
+      }),
+    ]))
+  } finally {
+    harness.restore()
+  }
+})
+
+test('uses the supplied timestamp for retention evaluation', async () => {
+  const request = createRequest('request-1', '2026-07-15T00:00:00.000Z')
+  const requestRow = createRequestRow(request)
+  const harness = createHarness([requestRow])
+  try {
+    await expect(harness.client.redactExpired('workspace-1', '2026-07-01T00:00:00.000Z')).resolves.toEqual({
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 0,
+    })
+    expect(harness.rows.get('REQUEST#customer-1#request-1')).toEqual(requestRow)
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('resumes Customer retention after a later transaction fails', async () => {
+  const requestRows = Array.from({ length: 105 }, (_, index) =>
+    createRequestRow(createRequest(`request-${index + 1}`)),
+  )
+  const harness = createHarness(requestRows, { failTransactionAt: 2 })
+  try {
+    await expect(harness.client.redactExpired('workspace-1')).rejects.toThrow(
+      'Injected Customer transaction failure.',
+    )
+    const pendingMetadata = harness.rows.get('META')
+    expect(pendingMetadata).toMatchObject({
+      revision: 5,
+      retention: {
+        evaluatedAt: NOW,
+        cursor: 'REQUEST#customer-1#request-93',
+      },
+    })
+
+    await expect(harness.client.redactExpired('workspace-1')).resolves.toMatchObject({
+      requestsRedacted: 0,
+    })
+    expect(findMetadataPut(harness.commands, '#retention.#retentionEvaluatedAt')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#deletion': 'deletion',
+        '#retention': 'retention',
+        '#merge': 'merge',
+      },
+    })
+    expect(harness.rows.get('META')).toMatchObject({ revision: 6 })
+    expect(harness.rows.get('META')).not.toHaveProperty('retention')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('hides and resumes a Customer deletion after a later transaction fails', async () => {
+  const requestRows = Array.from({ length: 105 }, (_, index) =>
+    createRequestRow(createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z')),
+  )
+  const harness = createHarness([createCustomerRow(), ...requestRows], { failTransactionAt: 2 })
+  try {
+    const customer = createCustomerRow().customer
+    await expect(harness.client.deleteCustomer(
+      'workspace-1',
+      customer.id,
+      'member-1',
+      customer.revision,
+    )).rejects.toThrow('Injected Customer transaction failure.')
+
+    expect(harness.rows.get('META')).toMatchObject({
+      revision: 5,
+      deletion: { customerId: customer.id },
+    })
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeTrue()
+
+    await expect(harness.client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({
+      code: 'CustomerNotFound',
+    })
+    expect(harness.rows.get('META')).not.toHaveProperty('deletion')
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not mix unrelated retention writes into a Customer deletion', async () => {
+  const ownRequest = createRequestRow(createRequest(
+    'request-1',
+    '2027-08-01T00:00:00.000Z',
+  ))
+  const unrelatedExpiredRequest = createRequestRow(createRequest(
+    'request-unrelated',
+    '2026-07-01T00:00:00.000Z',
+    'customer-2',
+  ))
+  const harness = createHarness([createCustomerRow(), ownRequest, unrelatedExpiredRequest])
+  try {
+    await expect(harness.client.deleteCustomer(
+      'workspace-1',
+      'customer-1',
+      'member-1',
+      1,
+    )).resolves.toBeUndefined()
+
+    const transactions = harness.commands.filter((command) => command.name === 'TransactWriteCommand')
+    expect(transactions).toHaveLength(1)
+    expect(harness.rows.get('REQUEST#customer-2#request-unrelated')).toEqual(unrelatedExpiredRequest)
+  } finally {
+    harness.restore()
+  }
+})
+
+/** Checks whether an unknown harness value is a non-array object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

@@ -46,6 +46,38 @@ export interface AutomationWorkItemReader {
   }>
 }
 
+/** Durable Customer fallback used when a completed Work Item audit event is retried. */
+export interface CustomerCompletionNotificationPreparation {
+  /** Creates idempotent completion candidates for one completed Work Item.
+   *
+   * @param workspaceId Workspace containing the completed Work Item.
+   * @param teamId Team owning the completed Work Item.
+   * @param workItemId Completed Work Item identifier.
+   * @param actorId Stable actor or service identity used for the projection.
+   * @returns A promise that resolves after the candidates are durable.
+   */
+  prepareCompletionNotifications(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    actorId: string,
+  ): Promise<unknown>
+  /** Removes stale completion candidates after a Work Item leaves completed status.
+   *
+   * @param workspaceId Workspace containing the reopened Work Item.
+   * @param teamId Team owning the reopened Work Item.
+   * @param workItemId Reopened Work Item identifier.
+   * @param actorId Stable actor or service identity used for the invalidation.
+   * @returns A promise that resolves after the candidates are removed.
+   */
+  invalidateCompletionNotifications?(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+    actorId: string,
+  ): Promise<unknown>
+}
+
 /** Focused Rule-read and execution capabilities required by event delivery. */
 export type AutomationEventPort = AutomationExecutionServicePort &
   Pick<AutomationRuleTemplatePort, 'listRules'>
@@ -123,6 +155,7 @@ export function parseAutomationStreamRecord(record: DynamoStreamRecord) {
  * @param entitlement - Server-side Automation feature gate.
  * @param engine - Rule execution engine.
  * @param workItems - Optional canonical Work Item reader used for hydration.
+ * @param customerCompletionNotifications - Optional durable Customer fallback.
  * @returns A durable Automation event processor.
  */
 export function createAutomationEventProcessor(
@@ -133,9 +166,14 @@ export function createAutomationEventProcessor(
     createUnavailableAutomationActionExecutor(),
   ),
   workItems?: AutomationWorkItemReader,
+  customerCompletionNotifications?: CustomerCompletionNotificationPreparation,
 ): AutomationEventProcessor {
   return {
     async process(event) {
+      await prepareCustomerCompletionNotificationsFromAudit(
+        event,
+        customerCompletionNotifications,
+      )
       if (!await entitlement.isAutomationEnabled(event.workspaceId)) return
       const rules = await client.listRules(event.workspaceId)
       const hydratedEvent = await hydrateAutomationWorkItem(event, workItems)
@@ -144,6 +182,58 @@ export function createAutomationEventProcessor(
       ))
     },
   }
+}
+
+/** Replays Customer completion preparation from the durable Audit stream event.
+ *
+ * @param event Parsed Audit event from the durable stream.
+ * @param dependencies Optional Customer projection dependency.
+ * @returns A promise that resolves after preparation or rejects for stream retry.
+ */
+async function prepareCustomerCompletionNotificationsFromAudit(
+  event: AutomationEvent,
+  dependencies: CustomerCompletionNotificationPreparation | undefined,
+): Promise<void> {
+  const metadata = event.metadata
+  const completionTransition = metadata?.completionTransition === true
+  const completionReopened = metadata?.completionReopened === true
+  if (
+    dependencies === undefined ||
+    event.eventType !== 'work-item.updated' ||
+    (!completionTransition && !completionReopened)
+  ) return
+  const teamId = readText(metadata?.teamId)
+  const workItemId = readText(metadata?.issueId) ?? readText(metadata?.workItemId)
+  if (!teamId || !workItemId) {
+    throw new AutomationError(
+      'invalid-input',
+      'AutomationOutboxEventMalformed',
+      'Work Item completion audit event is missing Customer notification scope.',
+    )
+  }
+  if (completionReopened) {
+    if (dependencies.invalidateCompletionNotifications === undefined) {
+      throw new AutomationError(
+        'unavailable',
+        'CustomerCompletionInvalidationUnavailable',
+        'Customer completion invalidation is not configured.',
+        true,
+      )
+    }
+    await dependencies.invalidateCompletionNotifications(
+      event.workspaceId,
+      teamId,
+      workItemId,
+      'automation-customer-completion-invalidation',
+    )
+    return
+  }
+  await dependencies.prepareCompletionNotifications(
+    event.workspaceId,
+    teamId,
+    workItemId,
+    'automation-customer-completion-projection',
+  )
 }
 
 async function hydrateAutomationWorkItem(

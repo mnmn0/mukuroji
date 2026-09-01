@@ -105,6 +105,8 @@ type HarnessOptions = {
   validateAdmission?: TriageAdmissionValidator
   /** Commit-time settings reference guards. */
   validateConfigurationReferences?: TriageConfigurationReferenceValidator
+  /** Customer table used to test cross-store association conditions. */
+  customerTableName?: string
 }
 
 /** Creates a real DocumentClient whose send method follows a deterministic response list.
@@ -145,6 +147,7 @@ function createHarness(responses: unknown[], options: HarnessOptions = {}) {
       cursorSecret: 'test-cursor-secret',
       now: () => new Date(NOW),
       id: () => 'triage-manual-1',
+      ...(options.customerTableName ? { customerTableName: options.customerTableName } : {}),
       ...(options.validateAdmission
         ? { validateAdmission: options.validateAdmission }
         : {}),
@@ -546,6 +549,441 @@ describe('DynamoDbTriageClient transaction failure classification', () => {
     }
   })
 })
+
+describe('DynamoDbTriageClient Customer cleanup', () => {
+  test('clears matching Customer reverse links through the revision-fenced association transaction', async () => {
+    const entry = createEntry()
+    entry.customerId = 'customer-1'
+    entry.contactId = 'contact-1'
+    entry.customerRequestId = 'request-1'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Items: [storedEntry] },
+      { Item: storedEntry },
+      {},
+    ], { customerTableName: 'CustomersTable' })
+
+    try {
+      await harness.client.clearCustomerAssociations('workspace-1', 'customer-1', 'member@example.com')
+
+      expect(harness.commands.map(({ name }) => name)).toEqual([
+        'QueryCommand',
+        'GetCommand',
+        'TransactWriteCommand',
+      ])
+      const transaction = harness.commands[2]?.input
+      expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+            ConditionExpression: expect.stringContaining('#deletion.#customerId = :customerId'),
+            ExpressionAttributeValues: expect.objectContaining({
+              ':customerId': 'customer-1',
+              ':triagePhase': 'triage',
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            ConditionExpression: '#revision = :expectedRevision AND teamId = :teamId',
+            ExpressionAttributeValues: expect.objectContaining({
+              ':expectedRevision': entry.revision,
+              ':entry': expect.objectContaining({
+                customerId: undefined,
+                contactId: undefined,
+                customerRequestId: undefined,
+              }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'CUSTOMER#customer-1' },
+            ConditionExpression: 'attribute_exists(#customer) AND #customer.#id = :customerId',
+          }),
+        }),
+        expect.objectContaining({
+          Put: expect.objectContaining({
+            Item: expect.objectContaining({
+              event: expect.objectContaining({ type: 'customer-associated' }),
+            }),
+          }),
+        }),
+      ]))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('requires an unmarked Customer for a new association', async () => {
+    const entry = createEntry()
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Item: storedEntry },
+      {},
+    ], { customerTableName: 'CustomersTable' })
+
+    try {
+      await harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        {
+          expectedRevision: entry.revision,
+          customerId: 'customer-1',
+        },
+      )
+
+      const transaction = harness.commands[1]?.input
+      expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+            ConditionExpression: expect.stringContaining('attribute_not_exists(#requestOperation)'),
+            ExpressionAttributeNames: expect.objectContaining({
+              '#contactOperation': 'contactOperation',
+              '#requestOperation': 'requestOperation',
+            }),
+          }),
+        }),
+      ]))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fences Contact and Request rows when creating a Customer association', async () => {
+    const entry = createEntry()
+    entry.customerId = 'customer-1'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Item: storedEntry },
+      {},
+    ], { customerTableName: 'CustomersTable' })
+
+    try {
+      await harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        {
+          expectedRevision: entry.revision,
+          contactId: 'contact-1',
+          customerRequestId: 'request-1',
+        },
+      )
+
+      const transactItems = harness.commands[1]?.input.TransactItems
+      expect(transactItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#customer-1#contact-1' },
+            ConditionExpression: 'attribute_exists(#contact) AND #contact.#customerId = :customerId AND #contact.#status = :activeStatus',
+            ExpressionAttributeNames: {
+              '#contact': 'contact',
+              '#customerId': 'customerId',
+              '#status': 'status',
+            },
+          }),
+        }),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'CUSTOMER#customer-1' },
+            ConditionExpression: 'attribute_exists(#customer) AND #customer.#id = :customerId',
+          }),
+        }),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-1#request-1' },
+            ConditionExpression: 'attribute_exists(#request) AND #request.#customerId = :customerId AND #request.#triageEntryId = :entryId',
+            ExpressionAttributeNames: {
+              '#request': 'request',
+              '#customerId': 'customerId',
+              '#triageEntryId': 'triageEntryId',
+            },
+          }),
+        }),
+      ]))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('allows source-owned Contact and Request rows during a Customer merge repoint', async () => {
+    const entry = createEntry()
+    entry.customerId = 'customer-source'
+    entry.contactId = 'contact-1'
+    entry.customerRequestId = 'request-1'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Item: storedEntry },
+      {},
+    ], { customerTableName: 'CustomersTable' })
+
+    try {
+      await harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        {
+          expectedRevision: entry.revision,
+          customerId: 'customer-target',
+          contactId: entry.contactId,
+          customerRequestId: entry.customerRequestId,
+        },
+        undefined,
+        {
+          kind: 'merge',
+          sourceCustomerId: 'customer-source',
+          targetCustomerId: 'customer-target',
+        },
+      )
+
+      const transactItems = harness.commands[1]?.input.TransactItems
+      expect(transactItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: { workspaceId: 'workspace-1', recordKey: 'CUSTOMER#customer-target' },
+            ConditionExpression: 'attribute_exists(#customer) AND #customer.#id = :customerId',
+            ExpressionAttributeValues: { ':customerId': 'customer-target' },
+          }),
+        }),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: { workspaceId: 'workspace-1', recordKey: 'CUSTOMER#customer-source' },
+            ConditionExpression: 'attribute_exists(#customer) AND #customer.#id = :customerId',
+            ExpressionAttributeValues: { ':customerId': 'customer-source' },
+          }),
+        }),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#customer-source#contact-1' },
+            ConditionExpression: 'attribute_exists(#contact) AND (#contact.#customerId = :customerId OR #contact.#customerId = :sourceCustomerId)',
+            ExpressionAttributeValues: {
+              ':customerId': 'customer-source',
+              ':sourceCustomerId': 'customer-source',
+            },
+          }),
+        }),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-source#request-1' },
+            ConditionExpression: 'attribute_exists(#request) AND (#request.#customerId = :customerId OR #request.#customerId = :sourceCustomerId) AND #request.#triageEntryId = :entryId',
+            ExpressionAttributeValues: {
+              ':customerId': 'customer-source',
+              ':sourceCustomerId': 'customer-source',
+              ':entryId': 'triage-1',
+            },
+          }),
+        }),
+      ]))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('does not require an active Contact while clearing a Customer deletion association', async () => {
+    const entry = createEntry()
+    entry.customerId = 'customer-1'
+    entry.contactId = 'contact-1'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Item: storedEntry },
+      {},
+    ], { customerTableName: 'CustomersTable' })
+
+    try {
+      await harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        {
+          expectedRevision: entry.revision,
+          customerId: null,
+          contactId: null,
+          customerRequestId: null,
+        },
+        undefined,
+        { kind: 'deletion', customerId: 'customer-1' },
+      )
+
+      const transaction = harness.commands.find((command) => command.name === 'TransactWriteCommand')
+      const transactionItems = isUnknownArray(transaction?.input.TransactItems)
+        ? transaction.input.TransactItems
+        : []
+      const contactCheck = transactionItems.find((item) => {
+        if (!isRecord(item) || !isRecord(item.ConditionCheck) || !isRecord(item.ConditionCheck.Key)) return false
+        return item.ConditionCheck.Key.recordKey === 'CONTACT#customer-1#contact-1'
+      })
+      if (!isRecord(contactCheck) || !isRecord(contactCheck.ConditionCheck)) {
+        throw new TypeError('Expected a Contact condition check.')
+      }
+      expect(contactCheck.ConditionCheck).toMatchObject({
+        ConditionExpression: 'attribute_exists(#contact) AND #contact.#customerId = :customerId',
+        ExpressionAttributeNames: {
+          '#contact': 'contact',
+          '#customerId': 'customerId',
+        },
+      })
+      expect(contactCheck.ConditionCheck).not.toHaveProperty('ExpressionAttributeValues.:activeStatus')
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a caller authorization cancellation separately from a Triage revision conflict', async () => {
+    const entry = createEntry()
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const authorizationGuard = {
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member@example.com' },
+        ConditionExpression: '#status = :active',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'active' },
+      },
+    }
+    const failure = Object.assign(new Error('Authorization changed.'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+        { Code: 'None' },
+        { Code: 'None' },
+      ],
+    })
+    const harness = createHarness([{ Item: storedEntry }, failure], { customerTableName: 'CustomersTable' })
+
+    try {
+      await expect(harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        { expectedRevision: entry.revision, customerId: 'customer-1' },
+        [authorizationGuard],
+      )).rejects.toMatchObject({ code: 'TriageAuthorizationChanged', status: 409 })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a Customer graph cancellation separately from a Triage revision conflict', async () => {
+    const entry = createEntry()
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const failure = Object.assign(new Error('Customer row changed.'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+        { Code: 'None' },
+      ],
+    })
+    const harness = createHarness([{ Item: storedEntry }, failure], { customerTableName: 'CustomersTable' })
+
+    try {
+      await expect(harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        { expectedRevision: entry.revision, customerId: 'customer-1' },
+      )).rejects.toMatchObject({ code: 'TriageCustomerAssociationConflict', status: 409 })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a Customer operation cancellation separately from a Triage revision conflict', async () => {
+    const entry = createEntry()
+    entry.customerId = 'customer-1'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const failure = Object.assign(new Error('Customer deletion changed.'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [
+        { Code: 'None' },
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+        { Code: 'None' },
+      ],
+    })
+    const harness = createHarness([{ Item: storedEntry }, failure], { customerTableName: 'CustomersTable' })
+
+    try {
+      await expect(harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        { expectedRevision: entry.revision, customerId: null },
+        undefined,
+        { kind: 'deletion', customerId: 'customer-1' },
+      )).rejects.toMatchObject({ code: 'TriageCustomerOperationConflict', status: 409 })
+    } finally {
+      harness.restore()
+    }
+  })
+})
+
+/** Narrows unknown values to plain object records for command assertions. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Narrows unknown values to read-only arrays without introducing an unsafe cast. */
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value)
+}
 
 describe('DynamoDbTriageClient configuration receipts', () => {
   test('commits and replays an initial revision-zero replacement', async () => {

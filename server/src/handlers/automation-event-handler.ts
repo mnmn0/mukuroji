@@ -43,6 +43,7 @@ export {
   processAutomationEventBatch,
   type AutomationEventPort,
   type AutomationEventProcessor,
+  type CustomerCompletionNotificationPreparation,
   type AutomationWorkItemReader,
   type BatchResponse,
   type DynamoStreamEvent,

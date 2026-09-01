@@ -8,6 +8,7 @@ import type {
   AuditEventV1,
 } from '../../modules/audit/audit'
 import type { CognitoClient } from '../../modules/authentication'
+import type { CustomerClient } from '../../modules/customers'
 import type { AiAssistanceService } from '../../modules/ai-assistance'
 import type {
   AutomationBulkOperationPort,
@@ -114,6 +115,8 @@ export interface AuthenticationDependencies {
 
 /** Dependencies required by Workspace and Enterprise Identity routes. */
 export interface WorkspaceDependencies {
+  /** Provides Customer, Contact, and Customer Request persistence. */
+  customers: CustomerClient
   /** Provides the Dashboard read model. */
   dashboardSummary: DashboardSummaryClient
   /** Provides Team, Project, and member directory persistence. */

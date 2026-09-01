@@ -54,6 +54,7 @@ export function buildScheduleWorkers(
   const {
     analyticsTable,
     auditEventsTable,
+    customersTable,
     planningTable,
     projectDirectoryTable,
     tenantAdministrationTable,
@@ -198,7 +199,7 @@ export function buildScheduleWorkers(
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
       description:
-        'Emits deterministic Work Item and Planning health update notification events.',
+        'Emits deterministic notifications and applies due Customer retention redaction.',
       onFailure: new lambdaDestinations.SqsDestination(notificationScheduleDlq),
       retryAttempts: 2,
       bundling: {
@@ -210,6 +211,7 @@ export function buildScheduleWorkers(
       environment: {
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+        CUSTOMERS_TABLE_NAME: customersTable.tableName,
         NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
         NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
         PLANNING_TABLE_NAME: planningTable.tableName,
@@ -249,7 +251,29 @@ export function buildScheduleWorkers(
   }));
   projectDirectoryTable.grants.readData(notificationScheduleFunction);
   workItemsTable.grants.readData(notificationScheduleFunction);
+  notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:UpdateItem'],
+    resources: [workItemsTable.tableArn],
+    conditions: {
+      'ForAllValues:StringEquals': {
+        'dynamodb:Attributes': [
+          'directoryTeamId',
+          'issueId',
+          'customerCompletionPreparationAt',
+          'customerCompletionPreparationRevision',
+        ],
+      },
+    },
+  }));
   auditEventsTable.grants.writeData(notificationScheduleFunction);
+  notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:TransactWriteItems'],
+    resources: [customersTable.tableArn],
+  }));
+  notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:Query'],
+    resources: [customersTable.tableArn, `${customersTable.tableArn}/index/CustomerRetentionIndex`],
+  }));
 
   new cloudwatch.Alarm(scope, 'NotificationScheduleDlqAlarm', {
     alarmDescription:

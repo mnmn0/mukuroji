@@ -89,6 +89,8 @@ export type TenantOperationResourceOwnerConfig = {
   analyticsTableName: string
   /** Public request-intake table. */
   requestIntakeTableName: string
+  /** Workspace-scoped Customer and Customer Request table. */
+  customersTableName: string
   /** Workspace directory table. */
   projectDirectoryTableName: string
   /** Immutable audit event table retained after closure. */
@@ -345,6 +347,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         nestedWorkspaceSelector(['value', 'targetWorkspaceId'], 'equals'),
       ]),
       exactTarget('analytics', this.config.analyticsTableName, 'workspaceId', 'recordKey'),
+      exactTarget('customers', this.config.customersTableName, 'workspaceId', 'recordKey'),
       attributeTarget(
         'request-intake',
         this.config.requestIntakeTableName,

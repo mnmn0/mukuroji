@@ -644,6 +644,7 @@ export const workspaceMessages = {
   'sidebar.nav.myTasks': 'My tasks',
   'sidebar.nav.inbox': 'Inbox',
   'sidebar.nav.requests': 'Requests',
+  'sidebar.nav.customers': 'Customers',
   'sidebar.nav.documents': 'Documents',
   'sidebar.nav.dashboard': 'Dashboard',
   'sidebar.nav.planning': 'Planning',
