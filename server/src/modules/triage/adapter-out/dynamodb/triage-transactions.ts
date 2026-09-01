@@ -98,6 +98,8 @@ export type CreateTriageCustomerAssociationTransactionItemsInput = {
   event: TriageEntryEvent
   /** Live authorization fences supplied by the HTTP composition boundary. */
   authorizationConditionChecks?: TriageTransactionItems
+  /** Customer operation condition that fences the cross-store association. */
+  customerOperationConditionCheck?: TriageTransactionItem
 }
 
 /** Builds the root update and immutable event for a Customer association.
@@ -117,6 +119,7 @@ export function createTriageCustomerAssociationTransactionItems(
   }
   return [
     ...(input.authorizationConditionChecks ?? []),
+    ...(input.customerOperationConditionCheck ? [input.customerOperationConditionCheck] : []),
     createEntryUpdate(
       input.tableName,
       input.next,

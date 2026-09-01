@@ -56,6 +56,7 @@ import {
 import {
   createTriageBulkTargetIdempotencyKey,
   createTriageInputFingerprint,
+  type TriageCustomerAssociationOperation,
 } from '../../triage'
 import type {
   ResolveTriageWorkItemAction,
@@ -81,6 +82,7 @@ import {
   decodeTriageEntryRow,
   DEFAULT_TRIAGE_WAKE_SHARD_COUNT,
   type TriageTransactionContribution,
+  type TriageTransactionItem,
   type TriageTransactionItems,
 } from './triage-transactions'
 import type { TriageAuditOutboxConfiguration } from './triage-audit-events'
@@ -113,6 +115,8 @@ export type DynamoDbTriageClientOptions = {
   documentClient?: DynamoDBDocumentClient
   /** Low-level client used when no DocumentClient is supplied. */
   dynamoDbClient?: DynamoDBClient
+  /** Customer table whose operation marker fences Customer associations. */
+  customerTableName?: string
   /** Number of deterministic sparse wake partitions. */
   wakeShardCount?: number
   /** Secret authenticating scope-bound pagination cursors. */
@@ -259,6 +263,9 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Request Intake DocumentClient. */
   private readonly documentClient: DynamoDBDocumentClient
 
+  /** Optional Customer table used for cross-store operation conditions. */
+  private readonly customerTableName?: string
+
   /** Number of deterministic sparse wake partitions. */
   private readonly wakeShardCount: number
 
@@ -307,6 +314,10 @@ export class DynamoDbTriageClient implements TriageClient {
     this.documentClient = options.documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
       marshallOptions: { removeUndefinedValues: true },
     })
+    const configuredCustomerTableName = options.customerTableName?.trim() ?? readEnvironment('CUSTOMERS_TABLE_NAME')
+    this.customerTableName = configuredCustomerTableName
+      ? requireText(configuredCustomerTableName, 'Customer table name', 1_000)
+      : undefined
     this.tableName = requireText(
       options.tableName ?? readEnvironment('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
       'Request Intake table name',
@@ -490,6 +501,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param actor The authenticated mutation actor.
    * @param input The customer association and expected revision.
    * @param authorizationConditionChecks Live Team, Project, and actor fences joined to the transaction.
+   * @param customerOperation Durable Customer operation that owns a cleanup or repoint mutation.
    * @returns The updated permission-safe Triage Entry.
    */
   async associateCustomer(
@@ -499,6 +511,7 @@ export class DynamoDbTriageClient implements TriageClient {
     actor: TriageActor,
     input: UpdateTriageCustomerAssociationInput,
     authorizationConditionChecks?: TriageAuthorizationConditionChecks,
+    customerOperation?: TriageCustomerAssociationOperation,
   ): Promise<TriageEntry> {
     requireUserId(actor.id, 'Triage actor ID')
     const current = await this.getEntryForMutation(workspaceId, teamId, entryId)
@@ -541,12 +554,18 @@ export class DynamoDbTriageClient implements TriageClient {
       updatedAt: now,
     }
     validateTriageCustomerAssociation(next)
+    const customerOperationConditionCheck = this.createCustomerOperationConditionCheck(
+      workspaceId,
+      nextCustomerId,
+      customerOperation,
+    )
     const transactItems = createTriageCustomerAssociationTransactionItems({
       tableName: this.tableName,
       current,
       next,
       event: associationEvent,
       authorizationConditionChecks,
+      customerOperationConditionCheck,
     })
     if (transactItems.length > 100) {
       throw new TriageError(409, 'TriageTransactionTooLarge', 'The Customer association is too large.')
@@ -564,26 +583,15 @@ export class DynamoDbTriageClient implements TriageClient {
     return projectTriageEntryForResponse(next, now)
   }
 
-  /** Clears reverse Customer links before a Customer graph is deleted.
-   *
-   * The Customer deletion route supplies the already-authorized Workspace
-   * operation. Every matching entry is nevertheless reread and updated through
-   * the normal revision-fenced association path so concurrent Triage changes
-   * cannot be silently overwritten.
+  /** Lists every Triage Entry currently associated with a Customer.
    *
    * @param workspaceId The owning Workspace ID.
-   * @param customerId The Customer whose links must be cleared.
-   * @param actorId The authenticated actor performing the cleanup.
-   * @returns A promise that resolves after all matching links are cleared.
+   * @param customerId The Customer whose reverse links should be listed.
+   * @returns The currently associated Triage Entries.
    */
-  async clearCustomerAssociations(
-    workspaceId: string,
-    customerId: string,
-    actorId: string,
-  ): Promise<void> {
+  async listCustomerAssociations(workspaceId: string, customerId: string): Promise<TriageEntry[]> {
     requireWorkspaceId(workspaceId)
     requireIdentifier(customerId, 'Customer ID')
-    requireUserId(actorId, 'Triage actor ID')
     const entries: TriageEntry[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
@@ -619,6 +627,28 @@ export class DynamoDbTriageClient implements TriageClient {
       }
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey !== undefined)
+    return entries
+  }
+
+  /** Clears reverse Customer links before a Customer graph is deleted.
+   *
+   * The Customer deletion route supplies the already-authorized Workspace
+   * operation. Every matching entry is nevertheless reread and updated through
+   * the normal revision-fenced association path so concurrent Triage changes
+   * cannot be silently overwritten.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose links must be cleared.
+   * @param actorId The authenticated actor performing the cleanup.
+   * @returns A promise that resolves after all matching links are cleared.
+   */
+  async clearCustomerAssociations(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+  ): Promise<void> {
+    requireUserId(actorId, 'Triage actor ID')
+    const entries = await this.listCustomerAssociations(workspaceId, customerId)
 
     for (const entry of entries) {
       await this.associateCustomer(
@@ -632,7 +662,66 @@ export class DynamoDbTriageClient implements TriageClient {
           contactId: null,
           customerRequestId: null,
         },
+        undefined,
+        { kind: 'deletion', customerId },
       )
+    }
+  }
+
+  /** Builds the Customer META condition shared by association and deletion flows.
+   *
+   * @param workspaceId Workspace containing the Customer metadata row.
+   * @param customerId Customer assigned by the resulting association, when any.
+   * @param operation Cross-store operation that owns the mutation, when any.
+   * @returns A transaction condition or undefined when the Customer table is not configured.
+   */
+  private createCustomerOperationConditionCheck(
+    workspaceId: string,
+    customerId: string | undefined,
+    operation: TriageCustomerAssociationOperation | undefined,
+  ): TriageTransactionItem | undefined {
+    if (!this.customerTableName) return undefined
+    const names: Record<string, string> = {
+      '#workspaceId': 'workspaceId',
+      '#recordKey': 'recordKey',
+    }
+    const values: Record<string, unknown> = {}
+    let conditionExpression = 'attribute_exists(#workspaceId) AND attribute_exists(#recordKey)'
+    if (operation?.kind === 'deletion') {
+      if (customerId !== undefined && customerId !== operation.customerId) {
+        throw new TriageError(400, 'InvalidTriageInput', 'The deletion operation does not own this Customer association.')
+      }
+      conditionExpression += ' AND #deletion.#customerId = :customerId AND #deletion.#phase = :triagePhase'
+      names['#deletion'] = 'deletion'
+      names['#customerId'] = 'customerId'
+      names['#phase'] = 'phase'
+      values[':customerId'] = operation.customerId
+      values[':triagePhase'] = 'triage'
+    } else if (operation?.kind === 'merge') {
+      if (customerId !== operation.targetCustomerId) {
+        throw new TriageError(400, 'InvalidTriageInput', 'The merge operation does not target this Customer association.')
+      }
+      conditionExpression += ' AND #merge.#mergeSource = :mergeSource AND #merge.#mergeTarget = :mergeTarget'
+      names['#merge'] = 'merge'
+      names['#mergeSource'] = 'sourceCustomerId'
+      names['#mergeTarget'] = 'targetCustomerId'
+      values[':mergeSource'] = operation.sourceCustomerId
+      values[':mergeTarget'] = operation.targetCustomerId
+    } else if (customerId !== undefined) {
+      conditionExpression += ' AND attribute_not_exists(#deletion) AND attribute_not_exists(#merge)'
+      names['#deletion'] = 'deletion'
+      names['#merge'] = 'merge'
+    } else {
+      return undefined
+    }
+    return {
+      ConditionCheck: {
+        TableName: this.customerTableName,
+        Key: { workspaceId, recordKey: 'META' },
+        ConditionExpression: conditionExpression,
+        ExpressionAttributeNames: names,
+        ...(Object.keys(values).length > 0 ? { ExpressionAttributeValues: values } : {}),
+      },
     }
   }
 

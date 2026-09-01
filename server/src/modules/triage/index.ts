@@ -26,6 +26,7 @@ export {
   type TriageAuthorizationConditionChecks,
   type TriageAuditContextFactory,
   type TriageClient,
+  type TriageCustomerAssociationOperation,
   type TriageIdempotency,
   type TriageWorkItemActionResolution,
 } from './triage'

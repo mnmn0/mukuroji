@@ -9162,7 +9162,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
           workspaceId: principal.directoryId,
           teamId,
           issueId,
-          error,
+          errorCode: error instanceof CustomerError ? error.code : 'CustomerImpactUnavailable',
         })
       }
     }
@@ -20096,16 +20096,27 @@ function hasEnterpriseCustomerPermission(
   permission: EnterprisePermissionId,
   scope?: CustomerAuthorizationScope,
 ): boolean {
-  const resource: EnterpriseAuthorizationResource = scope
+  const resource: EnterpriseAuthorizationResource = scope === undefined
     ? {
-        workspaceId: principal.directoryId,
-        kind: 'team',
-        targetId: scope.teamId,
-      }
-    : {
         workspaceId: principal.directoryId,
         kind: 'workspace',
       }
+    : 'teamId' in scope
+      ? {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: scope.teamId,
+        }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: scope.projectId,
+          ...(principal.enterpriseAuthorizationResource?.kind === 'project' &&
+            principal.enterpriseAuthorizationResource.targetId === scope.projectId &&
+            principal.enterpriseAuthorizationResource.parentTeamId !== undefined
+            ? { parentTeamId: principal.enterpriseAuthorizationResource.parentTeamId }
+            : {}),
+        }
   const evaluation = principal.enterpriseAuthorizationEvaluation
   if (evaluation !== undefined) {
     return evaluateEnterpriseAccess({
@@ -20130,7 +20141,9 @@ function isSameEnterpriseAuthorizationResource(
 ): boolean {
   if (!left || left.workspaceId !== right.workspaceId || left.kind !== right.kind) return false
   if (right.kind === 'workspace') return true
-  return left.kind === 'team' && left.targetId === right.targetId
+  return left.targetId === right.targetId && (
+    right.kind === 'team' || left.parentTeamId === right.parentTeamId
+  )
 }
 
 /**

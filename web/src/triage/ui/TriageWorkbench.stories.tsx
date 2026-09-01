@@ -213,6 +213,22 @@ export const CustomerRequestAssociation: Story = {
   },
 }
 
+/** Accepted Triage Entry keeps an explicit retry state when Customer options fail to load. */
+export const CustomerRequestAssociationError: Story = {
+  args: {
+    customerOptionsErrorMessage: 'Customers could not be loaded.',
+    explicitEntryId: 'triage-form-1',
+    onCreateCustomerRequest,
+    onRetryCustomerOptions: fn(),
+    selectedEntry: entryViews[2],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Customers could not be loaded.')
+    await userEvent.click(canvas.getByRole('button', { name: 'Reload' }))
+  },
+}
+
 const onAiTriageAction = fn(async () => triageEntryFixtures[0] ?? Promise.reject(new Error('Missing fixture')))
 const onTeamTriageAiGenerate = fn(async (input: GenerateAiAssistanceRequest) => {
   void input

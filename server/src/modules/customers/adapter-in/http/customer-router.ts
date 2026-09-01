@@ -44,11 +44,20 @@ export type CustomerPrincipal = {
   canViewSensitiveData: boolean
 }
 
-/** Team resource used when a Customer route is authorized through Team access. */
-export type CustomerAuthorizationScope = {
-  /** Team that owns the Customer operation's canonical resource. */
-  teamId: string
-}
+/** Resource used when a Customer route is authorized through a scoped access check. */
+export type CustomerAuthorizationScope =
+  | {
+      /** Team that owns the Customer operation's canonical resource. */
+      teamId: string
+      /** Project scope is mutually exclusive with a Team scope. */
+      projectId?: never
+    }
+  | {
+      /** Project that owns the Customer operation's canonical resource. */
+      projectId: string
+      /** Team scope is mutually exclusive with a Project scope. */
+      teamId?: never
+    }
 
 /** Result of resolving a Work Item for a Customer Request link. */
 export type CustomerWorkItemAuthorization = {
@@ -75,7 +84,7 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   /** Resolves and authorizes a Project before reading or mutating its associations. */
   verifyProjectAccess(principal: Principal, projectId: string, minimum: 'viewer' | 'member'): Promise<void>
   /** Returns the Triage operations used for Customer associations. */
-  getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'clearCustomerAssociations'>
+  getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'listCustomerAssociations' | 'clearCustomerAssociations'>
   /** Safely parses a JSON request body. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Maps Customer, authentication, authorization, and persistence failures to HTTP. */
@@ -280,27 +289,26 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
       const customerId = context.req.param('customerId') ?? ''
       const expectedRevision = readExpectedRevision(context.req.query('expectedRevision'))
-      const customer = await dependencies.getCustomers().getCustomer(
-        principal.directoryId,
-        customerId,
-      )
-      if (customer.customer.revision !== expectedRevision) {
-        throw new CustomerError(409, 'CustomerRevisionConflict', 'Customer changed. Reload and try again.')
-      }
       const triage = dependencies.getTriage()
       if (!triage.clearCustomerAssociations) {
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association cleanup is unavailable.')
       }
+      const customers = dependencies.getCustomers()
+      await customers.beginCustomerDeletion(
+        principal.directoryId,
+        customerId,
+        principal.userKey,
+        expectedRevision,
+      )
       await triage.clearCustomerAssociations(
         principal.directoryId,
         customerId,
         principal.userKey,
       )
-      await dependencies.getCustomers().deleteCustomer(
+      await customers.completeCustomerDeletion(
         principal.directoryId,
         customerId,
         principal.userKey,
-        expectedRevision,
       )
       return context.body(null, 204)
     } catch (error) {
@@ -311,11 +319,52 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customers/:customerId/merge', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
-      const detail = await dependencies.getCustomers().mergeCustomer(
+      const triage = dependencies.getTriage()
+      if (!triage.associateCustomer || !triage.listCustomerAssociations) {
+        throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association repointing is unavailable.')
+      }
+      const customers = dependencies.getCustomers()
+      const sourceCustomerId = context.req.param('customerId') ?? ''
+      const input = readMergeCustomerInput(await dependencies.readJson(context.req))
+      await customers.beginCustomerMerge(
         principal.directoryId,
-        context.req.param('customerId') ?? '',
+        sourceCustomerId,
         principal.userKey,
-        readMergeCustomerInput(await dependencies.readJson(context.req)),
+        input,
+      )
+      const associations = await triage.listCustomerAssociations(principal.directoryId, sourceCustomerId)
+      for (const entry of associations) {
+        const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
+          ? await dependencies.createTriageAuthorizationConditionChecks(
+              principal,
+              entry.teamId,
+              [entry.projectId],
+            )
+          : undefined
+        await triage.associateCustomer(
+          principal.directoryId,
+          entry.teamId,
+          entry.id,
+          { id: principal.userKey },
+          {
+            expectedRevision: entry.revision,
+            customerId: input.targetCustomerId,
+            contactId: entry.contactId ?? null,
+            customerRequestId: entry.customerRequestId ?? null,
+          },
+          authorizationConditionChecks,
+          {
+            kind: 'merge',
+            sourceCustomerId,
+            targetCustomerId: input.targetCustomerId,
+          },
+        )
+      }
+      const detail = await customers.completeCustomerMerge(
+        principal.directoryId,
+        sourceCustomerId,
+        principal.userKey,
+        input,
       )
       return context.json(await projectCustomerDetail(principal, detail, dependencies))
     } catch (error) {
@@ -430,9 +479,19 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.delete('/api/customer-requests/:requestId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
-      await dependencies.getCustomers().deleteRequest(
+      const customers = dependencies.getCustomers()
+      const requestId = context.req.param('requestId') ?? ''
+      const request = await customers.getRequest(principal.directoryId, requestId)
+      if (request.triageEntryId !== undefined) {
+        throw new CustomerError(
+          409,
+          'CustomerRequestTriageAssociation',
+          'A Customer Request associated with a Triage Entry cannot be deleted.',
+        )
+      }
+      await customers.deleteRequest(
         principal.directoryId,
-        context.req.param('requestId') ?? '',
+        requestId,
         principal.userKey,
         readExpectedRevision(context.req.query('expectedRevision')),
       )
@@ -692,8 +751,8 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
 
   router.get('/api/projects/:projectId/customer-impact', async (context) => {
     try {
-      const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const projectId = requirePathValue(context.req.param('projectId'), 'Project ID')
+      const principal = await dependencies.requireWorkspaceAccess(context, 'read', { projectId })
       await dependencies.verifyProjectAccess(principal, projectId, 'viewer')
       return context.json(projectCustomerImpact(principal, await dependencies.getCustomers().getProjectImpact(principal.directoryId, projectId)))
     } catch (error) {

@@ -92,6 +92,23 @@ export type TriageAuditContextFactory = (
   idempotency: TriageIdempotency,
 ) => MutationAuditContext
 
+/** Cross-store Customer operation that owns a Triage association mutation. */
+export type TriageCustomerAssociationOperation =
+  | {
+      /** Operation type represented by the Customer deletion marker. */
+      kind: 'deletion'
+      /** Customer whose association is being cleared. */
+      customerId: string
+    }
+  | {
+      /** Operation type represented by the Customer merge marker. */
+      kind: 'merge'
+      /** Customer being merged away. */
+      sourceCustomerId: string
+      /** Customer that retains the merged graph. */
+      targetCustomerId: string
+    }
+
 /** Work Item resolution contributed by application composition. */
 export type TriageWorkItemActionResolution = {
   /** The canonical Work Item selected or created for the action. */
@@ -270,6 +287,7 @@ export interface TriageClient {
    * @param actor The authenticated actor performing the association.
    * @param input The association and expected revision.
    * @param authorizationConditionChecks Live Team, Project, and actor fences joined to the association transaction.
+   * @param customerOperation Durable Customer operation that owns a cleanup or repoint mutation.
    * @returns The updated permission-safe entry, when the adapter supports the operation.
    */
   associateCustomer?(
@@ -279,7 +297,18 @@ export interface TriageClient {
     actor: TriageActor,
     input: UpdateTriageCustomerAssociationInput,
     authorizationConditionChecks?: TriageAuthorizationConditionChecks,
+    customerOperation?: TriageCustomerAssociationOperation,
   ): Promise<TriageEntry>
+  /** Lists every Triage Entry currently associated with a Customer.
+   *
+   * The result is intended for resumable cross-store Customer merge orchestration;
+   * callers must revision-fence each subsequent association mutation.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose reverse links should be listed.
+   * @returns The currently associated Triage Entries.
+   */
+  listCustomerAssociations?(workspaceId: string, customerId: string): Promise<TriageEntry[]>
   /** Clears every Customer association in one Workspace before Customer deletion.
    *
    * The caller must already hold the Workspace-level Customer management

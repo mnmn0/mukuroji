@@ -3,6 +3,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { expect, spyOn, test } from 'bun:test'
 import type { CustomerRequest } from '@mukuroji/contracts'
 import {
+  createCustomerContactRecord,
   createCustomerRecord,
   createCustomerRequestRecord,
 } from '../../domain/customer'
@@ -43,12 +44,12 @@ function createRequestRow(request: CustomerRequest) {
 }
 
 /** Creates a persisted row for one Customer root. */
-function createCustomerRow() {
+function createCustomerRow(customerId = 'customer-1', name = 'Acme Corporation') {
   const customer = createCustomerRecord(
     'workspace-1',
-    'customer-1',
+    customerId,
     {
-      name: 'Acme Corporation',
+      name,
       tier: 'enterprise',
       size: 'enterprise',
       status: 'active',
@@ -61,6 +62,23 @@ function createCustomerRow() {
     recordKey: `CUSTOMER#${customer.id}`,
     entityType: 'customer',
     customer,
+  }
+}
+
+/** Creates a persisted row for one Customer contact. */
+function createContactRow(customerId: string, contactId: string) {
+  const contact = createCustomerContactRecord(
+    'workspace-1',
+    customerId,
+    contactId,
+    { name: `Contact ${contactId}` },
+    NOW,
+  )
+  return {
+    workspaceId: contact.workspaceId,
+    recordKey: `CONTACT#${contact.id}`,
+    entityType: 'contact',
+    contact,
   }
 }
 
@@ -170,13 +188,123 @@ test('uses a focused record-prefix query for a Customer Request read', async () 
 
     const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
     expect(queryCommands).toHaveLength(1)
-    expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand', 'QueryCommand'])
+    expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand', 'QueryCommand', 'GetCommand'])
     expect(queryCommands[0]?.input).toMatchObject({
       KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
       ExpressionAttributeValues: {
         ':recordPrefix': 'REQUEST#',
       },
     })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('keeps a Customer hidden until cross-store deletion cleanup completes', async () => {
+  const customer = createCustomerRow().customer
+  const harness = createHarness([createCustomerRow()])
+  try {
+    await expect(harness.client.beginCustomerDeletion(
+      'workspace-1',
+      customer.id,
+      'member-1',
+      customer.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      deletion: { customerId: customer.id, phase: 'triage' },
+    })
+    await expect(harness.client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({
+      code: 'CustomerNotFound',
+    })
+
+    await expect(harness.client.completeCustomerDeletion(
+      'workspace-1',
+      customer.id,
+      'member-1',
+    )).resolves.toBeUndefined()
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+    expect(harness.rows.get('META')).not.toHaveProperty('deletion')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('repoints a Customer Triage merge before retiring the source graph', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const harness = createHarness([
+    {
+      workspaceId: source.workspaceId,
+      recordKey: `CUSTOMER#${source.id}`,
+      entityType: 'customer',
+      customer: source,
+    },
+    {
+      workspaceId: target.workspaceId,
+      recordKey: `CUSTOMER#${target.id}`,
+      entityType: 'customer',
+      customer: target,
+    },
+  ])
+  try {
+    const input = {
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }
+    await expect(harness.client.beginCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      merge: {
+        sourceCustomerId: source.id,
+        targetCustomerId: target.id,
+      },
+    })
+    await expect(harness.client.completeCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toMatchObject({
+      customer: { id: target.id },
+    })
+    expect(harness.rows.has(`CUSTOMER#${source.id}`)).toBeFalse()
+    expect(harness.rows.get(`CUSTOMER#${target.id}`)).toMatchObject({
+      customer: { id: target.id, revision: target.revision + 1 },
+    })
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('splits a large Customer merge while retaining a resumable merge marker', async () => {
+  const source = createCustomerRow('customer-source', 'Acme duplicate').customer
+  const target = createCustomerRow('customer-target', 'Acme Corporation').customer
+  const contactRows = Array.from({ length: 100 }, (_, index) => createContactRow(source.id, `contact-${index + 1}`))
+  const harness = createHarness([
+    {
+      workspaceId: source.workspaceId,
+      recordKey: `CUSTOMER#${source.id}`,
+      entityType: 'customer',
+      customer: source,
+    },
+    {
+      workspaceId: target.workspaceId,
+      recordKey: `CUSTOMER#${target.id}`,
+      entityType: 'customer',
+      customer: target,
+    },
+    ...contactRows,
+  ])
+  try {
+    const input = {
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }
+    await harness.client.beginCustomerMerge('workspace-1', source.id, 'member-1', input)
+    await expect(harness.client.completeCustomerMerge('workspace-1', source.id, 'member-1', input)).resolves.toMatchObject({
+      customer: { id: target.id },
+    })
+    expect(harness.rows.has(`CUSTOMER#${source.id}`)).toBeFalse()
+    expect([...harness.rows.values()].filter((row) => isRecord(row) && typeof row.recordKey === 'string' && row.recordKey.startsWith('CONTACT#'))).toHaveLength(100)
+    expect([...harness.commands].filter((command) => command.name === 'TransactWriteCommand').length).toBeGreaterThan(2)
+    expect(harness.rows.get('META')).not.toHaveProperty('merge')
   } finally {
     harness.restore()
   }

@@ -94,6 +94,7 @@ describe('automation event handler', () => {
     expect(ruleReads).toBe(0)
   })
 
+  /** Verifies completion-notification preparation is retried independently of Automation rules. */
   test('retries Customer completion preparation even when Automation is disabled', async () => {
     const client = createAutomationEventPort({
       async listRules() {

@@ -165,6 +165,7 @@ export function TeamTriagePage() {
           id: customer.id,
           name: customer.name,
         }))}
+        customerOptionsErrorMessage={customerDirectory.error ? t('customers.loadError') : undefined}
         counts={countTriageEntryViews(entryViews)}
         detailErrorMessage={detailErrorMessage}
         didSaveConfiguration={mutation.didSaveSettings}
@@ -216,6 +217,7 @@ export function TeamTriagePage() {
         onLoadMore={() => void queue.setSize(queue.size + 1)}
         onRetryConfiguration={() => void settings.mutate()}
         onRetryDetail={() => void detail.mutate()}
+        onRetryCustomerOptions={() => void customerDirectory.mutate()}
         onRetryQueue={() => void queue.mutate()}
         onSaveConfiguration={mutation.saveSettings}
         onSelectEntry={(entryId) => replaceRouteState('queue', entryId)}

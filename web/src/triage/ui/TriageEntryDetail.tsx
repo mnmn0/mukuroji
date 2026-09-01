@@ -79,6 +79,10 @@ export type TriageEntryDetailProps = {
   readonly customerOptions?: readonly Pick<Customer, 'id' | 'name'>[]
   /** Whether the Customer picker is still loading. */
   readonly isCustomerOptionsLoading?: boolean
+  /** Safe error message when the Customer picker cannot load its options. */
+  readonly customerOptionsErrorMessage?: string
+  /** Retries loading Customer picker options. */
+  readonly onRetryCustomerOptions?: () => void
   /** Restores queue navigation after a successful action. */
   readonly onActionComplete?: (entryId: string) => void
 }
@@ -114,6 +118,7 @@ export function TriageEntryDetail({
   aiAssistanceController,
   errorMessage,
   customerOptions,
+  customerOptionsErrorMessage,
   isCustomerOptionsLoading = false,
   isAiOperationPending = false,
   isLoading = false,
@@ -126,6 +131,7 @@ export function TriageEntryDetail({
   onBack,
   onOperationPendingChange,
   onRetry,
+  onRetryCustomerOptions,
   t,
   teamId,
   eligibleAssigneeIdsByProject,
@@ -549,6 +555,19 @@ export function TriageEntryDetail({
               <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
                 {t('triage.customerRequest.loading')}
               </p>
+            ) : customerOptionsErrorMessage ? (
+              <div className="grid gap-3 border-l-2 border-red-400 bg-red-50 px-3 py-2" role="alert">
+                <p className="text-sm font-semibold text-red-700">{customerOptionsErrorMessage}</p>
+                {onRetryCustomerOptions ? (
+                  <button
+                    className="workbench-button-secondary min-h-9 w-fit px-3"
+                    onClick={onRetryCustomerOptions}
+                    type="button"
+                  >
+                    {t('customers.retry')}
+                  </button>
+                ) : null}
+              </div>
             ) : customerOptions === undefined ? null : customerOptions.length === 0 ? (
               <p className="text-sm font-medium text-[var(--workbench-muted)]">
                 {t('triage.customerRequest.noCustomers')}

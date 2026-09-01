@@ -98,6 +98,23 @@ export interface CustomerClient {
    * @returns A promise that resolves after deletion completes.
    */
   deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Records the first phase of a cross-store Customer deletion.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose external associations will be cleared.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Customer revision required to start deletion.
+   * @returns A promise that resolves after the deletion marker is durable.
+   */
+  beginCustomerDeletion(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Completes a cross-store Customer deletion after external links are cleared.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer being deleted.
+   * @param actorId Authenticated actor performing the deletion.
+   * @returns A promise that resolves after the Customer graph is deleted.
+   */
+  completeCustomerDeletion(workspaceId: string, customerId: string, actorId: string): Promise<void>
   /** Merges a source customer into a retained customer.
    *
    * @param workspaceId Workspace containing both Customers.
@@ -107,6 +124,24 @@ export interface CustomerClient {
    * @returns The retained Customer detail graph.
    */
   mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail>
+  /** Records a resumable cross-store Customer merge.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Customer and revision fences.
+   * @returns A promise that resolves after the merge marker is durable.
+   */
+  beginCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void>
+  /** Completes a cross-store Customer merge after external links are repointed.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Customer and revision fences.
+   * @returns The retained Customer detail graph.
+   */
+  completeCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail>
   /** Lists contacts belonging to a customer.
    *
    * @param workspaceId Workspace containing the Customer.
@@ -338,6 +373,12 @@ export class InMemoryCustomerClient implements CustomerClient {
   /** Per-Workspace Customer state. */
   private readonly workspaces = new Map<string, CustomerWorkspaceState>()
 
+  /** Cross-store Customer deletions waiting for Triage association cleanup. */
+  private readonly pendingDeletions = new Map<string, CustomerDeletionMarker>()
+
+  /** Cross-store Customer merges waiting for Triage association repointing. */
+  private readonly pendingMerges = new Map<string, CustomerMergeMarker>()
+
   /** Test-replaceable clock. */
   private readonly now: () => Date
 
@@ -404,6 +445,27 @@ export class InMemoryCustomerClient implements CustomerClient {
     })
   }
 
+  /** Hides Customer-owned records from a read snapshot while an external operation is pending.
+   *
+   * @param workspaceId Workspace whose snapshot should be masked.
+   * @param customerIds Customers hidden from the snapshot.
+   * @returns Nothing; the supplied snapshot is mutated in place.
+   */
+  maskCustomerOperation(workspaceId: string, customerIds: readonly string[]): void {
+    const state = this.rawState(workspaceId)
+    const hiddenCustomerIds = new Set(customerIds)
+    for (const customerId of hiddenCustomerIds) state.customers.delete(customerId)
+    for (const [contactId, contact] of state.contacts) {
+      if (hiddenCustomerIds.has(contact.customerId)) state.contacts.delete(contactId)
+    }
+    for (const [requestId, request] of state.requests) {
+      if (hiddenCustomerIds.has(request.customerId)) state.requests.delete(requestId)
+    }
+    for (const [notificationId, notification] of state.notifications) {
+      if (hiddenCustomerIds.has(notification.customerId)) state.notifications.delete(notificationId)
+    }
+  }
+
   /** Lists customers within one Workspace boundary.
    *
    * @param workspaceId Workspace containing the customers.
@@ -417,6 +479,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     const queryFingerprint = createListQueryFingerprint(normalizedInput)
     const datasetRevision = createCustomerDatasetRevision(state)
     const filtered = [...state.customers.values()]
+      .filter((customer) => !this.isCustomerUnavailable(workspaceId, customer.id))
       .map((customer) => this.withCustomerCounts(state, customer))
       .filter((customer) => matchesCustomer(customer, normalizedInput))
       .sort((left, right) => compareCustomers(left, right, normalizedInput))
@@ -451,22 +514,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @returns The Customer detail graph.
    */
   async getCustomer(workspaceId: string, customerId: string): Promise<CustomerDetail> {
+    this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
-    const customer = this.requireCustomer(state, customerId)
-    const contacts = [...state.contacts.values()]
-      .filter((contact) => contact.customerId === customer.id)
-      .sort(compareByName)
-    const requests = [...state.requests.values()]
-      .filter((request) => request.customerId === customer.id)
-      .sort(compareByReceivedAt)
-    const activeRequests = requests.filter((request) => request.status !== 'merged')
-    return {
-      customer: clone(this.withCustomerCounts(state, customer)),
-      contacts: contacts.map(clone),
-      requests: requests.map(clone),
-      workItems: deriveCustomerWorkItemSummaries(activeRequests),
-      projects: deriveCustomerProjectSummaries(activeRequests),
-    }
+    return this.createCustomerDetail(state, customerId)
   }
 
   /** Creates a customer.
@@ -478,6 +528,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async createCustomer(workspaceId: string, actorId: string, input: CreateCustomerInput): Promise<Customer> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const customer = createCustomerRecord(workspaceId, this.id(), input, this.now().toISOString())
     if ([...state.customers.values()].some((candidate) =>
@@ -497,6 +548,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer> {
     requireActor(actorId)
+    this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
     const current = this.requireCustomer(state, customerId)
     assertRevision(current.revision, input.expectedRevision, 'Customer')
@@ -518,19 +570,65 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
+    const pendingDeletion = this.pendingDeletions.get(workspaceId)
+    if (pendingDeletion) {
+      if (pendingDeletion.customerId !== customerId) {
+        throw new CustomerError(409, 'CustomerDeletionInProgress', 'Another Customer deletion is still being completed.')
+      }
+      throw new CustomerError(409, 'CustomerDeletionInProgress', 'Clear the Customer Triage associations before completing deletion.')
+    }
+    if (this.pendingMerges.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'A Customer merge is still being completed.')
+    }
     const state = this.rawState(workspaceId)
     const current = this.requireCustomer(state, customerId)
     assertRevision(current.revision, expectedRevision, 'Customer')
-    state.customers.delete(customerId)
-    for (const [contactId, contact] of state.contacts) if (contact.customerId === customerId) state.contacts.delete(contactId)
-    for (const [requestId, request] of state.requests) {
-      if (request.customerId !== customerId) continue
-      state.requests.delete(requestId)
-      this.deleteRequestNotifications(state, requestId)
+    this.deleteCustomerState(state, customerId)
+  }
+
+  /** Records the first phase of a cross-store Customer deletion.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose external associations will be cleared.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Customer revision required to start deletion.
+   * @returns A promise that resolves after the deletion marker is durable.
+   */
+  async beginCustomerDeletion(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
+    requireActor(actorId)
+    const pendingDeletion = this.pendingDeletions.get(workspaceId)
+    if (pendingDeletion) {
+      if (pendingDeletion.customerId !== customerId || pendingDeletion.expectedRevision !== expectedRevision) {
+        throw new CustomerError(409, 'CustomerDeletionInProgress', 'Another Customer deletion is still being completed.')
+      }
+      return
     }
-    for (const [notificationId, notification] of state.notifications) {
-      if (notification.customerId === customerId) state.notifications.delete(notificationId)
+    if (this.pendingMerges.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'A Customer merge is still being completed.')
     }
+    const current = this.requireCustomer(this.rawState(workspaceId), customerId)
+    assertRevision(current.revision, expectedRevision, 'Customer')
+    this.pendingDeletions.set(workspaceId, { customerId, expectedRevision })
+  }
+
+  /** Completes a cross-store Customer deletion after external links are cleared.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer being deleted.
+   * @param actorId Authenticated actor performing the deletion.
+   * @returns A promise that resolves after the Customer graph is deleted.
+   */
+  async completeCustomerDeletion(workspaceId: string, customerId: string, actorId: string): Promise<void> {
+    requireActor(actorId)
+    const pendingDeletion = this.pendingDeletions.get(workspaceId)
+    if (!pendingDeletion || pendingDeletion.customerId !== customerId) {
+      throw new CustomerError(409, 'CustomerDeletionInProgress', 'The Customer deletion marker is missing or does not match.')
+    }
+    const state = this.rawState(workspaceId)
+    const current = this.requireCustomer(state, customerId)
+    assertRevision(current.revision, pendingDeletion.expectedRevision, 'Customer')
+    this.deleteCustomerState(state, customerId)
+    this.pendingDeletions.delete(workspaceId)
   }
 
   /** Merges a source customer into a retained customer.
@@ -543,56 +641,63 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail> {
     requireActor(actorId)
+    const pendingMerge = this.pendingMerges.get(workspaceId)
+    if (pendingMerge) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'Complete the cross-store Customer merge before starting another merge.')
+    }
+    if (this.pendingDeletions.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerDeletionInProgress', 'A Customer deletion is still being completed.')
+    }
+    return await this.mergeCustomerState(workspaceId, sourceCustomerId, input)
+  }
+
+  /** Records a resumable cross-store Customer merge.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Customer and revision fences.
+   * @returns A promise that resolves after the merge marker is durable.
+   */
+  async beginCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void> {
+    requireActor(actorId)
+    const pendingMerge = this.pendingMerges.get(workspaceId)
+    if (pendingMerge) {
+      if (!sameCustomerMergeMarker(pendingMerge, sourceCustomerId, input)) {
+        throw new CustomerError(409, 'CustomerMergeInProgress', 'Another Customer merge is still being completed.')
+      }
+      return
+    }
+    if (this.pendingDeletions.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerDeletionInProgress', 'A Customer deletion is still being completed.')
+    }
     const state = this.state(workspaceId)
-    if (sourceCustomerId === input.targetCustomerId) throw new CustomerError(400, 'InvalidCustomerMerge', 'A customer cannot be merged into itself.')
-    const source = this.requireCustomer(state, sourceCustomerId)
-    const target = this.requireCustomer(state, input.targetCustomerId)
-    assertRevision(source.revision, input.sourceExpectedRevision, 'Source customer')
-    assertRevision(target.revision, input.targetExpectedRevision, 'Target customer')
-    const existingContactEmails = new Set(
-      [...state.contacts.values()]
-        .filter((contact) => contact.customerId === target.id)
-        .map((contact) => normalizeContactEmail(contact.email))
-        .filter((email): email is string => email !== undefined),
-    )
-    for (const contact of state.contacts.values()) {
-      if (contact.customerId !== source.id) continue
-      const email = normalizeContactEmail(contact.email)
-      if (email === undefined) continue
-      if (existingContactEmails.has(email)) {
-        throw new CustomerError(
-          409,
-          'CustomerContactAlreadyExists',
-          'Customer merge would create duplicate contact email addresses.',
-        )
-      }
-      existingContactEmails.add(email)
+    this.assertCustomerMergePreconditions(state, sourceCustomerId, input)
+    this.pendingMerges.set(workspaceId, {
+      sourceCustomerId,
+      targetCustomerId: input.targetCustomerId,
+      sourceExpectedRevision: input.sourceExpectedRevision,
+      targetExpectedRevision: input.targetExpectedRevision,
+    })
+  }
+
+  /** Completes a cross-store Customer merge after external links are repointed.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Customer and revision fences.
+   * @returns The retained Customer detail graph.
+   */
+  async completeCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail> {
+    requireActor(actorId)
+    const pendingMerge = this.pendingMerges.get(workspaceId)
+    if (!pendingMerge || !sameCustomerMergeMarker(pendingMerge, sourceCustomerId, input)) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'The Customer merge marker is missing or does not match.')
     }
-    const mergedAt = this.now().toISOString()
-    for (const contact of state.contacts.values()) {
-      if (contact.customerId !== source.id) continue
-      state.contacts.set(contact.id, { ...contact, customerId: target.id, revision: contact.revision + 1, updatedAt: mergedAt })
-    }
-    for (const request of state.requests.values()) {
-      if (request.customerId !== source.id) continue
-      state.requests.set(request.id, { ...request, customerId: target.id, revision: request.revision + 1, updatedAt: mergedAt })
-    }
-    const retainedPrimaryContact = [...state.contacts.values()]
-      .find((contact) => contact.customerId === target.id && contact.primary)
-    if (retainedPrimaryContact) this.clearPrimaryContacts(state, target.id, retainedPrimaryContact.id)
-    for (const [notificationId, notification] of state.notifications) {
-      if (notification.customerId === source.id) {
-        state.notifications.set(notificationId, { ...notification, customerId: target.id })
-      }
-    }
-    state.customers.delete(source.id)
-    const mergedTarget = {
-      ...target,
-      revision: target.revision + 1,
-      updatedAt: mergedAt,
-    }
-    state.customers.set(target.id, mergedTarget)
-    return await this.getCustomer(workspaceId, target.id)
+    const detail = await this.mergeCustomerState(workspaceId, sourceCustomerId, input)
+    this.pendingMerges.delete(workspaceId)
+    return detail
   }
 
   /** Lists contacts belonging to a customer.
@@ -602,6 +707,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @returns Contacts owned by the Customer.
    */
   async listContacts(workspaceId: string, customerId: string): Promise<CustomerContact[]> {
+    this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
     return [...state.contacts.values()]
@@ -618,6 +724,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @returns The requested contact.
    */
   async getContact(workspaceId: string, customerId: string, contactId: string): Promise<CustomerContact> {
+    this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
     const contact = state.contacts.get(contactId)
@@ -635,6 +742,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact> {
     requireActor(actorId)
+    this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
     const contact = createCustomerContactRecord(workspaceId, customerId, this.id(), input, this.now().toISOString())
@@ -747,6 +855,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     const queryFingerprint = createListQueryFingerprint(normalizedInput)
     const datasetRevision = createRequestDatasetRevision(state)
     const filtered = [...state.requests.values()]
+      .filter((request) => !this.isCustomerUnavailable(workspaceId, request.customerId))
       .filter((request) => matchesRequest(request, normalizedInput))
       .sort(compareByReceivedAt)
     const offset = decodeOffset(
@@ -782,6 +891,7 @@ export class InMemoryCustomerClient implements CustomerClient {
   async getRequest(workspaceId: string, requestId: string): Promise<CustomerRequest> {
     const request = this.state(workspaceId).requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
+    this.assertCustomerAvailable(workspaceId, request.customerId)
     return clone(request)
   }
 
@@ -794,6 +904,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async createRequest(workspaceId: string, actorId: string, input: CreateCustomerRequestInput): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertCustomerAvailable(workspaceId, input.customerId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, input.customerId)
     const requestId = input.triageEntryId === undefined
@@ -863,7 +974,15 @@ export class InMemoryCustomerClient implements CustomerClient {
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
+    this.assertCustomerAvailable(workspaceId, request.customerId)
     assertRevision(request.revision, expectedRevision, 'Customer Request')
+    if (request.triageEntryId !== undefined) {
+      throw new CustomerError(
+        409,
+        'CustomerRequestTriageAssociation',
+        'A Customer Request associated with a Triage Entry cannot be deleted.',
+      )
+    }
     state.requests.delete(requestId)
     this.deleteRequestNotifications(state, requestId)
   }
@@ -1031,9 +1150,14 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async getWorkItemImpact(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerImpactSignal> {
     const state = this.state(workspaceId)
-    const requests = [...state.requests.values()].filter((request) => request.workItemLinks.some((link) => link.teamId === teamId && link.workItemId === workItemId))
+    const requests = [...state.requests.values()].filter((request) =>
+      !this.isCustomerUnavailable(workspaceId, request.customerId) &&
+      request.workItemLinks.some((link) => link.teamId === teamId && link.workItemId === workItemId)
+    )
     return calculateCustomerImpactSignal(
-      [...state.customers.values()].map((customer) => this.withCustomerCounts(state, customer)),
+      [...state.customers.values()]
+        .filter((customer) => !this.isCustomerUnavailable(workspaceId, customer.id))
+        .map((customer) => this.withCustomerCounts(state, customer)),
       requests,
     )
   }
@@ -1046,9 +1170,14 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal> {
     const state = this.state(workspaceId)
-    const requests = [...state.requests.values()].filter((request) => request.projectLinks.some((link) => link.projectId === projectId) || request.workItemLinks.some((link) => link.projectId === projectId))
+    const requests = [...state.requests.values()].filter((request) =>
+      !this.isCustomerUnavailable(workspaceId, request.customerId) &&
+      (request.projectLinks.some((link) => link.projectId === projectId) || request.workItemLinks.some((link) => link.projectId === projectId))
+    )
     return calculateCustomerImpactSignal(
-      [...state.customers.values()].map((customer) => this.withCustomerCounts(state, customer)),
+      [...state.customers.values()]
+        .filter((customer) => !this.isCustomerUnavailable(workspaceId, customer.id))
+        .map((customer) => this.withCustomerCounts(state, customer)),
       requests,
     )
   }
@@ -1204,24 +1333,16 @@ export class InMemoryCustomerClient implements CustomerClient {
     for (const request of requests) {
       const id = `completion:${teamId}:${workItemId}:${request.id}`
       const existing = state.notifications.get(id)
-      if (existing) {
-        candidates.push(clone(existing))
-        continue
-      }
-      const notification: CustomerCompletionNotification = {
+      const notification = refreshCompletionNotification(existing, {
         id,
         workspaceId,
         requestId: request.id,
-        customerId: request.customerId,
         teamId,
         workItemId,
-        canNotify: request.source.canNotify && request.retention?.redactedAt === undefined,
-        ...(request.retention?.redactedAt
-          ? { skipReason: 'retention-redacted' as const }
-          : request.source.canNotify ? {} : { skipReason: 'source-not-capable' as const }),
-        preparedAt: now,
-      }
-      state.notifications.set(id, notification)
+        request,
+        now,
+      })
+      if (!existing || JSON.stringify(existing) !== JSON.stringify(notification)) state.notifications.set(id, notification)
       candidates.push(clone(notification))
     }
     return candidates
@@ -1235,9 +1356,28 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @returns Previously prepared notification candidates.
    */
   async listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]> {
-    return [...this.state(workspaceId).notifications.values()]
-      .filter((notification) => notification.teamId === teamId && notification.workItemId === workItemId)
-      .map(clone)
+    const state = this.state(workspaceId)
+    const candidates: CustomerCompletionNotification[] = []
+    for (const [notificationId, existing] of state.notifications) {
+      if (existing.teamId !== teamId || existing.workItemId !== workItemId) continue
+      const request = state.requests.get(existing.requestId)
+      if (!request || request.status === 'merged' || !request.workItemLinks.some((link) => link.teamId === teamId && link.workItemId === workItemId)) {
+        state.notifications.delete(notificationId)
+        continue
+      }
+      const notification = refreshCompletionNotification(existing, {
+        id: existing.id,
+        workspaceId,
+        requestId: request.id,
+        teamId,
+        workItemId,
+        request,
+        now: this.now().toISOString(),
+      })
+      if (JSON.stringify(existing) !== JSON.stringify(notification)) state.notifications.set(notificationId, notification)
+      candidates.push(clone(notification))
+    }
+    return candidates
   }
 
   /** Returns or creates one isolated Workspace state container. */
@@ -1268,6 +1408,169 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     this.workspaces.set(workspaceId, state)
     return state
+  }
+
+  /** Applies the Customer-side half of a merge to one mutable graph.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param input Target Customer and revision fences.
+   * @returns The retained Customer detail graph.
+   */
+  private async mergeCustomerState(
+    workspaceId: string,
+    sourceCustomerId: string,
+    input: MergeCustomerInput,
+  ): Promise<CustomerDetail> {
+    const state = this.state(workspaceId)
+    this.assertCustomerMergePreconditions(state, sourceCustomerId, input)
+    const source = this.requireCustomer(state, sourceCustomerId)
+    const target = this.requireCustomer(state, input.targetCustomerId)
+    const mergedAt = this.now().toISOString()
+    for (const contact of state.contacts.values()) {
+      if (contact.customerId !== source.id) continue
+      state.contacts.set(contact.id, { ...contact, customerId: target.id, revision: contact.revision + 1, updatedAt: mergedAt })
+    }
+    for (const request of state.requests.values()) {
+      if (request.customerId !== source.id) continue
+      state.requests.set(request.id, { ...request, customerId: target.id, revision: request.revision + 1, updatedAt: mergedAt })
+    }
+    const retainedPrimaryContact = [...state.contacts.values()]
+      .find((contact) => contact.customerId === target.id && contact.primary)
+    if (retainedPrimaryContact) this.clearPrimaryContacts(state, target.id, retainedPrimaryContact.id)
+    for (const [notificationId, notification] of state.notifications) {
+      if (notification.customerId === source.id) {
+        state.notifications.set(notificationId, { ...notification, customerId: target.id })
+      }
+    }
+    state.customers.delete(source.id)
+    const mergedTarget = {
+      ...target,
+      revision: target.revision + 1,
+      updatedAt: mergedAt,
+    }
+    state.customers.set(target.id, mergedTarget)
+    return this.createCustomerDetail(state, target.id)
+  }
+
+  /** Validates Customer identity and revision constraints before a merge marker is written.
+   *
+   * @param state Customer graph to inspect.
+   * @param sourceCustomerId Customer being merged away.
+   * @param input Target Customer and revision fences.
+   * @returns Nothing; throws when the merge cannot begin.
+   */
+  private assertCustomerMergePreconditions(
+    state: CustomerWorkspaceState,
+    sourceCustomerId: string,
+    input: MergeCustomerInput,
+  ): void {
+    if (sourceCustomerId === input.targetCustomerId) throw new CustomerError(400, 'InvalidCustomerMerge', 'A customer cannot be merged into itself.')
+    const source = this.requireCustomer(state, sourceCustomerId)
+    const target = this.requireCustomer(state, input.targetCustomerId)
+    assertRevision(source.revision, input.sourceExpectedRevision, 'Source customer')
+    assertRevision(target.revision, input.targetExpectedRevision, 'Target customer')
+    const existingContactEmails = new Set(
+      [...state.contacts.values()]
+        .filter((contact) => contact.customerId === target.id)
+        .map((contact) => normalizeContactEmail(contact.email))
+        .filter((email): email is string => email !== undefined),
+    )
+    for (const contact of state.contacts.values()) {
+      if (contact.customerId !== source.id) continue
+      const email = normalizeContactEmail(contact.email)
+      if (email === undefined) continue
+      if (existingContactEmails.has(email)) {
+        throw new CustomerError(
+          409,
+          'CustomerContactAlreadyExists',
+          'Customer merge would create duplicate contact email addresses.',
+        )
+      }
+      existingContactEmails.add(email)
+    }
+  }
+
+  /** Removes a Customer and every Customer-owned record from an in-memory graph.
+   *
+   * @param state Customer graph to mutate.
+   * @param customerId Customer and owned records to remove.
+   * @returns Nothing; the supplied graph is mutated in place.
+   */
+  private deleteCustomerState(state: CustomerWorkspaceState, customerId: string): void {
+    state.customers.delete(customerId)
+    for (const [contactId, contact] of state.contacts) if (contact.customerId === customerId) state.contacts.delete(contactId)
+    for (const [requestId, request] of state.requests) {
+      if (request.customerId !== customerId) continue
+      state.requests.delete(requestId)
+      this.deleteRequestNotifications(state, requestId)
+    }
+    for (const [notificationId, notification] of state.notifications) {
+      if (notification.customerId === customerId) state.notifications.delete(notificationId)
+    }
+  }
+
+  /** Builds a Customer detail graph from an already loaded mutable state.
+   *
+   * @param state Customer graph to inspect.
+   * @param customerId Customer whose detail graph should be built.
+   * @returns The Customer detail graph.
+   */
+  private createCustomerDetail(state: CustomerWorkspaceState, customerId: string): CustomerDetail {
+    const customer = this.requireCustomer(state, customerId)
+    const contacts = [...state.contacts.values()]
+      .filter((contact) => contact.customerId === customer.id)
+      .sort(compareByName)
+    const requests = [...state.requests.values()]
+      .filter((request) => request.customerId === customer.id)
+      .sort(compareByReceivedAt)
+    const activeRequests = requests.filter((request) => request.status !== 'merged')
+    return {
+      customer: clone(this.withCustomerCounts(state, customer)),
+      contacts: contacts.map(clone),
+      requests: requests.map(clone),
+      workItems: deriveCustomerWorkItemSummaries(activeRequests),
+      projects: deriveCustomerProjectSummaries(activeRequests),
+    }
+  }
+
+  /** Checks whether a Customer is hidden by a pending cross-store operation.
+   *
+   * @param workspaceId Workspace containing the operation.
+   * @param customerId Customer to inspect.
+   * @returns Whether the Customer must be hidden from reads.
+   */
+  private isCustomerUnavailable(workspaceId: string, customerId: string): boolean {
+    const pendingDeletion = this.pendingDeletions.get(workspaceId)
+    if (pendingDeletion?.customerId === customerId) return true
+    const pendingMerge = this.pendingMerges.get(workspaceId)
+    return pendingMerge?.sourceCustomerId === customerId || pendingMerge?.targetCustomerId === customerId
+  }
+
+  /** Throws a not-found error for a Customer hidden by a pending operation.
+   *
+   * @param workspaceId Workspace containing the operation.
+   * @param customerId Customer to inspect.
+   * @returns Nothing; throws when the Customer is unavailable.
+   */
+  private assertCustomerAvailable(workspaceId: string, customerId: string): void {
+    if (this.isCustomerUnavailable(workspaceId, customerId)) {
+      throw notFound('CustomerNotFound', 'The customer was not found.')
+    }
+  }
+
+  /** Rejects a new operation while another cross-store operation owns the Workspace.
+   *
+   * @param workspaceId Workspace to inspect.
+   * @returns Nothing; throws when another operation is pending.
+   */
+  private assertNoCustomerOperation(workspaceId: string): void {
+    if (this.pendingDeletions.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerDeletionInProgress', 'A Customer deletion is still being completed.')
+    }
+    if (this.pendingMerges.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'A Customer merge is still being completed.')
+    }
   }
 
   /** Reads one customer or throws a stable not-found error. */
@@ -1315,6 +1618,100 @@ export class InMemoryCustomerClient implements CustomerClient {
       if (notification.requestId === requestId) state.notifications.delete(notificationId)
     }
   }
+}
+
+/** In-memory marker for a deletion whose external associations are being cleared. */
+type CustomerDeletionMarker = {
+  /** Customer whose external associations are being cleared. */
+  customerId: string
+  /** Customer revision captured when the operation started. */
+  expectedRevision: number
+}
+
+/** In-memory marker for a merge whose external associations are being repointed. */
+type CustomerMergeMarker = {
+  /** Customer being merged away. */
+  sourceCustomerId: string
+  /** Customer that will remain after the merge. */
+  targetCustomerId: string
+  /** Source revision captured when the operation started. */
+  sourceExpectedRevision: number
+  /** Target revision captured when the operation started. */
+  targetExpectedRevision: number
+}
+
+/** Inputs needed to derive one completion notification candidate. */
+type CompletionNotificationSeed = {
+  /** Deterministic notification identifier. */
+  id: string
+  /** Workspace that owns the notification candidate. */
+  workspaceId: string
+  /** Customer Request represented by the candidate. */
+  requestId: string
+  /** Team containing the completed Work Item. */
+  teamId: string
+  /** Completed Work Item represented by the candidate. */
+  workItemId: string
+  /** Current Customer Request state used to derive notification capability. */
+  request: CustomerRequest
+  /** Timestamp to record when capability-bearing state changed. */
+  now: string
+}
+
+/** Recomputes notification capability while preserving an unchanged candidate timestamp.
+ *
+ * @param existing Previously persisted candidate, when present.
+ * @param seed Current request and operation context.
+ * @returns A current notification candidate.
+ */
+function refreshCompletionNotification(
+  existing: CustomerCompletionNotification | undefined,
+  seed: CompletionNotificationSeed,
+): CustomerCompletionNotification {
+  const canNotify = seed.request.source.canNotify && seed.request.retention?.redactedAt === undefined
+  const skipReason = seed.request.retention?.redactedAt
+    ? 'retention-redacted' as const
+    : seed.request.source.canNotify ? undefined : 'source-not-capable' as const
+  if (
+    existing &&
+    existing.id === seed.id &&
+    existing.workspaceId === seed.workspaceId &&
+    existing.requestId === seed.requestId &&
+    existing.customerId === seed.request.customerId &&
+    existing.teamId === seed.teamId &&
+    existing.workItemId === seed.workItemId &&
+    existing.canNotify === canNotify &&
+    existing.skipReason === skipReason
+  ) return existing
+  return {
+    id: seed.id,
+    workspaceId: seed.workspaceId,
+    requestId: seed.requestId,
+    customerId: seed.request.customerId,
+    teamId: seed.teamId,
+    workItemId: seed.workItemId,
+    canNotify,
+    ...(skipReason === undefined ? {} : { skipReason }),
+    preparedAt: seed.now,
+  }
+}
+
+/** Compares an in-memory merge marker with a requested retry.
+ *
+ * @param marker Persisted in-memory merge marker.
+ * @param sourceCustomerId Requested source Customer.
+ * @param input Requested target and revision fences.
+ * @returns Whether the retry describes the same merge.
+ */
+function sameCustomerMergeMarker(
+  marker: CustomerMergeMarker,
+  sourceCustomerId: string,
+  input: MergeCustomerInput,
+): boolean {
+  return marker.sourceCustomerId === sourceCustomerId &&
+    marker.targetCustomerId === input.targetCustomerId &&
+    marker.sourceExpectedRevision === input.sourceExpectedRevision &&
+    marker.targetExpectedRevision === input.targetExpectedRevision
 }
 
 /** Ensures a mutation has a stable actor identity. */

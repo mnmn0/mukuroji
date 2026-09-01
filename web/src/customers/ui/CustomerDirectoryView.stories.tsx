@@ -121,3 +121,11 @@ export const Default: Story = {}
 export const Empty: Story = {
   args: { customers: [], detail: undefined, onOpenProject: () => undefined, search: 'missing' },
 }
+
+/** Renders the directory for a member without sensitive-data access. */
+export const Restricted: Story = {
+  args: {
+    canViewSensitiveData: false,
+    search: '',
+  },
+}

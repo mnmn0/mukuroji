@@ -468,6 +468,35 @@ test('does not close a Customer Request when one of several linked Work Items co
   expect((await client.getRequest('workspace-1', request.id)).status).toBe('requested')
 })
 
+test('refreshes completion notification capability after a Request source changes', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+  })
+
+  await expect(client.prepareCompletionNotifications('workspace-1', 'support', 'work-item-1', 'member-1')).resolves.toMatchObject([{
+    canNotify: true,
+  }])
+  const updated = await client.updateRequest('workspace-1', request.id, 'member-1', {
+    expectedRevision: request.revision + 1,
+    source: { kind: 'portal', canNotify: false },
+  })
+  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1')).resolves.toMatchObject([{
+    requestId: updated.id,
+    canNotify: false,
+    skipReason: 'source-not-capable',
+  }])
+})
+
 test('keeps Customer references and notification candidates consistent across destructive mutations', async () => {
   const client = createClient()
   const customer = await client.createCustomer('workspace-1', 'member-1', {

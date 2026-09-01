@@ -15,7 +15,7 @@ import type { TriageClient } from '../../../triage'
 const NOW = '2026-08-01T00:00:00.000Z'
 
 /** Triage operations used by Customer Router integration tests. */
-type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'clearCustomerAssociations'>
+type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'listCustomerAssociations' | 'clearCustomerAssociations'>
 
 /** Optional live-resource authorization replacements used by router tests. */
 type CustomerTestAuthorization = Partial<Pick<
@@ -80,6 +80,49 @@ async function createRequest(client: InMemoryCustomerClient, customerId: string)
     receivedAt: NOW,
     importance: 'high',
   })
+}
+
+/** Creates a minimal accepted Triage Entry with a Customer reverse link. */
+function createCustomerAssociationEntry(customerId: string): TriageEntry {
+  return {
+    schemaVersion: 1,
+    id: 'triage-customer-1',
+    workspaceId: 'workspace-1',
+    source: { kind: 'email', sourceId: 'message-customer-1', provider: 'mail' },
+    sourcePreview: {
+      title: 'Customer request',
+      body: 'Please support SSO.',
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: false,
+      truncated: false,
+    },
+    requester: { displayName: 'Ada Lovelace', guest: false },
+    receivedAt: NOW,
+    lastActivityAt: NOW,
+    state: 'accepted',
+    routing: { reason: 'Support', candidates: [] },
+    teamId: 'support',
+    permission: { visibility: 'full', canReply: true, guestVisible: true, checkedAt: NOW },
+    retention: { expiresAt: '2027-08-01T00:00:00.000Z' },
+    customerId,
+    revision: 1,
+    createdAt: NOW,
+    updatedAt: NOW,
+    capabilities: {
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: true,
+      canViewInternalContext: false,
+    },
+    events: [],
+  }
 }
 
 test('links a Customer Request directly to a Project through the authorized route', async () => {
@@ -397,6 +440,112 @@ test('clears Triage Customer associations before deleting a Customer', async () 
   await expect(client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({
     code: 'CustomerNotFound',
   })
+})
+
+test('repoints Triage Customer associations before merging Customers', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const source = await createCustomer(client)
+  const target = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Globex Industries',
+    domain: 'globex.example',
+    tier: 'growth',
+    size: 'mid-market',
+    status: 'active',
+    health: 'healthy',
+  })
+  const entry = createCustomerAssociationEntry(source.id)
+  const associations: Array<{ customerId: string | null; contactId: string | null; customerRequestId: string | null }> = []
+  const operations: unknown[] = []
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    listCustomerAssociations: async () => [entry],
+    associateCustomer: async (_workspaceId, _teamId, _entryId, _actor, input, _authorization, operation) => {
+      associations.push({
+        customerId: input.customerId ?? null,
+        contactId: input.contactId ?? null,
+        customerRequestId: input.customerRequestId ?? null,
+      })
+      operations.push(operation)
+      return { ...entry, customerId: input.customerId ?? undefined, revision: entry.revision + 1 }
+    },
+  })
+
+  const response = await app.request(`/api/customers/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(associations).toEqual([{ customerId: target.id, contactId: null, customerRequestId: null }])
+  expect(operations).toEqual([{
+    kind: 'merge',
+    sourceCustomerId: source.id,
+    targetCustomerId: target.id,
+  }])
+  await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
+  await expect(client.getCustomer('workspace-1', target.id)).resolves.toMatchObject({ customer: { id: target.id } })
+})
+
+test('rejects deletion of a Customer Request that still points to Triage', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const request = await client.createRequest('workspace-1', 'member-1', {
+    customerId: customer.id,
+    triageEntryId: 'triage-customer-1',
+    source: { kind: 'email', provider: 'mail', canNotify: true },
+    originalMessage: 'Please support SSO.',
+    receivedAt: NOW,
+    importance: 'normal',
+  })
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  })
+
+  const response = await app.request(`/api/customer-requests/${request.id}?expectedRevision=${request.revision}`, {
+    method: 'DELETE',
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'CustomerRequestTriageAssociation' })
+  await expect(client.getRequest('workspace-1', request.id)).resolves.toMatchObject({ id: request.id })
+})
+
+test('passes the Project scope into Customer impact authorization', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  let scope: CustomerAuthorizationScope | undefined
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    undefined,
+    async (_context, _minimum, authorizationScope) => {
+      scope = authorizationScope
+      return {
+        directoryId: 'workspace-1',
+        userKey: 'member-1',
+        canViewSensitiveData: true,
+      }
+    },
+  )
+
+  const response = await app.request('/api/projects/project-1/customer-impact')
+
+  expect(response.status).toBe(200)
+  expect(scope).toEqual({ projectId: 'project-1' })
 })
 
 test('replays saved Customer view creation with the same idempotency key', async () => {

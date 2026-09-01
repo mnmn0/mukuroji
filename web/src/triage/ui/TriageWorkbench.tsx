@@ -131,6 +131,10 @@ export type TriageWorkbenchProps = {
   readonly customerOptions?: readonly Pick<Customer, 'id' | 'name'>[]
   /** Whether the Customer picker is still loading. */
   readonly isCustomerOptionsLoading?: boolean
+  /** Safe error message when the Customer picker cannot load its options. */
+  readonly customerOptionsErrorMessage?: string
+  /** Retries loading Customer picker options. */
+  readonly onRetryCustomerOptions?: () => void
   /** Applies one explicit bounded bulk action. */
   readonly onBulkAction?: (
     input: TriageBulkActionInput,
@@ -165,6 +169,7 @@ export function TriageWorkbench({
   hasMore = false,
   isBulkPending = false,
   isCustomerOptionsLoading = false,
+  customerOptionsErrorMessage,
   isConfigurationLoading = false,
   isDetailLoading = false,
   isQueueLoading = false,
@@ -184,6 +189,7 @@ export function TriageWorkbench({
   onRetryConfiguration,
   onRetryDetail,
   onRetryQueue,
+  onRetryCustomerOptions,
   onSaveConfiguration,
   onSelectEntry,
   onViewChange,
@@ -342,8 +348,10 @@ export function TriageWorkbench({
                   onBack={backToQueue}
                   onCreateCustomerRequest={onCreateCustomerRequest}
                   customerOptions={customerOptions}
+                  customerOptionsErrorMessage={customerOptionsErrorMessage}
                   isCustomerOptionsLoading={isCustomerOptionsLoading}
                   onRetry={onRetryDetail}
+                  onRetryCustomerOptions={onRetryCustomerOptions}
                   t={t}
                   teamId={teamId}
                   eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}

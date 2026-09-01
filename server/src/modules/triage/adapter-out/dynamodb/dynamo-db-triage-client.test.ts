@@ -105,6 +105,8 @@ type HarnessOptions = {
   validateAdmission?: TriageAdmissionValidator
   /** Commit-time settings reference guards. */
   validateConfigurationReferences?: TriageConfigurationReferenceValidator
+  /** Customer table used to test cross-store association conditions. */
+  customerTableName?: string
 }
 
 /** Creates a real DocumentClient whose send method follows a deterministic response list.
@@ -145,6 +147,7 @@ function createHarness(responses: unknown[], options: HarnessOptions = {}) {
       cursorSecret: 'test-cursor-secret',
       now: () => new Date(NOW),
       id: () => 'triage-manual-1',
+      ...(options.customerTableName ? { customerTableName: options.customerTableName } : {}),
       ...(options.validateAdmission
         ? { validateAdmission: options.validateAdmission }
         : {}),
@@ -563,7 +566,7 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
       { Items: [storedEntry] },
       { Item: storedEntry },
       {},
-    ])
+    ], { customerTableName: 'CustomersTable' })
 
     try {
       await harness.client.clearCustomerAssociations('workspace-1', 'customer-1', 'member@example.com')
@@ -575,6 +578,17 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
       ])
       const transaction = harness.commands[2]?.input
       expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+            ConditionExpression: expect.stringContaining('#deletion.#customerId = :customerId'),
+            ExpressionAttributeValues: expect.objectContaining({
+              ':customerId': 'customer-1',
+              ':triagePhase': 'triage',
+            }),
+          }),
+        }),
         expect.objectContaining({
           Update: expect.objectContaining({
             ConditionExpression: '#revision = :expectedRevision AND teamId = :teamId',
@@ -593,6 +607,46 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
             Item: expect.objectContaining({
               event: expect.objectContaining({ type: 'customer-associated' }),
             }),
+          }),
+        }),
+      ]))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('requires an unmarked Customer for a new association', async () => {
+    const entry = createEntry()
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Item: storedEntry },
+      {},
+    ], { customerTableName: 'CustomersTable' })
+
+    try {
+      await harness.client.associateCustomer(
+        'workspace-1',
+        entry.teamId,
+        entry.id,
+        { id: 'member@example.com' },
+        {
+          expectedRevision: entry.revision,
+          customerId: 'customer-1',
+        },
+      )
+
+      const transaction = harness.commands[1]?.input
+      expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            TableName: 'CustomersTable',
+            Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+            ConditionExpression: expect.stringContaining('attribute_not_exists(#deletion)'),
           }),
         }),
       ]))
