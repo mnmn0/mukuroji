@@ -370,6 +370,109 @@ test('rejects an oversized ordinary Customer graph mutation before writing', asy
   }
 })
 
+test('keeps a Contact deletion fenced until the cross-store check completes', async () => {
+  const contactRow = createContactRow('customer-1', 'contact-1')
+  const request = { ...createRequest('request-1', '2027-08-01T00:00:00.000Z'), contactId: contactRow.contact.id }
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation', { contactCount: 1, requestCount: 1, openRequestCount: 1 }),
+    contactRow,
+    createRequestRow(request),
+  ])
+  try {
+    await expect(harness.client.beginCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.get('META')).toMatchObject({
+      contactOperation: {
+        kind: 'deletion',
+        customerId: 'customer-1',
+        contactId: contactRow.contact.id,
+        expectedRevision: contactRow.contact.revision,
+      },
+    })
+    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeTrue()
+
+    await expect(harness.client.completeCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).resolves.toBeUndefined()
+
+    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeFalse()
+    expect(harness.rows.get('REQUEST#request-1')).toMatchObject({ request: { contactId: undefined } })
+    expect(harness.rows.get('CUSTOMER#customer-1')).toMatchObject({ customer: { contactCount: 0 } })
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+    expect(findMetadataPut(harness.commands, '#contactOperation.#contactOperationKind')).toMatchObject({
+      ExpressionAttributeNames: {
+        '#contactOperation': 'contactOperation',
+        '#contactOperationKind': 'kind',
+      },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('cancels a matching Contact merge marker without changing the graph', async () => {
+  const sourceRow = createContactRow('customer-1', 'contact-source')
+  const targetRow = createContactRow('customer-1', 'contact-target')
+  const harness = createHarness([createCustomerRow(), sourceRow, targetRow])
+  try {
+    const input = {
+      targetContactId: targetRow.contact.id,
+      sourceExpectedRevision: sourceRow.contact.revision,
+      targetExpectedRevision: targetRow.contact.revision,
+    }
+    await expect(harness.client.beginCustomerContactMerge(
+      'workspace-1',
+      sourceRow.contact.id,
+      'member-1',
+      input,
+    )).resolves.toBeUndefined()
+    await expect(harness.client.cancelCustomerContactMerge(
+      'workspace-1',
+      sourceRow.contact.id,
+      'member-1',
+      input,
+    )).resolves.toBeUndefined()
+    expect(harness.rows.has(`CONTACT#${sourceRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#${targetRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('rejects an oversized Contact deletion before fencing the graph', async () => {
+  const contactRow = createContactRow('customer-1', 'contact-1')
+  const requestRows = Array.from({ length: 100 }, (_, index) => createRequestRow({
+    ...createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z'),
+    contactId: contactRow.contact.id,
+  }))
+  const harness = createHarness([createCustomerRow(), contactRow, ...requestRows])
+  try {
+    await expect(harness.client.beginCustomerContactDeletion(
+      'workspace-1',
+      'customer-1',
+      contactRow.contact.id,
+      'member-1',
+      contactRow.contact.revision,
+    )).rejects.toMatchObject({ code: 'CustomerTransactionTooLarge', status: 409 })
+    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeTrue()
+    expect([...harness.rows.keys()].filter((recordKey) => recordKey.startsWith('REQUEST#'))).toHaveLength(100)
+    expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
 test('classifies mixed authorization and revision cancellations as a retryable Customer conflict', async () => {
   const request = createRequest('request-1', '2027-08-01T00:00:00.000Z')
   const authorizationConditionCheck = {

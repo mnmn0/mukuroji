@@ -50,6 +50,9 @@ import {
   InMemoryCustomerClient,
   type CustomerAuthorizationConditionChecks,
   type CustomerClient,
+  type CustomerContactDeletionOperation,
+  type CustomerContactMergeOperation,
+  type CustomerContactOperation,
   type CustomerWorkspaceState,
 } from '../../customers'
 import { createDynamoDbClient } from '../../../../infrastructure/aws/dynamodb-client'
@@ -300,6 +303,9 @@ export class DynamoDbCustomerClient implements CustomerClient {
    */
   async deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingContactOperation) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     if (metadata.pendingDeletion) {
       if (metadata.pendingDeletion.customerId !== customerId) {
         throw new CustomerError(
@@ -346,6 +352,9 @@ export class DynamoDbCustomerClient implements CustomerClient {
   async beginCustomerDeletion(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireText(actorId, 'Customer actor ID')
     const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingContactOperation) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     if (metadata.pendingDeletion) {
       if (metadata.pendingDeletion.customerId !== customerId) {
         throw new CustomerError(409, 'CustomerDeletionInProgress', 'Another Customer deletion is still being completed.')
@@ -399,6 +408,9 @@ export class DynamoDbCustomerClient implements CustomerClient {
    */
   async mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail> {
     const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingContactOperation) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     if (metadata.pendingMerge) {
       throw new CustomerError(409, 'CustomerMergeInProgress', 'A Customer merge is still being completed.')
     }
@@ -424,6 +436,9 @@ export class DynamoDbCustomerClient implements CustomerClient {
   async beginCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void> {
     requireText(actorId, 'Customer actor ID')
     const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingContactOperation) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     if (metadata.pendingMerge) {
       if (!sameCustomerMergeOperation(metadata.pendingMerge, sourceCustomerId, input)) {
         throw new CustomerError(409, 'CustomerMergeInProgress', 'Another Customer merge is still being completed.')
@@ -578,6 +593,224 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
     ], true)
+  }
+
+  /** Records a Contact deletion before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact whose deletion is being prepared.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision required to start deletion.
+   * @returns A promise that resolves after the durable operation marker is written.
+   */
+  async beginCustomerContactDeletion(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireText(actorId, 'Customer actor ID')
+    const operation: CustomerContactDeletionOperation = {
+      kind: 'deletion',
+      customerId,
+      contactId,
+      expectedRevision,
+    }
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingContactOperation) {
+      if (sameCustomerContactOperation(metadata.pendingContactOperation, operation)) return
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
+    }
+    this.assertNoOtherCustomerOperation(metadata)
+    const loaded = await this.load(workspaceId, [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
+    const probe = new InMemoryCustomerClient({ now: this.now, id: this.id })
+    probe.replaceWorkspaceState(workspaceId, loaded.state)
+    await probe.deleteContact(workspaceId, customerId, contactId, actorId, expectedRevision)
+    this.assertContactMutationFitsTransaction(
+      workspaceId,
+      loaded.state,
+      probe.readWorkspaceStateWithoutRetention(workspaceId),
+    )
+    await this.writeTransaction(workspaceId, loaded.revision, [], { nextContactOperation: operation })
+  }
+
+  /** Cancels a prepared Contact deletion without changing the Contact graph.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact whose deletion marker should be removed.
+   * @param actorId Authenticated actor cancelling the deletion.
+   * @param expectedRevision Contact revision captured when deletion began.
+   * @returns A promise that resolves after the durable operation marker is removed.
+   */
+  async cancelCustomerContactDeletion(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireText(actorId, 'Customer actor ID')
+    const operation: CustomerContactDeletionOperation = {
+      kind: 'deletion',
+      customerId,
+      contactId,
+      expectedRevision,
+    }
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    const pending = metadata.pendingContactOperation
+    if (!pending) return
+    if (!sameCustomerContactOperation(pending, operation)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
+    }
+    await this.writeTransaction(workspaceId, metadata.revision, [], { expectedContactOperation: pending })
+  }
+
+  /** Completes a prepared Contact deletion after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact being deleted.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision captured when deletion began.
+   * @returns A promise that resolves after the Contact graph is deleted.
+   */
+  async completeCustomerContactDeletion(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireText(actorId, 'Customer actor ID')
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    const pending = metadata.pendingContactOperation
+    const operation: CustomerContactDeletionOperation = {
+      kind: 'deletion',
+      customerId,
+      contactId,
+      expectedRevision,
+    }
+    if (!pending || !sameCustomerContactOperation(pending, operation)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'The Contact deletion marker is missing or does not match.')
+    }
+    const loaded = await this.loadWithoutRecovery(workspaceId, [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
+    const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
+    memory.replaceWorkspaceState(workspaceId, loaded.state)
+    await memory.deleteContact(workspaceId, customerId, contactId, actorId, expectedRevision)
+    memory.synchronizeCustomerCounts(workspaceId)
+    await this.persist(workspaceId, loaded, memory.readWorkspaceStateWithoutRetention(workspaceId), {
+      contact: { expected: pending },
+    })
+  }
+
+  /** Records a Contact merge before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Contact and revision fences.
+   * @returns A promise that resolves after the durable operation marker is written.
+   */
+  async beginCustomerContactMerge(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+  ): Promise<void> {
+    requireText(actorId, 'Customer actor ID')
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingContactOperation) {
+      if (sameCustomerContactMergeRequest(metadata.pendingContactOperation, sourceContactId, input)) return
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
+    }
+    this.assertNoOtherCustomerOperation(metadata)
+    const loaded = await this.load(workspaceId, [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
+    const source = loaded.state.contacts.get(sourceContactId)
+    if (!source) throw new CustomerError(404, 'CustomerContactNotFound', 'The customer contact was not found.')
+    const probe = new InMemoryCustomerClient({ now: this.now, id: this.id })
+    probe.replaceWorkspaceState(workspaceId, loaded.state)
+    await probe.mergeContact(workspaceId, sourceContactId, actorId, input)
+    probe.synchronizeCustomerCounts(workspaceId)
+    this.assertContactMutationFitsTransaction(
+      workspaceId,
+      loaded.state,
+      probe.readWorkspaceStateWithoutRetention(workspaceId),
+    )
+    const operation: CustomerContactMergeOperation = {
+      kind: 'merge',
+      customerId: source.customerId,
+      sourceContactId,
+      targetContactId: input.targetContactId,
+      sourceExpectedRevision: input.sourceExpectedRevision,
+      targetExpectedRevision: input.targetExpectedRevision,
+    }
+    await this.writeTransaction(workspaceId, loaded.revision, [], { nextContactOperation: operation })
+  }
+
+  /** Cancels a prepared Contact merge without changing the Contact graph.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact whose merge marker should be removed.
+   * @param actorId Authenticated actor cancelling the merge.
+   * @param input Target Contact and revision fences captured when merging began.
+   * @returns A promise that resolves after the durable operation marker is removed.
+   */
+  async cancelCustomerContactMerge(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+  ): Promise<void> {
+    requireText(actorId, 'Customer actor ID')
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    const pending = metadata.pendingContactOperation
+    if (!pending) return
+    if (!sameCustomerContactMergeRequest(pending, sourceContactId, input)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
+    }
+    await this.writeTransaction(workspaceId, metadata.revision, [], { expectedContactOperation: pending })
+  }
+
+  /** Completes a prepared Contact merge after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Contact and revision fences captured when merging began.
+   * @returns The retained Contact.
+   */
+  async completeCustomerContactMerge(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+  ): Promise<CustomerContact> {
+    requireText(actorId, 'Customer actor ID')
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    const pending = metadata.pendingContactOperation
+    if (!pending || !sameCustomerContactMergeRequest(pending, sourceContactId, input)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'The Contact merge marker is missing or does not match.')
+    }
+    const loaded = await this.loadWithoutRecovery(workspaceId, [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
+    const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
+    memory.replaceWorkspaceState(workspaceId, loaded.state)
+    const contact = await memory.mergeContact(workspaceId, sourceContactId, actorId, input)
+    memory.synchronizeCustomerCounts(workspaceId)
+    await this.persist(workspaceId, loaded, memory.readWorkspaceStateWithoutRetention(workspaceId), {
+      contact: { expected: pending },
+    })
+    return contact
   }
 
   /** Deletes a customer contact.
@@ -901,6 +1134,9 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
+    if (hasExternalCustomerOperation(loaded)) {
+      throw new CustomerError(409, 'CustomerOperationInProgress', 'A cross-store Customer operation is still being completed.')
+    }
     const memory = new InMemoryCustomerClient({
       now: () => new Date(now),
       id: this.id,
@@ -953,6 +1189,50 @@ export class DynamoDbCustomerClient implements CustomerClient {
       }
     }
     return notifications
+  }
+
+  /** Rejects a new cross-store operation while another Customer operation is pending.
+   *
+   * @param metadata Current Customer META operation markers.
+   * @returns Nothing; throws when another operation owns the Workspace.
+   */
+  private assertNoOtherCustomerOperation(metadata: LoadedCustomerMetadata): void {
+    if (metadata.pendingDeletion) {
+      throw new CustomerError(409, 'CustomerDeletionInProgress', 'A Customer deletion is still being completed.')
+    }
+    if (metadata.pendingRetention) {
+      throw new CustomerError(409, 'CustomerRetentionInProgress', 'Customer retention processing is still being completed.')
+    }
+    if (metadata.pendingMerge) {
+      throw new CustomerError(409, 'CustomerMergeInProgress', 'A Customer merge is still being completed.')
+    }
+  }
+
+  /** Rejects a Contact operation that cannot fit in its final atomic transaction.
+   *
+   * @param workspaceId Workspace containing the compared Customer graph.
+   * @param previousState Graph loaded before the Contact mutation.
+   * @param nextState Graph after the Contact mutation has been simulated.
+   * @returns Nothing; throws before a durable Contact marker is written when the transaction is too large.
+   */
+  private assertContactMutationFitsTransaction(
+    workspaceId: string,
+    previousState: CustomerWorkspaceState,
+    nextState: CustomerWorkspaceState,
+  ): void {
+    const previousRows = new Map(serializeState(workspaceId, previousState).map((row) => [row.recordKey, row]))
+    const nextRows = new Map(serializeState(workspaceId, nextState).map((row) => [row.recordKey, row]))
+    const changedRows = [...nextRows].filter(([recordKey, row]) => {
+      const previous = previousRows.get(recordKey)
+      return !previous || JSON.stringify(previous) !== JSON.stringify(row)
+    }).length + [...previousRows.keys()].filter((recordKey) => !nextRows.has(recordKey)).length
+    if (changedRows > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
+      throw new CustomerError(
+        409,
+        'CustomerTransactionTooLarge',
+        'The Contact mutation is too large to commit atomically. Retry with a smaller graph.',
+      )
+    }
   }
 
   /** Queries one Customer record category through a bounded number of rows.
@@ -1019,6 +1299,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       ...(decoded.deletion ? { pendingDeletion: decoded.deletion } : {}),
       ...(decoded.retention ? { pendingRetention: decoded.retention } : {}),
       ...(decoded.merge ? { pendingMerge: decoded.merge } : {}),
+      ...(decoded.contactOperation ? { pendingContactOperation: decoded.contactOperation } : {}),
     }
   }
 
@@ -1079,6 +1360,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       ...(metadata.pendingDeletion ? { pendingDeletion: metadata.pendingDeletion } : {}),
       ...(metadata.pendingRetention ? { pendingRetention: metadata.pendingRetention } : {}),
       ...(metadata.pendingMerge ? { pendingMerge: metadata.pendingMerge } : {}),
+      ...(metadata.pendingContactOperation ? { pendingContactOperation: metadata.pendingContactOperation } : {}),
     }
   }
 
@@ -1265,12 +1547,13 @@ export class DynamoDbCustomerClient implements CustomerClient {
       await this.persistMergeBatch(workspaceId, loaded.revision, recordItems, options.merge.expected)
       return
     }
-    if (recordItems.length === 0) return
+    if (recordItems.length === 0 && !options.contact) return
     await this.persistRecordItems(
       workspaceId,
       loaded.revision,
       recordItems,
       options.authorizationConditionChecks,
+      options.contact?.expected,
     )
   }
 
@@ -1315,6 +1598,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
     startingRevision: number,
     recordItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
     authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+    expectedContactOperation?: CustomerContactOperation,
   ): Promise<number> {
     const authorizationItems = authorizationConditionChecks ?? []
     if (recordItems.length + authorizationItems.length > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
@@ -1326,6 +1610,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
     }
     return await this.writeTransaction(workspaceId, startingRevision, recordItems, {
       authorizationConditionChecks: authorizationItems,
+      ...(expectedContactOperation ? { expectedContactOperation } : {}),
     })
   }
 
@@ -1495,19 +1780,21 @@ export class DynamoDbCustomerClient implements CustomerClient {
     const expressionAttributeValues: Record<string, unknown> = expectedRevision === 0
       ? {}
       : { ':revision': expectedRevision }
-    if (expectedRevision !== 0 || options.expectedDeletion || options.expectedRetention || options.expectedMerge) {
+    if (expectedRevision !== 0 || options.expectedDeletion || options.expectedRetention || options.expectedMerge || options.expectedContactOperation) {
       expressionAttributeNames['#deletion'] = 'deletion'
       expressionAttributeNames['#retention'] = 'retention'
       expressionAttributeNames['#merge'] = 'merge'
+      expressionAttributeNames['#contactOperation'] = 'contactOperation'
     }
     if (options.expectedDeletion) {
       conditionParts.push(
         '#deletion.#deletionCustomerId = :deletionCustomerId',
         options.expectedDeletion.cursor === undefined
           ? 'attribute_not_exists(#deletion.#deletionCursor)'
-          : '#deletion.#deletionCursor = :deletionCursor',
+        : '#deletion.#deletionCursor = :deletionCursor',
         'attribute_not_exists(#retention)',
         'attribute_not_exists(#merge)',
+        'attribute_not_exists(#contactOperation)',
       )
       expressionAttributeNames['#deletion'] = 'deletion'
       expressionAttributeNames['#deletionCustomerId'] = 'customerId'
@@ -1524,9 +1811,10 @@ export class DynamoDbCustomerClient implements CustomerClient {
         '#retention.#retentionEvaluatedAt = :retentionEvaluatedAt',
         options.expectedRetention.cursor === undefined
           ? 'attribute_not_exists(#retention.#retentionCursor)'
-          : '#retention.#retentionCursor = :retentionCursor',
+        : '#retention.#retentionCursor = :retentionCursor',
         'attribute_not_exists(#deletion)',
         'attribute_not_exists(#merge)',
+        'attribute_not_exists(#contactOperation)',
       )
       expressionAttributeNames['#retention'] = 'retention'
       expressionAttributeNames['#retentionEvaluatedAt'] = 'evaluatedAt'
@@ -1543,9 +1831,10 @@ export class DynamoDbCustomerClient implements CustomerClient {
         '#merge.#mergeTargetRevision = :mergeTargetRevision',
         options.expectedMerge.cursor === undefined
           ? 'attribute_not_exists(#merge.#mergeCursor)'
-          : '#merge.#mergeCursor = :mergeCursor',
+        : '#merge.#mergeCursor = :mergeCursor',
         'attribute_not_exists(#deletion)',
         'attribute_not_exists(#retention)',
+        'attribute_not_exists(#contactOperation)',
       )
       expressionAttributeNames['#merge'] = 'merge'
       expressionAttributeNames['#mergeSource'] = 'sourceCustomerId'
@@ -1560,11 +1849,50 @@ export class DynamoDbCustomerClient implements CustomerClient {
       if (options.expectedMerge.cursor !== undefined) {
         expressionAttributeValues[':mergeCursor'] = options.expectedMerge.cursor
       }
+    } else if (options.expectedContactOperation) {
+      const expectedContactOperation = options.expectedContactOperation
+      expressionAttributeNames['#contactOperationKind'] = 'kind'
+      expressionAttributeNames['#contactOperationCustomerId'] = 'customerId'
+      expressionAttributeValues[':contactOperationKind'] = expectedContactOperation.kind
+      expressionAttributeValues[':contactOperationCustomerId'] = expectedContactOperation.customerId
+      conditionParts.push(
+        '#contactOperation.#contactOperationKind = :contactOperationKind',
+        '#contactOperation.#contactOperationCustomerId = :contactOperationCustomerId',
+        'attribute_not_exists(#deletion)',
+        'attribute_not_exists(#retention)',
+        'attribute_not_exists(#merge)',
+      )
+      if (expectedContactOperation.kind === 'deletion') {
+        expressionAttributeNames['#contactOperationContactId'] = 'contactId'
+        expressionAttributeNames['#contactOperationExpectedRevision'] = 'expectedRevision'
+        expressionAttributeValues[':contactOperationContactId'] = expectedContactOperation.contactId
+        expressionAttributeValues[':contactOperationExpectedRevision'] = expectedContactOperation.expectedRevision
+        conditionParts.push(
+          '#contactOperation.#contactOperationContactId = :contactOperationContactId',
+          '#contactOperation.#contactOperationExpectedRevision = :contactOperationExpectedRevision',
+        )
+      } else {
+        expressionAttributeNames['#contactOperationSourceContactId'] = 'sourceContactId'
+        expressionAttributeNames['#contactOperationTargetContactId'] = 'targetContactId'
+        expressionAttributeNames['#contactOperationSourceExpectedRevision'] = 'sourceExpectedRevision'
+        expressionAttributeNames['#contactOperationTargetExpectedRevision'] = 'targetExpectedRevision'
+        expressionAttributeValues[':contactOperationSourceContactId'] = expectedContactOperation.sourceContactId
+        expressionAttributeValues[':contactOperationTargetContactId'] = expectedContactOperation.targetContactId
+        expressionAttributeValues[':contactOperationSourceExpectedRevision'] = expectedContactOperation.sourceExpectedRevision
+        expressionAttributeValues[':contactOperationTargetExpectedRevision'] = expectedContactOperation.targetExpectedRevision
+        conditionParts.push(
+          '#contactOperation.#contactOperationSourceContactId = :contactOperationSourceContactId',
+          '#contactOperation.#contactOperationTargetContactId = :contactOperationTargetContactId',
+          '#contactOperation.#contactOperationSourceExpectedRevision = :contactOperationSourceExpectedRevision',
+          '#contactOperation.#contactOperationTargetExpectedRevision = :contactOperationTargetExpectedRevision',
+        )
+      }
     } else if (expectedRevision !== 0) {
       conditionParts.push(
         'attribute_not_exists(#deletion)',
         'attribute_not_exists(#retention)',
         'attribute_not_exists(#merge)',
+        'attribute_not_exists(#contactOperation)',
       )
     }
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
@@ -1581,6 +1909,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
             ...(options.nextDeletion ? { deletion: options.nextDeletion } : {}),
             ...(options.nextRetention ? { retention: options.nextRetention } : {}),
             ...(options.nextMerge ? { merge: options.nextMerge } : {}),
+            ...(options.nextContactOperation ? { contactOperation: options.nextContactOperation } : {}),
           },
           ConditionExpression: conditionParts.join(' AND '),
           ...(Object.keys(expressionAttributeNames).length > 0
@@ -1678,6 +2007,8 @@ type LoadedCustomerWorkspace = {
   pendingRetention?: CustomerRetentionOperation
   /** Durable merge marker, when external Triage links await repointing. */
   pendingMerge?: CustomerMergeOperation
+  /** Durable Contact operation marker, when Triage reverse links are being checked. */
+  pendingContactOperation?: CustomerContactOperation
 }
 
 /** Metadata returned by a focused read of the Customer control row. */
@@ -1690,6 +2021,8 @@ type LoadedCustomerMetadata = {
   pendingRetention?: CustomerRetentionOperation
   /** Durable merge marker, when external Triage links await repointing. */
   pendingMerge?: CustomerMergeOperation
+  /** Durable Contact operation marker, when Triage reverse links are being checked. */
+  pendingContactOperation?: CustomerContactOperation
 }
 
 /** Optional mutation behavior selected by a Customer adapter operation. */
@@ -1709,6 +2042,11 @@ type CustomerPersistOptions = {
   merge?: {
     /** Merge marker that must still be present before the commit. */
     expected: CustomerMergeOperation
+  }
+  /** Contact mutation whose marker must still be present before the commit. */
+  contact?: {
+    /** Contact operation marker that must still be present before the commit. */
+    expected: CustomerContactOperation
   }
 }
 
@@ -1760,6 +2098,10 @@ type CustomerTransactionOptions = {
   expectedMerge?: CustomerMergeOperation
   /** Merge marker to store with the next metadata revision. */
   nextMerge?: CustomerMergeOperation
+  /** Contact operation marker that must still be present before the transaction may commit. */
+  expectedContactOperation?: CustomerContactOperation
+  /** Contact operation marker to store with the next metadata revision. */
+  nextContactOperation?: CustomerContactOperation
 }
 
 /** Optional sparse-index attributes carried by unredacted Customer-owned rows. */
@@ -1787,6 +2129,8 @@ type StoredCustomerRow =
       retention?: CustomerRetentionOperation
       /** Merge operation awaiting external association repointing, when present. */
       merge?: CustomerMergeOperation
+      /** Contact operation awaiting Triage reverse-association checks, when present. */
+      contactOperation?: CustomerContactOperation
     }
   | {
       /** Workspace partition key. */
@@ -1852,6 +2196,8 @@ type DecodedCustomerRow =
       retention?: CustomerRetentionOperation
       /** Merge operation awaiting external association repointing, when present. */
       merge?: CustomerMergeOperation
+      /** Contact operation awaiting Triage reverse-association checks, when present. */
+      contactOperation?: CustomerContactOperation
     }
   | {
       /** Narrowed row discriminator. */
@@ -1948,7 +2294,8 @@ function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRo
     isSafeRevision(value.revision) &&
     (value.deletion === undefined || isCustomerDeletionOperation(value.deletion)) &&
     (value.retention === undefined || isCustomerRetentionOperation(value.retention)) &&
-    (value.merge === undefined || isCustomerMergeOperation(value.merge))
+    (value.merge === undefined || isCustomerMergeOperation(value.merge)) &&
+    (value.contactOperation === undefined || isCustomerContactOperation(value.contactOperation))
   ) {
     const deletion = value.deletion === undefined
       ? undefined
@@ -1962,6 +2309,7 @@ function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRo
       ...(deletion === undefined ? {} : { deletion }),
       ...(value.retention === undefined ? {} : { retention: value.retention }),
       ...(value.merge === undefined ? {} : { merge: value.merge }),
+      ...(value.contactOperation === undefined ? {} : { contactOperation: value.contactOperation }),
     }
   }
   if (value.entityType === 'customer' && isCustomer(value.customer) && value.customer.workspaceId === workspaceId && value.recordKey === `CUSTOMER#${value.customer.id}`) return { kind: 'customer', value: value.customer }
@@ -2171,6 +2519,19 @@ function isCustomerRetentionOperation(value: unknown): value is CustomerRetentio
     (value.cursor === undefined || isString(value.cursor))
 }
 
+/** Validates a persisted Contact operation marker. */
+function isCustomerContactOperation(value: unknown): value is CustomerContactOperation {
+  if (!isRecord(value)) return false
+  if (value.kind === 'deletion') {
+    return isString(value.customerId) && isString(value.contactId) && isSafeRevision(value.expectedRevision)
+  }
+  if (value.kind === 'merge') {
+    return isString(value.customerId) && isString(value.sourceContactId) && isString(value.targetContactId) &&
+      isSafeRevision(value.sourceExpectedRevision) && isSafeRevision(value.targetExpectedRevision)
+  }
+  return false
+}
+
 /** Compares the control metadata captured before and after one multi-query read.
  *
  * @param left Metadata captured before the record queries.
@@ -2181,7 +2542,50 @@ function sameCustomerMetadata(left: LoadedCustomerMetadata, right: LoadedCustome
   return left.revision === right.revision &&
     JSON.stringify(left.pendingDeletion) === JSON.stringify(right.pendingDeletion) &&
     JSON.stringify(left.pendingRetention) === JSON.stringify(right.pendingRetention) &&
-    JSON.stringify(left.pendingMerge) === JSON.stringify(right.pendingMerge)
+    JSON.stringify(left.pendingMerge) === JSON.stringify(right.pendingMerge) &&
+    JSON.stringify(left.pendingContactOperation) === JSON.stringify(right.pendingContactOperation)
+}
+
+/** Compares two Contact operation markers for idempotent retries.
+ *
+ * @param left Existing Contact operation marker.
+ * @param right Requested Contact operation marker.
+ * @returns Whether both markers describe the same operation.
+ */
+function sameCustomerContactOperation(
+  left: CustomerContactOperation,
+  right: CustomerContactOperation,
+): boolean {
+  if (left.kind !== right.kind || left.customerId !== right.customerId) return false
+  if (left.kind === 'deletion' && right.kind === 'deletion') {
+    return left.contactId === right.contactId && left.expectedRevision === right.expectedRevision
+  }
+  if (left.kind === 'merge' && right.kind === 'merge') {
+    return left.sourceContactId === right.sourceContactId &&
+      left.targetContactId === right.targetContactId &&
+      left.sourceExpectedRevision === right.sourceExpectedRevision &&
+      left.targetExpectedRevision === right.targetExpectedRevision
+  }
+  return false
+}
+
+/** Checks whether a Contact merge marker matches a retry request.
+ *
+ * @param operation Existing Contact operation marker.
+ * @param sourceContactId Requested source Contact.
+ * @param input Requested target and revision fences.
+ * @returns Whether the marker describes the requested merge.
+ */
+function sameCustomerContactMergeRequest(
+  operation: CustomerContactOperation,
+  sourceContactId: string,
+  input: MergeCustomerContactInput,
+): boolean {
+  return operation.kind === 'merge' &&
+    operation.sourceContactId === sourceContactId &&
+    operation.targetContactId === input.targetContactId &&
+    operation.sourceExpectedRevision === input.sourceExpectedRevision &&
+    operation.targetExpectedRevision === input.targetExpectedRevision
 }
 
 /** Checks whether a Customer merge marker matches a retry request.
@@ -2208,7 +2612,9 @@ function sameCustomerMergeOperation(
  * @returns Whether ordinary Customer mutations must wait for external cleanup.
  */
 function hasExternalCustomerOperation(loaded: LoadedCustomerWorkspace): boolean {
-  return loaded.pendingMerge !== undefined || loaded.pendingDeletion?.phase === 'triage'
+  return loaded.pendingMerge !== undefined ||
+    loaded.pendingContactOperation !== undefined ||
+    loaded.pendingDeletion?.phase === 'triage'
 }
 
 /** Checks whether an untrusted value is a finite nonnegative number. */

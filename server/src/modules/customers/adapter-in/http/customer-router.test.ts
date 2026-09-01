@@ -33,6 +33,7 @@ function createTestApp(
     getEntry: async () => {
       throw new Error('Triage is not used by this test.')
     },
+    listCustomerAssociations: async () => [],
     clearCustomerAssociations: async () => undefined,
   },
   requireWorkspaceAccess: CustomerRouterDependencies['requireWorkspaceAccess'] = async () => principal,
@@ -514,6 +515,76 @@ test('rejects merging a Contact that still has a Triage reverse link', async () 
 
   expect(response.status).toBe(409)
   expect(await response.json()).toMatchObject({ code: 'CustomerContactTriageAssociation' })
+  await expect(client.getContact('workspace-1', customer.id, source.id)).resolves.toMatchObject({ id: source.id })
+})
+
+test('cancels a Contact deletion when the locked Triage rescan finds a reverse link', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Ada Lovelace',
+  })
+  const entry = createCustomerAssociationEntry(customer.id, contact.id)
+  let listCalls = 0
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    listCustomerAssociations: async () => {
+      listCalls += 1
+      return listCalls === 1 ? [] : [entry]
+    },
+  })
+
+  const response = await app.request(
+    `/api/customers/${customer.id}/contacts/${contact.id}?expectedRevision=${contact.revision}`,
+    { method: 'DELETE' },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'CustomerContactTriageAssociation' })
+  expect(listCalls).toBe(2)
+  await expect(client.getContact('workspace-1', customer.id, contact.id)).resolves.toMatchObject({ id: contact.id })
+})
+
+test('cancels a Contact merge when the locked Triage rescan finds a reverse link', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const source = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Ada Lovelace',
+  })
+  const target = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Grace Hopper',
+  })
+  const entry = createCustomerAssociationEntry(customer.id, source.id)
+  let listCalls = 0
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    listCustomerAssociations: async () => {
+      listCalls += 1
+      return listCalls === 1 ? [] : [entry]
+    },
+  })
+
+  const response = await app.request(`/api/customer-contacts/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetContactId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'CustomerContactTriageAssociation' })
+  expect(listCalls).toBe(2)
   await expect(client.getContact('workspace-1', customer.id, source.id)).resolves.toMatchObject({ id: source.id })
 })
 

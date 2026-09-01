@@ -60,6 +60,37 @@ export type CustomerWorkspaceState = {
 /** DynamoDB conditions supplied by an already-authorized live-resource boundary. */
 export type CustomerAuthorizationConditionChecks = TriageAuthorizationConditionChecks
 
+/** Durable marker for a Contact deletion that is being checked against Triage. */
+export type CustomerContactDeletionOperation = {
+  /** Discriminator for a Contact deletion operation. */
+  kind: 'deletion'
+  /** Customer that owns the Contact. */
+  customerId: string
+  /** Contact that is about to be deleted. */
+  contactId: string
+  /** Contact revision captured before the operation started. */
+  expectedRevision: number
+}
+
+/** Durable marker for a Contact merge that is being checked against Triage. */
+export type CustomerContactMergeOperation = {
+  /** Discriminator for a Contact merge operation. */
+  kind: 'merge'
+  /** Customer that owns both Contacts. */
+  customerId: string
+  /** Contact being merged away. */
+  sourceContactId: string
+  /** Contact retained by the merge. */
+  targetContactId: string
+  /** Source Contact revision captured before the operation started. */
+  sourceExpectedRevision: number
+  /** Target Contact revision captured before the operation started. */
+  targetExpectedRevision: number
+}
+
+/** Durable marker for either kind of Contact operation. */
+export type CustomerContactOperation = CustomerContactDeletionOperation | CustomerContactMergeOperation
+
 /** Public Customer persistence and application surface. */
 export interface CustomerClient {
   /** Lists customers within one Workspace boundary.
@@ -230,6 +261,63 @@ export interface CustomerClient {
     input: MergeCustomerContactInput,
     authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<CustomerContact>
+  /** Records a Contact deletion before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact whose deletion is being prepared.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision required to start deletion.
+   * @returns A promise that resolves after the durable operation marker is written.
+   */
+  beginCustomerContactDeletion(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Cancels a prepared Contact deletion without changing the Contact graph.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact whose deletion marker should be removed.
+   * @param actorId Authenticated actor cancelling the deletion.
+   * @param expectedRevision Contact revision captured when deletion began.
+   * @returns A promise that resolves after the marker is removed.
+   */
+  cancelCustomerContactDeletion(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Completes a prepared Contact deletion after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact being deleted.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision captured when deletion began.
+   * @returns A promise that resolves after the Contact graph is deleted.
+   */
+  completeCustomerContactDeletion(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void>
+  /** Records a Contact merge before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Contact and revision fences.
+   * @returns A promise that resolves after the durable operation marker is written.
+   */
+  beginCustomerContactMerge(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<void>
+  /** Cancels a prepared Contact merge without changing the Contact graph.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact whose merge marker should be removed.
+   * @param actorId Authenticated actor cancelling the merge.
+   * @param input Target Contact and revision fences captured when merging began.
+   * @returns A promise that resolves after the marker is removed.
+   */
+  cancelCustomerContactMerge(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<void>
+  /** Completes a prepared Contact merge after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Contact and revision fences captured when merging began.
+   * @returns The retained Contact.
+   */
+  completeCustomerContactMerge(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<CustomerContact>
   /** Lists customer requests within a Workspace boundary.
    *
    * @param workspaceId Workspace containing the requests.
@@ -441,6 +529,9 @@ export class InMemoryCustomerClient implements CustomerClient {
 
   /** Cross-store Customer merges waiting for Triage association repointing. */
   private readonly pendingMerges = new Map<string, CustomerMergeMarker>()
+
+  /** Contact mutations waiting for Triage reverse-association checks. */
+  private readonly pendingContactOperations = new Map<string, CustomerContactOperation>()
 
   /** Test-replaceable clock. */
   private readonly now: () => Date
@@ -659,6 +750,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
     const current = this.requireCustomer(state, customerId)
@@ -681,6 +773,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
+    if (this.pendingContactOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     const pendingDeletion = this.pendingDeletions.get(workspaceId)
     if (pendingDeletion) {
       if (pendingDeletion.customerId !== customerId) {
@@ -707,6 +802,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async beginCustomerDeletion(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
+    if (this.pendingContactOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     const pendingDeletion = this.pendingDeletions.get(workspaceId)
     if (pendingDeletion) {
       if (pendingDeletion.customerId !== customerId || pendingDeletion.expectedRevision !== expectedRevision) {
@@ -752,6 +850,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail> {
     requireActor(actorId)
+    if (this.pendingContactOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     const pendingMerge = this.pendingMerges.get(workspaceId)
     if (pendingMerge) {
       throw new CustomerError(409, 'CustomerMergeInProgress', 'Complete the cross-store Customer merge before starting another merge.')
@@ -772,6 +873,9 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async beginCustomerMerge(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<void> {
     requireActor(actorId)
+    if (this.pendingContactOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
     const pendingMerge = this.pendingMerges.get(workspaceId)
     if (pendingMerge) {
       if (!sameCustomerMergeMarker(pendingMerge, sourceCustomerId, input)) {
@@ -879,6 +983,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
@@ -905,6 +1010,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async updateContact(workspaceId: string, customerId: string, contactId: string, actorId: string, input: UpdateCustomerContactInput): Promise<CustomerContact> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const current = await this.getContact(workspaceId, customerId, contactId)
     assertRevision(current.revision, input.expectedRevision, 'Customer contact')
@@ -937,19 +1043,112 @@ export class InMemoryCustomerClient implements CustomerClient {
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<void> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const current = await this.getContact(workspaceId, customerId, contactId)
     assertRevision(current.revision, expectedRevision, 'Customer contact')
     const state = this.state(workspaceId)
-    state.contacts.delete(contactId)
-    for (const [requestId, request] of state.requests) {
-      if (request.contactId !== contactId) continue
-      state.requests.set(requestId, {
-        ...request,
-        contactId: undefined,
-        revision: request.revision + 1,
-        updatedAt: this.now().toISOString(),
-      })
+    this.deleteContactState(state, contactId)
+  }
+
+  /** Records a Contact deletion before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact whose deletion is being prepared.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision required to start deletion.
+   * @returns A promise that resolves after the operation marker is recorded.
+   */
+  async beginCustomerContactDeletion(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireActor(actorId)
+    const operation: CustomerContactDeletionOperation = {
+      kind: 'deletion',
+      customerId,
+      contactId,
+      expectedRevision,
     }
+    const pending = this.pendingContactOperations.get(workspaceId)
+    if (pending) {
+      if (sameCustomerContactOperation(pending, operation)) return
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
+    }
+    this.assertNoCustomerOperation(workspaceId)
+    const state = this.state(workspaceId)
+    this.requireCustomer(state, customerId)
+    const current = this.requireContactForCustomer(state, contactId, customerId)
+    assertRevision(current.revision, expectedRevision, 'Customer contact')
+    this.pendingContactOperations.set(workspaceId, operation)
+  }
+
+  /** Cancels a prepared Contact deletion without changing the Contact graph.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact whose deletion marker should be removed.
+   * @param actorId Authenticated actor cancelling the deletion.
+   * @param expectedRevision Contact revision captured when deletion began.
+   * @returns A promise that resolves after the operation marker is removed.
+   */
+  async cancelCustomerContactDeletion(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireActor(actorId)
+    const operation: CustomerContactDeletionOperation = {
+      kind: 'deletion',
+      customerId,
+      contactId,
+      expectedRevision,
+    }
+    const pending = this.pendingContactOperations.get(workspaceId)
+    if (!pending) return
+    if (!sameCustomerContactOperation(pending, operation)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
+    }
+    this.pendingContactOperations.delete(workspaceId)
+  }
+
+  /** Completes a prepared Contact deletion after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing the Customer and Contact.
+   * @param customerId Contact owner.
+   * @param contactId Contact being deleted.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision captured when deletion began.
+   * @returns A promise that resolves after the Contact graph is deleted.
+   */
+  async completeCustomerContactDeletion(
+    workspaceId: string,
+    customerId: string,
+    contactId: string,
+    actorId: string,
+    expectedRevision: number,
+  ): Promise<void> {
+    requireActor(actorId)
+    const operation: CustomerContactDeletionOperation = {
+      kind: 'deletion',
+      customerId,
+      contactId,
+      expectedRevision,
+    }
+    const pending = this.pendingContactOperations.get(workspaceId)
+    if (!pending || !sameCustomerContactOperation(pending, operation)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'The Contact deletion marker is missing or does not match.')
+    }
+    const state = this.rawState(workspaceId)
+    const current = this.requireContactForCustomer(state, contactId, customerId)
+    assertRevision(current.revision, expectedRevision, 'Customer contact')
+    this.deleteContactState(state, contactId)
+    this.pendingContactOperations.delete(workspaceId)
   }
 
   /** Merges a source contact into a retained contact.
@@ -969,28 +1168,89 @@ export class InMemoryCustomerClient implements CustomerClient {
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<CustomerContact> {
     requireActor(actorId)
-    if (sourceContactId === input.targetContactId) throw new CustomerError(400, 'InvalidCustomerMerge', 'A contact cannot be merged into itself.')
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
-    const source = this.requireContact(state, sourceContactId)
-    const target = this.requireContact(state, input.targetContactId)
-    if (source.customerId !== target.customerId) {
-      throw new CustomerError(400, 'InvalidCustomerMerge', 'Contacts from different Customers cannot be merged.')
+    return clone(this.mergeContactState(state, sourceContactId, input))
+  }
+
+  /** Records a Contact merge before checking Triage reverse associations.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Contact and revision fences.
+   * @returns A promise that resolves after the operation marker is recorded.
+   */
+  async beginCustomerContactMerge(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+  ): Promise<void> {
+    requireActor(actorId)
+    const pending = this.pendingContactOperations.get(workspaceId)
+    if (pending && sameCustomerContactMergeRequest(pending, sourceContactId, input)) return
+    if (pending) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
     }
-    assertRevision(source.revision, input.sourceExpectedRevision, 'Source contact')
-    assertRevision(target.revision, input.targetExpectedRevision, 'Target contact')
-    for (const request of state.requests.values()) {
-      if (request.contactId !== source.id) continue
-      state.requests.set(request.id, { ...request, contactId: target.id, revision: request.revision + 1, updatedAt: this.now().toISOString() })
+    this.assertNoCustomerOperation(workspaceId)
+    const state = this.state(workspaceId)
+    const { source } = this.validateContactMerge(state, sourceContactId, input)
+    this.pendingContactOperations.set(workspaceId, {
+      kind: 'merge',
+      customerId: source.customerId,
+      sourceContactId,
+      targetContactId: input.targetContactId,
+      sourceExpectedRevision: input.sourceExpectedRevision,
+      targetExpectedRevision: input.targetExpectedRevision,
+    })
+  }
+
+  /** Cancels a prepared Contact merge without changing the Contact graph.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact whose merge marker should be removed.
+   * @param actorId Authenticated actor cancelling the merge.
+   * @param input Target Contact and revision fences captured when merging began.
+   * @returns A promise that resolves after the operation marker is removed.
+   */
+  async cancelCustomerContactMerge(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+  ): Promise<void> {
+    requireActor(actorId)
+    const pending = this.pendingContactOperations.get(workspaceId)
+    if (!pending) return
+    if (!sameCustomerContactMergeRequest(pending, sourceContactId, input)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'Another Contact mutation is still being completed.')
     }
-    state.contacts.delete(source.id)
-    const mergedTarget = {
-      ...target,
-      primary: target.primary || source.primary,
-      revision: target.revision + 1,
-      updatedAt: this.now().toISOString(),
+    this.pendingContactOperations.delete(workspaceId)
+  }
+
+  /** Completes a prepared Contact merge after Triage reverse associations are clear.
+   *
+   * @param workspaceId Workspace containing both Contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Contact and revision fences captured when merging began.
+   * @returns The retained Contact.
+   */
+  async completeCustomerContactMerge(
+    workspaceId: string,
+    sourceContactId: string,
+    actorId: string,
+    input: MergeCustomerContactInput,
+  ): Promise<CustomerContact> {
+    requireActor(actorId)
+    const pending = this.pendingContactOperations.get(workspaceId)
+    if (!pending || !sameCustomerContactMergeRequest(pending, sourceContactId, input)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'The Contact merge marker is missing or does not match.')
     }
-    if (mergedTarget.primary) this.clearPrimaryContacts(state, target.customerId, target.id)
-    state.contacts.set(target.id, mergedTarget)
+    const state = this.rawState(workspaceId)
+    const mergedTarget = this.mergeContactState(state, sourceContactId, input)
+    this.pendingContactOperations.delete(workspaceId)
     return clone(mergedTarget)
   }
 
@@ -1056,6 +1316,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async createRequest(workspaceId: string, actorId: string, input: CreateCustomerRequestInput): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     this.assertCustomerAvailable(workspaceId, input.customerId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, input.customerId)
@@ -1095,6 +1356,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async updateRequest(workspaceId: string, requestId: string, actorId: string, input: UpdateCustomerRequestInput): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const current = state.requests.get(requestId)
     if (!current) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
@@ -1123,6 +1385,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
@@ -1156,6 +1419,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async mergeRequest(workspaceId: string, sourceRequestId: string, actorId: string, input: MergeCustomerRequestInput): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     if (sourceRequestId === input.targetRequestId) throw new CustomerError(400, 'InvalidCustomerMerge', 'A request cannot be merged into itself.')
     const state = this.state(workspaceId)
     const source = state.requests.get(sourceRequestId)
@@ -1218,6 +1482,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
@@ -1255,6 +1520,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
@@ -1287,6 +1553,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
@@ -1319,6 +1586,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
   ): Promise<CustomerRequest> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const request = state.requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
@@ -1399,6 +1667,7 @@ export class InMemoryCustomerClient implements CustomerClient {
   /** Creates a saved customer directory view. */
   async createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput, idempotencyKey?: string): Promise<CustomerSavedView> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const name = requireViewName(input.name)
     const viewId = idempotencyKey === undefined
@@ -1436,6 +1705,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async updateSavedView(workspaceId: string, viewId: string, actorId: string, input: UpdateCustomerSavedViewInput): Promise<CustomerSavedView> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const current = state.views.get(viewId)
     if (!current) throw notFound('CustomerSavedViewNotFound', 'The saved customer view was not found.')
@@ -1462,6 +1732,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async deleteSavedView(workspaceId: string, viewId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const view = state.views.get(viewId)
     if (!view) throw notFound('CustomerSavedViewNotFound', 'The saved customer view was not found.')
@@ -1495,6 +1766,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @returns Counts of redacted records by category.
    */
   async redactExpired(workspaceId: string, now = this.now().toISOString()): Promise<import('@mukuroji/contracts').CustomerRetentionResult> {
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.rawState(workspaceId)
     const redacted = redactExpiredCustomerData(
       [...state.customers.values()],
@@ -1519,6 +1791,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    */
   async prepareCompletionNotifications(workspaceId: string, teamId: string, workItemId: string, actorId: string, now = this.now().toISOString()): Promise<CustomerCompletionNotification[]> {
     requireActor(actorId)
+    this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
     const requests = [...state.requests.values()].filter((request) =>
       request.status !== 'merged' && request.workItemLinks.some((link) => link.teamId === teamId && link.workItemId === workItemId)
@@ -1602,6 +1875,80 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     this.workspaces.set(workspaceId, state)
     return state
+  }
+
+  /** Removes a Contact and detaches it from every owned Customer Request.
+   *
+   * @param state Customer graph to mutate.
+   * @param contactId Contact to remove.
+   * @returns Nothing; the supplied graph is mutated in place.
+   */
+  private deleteContactState(state: CustomerWorkspaceState, contactId: string): void {
+    state.contacts.delete(contactId)
+    for (const [requestId, request] of state.requests) {
+      if (request.contactId !== contactId) continue
+      state.requests.set(requestId, {
+        ...request,
+        contactId: undefined,
+        revision: request.revision + 1,
+        updatedAt: this.now().toISOString(),
+      })
+    }
+  }
+
+  /** Validates the two Contacts and revision fences used by a merge.
+   *
+   * @param state Customer graph to inspect.
+   * @param sourceContactId Contact being merged away.
+   * @param input Target Contact and revision fences.
+   * @returns The validated source and target Contacts.
+   */
+  private validateContactMerge(
+    state: CustomerWorkspaceState,
+    sourceContactId: string,
+    input: MergeCustomerContactInput,
+  ): { source: CustomerContact; target: CustomerContact } {
+    if (sourceContactId === input.targetContactId) {
+      throw new CustomerError(400, 'InvalidCustomerMerge', 'A contact cannot be merged into itself.')
+    }
+    const source = this.requireContact(state, sourceContactId)
+    const target = this.requireContact(state, input.targetContactId)
+    if (source.customerId !== target.customerId) {
+      throw new CustomerError(400, 'InvalidCustomerMerge', 'Contacts from different Customers cannot be merged.')
+    }
+    this.requireCustomer(state, source.customerId)
+    assertRevision(source.revision, input.sourceExpectedRevision, 'Source contact')
+    assertRevision(target.revision, input.targetExpectedRevision, 'Target contact')
+    return { source, target }
+  }
+
+  /** Applies the Customer-side half of a Contact merge to one mutable graph.
+   *
+   * @param state Customer graph to mutate.
+   * @param sourceContactId Contact being merged away.
+   * @param input Target Contact and revision fences.
+   * @returns The retained Contact after links are repointed.
+   */
+  private mergeContactState(
+    state: CustomerWorkspaceState,
+    sourceContactId: string,
+    input: MergeCustomerContactInput,
+  ): CustomerContact {
+    const { source, target } = this.validateContactMerge(state, sourceContactId, input)
+    for (const request of state.requests.values()) {
+      if (request.contactId !== source.id) continue
+      state.requests.set(request.id, { ...request, contactId: target.id, revision: request.revision + 1, updatedAt: this.now().toISOString() })
+    }
+    state.contacts.delete(source.id)
+    const mergedTarget = {
+      ...target,
+      primary: target.primary || source.primary,
+      revision: target.revision + 1,
+      updatedAt: this.now().toISOString(),
+    }
+    if (mergedTarget.primary) this.clearPrimaryContacts(state, target.customerId, target.id)
+    state.contacts.set(target.id, mergedTarget)
+    return mergedTarget
   }
 
   /** Applies the Customer-side half of a merge to one mutable graph.
@@ -1765,6 +2112,9 @@ export class InMemoryCustomerClient implements CustomerClient {
     if (this.pendingMerges.has(workspaceId)) {
       throw new CustomerError(409, 'CustomerMergeInProgress', 'A Customer merge is still being completed.')
     }
+    if (this.pendingContactOperations.has(workspaceId)) {
+      throw new CustomerError(409, 'CustomerContactMutationInProgress', 'A Contact mutation is still being completed.')
+    }
   }
 
   /** Reads one customer or throws a stable not-found error. */
@@ -1906,6 +2256,48 @@ function sameCustomerMergeMarker(
     marker.targetCustomerId === input.targetCustomerId &&
     marker.sourceExpectedRevision === input.sourceExpectedRevision &&
     marker.targetExpectedRevision === input.targetExpectedRevision
+}
+
+/** Compares two Contact operation markers for idempotent retries.
+ *
+ * @param left Existing Contact operation marker.
+ * @param right Requested Contact operation marker.
+ * @returns Whether both markers describe the same operation.
+ */
+function sameCustomerContactOperation(
+  left: CustomerContactOperation,
+  right: CustomerContactOperation,
+): boolean {
+  if (left.kind !== right.kind || left.customerId !== right.customerId) return false
+  if (left.kind === 'deletion' && right.kind === 'deletion') {
+    return left.contactId === right.contactId && left.expectedRevision === right.expectedRevision
+  }
+  if (left.kind === 'merge' && right.kind === 'merge') {
+    return left.sourceContactId === right.sourceContactId &&
+      left.targetContactId === right.targetContactId &&
+      left.sourceExpectedRevision === right.sourceExpectedRevision &&
+      left.targetExpectedRevision === right.targetExpectedRevision
+  }
+  return false
+}
+
+/** Checks whether a Contact merge marker matches a retry request.
+ *
+ * @param operation Existing Contact operation marker.
+ * @param sourceContactId Requested source Contact.
+ * @param input Requested target and revision fences.
+ * @returns Whether the marker describes the requested merge.
+ */
+function sameCustomerContactMergeRequest(
+  operation: CustomerContactOperation,
+  sourceContactId: string,
+  input: MergeCustomerContactInput,
+): operation is CustomerContactMergeOperation {
+  return operation.kind === 'merge' &&
+    operation.sourceContactId === sourceContactId &&
+    operation.targetContactId === input.targetContactId &&
+    operation.sourceExpectedRevision === input.sourceExpectedRevision &&
+    operation.targetExpectedRevision === input.targetExpectedRevision
 }
 
 /** Ensures a mutation has a stable actor identity. */

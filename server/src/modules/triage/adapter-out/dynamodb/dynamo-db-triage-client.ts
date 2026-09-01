@@ -771,8 +771,9 @@ export class DynamoDbTriageClient implements TriageClient {
       if (customerId !== undefined && customerId !== operation.customerId) {
         throw new TriageError(400, 'InvalidTriageInput', 'The deletion operation does not own this Customer association.')
       }
-      conditionExpression += ' AND #deletion.#customerId = :customerId AND #deletion.#phase = :triagePhase'
+      conditionExpression += ' AND #deletion.#customerId = :customerId AND #deletion.#phase = :triagePhase AND attribute_not_exists(#contactOperation)'
       names['#deletion'] = 'deletion'
+      names['#contactOperation'] = 'contactOperation'
       names['#customerId'] = 'customerId'
       names['#phase'] = 'phase'
       values[':customerId'] = operation.customerId
@@ -781,16 +782,18 @@ export class DynamoDbTriageClient implements TriageClient {
       if (customerId !== operation.targetCustomerId) {
         throw new TriageError(400, 'InvalidTriageInput', 'The merge operation does not target this Customer association.')
       }
-      conditionExpression += ' AND #merge.#mergeSource = :mergeSource AND #merge.#mergeTarget = :mergeTarget'
+      conditionExpression += ' AND #merge.#mergeSource = :mergeSource AND #merge.#mergeTarget = :mergeTarget AND attribute_not_exists(#contactOperation)'
       names['#merge'] = 'merge'
+      names['#contactOperation'] = 'contactOperation'
       names['#mergeSource'] = 'sourceCustomerId'
       names['#mergeTarget'] = 'targetCustomerId'
       values[':mergeSource'] = operation.sourceCustomerId
       values[':mergeTarget'] = operation.targetCustomerId
     } else if (customerId !== undefined) {
-      conditionExpression += ' AND attribute_not_exists(#deletion) AND attribute_not_exists(#merge)'
+      conditionExpression += ' AND attribute_not_exists(#deletion) AND attribute_not_exists(#merge) AND attribute_not_exists(#contactOperation)'
       names['#deletion'] = 'deletion'
       names['#merge'] = 'merge'
+      names['#contactOperation'] = 'contactOperation'
     } else {
       return undefined
     }

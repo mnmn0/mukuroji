@@ -444,13 +444,43 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
       const customerId = context.req.param('customerId') ?? ''
       const contactId = context.req.param('contactId') ?? ''
+      const expectedRevision = readExpectedRevision(context.req.query('expectedRevision'))
+      const customers = dependencies.getCustomers()
       await assertContactMutationAllowed(principal.directoryId, customerId, contactId, dependencies)
-      await dependencies.getCustomers().deleteContact(
+      await customers.beginCustomerContactDeletion(
         principal.directoryId,
         customerId,
         contactId,
         principal.userKey,
-        readExpectedRevision(context.req.query('expectedRevision')),
+        expectedRevision,
+      )
+      try {
+        await assertContactMutationAllowed(principal.directoryId, customerId, contactId, dependencies)
+      } catch (error) {
+        try {
+          await customers.cancelCustomerContactDeletion(
+            principal.directoryId,
+            customerId,
+            contactId,
+            principal.userKey,
+            expectedRevision,
+          )
+        } catch (cancelError) {
+          throw new CustomerError(
+            503,
+            'CustomerContactMutationCancellationFailed',
+            'The Contact deletion could not be safely prepared. Retry the operation.',
+            { cause: cancelError },
+          )
+        }
+        throw error
+      }
+      await customers.completeCustomerContactDeletion(
+        principal.directoryId,
+        customerId,
+        contactId,
+        principal.userKey,
+        expectedRevision,
       )
       return context.body(null, 204)
     } catch (error) {
@@ -473,7 +503,39 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         sourceContactId,
         dependencies,
       )
-      const contact = await dependencies.getCustomers().mergeContact(
+      const customers = dependencies.getCustomers()
+      await customers.beginCustomerContactMerge(
+        principal.directoryId,
+        sourceContactId,
+        principal.userKey,
+        input,
+      )
+      try {
+        await assertContactMutationAllowed(
+          principal.directoryId,
+          sourceContact.customerId,
+          sourceContactId,
+          dependencies,
+        )
+      } catch (error) {
+        try {
+          await customers.cancelCustomerContactMerge(
+            principal.directoryId,
+            sourceContactId,
+            principal.userKey,
+            input,
+          )
+        } catch (cancelError) {
+          throw new CustomerError(
+            503,
+            'CustomerContactMutationCancellationFailed',
+            'The Contact merge could not be safely prepared. Retry the operation.',
+            { cause: cancelError },
+          )
+        }
+        throw error
+      }
+      const contact = await customers.completeCustomerContactMerge(
         principal.directoryId,
         sourceContactId,
         principal.userKey,
