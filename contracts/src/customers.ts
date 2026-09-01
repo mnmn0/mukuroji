@@ -521,6 +521,8 @@ export type CreateCustomerRequestInput = {
   contactId?: string
   /** Triage Entry that originated this request, when applicable. */
   triageEntryId?: string
+  /** Caller-selected key used to make non-Triage retries idempotent. */
+  idempotencyKey?: string
   /** Provider-neutral source metadata. */
   source: CustomerRequestSource
   /** Original request message. */

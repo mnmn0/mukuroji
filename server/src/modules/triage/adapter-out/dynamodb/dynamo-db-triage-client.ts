@@ -11,7 +11,6 @@ import {
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
-  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import {
   TRIAGE_BULK_ACTION_LIMIT,
@@ -69,6 +68,7 @@ import type {
 import {
   createTriageAcceptanceTransactionItems,
   createTriageActionTransactionItems,
+  createTriageCustomerAssociationTransactionItems,
   createTriageConfigurationRevisionConditionCheck,
   createTriageEntryKey,
   createTriageEntryTransactionItems,
@@ -489,6 +489,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param entryId The target Triage Entry identifier.
    * @param actor The authenticated mutation actor.
    * @param input The customer association and expected revision.
+   * @param authorizationConditionChecks Live Team, Project, and actor fences joined to the transaction.
    * @returns The updated permission-safe Triage Entry.
    */
   async associateCustomer(
@@ -497,6 +498,7 @@ export class DynamoDbTriageClient implements TriageClient {
     entryId: string,
     actor: TriageActor,
     input: UpdateTriageCustomerAssociationInput,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageEntry> {
     requireUserId(actor.id, 'Triage actor ID')
     const current = await this.getEntryForMutation(workspaceId, teamId, entryId)
@@ -539,24 +541,18 @@ export class DynamoDbTriageClient implements TriageClient {
       updatedAt: now,
     }
     validateTriageCustomerAssociation(next)
+    const transactItems = createTriageCustomerAssociationTransactionItems({
+      tableName: this.tableName,
+      current,
+      next,
+      event: associationEvent,
+      authorizationConditionChecks,
+    })
+    if (transactItems.length > 100) {
+      throw new TriageError(409, 'TriageTransactionTooLarge', 'The Customer association is too large.')
+    }
     try {
-      await this.documentClient.send(new UpdateCommand({
-        TableName: this.tableName,
-        Key: createTriageEntryKey(workspaceId, entryId),
-        UpdateExpression: 'SET #entry = :entry, #revision = :revision',
-        ConditionExpression: '#revision = :expectedRevision AND #teamId = :teamId',
-        ExpressionAttributeNames: {
-          '#entry': 'entry',
-          '#revision': 'revision',
-          '#teamId': 'teamId',
-        },
-        ExpressionAttributeValues: {
-          ':entry': next,
-          ':revision': next.revision,
-          ':expectedRevision': input.expectedRevision,
-          ':teamId': teamId,
-        },
-      }))
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
       if (isConditionalConflict(error)) {
         throw new TriageError(409, 'TriageRevisionConflict', 'The triage entry changed.', {

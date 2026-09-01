@@ -86,6 +86,47 @@ export type TriageTransactionContribution = {
   transactItems: TriageTransactionItems
 }
 
+/** Input for atomically associating a Triage Entry with a Customer graph. */
+export type CreateTriageCustomerAssociationTransactionItemsInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Canonical entry read before the revision-fenced association. */
+  current: TriageEntry
+  /** Canonical entry after the Customer association event is appended. */
+  next: TriageEntry
+  /** Immutable event describing the association mutation. */
+  event: TriageEntryEvent
+  /** Live authorization fences supplied by the HTTP composition boundary. */
+  authorizationConditionChecks?: TriageTransactionItems
+}
+
+/** Builds the root update and immutable event for a Customer association.
+ *
+ * @param input The current entry, next entry, event, table, and live authorization fences.
+ * @returns Transaction actions that commit the association and its immutable audit projection.
+ */
+export function createTriageCustomerAssociationTransactionItems(
+  input: CreateTriageCustomerAssociationTransactionItemsInput,
+): TriageTransactionItems {
+  if (input.next.revision !== input.current.revision + 1) {
+    throw new TriageError(
+      400,
+      'InvalidTriageInput',
+      'The Customer association revision must advance exactly once.',
+    )
+  }
+  return [
+    ...(input.authorizationConditionChecks ?? []),
+    createEntryUpdate(
+      input.tableName,
+      input.next,
+      input.current.revision,
+      DEFAULT_TRIAGE_WAKE_SHARD_COUNT,
+    ),
+    createEventPut(input.tableName, input.next, input.event),
+  ]
+}
+
 /** Input for an operation receipt composed by an external owner transaction. */
 export type CreateTriageOperationReceiptTransactionPutInput = {
   /** Request Intake table name. */

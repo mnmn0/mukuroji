@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { TRIAGE_ENTRY_SCHEMA_VERSION, type TriageEntry } from '@mukuroji/contracts'
+import { TRIAGE_ENTRY_SCHEMA_VERSION, type TriageEntry, type TriageEntryEvent } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../../../audit'
 import { createTriageCapabilities, redactExpiredTriageEntry } from '../../domain/triage-entry'
 import {
@@ -10,6 +10,7 @@ import {
   createFormTriageEntryTransactionItems,
   createTriageAcceptanceTransactionItems,
   createTriageActionTransactionItems,
+  createTriageCustomerAssociationTransactionItems,
   createTriageEntryKey,
   createTriageSourceActivityTransactionItems,
   createTriageSourceClaimKey,
@@ -137,6 +138,58 @@ describe('triage DynamoDB transaction contributions', () => {
     expect(items[2]?.Put?.Item).toMatchObject({
       entryType: 'triage-entry-event',
       entryId: 'triage-form-1',
+    })
+  })
+
+  test('atomically persists a Customer association and its immutable event', () => {
+    const current = createEntry()
+    const event: TriageEntryEvent = {
+      id: 'customer-associated-1',
+      type: 'customer-associated',
+      actorId: 'member-1',
+      summary: 'Customer association updated.',
+      createdAt: '2026-08-09T00:05:00.000Z',
+    }
+    const next: TriageEntry = {
+      ...current,
+      customerId: 'customer-1',
+      customerRequestId: 'request-1',
+      events: [...current.events, event],
+      revision: current.revision + 1,
+      updatedAt: event.createdAt,
+    }
+    const items = createTriageCustomerAssociationTransactionItems({
+      tableName: 'RequestIntakeTable',
+      current,
+      next,
+      event,
+      authorizationConditionChecks: [{
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId: 'workspace-1', memberKey: 'member-1' },
+          ConditionExpression: 'attribute_exists(workspaceId)',
+        },
+      }],
+    })
+
+    expect(items).toHaveLength(3)
+    expect(items[0]?.ConditionCheck).toMatchObject({
+      TableName: 'WorkspaceAccessTable',
+      ConditionExpression: 'attribute_exists(workspaceId)',
+    })
+    expect(items[1]?.Update).toMatchObject({
+      Key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-form-1' },
+      ConditionExpression: '#revision = :expectedRevision AND teamId = :teamId',
+    })
+    expect(items[2]?.Put).toMatchObject({
+      Item: {
+        entryType: 'triage-entry-event',
+        scopeKey: 'WORKSPACE#workspace-1',
+        recordKey: `TRIAGE_EVENT#${current.id}#${event.createdAt}#${event.id}`,
+        entryId: current.id,
+        event,
+      },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
     })
   })
 

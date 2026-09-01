@@ -72,9 +72,7 @@ export type SidebarTeam = {
   projects?: SidebarProject[]
 }
 
-/**
- * サイドバーの主要ナビゲーション項目です。
- */
+/** Identifiers for the primary sidebar navigation items. */
 export type SidebarNavId =
   | 'home'
   | 'focus'

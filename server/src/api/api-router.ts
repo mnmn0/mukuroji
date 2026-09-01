@@ -6041,6 +6041,50 @@ routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>
   verifyTriageAccess: async (principal, teamId, minimum) => {
     await requireTeamPermission(principal, teamId, minimum)
   },
+  createTriageAuthorizationConditionChecks: async (principal, teamId, projectIds) => {
+    const teamContext = await requireTeamPermission(principal, teamId, 'member')
+    const createActiveReferenceConditionChecks = workspaceDependencies.projectDirectory
+      .createActiveReferenceConditionChecks
+    if (!createActiveReferenceConditionChecks) {
+      throw new TriageError(
+        503,
+        'TriageAuthorizationFenceUnavailable',
+        'Triage authorization fencing is unavailable. Retry the request.',
+      )
+    }
+    const checks: TriageAuthorizationConditionChecks = []
+    const uniqueProjectIds = new Set(projectIds.filter((projectId): projectId is string => projectId !== undefined))
+    for (const projectId of uniqueProjectIds) {
+      checks.push(...await createActiveReferenceConditionChecks.call(
+        workspaceDependencies.projectDirectory,
+        principal.directoryId,
+        teamId,
+        projectId,
+      ))
+      checks.push(...await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        teamContext,
+        principal.directoryId,
+        teamId,
+        projectId,
+      ))
+    }
+    if (uniqueProjectIds.size === 0) {
+      checks.push(...await createActiveReferenceConditionChecks.call(
+        workspaceDependencies.projectDirectory,
+        principal.directoryId,
+        teamId,
+      ))
+      checks.push(...await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        teamContext,
+        principal.directoryId,
+        teamId,
+        undefined,
+      ))
+    }
+    return mergeTriageConditionChecks(checks)
+  },
   verifyWorkItemAccess: async (principal, teamId, workItemId, minimum) => {
     const context = await requireTeamPermission(principal, teamId, minimum)
     const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
@@ -9087,16 +9131,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         )
       }
     }
-    const customerCompletionPreparation = hasCustomerReadAccess(principal) && detail.issue.statusCategory === 'completed'
-      ? prepareCustomerCompletionNotificationsBestEffort(
-          workspaceDependencies.customers,
-          principal.directoryId,
-          teamId,
-          issueId,
-          principal.userKey,
-          'Work Item detail read',
-        )
-      : Promise.resolve()
     const [collaborationComments, resolvedConfiguration, relationPage, customerImpact] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
@@ -9115,7 +9149,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
             issueId,
           )
         : Promise.resolve(undefined),
-      customerCompletionPreparation,
     ])
     const allCollaborationComments = collaborationComments.sort(
       compareMigrationAwareComments,
@@ -25400,14 +25433,18 @@ async function requireCustomerWorkspaceAccess(
     requireCustomerManagement(principal)
   } else if (minimum === 'write') {
     requireWorkspaceBusinessWrite(principal)
-    requireCustomerReadAccess(principal)
+    if (principal.enterprisePermissions === undefined) {
+      requireCustomerManagement(principal)
+    } else {
+      requireCustomerReadAccess(principal)
+    }
   } else {
     requireWorkspaceBusinessRead(principal)
     requireCustomerReadAccess(principal)
   }
   return {
     ...principal,
-    canViewSensitiveData: minimum === 'manage' || hasCustomerReadAccess(principal),
+    canViewSensitiveData: hasCustomerManagementAccess(principal),
   }
 }
 
@@ -25423,20 +25460,27 @@ function requireCustomerReadAccess(principal: WorkspacePrincipal): void {
 
 /** Requires Customer merge, export, and deletion management authority. */
 function requireCustomerManagement(principal: WorkspacePrincipal): void {
-  if (principal.isSystemAdmin && (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin')) return
-  if (principal.enterprisePermissions !== undefined) {
-    if (
-      hasEnterpriseWorkspacePermission(principal, 'requests.manage') ||
-      hasEnterpriseWorkspacePermission(principal, 'workspace.manage')
-    ) return
-  } else if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
-    return
-  }
+  if (hasCustomerManagementAccess(principal)) return
   throw new WorkspaceAccessError(
     403,
     'CustomerManagementDenied',
     'Customer management permission is required.',
   )
+}
+
+/** Checks whether the principal has the authority required to expose Customer internals or mutate them. */
+function hasCustomerManagementAccess(principal: WorkspacePrincipal): boolean {
+  if (principal.isSystemAdmin && (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin')) return true
+  if (principal.enterprisePermissions !== undefined) {
+    if (
+      hasEnterpriseWorkspacePermission(principal, 'requests.manage') ||
+      hasEnterpriseWorkspacePermission(principal, 'workspace.manage')
+    ) return true
+    return false
+  } else if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return true
+  }
+  return false
 }
 
 /**

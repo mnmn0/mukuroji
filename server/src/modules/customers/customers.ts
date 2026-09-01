@@ -165,20 +165,42 @@ export class InMemoryCustomerClient implements CustomerClient {
     })
   }
 
-  /** Lists customers within one Workspace boundary. */
+  /** Lists customers within one Workspace boundary.
+   *
+   * @param workspaceId Workspace containing the customers.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered customer page.
+   */
   async listCustomers(workspaceId: string, input: CustomerListInput = {}): Promise<CustomerPage> {
     const state = this.state(workspaceId)
+    const limit = normalizeLimit(input.limit)
+    const normalizedInput = { ...input, limit }
+    const queryFingerprint = createListQueryFingerprint(normalizedInput)
+    const datasetRevision = createCustomerDatasetRevision(state)
     const filtered = [...state.customers.values()]
       .map((customer) => this.withCustomerCounts(state, customer))
-      .filter((customer) => matchesCustomer(customer, input))
-      .sort((left, right) => compareCustomers(left, right, input))
-    const limit = normalizeLimit(input.limit)
-    const offset = decodeOffset(input.cursor, workspaceId, 'customers')
+      .filter((customer) => matchesCustomer(customer, normalizedInput))
+      .sort((left, right) => compareCustomers(left, right, normalizedInput))
+    const offset = decodeOffset(
+      input.cursor,
+      workspaceId,
+      'customers',
+      queryFingerprint,
+      datasetRevision,
+    )
     const page = filtered.slice(offset, offset + limit).map(clone)
     return {
       customers: page,
       ...(offset + page.length < filtered.length
-        ? { nextCursor: encodeOffset(workspaceId, 'customers', offset + page.length) }
+        ? {
+            nextCursor: encodeOffset(
+              workspaceId,
+              'customers',
+              offset + page.length,
+              queryFingerprint,
+              datasetRevision,
+            ),
+          }
         : {}),
     }
   }
@@ -247,7 +269,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
   }
 
-  /** Merges a source customer into a retained customer. */
+  /** Merges a source customer into a retained customer.
+   *
+   * @param workspaceId Workspace containing both customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target customer and revision fences.
+   * @returns The retained customer's updated detail graph.
+   */
   async mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -256,6 +285,25 @@ export class InMemoryCustomerClient implements CustomerClient {
     const target = this.requireCustomer(state, input.targetCustomerId)
     assertRevision(source.revision, input.sourceExpectedRevision, 'Source customer')
     assertRevision(target.revision, input.targetExpectedRevision, 'Target customer')
+    const existingContactEmails = new Set(
+      [...state.contacts.values()]
+        .filter((contact) => contact.customerId === target.id)
+        .map((contact) => normalizeContactEmail(contact.email))
+        .filter((email): email is string => email !== undefined),
+    )
+    for (const contact of state.contacts.values()) {
+      if (contact.customerId !== source.id) continue
+      const email = normalizeContactEmail(contact.email)
+      if (email === undefined) continue
+      if (existingContactEmails.has(email)) {
+        throw new CustomerError(
+          409,
+          'CustomerContactAlreadyExists',
+          'Customer merge would create duplicate contact email addresses.',
+        )
+      }
+      existingContactEmails.add(email)
+    }
     const mergedAt = this.now().toISOString()
     for (const contact of state.contacts.values()) {
       if (contact.customerId !== source.id) continue
@@ -302,14 +350,23 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(contact)
   }
 
-  /** Creates a customer contact. */
+  /** Creates a customer contact.
+   *
+   * @param workspaceId Workspace containing the customer.
+   * @param customerId Owning customer identifier.
+   * @param actorId Authenticated actor creating the contact.
+   * @param input Contact fields and retention settings.
+   * @returns The created contact.
+   */
   async createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact> {
     requireActor(actorId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
     const contact = createCustomerContactRecord(workspaceId, customerId, this.id(), input, this.now().toISOString())
-    const normalizedEmail = input.email?.trim().toLowerCase()
-    if (normalizedEmail && [...state.contacts.values()].some((contact) => contact.customerId === customerId && contact.email === normalizedEmail)) {
+    const normalizedEmail = normalizeContactEmail(input.email)
+    if (normalizedEmail && [...state.contacts.values()].some((candidate) =>
+      candidate.customerId === customerId && normalizeContactEmail(candidate.email) === normalizedEmail
+    )) {
       throw new CustomerError(409, 'CustomerContactAlreadyExists', 'A contact with the same email already exists for this customer.')
     }
     if (input.primary) this.clearPrimaryContacts(state, customerId)
@@ -317,15 +374,24 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(this.state(workspaceId).contacts.get(contact.id) ?? contact)
   }
 
-  /** Updates a customer contact under an optimistic revision fence. */
+  /** Updates a customer contact under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the customer.
+   * @param customerId Owning customer identifier.
+   * @param contactId Contact being updated.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Contact changes and the expected revision.
+   * @returns The updated contact.
+   */
   async updateContact(workspaceId: string, customerId: string, contactId: string, actorId: string, input: UpdateCustomerContactInput): Promise<CustomerContact> {
     requireActor(actorId)
     const state = this.state(workspaceId)
     const current = await this.getContact(workspaceId, customerId, contactId)
     assertRevision(current.revision, input.expectedRevision, 'Customer contact')
     const updated = updateCustomerContactRecord(current, input, this.now().toISOString())
-    if (updated.email && [...state.contacts.values()].some((contact) =>
-      contact.id !== contactId && contact.customerId === customerId && contact.email === updated.email
+    const normalizedEmail = normalizeContactEmail(updated.email)
+    if (normalizedEmail && [...state.contacts.values()].some((contact) =>
+      contact.id !== contactId && contact.customerId === customerId && normalizeContactEmail(contact.email) === normalizedEmail
     )) throw new CustomerError(409, 'CustomerContactAlreadyExists', 'A contact with the same email already exists for this customer.')
     if (updated.primary) this.clearPrimaryContacts(state, customerId, contactId)
     state.contacts.set(contactId, updated)
@@ -378,19 +444,41 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(mergedTarget)
   }
 
-  /** Lists customer requests within a Workspace boundary. */
+  /** Lists customer requests within a Workspace boundary.
+   *
+   * @param workspaceId Workspace containing the requests.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered Customer Request page.
+   */
   async listRequests(workspaceId: string, input: CustomerRequestListInput = {}): Promise<CustomerRequestPage> {
     const state = this.state(workspaceId)
-    const filtered = [...state.requests.values()]
-      .filter((request) => matchesRequest(request, input))
-      .sort(compareByReceivedAt)
     const limit = normalizeLimit(input.limit)
-    const offset = decodeOffset(input.cursor, workspaceId, 'requests')
+    const normalizedInput = { ...input, limit }
+    const queryFingerprint = createListQueryFingerprint(normalizedInput)
+    const datasetRevision = createRequestDatasetRevision(state)
+    const filtered = [...state.requests.values()]
+      .filter((request) => matchesRequest(request, normalizedInput))
+      .sort(compareByReceivedAt)
+    const offset = decodeOffset(
+      input.cursor,
+      workspaceId,
+      'requests',
+      queryFingerprint,
+      datasetRevision,
+    )
     const page = filtered.slice(offset, offset + limit).map(clone)
     return {
       requests: page,
       ...(offset + page.length < filtered.length
-        ? { nextCursor: encodeOffset(workspaceId, 'requests', offset + page.length) }
+        ? {
+            nextCursor: encodeOffset(
+              workspaceId,
+              'requests',
+              offset + page.length,
+              queryFingerprint,
+              datasetRevision,
+            ),
+          }
         : {}),
     }
   }
@@ -402,31 +490,51 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(request)
   }
 
-  /** Creates a Customer Request. */
+  /** Creates a Customer Request.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param actorId Authenticated actor creating the request.
+   * @param input Request source, customer association, and retry identity.
+   * @returns The created or idempotently replayed request.
+   */
   async createRequest(workspaceId: string, actorId: string, input: CreateCustomerRequestInput): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, input.customerId)
-    if (input.contactId) this.requireContactForCustomer(state, input.contactId, input.customerId)
     const requestId = input.triageEntryId === undefined
-      ? this.id()
+      ? input.idempotencyKey === undefined
+        ? this.id()
+        : createIdempotentRequestId(workspaceId, input.idempotencyKey)
       : createTriageRequestId(workspaceId, input.triageEntryId)
     const request = createCustomerRequestRecord(workspaceId, requestId, input, this.now().toISOString())
     const existing = state.requests.get(request.id)
     if (existing) {
       if (!sameRequestOrigin(existing, request)) {
-        throw new CustomerError(409, 'CustomerRequestAlreadyExists', 'A Customer Request already exists for this Triage Entry.')
+        throw new CustomerError(409, 'CustomerRequestAlreadyExists', 'A Customer Request already exists for this retry key or Triage Entry.')
       }
       if (existing.status === 'merged') {
         throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot be reused.')
       }
       return clone(existing)
     }
+    if (input.contactId) {
+      const contact = this.requireContactForCustomer(state, input.contactId, input.customerId)
+      if (contact.status !== 'active') {
+        throw new CustomerError(409, 'CustomerContactInactive', 'An inactive contact cannot be assigned to a new Customer Request.')
+      }
+    }
     state.requests.set(request.id, request)
     return clone(this.state(workspaceId).requests.get(request.id) ?? request)
   }
 
-  /** Updates a Customer Request under an optimistic revision fence. */
+  /** Updates a Customer Request under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request being updated.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Request changes and the expected revision.
+   * @returns The updated request.
+   */
   async updateRequest(workspaceId: string, requestId: string, actorId: string, input: UpdateCustomerRequestInput): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -436,7 +544,12 @@ export class InMemoryCustomerClient implements CustomerClient {
     assertRevision(current.revision, input.expectedRevision, 'Customer Request')
     if (input.status === 'merged') throw new CustomerError(400, 'InvalidCustomerInput', 'A Customer Request can only become merged through a merge operation.')
     if (input.contactId && !state.contacts.has(input.contactId)) throw notFound('CustomerContactNotFound', 'The customer contact was not found.')
-    if (input.contactId) this.requireContactForCustomer(state, input.contactId, current.customerId)
+    if (input.contactId) {
+      const contact = this.requireContactForCustomer(state, input.contactId, current.customerId)
+      if (contact.status !== 'active') {
+        throw new CustomerError(409, 'CustomerContactInactive', 'An inactive contact cannot be assigned to a Customer Request.')
+      }
+    }
     const updated = updateCustomerRequestRecord(current, input, this.now().toISOString())
     state.requests.set(requestId, updated)
     return clone(updated)
@@ -453,7 +566,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     this.deleteRequestNotifications(state, requestId)
   }
 
-  /** Merges a source request into a retained request. */
+  /** Merges a source request into a retained request.
+   *
+   * @param workspaceId Workspace containing both requests.
+   * @param sourceRequestId Request being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target request and revision fences.
+   * @returns The retained request after links are combined.
+   */
   async mergeRequest(workspaceId: string, sourceRequestId: string, actorId: string, input: MergeCustomerRequestInput): Promise<CustomerRequest> {
     requireActor(actorId)
     if (sourceRequestId === input.targetRequestId) throw new CustomerError(400, 'InvalidCustomerMerge', 'A request cannot be merged into itself.')
@@ -490,6 +610,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     state.requests.set(target.id, mergedTarget)
     state.requests.set(source.id, mergedSource)
+    this.deleteRequestNotifications(state, source.id)
     return clone(mergedTarget)
   }
 
@@ -818,6 +939,16 @@ function customerIdentityKey(name: string, domain: string | undefined): string {
   return `${name.trim().toLocaleLowerCase('en-US')}\u0000${domain?.trim().toLowerCase() ?? ''}`
 }
 
+/** Normalizes a Contact email for duplicate detection and merge validation.
+ *
+ * @param email Optional Contact email.
+ * @returns A case- and whitespace-normalized email, or undefined when empty.
+ */
+function normalizeContactEmail(email: string | undefined): string | undefined {
+  const normalized = email?.trim().toLowerCase()
+  return normalized || undefined
+}
+
 /** Matches one Customer directory query. */
 function matchesCustomer(customer: Customer, input: CustomerListInput): boolean {
   const search = input.search?.trim().toLocaleLowerCase('en-US')
@@ -873,6 +1004,20 @@ function createTriageRequestId(workspaceId: string, triageEntryId: string): stri
   return `triage-${createHash('sha256').update(`${workspaceId}\u0000${triageEntryId}`, 'utf8').digest('hex')}`
 }
 
+/** Creates the deterministic ID used to make keyed Customer Request retries safe.
+ *
+ * @param workspaceId Workspace scope for the retry key.
+ * @param idempotencyKey Caller-selected retry key.
+ * @returns A deterministic physical-safe request identifier.
+ */
+function createIdempotentRequestId(workspaceId: string, idempotencyKey: string): string {
+  const normalizedKey = idempotencyKey.trim()
+  if (!normalizedKey) {
+    throw new CustomerError(400, 'InvalidCustomerInput', 'Customer Request idempotency key is invalid.')
+  }
+  return `request-${createHash('sha256').update(`${workspaceId}\u0000${normalizedKey}`, 'utf8').digest('hex')}`
+}
+
 /** Compares immutable origin fields for a deterministic Customer Request retry. */
 function sameRequestOrigin(left: CustomerRequest, right: CustomerRequest): boolean {
   return left.workspaceId === right.workspaceId &&
@@ -883,6 +1028,7 @@ function sameRequestOrigin(left: CustomerRequest, right: CustomerRequest): boole
     left.originalMessage === right.originalMessage &&
     left.receivedAt === right.receivedAt &&
     left.importance === right.importance &&
+    left.retention?.expiresAt === right.retention?.expiresAt &&
     JSON.stringify(left.externalReference) === JSON.stringify(right.externalReference)
 }
 
@@ -914,17 +1060,105 @@ function normalizeLimit(value: number | undefined): number {
   return value
 }
 
-/** Encodes a Workspace-bound in-memory page offset. */
-function encodeOffset(workspaceId: string, kind: string, offset: number): string {
-  return Buffer.from(JSON.stringify({ workspaceId, kind, offset }), 'utf8').toString('base64url')
+/** Normalizes the query fields that determine one Customer list result.
+ *
+ * @param input Customer or Customer Request list input.
+ * @returns A query object without the cursor position.
+ */
+function normalizeListQuery(input: CustomerListInput | CustomerRequestListInput): Record<string, unknown> {
+  const query = { ...input }
+  delete query.cursor
+  return query
 }
 
-/** Decodes a Workspace-bound in-memory page offset. */
-function decodeOffset(value: string | undefined, workspaceId: string, kind: string): number {
+/** Creates a digest for the normalized list query embedded in a cursor.
+ *
+ * @param input Customer or Customer Request list input.
+ * @returns A stable SHA-256 query fingerprint.
+ */
+function createListQueryFingerprint(input: CustomerListInput | CustomerRequestListInput): string {
+  return createHash('sha256').update(JSON.stringify(normalizeListQuery(input)), 'utf8').digest('hex')
+}
+
+/** Creates a revision digest for Customer rows that affect directory counts and sorting.
+ *
+ * @param state Current Customer workspace state.
+ * @returns A stable digest of Customer, Contact, and Request revisions.
+ */
+function createCustomerDatasetRevision(state: CustomerWorkspaceState): string {
+  return createHash('sha256').update(JSON.stringify([
+    ...[...state.customers.values()].map((customer) => [customer.id, customer.revision, customer.updatedAt]),
+    ...[...state.contacts.values()].map((contact) => [contact.id, contact.customerId, contact.revision, contact.updatedAt]),
+    ...[...state.requests.values()].map((request) => [request.id, request.customerId, request.status, request.revision, request.updatedAt]),
+  ].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))), 'utf8').digest('hex')
+}
+
+/** Creates a revision digest for Customer Request list rows.
+ *
+ * @param state Current Customer workspace state.
+ * @returns A stable digest of Request list revisions and sort fields.
+ */
+function createRequestDatasetRevision(state: CustomerWorkspaceState): string {
+  return createHash('sha256').update(JSON.stringify(
+    [...state.requests.values()]
+      .map((request) => [
+        request.id,
+        request.customerId,
+        request.status,
+        request.importance,
+        request.source,
+        request.originalMessage,
+        request.receivedAt,
+        request.externalReference,
+        request.revision,
+        request.updatedAt,
+      ])
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  ), 'utf8').digest('hex')
+}
+
+/** Encodes a Workspace-bound in-memory page offset with query and dataset fences.
+ *
+ * @param workspaceId Workspace scope bound to the cursor.
+ * @param kind List resource kind bound to the cursor.
+ * @param offset Next result offset.
+ * @param queryFingerprint Fingerprint of the normalized list query.
+ * @param datasetRevision Digest of the result dataset revision.
+ * @returns An opaque base64url cursor.
+ */
+function encodeOffset(
+  workspaceId: string,
+  kind: string,
+  offset: number,
+  queryFingerprint: string,
+  datasetRevision: string,
+): string {
+  return Buffer.from(JSON.stringify({ workspaceId, kind, offset, queryFingerprint, datasetRevision }), 'utf8').toString('base64url')
+}
+
+/** Decodes a Workspace-bound in-memory page offset and its query fences.
+ *
+ * @param value Opaque cursor supplied by the caller.
+ * @param workspaceId Expected Workspace scope.
+ * @param kind Expected list resource kind.
+ * @param queryFingerprint Current normalized query fingerprint.
+ * @param datasetRevision Current result dataset digest.
+ * @returns The next result offset.
+ * @throws CustomerError when the cursor is malformed or stale.
+ */
+function decodeOffset(
+  value: string | undefined,
+  workspaceId: string,
+  kind: string,
+  queryFingerprint: string,
+  datasetRevision: string,
+): number {
   if (value === undefined) return 0
   try {
     const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
-    if (!isRecord(parsed) || parsed.workspaceId !== workspaceId || parsed.kind !== kind || typeof parsed.offset !== 'number' || !Number.isSafeInteger(parsed.offset) || parsed.offset < 0) throw new Error('invalid')
+    if (!isRecord(parsed) || parsed.workspaceId !== workspaceId || parsed.kind !== kind ||
+      parsed.queryFingerprint !== queryFingerprint || parsed.datasetRevision !== datasetRevision ||
+      typeof parsed.offset !== 'number' || !Number.isSafeInteger(parsed.offset) || parsed.offset < 0) throw new Error('invalid')
     return parsed.offset
   } catch (error) {
     throw new CustomerError(400, 'InvalidCustomerCursor', 'The customer cursor is invalid.', { cause: error })

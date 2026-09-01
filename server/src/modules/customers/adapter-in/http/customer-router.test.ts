@@ -107,6 +107,93 @@ test('accepts zero as the minimum Customer Request count filter', async () => {
   expect(body.customers).toHaveLength(1)
 })
 
+test('requires an idempotency key and validates optional Customer Request fields', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  })
+  const requestBody = {
+    customerId: customer.id,
+    source: { kind: 'portal', canNotify: true },
+    originalMessage: 'Please support SSO.',
+    receivedAt: NOW,
+    importance: 'high',
+  }
+
+  const missingKey = await app.request('/api/customer-requests', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  })
+  expect(missingKey.status).toBe(400)
+  expect(await missingKey.json()).toMatchObject({ code: 'InvalidCustomerInput' })
+
+  const malformedOptionalField = await app.request('/api/customer-requests', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'Idempotency-Key': 'request-1',
+    },
+    body: JSON.stringify({ ...requestBody, contactId: 42 }),
+  })
+  expect(malformedOptionalField.status).toBe(400)
+  expect(await malformedOptionalField.json()).toMatchObject({ code: 'InvalidCustomerInput' })
+
+  const forgedTriageAssociation = await app.request('/api/customer-requests', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'Idempotency-Key': 'request-2',
+    },
+    body: JSON.stringify({ ...requestBody, triageEntryId: 'triage-forged' }),
+  })
+  expect(forgedTriageAssociation.status).toBe(400)
+  expect(await forgedTriageAssociation.json()).toMatchObject({
+    code: 'CustomerTriageAssociationForbidden',
+  })
+
+  const created = await app.request('/api/customer-requests', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'Idempotency-Key': 'request-3',
+    },
+    body: JSON.stringify(requestBody),
+  })
+  expect(created.status).toBe(201)
+  const repeated = await app.request('/api/customer-requests', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'Idempotency-Key': 'request-3',
+    },
+    body: JSON.stringify(requestBody),
+  })
+  expect(repeated.status).toBe(201)
+  expect(await repeated.json()).toEqual(await created.clone().json())
+})
+
+test('rejects restricted Customer searches before scanning sensitive fields', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  await createCustomer(client)
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'guest-1',
+    canViewSensitiveData: false,
+  })
+
+  const customerResponse = await app.request('/api/customers?search=acme')
+  const requestResponse = await app.request('/api/customer-requests?search=sso')
+
+  expect(customerResponse.status).toBe(403)
+  expect(await customerResponse.json()).toMatchObject({ code: 'CustomerSearchRestricted' })
+  expect(requestResponse.status).toBe(403)
+  expect(await requestResponse.json()).toMatchObject({ code: 'CustomerSearchRestricted' })
+})
+
 test('projects sensitive Customer fields and request content for restricted readers', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const customer = await createCustomer(client)
@@ -298,6 +385,13 @@ test('validates partial Triage Customer associations against the current Custome
   const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Ada Lovelace',
   })
+  const inactiveContact = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Grace Hopper',
+  })
+  await client.updateContact('workspace-1', customer.id, inactiveContact.id, 'member-1', {
+    expectedRevision: inactiveContact.revision,
+    status: 'inactive',
+  })
   const entry: TriageEntry = {
     schemaVersion: 1,
     id: 'triage-3',
@@ -341,7 +435,9 @@ test('validates partial Triage Customer associations against the current Custome
     getEntry: async () => entry,
     associateCustomer: async (_workspaceId, _teamId, _entryId, _actor, input) => ({
       ...entry,
-      contactId: input.contactId ?? undefined,
+      ...(input.customerId === null ? { customerId: undefined } : {}),
+      ...(input.contactId === null ? { contactId: undefined } : input.contactId === undefined ? {} : { contactId: input.contactId }),
+      ...(input.customerRequestId === null ? { customerRequestId: undefined } : input.customerRequestId === undefined ? {} : { customerRequestId: input.customerRequestId }),
       revision: entry.revision + 1,
     }),
   }
@@ -351,6 +447,15 @@ test('validates partial Triage Customer associations against the current Custome
     canViewSensitiveData: true,
   }, association)
 
+  const inactiveResponse = await app.request('/api/teams/support/triage-entries/triage-3/customer', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ expectedRevision: entry.revision, contactId: inactiveContact.id }),
+  })
+
+  expect(inactiveResponse.status).toBe(409)
+  expect(await inactiveResponse.json()).toMatchObject({ code: 'CustomerContactInactive' })
+
   const response = await app.request('/api/teams/support/triage-entries/triage-3/customer', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
@@ -359,4 +464,23 @@ test('validates partial Triage Customer associations against the current Custome
 
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({ contactId: contact.id })
+
+  const clearedResponse = await app.request('/api/teams/support/triage-entries/triage-3/customer', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: entry.revision,
+      customerId: null,
+      contactId: null,
+      customerRequestId: null,
+    }),
+  })
+
+  const clearedBody: { id: string; revision: number; customerId?: string } = await clearedResponse.json()
+  expect(clearedResponse.status).toBe(200)
+  expect(clearedBody).toMatchObject({
+    id: entry.id,
+    revision: entry.revision + 1,
+  })
+  expect(clearedBody).not.toHaveProperty('customerId')
 })

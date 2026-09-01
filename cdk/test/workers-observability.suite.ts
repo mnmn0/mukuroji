@@ -2542,6 +2542,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
         COLLABORATION_TABLE_NAME: { Ref: 'WorkItemCollaborationTableFDECF217' },
+        CUSTOMERS_TABLE_NAME: { Ref: 'CustomersTableB554B793' },
         COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
         COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
         FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
@@ -2569,6 +2570,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
         COLLABORATION_TABLE_NAME: { Ref: 'WorkItemCollaborationTableFDECF217' },
+        CUSTOMERS_TABLE_NAME: { Ref: 'CustomersTableB554B793' },
         COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
         COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
         FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
@@ -2698,6 +2700,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       Resource: expect.arrayContaining([
         { 'Fn::GetAtt': ['AutomationTableE3D67F0D', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
+        { 'Fn::GetAtt': ['CustomersTableB554B793', 'Arn'] },
         { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
         { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },

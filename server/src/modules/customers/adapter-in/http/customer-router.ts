@@ -27,7 +27,7 @@ import {
   CustomerError,
 } from '../../domain/customer'
 import type { CustomerClient } from '../../customers'
-import type { TriageClient } from '../../../triage'
+import type { TriageAuthorizationConditionChecks, TriageClient } from '../../../triage'
 
 /** Minimum authenticated Workspace identity required by Customer routes. */
 export type CustomerPrincipal = {
@@ -53,6 +53,12 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   requireWorkspaceAccess(context: Context, minimum: 'read' | 'write' | 'manage'): Promise<Principal>
   /** Verifies Team access before associating a Triage Entry. */
   verifyTriageAccess(principal: Principal, teamId: string, minimum: 'viewer' | 'member'): Promise<void>
+  /** Builds the same live Team, Project, and actor fences used by Triage mutations. */
+  createTriageAuthorizationConditionChecks?: (
+    principal: Principal,
+    teamId: string,
+    projectIds: readonly (string | undefined)[],
+  ) => Promise<TriageAuthorizationConditionChecks>
   /** Resolves and authorizes a Work Item before creating a customer link. */
   verifyWorkItemAccess(principal: Principal, teamId: string, workItemId: string, minimum: 'viewer' | 'member'): Promise<CustomerWorkItemAuthorization>
   /** Resolves and authorizes a Project before reading or mutating its associations. */
@@ -81,10 +87,9 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers/report', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      const page = await dependencies.getCustomers().listCustomers(
-        principal.directoryId,
-        readCustomerListInput(context),
-      )
+      const input = readCustomerListInput(context)
+      requireRestrictedSearch(principal, input.search)
+      const page = await dependencies.getCustomers().listCustomers(principal.directoryId, input)
       return context.json({
         ...page,
         customers: page.customers.map((customer) => projectCustomer(principal, customer)),
@@ -148,10 +153,9 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      const page = await dependencies.getCustomers().listCustomers(
-        principal.directoryId,
-        readCustomerListInput(context),
-      )
+      const input = readCustomerListInput(context)
+      requireRestrictedSearch(principal, input.search)
+      const page = await dependencies.getCustomers().listCustomers(principal.directoryId, input)
       return context.json({
         ...page,
         customers: page.customers.map((customer) => projectCustomer(principal, customer)),
@@ -319,10 +323,9 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customer-requests', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      const page = await dependencies.getCustomers().listRequests(
-        principal.directoryId,
-        readRequestListInput(context),
-      )
+      const input = readRequestListInput(context)
+      requireRestrictedSearch(principal, input.search)
+      const page = await dependencies.getCustomers().listRequests(principal.directoryId, input)
       return context.json({
         ...page,
         requests: page.requests.map((request) => projectRequest(principal, request)),
@@ -335,10 +338,11 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customer-requests', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const body = await dependencies.readJson(context.req)
       const request = await dependencies.getCustomers().createRequest(
         principal.directoryId,
         principal.userKey,
-        readCreateRequestInput(await dependencies.readJson(context.req)),
+        readCreateRequestInput(body, readIdempotencyKey(context.req.header('Idempotency-Key'))),
       )
       return context.json(projectRequest(principal, request), 201)
     } catch (error) {
@@ -486,8 +490,12 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         : input.customerId
       if (effectiveCustomerId && effectiveCustomerId !== null) {
         const customer = await customerClient.getCustomer(principal.directoryId, effectiveCustomerId)
-        if (input.contactId && !customer.contacts.some((contact) => contact.id === input.contactId)) {
-          throw new CustomerError(404, 'CustomerContactNotFound', 'The customer contact was not found.')
+        if (input.contactId) {
+          const contact = customer.contacts.find((candidate) => candidate.id === input.contactId)
+          if (!contact) throw new CustomerError(404, 'CustomerContactNotFound', 'The customer contact was not found.')
+          if (contact.status !== 'active') {
+            throw new CustomerError(409, 'CustomerContactInactive', 'An inactive contact cannot be associated with a Triage Entry.')
+          }
         }
         if (input.customerRequestId && !customer.requests.some((request) => request.id === input.customerRequestId)) {
           throw new CustomerError(404, 'CustomerRequestNotFound', 'The customer request was not found.')
@@ -498,18 +506,29 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
             throw new CustomerError(409, 'CustomerRequestTriageMismatch', 'The Customer Request is not linked to this Triage Entry.')
           }
         }
-      } else if (input.contactId !== undefined || input.customerRequestId !== undefined) {
+      } else if (
+        input.contactId !== undefined && input.contactId !== null ||
+        input.customerRequestId !== undefined && input.customerRequestId !== null
+      ) {
         throw new CustomerError(400, 'InvalidCustomerInput', 'A Customer is required when a Contact or Customer Request is associated.')
       }
       if (!triage.associateCustomer) {
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association is unavailable.')
       }
+      const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
+        ? await dependencies.createTriageAuthorizationConditionChecks(
+            principal,
+            teamId,
+            [currentEntry.projectId],
+          )
+        : undefined
       const entry = await triage.associateCustomer(
         principal.directoryId,
         teamId,
         entryId,
         { id: principal.userKey },
         input,
+        authorizationConditionChecks,
       )
       return context.json(projectTriageAssociation(entry))
     } catch (error) {
@@ -563,11 +582,14 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
             'member',
           )
         : undefined
-      const customer = await dependencies.getCustomers().getCustomer(principal.directoryId, input.customerId)
+      const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
+        ? await dependencies.createTriageAuthorizationConditionChecks(
+            principal,
+            teamId,
+            [entry.projectId, workItemAuthorization?.projectId],
+          )
+        : undefined
       const contactId = input.contactId ?? entry.contactId
-      if (contactId && !customer.contacts.some((contact) => contact.id === contactId)) {
-        throw new CustomerError(404, 'CustomerContactNotFound', 'The customer contact was not found.')
-      }
       let request = await dependencies.getCustomers().createRequest(
         principal.directoryId,
         principal.userKey,
@@ -598,6 +620,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
           ...(contactId ? { contactId } : {}),
           customerRequestId: request.id,
         },
+        authorizationConditionChecks,
       )
       return context.json(projectRequest(principal, request), 201)
     } catch (error) {
@@ -733,15 +756,15 @@ function readCreateCustomerInput(value: unknown): CreateCustomerInput {
   const body = readRecord(value)
   return {
     name: readRequiredString(body.name, 'Customer name'),
-    ...(readOptionalString(body.domain) ? { domain: readOptionalString(body.domain) } : {}),
-    ...(readOptionalString(body.ownerUserId) ? { ownerUserId: readOptionalString(body.ownerUserId) } : {}),
+    ...(readOptionalString(body.domain, 'Customer domain') ? { domain: readOptionalString(body.domain, 'Customer domain') } : {}),
+    ...(readOptionalString(body.ownerUserId, 'Customer owner') ? { ownerUserId: readOptionalString(body.ownerUserId, 'Customer owner') } : {}),
     tier: readEnum(body.tier, ['strategic', 'enterprise', 'growth', 'standard', 'trial'], 'Customer tier'),
     size: readEnum(body.size, ['startup', 'small', 'mid-market', 'enterprise'], 'Customer size'),
     status: readEnum(body.status, ['prospect', 'active', 'inactive', 'churned'], 'Customer status'),
     health: readEnum(body.health, ['healthy', 'watch', 'at-risk', 'critical', 'unknown'], 'Customer health'),
     ...(body.businessValue === undefined ? {} : { businessValue: readNumber(body.businessValue, 'Business value') }),
     ...(body.notes === undefined ? {} : { notes: readNullableString(body.notes, 'Customer notes') ?? '' }),
-    ...(readOptionalString(body.retentionExpiresAt) ? { retentionExpiresAt: readOptionalString(body.retentionExpiresAt) } : {}),
+    ...(readOptionalString(body.retentionExpiresAt, 'Customer retention deadline') ? { retentionExpiresAt: readOptionalString(body.retentionExpiresAt, 'Customer retention deadline') } : {}),
   }
 }
 
@@ -767,11 +790,11 @@ function readCreateContactInput(value: unknown): CreateCustomerContactInput {
   const body = readRecord(value)
   return {
     name: readRequiredString(body.name, 'Contact name'),
-    ...(readOptionalString(body.email) ? { email: readOptionalString(body.email) } : {}),
-    ...(readOptionalString(body.role) ? { role: readOptionalString(body.role) } : {}),
-    ...(readOptionalString(body.phone) ? { phone: readOptionalString(body.phone) } : {}),
+    ...(readOptionalString(body.email, 'Contact email') ? { email: readOptionalString(body.email, 'Contact email') } : {}),
+    ...(readOptionalString(body.role, 'Contact role') ? { role: readOptionalString(body.role, 'Contact role') } : {}),
+    ...(readOptionalString(body.phone, 'Contact phone') ? { phone: readOptionalString(body.phone, 'Contact phone') } : {}),
     ...(body.primary === undefined ? {} : { primary: readBoolean(body.primary, 'Contact primary flag') }),
-    ...(readOptionalString(body.retentionExpiresAt) ? { retentionExpiresAt: readOptionalString(body.retentionExpiresAt) } : {}),
+    ...(readOptionalString(body.retentionExpiresAt, 'Contact retention deadline') ? { retentionExpiresAt: readOptionalString(body.retentionExpiresAt, 'Contact retention deadline') } : {}),
   }
 }
 
@@ -790,18 +813,21 @@ function readUpdateContactInput(value: unknown): UpdateCustomerContactInput {
 }
 
 /** Reads a Customer Request creation body. */
-function readCreateRequestInput(value: unknown): CreateCustomerRequestInput {
+function readCreateRequestInput(value: unknown, idempotencyKey: string): CreateCustomerRequestInput {
   const body = readRecord(value)
+  if (Object.prototype.hasOwnProperty.call(body, 'triageEntryId')) {
+    throw new CustomerError(400, 'CustomerTriageAssociationForbidden', 'Triage Entry associations must use the accepted Triage route.')
+  }
   return {
     customerId: readRequiredString(body.customerId, 'Customer ID'),
-    ...(readOptionalString(body.contactId) ? { contactId: readOptionalString(body.contactId) } : {}),
-    ...(readOptionalString(body.triageEntryId) ? { triageEntryId: readOptionalString(body.triageEntryId) } : {}),
+    ...(readOptionalString(body.contactId, 'Contact ID') ? { contactId: readOptionalString(body.contactId, 'Contact ID') } : {}),
+    idempotencyKey,
     source: readSource(body.source),
     originalMessage: readRequiredString(body.originalMessage, 'Customer Request message', true),
     receivedAt: readRequiredString(body.receivedAt, 'Customer Request received time'),
     importance: readEnum(body.importance, ['low', 'normal', 'high', 'urgent'], 'Customer Request importance'),
     ...(body.externalReference === undefined ? {} : { externalReference: readExternalReference(body.externalReference) }),
-    ...(readOptionalString(body.retentionExpiresAt) ? { retentionExpiresAt: readOptionalString(body.retentionExpiresAt) } : {}),
+    ...(readOptionalString(body.retentionExpiresAt, 'Customer Request retention deadline') ? { retentionExpiresAt: readOptionalString(body.retentionExpiresAt, 'Customer Request retention deadline') } : {}),
   }
 }
 
@@ -811,7 +837,7 @@ function readCreateRequestFromTriageInput(value: unknown): CreateCustomerRequest
   return {
     expectedRevision: readInteger(body.expectedRevision, 'Triage revision'),
     customerId: readRequiredString(body.customerId, 'Customer ID'),
-    ...(readOptionalString(body.contactId) ? { contactId: readOptionalString(body.contactId) } : {}),
+    ...(readOptionalString(body.contactId, 'Contact ID') ? { contactId: readOptionalString(body.contactId, 'Contact ID') } : {}),
     importance: readEnum(body.importance, ['low', 'normal', 'high', 'urgent'], 'Customer Request importance'),
   }
 }
@@ -865,9 +891,9 @@ function readSource(value: unknown): CustomerRequestSource {
   const source = readRecord(value)
   return {
     kind: readEnum(source.kind, ['form', 'chat', 'email', 'webhook', 'manual-handoff', 'portal', 'phone', 'manual'], 'Request source kind'),
-    ...(readOptionalString(source.provider) ? { provider: readOptionalString(source.provider) } : {}),
-    ...(readOptionalString(source.referenceId) ? { referenceId: readOptionalString(source.referenceId) } : {}),
-    ...(readOptionalString(source.permalink) ? { permalink: readOptionalString(source.permalink) } : {}),
+    ...(readOptionalString(source.provider, 'Request source provider') ? { provider: readOptionalString(source.provider, 'Request source provider') } : {}),
+    ...(readOptionalString(source.referenceId, 'Request source reference') ? { referenceId: readOptionalString(source.referenceId, 'Request source reference') } : {}),
+    ...(readOptionalString(source.permalink, 'Request source permalink') ? { permalink: readOptionalString(source.permalink, 'Request source permalink') } : {}),
     canNotify: source.canNotify === undefined ? false : readBoolean(source.canNotify, 'Request source notification capability'),
   }
 }
@@ -878,7 +904,7 @@ function readExternalReference(value: unknown) {
   return {
     provider: readRequiredString(reference.provider, 'External reference provider'),
     id: readRequiredString(reference.id, 'External reference ID'),
-    ...(readOptionalString(reference.permalink) ? { permalink: readOptionalString(reference.permalink) } : {}),
+    ...(readOptionalString(reference.permalink, 'External reference permalink') ? { permalink: readOptionalString(reference.permalink, 'External reference permalink') } : {}),
   }
 }
 
@@ -957,7 +983,10 @@ function readTriageAssociationInput(value: unknown): UpdateTriageCustomerAssocia
   const customerRequestId = body.customerRequestId === undefined
     ? undefined
     : readNullableString(body.customerRequestId, 'Customer Request ID')
-  if (customerId === null && (contactId !== undefined || customerRequestId !== undefined)) {
+  if (customerId === null && (
+    contactId !== undefined && contactId !== null ||
+    customerRequestId !== undefined && customerRequestId !== null
+  )) {
     throw new CustomerError(400, 'InvalidCustomerInput', 'A Customer is required when a Contact or Customer Request is associated.')
   }
   return {
@@ -993,7 +1022,7 @@ function readUpdateSavedViewInput(value: unknown): UpdateCustomerSavedViewInput 
 function readCustomerFilterRecord(value: unknown) {
   const record = readRecord(value)
   return {
-    ...(readOptionalString(record.search) ? { search: readOptionalString(record.search) } : {}),
+    ...(readOptionalString(record.search, 'Customer search') ? { search: readOptionalString(record.search, 'Customer search') } : {}),
     ...(record.tier === undefined ? {} : { tier: readEnum(record.tier, ['strategic', 'enterprise', 'growth', 'standard', 'trial'], 'Customer tier') }),
     ...(record.size === undefined ? {} : { size: readEnum(record.size, ['startup', 'small', 'mid-market', 'enterprise'], 'Customer size') }),
     ...(record.status === undefined ? {} : { status: readEnum(record.status, ['prospect', 'active', 'inactive', 'churned'], 'Customer status') }),
@@ -1018,9 +1047,17 @@ function readRequiredString(value: unknown, label: string, allowEmpty = false): 
   return value
 }
 
-/** Reads an optional string body field. */
-function readOptionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() ? value : undefined
+/** Reads an optional string body field without silently dropping malformed values.
+ *
+ * @param value Untrusted body field.
+ * @param label Human-readable field label for validation errors.
+ * @returns The original non-blank string, or undefined when the field is absent or blank.
+ * @throws CustomerError when a present value is not a string.
+ */
+function readOptionalString(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new CustomerError(400, 'InvalidCustomerInput', `${label} is invalid.`)
+  return value.trim() ? value : undefined
 }
 
 /** Reads a nullable string body field. */
@@ -1093,6 +1130,38 @@ function readOptionalQuery(context: Context, name: string): string | undefined {
 /** Reads a positive expected revision query parameter. */
 function readExpectedRevision(value: string | undefined): number {
   return readInteger(value === undefined ? undefined : Number(value), 'Expected revision')
+}
+
+/** Rejects searches that would require scanning fields hidden from a restricted reader.
+ *
+ * @param principal Authenticated Customer route principal.
+ * @param search Optional search text supplied by the caller.
+ * @throws CustomerError when a restricted principal supplies search text.
+ */
+function requireRestrictedSearch(principal: CustomerPrincipal, search: string | undefined): void {
+  if (!search || principal.canViewSensitiveData) return
+  throw new CustomerError(
+    403,
+    'CustomerSearchRestricted',
+    'Customer search requires Customer management access.',
+  )
+}
+
+/** Reads the caller-selected key required for generic Customer Request creation.
+ *
+ * @param value Idempotency-Key header value.
+ * @returns A trimmed, bounded retry key.
+ * @throws CustomerError when the header is missing or invalid.
+ */
+function readIdempotencyKey(value: string | undefined): string {
+  const normalized = value?.trim()
+  if (!normalized || normalized.length > 256 || [...normalized].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 31 || codePoint === 127
+  })) {
+    throw new CustomerError(400, 'InvalidCustomerInput', 'Idempotency-Key is required and invalid.')
+  }
+  return normalized
 }
 
 /** Reads an object body. */

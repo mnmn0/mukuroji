@@ -108,6 +108,166 @@ test('makes Triage-originated Customer Request retries idempotent and conflict o
   })).rejects.toMatchObject({ code: 'CustomerRequestAlreadyExists' })
 })
 
+test('makes generic Customer Request retries idempotent when the caller supplies a retry key', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const input = {
+    ...requestInput(customer.id),
+    idempotencyKey: 'support-request-1',
+  }
+
+  const first = await client.createRequest('workspace-1', 'member-1', input)
+  const repeated = await client.createRequest('workspace-1', 'member-1', input)
+
+  expect(repeated).toEqual(first)
+  expect((await client.listRequests('workspace-1')).requests).toHaveLength(1)
+  await expect(client.createRequest('workspace-1', 'member-1', {
+    ...input,
+    originalMessage: 'A different request must not reuse the retry key.',
+  })).rejects.toMatchObject({ code: 'CustomerRequestAlreadyExists' })
+})
+
+test('rejects inactive contacts for new Customer Requests and contact assignment updates', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Ada Lovelace',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  const retryInput = {
+    ...requestInput(customer.id),
+    contactId: contact.id,
+    idempotencyKey: 'request-with-contact',
+  }
+  const keyedRequest = await client.createRequest('workspace-1', 'member-1', retryInput)
+  await client.updateContact('workspace-1', customer.id, contact.id, 'member-1', {
+    expectedRevision: contact.revision,
+    status: 'inactive',
+  })
+
+  await expect(client.createRequest('workspace-1', 'member-1', retryInput)).resolves.toEqual(keyedRequest)
+  await expect(client.createRequest('workspace-1', 'member-1', {
+    ...requestInput(customer.id),
+    contactId: contact.id,
+  })).rejects.toMatchObject({ code: 'CustomerContactInactive' })
+  await expect(client.updateRequest('workspace-1', request.id, 'member-1', {
+    expectedRevision: request.revision,
+    contactId: contact.id,
+  })).rejects.toMatchObject({ code: 'CustomerContactInactive' })
+})
+
+test('rejects Customer merges that would collide on normalized contact email addresses', async () => {
+  const client = createClient()
+  const target = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const source = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme duplicate',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  await client.createContact('workspace-1', target.id, 'member-1', {
+    name: 'Target contact',
+    email: 'Ada@Example.com',
+  })
+  await client.createContact('workspace-1', source.id, 'member-1', {
+    name: 'Source contact',
+    email: ' ada@example.com ',
+  })
+
+  await expect(client.mergeCustomer('workspace-1', source.id, 'member-1', {
+    targetCustomerId: target.id,
+    sourceExpectedRevision: source.revision,
+    targetExpectedRevision: target.revision,
+  })).rejects.toMatchObject({ code: 'CustomerContactAlreadyExists' })
+})
+
+test('binds Customer list cursors to their query and dataset revision', async () => {
+  const client = createClient()
+  await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Globex',
+    tier: 'growth',
+    size: 'small',
+    status: 'prospect',
+    health: 'unknown',
+  })
+  const page = await client.listCustomers('workspace-1', { limit: 1 })
+  const cursor = page.nextCursor
+  expect(cursor).toBeDefined()
+  if (!cursor) throw new Error('Expected a next Customer cursor.')
+
+  await expect(client.listCustomers('workspace-1', {
+    limit: 1,
+    status: 'active',
+    cursor,
+  })).rejects.toMatchObject({ code: 'InvalidCustomerCursor' })
+
+  await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Initech',
+    tier: 'standard',
+    size: 'small',
+    status: 'active',
+    health: 'healthy',
+  })
+  await expect(client.listCustomers('workspace-1', { limit: 1, cursor })).rejects.toMatchObject({
+    code: 'InvalidCustomerCursor',
+  })
+})
+
+test('binds Customer Request cursors to searchable and sortable dataset changes', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  const second = await client.createRequest('workspace-1', 'member-1', {
+    ...requestInput(customer.id),
+    originalMessage: 'A second request with a searchable marker.',
+  })
+  const page = await client.listRequests('workspace-1', { limit: 1 })
+  const cursor = page.nextCursor
+  expect(cursor).toBeDefined()
+  if (!cursor) throw new Error('Expected a next Customer Request cursor.')
+
+  await client.updateRequest('workspace-1', second.id, 'member-1', {
+    expectedRevision: second.revision,
+    originalMessage: 'The searchable marker changed after page one.',
+  })
+
+  await expect(client.listRequests('workspace-1', { limit: 1, cursor })).rejects.toMatchObject({
+    code: 'InvalidCustomerCursor',
+  })
+})
+
 test('removes a Work Item-derived Project from Customer navigation when its Work Item link is removed', async () => {
   const client = createClient()
   const customer = await client.createCustomer('workspace-1', 'member-1', {
@@ -309,6 +469,7 @@ test('retains Customer Request provenance when duplicate requests are merged', a
     teamId: 'support',
     workItemId: 'work-item-1',
   })
+  await client.prepareCompletionNotifications('workspace-1', 'support', 'work-item-1', 'member-1')
 
   const merged = await client.mergeRequest('workspace-1', source.id, 'member-1', {
     targetRequestId: target.id,
@@ -316,6 +477,11 @@ test('retains Customer Request provenance when duplicate requests are merged', a
     targetExpectedRevision: target.revision,
   })
   const retainedSource = await client.getRequest('workspace-1', source.id)
+  const notificationsAfterMerge = await client.listCompletionNotifications(
+    'workspace-1',
+    'support',
+    'work-item-1',
+  )
 
   expect(merged.workItemLinks).toEqual([
     {
@@ -336,6 +502,7 @@ test('retains Customer Request provenance when duplicate requests are merged', a
     externalReference: { provider: 'crm', id: 'source-42' },
     importance: 'urgent',
   })
+  expect(notificationsAfterMerge).toEqual([])
   await expect(client.updateRequest('workspace-1', source.id, 'member-1', {
     expectedRevision: retainedSource.revision,
     originalMessage: 'should not change',

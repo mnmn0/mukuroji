@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo } from 'react'
-import { useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import type { CustomerListInput, CustomerSavedView } from '@mukuroji/contracts'
-import { createCustomerSavedView } from '../../customers/api'
+import { useCustomerSavedViewMutations } from '../../customers/mutations/useCustomerSavedViewMutations'
 import { useCustomer, useCustomerSavedViews, useCustomers } from '../../customers/queries/useCustomers'
 import { CustomerDirectoryView } from '../../customers/ui/CustomerDirectoryView'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -21,8 +20,6 @@ export function CustomerPage() {
   const navigate = useNavigate()
   const { customerId } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
-  const [saveViewError, setSaveViewError] = useState(false)
-  const [isSavingView, setIsSavingView] = useState(false)
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const filters = useMemo(() => readCustomerFilters(searchParams), [searchParams])
@@ -37,6 +34,11 @@ export function CustomerPage() {
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
   )
+  const savedViewMutations = useCustomerSavedViewMutations({
+    accessToken: workspace.accessToken,
+    enabled: workspace.canLoadWorkspaceData,
+    refresh: () => savedViews.mutate(),
+  })
   const detail = useCustomer(
     workspace.accessToken,
     customerId,
@@ -60,22 +62,12 @@ export function CustomerPage() {
   }, [setSearchParams])
 
   const saveView = useCallback(async (name: string) => {
-    if (!workspace.accessToken) return
-    setIsSavingView(true)
-    setSaveViewError(false)
-    try {
-      await createCustomerSavedView(workspace.accessToken, {
-        name,
-        filters,
-        ...(groupBy === undefined ? {} : { groupBy }),
-      })
-      await savedViews.mutate()
-    } catch {
-      setSaveViewError(true)
-    } finally {
-      setIsSavingView(false)
-    }
-  }, [filters, groupBy, savedViews, workspace.accessToken])
+    await savedViewMutations.save({
+      name,
+      filters,
+      ...(groupBy === undefined ? {} : { groupBy }),
+    })
+  }, [filters, groupBy, savedViewMutations])
 
   useEffect(() => {
     document.title = `${t('customers.title')} | ${t('app.title')}`
@@ -130,8 +122,8 @@ export function CustomerPage() {
           )}
           search={search}
           savedViews={savedViews.data ?? []}
-          isSavingView={isSavingView}
-          saveViewError={saveViewError ? t('customers.filters.saveError') : undefined}
+          isSavingView={savedViewMutations.isSaving}
+          saveViewError={savedViewMutations.hasError ? t('customers.filters.saveError') : undefined}
           t={t}
         />
       </WorkspaceRouteContent>

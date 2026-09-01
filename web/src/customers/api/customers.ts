@@ -75,10 +75,14 @@ export async function getCustomerSavedViews(accessToken: string): Promise<Custom
 export async function createCustomerSavedView(
   accessToken: string,
   input: CreateCustomerSavedViewInput,
+  context: MutationRequestContext,
 ): Promise<CustomerSavedView> {
   const data = await requestJson(`${customersApiBaseUrl}/customers/views`, accessToken, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...createMutationHeaders(context),
+    },
     body: JSON.stringify(input),
   })
   if (!isCustomerSavedView(data)) throw new CustomerApiError(502, 'Customer saved-view response is invalid.')

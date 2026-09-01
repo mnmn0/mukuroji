@@ -269,6 +269,7 @@ export interface TriageClient {
    * @param entryId The Triage Entry identifier.
    * @param actor The authenticated actor performing the association.
    * @param input The association and expected revision.
+   * @param authorizationConditionChecks Live Team, Project, and actor fences joined to the association transaction.
    * @returns The updated permission-safe entry, when the adapter supports the operation.
    */
   associateCustomer?(
@@ -277,6 +278,7 @@ export interface TriageClient {
     entryId: string,
     actor: TriageActor,
     input: UpdateTriageCustomerAssociationInput,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageEntry>
 }
 

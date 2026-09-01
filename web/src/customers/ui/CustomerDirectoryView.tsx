@@ -216,10 +216,6 @@ export function CustomerDirectoryView({
         <div className="workbench-panel p-8 text-sm font-semibold text-[var(--workbench-muted)]" role="status">
           {t('customers.loading')}
         </div>
-      ) : customers.length === 0 ? (
-        <div className="workbench-panel p-8 text-sm font-semibold text-[var(--workbench-muted)]">
-          {t('customers.empty')}
-        </div>
       ) : (
         <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.95fr)]">
           <section aria-labelledby="customer-directory-list-title" className="workbench-panel overflow-hidden">
@@ -228,36 +224,42 @@ export function CustomerDirectoryView({
                 {t('customers.title')}
               </h2>
             </div>
-            <div className="divide-y divide-[var(--workbench-border)]">
-              {groupCustomers(customers, groupBy, t).map((group) => (
-                <div key={group.key}>
-              {groupBy ? <h3 className="bg-[var(--workbench-surface-muted)] px-5 py-2 text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{group.label}</h3> : null}
-                  {group.customers.map((customer) => (
-                    <button
-                      className={`grid w-full gap-3 px-5 py-4 text-left transition hover:bg-teal-50/60 ${detail?.customer.id === customer.id ? 'bg-teal-50' : ''}`}
-                      key={customer.id}
-                      onClick={() => onSelectCustomer(customer.id)}
-                      type="button"
-                    >
-                      <span className="flex items-start justify-between gap-3">
-                        <span className="min-w-0">
-                          <span className="block truncate text-sm font-bold text-[var(--workbench-text)]">{customer.name}</span>
-                          <span className="mt-1 block truncate text-xs text-[var(--workbench-muted)]">
-                            {customer.domain ?? t('customers.noDomain')}
+            {customers.length === 0 ? (
+              <p className="p-8 text-sm font-semibold text-[var(--workbench-muted)]">
+                {t('customers.empty')}
+              </p>
+            ) : (
+              <div className="divide-y divide-[var(--workbench-border)]">
+                {groupCustomers(customers, groupBy, t).map((group) => (
+                  <div key={group.key}>
+                    {groupBy ? <h3 className="bg-[var(--workbench-surface-muted)] px-5 py-2 text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{group.label}</h3> : null}
+                    {group.customers.map((customer) => (
+                      <button
+                        className={`grid w-full gap-3 px-5 py-4 text-left transition hover:bg-teal-50/60 ${detail?.customer.id === customer.id ? 'bg-teal-50' : ''}`}
+                        key={customer.id}
+                        onClick={() => onSelectCustomer(customer.id)}
+                        type="button"
+                      >
+                        <span className="flex items-start justify-between gap-3">
+                          <span className="min-w-0">
+                            <span className="block truncate text-sm font-bold text-[var(--workbench-text)]">{customer.name}</span>
+                            <span className="mt-1 block truncate text-xs text-[var(--workbench-muted)]">
+                              {customer.domain ?? t('customers.noDomain')}
+                            </span>
                           </span>
+                          <CustomerBadge t={t} value={customer.health} />
                         </span>
-                        <CustomerBadge t={t} value={customer.health} />
-                      </span>
-                      <span className="flex flex-wrap gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
-                        <span>{t('customers.tier')}: {t(customerTierLabels[customer.tier])}</span>
-                        <span>{t('customers.size')}: {t(customerSizeLabels[customer.size])}</span>
-                        <span>{t('customers.requestCount').replace('{count}', String(customer.requestCount))}</span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
-              ))}
-            </div>
+                        <span className="flex flex-wrap gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                          <span>{t('customers.tier')}: {t(customerTierLabels[customer.tier])}</span>
+                          <span>{t('customers.size')}: {t(customerSizeLabels[customer.size])}</span>
+                          <span>{t('customers.requestCount').replace('{count}', String(customer.requestCount))}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
 
           <CustomerDetailPanel

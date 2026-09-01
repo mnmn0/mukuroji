@@ -356,7 +356,7 @@ function readEntryEvent(value: unknown): TriageEntryEvent {
     type !== 'snoozed' && type !== 'information-requested' &&
     type !== 'activity-received' && type !== 'resurfaced' &&
     type !== 'sla-breached' && type !== 'escalated' &&
-    type !== 'retention-redacted'
+    type !== 'retention-redacted' && type !== 'customer-associated'
   ) {
     throw invalidContractError()
   }

@@ -52,7 +52,7 @@ import {
   type WorkItemRelationEditorInput,
 } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { CanonicalWorkItem } from '../api/tasks'
-import { CustomerImpactPanel } from '../../customers/ui/CustomerImpactPanel'
+import { CustomerImpactPanel } from '../../customers/ui'
 import { resolveTaskPriority, taskPriorities } from '../model/taskView'
 import {
   areTaskSchedulesEqual,

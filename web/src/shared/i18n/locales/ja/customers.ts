@@ -1,4 +1,4 @@
-/** 顧客ディレクトリ domain の日本語メッセージです。 */
+/** Japanese messages for the Customer directory domain. */
 export const customersMessages = {
   'customers.eyebrow': 'Customer operations',
   'customers.title': '顧客',

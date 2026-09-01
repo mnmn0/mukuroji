@@ -95,7 +95,7 @@ export const triageMessages = {
   'triage.customerRequest.save': 'Customer Request として保存',
   'triage.customerRequest.saving': 'Customer Request を保存中…',
   'triage.customerRequest.succeeded': 'Customer Request を保存しました。',
-  'triage.customerRequest.error': 'Customer Request を保存できませんでした。最新のEntryを確認して再試行してください。',
+  'triage.customerRequest.error': 'Customer Request を保存できませんでした。最新の項目を確認して再試行してください。',
   'triage.permission.full': '全内容を表示可能',
   'triage.permission.metadata-only': 'メタデータのみ',
   'triage.permission.denied': 'ソースを表示できません',
