@@ -3,6 +3,7 @@ import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { expect, spyOn, test } from 'bun:test'
 import type { Customer, CustomerRequest } from '@mukuroji/contracts'
 import {
+  CUSTOMER_MAX_OPERATION_ROWS,
   createCustomerContactRecord,
   createCustomerRecord,
   createCustomerRequestRecord,
@@ -99,6 +100,8 @@ type HarnessOptions = {
   failConditionalTransactionReasons?: readonly { Code: 'ConditionalCheckFailed' | 'None' }[]
   /** Rows returned by the sparse Customer retention index. */
   retentionIndexRows?: readonly unknown[]
+  /** Maximum number of rows returned by one test Query response. */
+  queryPageSize?: number
 }
 
 /** Creates a real DocumentClient whose commands are captured without contacting AWS. */
@@ -146,10 +149,24 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
       const prefix = values && typeof values === 'object' && !Array.isArray(values)
         ? Reflect.get(values, ':recordPrefix')
         : undefined
+      const matchingRows = typeof prefix === 'string'
+        ? [...rows.values()].filter((row) => isRecord(row) && typeof row.recordKey === 'string' && row.recordKey.startsWith(prefix))
+        : []
+      const exclusiveStartKey = normalizedInput.ExclusiveStartKey
+      const startRecordKey = isRecord(exclusiveStartKey) && typeof exclusiveStartKey.recordKey === 'string'
+        ? exclusiveStartKey.recordKey
+        : undefined
+      const startIndex = startRecordKey === undefined
+        ? 0
+        : matchingRows.findIndex((row) => isRecord(row) && row.recordKey === startRecordKey) + 1
+      const pageSize = options.queryPageSize ?? matchingRows.length
+      const items = matchingRows.slice(startIndex, startIndex + pageSize)
+      const lastItem = items.at(-1)
       return {
-        Items: typeof prefix === 'string'
-          ? [...rows.values()].filter((row) => isRecord(row) && typeof row.recordKey === 'string' && row.recordKey.startsWith(prefix))
-          : [],
+        Items: items,
+        ...(startIndex + items.length < matchingRows.length && isRecord(lastItem) && typeof lastItem.recordKey === 'string'
+          ? { LastEvaluatedKey: { workspaceId: 'workspace-1', recordKey: lastItem.recordKey } }
+          : {}),
       }
     }
     if (name === 'GetCommand') {
@@ -239,7 +256,7 @@ test('uses a focused record-prefix query for a Customer Request read', async () 
 
     const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
     expect(queryCommands).toHaveLength(1)
-    expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand', 'QueryCommand', 'GetCommand'])
+    expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand', 'GetCommand', 'QueryCommand', 'GetCommand'])
     expect(queryCommands[0]?.input).toMatchObject({
       KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
       ExpressionAttributeValues: {
@@ -275,6 +292,22 @@ test('lists Customer roots with persisted counts without loading child records',
     expect(queryCommands).toHaveLength(1)
     expect(queryCommands[0]?.input).toMatchObject({
       ExpressionAttributeValues: { ':recordPrefix': 'CUSTOMER#' },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('bounds a paginated Customer read before accumulating an oversized dataset', async () => {
+  const customerRows = Array.from(
+    { length: CUSTOMER_MAX_OPERATION_ROWS + 1 },
+    (_, index) => createCustomerRow(`customer-${index + 1}`, `Customer ${index + 1}`),
+  )
+  const harness = createHarness(customerRows, { queryPageSize: 250 })
+  try {
+    await expect(harness.client.listCustomers('workspace-1')).rejects.toMatchObject({
+      code: 'CustomerOperationTooLarge',
+      status: 413,
     })
   } finally {
     harness.restore()

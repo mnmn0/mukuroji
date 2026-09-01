@@ -131,10 +131,16 @@ export type TriageWorkbenchProps = {
   readonly customerOptions?: readonly Pick<Customer, 'id' | 'name'>[]
   /** Whether the Customer picker is still loading. */
   readonly isCustomerOptionsLoading?: boolean
+  /** Whether another Customer picker page is available. */
+  readonly hasMoreCustomerOptions?: boolean
+  /** Whether another Customer picker page is loading. */
+  readonly isLoadingMoreCustomerOptions?: boolean
   /** Safe error message when the Customer picker cannot load its options. */
   readonly customerOptionsErrorMessage?: string
   /** Retries loading Customer picker options. */
   readonly onRetryCustomerOptions?: () => void
+  /** Loads exactly one additional Customer picker page. */
+  readonly onLoadMoreCustomerOptions?: () => void
   /** Applies one explicit bounded bulk action. */
   readonly onBulkAction?: (
     input: TriageBulkActionInput,
@@ -167,8 +173,10 @@ export function TriageWorkbench({
   explicitEntryId,
   filters,
   hasMore = false,
+  hasMoreCustomerOptions = false,
   isBulkPending = false,
   isCustomerOptionsLoading = false,
+  isLoadingMoreCustomerOptions = false,
   customerOptionsErrorMessage,
   isConfigurationLoading = false,
   isDetailLoading = false,
@@ -190,6 +198,7 @@ export function TriageWorkbench({
   onRetryDetail,
   onRetryQueue,
   onRetryCustomerOptions,
+  onLoadMoreCustomerOptions,
   onSaveConfiguration,
   onSelectEntry,
   onViewChange,
@@ -349,7 +358,10 @@ export function TriageWorkbench({
                   onCreateCustomerRequest={onCreateCustomerRequest}
                   customerOptions={customerOptions}
                   customerOptionsErrorMessage={customerOptionsErrorMessage}
+                  hasMoreCustomerOptions={hasMoreCustomerOptions}
                   isCustomerOptionsLoading={isCustomerOptionsLoading}
+                  isLoadingMoreCustomerOptions={isLoadingMoreCustomerOptions}
+                  onLoadMoreCustomerOptions={onLoadMoreCustomerOptions}
                   onRetry={onRetryDetail}
                   onRetryCustomerOptions={onRetryCustomerOptions}
                   t={t}

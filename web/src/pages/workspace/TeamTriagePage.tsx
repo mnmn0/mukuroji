@@ -173,8 +173,10 @@ export function TeamTriagePage() {
         explicitEntryId={routeState.entryId}
         filters={routeState.filters}
         hasMore={Boolean(lastQueuePage?.nextCursor)}
+        hasMoreCustomerOptions={customerDirectory.hasMore}
         isBulkPending={mutation.isBulkPending}
         isCustomerOptionsLoading={customerDirectory.isLoading}
+        isLoadingMoreCustomerOptions={customerDirectory.isLoadingMore}
         isConfigurationLoading={settings.isLoading}
         isDetailLoading={Boolean(selectedEntryId && detail.isLoading)}
         isQueueLoading={queue.isLoading}
@@ -215,6 +217,7 @@ export function TeamTriagePage() {
           replaceRouteState('queue', null, filters)
         }}
         onLoadMore={() => void queue.setSize(queue.size + 1)}
+        onLoadMoreCustomerOptions={customerDirectory.loadMore}
         onRetryConfiguration={() => void settings.mutate()}
         onRetryDetail={() => void detail.mutate()}
         onRetryCustomerOptions={() => void customerDirectory.mutate()}

@@ -43,6 +43,7 @@ import type {
   UpdateCustomerSavedViewInput,
 } from '@mukuroji/contracts'
 import {
+  CUSTOMER_MAX_OPERATION_ROWS,
   CustomerError,
 } from '../../domain/customer'
 import {
@@ -65,6 +66,9 @@ const CUSTOMER_RETENTION_INDEX_PARTITION = 'CUSTOMER_RETENTION'
 
 /** Maximum number of retention index pages processed by one scheduled invocation. */
 const CUSTOMER_RETENTION_MAX_PAGES = 1_000
+
+/** Explicit unbounded read limit reserved for resumable lifecycle operations. */
+const CUSTOMER_UNBOUNDED_READ_LIMIT = Number.POSITIVE_INFINITY
 
 /** Physical prefixes used to select one Customer record category. */
 const CUSTOMER_RECORD_PREFIX = 'CUSTOMER#'
@@ -322,7 +326,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
-    ])
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
     memory.replaceWorkspaceState(workspaceId, loaded.state)
     await memory.deleteCustomer(workspaceId, customerId, actorId, expectedRevision)
@@ -434,7 +438,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
-    ])
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const probe = new InMemoryCustomerClient({ now: this.now, id: this.id })
     probe.replaceWorkspaceState(workspaceId, loaded.state)
     await probe.mergeCustomer(workspaceId, sourceCustomerId, actorId, input)
@@ -468,7 +472,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
-    ])
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
     memory.replaceWorkspaceState(workspaceId, loaded.state)
     const detail = await memory.mergeCustomer(workspaceId, sourceCustomerId, actorId, input)
@@ -488,7 +492,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
         CONTACT_RECORD_PREFIX,
         REQUEST_RECORD_PREFIX,
         NOTIFICATION_RECORD_PREFIX,
-      ])
+      ], CUSTOMER_UNBOUNDED_READ_LIMIT)
       const nextMemory = new InMemoryCustomerClient({ now: this.now, id: this.id })
       nextMemory.replaceWorkspaceState(workspaceId, currentLoaded.state)
       currentDetail = await nextMemory.mergeCustomer(workspaceId, sourceCustomerId, actorId, input)
@@ -869,7 +873,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
    * @returns A point-in-time Customer data export.
    */
   async exportWorkspace(workspaceId: string): Promise<CustomerWorkspaceExport> {
-    const { memory } = await this.readMemoryForRead(workspaceId)
+    const { memory } = await this.readMemoryForRead(workspaceId, undefined, CUSTOMER_UNBOUNDED_READ_LIMIT)
     return await memory.exportWorkspace(workspaceId)
   }
 
@@ -884,7 +888,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
-    ])
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({
       now: () => new Date(now),
       id: this.id,
@@ -939,13 +943,18 @@ export class DynamoDbCustomerClient implements CustomerClient {
     return notifications
   }
 
-  /** Queries one Customer record category, including all DynamoDB pages.
+  /** Queries one Customer record category through a bounded number of rows.
    *
    * @param workspaceId Workspace partition to query.
    * @param recordPrefix Optional physical record prefix to keep the read focused.
+   * @param maxRows Maximum number of rows to retain in memory for this read.
    * @returns Untrusted DynamoDB rows for the selected scope.
    */
-  private async queryRows(workspaceId: string, recordPrefix?: string): Promise<unknown[]> {
+  private async queryRows(
+    workspaceId: string,
+    recordPrefix?: string,
+    maxRows = CUSTOMER_MAX_OPERATION_ROWS,
+  ): Promise<unknown[]> {
     const rows: unknown[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
@@ -962,7 +971,15 @@ export class DynamoDbCustomerClient implements CustomerClient {
         Limit: 250,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      rows.push(...response.Items ?? [])
+      const pageItems = response.Items ?? []
+      if (rows.length + pageItems.length > maxRows) {
+        throw new CustomerError(
+          413,
+          'CustomerOperationTooLarge',
+          'The Customer data set is too large to load in one operation.',
+        )
+      }
+      rows.push(...pageItems)
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
     return rows
@@ -997,17 +1014,28 @@ export class DynamoDbCustomerClient implements CustomerClient {
    *
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes; omitted loads the full graph.
+   * @param maxRows Maximum number of rows to retain in memory for this read.
    * @returns The selected state, revision, and durable operation marker.
    */
   private async loadWithoutRecovery(
     workspaceId: string,
     recordPrefixes?: readonly string[],
+    maxRows = CUSTOMER_MAX_OPERATION_ROWS,
   ): Promise<LoadedCustomerWorkspace> {
     const state = createEmptyState()
     const metadata = await this.readWorkspaceMetadata(workspaceId)
-    const rows = recordPrefixes === undefined
-      ? await this.queryRows(workspaceId)
-      : (await Promise.all(recordPrefixes.map((prefix) => this.queryRows(workspaceId, prefix)))).flat()
+    let rows: unknown[]
+    if (recordPrefixes === undefined) {
+      rows = await this.queryRows(workspaceId, undefined, maxRows)
+    } else {
+      rows = []
+      let remainingRows = maxRows
+      for (const prefix of recordPrefixes) {
+        const prefixRows = await this.queryRows(workspaceId, prefix, remainingRows)
+        rows.push(...prefixRows)
+        if (Number.isFinite(remainingRows)) remainingRows -= prefixRows.length
+      }
+    }
     for (const row of rows) {
       const decoded = decodeStoredRow(row, workspaceId)
       if (!decoded) throw new CustomerError(503, 'CustomerPersistenceCorrupt', 'A Customer record is malformed.')
@@ -1046,15 +1074,26 @@ export class DynamoDbCustomerClient implements CustomerClient {
    *
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes for a focused load.
+   * @param maxRows Maximum number of rows to retain in memory for this read.
    * @returns The selected state, revision, and durable operation markers.
    */
   private async load(
     workspaceId: string,
     recordPrefixes?: readonly string[],
+    maxRows = CUSTOMER_MAX_OPERATION_ROWS,
   ): Promise<LoadedCustomerWorkspace> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        const loaded = await this.loadWithoutRecovery(workspaceId, recordPrefixes)
+        const metadata = await this.readWorkspaceMetadata(workspaceId)
+        if (metadata.pendingDeletion?.phase === 'customer') {
+          await this.resumePendingDeletion(workspaceId, metadata.pendingDeletion)
+          continue
+        }
+        if (metadata.pendingRetention) {
+          await this.resumePendingRetention(workspaceId, metadata.pendingRetention)
+          continue
+        }
+        const loaded = await this.loadWithoutRecovery(workspaceId, recordPrefixes, maxRows)
         if (loaded.pendingDeletion?.phase === 'customer') {
           await this.resumePendingDeletion(workspaceId, loaded.pendingDeletion)
           continue
@@ -1080,18 +1119,20 @@ export class DynamoDbCustomerClient implements CustomerClient {
    *
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes for a focused load.
+   * @param maxRows Maximum number of rows to retain in memory for this read.
    * @returns The in-memory client, loaded revision, and retention changes.
    */
   private async readMemory(
     workspaceId: string,
     recordPrefixes?: readonly string[],
+    maxRows = CUSTOMER_MAX_OPERATION_ROWS,
   ): Promise<{
     memory: InMemoryCustomerClient
     loaded: LoadedCustomerWorkspace
     retentionResult: CustomerRetentionResult
     retentionAt: string
   }> {
-    const loaded = await this.load(workspaceId, recordPrefixes)
+    const loaded = await this.load(workspaceId, recordPrefixes, maxRows)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
     memory.replaceWorkspaceState(workspaceId, loaded.state)
     if (loaded.pendingDeletion?.phase === 'triage') {
@@ -1109,16 +1150,18 @@ export class DynamoDbCustomerClient implements CustomerClient {
    *
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes for a focused load.
+   * @param maxRows Maximum number of rows to retain in memory for this read.
    * @returns The in-memory client and loaded revision.
    */
   private async readMemoryForRead(
     workspaceId: string,
     recordPrefixes?: readonly string[],
+    maxRows = CUSTOMER_MAX_OPERATION_ROWS,
   ): Promise<{
     memory: InMemoryCustomerClient
     loaded: LoadedCustomerWorkspace
   }> {
-    const result = await this.readMemory(workspaceId, recordPrefixes)
+    const result = await this.readMemory(workspaceId, recordPrefixes, maxRows)
     if (!hasExternalCustomerOperation(result.loaded) && (
       result.retentionResult.customersRedacted > 0 ||
       result.retentionResult.contactsRedacted > 0 ||
@@ -1381,7 +1424,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
-    ])
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const recordKeys = serializeState(workspaceId, loaded.state)
       .filter((row) => isOwnedByCustomer(row, pendingDeletion.customerId))
       .map((row) => row.recordKey)
@@ -1404,7 +1447,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
-    ])
+    ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({
       now: () => new Date(pendingRetention.evaluatedAt),
       id: this.id,

@@ -79,10 +79,16 @@ export type TriageEntryDetailProps = {
   readonly customerOptions?: readonly Pick<Customer, 'id' | 'name'>[]
   /** Whether the Customer picker is still loading. */
   readonly isCustomerOptionsLoading?: boolean
+  /** Whether another Customer picker page is available. */
+  readonly hasMoreCustomerOptions?: boolean
+  /** Whether another Customer picker page is loading. */
+  readonly isLoadingMoreCustomerOptions?: boolean
   /** Safe error message when the Customer picker cannot load its options. */
   readonly customerOptionsErrorMessage?: string
   /** Retries loading Customer picker options. */
   readonly onRetryCustomerOptions?: () => void
+  /** Loads exactly one additional Customer picker page. */
+  readonly onLoadMoreCustomerOptions?: () => void
   /** Restores queue navigation after a successful action. */
   readonly onActionComplete?: (entryId: string) => void
 }
@@ -119,7 +125,9 @@ export function TriageEntryDetail({
   errorMessage,
   customerOptions,
   customerOptionsErrorMessage,
+  hasMoreCustomerOptions = false,
   isCustomerOptionsLoading = false,
+  isLoadingMoreCustomerOptions = false,
   isAiOperationPending = false,
   isLoading = false,
   isPending = false,
@@ -132,6 +140,7 @@ export function TriageEntryDetail({
   onOperationPendingChange,
   onRetry,
   onRetryCustomerOptions,
+  onLoadMoreCustomerOptions,
   t,
   teamId,
   eligibleAssigneeIdsByProject,
@@ -588,6 +597,16 @@ export function TriageEntryDetail({
                     ))}
                   </select>
                 </label>
+                {hasMoreCustomerOptions && onLoadMoreCustomerOptions ? (
+                  <button
+                    className="workbench-button-secondary min-h-9 w-fit px-3"
+                    disabled={isLoadingMoreCustomerOptions}
+                    onClick={onLoadMoreCustomerOptions}
+                    type="button"
+                  >
+                    {isLoadingMoreCustomerOptions ? t('customers.loadingMore') : t('customers.loadMore')}
+                  </button>
+                ) : null}
                 <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('triage.customerRequest.importance')}
                   <select
