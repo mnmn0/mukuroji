@@ -130,6 +130,8 @@ export type WorkspaceRouteContextValue = {
   canManageWorkspaceConfiguration: boolean
   /** Whether the current user may manage Workspace AI assistance policy. */
   canManageAiAssistance: boolean
+  /** Whether the current user may use Customer sensitive search and business-value filters. */
+  canViewCustomerSensitiveData: boolean
   /** Returns whether one AI workflow is currently enabled by rollout and saved settings. */
   isAiAssistanceTaskEnabled?: (task: AiAssistanceTask) => boolean
   /** Whether the current user may perform team-scoped content mutations. */
@@ -283,6 +285,7 @@ export function WorkspaceRouteProvider() {
   const canLoadWorkspaceData = Boolean(user && !currentUserError)
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
   const canManageAiAssistance = user?.canManageAiAssistance ?? canManageWorkspaceConfiguration
+  const canViewCustomerSensitiveData = user?.canViewCustomerSensitiveData ?? false
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
   const hasQuickAccessLoadError = Boolean(quickAccessError)
   const quickAccessProjects = useMemo(
@@ -739,6 +742,7 @@ export function WorkspaceRouteProvider() {
     accessToken,
     canLoadWorkspaceData,
     canManageAiAssistance,
+    canViewCustomerSensitiveData,
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
@@ -795,6 +799,7 @@ export function WorkspaceRouteProvider() {
     accessToken,
     canLoadWorkspaceData,
     canManageAiAssistance,
+    canViewCustomerSensitiveData,
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,

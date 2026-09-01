@@ -58,57 +58,220 @@ export type CustomerWorkspaceState = {
 
 /** Public Customer persistence and application surface. */
 export interface CustomerClient {
-  /** Lists customers within one Workspace boundary. */
+  /** Lists customers within one Workspace boundary.
+   *
+   * @param workspaceId Workspace containing the customers.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered customer page.
+   */
   listCustomers(workspaceId: string, input?: CustomerListInput): Promise<CustomerPage>
-  /** Reads a customer and its related graph. */
+  /** Reads a customer and its related graph.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to read.
+   * @returns The Customer detail graph.
+   */
   getCustomer(workspaceId: string, customerId: string): Promise<CustomerDetail>
-  /** Creates a customer. */
+  /** Creates a customer.
+   *
+   * @param workspaceId Workspace that will own the Customer.
+   * @param actorId Authenticated actor creating the Customer.
+   * @param input Customer creation fields.
+   * @returns The created Customer.
+   */
   createCustomer(workspaceId: string, actorId: string, input: CreateCustomerInput): Promise<Customer>
-  /** Updates a customer under an optimistic revision fence. */
+  /** Updates a customer under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Customer changes and the expected revision.
+   * @returns The updated Customer.
+   */
   updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer>
-  /** Deletes a customer and its owned contacts and requests. */
+  /** Deletes a customer and its owned contacts and requests.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Customer revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void>
-  /** Merges a source customer into a retained customer. */
+  /** Merges a source customer into a retained customer.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Customer and revision fences.
+   * @returns The retained Customer detail graph.
+   */
   mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail>
-  /** Lists contacts belonging to a customer. */
+  /** Lists contacts belonging to a customer.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose contacts should be listed.
+   * @returns Contacts owned by the Customer.
+   */
   listContacts(workspaceId: string, customerId: string): Promise<CustomerContact[]>
-  /** Reads one contact under its customer boundary. */
+  /** Reads one contact under its customer boundary.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to read.
+   * @returns The requested contact.
+   */
   getContact(workspaceId: string, customerId: string, contactId: string): Promise<CustomerContact>
-  /** Creates a customer contact. */
+  /** Creates a customer contact.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param actorId Authenticated actor creating the contact.
+   * @param input Contact creation fields.
+   * @returns The created contact.
+   */
   createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact>
-  /** Updates a customer contact under an optimistic revision fence. */
+  /** Updates a customer contact under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Contact changes and the expected revision.
+   * @returns The updated contact.
+   */
   updateContact(workspaceId: string, customerId: string, contactId: string, actorId: string, input: UpdateCustomerContactInput): Promise<CustomerContact>
-  /** Deletes a customer contact. */
+  /** Deletes a customer contact.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   deleteContact(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void>
-  /** Merges a source contact into a retained contact. */
+  /** Merges a source contact into a retained contact.
+   *
+   * @param workspaceId Workspace containing both contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target contact and revision fences.
+   * @returns The retained contact.
+   */
   mergeContact(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<CustomerContact>
-  /** Lists customer requests within a Workspace boundary. */
+  /** Lists customer requests within a Workspace boundary.
+   *
+   * @param workspaceId Workspace containing the requests.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered Customer Request page.
+   */
   listRequests(workspaceId: string, input?: CustomerRequestListInput): Promise<CustomerRequestPage>
-  /** Reads one Customer Request. */
+  /** Reads one Customer Request.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to read.
+   * @returns The requested Customer Request.
+   */
   getRequest(workspaceId: string, requestId: string): Promise<CustomerRequest>
-  /** Creates a Customer Request. */
+  /** Creates a Customer Request.
+   *
+   * @param workspaceId Workspace that will own the request.
+   * @param actorId Authenticated actor creating the request.
+   * @param input Request creation fields.
+   * @returns The created or idempotently replayed request.
+   */
   createRequest(workspaceId: string, actorId: string, input: CreateCustomerRequestInput): Promise<CustomerRequest>
-  /** Updates a Customer Request under an optimistic revision fence. */
+  /** Updates a Customer Request under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Request changes and the expected revision.
+   * @returns The updated Customer Request.
+   */
   updateRequest(workspaceId: string, requestId: string, actorId: string, input: UpdateCustomerRequestInput): Promise<CustomerRequest>
-  /** Deletes a Customer Request. */
+  /** Deletes a Customer Request.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Request revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void>
-  /** Merges a source request into a retained request. */
+  /** Merges a source request into a retained request.
+   *
+   * @param workspaceId Workspace containing both requests.
+   * @param sourceRequestId Request being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target request and revision fences.
+   * @returns The retained request.
+   */
   mergeRequest(workspaceId: string, sourceRequestId: string, actorId: string, input: MergeCustomerRequestInput): Promise<CustomerRequest>
-  /** Links a request to a Work Item, allowing many requests per Work Item. */
+  /** Links a request to a Work Item, allowing many requests per Work Item.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to link.
+   * @param actorId Authenticated actor creating the link.
+   * @param input Work Item link fields.
+   * @returns The updated Customer Request.
+   */
   linkRequestToWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput): Promise<CustomerRequest>
-  /** Removes a request-to-Work-Item link under a revision fence. */
+  /** Removes a request-to-Work-Item link under a revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to unlink.
+   * @param actorId Authenticated actor removing the link.
+   * @param input Work Item link and expected request revision.
+   * @returns The updated Customer Request.
+   */
   unlinkRequestFromWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput & { expectedRevision: number }): Promise<CustomerRequest>
-  /** Links a request directly to a Project, allowing many requests per Project. */
+  /** Links a request directly to a Project, allowing many requests per Project.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to link.
+   * @param actorId Authenticated actor creating the link.
+   * @param input Project link fields.
+   * @returns The updated Customer Request.
+   */
   linkRequestToProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput): Promise<CustomerRequest>
-  /** Removes a request-to-Project link under a revision fence. */
+  /** Removes a request-to-Project link under a revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to unlink.
+   * @param actorId Authenticated actor removing the link.
+   * @param input Project link and expected request revision.
+   * @returns The updated Customer Request.
+   */
   unlinkRequestFromProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput & { expectedRevision: number }): Promise<CustomerRequest>
-  /** Returns customer impact for one canonical Work Item. */
+  /** Returns customer impact for one canonical Work Item.
+   *
+   * @param workspaceId Workspace containing the Work Item links.
+   * @param teamId Work Item Team.
+   * @param workItemId Work Item to aggregate.
+   * @returns The aggregate Customer impact signal.
+   */
   getWorkItemImpact(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerImpactSignal>
-  /** Returns customer impact for one Project. */
+  /** Returns customer impact for one Project.
+   *
+   * @param workspaceId Workspace containing the Project links.
+   * @param projectId Project to aggregate.
+   * @returns The aggregate Customer impact signal.
+   */
   getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal>
-  /** Returns Work Items associated with a Customer. */
+  /** Returns Work Items associated with a Customer.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose Work Items should be listed.
+   * @returns Work Item summaries linked to the Customer.
+   */
   listCustomerWorkItems(workspaceId: string, customerId: string): Promise<CustomerWorkItemSummary[]>
-  /** Lists saved customer directory views. */
+  /** Lists saved customer directory views.
+   *
+   * @param workspaceId Workspace containing the saved views.
+   * @returns Saved views belonging to the Workspace.
+   */
   listSavedViews(workspaceId: string): Promise<CustomerSavedView[]>
   /** Creates a saved customer directory view.
    *
@@ -119,17 +282,54 @@ export interface CustomerClient {
    * @returns The created or idempotently replayed view.
    */
   createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput, idempotencyKey?: string): Promise<CustomerSavedView>
-  /** Updates a saved customer directory view. */
+  /** Updates a saved customer directory view.
+   *
+   * @param workspaceId Workspace containing the saved view.
+   * @param viewId View to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input View changes and the expected revision.
+   * @returns The updated saved view.
+   */
   updateSavedView(workspaceId: string, viewId: string, actorId: string, input: UpdateCustomerSavedViewInput): Promise<CustomerSavedView>
-  /** Deletes a saved customer directory view. */
+  /** Deletes a saved customer directory view.
+   *
+   * @param workspaceId Workspace containing the saved view.
+   * @param viewId View to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision View revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   deleteSavedView(workspaceId: string, viewId: string, actorId: string, expectedRevision: number): Promise<void>
-  /** Exports all Customer-owned records for one Workspace. */
+  /** Exports all Customer-owned records for one Workspace.
+   *
+   * @param workspaceId Workspace to export.
+   * @returns A point-in-time Customer data export.
+   */
   exportWorkspace(workspaceId: string): Promise<CustomerWorkspaceExport>
-  /** Applies retention redaction to expired Customer-owned records. */
+  /** Applies retention redaction to expired Customer-owned records.
+   *
+   * @param workspaceId Workspace whose records should be evaluated.
+   * @param now Optional evaluation timestamp.
+   * @returns Counts of redacted records by category.
+   */
   redactExpired(workspaceId: string, now?: string): Promise<import('@mukuroji/contracts').CustomerRetentionResult>
-  /** Prepares idempotent completion notification candidates for a Work Item. */
+  /** Prepares idempotent completion notification candidates for a Work Item.
+   *
+   * @param workspaceId Workspace containing the Work Item links.
+   * @param teamId Work Item Team.
+   * @param workItemId Completed Work Item.
+   * @param actorId Authenticated or service actor preparing candidates.
+   * @param now Optional preparation timestamp.
+   * @returns Deterministic notification candidates.
+   */
   prepareCompletionNotifications(workspaceId: string, teamId: string, workItemId: string, actorId: string, now?: string): Promise<CustomerCompletionNotification[]>
-  /** Lists previously prepared completion notification candidates. */
+  /** Lists previously prepared completion notification candidates.
+   *
+   * @param workspaceId Workspace containing the candidates.
+   * @param teamId Work Item Team.
+   * @param workItemId Work Item whose candidates should be listed.
+   * @returns Previously prepared notification candidates.
+   */
   listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]>
 }
 
@@ -144,15 +344,42 @@ export class InMemoryCustomerClient implements CustomerClient {
   /** Test-replaceable ID generator. */
   private readonly id: () => string
 
-  /** Creates an in-memory Customer client. */
+  /** Creates an in-memory Customer client.
+   *
+   * @param options Optional clock and identifier-generator replacements.
+   */
   constructor(options: { now?: () => Date; id?: () => string } = {}) {
     this.now = options.now ?? (() => new Date())
     this.id = options.id ?? randomUUID
   }
 
-  /** Returns a deep-cloned Workspace state for a durable adapter bridge. */
+  /** Returns a deep-cloned Workspace state for a durable adapter bridge.
+   *
+   * @param workspaceId Workspace whose state should be copied.
+   * @returns A detached mutable state snapshot.
+   */
   readWorkspaceState(workspaceId: string): CustomerWorkspaceState {
-    const state = this.state(workspaceId)
+    return this.snapshotState(this.state(workspaceId))
+  }
+
+  /** Returns a deep-cloned Workspace state without applying retention.
+   *
+   * This bridge is used by destructive persistence operations that must not
+   * introduce unrelated retention writes into the same mutation.
+   *
+   * @param workspaceId Workspace whose state should be copied.
+   * @returns A detached mutable state snapshot without an implicit redaction pass.
+   */
+  readWorkspaceStateWithoutRetention(workspaceId: string): CustomerWorkspaceState {
+    return this.snapshotState(this.rawState(workspaceId))
+  }
+
+  /** Copies every collection in a Customer Workspace state.
+   *
+   * @param state State to clone.
+   * @returns A detached copy of the supplied state.
+   */
+  private snapshotState(state: CustomerWorkspaceState): CustomerWorkspaceState {
     return {
       customers: new Map([...state.customers].map(([id, customer]) => [id, clone(customer)])),
       contacts: new Map([...state.contacts].map(([id, contact]) => [id, clone(contact)])),
@@ -162,7 +389,11 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
   }
 
-  /** Replaces a Workspace state after a durable adapter has loaded it. */
+  /** Replaces a Workspace state after a durable adapter has loaded it.
+   *
+   * @param workspaceId Workspace whose state should be replaced.
+   * @param state Detached state snapshot to install.
+   */
   replaceWorkspaceState(workspaceId: string, state: CustomerWorkspaceState): void {
     this.workspaces.set(workspaceId, {
       customers: new Map([...state.customers].map(([id, customer]) => [id, clone(customer)])),
@@ -213,7 +444,12 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
   }
 
-  /** Reads a customer and its related graph. */
+  /** Reads a customer and its related graph.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to read.
+   * @returns The Customer detail graph.
+   */
   async getCustomer(workspaceId: string, customerId: string): Promise<CustomerDetail> {
     const state = this.state(workspaceId)
     const customer = this.requireCustomer(state, customerId)
@@ -233,7 +469,13 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
   }
 
-  /** Creates a customer. */
+  /** Creates a customer.
+   *
+   * @param workspaceId Workspace that will own the Customer.
+   * @param actorId Authenticated actor creating the Customer.
+   * @param input Customer creation fields.
+   * @returns The created Customer.
+   */
   async createCustomer(workspaceId: string, actorId: string, input: CreateCustomerInput): Promise<Customer> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -245,7 +487,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(this.state(workspaceId).customers.get(customer.id) ?? customer)
   }
 
-  /** Updates a customer under an optimistic revision fence. */
+  /** Updates a customer under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Customer changes and the expected revision.
+   * @returns The updated Customer.
+   */
   async updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -259,10 +508,17 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(this.withCustomerCounts(state, updated))
   }
 
-  /** Deletes a customer and its owned contacts and requests. */
+  /** Deletes a customer and its owned contacts and requests.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Customer revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
-    const state = this.state(workspaceId)
+    const state = this.rawState(workspaceId)
     const current = this.requireCustomer(state, customerId)
     assertRevision(current.revision, expectedRevision, 'Customer')
     state.customers.delete(customerId)
@@ -339,7 +595,12 @@ export class InMemoryCustomerClient implements CustomerClient {
     return await this.getCustomer(workspaceId, target.id)
   }
 
-  /** Lists contacts belonging to a customer. */
+  /** Lists contacts belonging to a customer.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose contacts should be listed.
+   * @returns Contacts owned by the Customer.
+   */
   async listContacts(workspaceId: string, customerId: string): Promise<CustomerContact[]> {
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
@@ -349,7 +610,13 @@ export class InMemoryCustomerClient implements CustomerClient {
       .map(clone)
   }
 
-  /** Reads one contact under its customer boundary. */
+  /** Reads one contact under its customer boundary.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to read.
+   * @returns The requested contact.
+   */
   async getContact(workspaceId: string, customerId: string, contactId: string): Promise<CustomerContact> {
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
@@ -406,7 +673,15 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(updated)
   }
 
-  /** Deletes a customer contact. */
+  /** Deletes a customer contact.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteContact(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
     const current = await this.getContact(workspaceId, customerId, contactId)
@@ -424,7 +699,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
   }
 
-  /** Merges a source contact into a retained contact. */
+  /** Merges a source contact into a retained contact.
+   *
+   * @param workspaceId Workspace containing both contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target contact and revision fences.
+   * @returns The retained contact.
+   */
   async mergeContact(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<CustomerContact> {
     requireActor(actorId)
     if (sourceContactId === input.targetContactId) throw new CustomerError(400, 'InvalidCustomerMerge', 'A contact cannot be merged into itself.')
@@ -491,7 +773,12 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
   }
 
-  /** Reads one Customer Request. */
+  /** Reads one Customer Request.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to read.
+   * @returns The requested Customer Request.
+   */
   async getRequest(workspaceId: string, requestId: string): Promise<CustomerRequest> {
     const request = this.state(workspaceId).requests.get(requestId)
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
@@ -563,7 +850,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(updated)
   }
 
-  /** Deletes a Customer Request. */
+  /** Deletes a Customer Request.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Request revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -622,7 +916,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(mergedTarget)
   }
 
-  /** Links a request to a Work Item, allowing many requests per Work Item. */
+  /** Links a request to a Work Item, allowing many requests per Work Item.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to link.
+   * @param actorId Authenticated actor creating the link.
+   * @param input Work Item link fields.
+   * @returns The updated Customer Request.
+   */
   async linkRequestToWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -645,7 +946,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(next)
   }
 
-  /** Removes a request-to-Work-Item link under a revision fence. */
+  /** Removes a request-to-Work-Item link under a revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to unlink.
+   * @param actorId Authenticated actor removing the link.
+   * @param input Work Item link and expected request revision.
+   * @returns The updated Customer Request.
+   */
   async unlinkRequestFromWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput & { expectedRevision: number }): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -663,7 +971,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(next)
   }
 
-  /** Links a request directly to a Project, idempotently. */
+  /** Links a request directly to a Project, idempotently.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to link.
+   * @param actorId Authenticated actor creating the link.
+   * @param input Project link fields.
+   * @returns The updated Customer Request.
+   */
   async linkRequestToProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -681,7 +996,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(next)
   }
 
-  /** Removes a request-to-Project link under a revision fence. */
+  /** Removes a request-to-Project link under a revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to unlink.
+   * @param actorId Authenticated actor removing the link.
+   * @param input Project link and expected request revision.
+   * @returns The updated Customer Request.
+   */
   async unlinkRequestFromProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput & { expectedRevision: number }): Promise<CustomerRequest> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -700,7 +1022,13 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(next)
   }
 
-  /** Returns customer impact for one canonical Work Item. */
+  /** Returns customer impact for one canonical Work Item.
+   *
+   * @param workspaceId Workspace containing the Work Item links.
+   * @param teamId Work Item Team.
+   * @param workItemId Work Item to aggregate.
+   * @returns The aggregate Customer impact signal.
+   */
   async getWorkItemImpact(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerImpactSignal> {
     const state = this.state(workspaceId)
     const requests = [...state.requests.values()].filter((request) => request.workItemLinks.some((link) => link.teamId === teamId && link.workItemId === workItemId))
@@ -710,7 +1038,12 @@ export class InMemoryCustomerClient implements CustomerClient {
     )
   }
 
-  /** Returns customer impact for one Project. */
+  /** Returns customer impact for one Project.
+   *
+   * @param workspaceId Workspace containing the Project links.
+   * @param projectId Project to aggregate.
+   * @returns The aggregate Customer impact signal.
+   */
   async getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal> {
     const state = this.state(workspaceId)
     const requests = [...state.requests.values()].filter((request) => request.projectLinks.some((link) => link.projectId === projectId) || request.workItemLinks.some((link) => link.projectId === projectId))
@@ -720,13 +1053,22 @@ export class InMemoryCustomerClient implements CustomerClient {
     )
   }
 
-  /** Returns Work Items associated with a Customer. */
+  /** Returns Work Items associated with a Customer.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose Work Items should be listed.
+   * @returns Work Item summaries linked to the Customer.
+   */
   async listCustomerWorkItems(workspaceId: string, customerId: string): Promise<CustomerWorkItemSummary[]> {
     const detail = await this.getCustomer(workspaceId, customerId)
     return detail.workItems
   }
 
-  /** Lists saved customer directory views. */
+  /** Lists saved customer directory views.
+   *
+   * @param workspaceId Workspace containing the saved views.
+   * @returns Saved views belonging to the Workspace.
+   */
   async listSavedViews(workspaceId: string): Promise<CustomerSavedView[]> {
     return [...this.state(workspaceId).views.values()].sort(compareByName).map(clone)
   }
@@ -761,7 +1103,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(view)
   }
 
-  /** Updates a saved customer directory view. */
+  /** Updates a saved customer directory view.
+   *
+   * @param workspaceId Workspace containing the saved view.
+   * @param viewId View to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input View changes and the expected revision.
+   * @returns The updated saved view.
+   */
   async updateSavedView(workspaceId: string, viewId: string, actorId: string, input: UpdateCustomerSavedViewInput): Promise<CustomerSavedView> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -780,7 +1129,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     return clone(updated)
   }
 
-  /** Deletes a saved customer directory view. */
+  /** Deletes a saved customer directory view.
+   *
+   * @param workspaceId Workspace containing the saved view.
+   * @param viewId View to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision View revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteSavedView(workspaceId: string, viewId: string, actorId: string, expectedRevision: number): Promise<void> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -790,7 +1146,11 @@ export class InMemoryCustomerClient implements CustomerClient {
     state.views.delete(viewId)
   }
 
-  /** Exports all Customer-owned records for one Workspace. */
+  /** Exports all Customer-owned records for one Workspace.
+   *
+   * @param workspaceId Workspace to export.
+   * @returns A point-in-time Customer data export.
+   */
   async exportWorkspace(workspaceId: string): Promise<CustomerWorkspaceExport> {
     const state = this.state(workspaceId)
     return {
@@ -805,8 +1165,13 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
   }
 
-  /** Applies retention redaction to expired Customer-owned records. */
-  async redactExpired(workspaceId: string, now = this.now().toISOString()) {
+  /** Applies retention redaction to expired Customer-owned records.
+   *
+   * @param workspaceId Workspace whose records should be evaluated.
+   * @param now Optional evaluation timestamp.
+   * @returns Counts of redacted records by category.
+   */
+  async redactExpired(workspaceId: string, now = this.now().toISOString()): Promise<import('@mukuroji/contracts').CustomerRetentionResult> {
     const state = this.rawState(workspaceId)
     const redacted = redactExpiredCustomerData(
       [...state.customers.values()],
@@ -820,7 +1185,15 @@ export class InMemoryCustomerClient implements CustomerClient {
     return redacted.result
   }
 
-  /** Prepares idempotent completion notification candidates for a Work Item. */
+  /** Prepares idempotent completion notification candidates for a Work Item.
+   *
+   * @param workspaceId Workspace containing the Work Item links.
+   * @param teamId Work Item Team.
+   * @param workItemId Completed Work Item.
+   * @param actorId Authenticated or service actor preparing candidates.
+   * @param now Optional preparation timestamp.
+   * @returns Deterministic notification candidates.
+   */
   async prepareCompletionNotifications(workspaceId: string, teamId: string, workItemId: string, actorId: string, now = this.now().toISOString()): Promise<CustomerCompletionNotification[]> {
     requireActor(actorId)
     const state = this.state(workspaceId)
@@ -854,7 +1227,13 @@ export class InMemoryCustomerClient implements CustomerClient {
     return candidates
   }
 
-  /** Lists previously prepared completion notification candidates. */
+  /** Lists previously prepared completion notification candidates.
+   *
+   * @param workspaceId Workspace containing the candidates.
+   * @param teamId Work Item Team.
+   * @param workItemId Work Item whose candidates should be listed.
+   * @returns Previously prepared notification candidates.
+   */
   async listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]> {
     return [...this.state(workspaceId).notifications.values()]
       .filter((notification) => notification.teamId === teamId && notification.workItemId === workItemId)

@@ -77,7 +77,10 @@ export function readServerEnvironment(): ServerEnvironment {
 export function loadServerConfig(
   environment: ServerEnvironment = readServerEnvironment(),
   runtime: ServerRuntime = {
-    localBun: typeof Bun !== 'undefined' && !environment.AWS_LAMBDA_FUNCTION_NAME,
+    localBun: typeof Bun !== 'undefined' &&
+      environment.NODE_ENV !== 'production' &&
+      !environment.AWS_LAMBDA_FUNCTION_NAME &&
+      !environment.AWS_EXECUTION_ENV,
   },
 ): ServerConfig {
   rejectLegacyWorkItemTableEnvironment(environment)
@@ -89,11 +92,16 @@ export function loadServerConfig(
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean)
-  const dynamoDbEndpoint = firstNonBlank(
+  const configuredDynamoDbEndpoint = firstNonBlank(
     environment.DYNAMODB_ENDPOINT,
     environment.AWS_ENDPOINT_URL_DYNAMODB,
     environment.AWS_ENDPOINT_URL,
-  ) ?? (runtime.localBun ? 'http://localhost:4566' : undefined)
+  )
+  const dynamoDbEndpoint = validateOptionalDynamoDbEndpoint(
+    configuredDynamoDbEndpoint ?? (runtime.localBun ? 'http://localhost:4566' : undefined),
+    awsRegion,
+    environment,
+  )
   const cognitoEndpoint =
     environment.COGNITO_ENDPOINT ?? environment.AWS_ENDPOINT_URL
   const sqsEndpoint = firstNonBlank(
@@ -139,6 +147,15 @@ export function loadServerConfig(
       return resolvePublicApiCursorSecret(environment, production)
     },
   })
+}
+
+/** Validates an optional DynamoDB endpoint before it is passed to an AWS client. */
+function validateOptionalDynamoDbEndpoint(
+  value: string | undefined,
+  awsRegion: string,
+  environment: ServerEnvironment,
+): string | undefined {
+  return value === undefined ? undefined : validateDynamoDbEndpoint(value, awsRegion, environment)
 }
 
 /** Rejects removed Work Items table aliases instead of silently selecting a default table. */
@@ -238,6 +255,64 @@ function validateSecretsManagerEndpoint(
   return endpoint.origin
 }
 
+/**
+ * Validates and normalizes a configured DynamoDB endpoint.
+ *
+ * Local emulator endpoints are limited to known hosts and HTTP.  Remote
+ * endpoints must be the selected region's standard or FIPS AWS hostname so
+ * that credentials are not sent to an arbitrary endpoint.
+ */
+function validateDynamoDbEndpoint(
+  value: string,
+  awsRegion: string,
+  environment: ServerEnvironment,
+): string {
+  let endpoint: URL
+  try {
+    endpoint = new URL(value)
+  } catch {
+    throw new TypeError('DynamoDB endpoint must be a valid absolute URL.')
+  }
+
+  if (
+    endpoint.username ||
+    endpoint.password ||
+    endpoint.pathname !== '/' ||
+    endpoint.search ||
+    endpoint.hash
+  ) {
+    throw new TypeError(
+      'DynamoDB endpoint must not include credentials, a path, a query, or a fragment.',
+    )
+  }
+
+  if (isLocalDynamoDbHostname(endpoint.hostname)) {
+    if (
+      endpoint.protocol !== 'http:' ||
+      environment.NODE_ENV === 'production' ||
+      (environment.AWS_LAMBDA_FUNCTION_NAME || environment.AWS_EXECUTION_ENV) &&
+        environment.MUKUROJI_LOCAL_AWS_RUNTIME !== LOCAL_AWS_RUNTIME_MARKER
+    ) {
+      throw new TypeError(
+        'Local DynamoDB endpoints require an explicit non-production Floci runtime.',
+      )
+    }
+    return endpoint.origin
+  }
+
+  if (
+    endpoint.protocol !== 'https:' ||
+    hasExplicitPort(value) ||
+    !isRegionBoundAwsDynamoDbHostname(endpoint.hostname, awsRegion)
+  ) {
+    throw new TypeError(
+      'DynamoDB endpoint must use the configured AWS region standard or FIPS HTTPS hostname.',
+    )
+  }
+
+  return endpoint.origin
+}
+
 /** Returns whether an absolute URL spells out a port in its authority component. */
 function hasExplicitPort(value: string): boolean {
   const authorityStart = value.indexOf('://') + 3
@@ -265,6 +340,18 @@ function isLocalSecretsManagerHostname(hostname: string): boolean {
   ].includes(hostname)
 }
 
+/** Returns whether a hostname is an explicitly supported local DynamoDB host. */
+function isLocalDynamoDbHostname(hostname: string): boolean {
+  return [
+    'localhost',
+    '127.0.0.1',
+    '[::1]',
+    '0.0.0.0',
+    'floci',
+    'localstack',
+  ].includes(hostname)
+}
+
 /** Returns whether a hostname is an exact regional AWS Secrets Manager endpoint. */
 function isRegionBoundAwsSecretsManagerHostname(
   hostname: string,
@@ -279,5 +366,22 @@ function isRegionBoundAwsSecretsManagerHostname(
     `secretsmanager-fips.${awsRegion}.amazonaws.com`,
     `secretsmanager.${awsRegion}.amazonaws.com.cn`,
     `secretsmanager-fips.${awsRegion}.amazonaws.com.cn`,
+  ].includes(hostname)
+}
+
+/** Returns whether a hostname is an exact regional AWS DynamoDB endpoint. */
+function isRegionBoundAwsDynamoDbHostname(
+  hostname: string,
+  awsRegion: string,
+): boolean {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)+-[0-9]+$/.test(awsRegion)) {
+    return false
+  }
+
+  return [
+    `dynamodb.${awsRegion}.amazonaws.com`,
+    `dynamodb-fips.${awsRegion}.amazonaws.com`,
+    `dynamodb.${awsRegion}.amazonaws.com.cn`,
+    `dynamodb-fips.${awsRegion}.amazonaws.com.cn`,
   ].includes(hostname)
 }

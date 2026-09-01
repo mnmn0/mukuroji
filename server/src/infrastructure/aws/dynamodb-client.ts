@@ -17,15 +17,20 @@ import {
 export function createDynamoDbClient(
   config: ServerConfig = loadServerConfig(),
 ): DynamoDBClient {
+  const localEndpoint = isExplicitLocalDynamoDbEndpoint(config.dynamoDbEndpoint)
   return new DynamoDBClient({
     region: config.awsRegion,
     ...(config.dynamoDbEndpoint
       ? {
           endpoint: config.dynamoDbEndpoint,
-          credentials: {
-            accessKeyId: config.environment.AWS_ACCESS_KEY_ID ?? 'test',
-            secretAccessKey: config.environment.AWS_SECRET_ACCESS_KEY ?? 'test',
-          },
+          ...(localEndpoint
+            ? {
+                credentials: {
+                  accessKeyId: 'local',
+                  secretAccessKey: 'local',
+                },
+              }
+            : {}),
         }
       : {}),
   })

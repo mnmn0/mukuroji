@@ -14,7 +14,10 @@ import { MobileSidebarButton, useWorkspaceSidebarController } from '../../shared
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
-/** Renders the Workspace Customer directory and selected Customer graph. */
+/** Renders the Workspace Customer directory and selected Customer graph.
+ *
+ * @returns The routed Customer directory page.
+ */
 export function CustomerPage() {
   const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
@@ -22,7 +25,11 @@ export function CustomerPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const filters = useMemo(() => readCustomerFilters(searchParams), [searchParams])
+  const rawFilters = useMemo(() => readCustomerFilters(searchParams), [searchParams])
+  const filters = useMemo(
+    () => projectCustomerDirectoryFilters(rawFilters, workspace.canViewCustomerSensitiveData),
+    [rawFilters, workspace.canViewCustomerSensitiveData],
+  )
   const search = filters.search ?? ''
   const groupBy = readCustomerGroupBy(searchParams.get('groupBy'))
   const customers = useCustomers(
@@ -94,6 +101,7 @@ export function CustomerPage() {
         sessionErrors={[customers.error, detail.error, savedViews.error]}
       >
         <CustomerDirectoryView
+          canViewSensitiveData={workspace.canViewCustomerSensitiveData}
           customers={customers.data?.customers ?? []}
           detail={detail.data}
           errorMessage={errorMessage}
@@ -144,6 +152,19 @@ function readCustomerFilters(searchParams: URLSearchParams): CustomerListInput {
     ...(readSearchEnum(searchParams.get('sortBy'), customerSortFields) ? { sortBy: readSearchEnum(searchParams.get('sortBy'), customerSortFields) } : {}),
     ...(readSearchEnum(searchParams.get('sortDirection'), customerSortDirections) ? { sortDirection: readSearchEnum(searchParams.get('sortDirection'), customerSortDirections) } : {}),
   }
+}
+
+/** Removes Customer filters that the current principal cannot use safely. */
+function projectCustomerDirectoryFilters(
+  filters: CustomerListInput,
+  canViewSensitiveData: boolean,
+): CustomerListInput {
+  if (canViewSensitiveData) return filters
+  const projected = { ...filters }
+  delete projected.search
+  delete projected.minBusinessValue
+  if (projected.sortBy === 'businessValue') delete projected.sortBy
+  return projected
 }
 
 /** Writes the supported Customer directory state back to URL parameters. */

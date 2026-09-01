@@ -405,8 +405,9 @@ import {
   CustomerError,
   createCustomerRouter,
   projectCustomerImpactSignal,
+  type CustomerAuthorizationScope,
+  type CustomerPrincipal,
 } from '../modules/customers'
-import type { CustomerPrincipal } from '../modules/customers/adapter-in/http/customer-router'
 import {
   createPublicRequestIntakeRouter,
 } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
@@ -2908,6 +2909,7 @@ routeApp.get('/api/auth/me', async (c) => {
       workspaceRole: principal.workspaceRole,
       workspaceMemberStatus: principal.workspaceMemberStatus,
       canManageAiAssistance: canManageAiAssistanceWorkspace(principal),
+      canViewCustomerSensitiveData: hasCustomerManagementAccess(principal),
     })
   } catch (error) {
     if (error instanceof WorkspaceAccessError) {
@@ -9132,7 +9134,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         )
       }
     }
-    const [collaborationComments, resolvedConfiguration, relationPage, customerImpact] = await Promise.all([
+    const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
         viewerMemberKey: principal.userKey,
@@ -9143,14 +9145,27 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       }, collaborationReadBudget),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
-      hasCustomerReadAccess(principal)
-        ? workspaceDependencies.customers.getWorkItemImpact(
+    ])
+    let customerImpact: TeamIssueDetailResponse['customerImpact']
+    if (hasCustomerReadAccess(principal, { teamId })) {
+      try {
+        customerImpact = projectCustomerImpactSignal(
+          await workspaceDependencies.customers.getWorkItemImpact(
             principal.directoryId,
             teamId,
             issueId,
-          ).then((signal) => projectCustomerImpactSignal(signal, hasCustomerManagementAccess(principal)))
-        : Promise.resolve(undefined),
-    ])
+          ),
+          hasCustomerManagementAccess(principal, { teamId }),
+        )
+      } catch (error) {
+        console.error('Customer impact was unavailable while loading Work Item detail.', {
+          workspaceId: principal.directoryId,
+          teamId,
+          issueId,
+          error,
+        })
+      }
+    }
     const allCollaborationComments = collaborationComments.sort(
       compareMigrationAwareComments,
     )
@@ -20058,21 +20073,42 @@ function hasEnterpriseWorkspaceRequestPermission(principal: WorkspacePrincipal):
 }
 
 /** Checks whether the authenticated principal may receive Customer impact data. */
-function hasCustomerReadAccess(principal: WorkspacePrincipal): boolean {
+function hasCustomerReadAccess(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): boolean {
   if (principal.workspaceRole === 'guest') return false
   const evaluation = principal.enterpriseAuthorizationEvaluation
   if (evaluation === undefined) return principal.enterprisePermissions === undefined
-  const resource: EnterpriseAuthorizationResource = {
-    workspaceId: principal.directoryId,
-    kind: 'workspace',
-  }
   const customerReadPermissions: readonly EnterprisePermissionId[] = [
     'requests.read',
     'requests.manage',
     'workspace.manage',
   ]
   return customerReadPermissions.some((permission) =>
-    evaluateEnterpriseAccess({
+    hasEnterpriseCustomerPermission(principal, permission, scope)
+  )
+}
+
+/** Checks one Customer capability against the same Enterprise resource as the route. */
+function hasEnterpriseCustomerPermission(
+  principal: WorkspacePrincipal,
+  permission: EnterprisePermissionId,
+  scope?: CustomerAuthorizationScope,
+): boolean {
+  const resource: EnterpriseAuthorizationResource = scope
+    ? {
+        workspaceId: principal.directoryId,
+        kind: 'team',
+        targetId: scope.teamId,
+      }
+    : {
+        workspaceId: principal.directoryId,
+        kind: 'workspace',
+      }
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation !== undefined) {
+    return evaluateEnterpriseAccess({
       permission,
       principal: evaluation.principal,
       assignments: evaluation.assignments,
@@ -20080,7 +20116,21 @@ function hasCustomerReadAccess(principal: WorkspacePrincipal): boolean {
       groupMappings: evaluation.groupMappings,
       resource,
     }).allowed
-  )
+  }
+  if (!scope) return hasEnterpriseWorkspacePermission(principal, permission)
+  return principal.enterpriseRouteAuthorizedAtResource === true &&
+    isSameEnterpriseAuthorizationResource(principal.enterpriseAuthorizationResource, resource) &&
+    principal.enterprisePermissions?.includes(permission) === true
+}
+
+/** Compares two resource descriptors without widening their scoped target. */
+function isSameEnterpriseAuthorizationResource(
+  left: EnterpriseAuthorizationResource | undefined,
+  right: EnterpriseAuthorizationResource,
+): boolean {
+  if (!left || left.workspaceId !== right.workspaceId || left.kind !== right.kind) return false
+  if (right.kind === 'workspace') return true
+  return left.kind === 'team' && left.targetId === right.targetId
 }
 
 /**
@@ -25424,6 +25474,7 @@ function requireWorkspaceBusinessRead(principal: WorkspacePrincipal) {
 async function requireCustomerWorkspaceAccess(
   context: Context,
   minimum: 'read' | 'write' | 'manage',
+  scope?: CustomerAuthorizationScope,
 ): Promise<WorkspacePrincipal & CustomerPrincipal> {
   const accessToken = readBearerAccessToken(context)
   if (!accessToken) {
@@ -25431,27 +25482,30 @@ async function requireCustomerWorkspaceAccess(
   }
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
   if (minimum === 'manage') {
-    requireCustomerManagement(principal)
+    requireCustomerManagement(principal, scope)
   } else if (minimum === 'write') {
     requireWorkspaceBusinessWrite(principal)
     if (principal.enterprisePermissions === undefined) {
-      requireCustomerManagement(principal)
+      requireCustomerManagement(principal, scope)
     } else {
-      requireCustomerReadAccess(principal)
+      requireCustomerReadAccess(principal, scope)
     }
   } else {
     requireWorkspaceBusinessRead(principal)
-    requireCustomerReadAccess(principal)
+    requireCustomerReadAccess(principal, scope)
   }
   return {
     ...principal,
-    canViewSensitiveData: hasCustomerManagementAccess(principal),
+    canViewSensitiveData: hasCustomerManagementAccess(principal, scope),
   }
 }
 
 /** Requires the Workspace-scoped Customer read capability. */
-function requireCustomerReadAccess(principal: WorkspacePrincipal): void {
-  if (hasCustomerReadAccess(principal)) return
+function requireCustomerReadAccess(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): void {
+  if (hasCustomerReadAccess(principal, scope)) return
   throw new WorkspaceAccessError(
     403,
     'CustomerReadDenied',
@@ -25460,8 +25514,11 @@ function requireCustomerReadAccess(principal: WorkspacePrincipal): void {
 }
 
 /** Requires Customer merge, export, and deletion management authority. */
-function requireCustomerManagement(principal: WorkspacePrincipal): void {
-  if (hasCustomerManagementAccess(principal)) return
+function requireCustomerManagement(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): void {
+  if (hasCustomerManagementAccess(principal, scope)) return
   throw new WorkspaceAccessError(
     403,
     'CustomerManagementDenied',
@@ -25470,14 +25527,19 @@ function requireCustomerManagement(principal: WorkspacePrincipal): void {
 }
 
 /** Checks whether the principal has the authority required to expose Customer internals or mutate them. */
-function hasCustomerManagementAccess(principal: WorkspacePrincipal): boolean {
+function hasCustomerManagementAccess(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): boolean {
   if (principal.isSystemAdmin && (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin')) return true
   if (principal.enterprisePermissions !== undefined) {
-    if (
-      hasEnterpriseWorkspacePermission(principal, 'requests.manage') ||
-      hasEnterpriseWorkspacePermission(principal, 'workspace.manage')
-    ) return true
-    return false
+    const customerManagementPermissions: readonly EnterprisePermissionId[] = [
+      'requests.manage',
+      'workspace.manage',
+    ]
+    return customerManagementPermissions.some((permission) =>
+      hasEnterpriseCustomerPermission(principal, permission, scope)
+    )
   } else if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
     return true
   }

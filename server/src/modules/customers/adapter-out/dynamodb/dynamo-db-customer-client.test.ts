@@ -2,19 +2,26 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { expect, spyOn, test } from 'bun:test'
 import type { CustomerRequest } from '@mukuroji/contracts'
-import { createCustomerRequestRecord } from '../../domain/customer'
+import {
+  createCustomerRecord,
+  createCustomerRequestRecord,
+} from '../../domain/customer'
 import { DynamoDbCustomerClient } from './dynamo-db-customer-client'
 
 /** Stable DynamoDB adapter test instant. */
 const NOW = '2026-08-01T00:00:00.000Z'
 
 /** Creates a valid request row for adapter read and retention tests. */
-function createRequest(id: string, retentionExpiresAt = '2026-07-01T00:00:00.000Z'): CustomerRequest {
+function createRequest(
+  id: string,
+  retentionExpiresAt = '2026-07-01T00:00:00.000Z',
+  customerId = 'customer-1',
+): CustomerRequest {
   return createCustomerRequestRecord(
     'workspace-1',
     id,
     {
-      customerId: 'customer-1',
+      customerId,
       source: { kind: 'email', provider: 'mail', canNotify: true },
       originalMessage: 'Please support SSO.',
       receivedAt: NOW,
@@ -35,14 +42,56 @@ function createRequestRow(request: CustomerRequest) {
   }
 }
 
+/** Creates a persisted row for one Customer root. */
+function createCustomerRow() {
+  const customer = createCustomerRecord(
+    'workspace-1',
+    'customer-1',
+    {
+      name: 'Acme Corporation',
+      tier: 'enterprise',
+      size: 'enterprise',
+      status: 'active',
+      health: 'healthy',
+    },
+    NOW,
+  )
+  return {
+    workspaceId: customer.workspaceId,
+    recordKey: `CUSTOMER#${customer.id}`,
+    entityType: 'customer',
+    customer,
+  }
+}
+
+/** Optional fault injection for the transactional Customer adapter harness. */
+type HarnessOptions = {
+  /** Transaction number that should fail once, counted from one. */
+  failTransactionAt?: number
+}
+
 /** Creates a real DocumentClient whose commands are captured without contacting AWS. */
-function createHarness(requestRows: readonly unknown[]) {
+function createHarness(requestRows: readonly unknown[], options: HarnessOptions = {}) {
   const lowLevelClient = new DynamoDBClient({
     region: 'us-east-1',
     credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
   })
   const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const rows = new Map<string, unknown>([['META', {
+    workspaceId: 'workspace-1',
+    recordKey: 'META',
+    entityType: 'meta',
+    revision: 4,
+  }]])
+  for (const row of requestRows) {
+    if (!isRecord(row) || typeof row.recordKey !== 'string') {
+      throw new TypeError('The Customer test row is missing a record key.')
+    }
+    rows.set(row.recordKey, row)
+  }
+  let transactionCount = 0
+  let failedTransaction = false
   const sendSpy = spyOn(documentClient, 'send')
   sendSpy.mockImplementation(async (command) => {
     const constructorValue = Reflect.get(command, 'constructor')
@@ -63,17 +112,39 @@ function createHarness(requestRows: readonly unknown[]) {
       const prefix = values && typeof values === 'object' && !Array.isArray(values)
         ? Reflect.get(values, ':recordPrefix')
         : undefined
-      return { Items: prefix === 'REQUEST#' ? requestRows : [] }
+      return {
+        Items: typeof prefix === 'string'
+          ? [...rows.values()].filter((row) => isRecord(row) && typeof row.recordKey === 'string' && row.recordKey.startsWith(prefix))
+          : [],
+      }
     }
     if (name === 'GetCommand') {
-      return {
-        Item: {
-          workspaceId: 'workspace-1',
-          recordKey: 'META',
-          entityType: 'meta',
-          revision: 4,
-        },
+      const key = normalizedInput.Key
+      const recordKey = isRecord(key) && typeof key.recordKey === 'string'
+        ? key.recordKey
+        : undefined
+      return { Item: recordKey ? rows.get(recordKey) : undefined }
+    }
+    if (name === 'TransactWriteCommand') {
+      transactionCount += 1
+      if (!failedTransaction && options.failTransactionAt === transactionCount) {
+        failedTransaction = true
+        throw new Error('Injected Customer transaction failure.')
       }
+      const items = normalizedInput.TransactItems
+      if (!Array.isArray(items)) throw new TypeError('Customer transaction items are missing.')
+      for (const item of items) {
+        if (!isRecord(item)) continue
+        const put = item.Put
+        if (isRecord(put) && isRecord(put.Item) && typeof put.Item.recordKey === 'string') {
+          rows.set(put.Item.recordKey, put.Item)
+          continue
+        }
+        const deletion = item.Delete
+        const key = isRecord(deletion) ? deletion.Key : undefined
+        if (isRecord(key) && typeof key.recordKey === 'string') rows.delete(key.recordKey)
+      }
+      return {}
     }
     return {}
   })
@@ -86,6 +157,7 @@ function createHarness(requestRows: readonly unknown[]) {
       id: () => 'generated-id',
     }),
     commands,
+    rows,
     restore: () => sendSpy.mockRestore(),
   }
 }
@@ -117,7 +189,7 @@ test('splits retention writes into resumable DynamoDB-sized batches', async () =
   const harness = createHarness(requestRows)
   try {
     await expect(harness.client.redactExpired('workspace-1')).resolves.toMatchObject({
-      requestsRedacted: 0,
+      requestsRedacted: 105,
     })
 
     const transactions = harness.commands.filter((command) => command.name === 'TransactWriteCommand')
@@ -145,3 +217,110 @@ test('splits retention writes into resumable DynamoDB-sized batches', async () =
     harness.restore()
   }
 })
+
+test('uses the supplied timestamp for retention evaluation', async () => {
+  const request = createRequest('request-1', '2026-07-15T00:00:00.000Z')
+  const requestRow = createRequestRow(request)
+  const harness = createHarness([requestRow])
+  try {
+    await expect(harness.client.redactExpired('workspace-1', '2026-07-01T00:00:00.000Z')).resolves.toEqual({
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 0,
+    })
+    expect(harness.rows.get('REQUEST#request-1')).toEqual(requestRow)
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('resumes Customer retention after a later transaction fails', async () => {
+  const requestRows = Array.from({ length: 105 }, (_, index) =>
+    createRequestRow(createRequest(`request-${index + 1}`)),
+  )
+  const harness = createHarness(requestRows, { failTransactionAt: 2 })
+  try {
+    await expect(harness.client.redactExpired('workspace-1')).rejects.toThrow(
+      'Injected Customer transaction failure.',
+    )
+    const pendingMetadata = harness.rows.get('META')
+    expect(pendingMetadata).toMatchObject({
+      revision: 5,
+      retention: {
+        evaluatedAt: NOW,
+        cursor: 'REQUEST#request-93',
+      },
+    })
+
+    await expect(harness.client.redactExpired('workspace-1')).resolves.toMatchObject({
+      requestsRedacted: 0,
+    })
+    expect(harness.rows.get('META')).toMatchObject({ revision: 6 })
+    expect(harness.rows.get('META')).not.toHaveProperty('retention')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('hides and resumes a Customer deletion after a later transaction fails', async () => {
+  const requestRows = Array.from({ length: 105 }, (_, index) =>
+    createRequestRow(createRequest(`request-${index + 1}`, '2027-08-01T00:00:00.000Z')),
+  )
+  const harness = createHarness([createCustomerRow(), ...requestRows], { failTransactionAt: 2 })
+  try {
+    const customer = createCustomerRow().customer
+    await expect(harness.client.deleteCustomer(
+      'workspace-1',
+      customer.id,
+      'member-1',
+      customer.revision,
+    )).rejects.toThrow('Injected Customer transaction failure.')
+
+    expect(harness.rows.get('META')).toMatchObject({
+      revision: 5,
+      deletion: { customerId: customer.id },
+    })
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeTrue()
+
+    await expect(harness.client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({
+      code: 'CustomerNotFound',
+    })
+    expect(harness.rows.get('META')).not.toHaveProperty('deletion')
+    expect(harness.rows.has(`CUSTOMER#${customer.id}`)).toBeFalse()
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not mix unrelated retention writes into a Customer deletion', async () => {
+  const ownRequest = createRequestRow(createRequest(
+    'request-1',
+    '2027-08-01T00:00:00.000Z',
+  ))
+  const unrelatedExpiredRequest = createRequestRow(createRequest(
+    'request-unrelated',
+    '2026-07-01T00:00:00.000Z',
+    'customer-2',
+  ))
+  const harness = createHarness([createCustomerRow(), ownRequest, unrelatedExpiredRequest])
+  try {
+    await expect(harness.client.deleteCustomer(
+      'workspace-1',
+      'customer-1',
+      'member-1',
+      1,
+    )).resolves.toBeUndefined()
+
+    const transactions = harness.commands.filter((command) => command.name === 'TransactWriteCommand')
+    expect(transactions).toHaveLength(1)
+    expect(harness.rows.get('REQUEST#request-unrelated')).toEqual(unrelatedExpiredRequest)
+  } finally {
+    harness.restore()
+  }
+})
+
+/** Checks whether an unknown harness value is a non-array object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

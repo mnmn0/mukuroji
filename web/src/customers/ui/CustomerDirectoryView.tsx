@@ -13,6 +13,8 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 export type CustomerDirectoryViewProps = {
   /** Customers returned by the current directory query. */
   customers: readonly Customer[]
+  /** Whether sensitive Customer search and business-value controls are allowed. */
+  canViewSensitiveData: boolean
   /** Selected Customer detail graph, when a route Customer is selected. */
   detail?: CustomerDetail
   /** Current URL-backed search value. */
@@ -55,8 +57,13 @@ export type CustomerDirectoryViewProps = {
   onOpenProject: (project: CustomerProjectSummary) => void
 }
 
-/** Renders Customer discovery, account attributes, and source-to-work traceability. */
+/** Renders Customer discovery, account attributes, and source-to-work traceability.
+ *
+ * @param props Directory filters, data, permissions, and interaction callbacks.
+ * @returns The Customer directory and selected detail view.
+ */
 export function CustomerDirectoryView({
+  canViewSensitiveData,
   customers,
   detail,
   search,
@@ -82,17 +89,19 @@ export function CustomerDirectoryView({
   return (
     <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
       <div className="workbench-panel grid gap-4 p-4">
-        <label className="min-w-0 flex-1">
-          <span className="sr-only">{t('customers.searchLabel')}</span>
-          <input
-            aria-label={t('customers.searchLabel')}
-            className="workbench-input min-h-11 w-full"
-            onChange={(event) => onSearchChange(event.target.value)}
-            placeholder={t('customers.search')}
-            type="search"
-            value={search}
-          />
-        </label>
+        {canViewSensitiveData ? (
+          <label className="min-w-0 flex-1">
+            <span className="sr-only">{t('customers.searchLabel')}</span>
+            <input
+              aria-label={t('customers.searchLabel')}
+              className="workbench-input min-h-11 w-full"
+              onChange={(event) => onSearchChange(event.target.value)}
+              placeholder={t('customers.search')}
+              type="search"
+              value={search}
+            />
+          </label>
+        ) : null}
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <FilterSelect
             label={t('customers.filters.tier')}
@@ -124,21 +133,23 @@ export function CustomerDirectoryView({
           />
         </div>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-            <span>{t('customers.filters.minBusinessValue')}</span>
-            <input
-              className="workbench-input min-h-10 w-full"
-              inputMode="numeric"
-              min="0"
-              max="100"
-              onChange={(event) => onFiltersChange({
-                ...filters,
-                minBusinessValue: event.target.value ? Number(event.target.value) : undefined,
-              })}
-              type="number"
-              value={filters.minBusinessValue ?? ''}
-            />
-          </label>
+          {canViewSensitiveData ? (
+            <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+              <span>{t('customers.filters.minBusinessValue')}</span>
+              <input
+                className="workbench-input min-h-10 w-full"
+                inputMode="numeric"
+                min="0"
+                max="100"
+                onChange={(event) => onFiltersChange({
+                  ...filters,
+                  minBusinessValue: event.target.value ? Number(event.target.value) : undefined,
+                })}
+                type="number"
+                value={filters.minBusinessValue ?? ''}
+              />
+            </label>
+          ) : null}
           <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
             <span>{t('customers.filters.minRequestCount')}</span>
             <input
@@ -158,7 +169,7 @@ export function CustomerDirectoryView({
           </label>
           <FilterSelect
             label={t('customers.filters.sortBy')}
-            options={customerSortOptions}
+            options={canViewSensitiveData ? customerSortOptions : customerSafeSortOptions}
             value={filters.sortBy ?? 'updatedAt'}
             onChange={(value) => onFiltersChange({ ...filters, sortBy: value })}
             t={t}
@@ -481,6 +492,9 @@ const customerSortOptions = [
   { value: 'requestCount', labelKey: 'customers.filters.sort.requestCount' },
   { value: 'openRequestCount', labelKey: 'customers.filters.sort.openRequestCount' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['sortBy']>>[]
+
+/** Customer sort options that do not require sensitive business-value access. */
+const customerSafeSortOptions = customerSortOptions.filter((option) => option.value !== 'businessValue')
 
 /** Customer sort-direction options supported by the directory filter. */
 const customerSortDirectionOptions = [

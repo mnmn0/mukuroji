@@ -72,8 +72,9 @@ function createAutomationActionDependencies(
 export function createProductionAutomationEventHandler() {
   const automationRepository = createAutomationRepository()
   const teamIssues = new DynamoDbTeamIssuesClient()
+  const actionDependencies = createAutomationActionDependencies(automationRepository, teamIssues)
   const actionExecutor = createAutomationActionExecutor(
-    createAutomationActionDependencies(automationRepository, teamIssues),
+    actionDependencies,
   )
   const tenantFeatureGate = createProductionTenantFeatureGate('automation')
   const processor = createAutomationEventProcessor(
@@ -83,6 +84,7 @@ export function createProductionAutomationEventHandler() {
     },
     new AutomationEngine(automationRepository, actionExecutor),
     teamIssues,
+    actionDependencies.customers,
   )
 
   return (event: DynamoStreamEvent) => processAutomationEventBatch(event, processor)

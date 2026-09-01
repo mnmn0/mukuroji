@@ -27,6 +27,7 @@ export {
 } from './adapter-out/dynamodb/dynamo-db-customer-client'
 export {
   createCustomerRouter,
+  type CustomerAuthorizationScope,
   type CustomerPrincipal,
   type CustomerRouterDependencies,
   type CustomerWorkItemAuthorization,

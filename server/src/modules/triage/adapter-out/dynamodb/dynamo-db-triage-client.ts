@@ -564,6 +564,78 @@ export class DynamoDbTriageClient implements TriageClient {
     return projectTriageEntryForResponse(next, now)
   }
 
+  /** Clears reverse Customer links before a Customer graph is deleted.
+   *
+   * The Customer deletion route supplies the already-authorized Workspace
+   * operation. Every matching entry is nevertheless reread and updated through
+   * the normal revision-fenced association path so concurrent Triage changes
+   * cannot be silently overwritten.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose links must be cleared.
+   * @param actorId The authenticated actor performing the cleanup.
+   * @returns A promise that resolves after all matching links are cleared.
+   */
+  async clearCustomerAssociations(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+  ): Promise<void> {
+    requireWorkspaceId(workspaceId)
+    requireIdentifier(customerId, 'Customer ID')
+    requireUserId(actorId, 'Triage actor ID')
+    const entries: TriageEntry[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':scopeKey': createWorkspaceScopeKey(workspaceId),
+          ':prefix': 'TRIAGE#',
+        },
+        ConsistentRead: true,
+        Limit: 100,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of response.Items ?? []) {
+        const key = readPrimaryKey(item)
+        if (!key) {
+          throw new TriageError(
+            503,
+            'TriagePersistenceCorrupt',
+            'A Triage Entry row has an invalid primary key.',
+          )
+        }
+        const entry = decodeTriageEntryRow(item, key)
+        if (!entry) {
+          throw new TriageError(
+            503,
+            'TriagePersistenceCorrupt',
+            'A Triage Entry row is malformed.',
+          )
+        }
+        if (entry.customerId === customerId) entries.push(entry)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+
+    for (const entry of entries) {
+      await this.associateCustomer(
+        workspaceId,
+        entry.teamId,
+        entry.id,
+        { id: actorId },
+        {
+          expectedRevision: entry.revision,
+          customerId: null,
+          contactId: null,
+          customerRequestId: null,
+        },
+      )
+    }
+  }
+
   /** Strongly reads one canonical stored entry without applying a response projection. */
   private async readStoredEntry(workspaceId: string, entryId: string): Promise<TriageEntry> {
     const key = createTriageEntryKey(workspaceId, entryId)

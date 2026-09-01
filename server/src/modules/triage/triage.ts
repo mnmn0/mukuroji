@@ -280,6 +280,22 @@ export interface TriageClient {
     input: UpdateTriageCustomerAssociationInput,
     authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageEntry>
+  /** Clears every Customer association in one Workspace before Customer deletion.
+   *
+   * The caller must already hold the Workspace-level Customer management
+   * permission. Each changed entry is still revision-fenced and records an
+   * immutable association-cleared event.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose reverse links must be removed.
+   * @param actorId The authenticated actor performing the cleanup.
+   * @returns A promise that resolves after all matching links are cleared.
+   */
+  clearCustomerAssociations?(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+  ): Promise<void>
 }
 
 /** Recursively sorts object keys for a stable semantic fingerprint.

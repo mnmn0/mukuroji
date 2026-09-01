@@ -13,6 +13,7 @@ import type {
   CustomerRequest,
   CustomerRequestSource,
   CustomerSavedView,
+  CustomerWorkItemSummary,
   CustomerWorkspaceExport,
   LinkCustomerRequestProjectInput,
   LinkCustomerRequestWorkItemInput,
@@ -43,6 +44,12 @@ export type CustomerPrincipal = {
   canViewSensitiveData: boolean
 }
 
+/** Team resource used when a Customer route is authorized through Team access. */
+export type CustomerAuthorizationScope = {
+  /** Team that owns the Customer operation's canonical resource. */
+  teamId: string
+}
+
 /** Result of resolving a Work Item for a Customer Request link. */
 export type CustomerWorkItemAuthorization = {
   /** Project assigned to the Work Item, when available. */
@@ -54,7 +61,7 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   /** Returns the Customer application client. */
   getCustomers(): CustomerClient
   /** Authenticates and authorizes the current Workspace request. */
-  requireWorkspaceAccess(context: Context, minimum: 'read' | 'write' | 'manage'): Promise<Principal>
+  requireWorkspaceAccess(context: Context, minimum: 'read' | 'write' | 'manage', scope?: CustomerAuthorizationScope): Promise<Principal>
   /** Verifies Team access before associating a Triage Entry. */
   verifyTriageAccess(principal: Principal, teamId: string, minimum: 'viewer' | 'member'): Promise<void>
   /** Builds the same live Team, Project, and actor fences used by Triage mutations. */
@@ -68,21 +75,25 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   /** Resolves and authorizes a Project before reading or mutating its associations. */
   verifyProjectAccess(principal: Principal, projectId: string, minimum: 'viewer' | 'member'): Promise<void>
   /** Returns the Triage operations used for Customer associations. */
-  getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer'>
+  getTriage(): Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'clearCustomerAssociations'>
   /** Safely parses a JSON request body. */
   readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
   /** Maps Customer, authentication, authorization, and persistence failures to HTTP. */
   mapError(context: Context, error: unknown): Response
 }
 
-/** Creates Workspace-scoped Customer directory, request, impact, and lifecycle routes. */
+/** Creates Workspace-scoped Customer directory, request, impact, and lifecycle routes.
+ *
+ * @param dependencies Authentication, authorization, application, and response dependencies.
+ * @returns A Hono router containing Customer HTTP routes.
+ */
 export function createCustomerRouter<Principal extends CustomerPrincipal = CustomerPrincipal>(dependencies: CustomerRouterDependencies<Principal>): Hono {
   const router = new Hono()
 
   router.get('/api/customers/export', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
-      return context.json(projectExport(principal, await dependencies.getCustomers().exportWorkspace(principal.directoryId)))
+      return context.json(await projectExport(principal, await dependencies.getCustomers().exportWorkspace(principal.directoryId), dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -118,12 +129,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const input = readCreateSavedViewInput(await dependencies.readJson(context.req))
       requireRestrictedCustomerFilters(principal, input.filters)
-      return context.json(await dependencies.getCustomers().createSavedView(
+      const view = await dependencies.getCustomers().createSavedView(
         principal.directoryId,
         principal.userKey,
         input,
         readIdempotencyKey(context.req.header('Idempotency-Key')),
-      ), 201)
+      )
+      return context.json(projectSavedView(principal, view), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -134,12 +146,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const input = readUpdateSavedViewInput(await dependencies.readJson(context.req))
       if (input.filters) requireRestrictedCustomerFilters(principal, input.filters)
-      return context.json(await dependencies.getCustomers().updateSavedView(
+      const view = await dependencies.getCustomers().updateSavedView(
         principal.directoryId,
         context.req.param('viewId') ?? '',
         principal.userKey,
         input,
-      ))
+      )
+      return context.json(projectSavedView(principal, view))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -178,11 +191,12 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customers', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
-      return context.json(await dependencies.getCustomers().createCustomer(
+      const customer = await dependencies.getCustomers().createCustomer(
         principal.directoryId,
         principal.userKey,
         readCreateCustomerInput(await dependencies.readJson(context.req)),
-      ), 201)
+      )
+      return context.json(projectCustomer(principal, customer), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -192,9 +206,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       return context.json({
-        workItems: await dependencies.getCustomers().listCustomerWorkItems(
-          principal.directoryId,
-          context.req.param('customerId') ?? '',
+        workItems: await projectCustomerWorkItems(
+          principal,
+          await dependencies.getCustomers().listCustomerWorkItems(
+            principal.directoryId,
+            context.req.param('customerId') ?? '',
+          ),
+          dependencies,
         ),
       })
     } catch (error) {
@@ -218,12 +236,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customers/:customerId/contacts', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
-      return context.json(await dependencies.getCustomers().createContact(
+      const contact = await dependencies.getCustomers().createContact(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         principal.userKey,
         readCreateContactInput(await dependencies.readJson(context.req)),
-      ), 201)
+      )
+      return context.json(projectContact(principal, contact), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -232,10 +251,10 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers/:customerId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      return context.json(projectDetail(principal, await dependencies.getCustomers().getCustomer(
+      return context.json(await projectCustomerDetail(principal, await dependencies.getCustomers().getCustomer(
         principal.directoryId,
         context.req.param('customerId') ?? '',
-      )))
+      ), dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -244,12 +263,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.patch('/api/customers/:customerId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
-      return context.json(await dependencies.getCustomers().updateCustomer(
+      const customer = await dependencies.getCustomers().updateCustomer(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         principal.userKey,
         readUpdateCustomerInput(await dependencies.readJson(context.req)),
-      ))
+      )
+      return context.json(projectCustomer(principal, customer))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -258,11 +278,29 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.delete('/api/customers/:customerId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
+      const customerId = context.req.param('customerId') ?? ''
+      const expectedRevision = readExpectedRevision(context.req.query('expectedRevision'))
+      const customer = await dependencies.getCustomers().getCustomer(
+        principal.directoryId,
+        customerId,
+      )
+      if (customer.customer.revision !== expectedRevision) {
+        throw new CustomerError(409, 'CustomerRevisionConflict', 'Customer changed. Reload and try again.')
+      }
+      const triage = dependencies.getTriage()
+      if (!triage.clearCustomerAssociations) {
+        throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association cleanup is unavailable.')
+      }
+      await triage.clearCustomerAssociations(
+        principal.directoryId,
+        customerId,
+        principal.userKey,
+      )
       await dependencies.getCustomers().deleteCustomer(
         principal.directoryId,
-        context.req.param('customerId') ?? '',
+        customerId,
         principal.userKey,
-        readExpectedRevision(context.req.query('expectedRevision')),
+        expectedRevision,
       )
       return context.body(null, 204)
     } catch (error) {
@@ -279,7 +317,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         readMergeCustomerInput(await dependencies.readJson(context.req)),
       )
-      return context.json(projectDetail(principal, detail))
+      return context.json(await projectCustomerDetail(principal, detail, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -288,13 +326,14 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.patch('/api/customers/:customerId/contacts/:contactId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
-      return context.json(await dependencies.getCustomers().updateContact(
+      const contact = await dependencies.getCustomers().updateContact(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         context.req.param('contactId') ?? '',
         principal.userKey,
         readUpdateContactInput(await dependencies.readJson(context.req)),
-      ))
+      )
+      return context.json(projectContact(principal, contact))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -319,12 +358,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customer-contacts/:contactId/merge', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
-      return context.json(await dependencies.getCustomers().mergeContact(
+      const contact = await dependencies.getCustomers().mergeContact(
         principal.directoryId,
         context.req.param('contactId') ?? '',
         principal.userKey,
         readMergeContactInput(await dependencies.readJson(context.req)),
-      ))
+      )
+      return context.json(projectContact(principal, contact))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -338,7 +378,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const page = await dependencies.getCustomers().listRequests(principal.directoryId, input)
       return context.json({
         ...page,
-        requests: page.requests.map((request) => projectRequest(principal, request)),
+        requests: await Promise.all(page.requests.map((request) => projectRequestForResponse(principal, request, dependencies))),
       })
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -354,7 +394,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         readCreateRequestInput(body, readIdempotencyKey(context.req.header('Idempotency-Key'))),
       )
-      return context.json(projectRequest(principal, request), 201)
+      return context.json(await projectRequestForResponse(principal, request, dependencies), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -363,10 +403,10 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customer-requests/:requestId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      return context.json(projectRequest(principal, await dependencies.getCustomers().getRequest(
+      return context.json(await projectRequestForResponse(principal, await dependencies.getCustomers().getRequest(
         principal.directoryId,
         context.req.param('requestId') ?? '',
-      )))
+      ), dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -381,7 +421,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         readUpdateRequestInput(await dependencies.readJson(context.req)),
       )
-      return context.json(projectRequest(principal, request))
+      return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -411,7 +451,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         readMergeRequestInput(await dependencies.readJson(context.req)),
       )
-      return context.json(projectRequest(principal, request))
+      return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -428,7 +468,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         { ...body, ...(access.projectId ? { projectId: access.projectId } : {}) },
       )
-      return context.json(projectRequest(principal, request))
+      return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -445,7 +485,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         body,
       )
-      return context.json(projectRequest(principal, request))
+      return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -462,7 +502,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         body,
       )
-      return context.json(projectRequest(principal, request))
+      return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -479,7 +519,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         body,
       )
-      return context.json(projectRequest(principal, request))
+      return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -487,10 +527,10 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
 
   router.put('/api/teams/:teamId/triage-entries/:entryId/customer', async (context) => {
     try {
-      const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const teamId = requirePathValue(context.req.param('teamId'), 'Team ID')
       const entryId = requirePathValue(context.req.param('entryId'), 'Triage Entry ID')
       const input = readTriageAssociationInput(await dependencies.readJson(context.req))
+      const principal = await dependencies.requireWorkspaceAccess(context, 'write', { teamId })
       await dependencies.verifyTriageAccess(principal, teamId, 'member')
       const triage = dependencies.getTriage()
       const currentEntry = await triage.getEntry(principal.directoryId, teamId, entryId)
@@ -548,10 +588,10 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
 
   router.post('/api/teams/:teamId/triage-entries/:entryId/customer-request', async (context) => {
     try {
-      const principal = await dependencies.requireWorkspaceAccess(context, 'write')
       const teamId = requirePathValue(context.req.param('teamId'), 'Team ID')
       const entryId = requirePathValue(context.req.param('entryId'), 'Triage Entry ID')
       const input = readCreateRequestFromTriageInput(await dependencies.readJson(context.req))
+      const principal = await dependencies.requireWorkspaceAccess(context, 'write', { teamId })
       await dependencies.verifyTriageAccess(principal, teamId, 'member')
       const triage = dependencies.getTriage()
       if (!triage.associateCustomer) {
@@ -575,7 +615,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         if (existing.triageEntryId !== entryId) {
           throw new CustomerError(409, 'CustomerRequestTriageMismatch', 'The Customer Request is not linked to this Triage Entry.')
         }
-        return context.json(projectRequest(principal, existing))
+        return context.json(await projectRequestForResponse(principal, existing, dependencies))
       }
       if (entry.customerId && entry.customerId !== input.customerId) {
         throw new CustomerError(409, 'CustomerAlreadyAssociated', 'This Triage Entry is already associated with another Customer.')
@@ -632,7 +672,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         },
         authorizationConditionChecks,
       )
-      return context.json(projectRequest(principal, request), 201)
+      return context.json(await projectRequestForResponse(principal, request, dependencies), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -640,9 +680,9 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
 
   router.get('/api/teams/:teamId/issues/:issueId/customer-impact', async (context) => {
     try {
-      const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const teamId = requirePathValue(context.req.param('teamId'), 'Team ID')
       const issueId = requirePathValue(context.req.param('issueId'), 'Work Item ID')
+      const principal = await dependencies.requireWorkspaceAccess(context, 'read', { teamId })
       await dependencies.verifyWorkItemAccess(principal, teamId, issueId, 'viewer')
       return context.json(projectCustomerImpact(principal, await dependencies.getCustomers().getWorkItemImpact(principal.directoryId, teamId, issueId)))
     } catch (error) {
@@ -722,6 +762,89 @@ function projectRequest(principal: CustomerPrincipal, request: CustomerRequest):
   }
 }
 
+/** Projects Customer Request relationship links through live Team and Project authorization. */
+async function projectRequestForResponse<Principal extends CustomerPrincipal>(
+  principal: Principal,
+  request: CustomerRequest,
+  dependencies: Pick<CustomerRouterDependencies<Principal>, 'verifyWorkItemAccess' | 'verifyProjectAccess'>,
+): Promise<CustomerRequest> {
+  const workItemLinks = (await Promise.all(request.workItemLinks.map(async (link) => {
+    try {
+      const access = await dependencies.verifyWorkItemAccess(
+        principal,
+        link.teamId,
+        link.workItemId,
+        'viewer',
+      )
+      const projectedLink = { ...link }
+      if (access.projectId) {
+        projectedLink.projectId = access.projectId
+      } else {
+        delete projectedLink.projectId
+      }
+      return projectedLink
+    } catch (error) {
+      if (isHiddenCustomerRelationshipError(error)) return undefined
+      throw error
+    }
+  }))).flatMap((link) => link === undefined ? [] : [link])
+  const projectLinks = (await Promise.all(request.projectLinks.map(async (link) => {
+    try {
+      await dependencies.verifyProjectAccess(principal, link.projectId, 'viewer')
+      return link
+    } catch (error) {
+      if (isHiddenCustomerRelationshipError(error)) return undefined
+      throw error
+    }
+  }))).flatMap((link) => link === undefined ? [] : [link])
+  return projectRequest(principal, { ...request, workItemLinks, projectLinks })
+}
+
+/** Projects Customer Work Item summaries through live Work Item authorization. */
+async function projectCustomerWorkItems<Principal extends CustomerPrincipal>(
+  principal: Principal,
+  workItems: readonly CustomerWorkItemSummary[],
+  dependencies: Pick<CustomerRouterDependencies<Principal>, 'verifyWorkItemAccess'>,
+): Promise<CustomerWorkItemSummary[]> {
+  return (await Promise.all(workItems.map(async (workItem) => {
+    try {
+      const access = await dependencies.verifyWorkItemAccess(
+        principal,
+        workItem.teamId,
+        workItem.workItemId,
+        'viewer',
+      )
+      const projectedWorkItem: CustomerWorkItemSummary = { ...workItem }
+      if (access.projectId) {
+        projectedWorkItem.projectId = access.projectId
+      } else {
+        delete projectedWorkItem.projectId
+      }
+      return projectedWorkItem
+    } catch (error) {
+      if (isHiddenCustomerRelationshipError(error)) return undefined
+      throw error
+    }
+  }))).flatMap((workItem) => workItem === undefined ? [] : [workItem])
+}
+
+/** Projects Customer Project summaries through live Project authorization. */
+async function projectCustomerProjects<Principal extends CustomerPrincipal>(
+  principal: Principal,
+  projects: CustomerDetail['projects'],
+  dependencies: Pick<CustomerRouterDependencies<Principal>, 'verifyProjectAccess'>,
+): Promise<CustomerDetail['projects']> {
+  return (await Promise.all(projects.map(async (project) => {
+    try {
+      await dependencies.verifyProjectAccess(principal, project.projectId, 'viewer')
+      return project
+    } catch (error) {
+      if (isHiddenCustomerRelationshipError(error)) return undefined
+      throw error
+    }
+  }))).flatMap((project) => project === undefined ? [] : [project])
+}
+
 /** Projects a complete Customer detail response. */
 function projectDetail(principal: CustomerPrincipal, detail: CustomerDetail): CustomerDetail {
   return {
@@ -733,13 +856,35 @@ function projectDetail(principal: CustomerPrincipal, detail: CustomerDetail): Cu
   }
 }
 
+/** Projects a complete Customer detail after filtering every linked resource. */
+async function projectCustomerDetail<Principal extends CustomerPrincipal>(
+  principal: Principal,
+  detail: CustomerDetail,
+  dependencies: Pick<CustomerRouterDependencies<Principal>, 'verifyWorkItemAccess' | 'verifyProjectAccess'>,
+): Promise<CustomerDetail> {
+  const requests = await Promise.all(detail.requests.map((request) =>
+    projectRequestForResponse(principal, request, dependencies)
+  ))
+  const [workItems, projects] = await Promise.all([
+    projectCustomerWorkItems(principal, detail.workItems, dependencies),
+    projectCustomerProjects(principal, detail.projects, dependencies),
+  ])
+  return projectDetail(principal, { ...detail, requests, workItems, projects })
+}
+
 /** Projects an export while preserving the Workspace ownership boundary. */
-function projectExport(principal: CustomerPrincipal, value: CustomerWorkspaceExport): CustomerWorkspaceExport {
+async function projectExport<Principal extends CustomerPrincipal>(
+  principal: Principal,
+  value: CustomerWorkspaceExport,
+  dependencies: Pick<CustomerRouterDependencies<Principal>, 'verifyWorkItemAccess' | 'verifyProjectAccess'>,
+): Promise<CustomerWorkspaceExport> {
   return {
     ...value,
     customers: value.customers.map((customer) => projectCustomer(principal, customer)),
     contacts: value.contacts.map((contact) => projectContact(principal, contact)),
-    requests: value.requests.map((request) => projectRequest(principal, request)),
+    requests: await Promise.all(value.requests.map((request) =>
+      projectRequestForResponse(principal, request, dependencies)
+    )),
   }
 }
 
@@ -763,7 +908,7 @@ function readCustomerListInput(context: Context) {
     ...(readOptionalEnum(context.req.query('size'), ['startup', 'small', 'mid-market', 'enterprise'] as const) ? { size: readOptionalEnum(context.req.query('size'), ['startup', 'small', 'mid-market', 'enterprise'] as const) } : {}),
     ...(readOptionalEnum(context.req.query('status'), ['prospect', 'active', 'inactive', 'churned'] as const) ? { status: readOptionalEnum(context.req.query('status'), ['prospect', 'active', 'inactive', 'churned'] as const) } : {}),
     ...(readOptionalEnum(context.req.query('health'), ['healthy', 'watch', 'at-risk', 'critical', 'unknown'] as const) ? { health: readOptionalEnum(context.req.query('health'), ['healthy', 'watch', 'at-risk', 'critical', 'unknown'] as const) } : {}),
-    ...(readOptionalNumber(context.req.query('minBusinessValue'), 'Minimum business value') === undefined ? {} : { minBusinessValue: readOptionalNumber(context.req.query('minBusinessValue'), 'Minimum business value') }),
+    ...(readOptionalBusinessValue(context.req.query('minBusinessValue'), 'Minimum business value') === undefined ? {} : { minBusinessValue: readOptionalBusinessValue(context.req.query('minBusinessValue'), 'Minimum business value') }),
     ...(readOptionalNonnegativeInteger(context.req.query('minRequestCount'), 'Minimum request count') === undefined ? {} : { minRequestCount: readOptionalNonnegativeInteger(context.req.query('minRequestCount'), 'Minimum request count') }),
     ...(readOptionalEnum(context.req.query('sortBy'), ['name', 'tier', 'size', 'status', 'health', 'businessValue', 'requestCount', 'openRequestCount', 'updatedAt'] as const) ? { sortBy: readOptionalEnum(context.req.query('sortBy'), ['name', 'tier', 'size', 'status', 'health', 'businessValue', 'requestCount', 'openRequestCount', 'updatedAt'] as const) } : {}),
     ...(readOptionalEnum(context.req.query('sortDirection'), ['ascending', 'descending'] as const) ? { sortDirection: readOptionalEnum(context.req.query('sortDirection'), ['ascending', 'descending'] as const) } : {}),
@@ -1061,7 +1206,7 @@ function readCustomerFilterRecord(value: unknown) {
     ...(record.size === undefined ? {} : { size: readEnum(record.size, ['startup', 'small', 'mid-market', 'enterprise'], 'Customer size') }),
     ...(record.status === undefined ? {} : { status: readEnum(record.status, ['prospect', 'active', 'inactive', 'churned'], 'Customer status') }),
     ...(record.health === undefined ? {} : { health: readEnum(record.health, ['healthy', 'watch', 'at-risk', 'critical', 'unknown'], 'Customer health') }),
-    ...(record.minBusinessValue === undefined ? {} : { minBusinessValue: readNumber(record.minBusinessValue, 'Minimum business value') }),
+    ...(record.minBusinessValue === undefined ? {} : { minBusinessValue: readBusinessValue(record.minBusinessValue, 'Minimum business value') }),
     ...(record.minRequestCount === undefined ? {} : { minRequestCount: readNonnegativeInteger(record.minRequestCount, 'Minimum request count') }),
     ...(record.sortBy === undefined ? {} : { sortBy: readEnum(record.sortBy, ['name', 'tier', 'size', 'status', 'health', 'businessValue', 'requestCount', 'openRequestCount', 'updatedAt'], 'Customer sort field') }),
     ...(record.sortDirection === undefined ? {} : { sortDirection: readEnum(record.sortDirection, ['ascending', 'descending'], 'Customer sort direction') }),
@@ -1113,6 +1258,15 @@ function readNumber(value: unknown, label: string): number {
   return value
 }
 
+/** Reads a Customer business-value score in its inclusive persisted range. */
+function readBusinessValue(value: unknown, label: string): number {
+  const number = readNumber(value, label)
+  if (number < 0 || number > 100) {
+    throw new CustomerError(400, 'InvalidCustomerInput', `${label} must be between 0 and 100.`)
+  }
+  return number
+}
+
 /** Reads an integer body field. */
 function readInteger(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) throw new CustomerError(400, 'InvalidCustomerInput', `${label} is invalid.`)
@@ -1125,10 +1279,10 @@ function readNonnegativeInteger(value: unknown, label: string): number {
   return value
 }
 
-/** Reads an optional query number. */
-function readOptionalNumber(value: string | undefined, label: string): number | undefined {
+/** Reads an optional Customer business-value score from a query parameter. */
+function readOptionalBusinessValue(value: string | undefined, label: string): number | undefined {
   if (value === undefined || value.trim() === '') return undefined
-  return readNumber(Number(value), label)
+  return readBusinessValue(Number(value), label)
 }
 
 /** Reads an optional query integer. */
@@ -1211,6 +1365,11 @@ function readIdempotencyKey(value: string | undefined): string {
 function readRecord(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) throw new CustomerError(400, 'InvalidCustomerInput', 'A JSON object body is required.')
   return value
+}
+
+/** Identifies authorization and not-found errors that hide a relationship. */
+function isHiddenCustomerRelationshipError(value: unknown): boolean {
+  return isRecord(value) && (value.status === 403 || value.status === 404)
 }
 
 /** Checks whether an untrusted value is a non-array object. */

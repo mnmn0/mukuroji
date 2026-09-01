@@ -23,7 +23,12 @@ export class CustomerApiError extends Error {
   /** Stable API error code, when provided. */
   readonly code?: string
 
-  /** Creates one Customer API error. */
+  /** Creates one Customer API error.
+   *
+   * @param status HTTP status returned by the Customer API.
+   * @param message Human-readable API failure message.
+   * @param code Optional stable API error code.
+   */
   constructor(status: number, message: string, code?: string) {
     super(message)
     this.name = 'CustomerApiError'
@@ -36,7 +41,12 @@ const customersApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
-/** Loads the Workspace Customer directory using URL-backed filters. */
+/** Loads the Workspace Customer directory using URL-backed filters.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param input Filters, sort, pagination, and cursor state.
+ * @returns The validated Customer directory page.
+ */
 export async function getCustomers(
   accessToken: string,
   input: CustomerListInput = {},
@@ -62,7 +72,11 @@ export async function getCustomers(
   return data
 }
 
-/** Loads the saved Customer directory views visible to the current Workspace member. */
+/** Loads the saved Customer directory views visible to the current Workspace member.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @returns The validated saved directory views.
+ */
 export async function getCustomerSavedViews(accessToken: string): Promise<CustomerSavedView[]> {
   const data = await requestJson(`${customersApiBaseUrl}/customers/views`, accessToken)
   if (!isRecord(data) || !Array.isArray(data.views) || !data.views.every(isCustomerSavedView)) {
@@ -71,7 +85,13 @@ export async function getCustomerSavedViews(accessToken: string): Promise<Custom
   return data.views
 }
 
-/** Creates a saved Customer directory view. */
+/** Creates a saved Customer directory view.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param input Saved view name, filters, and grouping.
+ * @param context Mutation identity used for safe retries.
+ * @returns The created or idempotently replayed saved view.
+ */
 export async function createCustomerSavedView(
   accessToken: string,
   input: CreateCustomerSavedViewInput,
@@ -89,7 +109,12 @@ export async function createCustomerSavedView(
   return data
 }
 
-/** Loads one Customer, its Contacts, Requests, and related Work Items. */
+/** Loads one Customer, its Contacts, Requests, and related Work Items.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param customerId Customer to load.
+ * @returns The validated Customer detail graph.
+ */
 export async function getCustomer(
   accessToken: string,
   customerId: string,
@@ -102,7 +127,12 @@ export async function getCustomer(
   return data
 }
 
-/** Loads the aggregate Customer Request impact for one Project detail view. */
+/** Loads the aggregate Customer Request impact for one Project detail view.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param projectId Project whose Customer impact should be loaded.
+ * @returns The validated aggregate impact signal.
+ */
 export async function getProjectCustomerImpact(
   accessToken: string,
   projectId: string,
@@ -117,7 +147,15 @@ export async function getProjectCustomerImpact(
   return data
 }
 
-/** Saves one accepted Team Triage Entry as a Customer Request. */
+/** Saves one accepted Team Triage Entry as a Customer Request.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param teamId Team owning the accepted Triage Entry.
+ * @param entryId Accepted Triage Entry to convert.
+ * @param input Customer association and request importance.
+ * @param context Mutation identity used for safe retries.
+ * @returns The created or idempotently replayed Customer Request.
+ */
 export async function createCustomerRequestFromTriage(
   accessToken: string,
   teamId: string,

@@ -49,6 +49,7 @@ import {
   type CustomerClient,
   type CustomerWorkspaceState,
 } from '../../customers'
+import { createDynamoDbClient } from '../../../../infrastructure/aws/dynamodb-client'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
 /** Maximum number of Customer records written alongside one metadata fence. */
@@ -61,7 +62,12 @@ const REQUEST_RECORD_PREFIX = 'REQUEST#'
 const VIEW_RECORD_PREFIX = 'VIEW#'
 const NOTIFICATION_RECORD_PREFIX = 'NOTIFICATION#'
 
-/** DynamoDB construction options for the Customer adapter. */
+/**
+ * Options used to construct the DynamoDB-backed Customer adapter.
+ *
+ * The adapter creates a validated AWS client from the server configuration when
+ * callers do not supply an already configured client.
+ */
 export type DynamoDbCustomerClientOptions = {
   /** Customer table name. */
   tableName?: string
@@ -77,7 +83,14 @@ export type DynamoDbCustomerClientOptions = {
   id?: () => string
 }
 
-/** DynamoDB-backed Customer, Contact, and Customer Request client. */
+/**
+ * CustomerClient implementation backed by the Customer single-table DynamoDB store.
+ *
+ * All persisted operations remain fenced by the workspace metadata revision and
+ * use the validated server endpoint configuration.
+ *
+ * @implements CustomerClient
+ */
 export class DynamoDbCustomerClient implements CustomerClient {
   /** Durable Customer table name. */
   private readonly tableName: string
@@ -100,22 +113,14 @@ export class DynamoDbCustomerClient implements CustomerClient {
   /** In-flight local table initialization. */
   private tableReady?: Promise<void>
 
-  /** Creates a DynamoDB-backed Customer client. */
+  /** Creates a DynamoDB-backed Customer client.
+   *
+   * @param options Adapter configuration and optional test replacements.
+   */
   constructor(options: DynamoDbCustomerClientOptions = {}) {
     const serverConfig = loadServerConfig()
     const endpoint = serverConfig.dynamoDbEndpoint
-    this.dynamoDbClient = options.dynamoDbClient ?? new DynamoDBClient({
-      region: serverConfig.awsRegion,
-      ...(endpoint
-        ? {
-            endpoint,
-            credentials: {
-              accessKeyId: process.env.AWS_ACCESS_KEY_ID ?? 'test',
-              secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? 'test',
-            },
-          }
-        : {}),
-    })
+    this.dynamoDbClient = options.dynamoDbClient ?? createDynamoDbClient(serverConfig)
     this.documentClient = options.documentClient ?? DynamoDBDocumentClient.from(this.dynamoDbClient, {
       marshallOptions: { removeUndefinedValues: true },
     })
@@ -131,7 +136,12 @@ export class DynamoDbCustomerClient implements CustomerClient {
     this.id = options.id ?? randomUUID
   }
 
-  /** Lists customers within one Workspace boundary. */
+  /** Lists customers within one Workspace boundary.
+   *
+   * @param workspaceId Workspace containing the customers.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered customer page.
+   */
   async listCustomers(workspaceId: string, input?: CustomerListInput): Promise<CustomerPage> {
     const { memory } = await this.readMemoryForRead(workspaceId, [
       CUSTOMER_RECORD_PREFIX,
@@ -141,7 +151,12 @@ export class DynamoDbCustomerClient implements CustomerClient {
     return await memory.listCustomers(workspaceId, input)
   }
 
-  /** Reads a customer and its related graph. */
+  /** Reads a customer and its related graph.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to read.
+   * @returns The Customer detail graph.
+   */
   async getCustomer(workspaceId: string, customerId: string): Promise<CustomerDetail> {
     const { memory } = await this.readMemoryForRead(workspaceId, [
       CUSTOMER_RECORD_PREFIX,
@@ -151,27 +166,72 @@ export class DynamoDbCustomerClient implements CustomerClient {
     return await memory.getCustomer(workspaceId, customerId)
   }
 
-  /** Creates a customer. */
+  /** Creates a customer.
+   *
+   * @param workspaceId Workspace that will own the Customer.
+   * @param actorId Authenticated actor creating the Customer.
+   * @param input Customer creation fields.
+   * @returns The created Customer.
+   */
   async createCustomer(workspaceId: string, actorId: string, input: CreateCustomerInput): Promise<Customer> {
     return await this.mutate(workspaceId, (memory) => memory.createCustomer(workspaceId, actorId, input), [CUSTOMER_RECORD_PREFIX])
   }
 
-  /** Updates a customer under an optimistic revision fence. */
+  /** Updates a customer under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Customer changes and the expected revision.
+   * @returns The updated Customer.
+   */
   async updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer> {
     return await this.mutate(workspaceId, (memory) => memory.updateCustomer(workspaceId, customerId, actorId, input), [CUSTOMER_RECORD_PREFIX])
   }
 
-  /** Deletes a customer and its owned contacts and requests. */
+  /** Deletes a customer and its owned contacts and requests.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Customer revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteCustomer(workspaceId: string, customerId: string, actorId: string, expectedRevision: number): Promise<void> {
-    await this.mutate(workspaceId, async (memory) => await memory.deleteCustomer(workspaceId, customerId, actorId, expectedRevision), [
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingDeletion) {
+      if (metadata.pendingDeletion.customerId !== customerId) {
+        throw new CustomerError(
+          409,
+          'CustomerDeletionInProgress',
+          'Another Customer deletion is still being completed.',
+        )
+      }
+      await this.resumePendingDeletion(workspaceId, metadata.pendingDeletion)
+      return
+    }
+    const loaded = await this.load(workspaceId, [
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ])
+    const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
+    memory.replaceWorkspaceState(workspaceId, loaded.state)
+    await memory.deleteCustomer(workspaceId, customerId, actorId, expectedRevision)
+    await this.persist(workspaceId, loaded, memory.readWorkspaceStateWithoutRetention(workspaceId), {
+      deletion: { customerId },
+    })
   }
 
-  /** Merges a source customer into a retained customer. */
+  /** Merges a source customer into a retained customer.
+   *
+   * @param workspaceId Workspace containing both Customers.
+   * @param sourceCustomerId Customer being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target Customer and revision fences.
+   * @returns The retained Customer detail graph.
+   */
   async mergeCustomer(workspaceId: string, sourceCustomerId: string, actorId: string, input: MergeCustomerInput): Promise<CustomerDetail> {
     return await this.mutate(workspaceId, (memory) => memory.mergeCustomer(workspaceId, sourceCustomerId, actorId, input), [
       CUSTOMER_RECORD_PREFIX,
@@ -181,29 +241,63 @@ export class DynamoDbCustomerClient implements CustomerClient {
     ])
   }
 
-  /** Lists contacts belonging to a customer. */
+  /** Lists contacts belonging to a customer.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose contacts should be listed.
+   * @returns Contacts owned by the Customer.
+   */
   async listContacts(workspaceId: string, customerId: string): Promise<CustomerContact[]> {
     const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
     return await memory.listContacts(workspaceId, customerId)
   }
 
-  /** Reads one contact under its customer boundary. */
+  /** Reads one contact under its customer boundary.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to read.
+   * @returns The requested contact.
+   */
   async getContact(workspaceId: string, customerId: string, contactId: string): Promise<CustomerContact> {
     const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
     return await memory.getContact(workspaceId, customerId, contactId)
   }
 
-  /** Creates a customer contact. */
+  /** Creates a customer contact.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param actorId Authenticated actor creating the contact.
+   * @param input Contact creation fields.
+   * @returns The created contact.
+   */
   async createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact> {
     return await this.mutate(workspaceId, (memory) => memory.createContact(workspaceId, customerId, actorId, input), [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
   }
 
-  /** Updates a customer contact under an optimistic revision fence. */
+  /** Updates a customer contact under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Contact changes and the expected revision.
+   * @returns The updated contact.
+   */
   async updateContact(workspaceId: string, customerId: string, contactId: string, actorId: string, input: UpdateCustomerContactInput): Promise<CustomerContact> {
     return await this.mutate(workspaceId, (memory) => memory.updateContact(workspaceId, customerId, contactId, actorId, input), [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
   }
 
-  /** Deletes a customer contact. */
+  /** Deletes a customer contact.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Contact owner.
+   * @param contactId Contact to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Contact revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteContact(workspaceId: string, customerId: string, contactId: string, actorId: string, expectedRevision: number): Promise<void> {
     await this.mutate(workspaceId, async (memory) => await memory.deleteContact(workspaceId, customerId, contactId, actorId, expectedRevision), [
       CUSTOMER_RECORD_PREFIX,
@@ -212,24 +306,47 @@ export class DynamoDbCustomerClient implements CustomerClient {
     ])
   }
 
-  /** Merges a source contact into a retained contact. */
+  /** Merges a source contact into a retained contact.
+   *
+   * @param workspaceId Workspace containing both contacts.
+   * @param sourceContactId Contact being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target contact and revision fences.
+   * @returns The retained contact.
+   */
   async mergeContact(workspaceId: string, sourceContactId: string, actorId: string, input: MergeCustomerContactInput): Promise<CustomerContact> {
     return await this.mutate(workspaceId, (memory) => memory.mergeContact(workspaceId, sourceContactId, actorId, input), [CONTACT_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
   }
 
-  /** Lists customer requests within a Workspace boundary. */
+  /** Lists customer requests within a Workspace boundary.
+   *
+   * @param workspaceId Workspace containing the requests.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered Customer Request page.
+   */
   async listRequests(workspaceId: string, input?: CustomerRequestListInput): Promise<CustomerRequestPage> {
     const { memory } = await this.readMemoryForRead(workspaceId, [REQUEST_RECORD_PREFIX])
     return await memory.listRequests(workspaceId, input)
   }
 
-  /** Reads one Customer Request. */
+  /** Reads one Customer Request.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to read.
+   * @returns The requested Customer Request.
+   */
   async getRequest(workspaceId: string, requestId: string): Promise<CustomerRequest> {
     const { memory } = await this.readMemoryForRead(workspaceId, [REQUEST_RECORD_PREFIX])
     return await memory.getRequest(workspaceId, requestId)
   }
 
-  /** Creates a Customer Request. */
+  /** Creates a Customer Request.
+   *
+   * @param workspaceId Workspace that will own the request.
+   * @param actorId Authenticated actor creating the request.
+   * @param input Request creation fields.
+   * @returns The created or idempotently replayed request.
+   */
   async createRequest(workspaceId: string, actorId: string, input: CreateCustomerRequestInput): Promise<CustomerRequest> {
     return await this.mutate(workspaceId, (memory) => memory.createRequest(workspaceId, actorId, input), [
       CUSTOMER_RECORD_PREFIX,
@@ -238,101 +355,224 @@ export class DynamoDbCustomerClient implements CustomerClient {
     ])
   }
 
-  /** Updates a Customer Request under an optimistic revision fence. */
+  /** Updates a Customer Request under an optimistic revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input Request changes and the expected revision.
+   * @returns The updated Customer Request.
+   */
   async updateRequest(workspaceId: string, requestId: string, actorId: string, input: UpdateCustomerRequestInput): Promise<CustomerRequest> {
     return await this.mutate(workspaceId, (memory) => memory.updateRequest(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX, CONTACT_RECORD_PREFIX])
   }
 
-  /** Deletes a Customer Request. */
+  /** Deletes a Customer Request.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision Request revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void> {
     await this.mutate(workspaceId, async (memory) => await memory.deleteRequest(workspaceId, requestId, actorId, expectedRevision), [REQUEST_RECORD_PREFIX, NOTIFICATION_RECORD_PREFIX])
   }
 
-  /** Merges a source request into a retained request. */
+  /** Merges a source request into a retained request.
+   *
+   * @param workspaceId Workspace containing both requests.
+   * @param sourceRequestId Request being merged away.
+   * @param actorId Authenticated actor performing the merge.
+   * @param input Target request and revision fences.
+   * @returns The retained request.
+   */
   async mergeRequest(workspaceId: string, sourceRequestId: string, actorId: string, input: MergeCustomerRequestInput): Promise<CustomerRequest> {
     return await this.mutate(workspaceId, (memory) => memory.mergeRequest(workspaceId, sourceRequestId, actorId, input), [REQUEST_RECORD_PREFIX, NOTIFICATION_RECORD_PREFIX])
   }
 
-  /** Links a request to a Work Item, allowing many requests per Work Item. */
+  /** Links a request to a Work Item, allowing many requests per Work Item.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to link.
+   * @param actorId Authenticated actor creating the link.
+   * @param input Work Item link fields.
+   * @returns The updated Customer Request.
+   */
   async linkRequestToWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput): Promise<CustomerRequest> {
     return await this.mutate(workspaceId, (memory) => memory.linkRequestToWorkItem(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
   }
 
-  /** Removes a request-to-Work-Item link under a revision fence. */
+  /** Removes a request-to-Work-Item link under a revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to unlink.
+   * @param actorId Authenticated actor removing the link.
+   * @param input Work Item link and expected request revision.
+   * @returns The updated Customer Request.
+   */
   async unlinkRequestFromWorkItem(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestWorkItemInput & { expectedRevision: number }): Promise<CustomerRequest> {
     return await this.mutate(workspaceId, (memory) => memory.unlinkRequestFromWorkItem(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
   }
 
-  /** Links a request directly to a Project, idempotently. */
+  /** Links a request directly to a Project, idempotently.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to link.
+   * @param actorId Authenticated actor creating the link.
+   * @param input Project link fields.
+   * @returns The updated Customer Request.
+   */
   async linkRequestToProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput): Promise<CustomerRequest> {
     return await this.mutate(workspaceId, (memory) => memory.linkRequestToProject(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
   }
 
-  /** Removes a request-to-Project link under a revision fence. */
+  /** Removes a request-to-Project link under a revision fence.
+   *
+   * @param workspaceId Workspace containing the request.
+   * @param requestId Request to unlink.
+   * @param actorId Authenticated actor removing the link.
+   * @param input Project link and expected request revision.
+   * @returns The updated Customer Request.
+   */
   async unlinkRequestFromProject(workspaceId: string, requestId: string, actorId: string, input: LinkCustomerRequestProjectInput & { expectedRevision: number }): Promise<CustomerRequest> {
     return await this.mutate(workspaceId, (memory) => memory.unlinkRequestFromProject(workspaceId, requestId, actorId, input), [REQUEST_RECORD_PREFIX])
   }
 
-  /** Returns customer impact for one canonical Work Item. */
+  /** Returns customer impact for one canonical Work Item.
+   *
+   * @param workspaceId Workspace containing the Work Item links.
+   * @param teamId Work Item Team.
+   * @param workItemId Work Item to aggregate.
+   * @returns The aggregate Customer impact signal.
+   */
   async getWorkItemImpact(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerImpactSignal> {
     const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
     return await memory.getWorkItemImpact(workspaceId, teamId, workItemId)
   }
 
-  /** Returns customer impact for one Project. */
+  /** Returns customer impact for one Project.
+   *
+   * @param workspaceId Workspace containing the Project links.
+   * @param projectId Project to aggregate.
+   * @returns The aggregate Customer impact signal.
+   */
   async getProjectImpact(workspaceId: string, projectId: string): Promise<CustomerImpactSignal> {
     const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
     return await memory.getProjectImpact(workspaceId, projectId)
   }
 
-  /** Returns Work Items associated with a Customer. */
+  /** Returns Work Items associated with a Customer.
+   *
+   * @param workspaceId Workspace containing the Customer.
+   * @param customerId Customer whose Work Items should be listed.
+   * @returns Work Item summaries linked to the Customer.
+   */
   async listCustomerWorkItems(workspaceId: string, customerId: string): Promise<CustomerWorkItemSummary[]> {
     const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX, CONTACT_RECORD_PREFIX, REQUEST_RECORD_PREFIX])
     return await memory.listCustomerWorkItems(workspaceId, customerId)
   }
 
-  /** Lists saved customer directory views. */
+  /** Lists saved customer directory views.
+   *
+   * @param workspaceId Workspace containing the saved views.
+   * @returns Saved views belonging to the Workspace.
+   */
   async listSavedViews(workspaceId: string): Promise<CustomerSavedView[]> {
     const { memory } = await this.readMemoryForRead(workspaceId, [VIEW_RECORD_PREFIX])
     return await memory.listSavedViews(workspaceId)
   }
 
-  /** Creates a saved customer directory view. */
+  /** Creates a saved customer directory view.
+   *
+   * @param workspaceId Workspace that owns the view.
+   * @param actorId Authenticated actor creating the view.
+   * @param input View name, filters, and grouping.
+   * @param idempotencyKey Optional caller-selected retry key.
+   * @returns The created or idempotently replayed view.
+   */
   async createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput, idempotencyKey?: string): Promise<CustomerSavedView> {
     return await this.mutate(workspaceId, (memory) => memory.createSavedView(workspaceId, actorId, input, idempotencyKey), [VIEW_RECORD_PREFIX])
   }
 
-  /** Updates a saved customer directory view. */
+  /** Updates a saved customer directory view.
+   *
+   * @param workspaceId Workspace containing the saved view.
+   * @param viewId View to update.
+   * @param actorId Authenticated actor performing the update.
+   * @param input View changes and the expected revision.
+   * @returns The updated saved view.
+   */
   async updateSavedView(workspaceId: string, viewId: string, actorId: string, input: UpdateCustomerSavedViewInput): Promise<CustomerSavedView> {
     return await this.mutate(workspaceId, (memory) => memory.updateSavedView(workspaceId, viewId, actorId, input), [VIEW_RECORD_PREFIX])
   }
 
-  /** Deletes a saved customer directory view. */
+  /** Deletes a saved customer directory view.
+   *
+   * @param workspaceId Workspace containing the saved view.
+   * @param viewId View to delete.
+   * @param actorId Authenticated actor performing the deletion.
+   * @param expectedRevision View revision required for deletion.
+   * @returns A promise that resolves after deletion completes.
+   */
   async deleteSavedView(workspaceId: string, viewId: string, actorId: string, expectedRevision: number): Promise<void> {
     await this.mutate(workspaceId, async (memory) => await memory.deleteSavedView(workspaceId, viewId, actorId, expectedRevision), [VIEW_RECORD_PREFIX])
   }
 
-  /** Exports all Customer-owned records for one Workspace. */
+  /** Exports all Customer-owned records for one Workspace.
+   *
+   * @param workspaceId Workspace to export.
+   * @returns A point-in-time Customer data export.
+   */
   async exportWorkspace(workspaceId: string): Promise<CustomerWorkspaceExport> {
     const { memory } = await this.readMemoryForRead(workspaceId)
     return await memory.exportWorkspace(workspaceId)
   }
 
-  /** Applies retention redaction to expired Customer-owned records. */
+  /** Applies retention redaction to expired Customer-owned records.
+   *
+   * @param workspaceId Workspace whose records should be evaluated.
+   * @param now Optional evaluation timestamp.
+   * @returns Counts of redacted records by category.
+   */
   async redactExpired(workspaceId: string, now = this.now().toISOString()): Promise<CustomerRetentionResult> {
-    return await this.mutate(workspaceId, (memory) => memory.redactExpired(workspaceId, now), [
+    const loaded = await this.load(workspaceId, [
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
     ])
+    const memory = new InMemoryCustomerClient({
+      now: () => new Date(now),
+      id: this.id,
+    })
+    memory.replaceWorkspaceState(workspaceId, loaded.state)
+    const result = await memory.redactExpired(workspaceId, now)
+    await this.persist(workspaceId, loaded, memory.readWorkspaceStateWithoutRetention(workspaceId), {
+      retention: { evaluatedAt: now },
+    })
+    return result
   }
 
-  /** Prepares idempotent completion notification candidates for a Work Item. */
+  /** Prepares idempotent completion notification candidates for a Work Item.
+   *
+   * @param workspaceId Workspace containing the Work Item links.
+   * @param teamId Work Item Team.
+   * @param workItemId Completed Work Item.
+   * @param actorId Authenticated or service actor preparing candidates.
+   * @param now Optional preparation timestamp.
+   * @returns Deterministic notification candidates.
+   */
   async prepareCompletionNotifications(workspaceId: string, teamId: string, workItemId: string, actorId: string, now = this.now().toISOString()): Promise<CustomerCompletionNotification[]> {
     return await this.mutate(workspaceId, (memory) => memory.prepareCompletionNotifications(workspaceId, teamId, workItemId, actorId, now), [REQUEST_RECORD_PREFIX, NOTIFICATION_RECORD_PREFIX])
   }
 
-  /** Lists previously prepared completion notification candidates. */
+  /** Lists previously prepared completion notification candidates.
+   *
+   * @param workspaceId Workspace containing the candidates.
+   * @param teamId Work Item Team.
+   * @param workItemId Work Item whose candidates should be listed.
+   * @returns Previously prepared notification candidates.
+   */
   async listCompletionNotifications(workspaceId: string, teamId: string, workItemId: string): Promise<CustomerCompletionNotification[]> {
     const { memory } = await this.readMemoryForRead(workspaceId, [NOTIFICATION_RECORD_PREFIX])
     return await memory.listCompletionNotifications(workspaceId, teamId, workItemId)
@@ -367,38 +607,42 @@ export class DynamoDbCustomerClient implements CustomerClient {
     return rows
   }
 
-  /** Reads the optimistic Workspace revision without loading unrelated records.
+  /** Reads the optimistic Workspace metadata without loading unrelated records.
    *
    * @param workspaceId Workspace partition containing the META row.
-   * @returns The current Workspace graph revision, or zero before the first write.
+   * @returns The current graph revision and any deletion operation awaiting recovery.
    */
-  private async readWorkspaceRevision(workspaceId: string): Promise<number> {
+  private async readWorkspaceMetadata(workspaceId: string): Promise<LoadedCustomerMetadata> {
+    await this.ensureTable()
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: 'META' },
       ConsistentRead: true,
     }))
-    if (response.Item === undefined) return 0
+    if (response.Item === undefined) return { revision: 0 }
     const decoded = decodeStoredRow(response.Item, workspaceId)
     if (!decoded || decoded.kind !== 'meta') {
       throw new CustomerError(503, 'CustomerPersistenceCorrupt', 'The Customer metadata row is malformed.')
     }
-    return decoded.revision
+    return {
+      revision: decoded.revision,
+      ...(decoded.deletion ? { pendingDeletion: decoded.deletion } : {}),
+      ...(decoded.retention ? { pendingRetention: decoded.retention } : {}),
+    }
   }
 
-  /** Loads selected Workspace records and its optimistic control revision.
+  /** Loads selected Workspace records without recovering a pending deletion.
    *
    * @param workspaceId Workspace partition to load.
    * @param recordPrefixes Optional physical prefixes; omitted loads the full graph.
-   * @returns The selected state and its Workspace revision.
+   * @returns The selected state, revision, and durable operation marker.
    */
-  private async load(
+  private async loadWithoutRecovery(
     workspaceId: string,
     recordPrefixes?: readonly string[],
   ): Promise<LoadedCustomerWorkspace> {
-    await this.ensureTable()
     const state = createEmptyState()
-    const revision = await this.readWorkspaceRevision(workspaceId)
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
     const rows = recordPrefixes === undefined
       ? await this.queryRows(workspaceId)
       : (await Promise.all(recordPrefixes.map((prefix) => this.queryRows(workspaceId, prefix)))).flat()
@@ -419,7 +663,29 @@ export class DynamoDbCustomerClient implements CustomerClient {
         state.notifications.set(decoded.value.id, decoded.value)
       }
     }
-    return { state, revision }
+    return {
+      state,
+      revision: metadata.revision,
+      ...(metadata.pendingDeletion ? { pendingDeletion: metadata.pendingDeletion } : {}),
+      ...(metadata.pendingRetention ? { pendingRetention: metadata.pendingRetention } : {}),
+    }
+  }
+
+  /** Loads selected Workspace records after completing any pending deletion. */
+  private async load(
+    workspaceId: string,
+    recordPrefixes?: readonly string[],
+  ): Promise<LoadedCustomerWorkspace> {
+    const loaded = await this.loadWithoutRecovery(workspaceId, recordPrefixes)
+    if (loaded.pendingDeletion) {
+      await this.resumePendingDeletion(workspaceId, loaded.pendingDeletion)
+      return await this.load(workspaceId, recordPrefixes)
+    }
+    if (loaded.pendingRetention) {
+      await this.resumePendingRetention(workspaceId, loaded.pendingRetention)
+      return await this.load(workspaceId, recordPrefixes)
+    }
+    return loaded
   }
 
   /** Loads selected Workspace records into the shared in-memory application implementation.
@@ -435,12 +701,14 @@ export class DynamoDbCustomerClient implements CustomerClient {
     memory: InMemoryCustomerClient
     loaded: LoadedCustomerWorkspace
     retentionResult: CustomerRetentionResult
+    retentionAt: string
   }> {
     const loaded = await this.load(workspaceId, recordPrefixes)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
     memory.replaceWorkspaceState(workspaceId, loaded.state)
-    const retentionResult = await memory.redactExpired(workspaceId, this.now().toISOString())
-    return { memory, loaded, retentionResult }
+    const retentionAt = this.now().toISOString()
+    const retentionResult = await memory.redactExpired(workspaceId, retentionAt)
+    return { memory, loaded, retentionResult, retentionAt }
   }
 
   /** Loads selected Workspace records and persists any retention redaction before returning it.
@@ -462,7 +730,9 @@ export class DynamoDbCustomerClient implements CustomerClient {
       result.retentionResult.contactsRedacted > 0 ||
       result.retentionResult.requestsRedacted > 0
     ) {
-      await this.persist(workspaceId, result.loaded, result.memory.readWorkspaceState(workspaceId))
+      await this.persist(workspaceId, result.loaded, result.memory.readWorkspaceState(workspaceId), {
+        retention: { evaluatedAt: result.retentionAt },
+      })
     }
     return result
   }
@@ -491,6 +761,7 @@ export class DynamoDbCustomerClient implements CustomerClient {
     workspaceId: string,
     loaded: LoadedCustomerWorkspace,
     nextState: CustomerWorkspaceState,
+    options: CustomerPersistOptions = {},
   ): Promise<void> {
     const previousRows = new Map(serializeState(workspaceId, loaded.state).map((row) => [row.recordKey, row]))
     const nextRows = new Map(serializeState(workspaceId, nextState).map((row) => [row.recordKey, row]))
@@ -501,40 +772,281 @@ export class DynamoDbCustomerClient implements CustomerClient {
     }
     const deleteRecordKeys = [...previousRows.keys()]
       .filter((recordKey) => !nextRows.has(recordKey))
-      .sort((left, right) => Number(left.startsWith('CUSTOMER#')) - Number(right.startsWith('CUSTOMER#')))
+      .sort(compareCustomerDeletionRecordKeys)
     const deleteItems: NonNullable<TransactWriteCommandInput['TransactItems']> = deleteRecordKeys.map((recordKey) => ({
       Delete: { TableName: this.tableName, Key: { workspaceId, recordKey } },
     }))
+    if (options.deletion && deleteRecordKeys.length > 0) {
+      let revision = await this.persistDeletionBatches(
+        workspaceId,
+        loaded.revision,
+        deleteRecordKeys,
+        options.deletion.customerId,
+      )
+      if (putItems.length > 0) {
+        revision = await this.persistRecordItems(workspaceId, revision, putItems)
+      }
+      return
+    }
+    if (options.retention) {
+      await this.persistRetentionBatches(
+        workspaceId,
+        loaded.revision,
+        putItems,
+        options.retention.evaluatedAt,
+        options.retention.expected,
+      )
+      return
+    }
     const recordItems = [...putItems, ...deleteItems]
     if (recordItems.length === 0) return
-    for (const [batchIndex, batch] of chunk(recordItems, CUSTOMER_TRANSACTION_RECORD_LIMIT).entries()) {
-      const expectedRevision = loaded.revision + batchIndex
-      const nextRevision = expectedRevision + 1
-      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
-        ...batch,
-        {
-          Put: {
-            TableName: this.tableName,
-            Item: { workspaceId, recordKey: 'META', entityType: 'meta', revision: nextRevision },
-            ConditionExpression: expectedRevision === 0
-              ? 'attribute_not_exists(recordKey)'
-              : '#revision = :revision',
-            ...(expectedRevision === 0
-              ? {}
-              : {
-                  ExpressionAttributeNames: { '#revision': 'revision' },
-                  ExpressionAttributeValues: { ':revision': expectedRevision },
-                }),
-          },
-        },
-      ]
-      try {
-        await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
-      } catch (error) {
-        if (isConditionalConflict(error)) throw new CustomerError(409, 'CustomerRevisionConflict', 'Customer data changed. Reload and try again.', { cause: error })
-        throw error
-      }
+    await this.persistRecordItems(workspaceId, loaded.revision, recordItems)
+  }
+
+  /** Persists ordinary graph records in bounded revision-fenced transactions. */
+  private async persistRecordItems(
+    workspaceId: string,
+    startingRevision: number,
+    recordItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+  ): Promise<number> {
+    if (recordItems.length > CUSTOMER_TRANSACTION_RECORD_LIMIT) {
+      throw new CustomerError(
+        409,
+        'CustomerTransactionTooLarge',
+        'The Customer mutation is too large to commit atomically. Retry with a smaller graph.',
+      )
     }
+    let revision = startingRevision
+    for (const batch of chunk(recordItems, CUSTOMER_TRANSACTION_RECORD_LIMIT)) {
+      revision = await this.writeTransaction(workspaceId, revision, batch)
+    }
+    return revision
+  }
+
+  /** Persists retention changes through a cursor-bearing metadata operation. */
+  private async persistRetentionBatches(
+    workspaceId: string,
+    startingRevision: number,
+    putItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    evaluatedAt: string,
+    expectedRetention?: CustomerRetentionOperation,
+  ): Promise<number> {
+    const pendingItems = putItems
+      .filter((item) => item.Put?.Item && typeof item.Put.Item.recordKey === 'string')
+      .filter((item) => expectedRetention?.cursor === undefined || compareCustomerRecordKeys(
+        readRecordKey(item),
+        expectedRetention.cursor,
+      ) > 0)
+      .sort((left, right) => compareCustomerRecordKeys(readRecordKey(left), readRecordKey(right)))
+    const batches = chunk(pendingItems, CUSTOMER_TRANSACTION_RECORD_LIMIT)
+    let revision = startingRevision
+    if (batches.length === 0) {
+      if (!expectedRetention) return revision
+      await this.writeTransaction(workspaceId, revision, [], { expectedRetention })
+      return revision + 1
+    }
+    for (const [batchIndex, batch] of batches.entries()) {
+      const cursor = readRecordKey(batch.at(-1))
+      const hasRemainingItems = batchIndex + 1 < batches.length
+      revision = await this.writeTransaction(
+        workspaceId,
+        revision,
+        batch,
+        {
+          expectedRetention,
+          nextRetention: hasRemainingItems ? { evaluatedAt, cursor } : undefined,
+        },
+      )
+      expectedRetention = hasRemainingItems ? { evaluatedAt, cursor } : undefined
+    }
+    return revision
+  }
+
+  /** Persists or resumes a Customer deletion while keeping its cursor in META. */
+  private async persistDeletionBatches(
+    workspaceId: string,
+    startingRevision: number,
+    recordKeys: readonly string[],
+    customerId: string,
+    expectedDeletion?: CustomerDeletionOperation,
+  ): Promise<number> {
+    if (expectedDeletion && expectedDeletion.customerId !== customerId) {
+      throw new CustomerError(
+        409,
+        'CustomerDeletionInProgress',
+        'The pending Customer deletion does not match the requested Customer.',
+      )
+    }
+    const pendingKeys = recordKeys
+      .filter((recordKey) => expectedDeletion?.cursor === undefined || compareCustomerDeletionRecordKeys(recordKey, expectedDeletion.cursor) > 0)
+      .sort(compareCustomerDeletionRecordKeys)
+    let revision = startingRevision
+    if (pendingKeys.length === 0) {
+      if (!expectedDeletion) return revision
+      await this.writeTransaction(
+        workspaceId,
+        revision,
+        [],
+        { expectedDeletion },
+      )
+      return revision + 1
+    }
+    const batches = chunk(pendingKeys, CUSTOMER_TRANSACTION_RECORD_LIMIT)
+    for (const [batchIndex, batch] of batches.entries()) {
+      const cursor = batch.at(-1)
+      if (cursor === undefined) continue
+      const hasRemainingKeys = batchIndex + 1 < batches.length
+      revision = await this.writeTransaction(
+        workspaceId,
+        revision,
+        batch.map((recordKey) => ({
+          Delete: { TableName: this.tableName, Key: { workspaceId, recordKey } },
+        })),
+        {
+          expectedDeletion,
+          nextDeletion: hasRemainingKeys ? { customerId, cursor } : undefined,
+        },
+      )
+      expectedDeletion = hasRemainingKeys ? { customerId, cursor } : undefined
+    }
+    return revision
+  }
+
+  /** Resumes a durable deletion marker before exposing the Customer graph. */
+  private async resumePendingDeletion(
+    workspaceId: string,
+    pendingDeletion: CustomerDeletionOperation,
+  ): Promise<void> {
+    const loaded = await this.loadWithoutRecovery(workspaceId, [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+      NOTIFICATION_RECORD_PREFIX,
+    ])
+    const recordKeys = serializeState(workspaceId, loaded.state)
+      .filter((row) => isOwnedByCustomer(row, pendingDeletion.customerId))
+      .map((row) => row.recordKey)
+      .sort(compareCustomerDeletionRecordKeys)
+    await this.persistDeletionBatches(
+      workspaceId,
+      loaded.revision,
+      recordKeys,
+      pendingDeletion.customerId,
+      pendingDeletion,
+    )
+  }
+
+  /** Recomputes and resumes a retention operation using its original timestamp. */
+  private async resumePendingRetention(
+    workspaceId: string,
+    pendingRetention: CustomerRetentionOperation,
+  ): Promise<void> {
+    const loaded = await this.loadWithoutRecovery(workspaceId, [
+      CUSTOMER_RECORD_PREFIX,
+      CONTACT_RECORD_PREFIX,
+      REQUEST_RECORD_PREFIX,
+    ])
+    const memory = new InMemoryCustomerClient({
+      now: () => new Date(pendingRetention.evaluatedAt),
+      id: this.id,
+    })
+    memory.replaceWorkspaceState(workspaceId, loaded.state)
+    await memory.redactExpired(workspaceId, pendingRetention.evaluatedAt)
+    await this.persist(
+      workspaceId,
+      loaded,
+      memory.readWorkspaceStateWithoutRetention(workspaceId),
+      { retention: { evaluatedAt: pendingRetention.evaluatedAt, expected: pendingRetention } },
+    )
+  }
+
+  /** Writes one bounded record batch and advances the Workspace metadata fence. */
+  private async writeTransaction(
+    workspaceId: string,
+    expectedRevision: number,
+    recordItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    options: CustomerTransactionOptions = {},
+  ): Promise<number> {
+    const nextRevision = expectedRevision + 1
+    const conditionParts = expectedRevision === 0
+      ? ['attribute_not_exists(recordKey)']
+      : ['#revision = :revision']
+    const expressionAttributeNames: Record<string, string> = expectedRevision === 0
+      ? {}
+      : { '#revision': 'revision' }
+    const expressionAttributeValues: Record<string, unknown> = expectedRevision === 0
+      ? {}
+      : { ':revision': expectedRevision }
+    if (options.expectedDeletion) {
+      conditionParts.push(
+        '#deletion.#deletionCustomerId = :deletionCustomerId',
+        options.expectedDeletion.cursor === undefined
+          ? 'attribute_not_exists(#deletion.#deletionCursor)'
+          : '#deletion.#deletionCursor = :deletionCursor',
+        'attribute_not_exists(#retention)',
+      )
+      expressionAttributeNames['#deletion'] = 'deletion'
+      expressionAttributeNames['#deletionCustomerId'] = 'customerId'
+      expressionAttributeNames['#deletionCursor'] = 'cursor'
+      expressionAttributeValues[':deletionCustomerId'] = options.expectedDeletion.customerId
+      if (options.expectedDeletion.cursor !== undefined) {
+        expressionAttributeValues[':deletionCursor'] = options.expectedDeletion.cursor
+      }
+    } else if (options.expectedRetention) {
+      conditionParts.push(
+        '#retention.#retentionEvaluatedAt = :retentionEvaluatedAt',
+        options.expectedRetention.cursor === undefined
+          ? 'attribute_not_exists(#retention.#retentionCursor)'
+          : '#retention.#retentionCursor = :retentionCursor',
+        'attribute_not_exists(#deletion)',
+      )
+      expressionAttributeNames['#retention'] = 'retention'
+      expressionAttributeNames['#retentionEvaluatedAt'] = 'evaluatedAt'
+      expressionAttributeNames['#retentionCursor'] = 'cursor'
+      expressionAttributeValues[':retentionEvaluatedAt'] = options.expectedRetention.evaluatedAt
+      if (options.expectedRetention.cursor !== undefined) {
+        expressionAttributeValues[':retentionCursor'] = options.expectedRetention.cursor
+      }
+    } else if (expectedRevision !== 0) {
+      conditionParts.push(
+        'attribute_not_exists(#deletion)',
+        'attribute_not_exists(#retention)',
+      )
+      expressionAttributeNames['#deletion'] = 'deletion'
+      expressionAttributeNames['#retention'] = 'retention'
+    }
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      ...recordItems,
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            workspaceId,
+            recordKey: 'META',
+            entityType: 'meta',
+            revision: nextRevision,
+            ...(options.nextDeletion ? { deletion: options.nextDeletion } : {}),
+            ...(options.nextRetention ? { retention: options.nextRetention } : {}),
+          },
+          ConditionExpression: conditionParts.join(' AND '),
+          ...(Object.keys(expressionAttributeNames).length > 0
+            ? { ExpressionAttributeNames: expressionAttributeNames }
+            : {}),
+          ...(Object.keys(expressionAttributeValues).length > 0
+            ? { ExpressionAttributeValues: expressionAttributeValues }
+            : {}),
+        },
+      },
+    ]
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      if (isConditionalConflict(error)) {
+        throw new CustomerError(409, 'CustomerRevisionConflict', 'Customer data changed. Reload and try again.', { cause: error })
+      }
+      throw error
+    }
+    return nextRevision
   }
 
   /** Ensures the local development table exists before a read or write. */
@@ -578,6 +1090,59 @@ type LoadedCustomerWorkspace = {
   state: CustomerWorkspaceState
   /** Revision stored by the Workspace control row. */
   revision: number
+  /** Durable deletion marker, when a previous deletion stopped mid-operation. */
+  pendingDeletion?: CustomerDeletionOperation
+  /** Durable retention marker, when a previous redaction stopped mid-operation. */
+  pendingRetention?: CustomerRetentionOperation
+}
+
+/** Metadata returned by a focused read of the Customer control row. */
+type LoadedCustomerMetadata = {
+  /** Current Workspace graph revision. */
+  revision: number
+  /** Durable deletion marker, when a deletion is awaiting recovery. */
+  pendingDeletion?: CustomerDeletionOperation
+  /** Durable retention marker, when a redaction is awaiting recovery. */
+  pendingRetention?: CustomerRetentionOperation
+}
+
+/** Optional mutation behavior selected by a Customer adapter operation. */
+type CustomerPersistOptions = {
+  /** Customer deletion that must be committed through a resumable cursor. */
+  deletion?: { customerId: string }
+  /** Retention evaluation that must be committed through a resumable cursor. */
+  retention?: {
+    evaluatedAt: string
+    expected?: CustomerRetentionOperation
+  }
+}
+
+/** Durable state used to resume a multi-transaction Customer deletion. */
+type CustomerDeletionOperation = {
+  /** Customer whose owned records are being removed. */
+  customerId: string
+  /** Last record key removed by the committed deletion batch. */
+  cursor?: string
+}
+
+/** Durable state used to resume a multi-transaction retention redaction. */
+type CustomerRetentionOperation = {
+  /** Timestamp used to decide which records were expired. */
+  evaluatedAt: string
+  /** Last record key redacted by the committed retention batch. */
+  cursor?: string
+}
+
+/** Options for one metadata-fenced DynamoDB transaction. */
+type CustomerTransactionOptions = {
+  /** Marker that must still be present before the transaction may commit. */
+  expectedDeletion?: CustomerDeletionOperation
+  /** Marker to store with the next metadata revision. */
+  nextDeletion?: CustomerDeletionOperation
+  /** Retention marker that must still be present before the transaction may commit. */
+  expectedRetention?: CustomerRetentionOperation
+  /** Retention marker to store with the next metadata revision. */
+  nextRetention?: CustomerRetentionOperation
 }
 
 /** Stored row variants used by the Customer single-table adapter. */
@@ -591,6 +1156,10 @@ type StoredCustomerRow =
       entityType: 'meta'
       /** Workspace graph revision. */
       revision: number
+      /** Deletion operation awaiting recovery, when present. */
+      deletion?: CustomerDeletionOperation
+      /** Retention operation awaiting recovery, when present. */
+      retention?: CustomerRetentionOperation
     }
   | {
       /** Workspace partition key. */
@@ -650,6 +1219,10 @@ type DecodedCustomerRow =
       kind: 'meta'
       /** Workspace graph revision. */
       revision: number
+      /** Deletion operation awaiting recovery, when present. */
+      deletion?: CustomerDeletionOperation
+      /** Retention operation awaiting recovery, when present. */
+      retention?: CustomerRetentionOperation
     }
   | {
       /** Narrowed row discriminator. */
@@ -707,7 +1280,20 @@ function serializeState(workspaceId: string, state: CustomerWorkspaceState): Sto
 /** Strictly decodes one untrusted DynamoDB row. */
 function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRow | undefined {
   if (!isRecord(value) || value.workspaceId !== workspaceId || typeof value.recordKey !== 'string') return undefined
-  if (value.entityType === 'meta' && value.recordKey === 'META' && isSafeRevision(value.revision)) return { kind: 'meta', revision: value.revision }
+  if (
+    value.entityType === 'meta' &&
+    value.recordKey === 'META' &&
+    isSafeRevision(value.revision) &&
+    (value.deletion === undefined || isCustomerDeletionOperation(value.deletion)) &&
+    (value.retention === undefined || isCustomerRetentionOperation(value.retention))
+  ) {
+    return {
+      kind: 'meta',
+      revision: value.revision,
+      ...(value.deletion === undefined ? {} : { deletion: value.deletion }),
+      ...(value.retention === undefined ? {} : { retention: value.retention }),
+    }
+  }
   if (value.entityType === 'customer' && isCustomer(value.customer) && value.customer.workspaceId === workspaceId && value.recordKey === `CUSTOMER#${value.customer.id}`) return { kind: 'customer', value: value.customer }
   if (value.entityType === 'contact' && isContact(value.contact) && value.contact.workspaceId === workspaceId && value.recordKey === `CONTACT#${value.contact.id}`) return { kind: 'contact', value: value.contact }
   if (value.entityType === 'request' && isRequest(value.request) && value.request.workspaceId === workspaceId && value.recordKey === `REQUEST#${value.request.id}`) return { kind: 'request', value: value.request }
@@ -857,6 +1443,20 @@ function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || isString(value)
 }
 
+/** Validates a persisted deletion operation marker. */
+function isCustomerDeletionOperation(value: unknown): value is CustomerDeletionOperation {
+  return isRecord(value) &&
+    isString(value.customerId) &&
+    (value.cursor === undefined || isString(value.cursor))
+}
+
+/** Validates a persisted retention operation marker. */
+function isCustomerRetentionOperation(value: unknown): value is CustomerRetentionOperation {
+  return isRecord(value) &&
+    isIsoInstant(value.evaluatedAt) &&
+    (value.cursor === undefined || isString(value.cursor))
+}
+
 /** Checks whether an untrusted value is a finite nonnegative number. */
 function isNonnegativeNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
@@ -865,6 +1465,39 @@ function isNonnegativeNumber(value: unknown): value is number {
 /** Checks whether an untrusted value belongs to a finite string union. */
 function isOneOf<const Expected extends string>(value: unknown, values: readonly Expected[]): value is Expected {
   return isString(value) && values.some((candidate) => candidate === value)
+}
+
+/** Orders physical Customer keys with the Customer root removed last. */
+function compareCustomerDeletionRecordKeys(left: string, right: string): number {
+  const leftIsCustomer = left.startsWith(CUSTOMER_RECORD_PREFIX)
+  const rightIsCustomer = right.startsWith(CUSTOMER_RECORD_PREFIX)
+  if (leftIsCustomer !== rightIsCustomer) return leftIsCustomer ? 1 : -1
+  return left.localeCompare(right)
+}
+
+/** Orders physical Customer keys for a resumable retention operation. */
+function compareCustomerRecordKeys(left: string, right: string): number {
+  return left.localeCompare(right)
+}
+
+/** Reads the sort key from a generated Customer put transaction item. */
+function readRecordKey(
+  item: NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined,
+): string {
+  const recordKey = item?.Put?.Item?.recordKey
+  if (typeof recordKey !== 'string') {
+    throw new CustomerError(500, 'CustomerPersistenceCorrupt', 'A generated Customer mutation row is malformed.')
+  }
+  return recordKey
+}
+
+/** Checks whether one serialized row belongs to the Customer being deleted. */
+function isOwnedByCustomer(row: StoredCustomerRow, customerId: string): boolean {
+  if (row.entityType === 'customer') return row.customer.id === customerId
+  if (row.entityType === 'contact') return row.contact.customerId === customerId
+  if (row.entityType === 'request') return row.request.customerId === customerId
+  if (row.entityType === 'completion-notification') return row.notification.customerId === customerId
+  return false
 }
 
 /** Reads a bounded non-empty string. */
@@ -879,7 +1512,9 @@ function isLocalEndpoint(endpoint: string | undefined): boolean {
   if (!endpoint) return false
   try {
     const url = new URL(endpoint)
-    return url.protocol === 'http:' && !url.username && !url.password && ['localhost', '127.0.0.1', 'floci', 'localstack'].includes(url.hostname)
+    return url.protocol === 'http:' && !url.username && !url.password && url.pathname === '/' &&
+      !url.search && !url.hash &&
+      ['localhost', '127.0.0.1', '[::1]', '0.0.0.0', 'floci', 'localstack'].includes(url.hostname)
   } catch {
     return false
   }

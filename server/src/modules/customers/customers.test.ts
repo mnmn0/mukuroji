@@ -601,3 +601,47 @@ test('applies retention before returning Customer-owned records', async () => {
     retention: { redactedAt: NOW.toISOString() },
   })
 })
+
+test('does not repopulate records after retention redaction', async () => {
+  let currentTime = new Date('2026-07-01T00:00:00.000Z')
+  const client = new InMemoryCustomerClient({
+    now: () => new Date(currentTime),
+  })
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+    retentionExpiresAt: '2026-07-31T00:00:00.000Z',
+  })
+  const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+    retentionExpiresAt: '2026-07-31T00:00:00.000Z',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', {
+    ...requestInput(customer.id),
+    contactId: contact.id,
+    retentionExpiresAt: '2026-07-31T00:00:00.000Z',
+  })
+
+  currentTime = new Date(NOW)
+  await client.redactExpired('workspace-1', NOW.toISOString())
+  const redactedCustomer = await client.getCustomer('workspace-1', customer.id)
+  const redactedContact = redactedCustomer.contacts.find((candidate) => candidate.id === contact.id)
+  const redactedRequest = redactedCustomer.requests.find((candidate) => candidate.id === request.id)
+
+  await expect(client.updateCustomer('workspace-1', customer.id, 'member-1', {
+    expectedRevision: redactedCustomer.customer.revision,
+    name: 'Repopulated customer',
+  })).rejects.toMatchObject({ code: 'CustomerRetentionRedacted' })
+  await expect(client.updateContact('workspace-1', customer.id, contact.id, 'member-1', {
+    expectedRevision: redactedContact?.revision ?? 0,
+    name: 'Repopulated contact',
+  })).rejects.toMatchObject({ code: 'CustomerRetentionRedacted' })
+  await expect(client.updateRequest('workspace-1', request.id, 'member-1', {
+    expectedRevision: redactedRequest?.revision ?? 0,
+    originalMessage: 'Repopulated request',
+  })).rejects.toMatchObject({ code: 'CustomerRetentionRedacted' })
+})

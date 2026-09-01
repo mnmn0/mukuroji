@@ -85,6 +85,7 @@ const meta = {
   parameters: { layout: 'fullscreen' },
   decorators: [(Story) => <div className="min-h-screen bg-[var(--workbench-bg)] p-6"><Story /></div>],
   args: {
+    canViewSensitiveData: true,
     customers: [customer],
     detail,
     errorMessage: undefined,

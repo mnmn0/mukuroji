@@ -2636,6 +2636,9 @@ export class DynamoDbTeamIssuesClient {
           notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
+          ...(beforeIssue.statusCategory !== 'completed' && afterIssue.statusCategory === 'completed'
+            ? { completionTransition: true }
+            : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({

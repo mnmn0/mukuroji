@@ -39,7 +39,13 @@ export class CustomerError extends Error {
   /** Stable machine-readable failure code. */
   readonly code: string
 
-  /** Creates a Customer domain error. */
+  /** Creates a Customer domain error.
+   *
+   * @param status HTTP status suitable for an adapter response.
+   * @param code Stable machine-readable failure code.
+   * @param message Human-readable failure message.
+   * @param options Optional native Error options.
+   */
   constructor(status: number, code: string, message: string, options?: ErrorOptions) {
     super(message, options)
     this.name = 'CustomerError'
@@ -48,7 +54,14 @@ export class CustomerError extends Error {
   }
 }
 
-/** Creates a validated Customer record from a transport-independent input. */
+/** Creates a validated Customer record from a transport-independent input.
+ *
+ * @param workspaceId Workspace that owns the Customer.
+ * @param id Stable Customer identifier.
+ * @param input Validated Customer creation fields.
+ * @param now Creation timestamp used for the record and default retention deadline.
+ * @returns The newly created Customer record.
+ */
 export function createCustomerRecord(
   workspaceId: string,
   id: string,
@@ -87,12 +100,19 @@ export function createCustomerRecord(
   }
 }
 
-/** Applies a validated partial update to a Customer record. */
+/** Applies a validated partial update to a Customer record.
+ *
+ * @param customer Existing Customer record to update.
+ * @param input Validated partial fields and expected revision.
+ * @param now Update timestamp stored on the result.
+ * @returns The updated Customer record.
+ */
 export function updateCustomerRecord(
   customer: Customer,
   input: UpdateCustomerInput,
   now: string,
 ): Customer {
+  assertRetentionMutable(customer.retention?.redactedAt, 'Customer')
   const updatedAt = requireIsoInstant(now, 'Customer update time')
   return {
     ...customer,
@@ -122,7 +142,15 @@ export function updateCustomerRecord(
   }
 }
 
-/** Creates a validated Customer contact record. */
+/** Creates a validated Customer contact record.
+ *
+ * @param workspaceId Workspace that owns the contact.
+ * @param customerId Customer that owns the contact.
+ * @param id Stable contact identifier.
+ * @param input Validated contact creation fields.
+ * @param now Creation timestamp used for the record and default retention deadline.
+ * @returns The newly created contact record.
+ */
 export function createCustomerContactRecord(
   workspaceId: string,
   customerId: string,
@@ -152,12 +180,19 @@ export function createCustomerContactRecord(
   }
 }
 
-/** Applies a validated partial update to a Customer contact. */
+/** Applies a validated partial update to a Customer contact.
+ *
+ * @param contact Existing contact record to update.
+ * @param input Validated partial fields and expected revision.
+ * @param now Update timestamp stored on the result.
+ * @returns The updated contact record.
+ */
 export function updateCustomerContactRecord(
   contact: CustomerContact,
   input: UpdateCustomerContactInput,
   now: string,
 ): CustomerContact {
+  assertRetentionMutable(contact.retention?.redactedAt, 'Customer contact')
   const updatedAt = requireIsoInstant(now, 'Contact update time')
   return {
     ...contact,
@@ -178,7 +213,14 @@ export function updateCustomerContactRecord(
   }
 }
 
-/** Creates a validated Customer Request source-of-need record. */
+/** Creates a validated Customer Request source-of-need record.
+ *
+ * @param workspaceId Workspace that owns the request.
+ * @param id Stable Customer Request identifier.
+ * @param input Validated request creation fields.
+ * @param now Creation timestamp used for the record and default retention deadline.
+ * @returns The newly created Customer Request record.
+ */
 export function createCustomerRequestRecord(
   workspaceId: string,
   id: string,
@@ -214,12 +256,19 @@ export function createCustomerRequestRecord(
   }
 }
 
-/** Applies a validated partial update to a Customer Request. */
+/** Applies a validated partial update to a Customer Request.
+ *
+ * @param request Existing Customer Request to update.
+ * @param input Validated partial fields and expected revision.
+ * @param now Update timestamp stored on the result.
+ * @returns The updated Customer Request.
+ */
 export function updateCustomerRequestRecord(
   request: CustomerRequest,
   input: UpdateCustomerRequestInput,
   now: string,
 ): CustomerRequest {
+  assertRetentionMutable(request.retention?.redactedAt, 'Customer Request')
   const updatedAt = requireIsoInstant(now, 'Customer Request update time')
   return {
     ...request,
@@ -247,7 +296,12 @@ export function updateCustomerRequestRecord(
   }
 }
 
-/** Computes the explainable Customer impact signal for one Work Item or Project. */
+/** Computes the explainable Customer impact signal for one Work Item or Project.
+ *
+ * @param customers Customers referenced by the candidate requests.
+ * @param requests Requests associated with the Work Item or Project.
+ * @returns The aggregate impact signal and its explainable request summaries.
+ */
 export function calculateCustomerImpactSignal(
   customers: readonly Customer[],
   requests: readonly CustomerRequest[],
@@ -342,7 +396,11 @@ export function projectCustomerImpactSignal(
   return projected
 }
 
-/** Builds unique Customer Work Item summaries from request links. */
+/** Builds unique Customer Work Item summaries from request links.
+ *
+ * @param requests Customer Requests whose Work Item links should be aggregated.
+ * @returns Deduplicated Work Item summaries sorted by canonical identity.
+ */
 export function deriveCustomerWorkItemSummaries(
   requests: readonly CustomerRequest[],
 ): CustomerWorkItemSummary[] {
@@ -376,7 +434,11 @@ export function deriveCustomerWorkItemSummaries(
   )
 }
 
-/** Builds unique Customer Project summaries from direct and Work Item links. */
+/** Builds unique Customer Project summaries from direct and Work Item links.
+ *
+ * @param requests Customer Requests whose Project links should be aggregated.
+ * @returns Deduplicated Project summaries sorted by Project identifier.
+ */
 export function deriveCustomerProjectSummaries(
   requests: readonly CustomerRequest[],
 ): CustomerProjectSummary[] {
@@ -405,7 +467,14 @@ export function deriveCustomerProjectSummaries(
     .sort((left, right) => left.projectId.localeCompare(right.projectId))
 }
 
-/** Redacts expired Customer-owned fields while preserving relationship identifiers. */
+/** Redacts expired Customer-owned fields while preserving relationship identifiers.
+ *
+ * @param customers Customers eligible for retention evaluation.
+ * @param contacts Contacts eligible for retention evaluation.
+ * @param requests Customer Requests eligible for retention evaluation.
+ * @param now Timestamp against which retention deadlines are evaluated.
+ * @returns Redacted record collections and counts for each record category.
+ */
 export function redactExpiredCustomerData(
   customers: readonly Customer[],
   contacts: readonly CustomerContact[],
@@ -597,6 +666,17 @@ function requireText(value: string, label: string, maximumLength: number, allowE
     throw new CustomerError(400, 'InvalidCustomerInput', `${label} is invalid.`)
   }
   return normalized
+}
+
+/** Prevents a retention-redacted record from being repopulated by a later update. */
+function assertRetentionMutable(redactedAt: string | undefined, label: string): void {
+  if (redactedAt !== undefined) {
+    throw new CustomerError(
+      409,
+      'CustomerRetentionRedacted',
+      `${label} data was redacted by retention policy and cannot be updated.`,
+    )
+  }
 }
 
 /** Requires a canonical ISO instant. */

@@ -1,7 +1,11 @@
 import { expect, test } from 'bun:test'
 import { Hono } from 'hono'
 import type { TriageEntry } from '@mukuroji/contracts'
-import type { CustomerPrincipal } from './customer-router'
+import type {
+  CustomerAuthorizationScope,
+  CustomerPrincipal,
+  CustomerRouterDependencies,
+} from './customer-router'
 import { createCustomerRouter } from './customer-router'
 import { CustomerError } from '../../domain/customer'
 import { InMemoryCustomerClient } from '../../customers'
@@ -11,7 +15,13 @@ import type { TriageClient } from '../../../triage'
 const NOW = '2026-08-01T00:00:00.000Z'
 
 /** Triage operations used by Customer Router integration tests. */
-type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer'>
+type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer' | 'clearCustomerAssociations'>
+
+/** Optional live-resource authorization replacements used by router tests. */
+type CustomerTestAuthorization = Partial<Pick<
+  CustomerRouterDependencies,
+  'verifyWorkItemAccess' | 'verifyProjectAccess'
+>>
 
 /** Creates a router with an in-memory Customer client and deterministic authorization. */
 function createTestApp(
@@ -21,15 +31,18 @@ function createTestApp(
     getEntry: async () => {
       throw new Error('Triage is not used by this test.')
     },
+    clearCustomerAssociations: async () => undefined,
   },
+  requireWorkspaceAccess: CustomerRouterDependencies['requireWorkspaceAccess'] = async () => principal,
+  authorization: CustomerTestAuthorization = {},
 ): Hono {
   const app = new Hono()
   app.route('/', createCustomerRouter({
     getCustomers: () => client,
-    requireWorkspaceAccess: async () => principal,
+    requireWorkspaceAccess,
     verifyTriageAccess: async () => undefined,
-    verifyWorkItemAccess: async () => ({ projectId: 'project-1' }),
-    verifyProjectAccess: async () => undefined,
+    verifyWorkItemAccess: authorization.verifyWorkItemAccess ?? (async () => ({ projectId: 'project-1' })),
+    verifyProjectAccess: authorization.verifyProjectAccess ?? (async () => undefined),
     getTriage: () => triage,
     readJson: async (request) => await request.json(),
     mapError: (_context, error) => {
@@ -105,6 +118,37 @@ test('accepts zero as the minimum Customer Request count filter', async () => {
 
   expect(response.status).toBe(200)
   expect(body.customers).toHaveLength(1)
+})
+
+test('rejects out-of-range business-value filters before querying or saving a view', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  })
+
+  for (const value of ['-1', '101']) {
+    const queryResponse = await app.request(`/api/customers?minBusinessValue=${value}`)
+    expect(queryResponse.status).toBe(400)
+    expect(await queryResponse.json()).toMatchObject({ code: 'InvalidCustomerInput' })
+
+    const viewResponse = await app.request('/api/customers/views', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'Idempotency-Key': `out-of-range-${value}`,
+      },
+      body: JSON.stringify({
+        name: `Invalid ${value}`,
+        filters: { minBusinessValue: Number(value) },
+      }),
+    })
+    expect(viewResponse.status).toBe(400)
+    expect(await viewResponse.json()).toMatchObject({ code: 'InvalidCustomerInput' })
+  }
+
+  expect(await client.listSavedViews('workspace-1')).toEqual([])
 })
 
 test('requires an idempotency key and validates optional Customer Request fields', async () => {
@@ -245,6 +289,116 @@ test('projects sensitive Customer fields and request content for restricted read
   expect(body.requests[0]).toMatchObject({ originalMessage: '', source: { canNotify: false } })
 })
 
+test('projects sensitive fields from restricted Customer mutation responses', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: false,
+  })
+
+  const response = await app.request(`/api/customers/${customer.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: customer.revision,
+      domain: 'updated.example',
+      businessValue: 90,
+      notes: 'restricted note',
+    }),
+  })
+  const body: { domain?: string; businessValue?: number; notes?: string } = await response.json()
+
+  expect(response.status).toBe(200)
+  expect(body.domain).toBeUndefined()
+  expect(body.businessValue).toBeUndefined()
+  expect(body.notes).toBeUndefined()
+})
+
+test('filters Customer relationships through live Team and Project access', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const request = await createRequest(client, customer.id)
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'hidden-team',
+    workItemId: 'hidden-work-item',
+    projectId: 'hidden-project',
+  })
+  await client.linkRequestToProject('workspace-1', request.id, 'member-1', {
+    projectId: 'hidden-project',
+  })
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    undefined,
+    undefined,
+    {
+      verifyWorkItemAccess: async (_principal, teamId) => {
+        if (teamId === 'hidden-team') throw { status: 403 }
+        return { projectId: 'project-1' }
+      },
+      verifyProjectAccess: async (_principal, projectId) => {
+        if (projectId === 'hidden-project') throw { status: 403 }
+      },
+    },
+  )
+
+  const detailResponse = await app.request(`/api/customers/${customer.id}`)
+  const detail: {
+    requests: Array<{ workItemLinks: unknown[]; projectLinks: unknown[] }>
+    workItems: unknown[]
+    projects: unknown[]
+  } = await detailResponse.json()
+  const workItemsResponse = await app.request(`/api/customers/${customer.id}/work-items`)
+
+  expect(detailResponse.status).toBe(200)
+  expect(detail).toMatchObject({
+    requests: [{ workItemLinks: [], projectLinks: [] }],
+    workItems: [],
+    projects: [],
+  })
+  expect(workItemsResponse.status).toBe(200)
+  expect(await workItemsResponse.json()).toEqual({ workItems: [] })
+})
+
+test('clears Triage Customer associations before deleting a Customer', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const calls: Array<[string, string, string]> = []
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    {
+      getEntry: async () => {
+        throw new Error('Triage entry is not read by deletion cleanup tests.')
+      },
+      clearCustomerAssociations: async (...args) => {
+        calls.push(args)
+      },
+    },
+  )
+
+  const response = await app.request(
+    `/api/customers/${customer.id}?expectedRevision=${customer.revision}`,
+    { method: 'DELETE' },
+  )
+
+  expect(response.status).toBe(204)
+  expect(calls).toEqual([['workspace-1', customer.id, 'member-1']])
+  await expect(client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({
+    code: 'CustomerNotFound',
+  })
+})
+
 test('replays saved Customer view creation with the same idempotency key', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const app = createTestApp(client, {
@@ -335,11 +489,19 @@ test('saves an accepted Triage Entry as a Customer Request and preserves its sou
       revision: entry.revision + 1,
     }),
   }
+  let customerScope: CustomerAuthorizationScope | undefined
   const app = createTestApp(client, {
     directoryId: 'workspace-1',
     userKey: 'member-1',
     canViewSensitiveData: true,
-  }, triage)
+  }, triage, async (_context, _minimum, scope) => {
+    customerScope = scope
+    return {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    }
+  })
 
   const response = await app.request('/api/teams/support/triage-entries/triage-1/customer-request', {
     method: 'POST',
@@ -369,6 +531,7 @@ test('saves an accepted Triage Entry as a Customer Request and preserves its sou
     originalMessage: 'Please support SSO.',
     workItemLinks: [{ teamId: 'support', workItemId: 'work-item-1', projectId: 'project-1' }],
   })
+  expect(customerScope).toEqual({ teamId: 'support' })
   expect((await client.getRequest('workspace-1', body.id)).customerId).toBe(customer.id)
 })
 
@@ -507,11 +670,19 @@ test('validates partial Triage Customer associations against the current Custome
       revision: entry.revision + 1,
     }),
   }
+  let customerScope: CustomerAuthorizationScope | undefined
   const app = createTestApp(client, {
     directoryId: 'workspace-1',
     userKey: 'member-1',
     canViewSensitiveData: true,
-  }, association)
+  }, association, async (_context, _minimum, scope) => {
+    customerScope = scope
+    return {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    }
+  })
 
   const inactiveResponse = await app.request('/api/teams/support/triage-entries/triage-3/customer', {
     method: 'PUT',
@@ -549,4 +720,5 @@ test('validates partial Triage Customer associations against the current Custome
     revision: entry.revision + 1,
   })
   expect(clearedBody).not.toHaveProperty('customerId')
+  expect(customerScope).toEqual({ teamId: 'support' })
 })

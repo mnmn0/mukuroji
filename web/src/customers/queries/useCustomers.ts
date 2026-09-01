@@ -14,7 +14,13 @@ const customerQueryConfig = {
   shouldRetryOnError: false,
 } as const
 
-/** Loads the Customer directory with SWR-owned URL filter state. */
+/** Loads the Customer directory with SWR-owned URL filter state.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param input URL-backed Customer filters.
+ * @param enabled Whether the directory query is allowed to run.
+ * @returns SWR state for the accumulated Customer pages.
+ */
 export function useCustomers(
   accessToken: string | undefined,
   input: CustomerListInput,
@@ -57,7 +63,12 @@ export function useCustomers(
   }
 }
 
-/** Loads saved Customer directory views when the Workspace directory is available. */
+/** Loads saved Customer directory views when the Workspace directory is available.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param enabled Whether the saved-view query is allowed to run.
+ * @returns SWR state for the saved-view collection.
+ */
 export function useCustomerSavedViews(
   accessToken: string | undefined,
   enabled: boolean,
@@ -71,7 +82,13 @@ export function useCustomerSavedViews(
   return { ...query, key }
 }
 
-/** Loads one Customer detail graph when a Customer route parameter is selected. */
+/** Loads one Customer detail graph when a Customer route parameter is selected.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param customerId Selected Customer identifier, when present.
+ * @param enabled Whether the detail query is allowed to run.
+ * @returns SWR state for the selected Customer detail.
+ */
 export function useCustomer(
   accessToken: string | undefined,
   customerId: string | undefined,
@@ -88,7 +105,13 @@ export function useCustomer(
   return { ...query, key }
 }
 
-/** Loads the Project-level Customer impact aggregate for a Project detail route. */
+/** Loads the Project-level Customer impact aggregate for a Project detail route.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param projectId Selected Project identifier, when present.
+ * @param enabled Whether the impact query is allowed to run.
+ * @returns SWR state for the Project Customer impact signal.
+ */
 export function useProjectCustomerImpact(
   accessToken: string | undefined,
   projectId: string | undefined,

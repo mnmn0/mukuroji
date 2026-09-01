@@ -62,6 +62,29 @@ test('uses one supplied configuration snapshot for transport and bootstrap', asy
   }
 })
 
+test('uses non-secret local credentials and the default provider chain for regional AWS endpoints', async () => {
+  const localConfig = loadServerConfig({
+    AWS_ACCESS_KEY_ID: 'real-looking-access-key',
+    AWS_SECRET_ACCESS_KEY: 'real-looking-secret',
+    DYNAMODB_ENDPOINT: 'http://floci:8000',
+  }, { localBun: false })
+  const localClient = createDynamoDbClient(localConfig)
+  const localCredentials = await localClient.config.credentials()
+  expect(localCredentials).toMatchObject({
+    accessKeyId: 'local',
+    secretAccessKey: 'local',
+  })
+  localClient.destroy()
+
+  const regionalConfig = loadServerConfig({
+    AWS_REGION: 'ap-northeast-1',
+    DYNAMODB_ENDPOINT: 'https://dynamodb.ap-northeast-1.amazonaws.com',
+  }, { localBun: false })
+  const regionalClient = createDynamoDbClient(regionalConfig)
+  expect(regionalClient.config.credentials).toBeDefined()
+  regionalClient.destroy()
+})
+
 test('local table bootstrap rejects userinfo and non-origin endpoint forms', async () => {
   for (const endpoint of [
     'http://localhost:443@remote-host:8000',
@@ -70,7 +93,7 @@ test('local table bootstrap rejects userinfo and non-origin endpoint forms', asy
     'https://localhost:8000',
   ]) {
     await withServerEnvironment({ DYNAMODB_ENDPOINT: endpoint }, () => {
-      expect(shouldBootstrapLocalDynamoDb()).toBe(false)
+      expect(() => shouldBootstrapLocalDynamoDb()).toThrow('DynamoDB endpoint')
     })
   }
 

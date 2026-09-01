@@ -31,6 +31,8 @@ export type CurrentUser = {
   workspaceMemberStatus: WorkspaceMemberStatus
   /** Whether the server resolved the current user as an AI policy manager. */
   canManageAiAssistance?: boolean
+  /** Whether the current user may use Customer sensitive search and business-value filters. */
+  canViewCustomerSensitiveData?: boolean
 }
 
 /**

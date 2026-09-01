@@ -547,6 +547,61 @@ describe('DynamoDbTriageClient transaction failure classification', () => {
   })
 })
 
+describe('DynamoDbTriageClient Customer cleanup', () => {
+  test('clears matching Customer reverse links through the revision-fenced association transaction', async () => {
+    const entry = createEntry()
+    entry.customerId = 'customer-1'
+    entry.contactId = 'contact-1'
+    entry.customerRequestId = 'request-1'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      { Items: [storedEntry] },
+      { Item: storedEntry },
+      {},
+    ])
+
+    try {
+      await harness.client.clearCustomerAssociations('workspace-1', 'customer-1', 'member@example.com')
+
+      expect(harness.commands.map(({ name }) => name)).toEqual([
+        'QueryCommand',
+        'GetCommand',
+        'TransactWriteCommand',
+      ])
+      const transaction = harness.commands[2]?.input
+      expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            ConditionExpression: '#revision = :expectedRevision AND teamId = :teamId',
+            ExpressionAttributeValues: expect.objectContaining({
+              ':expectedRevision': entry.revision,
+              ':entry': expect.objectContaining({
+                customerId: undefined,
+                contactId: undefined,
+                customerRequestId: undefined,
+              }),
+            }),
+          }),
+        }),
+        expect.objectContaining({
+          Put: expect.objectContaining({
+            Item: expect.objectContaining({
+              event: expect.objectContaining({ type: 'customer-associated' }),
+            }),
+          }),
+        }),
+      ]))
+    } finally {
+      harness.restore()
+    }
+  })
+})
+
 describe('DynamoDbTriageClient configuration receipts', () => {
   test('commits and replays an initial revision-zero replacement', async () => {
     const input = createConfigurationInput(0)
