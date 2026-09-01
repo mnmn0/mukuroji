@@ -406,6 +406,7 @@ import {
   createCustomerRouter,
   projectCustomerImpactSignal,
   type CustomerAuthorizationScope,
+  type CustomerAuthorizationConditionChecks,
   type CustomerPrincipal,
 } from '../modules/customers'
 import {
@@ -2925,6 +2926,8 @@ routeApp.get('/api/auth/me', async (c) => {
       workspaceRole: principal.workspaceRole,
       workspaceMemberStatus: principal.workspaceMemberStatus,
       canManageAiAssistance: canManageAiAssistanceWorkspace(principal),
+      canReadCustomers: hasCustomerReadAccess(principal),
+      canManageCustomerRequests: hasCustomerManagementAccess(principal),
       canViewCustomerSensitiveData: hasCustomerManagementAccess(principal),
       canManageCustomerViews: canManageCustomerViews(principal),
     })
@@ -6117,6 +6120,42 @@ routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>
   verifyTriageAccess: async (principal, teamId, minimum) => {
     await requireTeamPermission(principal, teamId, minimum)
   },
+  verifyCustomerOwner: async (principal, ownerUserId): Promise<CustomerAuthorizationConditionChecks> => {
+    const owner = await workspaceDependencies.workspaceAccess.getActiveMember(
+      principal.directoryId,
+      ownerUserId,
+    )
+    if (!owner || owner.role === 'guest') {
+      throw new CustomerError(
+        409,
+        'CustomerOwnerInactive',
+        'Customer owner must be an active non-guest Workspace member.',
+      )
+    }
+    const createActiveMemberConditionCheck = workspaceDependencies.workspaceAccess
+      .createActiveMemberConditionCheck
+    if (!createActiveMemberConditionCheck) {
+      throw new CustomerError(
+        503,
+        'CustomerOwnerAuthorizationFenceUnavailable',
+        'Customer owner authorization fencing is unavailable. Retry the request.',
+      )
+    }
+    const conditionCheck = await createActiveMemberConditionCheck.call(
+      workspaceDependencies.workspaceAccess,
+      principal.directoryId,
+      owner.memberKey,
+      { allowedRoles: ['owner', 'admin', 'member'] },
+    )
+    if (!conditionCheck) {
+      throw new CustomerError(
+        409,
+        'CustomerOwnerInactive',
+        'Customer owner must be an active non-guest Workspace member.',
+      )
+    }
+    return [conditionCheck]
+  },
   createTriageAuthorizationConditionChecks: createCustomerTriageAuthorizationConditionChecks,
   verifyWorkItemAccess: async (principal, teamId, workItemId, minimum) => {
     const context = await requireTeamPermission(principal, teamId, minimum)
@@ -6146,9 +6185,13 @@ routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>
     return detail.issue.assignedProjectId
       ? {
           projectId: detail.issue.assignedProjectId,
+          isCompleted: detail.issue.statusCategory === 'completed',
           ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
         }
-      : authorizationConditionChecks ? { authorizationConditionChecks } : {}
+      : {
+          isCompleted: detail.issue.statusCategory === 'completed',
+          ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
+        }
   },
   verifyProjectAccess: async (principal, projectId, minimum) => {
     await requireProjectPermission(principal, projectId, minimum)
@@ -23559,6 +23602,7 @@ async function requireTriageTeamAccess(
     ...(visibleProjectIds !== undefined ? { visibleProjectIds } : {}),
     ...(writableProjectIds !== undefined ? { writableProjectIds } : {}),
     canManageConfiguration,
+    canReadCustomerAssociations: hasCustomerReadAccess(principal, { teamId }),
   }
 }
 

@@ -95,7 +95,7 @@ const FILE_PROOFING_AUXILIARY_ENTRY_TYPES = new Set([
 /** Maximum UTF-8 bytes accepted for one DynamoDB export JSON record. */
 const RESTORE_DRILL_EXPORT_JSON_LINE_MAXIMUM_BYTES = 1_048_576
 
-/** One of the six fixed DynamoDB datasets included in a restore drill. */
+/** One of the seven fixed DynamoDB datasets included in a restore drill. */
 export type RestoreDrillAwsTableTarget = RestoreDrillTableTarget
 
 /** Stable logical order for every DynamoDB dataset included in a restore drill. */
@@ -116,6 +116,8 @@ export type RestoreDrillSourceTableNames = {
   readonly 'table:work-items': string
   /** Workspace Access source table. */
   readonly 'table:workspace-access': string
+  /** Customer source table. */
+  readonly 'table:customers': string
 }
 
 /** Explicit AWS resources available to the isolated restore drill adapter. */
@@ -436,7 +438,7 @@ export type CreateRestoreDrillAwsOperationsInput = {
 export type RestoreDrillStartRestoreInput = {
   /** Stable drill identifier used only through a deterministic digest. */
   readonly drillId: string
-  /** Canonical restore point shared by all six tables. */
+  /** Canonical restore point shared by all seven tables. */
   readonly restorePoint: string
   /** Previously measured source observation. */
   readonly source: RestoreDrillSourceTableObservation
@@ -446,7 +448,7 @@ export type RestoreDrillStartRestoreInput = {
 export type RestoreDrillStartExportInput = {
   /** Stable drill identifier used only through a deterministic digest. */
   readonly drillId: string
-  /** Canonical export point shared by all six tables. */
+  /** Canonical export point shared by all seven tables. */
   readonly exportPoint: string
   /** Previously measured source observation. */
   readonly source: RestoreDrillSourceTableObservation
@@ -789,7 +791,7 @@ export interface RestoreDrillAwsOperations {
   close(): void
 
   /**
-   * Collects PITR windows and canonical descriptors for all six fixed source tables.
+   * Collects PITR windows and canonical descriptors for all seven fixed source tables.
    *
    * @returns Observations in stable logical target order.
    */
@@ -1262,7 +1264,7 @@ class DefaultRestoreDrillAwsOperations implements RestoreDrillAwsOperations {
     this.closeOwnedTransport?.()
   }
 
-  /** Collects all six source PITR windows and table descriptors in stable order. */
+  /** Collects all seven source PITR windows and table descriptors in stable order. */
   async collectSourceTableObservations(): Promise<readonly RestoreDrillSourceTableObservation[]> {
     const observations: RestoreDrillSourceTableObservation[] = []
     for (const target of RESTORE_DRILL_AWS_TABLE_TARGETS) {
@@ -2640,6 +2642,10 @@ export function readRestoreDrillAwsConfiguration(
         environment,
         'FILE_PROOFING_TABLE_NAME',
       ),
+      'table:customers': readEnvironmentValue(
+        environment,
+        'CUSTOMERS_TABLE_NAME',
+      ),
     },
   }
   validateConfiguration(configuration)
@@ -2714,6 +2720,7 @@ function createCleanupRestrictedFullConfiguration(
       'table:work-item-configuration': 'cleanup-work-item-configuration-not-authorized',
       'table:work-items': 'cleanup-work-items-not-authorized',
       'table:workspace-access': 'cleanup-workspace-access-not-authorized',
+      'table:customers': 'cleanup-customers-not-authorized',
     },
   }
 }

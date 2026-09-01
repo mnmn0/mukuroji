@@ -69,6 +69,8 @@ export function TeamTriagePage() {
   )
   const selectedEntry = detail.data ? createTriageEntryView(detail.data) : undefined
   const customerPickerEnabled = workspace.canLoadWorkspaceData &&
+    workspace.canReadCustomers &&
+    workspace.canManageCustomerRequests &&
     Boolean(activeTeam) &&
     routeState.view === 'queue' &&
     selectedEntry?.entry.state === 'accepted' &&
@@ -201,7 +203,9 @@ export function TeamTriagePage() {
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}
         onBulkAction={mutation.applyBulkAction}
-        onCreateCustomerRequest={mutation.createCustomerRequest}
+        onCreateCustomerRequest={workspace.canManageCustomerRequests
+          ? mutation.createCustomerRequest
+          : undefined}
         onClearSelection={() => {
           setSelectedEntryIds([])
           mutation.clearFeedback()

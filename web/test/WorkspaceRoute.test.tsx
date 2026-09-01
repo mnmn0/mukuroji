@@ -10,6 +10,10 @@ import type { WorkspaceRouteContextValue } from '../src/workspace/ui/WorkspaceRo
 const routeContext: WorkspaceRouteContextValue = {
   canLoadWorkspaceData: true,
   canManageWorkspaceConfiguration: false,
+  canReadCustomers: true,
+  canManageCustomerRequests: true,
+  canViewCustomerSensitiveData: true,
+  canManageCustomerViews: true,
   canMutateTeamConfiguration: false,
   commonErrorKey: 'projects.error.loading',
   fontSizePreference: 'standard',

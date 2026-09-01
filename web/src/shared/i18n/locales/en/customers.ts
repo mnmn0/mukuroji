@@ -8,6 +8,7 @@ export const customersMessages = {
   'customers.loading': 'Loading customers.',
   'customers.loadingMore': 'Loading more…',
   'customers.loadError': 'Customers could not be loaded.',
+  'customers.permissionDenied': 'You do not have permission to view Customer operations.',
   'customers.loadMore': 'Load more customers',
   'customers.retry': 'Reload',
   'customers.empty': 'No customers match the current search.',

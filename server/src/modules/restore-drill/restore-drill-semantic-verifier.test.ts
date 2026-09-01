@@ -162,6 +162,7 @@ function configuration(): RestoreDrillAwsConfiguration {
     'table:work-item-configuration': 'source-3',
     'table:work-items': 'source-4',
     'table:workspace-access': 'source-5',
+    'table:customers': 'source-6',
   }
   return {
     accountId: ACCOUNT_ID,
@@ -248,6 +249,32 @@ describe('production semantic verifier adapter', () => {
         { versionStage: 'AWSCURRENT' },
         { versionId: SECRET_VERSION_ID },
       ])
+    } finally {
+      verifier.close()
+    }
+  })
+
+  test('covers the Customer table through exact aggregate verification without semantic reader access', async () => {
+    let readerCreateCount = 0
+    const factory: RestoreDrillSemanticReaderFactory = {
+      /** Captures an unexpected semantic reader construction. */
+      create() {
+        readerCreateCount += 1
+        throw new Error('Customer semantic reader should not be created.')
+      },
+    }
+    const verifier = new AwsRestoreDrillVerifier(configuration(), factory)
+    try {
+      await expect(verifier.readSemanticClaimPage(
+        verifierInput(),
+        'table:customers',
+        SECRET_VERSION_ID,
+        1_000_000,
+      )).resolves.toEqual({
+        claims: [],
+        retainedUnitCount: 0,
+      })
+      expect(readerCreateCount).toBe(0)
     } finally {
       verifier.close()
     }

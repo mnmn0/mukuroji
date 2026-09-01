@@ -20,6 +20,7 @@ export {
   InMemoryCustomerClient,
   type CustomerAuthorizationConditionChecks,
   type CustomerClient,
+  type CustomerContactIdempotencyReceipt,
   type CustomerRetentionClient,
   type CustomerRetentionSweepResult,
   type CustomerRequestIdempotencyReceipt,

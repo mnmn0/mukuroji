@@ -5,10 +5,40 @@ import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
-import { DynamoDbCustomerClient } from '../../modules/customers'
+import {
+  DynamoDbCustomerClient,
+  type CustomerRetentionClient,
+} from '../../modules/customers'
 import type {
   NotificationScheduleEvent,
+  NotificationScheduleResult,
 } from '../../modules/notifications/adapter-in/schedules/notification-schedule'
+
+/** Runs retention independently so a Customer failure cannot suppress notifications. */
+export function createRetentionAwareNotificationScheduleHandler(
+  retentionClient: Pick<CustomerRetentionClient, 'sweepExpiredRetention'>,
+  notificationHandler: (
+    event: NotificationScheduleEvent,
+  ) => Promise<NotificationScheduleResult>,
+): (event?: NotificationScheduleEvent) => Promise<NotificationScheduleResult> {
+  return async (event: NotificationScheduleEvent = {}) => {
+    let retentionError: unknown
+    let retentionFailed = false
+    try {
+      await retentionClient.sweepExpiredRetention(event.time)
+    } catch (error) {
+      retentionFailed = true
+      retentionError = error
+      console.error(
+        'Customer retention sweep failed; continuing notification delivery.',
+        error instanceof Error ? error.name : 'unknown error',
+      )
+    }
+    const result = await notificationHandler(event)
+    if (retentionFailed) throw retentionError
+    return result
+  }
+}
 
 /**
  * Creates the production Notification schedule handler.
@@ -29,8 +59,8 @@ export function createProductionNotificationScheduleHandler() {
       )
     },
   )
-  return async (event: NotificationScheduleEvent = {}) => {
-    await customerClient.sweepExpiredRetention(event.time)
-    return await notificationHandler(event)
-  }
+  return createRetentionAwareNotificationScheduleHandler(
+    customerClient,
+    notificationHandler,
+  )
 }

@@ -52,7 +52,7 @@ type ResourceAggregateOptions = {
 }
 
 /**
- * Creates six valid PITR windows in canonical order.
+ * Creates seven valid PITR windows in canonical order.
  *
  * @returns Complete PITR window vector.
  */
@@ -162,7 +162,7 @@ function createApprovalBinding(
 }
 
 describe('restore drill contract', () => {
-  test('fixes the six table targets and seven resource targets in canonical order', () => {
+  test('fixes the seven table targets and eight resource targets in canonical order', () => {
     expect(RESTORE_DRILL_TABLE_TARGETS).toEqual([
       'table:audit-events',
       'table:file-proofing',
@@ -170,6 +170,7 @@ describe('restore drill contract', () => {
       'table:work-item-configuration',
       'table:work-items',
       'table:workspace-access',
+      'table:customers',
     ])
     expect(RESTORE_DRILL_RESOURCE_TARGETS).toEqual([
       'bucket:file',
@@ -215,9 +216,9 @@ describe('restore point and objectives', () => {
   test('chooses min(latest) when max(earliest) remains inside every window', () => {
     const windows = createPitrWindows()
     expect(selectLatestCommonRestorePoint(windows)).toEqual({
-      commonEarliestRestorableTime: '2026-07-06T00:00:00.000Z',
-      commonLatestRestorableTime: '2026-07-31T23:59:54.000Z',
-      restorePoint: '2026-07-31T23:59:54.000Z',
+      commonEarliestRestorableTime: '2026-07-07T00:00:00.000Z',
+      commonLatestRestorableTime: '2026-07-31T23:59:53.000Z',
+      restorePoint: '2026-07-31T23:59:53.000Z',
     })
   })
 

@@ -56,6 +56,8 @@ export type TriagePrincipal = {
   writableProjectIds?: readonly string[]
   /** Whether the principal may read and replace Team Triage configuration. */
   canManageConfiguration?: boolean
+  /** Whether the principal may read Customer, Contact, and Customer Request identifiers. */
+  canReadCustomerAssociations: boolean
 }
 
 /** Input supplied to the composable action orchestration boundary. */
@@ -604,7 +606,10 @@ export function projectTriageEntryForPrincipal(
   principal: TriagePrincipal,
   entry: TriageEntry,
 ): TriageEntry {
-  const projected = projectTriageEntryForResponse(entry)
+  const projectedResponse = projectTriageEntryForResponse(entry)
+  const projected = principal.canReadCustomerAssociations
+    ? projectedResponse
+    : projectTriageEntryWithoutCustomerAssociations(projectedResponse)
   if (principal.visibleProjectIds === undefined) {
     return projectTriageCapabilitiesForPrincipal(principal, projected)
   }
@@ -628,6 +633,15 @@ export function projectTriageEntryForPrincipal(
     delete scoped.canonicalWorkItem
   }
   return projectTriageCapabilitiesForPrincipal(principal, scoped)
+}
+
+/** Removes Customer relationship identifiers from a Triage response for unauthorized readers. */
+function projectTriageEntryWithoutCustomerAssociations(entry: TriageEntry): TriageEntry {
+  const projected = { ...entry }
+  delete projected.customerId
+  delete projected.contactId
+  delete projected.customerRequestId
+  return projected
 }
 
 /** Applies the principal's live Team and Project write access to response capabilities.

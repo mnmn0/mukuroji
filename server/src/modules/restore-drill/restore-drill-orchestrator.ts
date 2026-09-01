@@ -37,12 +37,10 @@ import {
   SFNClient,
 } from '@aws-sdk/client-sfn'
 import {
-  CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS,
   createCrossDomainIntegrityNormalizedPageReader,
   type CrossDomainIntegrityFailureCode,
   type CrossDomainIntegrityNormalizedPageReader,
   type CrossDomainIntegrityNormalizedPageReaderConfiguration,
-  type CrossDomainIntegrityResourceIdentity,
   type CrossDomainIntegrityTableNames,
   type CrossDomainIntegrityTableTarget,
 } from '../data-integrity'
@@ -67,6 +65,7 @@ import {
   type RestoreDrillMultisetDigest,
   type RestoreDrillResourceAggregate,
   type RestoreDrillResourceIdentity,
+  type RestoreDrillResourceTarget,
   type RestoreDrillResultEvidence,
   type RestoreDrillRunOutcome,
   type RestoreDrillRunPhase,
@@ -557,7 +556,7 @@ export type RestoreDrillExportCompletion = {
 
 /** Durable result of exact aggregate and semantic verification. */
 export type RestoreDrillVerificationResult = {
-  /** Whether the isolated six-table semantic cross-domain verifier passed. */
+  /** Whether the isolated six-table semantic cross-domain verifier passed; Customer is covered by exact aggregate verification. */
   readonly crossDomainStatus: 'fail' | 'pass'
   /** Exact isolated physical identities in canonical resource order. */
   readonly resourceIdentities: readonly RestoreDrillResourceIdentity[]
@@ -659,7 +658,7 @@ export type RestoreDrillSemanticClaimPage = {
   readonly claims: readonly RestoreDrillSemanticClaim[]
   /** Opaque normalized-reader cursor absent after the terminal page. */
   readonly nextCursor?: string
-  /** Exact canonical units charged to the global six-table capacity. */
+  /** Exact canonical units charged to the global six-table semantic capacity. */
   readonly retainedUnitCount: number
 }
 
@@ -701,11 +700,11 @@ export type RestoreDrillVerificationProgress = {
   readonly restoreResources: readonly RestoreDrillResourceAggregate[]
   /** Monotonic compare-and-swap revision for the complete progress item. */
   readonly revision: number
-  /** Cumulative exact canonical semantic units across all six isolated tables. */
+  /** Cumulative exact canonical semantic units across the six isolated semantic tables. */
   readonly semanticItemCount: number
   /** Opaque normalized-reader cursor for the active semantic table target. */
   readonly semanticNextCursor?: string
-  /** Cumulative raw Scan pages across all six isolated semantic targets. */
+  /** Cumulative raw Scan pages across the six isolated semantic targets. */
   readonly semanticPageCount: number
   /** Opaque cursor for the active regular or Audit-latest requirement ledger. */
   readonly semanticRequirementCursor?: RestoreDrillSemanticRequirementCursor
@@ -715,7 +714,7 @@ export type RestoreDrillVerificationProgress = {
   readonly sourceFileResource?: RestoreDrillResourceAggregate
   /** Current bounded verification phase. */
   readonly stage: RestoreDrillVerificationStage
-  /** Canonical table target index from zero through the terminal six. */
+  /** Canonical table target index from zero through the terminal seven. */
   readonly targetIndex: number
   /** Next manifest data-file index for the active source target. */
   readonly unitIndex: number
@@ -1024,7 +1023,7 @@ export interface RestoreDrillStateStore {
     exportRecord: RestoreDrillRecordedExport,
   ): Promise<void>
 
-  /** Lists all six durable pre-API start intents in canonical order. */
+  /** Lists all seven durable pre-API start intents in canonical order. */
   listStartIntents(drillId: string): Promise<readonly RestoreDrillStartIntent[]>
 
   /** Reads opaque File scan progress from the latest committed checkpoint. */
@@ -6085,6 +6084,12 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
       !isNonNegativeInteger(remainingItemCapacity) ||
       remainingItemCapacity > MAX_VERIFICATION_SEMANTIC_UNITS
     ) throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
+    if (target === 'table:customers') {
+      return {
+        claims: [],
+        retainedUnitCount: 0,
+      }
+    }
     let reader: CrossDomainIntegrityNormalizedPageReader | undefined
     let result: RestoreDrillSemanticClaimPage | undefined
     let secret: RestoreDrillAuditPseudonymSecret | undefined
@@ -6531,6 +6536,8 @@ function toCrossDomainTableTarget(
       return 'work-items'
     case 'table:workspace-access':
       return 'workspace-access'
+    case 'table:customers':
+      throw new RestoreDrillOrchestratorFailure('VERIFICATION_FAILED')
     default:
       return assertUnreachable(target)
   }
@@ -6753,7 +6760,7 @@ async function requireVerificationExportVersion(
   return version
 }
 
-/** Validates six completed table resources in canonical target order. */
+/** Validates seven completed table resources in canonical target order. */
 function validateCompletedVerificationResources(
   resources: readonly RestoreDrillResourceAggregate[],
 ): void {
@@ -6818,7 +6825,7 @@ function createRestoreResourceIdentities(
   configuration: RestoreDrillAwsConfiguration,
   digestKey: Uint8Array,
 ): RestoreDrillResourceIdentity[] {
-  return CROSS_DOMAIN_INTEGRITY_RESOURCE_TARGETS.map((target) => ({
+  return RESTORE_DRILL_RESOURCE_TARGETS.map((target) => ({
     identityDigest: createPhysicalResourceIdentityDigest(
       target,
       resolveRestorePhysicalName(target, checkpoint, configuration),
@@ -6831,7 +6838,7 @@ function createRestoreResourceIdentities(
 
 /** Resolves one physical restore resource from the fixed logical identity vector. */
 function resolveRestorePhysicalName(
-  target: CrossDomainIntegrityResourceIdentity['target'],
+  target: RestoreDrillResourceTarget,
   checkpoint: RestoreDrillResourceCheckpoint,
   configuration: RestoreDrillAwsConfiguration,
 ): string {
@@ -6842,7 +6849,7 @@ function resolveRestorePhysicalName(
 
 /** Converts a cross-domain table target to the restore-drill target namespace. */
 function crossDomainTargetToRestoreTarget(
-  target: Exclude<CrossDomainIntegrityResourceIdentity['target'], 'bucket:file'>,
+  target: Exclude<RestoreDrillResourceTarget, 'bucket:file'>,
 ): RestoreDrillTableTarget {
   switch (target) {
     case 'table:audit-events':
@@ -6851,15 +6858,14 @@ function crossDomainTargetToRestoreTarget(
     case 'table:work-item-configuration':
     case 'table:work-items':
     case 'table:workspace-access':
+    case 'table:customers':
       return target
-    default:
-      return assertUnreachable(target)
   }
 }
 
 /** Calculates the existing domain-separated exact physical resource identity HMAC. */
 function createPhysicalResourceIdentityDigest(
-  target: CrossDomainIntegrityResourceIdentity['target'],
+  target: RestoreDrillResourceTarget,
   physicalName: string,
   configuration: RestoreDrillAwsConfiguration,
   digestKey: Uint8Array,
@@ -10304,7 +10310,8 @@ function isRestoreDrillTableTargetString(value: string): value is RestoreDrillTa
     value === 'table:project-directory' ||
     value === 'table:work-item-configuration' ||
     value === 'table:work-items' ||
-    value === 'table:workspace-access'
+    value === 'table:workspace-access' ||
+    value === 'table:customers'
 }
 
 /** Checks a bounded non-empty string. */

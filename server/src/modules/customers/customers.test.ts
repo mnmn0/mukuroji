@@ -163,6 +163,35 @@ test('keeps a deleted keyed Customer Request from being recreated by retry', asy
   })
 })
 
+test('keeps a deleted keyed Customer Contact from being recreated by retry', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const input = {
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+  }
+  const contact = await client.createContact('workspace-1', customer.id, 'member-1', input, 'deleted-contact-1')
+  await client.deleteContact('workspace-1', customer.id, contact.id, 'member-1', contact.revision)
+
+  await expect(client.createContact('workspace-1', customer.id, 'member-1', input, 'deleted-contact-1')).rejects.toMatchObject({
+    code: 'CustomerContactDeleted',
+    status: 409,
+  })
+  await expect(client.createContact('workspace-1', customer.id, 'member-1', {
+    ...input,
+    name: 'A changed contact must not reuse the deleted retry key.',
+  }, 'deleted-contact-1')).rejects.toMatchObject({
+    code: 'CustomerContactAlreadyExists',
+    status: 409,
+  })
+})
+
 test('uses the current Work Item Project assignment when calculating Project impact', async () => {
   const client = createClient()
   const customer = await client.createCustomer('workspace-1', 'member-1', {
@@ -187,6 +216,47 @@ test('uses the current Work Item Project assignment when calculating Project imp
     customerCount: 0,
     requestCount: 0,
   })
+})
+
+test('bounds canonical Work Item reads while calculating Project impact', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  for (const index of Array.from({ length: 12 }, (_, value) => value)) {
+    const request = await client.createRequest('workspace-1', 'member-1', {
+      ...requestInput(customer.id),
+      originalMessage: `Request ${index}`,
+    })
+    await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+      teamId: 'support',
+      workItemId: `work-item-${index}`,
+    })
+  }
+
+  let releaseResolvers: () => void = () => undefined
+  const release = new Promise<void>((resolve) => {
+    releaseResolvers = resolve
+  })
+  let activeReads = 0
+  let maximumActiveReads = 0
+  const impactPromise = client.getProjectImpact('workspace-1', 'project-1', async () => {
+    activeReads += 1
+    maximumActiveReads = Math.max(maximumActiveReads, activeReads)
+    await release
+    activeReads -= 1
+    return 'project-1'
+  })
+
+  await Promise.resolve()
+  releaseResolvers()
+  await impactPromise
+
+  expect(maximumActiveReads).toBe(8)
 })
 
 test('does not let an omitted retention deadline reuse a key created with an explicit deadline', async () => {
@@ -270,7 +340,7 @@ test('rejects inactive contacts for new Customer Requests and contact assignment
   })
   const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Ada Lovelace',
-  })
+  }, 'inactive-request-contact')
   const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
   const retryInput = {
     ...requestInput(customer.id),
@@ -313,11 +383,11 @@ test('rejects Customer merges that would collide on normalized contact email add
   await client.createContact('workspace-1', target.id, 'member-1', {
     name: 'Target contact',
     email: 'Ada@Example.com',
-  })
+  }, 'merge-target-contact')
   await client.createContact('workspace-1', source.id, 'member-1', {
     name: 'Source contact',
     email: ' ada@example.com ',
-  })
+  }, 'merge-source-contact')
 
   await expect(client.mergeCustomer('workspace-1', source.id, 'member-1', {
     targetCustomerId: target.id,
@@ -440,7 +510,7 @@ test('merges Customer identity and prepares idempotent source-capable completion
   const contact = await client.createContact('workspace-1', source.id, 'member-1', {
     name: 'Ada Lovelace',
     email: 'ada@example.com',
-  })
+  }, 'impact-contact')
   const request = await client.createRequest('workspace-1', 'member-1', {
     ...requestInput(source.id),
     contactId: contact.id,
@@ -522,6 +592,33 @@ test('does not close a Customer Request when one of several linked Work Items co
   await client.prepareCompletionNotifications('workspace-1', 'support', 'work-item-1', 'member-1')
 
   expect((await client.getRequest('workspace-1', request.id)).status).toBe('requested')
+})
+
+test('prepares a completion candidate when a request is linked to an already completed Work Item', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const request = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+
+  await client.linkRequestToWorkItem(
+    'workspace-1',
+    request.id,
+    'member-1',
+    { teamId: 'support', workItemId: 'work-item-1' },
+    undefined,
+    true,
+  )
+
+  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1', async () => true)).resolves.toMatchObject([{
+    requestId: request.id,
+    teamId: 'support',
+    workItemId: 'work-item-1',
+  }])
 })
 
 test('invalidates completion candidates when a Work Item reopens', async () => {
@@ -607,7 +704,7 @@ test('keeps Customer references and notification candidates consistent across de
     name: 'Ada Lovelace',
     email: 'ada@example.com',
     primary: true,
-  })
+  }, 'notification-contact')
   const request = await client.createRequest('workspace-1', 'member-1', {
     ...requestInput(customer.id),
     contactId: contact.id,
@@ -800,7 +897,7 @@ test('does not repopulate records after retention redaction', async () => {
     name: 'Ada Lovelace',
     email: 'ada@example.com',
     retentionExpiresAt: '2026-07-31T00:00:00.000Z',
-  })
+  }, 'retention-contact')
   const request = await client.createRequest('workspace-1', 'member-1', {
     ...requestInput(customer.id),
     contactId: contact.id,

@@ -63,6 +63,7 @@ import type {
   TriageActor,
   TriageAuditContextFactory,
   TriageAuthorizationConditionChecks,
+  TriageCustomerAssociationAuthorizationFactory,
   TriageClient,
   TriageIdempotency,
 } from '../../triage'
@@ -726,11 +727,15 @@ export class DynamoDbTriageClient implements TriageClient {
     workspaceId: string,
     customerId: string,
     actorId: string,
+    createAuthorizationConditionChecks?: TriageCustomerAssociationAuthorizationFactory,
   ): Promise<void> {
     requireUserId(actorId, 'Triage actor ID')
     const entries = await this.listCustomerAssociations(workspaceId, customerId)
 
     for (const entry of entries) {
+      const authorizationConditionChecks = createAuthorizationConditionChecks
+        ? await createAuthorizationConditionChecks(entry)
+        : undefined
       await this.associateCustomer(
         workspaceId,
         entry.teamId,
@@ -742,7 +747,7 @@ export class DynamoDbTriageClient implements TriageClient {
           contactId: null,
           customerRequestId: null,
         },
-        undefined,
+        authorizationConditionChecks,
         { kind: 'deletion', customerId },
       )
     }

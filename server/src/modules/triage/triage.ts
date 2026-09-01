@@ -109,6 +109,11 @@ export type TriageCustomerAssociationOperation =
       targetCustomerId: string
     }
 
+/** Builds live authorization conditions for one Customer association cleanup mutation. */
+export type TriageCustomerAssociationAuthorizationFactory = (
+  entry: TriageEntry,
+) => Promise<TriageAuthorizationConditionChecks | undefined>
+
 /** Work Item resolution contributed by application composition. */
 export type TriageWorkItemActionResolution = {
   /** The canonical Work Item selected or created for the action. */
@@ -318,12 +323,14 @@ export interface TriageClient {
    * @param workspaceId The owning Workspace ID.
    * @param customerId The Customer whose reverse links must be removed.
    * @param actorId The authenticated actor performing the cleanup.
+   * @param createAuthorizationConditionChecks Builds live Team and Project fences for each entry.
    * @returns A promise that resolves after all matching links are cleared.
    */
   clearCustomerAssociations?(
     workspaceId: string,
     customerId: string,
     actorId: string,
+    createAuthorizationConditionChecks?: TriageCustomerAssociationAuthorizationFactory,
   ): Promise<void>
 }
 

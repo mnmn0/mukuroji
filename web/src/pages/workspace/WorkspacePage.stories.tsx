@@ -132,6 +132,8 @@ const storyWorkspaceCommandMenuContext: WorkspaceCommandMenuContextValue = {
 const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   accessToken: 'storybook-access-token',
   canManageAiAssistance: true,
+  canReadCustomers: true,
+  canManageCustomerRequests: true,
   canManageCustomerViews: true,
   canViewCustomerSensitiveData: true,
   canLoadWorkspaceData: true,

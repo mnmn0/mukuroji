@@ -145,6 +145,7 @@ const CONFIGURATION: RestoreDrillAwsConfiguration = {
     'table:work-item-configuration': 'work-item-configuration',
     'table:work-items': 'work-items',
     'table:workspace-access': 'workspace-access',
+    'table:customers': 'customers',
   },
 }
 
@@ -1075,7 +1076,7 @@ describe('restore drill AWS primitives', () => {
     }
   })
 
-  test('collects exactly the six allowlisted PITR windows and descriptors', async () => {
+  test('collects exactly the seven allowlisted PITR windows and descriptors', async () => {
     const fixture = createFixture()
     const observations = await fixture.operations.collectSourceTableObservations()
 

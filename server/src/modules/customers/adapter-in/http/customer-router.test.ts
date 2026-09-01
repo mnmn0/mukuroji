@@ -22,7 +22,7 @@ type CustomerTestTriage = Pick<TriageClient, 'getEntry' | 'associateCustomer' | 
 /** Optional live-resource authorization replacements used by router tests. */
 type CustomerTestAuthorization = Partial<Pick<
   CustomerRouterDependencies,
-  'verifyWorkItemAccess' | 'verifyProjectAccess' | 'createTriageAuthorizationConditionChecks'
+  'verifyCustomerOwner' | 'verifyWorkItemAccess' | 'verifyProjectAccess' | 'createTriageAuthorizationConditionChecks'
 >>
 
 /** Creates a router with an in-memory Customer client and deterministic authorization. */
@@ -44,11 +44,11 @@ function createTestApp(
     getCustomers: () => client,
     requireWorkspaceAccess,
     verifyTriageAccess: async () => undefined,
-    verifyWorkItemAccess: authorization.verifyWorkItemAccess ?? (async () => ({ projectId: 'project-1' })),
+    verifyCustomerOwner: authorization.verifyCustomerOwner ?? (async () => []),
+    verifyWorkItemAccess: authorization.verifyWorkItemAccess ?? (async () => ({ projectId: 'project-1', isCompleted: false })),
     verifyProjectAccess: authorization.verifyProjectAccess ?? (async () => ({})),
-    ...(authorization.createTriageAuthorizationConditionChecks
-      ? { createTriageAuthorizationConditionChecks: authorization.createTriageAuthorizationConditionChecks }
-      : {}),
+    createTriageAuthorizationConditionChecks:
+      authorization.createTriageAuthorizationConditionChecks ?? (async () => []),
     getTriage: () => triage,
     readJson: async (request) => await request.json(),
     mapError: (_context, error) => {
@@ -63,6 +63,43 @@ function createTestApp(
   }))
   return app
 }
+
+test('fences Customer owner assignment through the authorization boundary', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const ownerChecks: Array<[string, string]> = []
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    undefined,
+    undefined,
+    {
+      verifyCustomerOwner: async (_principal, ownerUserId) => {
+        ownerChecks.push(['workspace-1', ownerUserId])
+        return []
+      },
+    },
+  )
+
+  const response = await app.request('/api/customers', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Acme Corporation',
+      ownerUserId: 'owner-1',
+      tier: 'enterprise',
+      size: 'enterprise',
+      status: 'active',
+      health: 'healthy',
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(ownerChecks).toEqual([['workspace-1', 'owner-1']])
+})
 
 /** Creates a Customer for Router integration tests. */
 async function createCustomer(client: InMemoryCustomerClient) {
@@ -152,6 +189,34 @@ test('links a Customer Request directly to a Project through the authorized rout
   expect(response.status).toBe(200)
   expect(body.projectLinks).toEqual([{ projectId: 'project-1', linkedAt: NOW, linkedBy: 'member-1' }])
   expect((await client.getProjectImpact('workspace-1', 'project-1', async () => 'project-1')).requestCount).toBe(1)
+})
+
+test('prepares a completion candidate when the link route targets a completed Work Item', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const request = await createRequest(client, customer.id)
+  const app = createTestApp(
+    client,
+    {
+      directoryId: 'workspace-1',
+      userKey: 'member-1',
+      canViewSensitiveData: true,
+    },
+    undefined,
+    undefined,
+    { verifyWorkItemAccess: async () => ({ projectId: 'project-1', isCompleted: true }) },
+  )
+
+  const response = await app.request(`/api/customer-requests/${request.id}/work-items`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ teamId: 'support', workItemId: 'work-item-1' }),
+  })
+
+  expect(response.status).toBe(200)
+  await expect(client.listCompletionNotifications('workspace-1', 'support', 'work-item-1', async () => true)).resolves.toMatchObject([{
+    requestId: request.id,
+  }])
 })
 
 test('accepts zero as the minimum Customer Request count filter', async () => {
@@ -268,6 +333,47 @@ test('requires an idempotency key and validates optional Customer Request fields
   })
   expect(repeated.status).toBe(201)
   expect(await repeated.json()).toEqual(await created.clone().json())
+})
+
+test('requires an idempotency key and replays Customer Contact creation safely', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  })
+  const body = JSON.stringify({ name: 'Ada Lovelace' })
+
+  const missingKey = await app.request(`/api/customers/${customer.id}/contacts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+  })
+  expect(missingKey.status).toBe(400)
+  expect(await missingKey.json()).toMatchObject({ code: 'InvalidCustomerInput' })
+
+  const created = await app.request(`/api/customers/${customer.id}/contacts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'Idempotency-Key': 'contact-1' },
+    body,
+  })
+  const repeated = await app.request(`/api/customers/${customer.id}/contacts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'Idempotency-Key': 'contact-1' },
+    body,
+  })
+  const conflicting = await app.request(`/api/customers/${customer.id}/contacts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'Idempotency-Key': 'contact-1' },
+    body: JSON.stringify({ name: 'Grace Hopper' }),
+  })
+
+  expect(created.status).toBe(201)
+  expect(repeated.status).toBe(201)
+  expect(await repeated.json()).toEqual(await created.clone().json())
+  expect(conflicting.status).toBe(409)
+  expect(await client.listContacts('workspace-1', customer.id)).toHaveLength(1)
 })
 
 test('rejects restricted Customer searches before scanning sensitive fields', async () => {
@@ -390,7 +496,7 @@ test('filters Customer relationships through live Team and Project access', asyn
     {
       verifyWorkItemAccess: async (_principal, teamId) => {
         if (teamId === 'hidden-team') throw { status: 403 }
-        return { projectId: 'project-1' }
+        return { projectId: 'project-1', isCompleted: false }
       },
       verifyProjectAccess: async (_principal, projectId) => {
         if (projectId === 'hidden-project') throw { status: 403 }
@@ -420,7 +526,7 @@ test('filters Customer relationships through live Team and Project access', asyn
 test('clears Triage Customer associations before deleting a Customer', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const customer = await createCustomer(client)
-  const calls: Array<[string, string, string]> = []
+  const calls: Array<Parameters<NonNullable<CustomerTestTriage['clearCustomerAssociations']>>> = []
   const app = createTestApp(
     client,
     {
@@ -432,6 +538,7 @@ test('clears Triage Customer associations before deleting a Customer', async () 
       getEntry: async () => {
         throw new Error('Triage entry is not read by deletion cleanup tests.')
       },
+      listCustomerAssociations: async () => [],
       clearCustomerAssociations: async (...args) => {
         calls.push(args)
       },
@@ -444,7 +551,9 @@ test('clears Triage Customer associations before deleting a Customer', async () 
   )
 
   expect(response.status).toBe(204)
-  expect(calls).toEqual([['workspace-1', customer.id, 'member-1']])
+  expect(calls.map(([workspaceId, customerId, actorId]) => [workspaceId, customerId, actorId]))
+    .toEqual([['workspace-1', customer.id, 'member-1']])
+  expect(calls[0]?.[3]).toEqual(expect.any(Function))
   await expect(client.getCustomer('workspace-1', customer.id)).rejects.toMatchObject({
     code: 'CustomerNotFound',
   })
@@ -455,7 +564,7 @@ test('rejects deleting a Contact that still has a Triage reverse link', async ()
   const customer = await createCustomer(client)
   const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Ada Lovelace',
-  })
+  }, 'delete-contact')
   const entry = createCustomerAssociationEntry(customer.id, contact.id)
   const app = createTestApp(
     client,
@@ -485,10 +594,10 @@ test('rejects merging a Contact that still has a Triage reverse link', async () 
   const customer = await createCustomer(client)
   const source = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Ada Lovelace',
-  })
+  }, 'merge-source-contact')
   const target = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Grace Hopper',
-  })
+  }, 'merge-target-contact')
   const entry = createCustomerAssociationEntry(customer.id, source.id)
   const app = createTestApp(
     client,
@@ -523,7 +632,7 @@ test('cancels a Contact deletion when the locked Triage rescan finds a reverse l
   const customer = await createCustomer(client)
   const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Ada Lovelace',
-  })
+  }, 'cancel-delete-contact')
   const entry = createCustomerAssociationEntry(customer.id, contact.id)
   let listCalls = 0
   const app = createTestApp(client, {
@@ -554,10 +663,10 @@ test('cancels a Contact merge when the locked Triage rescan finds a reverse link
   const customer = await createCustomer(client)
   const source = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Ada Lovelace',
-  })
+  }, 'cancel-merge-source-contact')
   const target = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Grace Hopper',
-  })
+  }, 'cancel-merge-target-contact')
   const entry = createCustomerAssociationEntry(customer.id, source.id)
   let listCalls = 0
   const app = createTestApp(client, {
@@ -732,7 +841,7 @@ test('rescans Triage associations after locking a Customer merge', async () => {
   await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
 })
 
-test('cancels a Customer merge when the locked Triage rescan loses authorization', async () => {
+test('retains a Customer merge marker when the locked Triage rescan loses authorization', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const source = await createCustomer(client)
   const target = await client.createCustomer('workspace-1', 'member-1', {
@@ -774,10 +883,24 @@ test('cancels a Customer merge when the locked Triage rescan loses authorization
 
   expect(response.status).toBe(403)
   expect(authorizationCalls).toBe(2)
-  await expect(client.getCustomer('workspace-1', source.id)).resolves.toMatchObject({ customer: { id: source.id } })
+  await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
+
+  const retryResponse = await app.request(`/api/customers/${source.id}/merge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      targetCustomerId: target.id,
+      sourceExpectedRevision: source.revision,
+      targetExpectedRevision: target.revision,
+    }),
+  })
+
+  expect(retryResponse.status).toBe(200)
+  expect(authorizationCalls).toBe(4)
+  await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
 })
 
-test('cancels a Customer merge when repointing a Triage association fails', async () => {
+test('retains a Customer merge marker when repointing a Triage association fails', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
   const source = await createCustomer(client)
   const target = await client.createCustomer('workspace-1', 'member-1', {
@@ -818,7 +941,7 @@ test('cancels a Customer merge when repointing a Triage association fails', asyn
 
   expect(firstResponse.status).toBe(503)
   expect(await firstResponse.json()).toMatchObject({ code: 'TriageCustomerAssociationUnavailable' })
-  await expect(client.getCustomer('workspace-1', source.id)).resolves.toMatchObject({ customer: { id: source.id } })
+  await expect(client.getCustomer('workspace-1', source.id)).rejects.toMatchObject({ code: 'CustomerNotFound' })
 
   const retryResponse = await app.request(`/api/customers/${source.id}/merge`, {
     method: 'POST',
@@ -902,7 +1025,7 @@ test('uses the live Work Item Project assignment for Project impact', async () =
     },
     undefined,
     undefined,
-    { verifyWorkItemAccess: async () => ({ projectId: 'project-new' }) },
+    { verifyWorkItemAccess: async () => ({ projectId: 'project-new', isCompleted: false }) },
   )
 
   const currentProjectResponse = await app.request('/api/projects/project-new/customer-impact')
@@ -1130,10 +1253,10 @@ test('validates partial Triage Customer associations against the current Custome
   const customer = await createCustomer(client)
   const contact = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Ada Lovelace',
-  })
+  }, 'triage-contact')
   const inactiveContact = await client.createContact('workspace-1', customer.id, 'member-1', {
     name: 'Grace Hopper',
-  })
+  }, 'triage-inactive-contact')
   await client.updateContact('workspace-1', customer.id, inactiveContact.id, 'member-1', {
     expectedRevision: inactiveContact.revision,
     status: 'inactive',

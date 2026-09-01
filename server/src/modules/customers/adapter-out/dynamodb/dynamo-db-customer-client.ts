@@ -50,6 +50,7 @@ import {
   InMemoryCustomerClient,
   type CustomerAuthorizationConditionChecks,
   type CustomerClient,
+  type CustomerContactIdempotencyReceipt,
   type CustomerContactDeletionOperation,
   type CustomerContactMergeOperation,
   type CustomerContactOperation,
@@ -83,6 +84,7 @@ const CUSTOMER_RECORD_PREFIX = 'CUSTOMER#'
 const CONTACT_RECORD_PREFIX = 'CONTACT#'
 const REQUEST_RECORD_PREFIX = 'REQUEST#'
 const REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX = 'REQUEST_RECEIPT#'
+const CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX = 'CONTACT_RECEIPT#'
 const VIEW_RECORD_PREFIX = 'VIEW#'
 const NOTIFICATION_RECORD_PREFIX = 'NOTIFICATION#'
 
@@ -191,6 +193,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     await this.ensureTable()
     const workspaceIds = new Set<string>()
     const processedWorkspaceIds = new Set<string>()
+    const failedWorkspaceIds = new Set<string>()
     const result: CustomerRetentionSweepResult = {
       scannedPages: 0,
       workspacesProcessed: 0,
@@ -200,13 +203,12 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     }
     let exclusiveStartKey: Record<string, unknown> | undefined
     let scannedPages = 0
+    let firstWorkspaceError: unknown
+    let pageLimitExceeded = false
     do {
       if (scannedPages >= pageLimit) {
-        throw new CustomerError(
-          503,
-          'CustomerRetentionSweepIncomplete',
-          'Customer retention exceeded the configured page limit.',
-        )
+        pageLimitExceeded = true
+        break
       }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
@@ -238,24 +240,40 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         workspaceIds.add(item.workspaceId)
       }
       for (const workspaceId of workspaceIds) {
-        if (processedWorkspaceIds.has(workspaceId)) continue
-        const retention = await this.redactExpired(workspaceId, evaluatedAt)
-        processedWorkspaceIds.add(workspaceId)
-        result.workspacesProcessed += 1
-        result.customersRedacted += retention.customersRedacted
-        result.contactsRedacted += retention.contactsRedacted
-        result.requestsRedacted += retention.requestsRedacted
+        if (processedWorkspaceIds.has(workspaceId) || failedWorkspaceIds.has(workspaceId)) continue
+        try {
+          const retention = await this.redactExpired(workspaceId, evaluatedAt)
+          processedWorkspaceIds.add(workspaceId)
+          result.workspacesProcessed += 1
+          result.customersRedacted += retention.customersRedacted
+          result.contactsRedacted += retention.contactsRedacted
+          result.requestsRedacted += retention.requestsRedacted
+        } catch (error) {
+          failedWorkspaceIds.add(workspaceId)
+          firstWorkspaceError ??= error
+        }
       }
       exclusiveStartKey = response.LastEvaluatedKey
       if (exclusiveStartKey !== undefined && scannedPages >= pageLimit) {
-        throw new CustomerError(
-          503,
-          'CustomerRetentionSweepIncomplete',
-          'Customer retention exceeded the configured page limit after processing the current page.',
-        )
+        pageLimitExceeded = true
       }
-    } while (exclusiveStartKey !== undefined)
+    } while (exclusiveStartKey !== undefined && !pageLimitExceeded)
     result.scannedPages = scannedPages
+    if (firstWorkspaceError !== undefined) {
+      throw new CustomerError(
+        503,
+        'CustomerRetentionWorkspaceFailed',
+        'One or more Customer Workspaces could not be redacted. Retry the retention sweep.',
+        { cause: firstWorkspaceError },
+      )
+    }
+    if (pageLimitExceeded) {
+      throw new CustomerError(
+        503,
+        'CustomerRetentionSweepIncomplete',
+        'Customer retention exceeded the configured page limit.',
+      )
+    }
     return result
   }
 
@@ -281,8 +299,19 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param input Customer creation fields.
    * @returns The created Customer.
    */
-  async createCustomer(workspaceId: string, actorId: string, input: CreateCustomerInput): Promise<Customer> {
-    return await this.mutate(workspaceId, (memory) => memory.createCustomer(workspaceId, actorId, input), [CUSTOMER_RECORD_PREFIX])
+  async createCustomer(
+    workspaceId: string,
+    actorId: string,
+    input: CreateCustomerInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<Customer> {
+    return await this.mutate(
+      workspaceId,
+      (memory) => memory.createCustomer(workspaceId, actorId, input),
+      [CUSTOMER_RECORD_PREFIX],
+      false,
+      authorizationConditionChecks,
+    )
   }
 
   /** Updates a customer under an optimistic revision fence.
@@ -293,8 +322,20 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param input Customer changes and the expected revision.
    * @returns The updated Customer.
    */
-  async updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer> {
-    return await this.mutate(workspaceId, (memory) => memory.updateCustomer(workspaceId, customerId, actorId, input), [CUSTOMER_RECORD_PREFIX])
+  async updateCustomer(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+    input: UpdateCustomerInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<Customer> {
+    return await this.mutate(
+      workspaceId,
+      (memory) => memory.updateCustomer(workspaceId, customerId, actorId, input),
+      [CUSTOMER_RECORD_PREFIX],
+      false,
+      authorizationConditionChecks,
+    )
   }
 
   /** Deletes a customer and its owned contacts and requests.
@@ -336,6 +377,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
+      CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -427,6 +469,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
+      CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], true)
   }
@@ -459,6 +502,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
+      CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const probe = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -506,6 +550,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
+      CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const memory = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -527,6 +572,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         CONTACT_RECORD_PREFIX,
         REQUEST_RECORD_PREFIX,
         REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
+        CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
         NOTIFICATION_RECORD_PREFIX,
       ], CUSTOMER_UNBOUNDED_READ_LIMIT)
       const nextMemory = new InMemoryCustomerClient({ now: this.now, id: this.id })
@@ -577,13 +623,21 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param customerId Contact owner.
    * @param actorId Authenticated actor creating the contact.
    * @param input Contact creation fields.
+   * @param idempotencyKey Required caller-selected retry key used to derive the stable Contact ID.
    * @returns The created contact.
    */
-  async createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact> {
-    return await this.mutate(workspaceId, (memory) => memory.createContact(workspaceId, customerId, actorId, input), [
+  async createContact(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+    input: CreateCustomerContactInput,
+    idempotencyKey: string,
+  ): Promise<CustomerContact> {
+    return await this.mutate(workspaceId, (memory) => memory.createContact(workspaceId, customerId, actorId, input, idempotencyKey), [
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
+      CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
     ], true)
   }
 
@@ -967,6 +1021,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param actorId Authenticated actor creating the link.
    * @param input Work Item link fields.
    * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
+   * @param prepareCompletionNotification Whether to prepare a completion candidate when the canonical Work Item is already complete.
    * @returns The updated Customer Request.
    */
   async linkRequestToWorkItem(
@@ -975,10 +1030,24 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     actorId: string,
     input: LinkCustomerRequestWorkItemInput,
     authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+    prepareCompletionNotification = false,
   ): Promise<CustomerRequest> {
-    return await this.mutate(workspaceId, (memory) => memory.linkRequestToWorkItem(workspaceId, requestId, actorId, input), [
-      REQUEST_RECORD_PREFIX,
-    ], false, authorizationConditionChecks)
+    return await this.mutate(
+      workspaceId,
+      (memory) => memory.linkRequestToWorkItem(
+        workspaceId,
+        requestId,
+        actorId,
+        input,
+        undefined,
+        prepareCompletionNotification,
+      ),
+      prepareCompletionNotification
+        ? [REQUEST_RECORD_PREFIX, NOTIFICATION_RECORD_PREFIX]
+        : [REQUEST_RECORD_PREFIX],
+      false,
+      authorizationConditionChecks,
+    )
   }
 
   /** Removes a request-to-Work-Item link under a revision fence.
@@ -1386,6 +1455,8 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         state.requests.set(decoded.value.id, decoded.value)
       } else if (decoded.kind === 'request-receipt') {
         state.requestIdempotencyReceipts.set(decoded.value.requestId, decoded.value)
+      } else if (decoded.kind === 'contact-receipt') {
+        state.contactIdempotencyReceipts.set(decoded.value.contactId, decoded.value)
       } else if (decoded.kind === 'view') {
         state.views.set(decoded.value.id, decoded.value)
       } else {
@@ -1763,6 +1834,7 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
       REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
+      CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX,
       NOTIFICATION_RECORD_PREFIX,
     ], CUSTOMER_UNBOUNDED_READ_LIMIT)
     const recordKeys = serializeState(workspaceId, loaded.state)
@@ -2222,6 +2294,16 @@ type StoredCustomerRow =
   | {
       /** Workspace partition key. */
       workspaceId: string
+      /** Customer Contact receipt sort key. */
+      recordKey: string
+      /** Row discriminator. */
+      entityType: 'contact-idempotency-receipt'
+      /** Content-free receipt for a deleted keyed Customer Contact. */
+      receipt: CustomerContactIdempotencyReceipt
+    }
+  | {
+      /** Workspace partition key. */
+      workspaceId: string
       /** Saved view sort key. */
       recordKey: string
       /** Row discriminator. */
@@ -2282,6 +2364,12 @@ type DecodedCustomerRow =
     }
   | {
       /** Narrowed row discriminator. */
+      kind: 'contact-receipt'
+      /** Decoded receipt for a deleted keyed Customer Contact. */
+      value: CustomerContactIdempotencyReceipt
+    }
+  | {
+      /** Narrowed row discriminator. */
       kind: 'view'
       /** Decoded saved view value. */
       value: CustomerSavedView
@@ -2300,6 +2388,7 @@ function createEmptyState(): CustomerWorkspaceState {
     contacts: new Map(),
     requests: new Map(),
     requestIdempotencyReceipts: new Map(),
+    contactIdempotencyReceipts: new Map(),
     views: new Map(),
     notifications: new Map(),
   }
@@ -2333,6 +2422,12 @@ function serializeState(workspaceId: string, state: CustomerWorkspaceState): Sto
       workspaceId,
       recordKey: `${REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${receipt.requestId}`,
       entityType: 'request-idempotency-receipt',
+      receipt,
+    })),
+    ...[...state.contactIdempotencyReceipts.values()].map((receipt): StoredCustomerRow => ({
+      workspaceId,
+      recordKey: `${CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${receipt.contactId}`,
+      entityType: 'contact-idempotency-receipt',
       receipt,
     })),
     ...[...state.views.values()].map((view): StoredCustomerRow => ({ workspaceId, recordKey: `VIEW#${view.id}`, entityType: 'view', view })),
@@ -2386,6 +2481,7 @@ function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRo
   if (value.entityType === 'contact' && isContact(value.contact) && value.contact.workspaceId === workspaceId && value.recordKey === `CONTACT#${value.contact.id}`) return { kind: 'contact', value: value.contact }
   if (value.entityType === 'request' && isRequest(value.request) && value.request.workspaceId === workspaceId && value.recordKey === `REQUEST#${value.request.id}`) return { kind: 'request', value: value.request }
   if (value.entityType === 'request-idempotency-receipt' && isRequestIdempotencyReceipt(value.receipt) && value.recordKey === `${REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${value.receipt.requestId}`) return { kind: 'request-receipt', value: value.receipt }
+  if (value.entityType === 'contact-idempotency-receipt' && isContactIdempotencyReceipt(value.receipt) && value.recordKey === `${CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${value.receipt.contactId}`) return { kind: 'contact-receipt', value: value.receipt }
   if (value.entityType === 'view' && isSavedView(value.view) && value.view.workspaceId === workspaceId && value.recordKey === `VIEW#${value.view.id}`) return { kind: 'view', value: value.view }
   if (value.entityType === 'completion-notification' && isNotification(value.notification) && value.notification.workspaceId === workspaceId && value.recordKey === `NOTIFICATION#${value.notification.id}`) return { kind: 'notification', value: value.notification }
   return undefined
@@ -2434,6 +2530,12 @@ function isRequest(value: unknown): value is CustomerRequest {
 /** Performs a small structural receipt validation at the persistence boundary. */
 function isRequestIdempotencyReceipt(value: unknown): value is CustomerRequestIdempotencyReceipt {
   return isRecord(value) && isString(value.requestId) && isString(value.customerId) &&
+    isString(value.fingerprint) && /^[a-f0-9]{64}$/.test(value.fingerprint)
+}
+
+/** Performs a small structural Contact receipt validation at the persistence boundary. */
+function isContactIdempotencyReceipt(value: unknown): value is CustomerContactIdempotencyReceipt {
+  return isRecord(value) && isString(value.contactId) && isString(value.customerId) &&
     isString(value.fingerprint) && /^[a-f0-9]{64}$/.test(value.fingerprint)
 }
 
@@ -2743,6 +2845,7 @@ function isOwnedByCustomer(row: StoredCustomerRow, customerId: string): boolean 
   if (row.entityType === 'contact') return row.contact.customerId === customerId
   if (row.entityType === 'request') return row.request.customerId === customerId
   if (row.entityType === 'request-idempotency-receipt') return row.receipt.customerId === customerId
+  if (row.entityType === 'contact-idempotency-receipt') return row.receipt.customerId === customerId
   if (row.entityType === 'completion-notification') return row.notification.customerId === customerId
   return false
 }

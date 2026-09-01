@@ -8,6 +8,7 @@ export const customersMessages = {
   'customers.loading': '顧客を読み込んでいます。',
   'customers.loadingMore': '追加読み込み中…',
   'customers.loadError': '顧客を読み込めませんでした。',
+  'customers.permissionDenied': 'Customer を閲覧する権限がありません。',
   'customers.loadMore': '顧客を追加読み込み',
   'customers.retry': '再読み込み',
   'customers.empty': '条件に一致する顧客はいません。',

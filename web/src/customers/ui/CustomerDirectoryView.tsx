@@ -98,6 +98,7 @@ export function CustomerDirectoryView({
   onOpenWorkItem,
   onOpenProject,
 }: CustomerDirectoryViewProps) {
+  const effectiveGroupBy = !canViewSensitiveData && groupBy === 'owner' ? undefined : groupBy
   return (
     <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
       <div className="workbench-panel grid gap-4 p-4">
@@ -197,8 +198,8 @@ export function CustomerDirectoryView({
           />
           <FilterSelect
             label={t('customers.filters.groupBy')}
-            options={customerGroupOptions}
-            value={groupBy}
+            options={canViewSensitiveData ? customerGroupOptions : customerSafeGroupOptions}
+            value={effectiveGroupBy}
             onChange={onGroupByChange}
             t={t}
           />
@@ -208,7 +209,7 @@ export function CustomerDirectoryView({
             <span>{t('customers.filters.savedView')}</span>
             <select
               className="workbench-input min-h-10 w-full"
-              value={savedViews.find((view) => matchesSavedView(view, filters, groupBy))?.id ?? ''}
+              value={savedViews.find((view) => matchesSavedView(view, filters, effectiveGroupBy))?.id ?? ''}
               onChange={(event) => {
                 const view = savedViews.find((candidate) => candidate.id === event.target.value)
                 if (view) onApplySavedView(view)
@@ -255,9 +256,9 @@ export function CustomerDirectoryView({
               </p>
             ) : (
               <div className="divide-y divide-[var(--workbench-border)]">
-                {groupCustomers(customers, groupBy, t).map((group) => (
+                {groupCustomers(customers, effectiveGroupBy, t).map((group) => (
                   <div key={group.key}>
-                    {groupBy ? <h3 className="bg-[var(--workbench-surface-muted)] px-5 py-2 text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{group.label}</h3> : null}
+                    {effectiveGroupBy ? <h3 className="bg-[var(--workbench-surface-muted)] px-5 py-2 text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{group.label}</h3> : null}
                     {group.customers.map((customer) => (
                       <button
                         className={`grid w-full gap-3 px-5 py-4 text-left transition hover:bg-teal-50/60 ${detail?.customer.id === customer.id ? 'bg-teal-50' : ''}`}
@@ -536,6 +537,9 @@ const customerGroupOptions = [
   { value: 'health', labelKey: 'customers.filters.group.health' },
   { value: 'owner', labelKey: 'customers.filters.group.owner' },
 ] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerSavedView['groupBy']>>[]
+
+/** Customer grouping options that do not expose redacted owner identifiers. */
+const customerSafeGroupOptions = customerGroupOptions.filter((option) => option.value !== 'owner')
 
 /** Localized labels for Customer commercial tiers. */
 const customerTierLabels: Record<Customer['tier'], MessageKey> = {

@@ -31,8 +31,16 @@ import {
   CustomerError,
   projectCustomerImpactSignal,
 } from '../../domain/customer'
-import type { CustomerClient, CustomerWorkItemProjectResolver } from '../../customers'
-import type { TriageAuthorizationConditionChecks, TriageClient } from '../../../triage'
+import type {
+  CustomerAuthorizationConditionChecks,
+  CustomerClient,
+  CustomerWorkItemProjectResolver,
+} from '../../customers'
+import type {
+  TriageAuthorizationConditionChecks,
+  TriageClient,
+  TriageCustomerAssociationAuthorizationFactory,
+} from '../../../triage'
 
 /** Minimum authenticated Workspace identity required by Customer routes. */
 export type CustomerPrincipal = {
@@ -63,6 +71,8 @@ export type CustomerAuthorizationScope =
 export type CustomerWorkItemAuthorization = {
   /** Project assigned to the Work Item, when available. */
   projectId?: string
+  /** Whether the canonical Work Item is currently completed. */
+  isCompleted: boolean
   /** Live Work Item, Team, Project, and actor fences for the Customer write. */
   authorizationConditionChecks?: TriageAuthorizationConditionChecks
 }
@@ -81,8 +91,10 @@ export type CustomerRouterDependencies<Principal extends CustomerPrincipal = Cus
   requireWorkspaceAccess(context: Context, minimum: 'read' | 'write' | 'manage', scope?: CustomerAuthorizationScope): Promise<Principal>
   /** Verifies Team access before associating a Triage Entry. */
   verifyTriageAccess(principal: Principal, teamId: string, minimum: 'viewer' | 'member'): Promise<void>
+  /** Verifies and fences a Customer owner as an active non-guest Workspace member. */
+  verifyCustomerOwner(principal: Principal, ownerUserId: string): Promise<CustomerAuthorizationConditionChecks>
   /** Builds the same live Team, Project, and actor fences used by Triage mutations. */
-  createTriageAuthorizationConditionChecks?: (
+  createTriageAuthorizationConditionChecks: (
     principal: Principal,
     teamId: string,
     projectIds: readonly (string | undefined)[],
@@ -208,10 +220,15 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customers', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const input = readCreateCustomerInput(await dependencies.readJson(context.req))
+      const authorizationConditionChecks = input.ownerUserId === undefined
+        ? undefined
+        : await dependencies.verifyCustomerOwner(principal, input.ownerUserId)
       const customer = await dependencies.getCustomers().createCustomer(
         principal.directoryId,
         principal.userKey,
-        readCreateCustomerInput(await dependencies.readJson(context.req)),
+        input,
+        authorizationConditionChecks,
       )
       return context.json(projectCustomer(principal, customer), 201)
     } catch (error) {
@@ -253,11 +270,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customers/:customerId/contacts', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const input = readCreateContactInput(await dependencies.readJson(context.req))
       const contact = await dependencies.getCustomers().createContact(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         principal.userKey,
-        readCreateContactInput(await dependencies.readJson(context.req)),
+        input,
+        readIdempotencyKey(context.req.header('Idempotency-Key')),
       )
       return context.json(projectContact(principal, contact), 201)
     } catch (error) {
@@ -280,11 +299,16 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.patch('/api/customers/:customerId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const input = readUpdateCustomerInput(await dependencies.readJson(context.req))
+      const authorizationConditionChecks = input.ownerUserId === undefined || input.ownerUserId === null
+        ? undefined
+        : await dependencies.verifyCustomerOwner(principal, input.ownerUserId)
       const customer = await dependencies.getCustomers().updateCustomer(
         principal.directoryId,
         context.req.param('customerId') ?? '',
         principal.userKey,
-        readUpdateCustomerInput(await dependencies.readJson(context.req)),
+        input,
+        authorizationConditionChecks,
       )
       return context.json(projectCustomer(principal, customer))
     } catch (error) {
@@ -298,10 +322,23 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const customerId = context.req.param('customerId') ?? ''
       const expectedRevision = readExpectedRevision(context.req.query('expectedRevision'))
       const triage = dependencies.getTriage()
-      if (!triage.clearCustomerAssociations) {
+      if (!triage.clearCustomerAssociations || !triage.listCustomerAssociations) {
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association cleanup is unavailable.')
       }
       const customers = dependencies.getCustomers()
+      const authorizeAssociation: TriageCustomerAssociationAuthorizationFactory = async (entry) => {
+        await dependencies.verifyTriageAccess(principal, entry.teamId, 'member')
+        return await dependencies.createTriageAuthorizationConditionChecks(
+          principal,
+          entry.teamId,
+          [entry.projectId],
+        )
+      }
+      const associations = await triage.listCustomerAssociations(
+        principal.directoryId,
+        customerId,
+      )
+      await Promise.all(associations.map((entry) => authorizeAssociation(entry)))
       await customers.beginCustomerDeletion(
         principal.directoryId,
         customerId,
@@ -312,6 +349,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.directoryId,
         customerId,
         principal.userKey,
+        authorizeAssociation,
       )
       await customers.completeCustomerDeletion(
         principal.directoryId,
@@ -349,13 +387,11 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
           authorizationConditionChecks?: TriageAuthorizationConditionChecks
         }> = []
         for (const entry of associations) {
-          const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
-            ? await dependencies.createTriageAuthorizationConditionChecks(
-                principal,
-                entry.teamId,
-                [entry.projectId],
-              )
-            : undefined
+          const authorizationConditionChecks = await dependencies.createTriageAuthorizationConditionChecks(
+            principal,
+            entry.teamId,
+            [entry.projectId],
+          )
           authorizedAssociations.push({ entry, authorizationConditionChecks })
         }
         return authorizedAssociations
@@ -367,52 +403,37 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         input,
       )
-      try {
-        const authorizedAssociations = await readAuthorizedAssociations()
-        for (const { entry, authorizationConditionChecks } of authorizedAssociations) {
-          await triage.associateCustomer(
-            principal.directoryId,
-            entry.teamId,
-            entry.id,
-            { id: principal.userKey },
-            {
-              expectedRevision: entry.revision,
-              customerId: input.targetCustomerId,
-              contactId: entry.contactId ?? null,
-              customerRequestId: entry.customerRequestId ?? null,
-            },
-            authorizationConditionChecks,
-            {
-              kind: 'merge',
-              sourceCustomerId,
-              targetCustomerId: input.targetCustomerId,
-            },
-          )
-        }
-        const detail = await customers.completeCustomerMerge(
+      const authorizedAssociations = await readAuthorizedAssociations()
+      for (const { entry, authorizationConditionChecks } of authorizedAssociations) {
+        await triage.associateCustomer(
           principal.directoryId,
-          sourceCustomerId,
-          principal.userKey,
-          input,
-        )
-        return context.json(await projectCustomerDetail(principal, detail, dependencies))
-      } catch (error) {
-        try {
-          await customers.cancelCustomerMerge(
-            principal.directoryId,
+          entry.teamId,
+          entry.id,
+          { id: principal.userKey },
+          {
+            expectedRevision: entry.revision,
+            customerId: input.targetCustomerId,
+            contactId: entry.contactId ?? null,
+            customerRequestId: entry.customerRequestId ?? null,
+          },
+          authorizationConditionChecks,
+          {
+            kind: 'merge',
             sourceCustomerId,
-            principal.userKey,
-            input,
-          )
-        } catch (cancelError) {
-          throw new CustomerError(
-            503,
-            'CustomerMergeCancellationFailed',
-            'The Customer merge could not be safely prepared. Retry the operation.',
-            { cause: cancelError },
-          )
-        }
-        throw error
+            targetCustomerId: input.targetCustomerId,
+          },
+        )
+      }
+      const detail = await customers.completeCustomerMerge(
+        principal.directoryId,
+        sourceCustomerId,
+        principal.userKey,
+        input,
+      )
+      try {
+        return context.json(await projectCustomerDetail(principal, detail, dependencies))
+      } catch {
+        return context.json(projectCommittedCustomerDetail(principal, detail))
       }
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -560,7 +581,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
 
   router.post('/api/customer-requests', async (context) => {
     try {
-      const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const principal = await dependencies.requireWorkspaceAccess(context, 'manage')
       const body = await dependencies.readJson(context.req)
       const request = await dependencies.getCustomers().createRequest(
         principal.directoryId,
@@ -651,6 +672,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         { ...body, ...(access.projectId ? { projectId: access.projectId } : {}) },
         access.authorizationConditionChecks,
+        access.isCompleted,
       )
       return context.json(await projectRequestForResponse(principal, request, dependencies))
     } catch (error) {
@@ -717,7 +739,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const teamId = requirePathValue(context.req.param('teamId'), 'Team ID')
       const entryId = requirePathValue(context.req.param('entryId'), 'Triage Entry ID')
       const input = readTriageAssociationInput(await dependencies.readJson(context.req))
-      const principal = await dependencies.requireWorkspaceAccess(context, 'write', { teamId })
+      const principal = await dependencies.requireWorkspaceAccess(context, 'manage', { teamId })
       await dependencies.verifyTriageAccess(principal, teamId, 'member')
       const triage = dependencies.getTriage()
       const currentEntry = await triage.getEntry(principal.directoryId, teamId, entryId)
@@ -752,13 +774,11 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       if (!triage.associateCustomer) {
         throw new CustomerError(503, 'TriageCustomerAssociationUnavailable', 'Triage Customer association is unavailable.')
       }
-      const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
-        ? await dependencies.createTriageAuthorizationConditionChecks(
-            principal,
-            teamId,
-            [currentEntry.projectId],
-          )
-        : undefined
+      const authorizationConditionChecks = await dependencies.createTriageAuthorizationConditionChecks(
+        principal,
+        teamId,
+        [currentEntry.projectId],
+      )
       const entry = await triage.associateCustomer(
         principal.directoryId,
         teamId,
@@ -778,7 +798,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const teamId = requirePathValue(context.req.param('teamId'), 'Team ID')
       const entryId = requirePathValue(context.req.param('entryId'), 'Triage Entry ID')
       const input = readCreateRequestFromTriageInput(await dependencies.readJson(context.req))
-      const principal = await dependencies.requireWorkspaceAccess(context, 'write', { teamId })
+      const principal = await dependencies.requireWorkspaceAccess(context, 'manage', { teamId })
       await dependencies.verifyTriageAccess(principal, teamId, 'member')
       const triage = dependencies.getTriage()
       if (!triage.associateCustomer) {
@@ -819,13 +839,11 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
             'member',
           )
         : undefined
-      const authorizationConditionChecks = dependencies.createTriageAuthorizationConditionChecks
-        ? await dependencies.createTriageAuthorizationConditionChecks(
-            principal,
-            teamId,
-            [entry.projectId, workItemAuthorization?.projectId],
-          )
-        : undefined
+      const authorizationConditionChecks = await dependencies.createTriageAuthorizationConditionChecks(
+        principal,
+        teamId,
+        [entry.projectId, workItemAuthorization?.projectId],
+      )
       const contactId = input.contactId ?? entry.contactId
       let request = await dependencies.getCustomers().createRequest(
         principal.directoryId,
@@ -843,6 +861,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
             ...(workItemAuthorization.projectId ? { projectId: workItemAuthorization.projectId } : {}),
           },
           workItemAuthorization.authorizationConditionChecks,
+          workItemAuthorization.isCompleted,
         )
       }
       // The deterministic Triage-originated Request remains available for a safe retry if
@@ -1086,6 +1105,23 @@ function projectDetail(principal: CustomerPrincipal, detail: CustomerDetail): Cu
     workItems: detail.workItems,
     projects: detail.projects,
   }
+}
+
+/** Projects a committed Customer merge without rereading fallible relationship resources. */
+function projectCommittedCustomerDetail(
+  principal: CustomerPrincipal,
+  detail: CustomerDetail,
+): CustomerDetail {
+  return projectDetail(principal, {
+    ...detail,
+    requests: detail.requests.map((request) => ({
+      ...request,
+      workItemLinks: [],
+      projectLinks: [],
+    })),
+    workItems: [],
+    projects: [],
+  })
 }
 
 /** Projects a complete Customer detail after filtering every linked resource. */

@@ -17,8 +17,9 @@ export type RestoreDrillTableTarget =
   | 'table:work-item-configuration'
   | 'table:work-items'
   | 'table:workspace-access'
+  | 'table:customers'
 
-/** Canonical fixed order for the six DynamoDB restore targets. */
+/** Canonical fixed order for the seven DynamoDB restore targets. */
 export const RESTORE_DRILL_TABLE_TARGETS: readonly RestoreDrillTableTarget[] = Object.freeze([
   'table:audit-events',
   'table:file-proofing',
@@ -26,12 +27,13 @@ export const RESTORE_DRILL_TABLE_TARGETS: readonly RestoreDrillTableTarget[] = O
   'table:work-item-configuration',
   'table:work-items',
   'table:workspace-access',
+  'table:customers',
 ])
 
 /** A physical resource whose isolated identity is bound into drill evidence. */
 export type RestoreDrillResourceTarget = 'bucket:file' | RestoreDrillTableTarget
 
-/** Canonical fixed order for the file bucket followed by all six DynamoDB tables. */
+/** Canonical fixed order for the file bucket followed by all seven DynamoDB tables. */
 export const RESTORE_DRILL_RESOURCE_TARGETS: readonly RestoreDrillResourceTarget[] =
   Object.freeze([
     'bucket:file',
@@ -538,7 +540,7 @@ export function parseRestoreDrillRunState(value: unknown): RestoreDrillRunState 
 /**
  * Selects the latest point contained by every required DynamoDB PITR window.
  *
- * @param value - Untrusted six-entry window vector in canonical table order.
+ * @param value - Untrusted seven-entry window vector in canonical table order.
  * @returns Common interval and its latest point.
  * @throws {RestoreDrillFailure} When a window is invalid, incomplete, reordered, or disjoint.
  */

@@ -4,6 +4,7 @@ import { expect, spyOn, test } from 'bun:test'
 import type { Customer, CustomerRequest } from '@mukuroji/contracts'
 import {
   CUSTOMER_MAX_OPERATION_ROWS,
+  CustomerError,
   createCustomerContactRecord,
   createCustomerRecord,
   createCustomerRequestRecord,
@@ -592,6 +593,37 @@ test('processes a retention page before failing on the configured page limit', a
   }
 })
 
+test('continues retention processing for later Workspaces after one redaction fails', async () => {
+  const harness = createHarness([], {
+    retentionIndexRows: [
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#request-1' },
+      { workspaceId: 'workspace-2', recordKey: 'REQUEST#request-2' },
+    ],
+  })
+  const redactedWorkspaceIds: string[] = []
+  const redactExpired = spyOn(harness.client, 'redactExpired').mockImplementation(async (workspaceId) => {
+    redactedWorkspaceIds.push(workspaceId)
+    if (workspaceId === 'workspace-1') {
+      throw new CustomerError(409, 'CustomerOperationInProgress', 'Customer operation is still being completed.')
+    }
+    return {
+      customersRedacted: 0,
+      contactsRedacted: 0,
+      requestsRedacted: 1,
+    }
+  })
+  try {
+    await expect(harness.client.sweepExpiredRetention(NOW)).rejects.toMatchObject({
+      code: 'CustomerRetentionWorkspaceFailed',
+      status: 503,
+    })
+    expect(redactedWorkspaceIds).toEqual(['workspace-1', 'workspace-2'])
+  } finally {
+    redactExpired.mockRestore()
+    harness.restore()
+  }
+})
+
 test('persists a deleted keyed Customer Request retry receipt', async () => {
   const customerRow = createCustomerRow()
   const harness = createHarness([customerRow])
@@ -619,6 +651,54 @@ test('persists a deleted keyed Customer Request retry receipt', async () => {
     expect(receiptRow.receipt.fingerprint).toMatch(/^[a-f0-9]{64}$/)
     await expect(harness.client.createRequest('workspace-1', 'member-1', input)).rejects.toMatchObject({
       code: 'CustomerRequestDeleted',
+      status: 409,
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('persists a deleted keyed Customer Contact retry receipt', async () => {
+  const customerRow = createCustomerRow()
+  const harness = createHarness([customerRow])
+  const input = {
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+  }
+  try {
+    const contact = await harness.client.createContact(
+      'workspace-1',
+      customerRow.customer.id,
+      'member-1',
+      input,
+      'deleted-contact-durable-receipt',
+    )
+    await harness.client.deleteContact(
+      'workspace-1',
+      customerRow.customer.id,
+      contact.id,
+      'member-1',
+      contact.revision,
+    )
+
+    expect(harness.rows.has(`CONTACT#${contact.id}`)).toBeFalse()
+    const receiptRow = harness.rows.get(`CONTACT_RECEIPT#${contact.id}`)
+    expect(receiptRow).toMatchObject({ entityType: 'contact-idempotency-receipt' })
+    if (!isRecord(receiptRow) || !isRecord(receiptRow.receipt)) throw new Error('The Customer Contact receipt row is malformed.')
+    expect(receiptRow.receipt).toMatchObject({
+      contactId: contact.id,
+      customerId: customerRow.customer.id,
+    })
+    expect(typeof receiptRow.receipt.fingerprint).toBe('string')
+    expect(receiptRow.receipt.fingerprint).toMatch(/^[a-f0-9]{64}$/)
+    await expect(harness.client.createContact(
+      'workspace-1',
+      customerRow.customer.id,
+      'member-1',
+      input,
+      'deleted-contact-durable-receipt',
+    )).rejects.toMatchObject({
+      code: 'CustomerContactDeleted',
       status: 409,
     })
   } finally {

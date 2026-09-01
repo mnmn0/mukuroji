@@ -259,6 +259,7 @@ test('restore runner and cleanup roles cannot cross production or isolation boun
     'TeamIssuesTable',
     'WorkItemConfigurationTable',
     'WorkspaceAccessTable',
+    'CustomersTable',
   ];
 
   const sourceRestoreStatement = runnerStatements.find((statement) =>

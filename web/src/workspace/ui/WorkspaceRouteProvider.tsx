@@ -132,6 +132,10 @@ export type WorkspaceRouteContextValue = {
   canManageAiAssistance: boolean
   /** Whether the current user may use Customer sensitive search and business-value filters. */
   canViewCustomerSensitiveData: boolean
+  /** Whether the current user may read Customer records and relationship identifiers. */
+  canReadCustomers: boolean
+  /** Whether the current user may create Customer Requests. */
+  canManageCustomerRequests: boolean
   /** Whether the current user may create or update Customer saved views. */
   canManageCustomerViews: boolean
   /** Returns whether one AI workflow is currently enabled by rollout and saved settings. */
@@ -288,6 +292,8 @@ export function WorkspaceRouteProvider() {
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
   const canManageAiAssistance = user?.canManageAiAssistance ?? canManageWorkspaceConfiguration
   const canViewCustomerSensitiveData = user?.canViewCustomerSensitiveData ?? false
+  const canReadCustomers = user?.canReadCustomers ?? false
+  const canManageCustomerRequests = user?.canManageCustomerRequests ?? false
   const canManageCustomerViews = user?.canManageCustomerViews ?? false
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
   const hasQuickAccessLoadError = Boolean(quickAccessError)
@@ -744,6 +750,8 @@ export function WorkspaceRouteProvider() {
   const contextValue = useMemo<WorkspaceRouteContextValue>(() => ({
     accessToken,
     canLoadWorkspaceData,
+    canReadCustomers,
+    canManageCustomerRequests,
     canManageAiAssistance,
     canManageCustomerViews,
     canViewCustomerSensitiveData,
@@ -802,6 +810,8 @@ export function WorkspaceRouteProvider() {
   }), [
     accessToken,
     canLoadWorkspaceData,
+    canReadCustomers,
+    canManageCustomerRequests,
     canManageAiAssistance,
     canManageCustomerViews,
     canViewCustomerSensitiveData,

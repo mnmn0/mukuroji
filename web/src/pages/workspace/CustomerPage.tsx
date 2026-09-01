@@ -31,25 +31,27 @@ export function CustomerPage() {
     [rawFilters, workspace.canViewCustomerSensitiveData],
   )
   const search = filters.search ?? ''
-  const groupBy = readCustomerGroupBy(searchParams.get('groupBy'))
+  const requestedGroupBy = readCustomerGroupBy(searchParams.get('groupBy'))
+  const groupBy = projectCustomerGroupBy(requestedGroupBy, workspace.canViewCustomerSensitiveData)
+  const customerAccessEnabled = workspace.canLoadWorkspaceData && workspace.canReadCustomers
   const customers = useCustomers(
     workspace.accessToken,
     filters,
-    workspace.canLoadWorkspaceData,
+    customerAccessEnabled,
   )
   const savedViews = useCustomerSavedViews(
     workspace.accessToken,
-    workspace.canLoadWorkspaceData,
+    customerAccessEnabled,
   )
   const savedViewMutations = useCustomerSavedViewMutations({
     accessToken: workspace.accessToken,
-    enabled: workspace.canLoadWorkspaceData && workspace.canManageCustomerViews,
+    enabled: customerAccessEnabled && workspace.canManageCustomerViews,
     refresh: () => savedViews.mutate(),
   })
   const detail = useCustomer(
     workspace.accessToken,
     customerId,
-    workspace.canLoadWorkspaceData,
+    customerAccessEnabled,
   )
 
   const replaceSearch = useCallback((value: string) => {
@@ -65,8 +67,12 @@ export function CustomerPage() {
   }, [filters, setSearchParams])
 
   const applySavedView = useCallback((view: CustomerSavedView) => {
-    updateDirectorySearchParams(setSearchParams, view.filters, view.groupBy)
-  }, [setSearchParams])
+    updateDirectorySearchParams(
+      setSearchParams,
+      view.filters,
+      projectCustomerGroupBy(view.groupBy, workspace.canViewCustomerSensitiveData),
+    )
+  }, [setSearchParams, workspace.canViewCustomerSensitiveData])
 
   const saveView = useCallback(async (name: string) => {
     await savedViewMutations.save({
@@ -100,7 +106,7 @@ export function CustomerPage() {
         isLoading={Boolean(workspace.canLoadWorkspaceData && !customers.data && customers.isLoading)}
         sessionErrors={[customers.error, detail.error, savedViews.error]}
       >
-        <CustomerDirectoryView
+        {workspace.canReadCustomers ? <CustomerDirectoryView
           canManageCustomerViews={workspace.canManageCustomerViews}
           canViewSensitiveData={workspace.canViewCustomerSensitiveData}
           customers={customers.data?.customers ?? []}
@@ -137,7 +143,11 @@ export function CustomerPage() {
           isSavingView={savedViewMutations.isSaving}
           saveViewError={savedViewMutations.hasError ? t('customers.filters.saveError') : undefined}
           t={t}
-        />
+        /> : (
+          <div className="workbench-panel p-8 text-sm text-[var(--workbench-muted)]" role="alert">
+            {t('customers.permissionDenied')}
+          </div>
+        )}
       </WorkspaceRouteContent>
     </>
   )
@@ -169,6 +179,14 @@ function projectCustomerDirectoryFilters(
   delete projected.minBusinessValue
   if (projected.sortBy === 'businessValue') delete projected.sortBy
   return projected
+}
+
+/** Removes Customer grouping dimensions whose identifiers are redacted for the current reader. */
+function projectCustomerGroupBy(
+  groupBy: CustomerSavedView['groupBy'],
+  canViewSensitiveData: boolean,
+): CustomerSavedView['groupBy'] {
+  return !canViewSensitiveData && groupBy === 'owner' ? undefined : groupBy
 }
 
 /** Writes the supported Customer directory state back to URL parameters. */

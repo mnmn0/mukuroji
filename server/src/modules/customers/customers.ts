@@ -43,6 +43,9 @@ import {
 import { CustomerError } from './domain/customer'
 import type { TriageAuthorizationConditionChecks } from '../triage'
 
+/** Maximum number of canonical Work Item reads issued concurrently for Project impact. */
+const CUSTOMER_PROJECT_IMPACT_RESOLUTION_CONCURRENCY = 8
+
 /** Complete mutable Customer state for one Workspace. */
 export type CustomerWorkspaceState = {
   /** Customer records keyed by ID. */
@@ -53,6 +56,8 @@ export type CustomerWorkspaceState = {
   requests: Map<string, CustomerRequest>
   /** Deletion receipts for keyed Customer Requests, keyed by request ID. */
   requestIdempotencyReceipts: Map<string, CustomerRequestIdempotencyReceipt>
+  /** Deletion receipts for keyed Customer Contacts, keyed by contact ID. */
+  contactIdempotencyReceipts: Map<string, CustomerContactIdempotencyReceipt>
   /** Saved Customer views keyed by ID. */
   views: Map<string, CustomerSavedView>
   /** Prepared completion notification candidates keyed by deterministic ID. */
@@ -66,6 +71,16 @@ export type CustomerRequestIdempotencyReceipt = {
   /** Customer that owned the deleted Request. */
   customerId: string
   /** Hash of the immutable Request creation fields. */
+  fingerprint: string
+}
+
+/** Durable, content-free receipt that prevents a deleted keyed Contact from being recreated. */
+export type CustomerContactIdempotencyReceipt = {
+  /** Contact ID derived from the original idempotency key. */
+  contactId: string
+  /** Customer that owned the deleted Contact. */
+  customerId: string
+  /** Hash of the immutable Contact creation fields. */
   fingerprint: string
 }
 
@@ -171,18 +186,31 @@ export interface CustomerClient {
    * @param workspaceId Workspace that will own the Customer.
    * @param actorId Authenticated actor creating the Customer.
    * @param input Customer creation fields.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The created Customer.
    */
-  createCustomer(workspaceId: string, actorId: string, input: CreateCustomerInput): Promise<Customer>
+  createCustomer(
+    workspaceId: string,
+    actorId: string,
+    input: CreateCustomerInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<Customer>
   /** Updates a customer under an optimistic revision fence.
    *
    * @param workspaceId Workspace containing the Customer.
    * @param customerId Customer to update.
    * @param actorId Authenticated actor performing the update.
    * @param input Customer changes and the expected revision.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
    * @returns The updated Customer.
    */
-  updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer>
+  updateCustomer(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+    input: UpdateCustomerInput,
+    authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<Customer>
   /** Deletes a customer and its owned contacts and requests.
    *
    * @param workspaceId Workspace containing the Customer.
@@ -273,9 +301,10 @@ export interface CustomerClient {
    * @param customerId Contact owner.
    * @param actorId Authenticated actor creating the contact.
    * @param input Contact creation fields.
+   * @param idempotencyKey Required caller-selected retry key for safe response-loss retries.
    * @returns The created contact.
    */
-  createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact>
+  createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput, idempotencyKey: string): Promise<CustomerContact>
   /** Updates a customer contact under an optimistic revision fence.
    *
    * @param workspaceId Workspace containing the Customer.
@@ -433,6 +462,7 @@ export interface CustomerClient {
    * @param actorId Authenticated actor creating the link.
    * @param input Work Item link fields.
    * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
+   * @param prepareCompletionNotification Whether to prepare a completion candidate when the canonical Work Item is already complete.
    * @returns The updated Customer Request.
    */
   linkRequestToWorkItem(
@@ -441,6 +471,7 @@ export interface CustomerClient {
     actorId: string,
     input: LinkCustomerRequestWorkItemInput,
     authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+    prepareCompletionNotification?: boolean,
   ): Promise<CustomerRequest>
   /** Removes a request-to-Work-Item link under a revision fence.
    *
@@ -659,6 +690,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       contacts: new Map([...state.contacts].map(([id, contact]) => [id, clone(contact)])),
       requests: new Map([...state.requests].map(([id, request]) => [id, clone(request)])),
       requestIdempotencyReceipts: new Map([...state.requestIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
+      contactIdempotencyReceipts: new Map([...state.contactIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       views: new Map([...state.views].map(([id, view]) => [id, clone(view)])),
       notifications: new Map([...state.notifications].map(([id, notification]) => [id, clone(notification)])),
     }
@@ -675,6 +707,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       contacts: new Map([...state.contacts].map(([id, contact]) => [id, clone(contact)])),
       requests: new Map([...state.requests].map(([id, request]) => [id, clone(request)])),
       requestIdempotencyReceipts: new Map([...state.requestIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
+      contactIdempotencyReceipts: new Map([...state.contactIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       views: new Map([...state.views].map(([id, view]) => [id, clone(view)])),
       notifications: new Map([...state.notifications].map(([id, notification]) => [id, clone(notification)])),
     })
@@ -695,6 +728,9 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     for (const [requestId, request] of state.requests) {
       if (hiddenCustomerIds.has(request.customerId)) state.requests.delete(requestId)
+    }
+    for (const [contactId, receipt] of state.contactIdempotencyReceipts) {
+      if (hiddenCustomerIds.has(receipt.customerId)) state.contactIdempotencyReceipts.delete(contactId)
     }
     for (const [notificationId, notification] of state.notifications) {
       if (hiddenCustomerIds.has(notification.customerId)) state.notifications.delete(notificationId)
@@ -807,9 +843,15 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param workspaceId Workspace that will own the Customer.
    * @param actorId Authenticated actor creating the Customer.
    * @param input Customer creation fields.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns The created Customer.
    */
-  async createCustomer(workspaceId: string, actorId: string, input: CreateCustomerInput): Promise<Customer> {
+  async createCustomer(
+    workspaceId: string,
+    actorId: string,
+    input: CreateCustomerInput,
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<Customer> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
@@ -827,9 +869,16 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param customerId Customer to update.
    * @param actorId Authenticated actor performing the update.
    * @param input Customer changes and the expected revision.
+   * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
    * @returns The updated Customer.
    */
-  async updateCustomer(workspaceId: string, customerId: string, actorId: string, input: UpdateCustomerInput): Promise<Customer> {
+  async updateCustomer(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+    input: UpdateCustomerInput,
+    _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+  ): Promise<Customer> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
     this.assertCustomerAvailable(workspaceId, customerId)
@@ -1060,15 +1109,38 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param customerId Owning customer identifier.
    * @param actorId Authenticated actor creating the contact.
    * @param input Contact fields and retention settings.
+   * @param idempotencyKey Caller-selected retry key used to derive the stable Contact ID.
    * @returns The created contact.
    */
-  async createContact(workspaceId: string, customerId: string, actorId: string, input: CreateCustomerContactInput): Promise<CustomerContact> {
+  async createContact(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+    input: CreateCustomerContactInput,
+    idempotencyKey: string,
+  ): Promise<CustomerContact> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
     this.assertCustomerAvailable(workspaceId, customerId)
     const state = this.state(workspaceId)
     this.requireCustomer(state, customerId)
-    const contact = createCustomerContactRecord(workspaceId, customerId, this.id(), input, this.now().toISOString())
+    const contactId = createIdempotentContactId(workspaceId, customerId, idempotencyKey)
+    const contact = createCustomerContactRecord(workspaceId, customerId, contactId, input, this.now().toISOString())
+    const fingerprint = createContactIdempotencyFingerprint(contact, input)
+    const receipt = state.contactIdempotencyReceipts.get(contactId)
+    if (receipt) {
+      if (receipt.customerId !== customerId || receipt.fingerprint !== fingerprint) {
+        throw new CustomerError(409, 'CustomerContactAlreadyExists', 'A customer contact already exists for this retry key.')
+      }
+      const existing = state.contacts.get(contactId)
+      if (!existing) {
+        throw new CustomerError(409, 'CustomerContactDeleted', 'A deleted Customer Contact cannot be recreated with the same retry key.')
+      }
+      return clone(existing)
+    }
+    if (state.contacts.has(contactId)) {
+      throw new CustomerError(409, 'CustomerContactAlreadyExists', 'A customer contact already exists for this retry key.')
+    }
     const normalizedEmail = normalizeContactEmail(input.email)
     if (normalizedEmail && [...state.contacts.values()].some((candidate) =>
       candidate.customerId === customerId && normalizeContactEmail(candidate.email) === normalizedEmail
@@ -1077,6 +1149,11 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     if (input.primary) this.clearPrimaryContacts(state, customerId)
     state.contacts.set(contact.id, contact)
+    state.contactIdempotencyReceipts.set(contact.id, {
+      contactId: contact.id,
+      customerId: contact.customerId,
+      fingerprint,
+    })
     return clone(this.state(workspaceId).contacts.get(contact.id) ?? contact)
   }
 
@@ -1574,6 +1651,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param actorId Authenticated actor creating the link.
    * @param input Work Item link fields.
    * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
+   * @param prepareCompletionNotification Whether to prepare a completion candidate after linking.
    * @returns The updated Customer Request.
    */
   async linkRequestToWorkItem(
@@ -1582,6 +1660,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     actorId: string,
     input: LinkCustomerRequestWorkItemInput,
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+    prepareCompletionNotification = false,
   ): Promise<CustomerRequest> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
@@ -1594,7 +1673,12 @@ export class InMemoryCustomerClient implements CustomerClient {
     const workItemLinks = existingLink && input.projectId !== undefined && existingLink.projectId !== input.projectId
       ? request.workItemLinks.map((link) => link === existingLink ? { ...link, projectId: input.projectId } : link)
       : existingLink ? request.workItemLinks : [...request.workItemLinks, { ...input, linkedAt, linkedBy: actorId }]
-    if (workItemLinks === request.workItemLinks) return clone(request)
+    if (workItemLinks === request.workItemLinks) {
+      if (prepareCompletionNotification) {
+        await this.prepareCompletionNotifications(workspaceId, input.teamId, input.workItemId, actorId)
+      }
+      return clone(request)
+    }
     const next = {
       ...request,
       workItemLinks,
@@ -1602,6 +1686,9 @@ export class InMemoryCustomerClient implements CustomerClient {
       updatedAt: linkedAt,
     }
     state.requests.set(requestId, next)
+    if (prepareCompletionNotification) {
+      await this.prepareCompletionNotifications(workspaceId, input.teamId, input.workItemId, actorId)
+    }
     return clone(next)
   }
 
@@ -1747,11 +1834,14 @@ export class InMemoryCustomerClient implements CustomerClient {
         workItemLinks.set(key, { teamId: link.teamId, workItemId: link.workItemId })
       }
     }
-    const resolvedProjects = await Promise.all([...workItemLinks.entries()].map(async ([key, link]) => ({
-      key,
-      projectId: await resolveWorkItemProject(link.teamId, link.workItemId),
-    })))
-    const workItemProjects = new Map(resolvedProjects.map(({ key, projectId: resolvedProjectId }) => [key, resolvedProjectId]))
+    const workItemProjects = new Map<string, string | undefined>()
+    await forEachWithConcurrency(
+      [...workItemLinks.entries()],
+      CUSTOMER_PROJECT_IMPACT_RESOLUTION_CONCURRENCY,
+      async ([key, link]) => {
+        workItemProjects.set(key, await resolveWorkItemProject(link.teamId, link.workItemId))
+      },
+    )
     const impactedRequests = requests.filter((request) =>
       request.projectLinks.some((link) => link.projectId === projectId) ||
       request.workItemLinks.some((link) => workItemProjects.get(`${link.teamId}\u0000${link.workItemId}`) === projectId)
@@ -2019,6 +2109,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       contacts: new Map(),
       requests: new Map(),
       requestIdempotencyReceipts: new Map(),
+      contactIdempotencyReceipts: new Map(),
       views: new Map(),
       notifications: new Map(),
     }
@@ -2129,6 +2220,10 @@ export class InMemoryCustomerClient implements CustomerClient {
       if (receipt.customerId !== source.id) continue
       state.requestIdempotencyReceipts.set(receipt.requestId, { ...receipt, customerId: target.id })
     }
+    for (const receipt of state.contactIdempotencyReceipts.values()) {
+      if (receipt.customerId !== source.id) continue
+      state.contactIdempotencyReceipts.set(receipt.contactId, { ...receipt, customerId: target.id })
+    }
     const retainedPrimaryContact = [...state.contacts.values()]
       .find((contact) => contact.customerId === target.id && contact.primary)
     if (retainedPrimaryContact) this.clearPrimaryContacts(state, target.id, retainedPrimaryContact.id)
@@ -2204,6 +2299,9 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     for (const [requestId, receipt] of state.requestIdempotencyReceipts) {
       if (receipt.customerId === customerId) state.requestIdempotencyReceipts.delete(requestId)
+    }
+    for (const [contactId, receipt] of state.contactIdempotencyReceipts) {
+      if (receipt.customerId === customerId) state.contactIdempotencyReceipts.delete(contactId)
     }
   }
 
@@ -2556,6 +2654,24 @@ function createIdempotentRequestId(workspaceId: string, idempotencyKey: string):
   return `request-${createHash('sha256').update(`${workspaceId}\u0000${normalizedKey}`, 'utf8').digest('hex')}`
 }
 
+/** Creates the deterministic ID used to make Customer Contact retries safe.
+ *
+ * @param workspaceId Workspace scope for the retry key.
+ * @param customerId Customer scope for the retry key.
+ * @param idempotencyKey Caller-selected retry key.
+ * @returns A deterministic physical-safe Contact identifier.
+ */
+function createIdempotentContactId(workspaceId: string, customerId: string, idempotencyKey: string): string {
+  const normalizedKey = idempotencyKey.trim()
+  if (!normalizedKey || normalizedKey.length > 256 || [...normalizedKey].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 31 || codePoint === 127
+  })) {
+    throw new CustomerError(400, 'InvalidCustomerInput', 'Contact Idempotency-Key is required and invalid.')
+  }
+  return `contact-${createHash('sha256').update(`${workspaceId}\u0000${customerId}\u0000${normalizedKey}`, 'utf8').digest('hex')}`
+}
+
 /** Hashes the immutable creation fields used to validate a deleted Request retry.
  *
  * @param input Request creation input whose retry identity is being recorded.
@@ -2624,6 +2740,57 @@ function stableSerialize(value: unknown): string {
     .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
     .map(([key, entry]) => `${JSON.stringify(key)}:${stableSerialize(entry)}`)
     .join(',')}}`
+}
+
+/** Runs asynchronous work with a fixed maximum number of concurrent callbacks.
+ *
+ * @param values Values to process.
+ * @param concurrency Maximum number of callbacks allowed to run concurrently.
+ * @param callback Asynchronous operation for one value.
+ * @returns A promise that resolves after every value has been processed.
+ */
+async function forEachWithConcurrency<Value>(
+  values: readonly Value[],
+  concurrency: number,
+  callback: (value: Value) => Promise<void>,
+): Promise<void> {
+  if (values.length === 0) return
+  const workerCount = Math.min(Math.max(Math.floor(concurrency), 1), values.length)
+  let nextIndex = 0
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= values.length) return
+      const value = values[index]
+      if (value === undefined) return
+      await callback(value)
+    }
+  }
+  await Promise.all(Array.from({ length: workerCount }, () => worker()))
+}
+
+/** Hashes the immutable creation fields used to validate a Contact retry.
+ *
+ * @param contact Contact reconstructed from the retry body.
+ * @param input Original retry input, used to distinguish an omitted retention deadline.
+ * @returns A content-free SHA-256 fingerprint of the Contact origin.
+ */
+function createContactIdempotencyFingerprint(
+  contact: CustomerContact,
+  input: CreateCustomerContactInput,
+): string {
+  return createHash('sha256').update(stableSerialize({
+    customerId: contact.customerId,
+    name: contact.name,
+    email: contact.email,
+    role: contact.role,
+    phone: contact.phone,
+    primary: contact.primary,
+    retentionExpiresAt: input.retentionExpiresAt === undefined
+      ? undefined
+      : contact.retention?.expiresAt,
+  }), 'utf8').digest('hex')
 }
 
 /** Computes the retention deadline that an omitted Customer Request input would have produced. */
