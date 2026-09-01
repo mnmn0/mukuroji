@@ -320,6 +320,67 @@ describe('notification schedule handler', () => {
     })
   })
 
+  test('retries durable Customer completion preparation before clearing its Work Item marker', async () => {
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? {
+          Items: [createWorkItem({
+            statusCategory: 'completed',
+            revision: 4,
+            customerCompletionPreparationAt: '2026-07-12T08:00:00.000Z',
+            customerCompletionPreparationRevision: 4,
+          })],
+        }
+      : {})
+    const preparations: unknown[] = []
+
+    const result = await runNotificationSchedule(createRunOptions(recording.client, {
+      prepareCustomerCompletionNotifications: async (preparation) => {
+        preparations.push(preparation)
+      },
+    }))
+
+    expect(result).toMatchObject({ scannedItems: 1, skippedItems: 1 })
+    expect(preparations).toEqual([{
+      workspaceId: 'workspace-1',
+      teamId: 'core-team',
+      workItemId: 'release-checklist',
+      revision: 4,
+      directoryTeamId: 'workspace-1#team#core-team',
+      issueId: 'release-checklist',
+    }])
+    expect(recording.commands.find(({ name }) => name === 'UpdateCommand')?.input).toEqual({
+      TableName: 'WorkItemsTable',
+      Key: {
+        directoryTeamId: 'workspace-1#team#core-team',
+        issueId: 'release-checklist',
+      },
+      UpdateExpression: 'REMOVE #preparationAt, #preparationRevision',
+      ConditionExpression: '#preparationRevision = :revision',
+      ExpressionAttributeNames: {
+        '#preparationAt': 'customerCompletionPreparationAt',
+        '#preparationRevision': 'customerCompletionPreparationRevision',
+      },
+      ExpressionAttributeValues: { ':revision': 4 },
+    })
+  })
+
+  test('leaves the completion marker for a later schedule retry when preparation fails', async () => {
+    const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
+      ? { Items: [createWorkItem({
+          customerCompletionPreparationAt: '2026-07-12T08:00:00.000Z',
+          customerCompletionPreparationRevision: 2,
+        })] }
+      : {})
+    const failure = new Error('Customer store unavailable.')
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      prepareCustomerCompletionNotifications: async () => {
+        throw failure
+      },
+    }))).rejects.toBe(failure)
+    expect(recording.commands.some(({ name }) => name === 'UpdateCommand')).toBeFalse()
+  })
+
   test('changes a date-only Work Item from future to due at the UTC day boundary', async () => {
     const beforeBoundary = createRecordingDocumentClient((name) =>
       name === 'ScanCommand' ? { Items: [createWorkItem()] } : {},

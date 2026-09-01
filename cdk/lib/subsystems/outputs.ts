@@ -32,6 +32,8 @@ export type StackOutputResources = {
   readonly analyticsTable: dynamodb.ITable;
   /** Public request intake table. */
   readonly requestIntakeTable: dynamodb.ITable;
+  /** Workspace-scoped Customer and Customer Request table. */
+  readonly customersTable: dynamodb.ITable;
   /** Append-only Work Item event table. */
   readonly teamIssueEventsTable: dynamodb.ITable;
   /** Workspace directory identifier parameter. */
@@ -86,6 +88,8 @@ export type StackOutputResources = {
   readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
   /** Dead-letter queue for collaboration projection failures. */
   readonly collaborationProjectionDlq: sqs.IQueue;
+  /** Dead-letter queue for terminal AI observability projection failures. */
+  readonly aiAssistanceObservabilityDlq: sqs.IQueue;
   /** Dead-letter queue for enterprise identity maintenance failures. */
   readonly enterpriseIdentityMaintenanceDlq: sqs.IQueue;
   /** Lambda function that processes enterprise SCIM group jobs. */
@@ -200,6 +204,9 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'RequestIntakeTableName', {
     value: resources.requestIntakeTable.tableName,
   });
+  new cdk.CfnOutput(scope, 'CustomersTableName', {
+    value: resources.customersTable.tableName,
+  });
   new cdk.CfnOutput(scope, 'TeamIssueEventsTableName', {
     value: resources.teamIssueEventsTable.tableName,
   });
@@ -297,6 +304,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'CollaborationProjectionDlqUrl', {
     value: resources.collaborationProjectionDlq.queueUrl,
+  });
+  new cdk.CfnOutput(scope, 'AiAssistanceObservabilityDlqUrl', {
+    value: resources.aiAssistanceObservabilityDlq.queueUrl,
   });
   new cdk.CfnOutput(scope, 'EnterpriseIdentityMaintenanceDlqUrl', {
     value: resources.enterpriseIdentityMaintenanceDlq.queueUrl,

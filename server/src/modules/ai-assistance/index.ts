@@ -38,6 +38,9 @@ export {
 } from './domain/ai-assistance-redaction'
 
 /** Application ports and use-case composition. */
+export {
+  AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS,
+} from './application/ports/ai-assistance-ports'
 export type {
   AiAssistanceActor,
   AiAssistanceAllowedValues,
@@ -46,7 +49,12 @@ export type {
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceAuthorizationState,
   AiAssistanceDecisionCommitFence,
+  AiAssistanceDecisionStoreResult,
   AiAssistanceGenerationCommitFence,
+  AiAssistanceFeedbackWriteResult,
+  AiAssistanceGenerationExecution,
+  AiAssistanceGenerationRequestObservation,
+  AiAssistanceGenerationRequestOutcome,
   AiAssistanceGenerationReservation,
   AiAssistanceGenerationBudgetReservation,
   AiAssistancePolicyAuthorization,
@@ -55,6 +63,11 @@ export type {
   AiAssistancePolicyAuditInput,
   AiAssistancePlanningDependency,
   AiAssistancePrivateMemberIdentifiers,
+  AiAssistanceProviderAttemptObservation,
+  AiAssistanceProviderAttemptOutcome,
+  AiAssistanceObservability,
+  AiAssistanceProjectionObservability,
+  AiAssistanceDecisionObservation,
   AiAssistanceTriageRoutingTuple,
   AiAssistanceTriageSourceRouting,
   AiAssistanceService,
@@ -65,6 +78,8 @@ export type {
   AiModelGenerationResult,
   CheckAiAssistanceAuthorizationInput,
   CompleteAiAssistanceGenerationReservationInput,
+  ExpireAiAssistanceGenerationAttemptInput,
+  MarkAiAssistanceGenerationProviderStartedInput,
   ResolveAiAssistanceContextInput,
   ResolvedAiAssistanceContext,
   ReadAiAssistanceGenerationReservationInput,
@@ -74,6 +89,8 @@ export type {
 } from './application/ports/ai-assistance-ports'
 /** Creates the application service used by the HTTP adapter and offline evaluator. */
 export {
+  createAiAssistanceFeedbackIdentity,
+  createAiAssistanceGenerationInputFingerprint,
   createAiAssistanceService,
   validateAiAssistanceDraftForApplication,
 } from './application/use-cases/ai-assistance-service'
@@ -86,6 +103,7 @@ export {
 
 /** WorkspaceSearchTable persistence adapter. */
 export {
+  createAiAssistanceFeedbackRecordKey,
   createAiAssistanceGenerationRecordKey,
   createAiAssistanceIdempotencyRecordKey,
   createAiAssistancePreferenceRecordKey,
@@ -104,3 +122,10 @@ export {
   type MastraStructuredGenerationResult,
   type MastraStructuredGenerationRunner,
 } from './adapter-out/mastra/mastra-bedrock-ai-model-gateway'
+
+/** Safe Embedded Metric Format observations for AI assistance operations. */
+export {
+  createAiAssistanceEmfObservability,
+  type AiAssistanceEmfObservabilityOptions,
+  type StructuredAiAssistanceLogSink,
+} from './adapter-out/observability/ai-assistance-observability'

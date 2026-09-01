@@ -79,6 +79,7 @@ const SAFE_API_METHODS = new Set([
 ])
 
 const SAFE_API_ROUTE_AREAS = new Set([
+  'ai-assistance',
   'analytics',
   'approvals',
   'audit',

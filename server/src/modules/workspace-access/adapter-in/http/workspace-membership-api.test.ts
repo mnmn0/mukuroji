@@ -30,6 +30,21 @@ test('returns Workspace role and active status for the current user', async () =
   expect(await response.json()).toMatchObject({
     workspaceRole: 'admin',
     workspaceMemberStatus: 'active',
+    canManageCustomerViews: true,
+  })
+})
+
+test('does not grant Customer saved-view mutation capability to a guest', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'guest' })
+
+  const response = await app.request('/api/auth/me', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    workspaceRole: 'guest',
+    canManageCustomerViews: false,
   })
 })
 

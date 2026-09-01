@@ -47,7 +47,11 @@ import type {
   AiAssistanceGenerationCommitFence,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
+  AiAssistanceGenerationExecution,
+  AiAssistanceFeedbackWriteResult,
   AiAssistanceGenerationReservation,
+  AiAssistanceObservability,
+  AiAssistanceProviderAttemptOutcome,
   CompleteAiAssistanceGenerationReservationInput,
   FinalizeAiAssistanceGenerationAttemptInput,
   AiAssistancePolicyAuthorization,
@@ -71,6 +75,7 @@ const DEFAULT_PROVIDER_TIMEOUT_MS = 12_000
 const DEFAULT_GENERATION_DEADLINE_MS = 19_000
 const GENERATION_DEADLINE_HEADROOM_MS = 1_000
 const DEFAULT_RESERVATION_LEASE_MS = 30_000
+const RESERVATION_LEASE_RECOVERY_HEADROOM_MS = 5_000
 const GENERATION_BUDGET_WINDOW_MS = 60_000
 const DEFAULT_WORKSPACE_GENERATION_LIMIT_PER_MINUTE = 32
 const DEFAULT_MEMBER_GENERATION_LIMIT_PER_MINUTE = 4
@@ -133,7 +138,7 @@ export function createAiAssistanceService(
   const generationDeadlineMs = options.generationDeadlineMs ?? DEFAULT_GENERATION_DEADLINE_MS
   const reservationLeaseMs = options.reservationLeaseMs ?? Math.max(
     DEFAULT_RESERVATION_LEASE_MS,
-    providerTimeoutMs + 5_000,
+    generationDeadlineMs + RESERVATION_LEASE_RECOVERY_HEADROOM_MS,
   )
   const workspaceGenerationLimitPerMinute =
     options.workspaceGenerationLimitPerMinute ??
@@ -150,11 +155,14 @@ export function createAiAssistanceService(
   const now = options.now ?? (() => new Date())
   const createId = options.createId ?? (() => crypto.randomUUID())
 
-  if (!Number.isSafeInteger(reservationLeaseMs) || reservationLeaseMs <= providerTimeoutMs) {
+  if (
+    !Number.isSafeInteger(reservationLeaseMs) ||
+    reservationLeaseMs < generationDeadlineMs + RESERVATION_LEASE_RECOVERY_HEADROOM_MS
+  ) {
     throw new AiAssistanceError(
       'validation',
       'InvalidAiAssistanceRequest',
-      'The AI assistance reservation lease must exceed the provider timeout.',
+      'The AI assistance reservation lease must include recovery headroom after the end-to-end generation deadline.',
     )
   }
   if (
@@ -334,9 +342,40 @@ export function createAiAssistanceService(
       throw createSafeAttemptError(
         reservation.failureCategory,
         reservation.failureCode,
+        true,
       )
     }
-    if (reservation.status !== 'replay' && reservation.status !== 'pending') {
+    if (reservation.status === 'pending') {
+      const recoveryAt = now()
+      if (Date.parse(reservation.leaseExpiresAt) > recoveryAt.getTime()) {
+        throw new AiAssistanceError(
+          'conflict',
+          'AiAssistanceGenerationInProgress',
+          'An AI assistance generation with this idempotency key is in progress.',
+        )
+      }
+      const recovered = await options.store.expireGenerationAttempt({
+        workspaceId: actor.workspaceId,
+        memberId: actor.memberId,
+        ...completionIdentity,
+        generationId: reservation.generationId,
+        failedAt: recoveryAt.toISOString(),
+      })
+      if (recovered.status === 'pending') {
+        throw new AiAssistanceError(
+          'conflict',
+          'AiAssistanceGenerationInProgress',
+          'An AI assistance generation with this idempotency key is being recovered.',
+        )
+      }
+      return await replayGenerationReservation(
+        actor,
+        recovered,
+        authorization,
+        completionIdentity,
+      )
+    }
+    if (reservation.status !== 'replay') {
       throw new AiAssistanceError(
         'upstream',
         'InvalidAiAssistanceRecord',
@@ -358,30 +397,11 @@ export function createAiAssistanceService(
           'The AI assistance generation has expired.',
         )
       }
-      if (reservation.status === 'pending' && !existing) {
-        throw new AiAssistanceError(
-          'conflict',
-          'AiAssistanceGenerationInProgress',
-          'An AI assistance generation with this idempotency key is in progress.',
-        )
-      }
       throw new AiAssistanceError(
         'upstream',
         'InvalidAiAssistanceRecord',
         'The AI assistance idempotency receipt references an invalid generation.',
       )
-    }
-    if (reservation.status === 'pending') {
-      await options.store.finalizeGenerationAttempt({
-        workspaceId: actor.workspaceId,
-        memberId: actor.memberId,
-        ...completionIdentity,
-        generationId: reservation.generationId,
-        outcome: 'succeeded',
-        endedAt: now().toISOString(),
-        latencyMs: existing.generation.details.usage.latencyMs,
-        usage: existing.generation.details.usage,
-      })
     }
     // The initial policy read happens before the reservation read. Re-read it
     // after the receipt is resolved so a concurrent retention shortening cannot
@@ -395,22 +415,22 @@ export function createAiAssistanceService(
     )
   }
 
-  /** Generates one permission-fenced structured draft. */
-  async function generate(
+  /** Executes one permission-fenced generation and reports durable replay state. */
+  async function generateExecution(
     actor: AiAssistanceActor,
-    input: GenerateAiAssistanceRequest,
+    request: GenerateAiAssistanceRequest,
     authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKeyValue: string,
     requestStartedAtMs?: number,
-  ): Promise<AiAssistanceGeneration> {
-    const request = parseGenerateAiAssistanceRequest(input)
+  ): Promise<AiAssistanceGenerationExecution> {
     const idempotencyKey = requireIdempotencyKey(idempotencyKeyValue)
     const [policy, preference] = await Promise.all([
       readPolicy(actor),
       getPreference(actor),
     ])
-    const inputFingerprint = createGenerationInputFingerprint(
-      actor,
+    const inputFingerprint = createAiAssistanceGenerationInputFingerprint(
+      actor.workspaceId,
+      actor.memberId,
       request,
     )
     const existingReservation = await options.store.readGenerationReservation({
@@ -420,12 +440,15 @@ export function createAiAssistanceService(
       inputFingerprint,
     })
     if (existingReservation !== undefined) {
-      return await replayGenerationReservation(
-        actor,
-        existingReservation,
-        authorization,
-        { idempotencyKey, inputFingerprint },
-      )
+      return {
+        generation: await replayGenerationReservation(
+          actor,
+          existingReservation,
+          authorization,
+          { idempotencyKey, inputFingerprint },
+        ),
+        replayed: true,
+      }
     }
     requireGenerationEnabled(policy, preference, request.task)
     const modelId = selectModelId(request.modelId, policy, deploymentAllowedModelIds)
@@ -464,19 +487,34 @@ export function createAiAssistanceService(
       generationId: reservation.generationId,
     }
     if (reservation.status === 'failed') {
-      throw createSafeAttemptError(reservation.failureCategory, reservation.failureCode)
-    }
-    if (reservation.status !== 'reserved') {
-      return await replayGenerationReservation(
-        actor,
-        reservation,
-        authorization,
-        { idempotencyKey, inputFingerprint },
+      throw createSafeAttemptError(
+        reservation.failureCategory,
+        reservation.failureCode,
+        true,
       )
     }
+    if (reservation.status !== 'reserved') {
+      return {
+        generation: await replayGenerationReservation(
+          actor,
+          reservation,
+          authorization,
+          { idempotencyKey, inputFingerprint },
+        ),
+        replayed: true,
+      }
+    }
 
+    let generationCommitAttempted = false
     let generationPersisted = false
     let attemptStartedAt: Date | undefined
+    let providerStartedAt: Date | undefined
+    let providerDispatchMarkerAttempted = false
+    let providerDispatchConfirmed = false
+    let gatewayReturnedWithoutDispatch = false
+    let providerDispatchMarkerAt: Date | undefined
+    let providerDispatchMarkerPromise: Promise<void> | undefined
+    let providerReturnedResult = false
     let modelResult: AiModelGenerationResult | undefined
     try {
       const resolvedContext = await authorization.resolveContext({ actor, request })
@@ -525,24 +563,10 @@ export function createAiAssistanceService(
         authorizationToken: context.authorizationToken,
         auditedInput: context.promptContext,
       }, maxOutputTokens)
-      const attemptStartedAtValue = now()
-      await options.store.startGenerationAttempt({
-        ...completion,
-        task: request.task,
-        modelId,
-        promptVersion: options.promptVersion,
-        traceId: actor.traceId,
-        startedAt: attemptStartedAtValue.toISOString(),
-        audit: {
-          request: providerRequest,
-          auditedInput: context.promptContext,
-          citations: [...context.citations],
-        },
-      })
-      attemptStartedAt = attemptStartedAtValue
-      // Re-resolve every source after the durable attempt starts and immediately
-      // before the paid call. This fences document bodies and comment windows
-      // that can change without a policy or Workspace ACL revision update.
+      // Re-resolve every source immediately before the durable provider-attempt
+      // marker. This fences revisioned sources and Document comment windows that
+      // can change without a policy or Workspace ACL revision update. A failed
+      // fence remains a provider-free reservation failure rather than an attempt.
       const preProviderAuthorizationState = await authorization.isAuthorizationCurrent({
         actor,
         request: providerRequest,
@@ -563,23 +587,54 @@ export function createAiAssistanceService(
       )) {
         throw authorizationChangedError('permission-changed')
       }
-      const providerStartedAt = now()
+      const providerAdmissionAt = now()
       const elapsedBeforeProviderMs = Math.max(
         0,
-        providerStartedAt.getTime() - generationRequestStartedAtMs,
+        providerAdmissionAt.getTime() - generationRequestStartedAtMs,
       )
-      const remainingProviderTimeoutMs = Math.min(
+      const remainingAtProviderAdmissionMs = Math.min(
         providerTimeoutMs,
         generationDeadlineMs - elapsedBeforeProviderMs - GENERATION_DEADLINE_HEADROOM_MS,
       )
-      if (remainingProviderTimeoutMs <= 0) {
+      if (remainingAtProviderAdmissionMs <= 0) {
         throw new AiAssistanceError(
           'timeout',
           'AiAssistanceProviderTimeout',
           'The AI assistance request exceeded its end-to-end deadline before Bedrock started.',
         )
       }
-      modelResult = await options.gateway.generate({
+      const attemptStartedAtValue = now()
+      await options.store.startGenerationAttempt({
+        ...completion,
+        task: request.task,
+        modelId,
+        promptVersion: options.promptVersion,
+        traceId: actor.traceId,
+        startedAt: attemptStartedAtValue.toISOString(),
+        audit: {
+          request: providerRequest,
+          auditedInput: context.promptContext,
+          citations: [...context.citations],
+        },
+      })
+      attemptStartedAt = attemptStartedAtValue
+      const providerInvocationReadyAt = now()
+      const elapsedAfterAttemptStartMs = Math.max(
+        0,
+        providerInvocationReadyAt.getTime() - generationRequestStartedAtMs,
+      )
+      const remainingProviderTimeoutMs = Math.min(
+        providerTimeoutMs,
+        generationDeadlineMs - elapsedAfterAttemptStartMs - GENERATION_DEADLINE_HEADROOM_MS,
+      )
+      if (remainingProviderTimeoutMs <= 0) {
+        throw new AiAssistanceError(
+          'timeout',
+          'AiAssistanceProviderTimeout',
+          'The AI assistance request exceeded its end-to-end deadline while starting Bedrock.',
+        )
+      }
+      const generatedModelResult = await options.gateway.generate({
         modelId,
         task: request.task,
         locale: request.locale,
@@ -591,10 +646,30 @@ export function createAiAssistanceService(
         traceId: actor.traceId,
         maxOutputTokens,
         timeoutMs: remainingProviderTimeoutMs,
+        /** Persists the exact post-invocation marker before result processing. */
+        async onProviderDispatch() {
+          if (providerDispatchMarkerPromise === undefined) {
+            providerDispatchMarkerAttempted = true
+            providerDispatchMarkerAt = now()
+            providerDispatchMarkerPromise = options.store.markGenerationProviderStarted({
+              ...completion,
+              attemptStartedAt: attemptStartedAtValue.toISOString(),
+              providerStartedAt: providerDispatchMarkerAt.toISOString(),
+            })
+          }
+          await providerDispatchMarkerPromise
+          providerStartedAt = providerDispatchMarkerAt
+          providerDispatchConfirmed = true
+        },
       })
+      if (!providerDispatchConfirmed) {
+        gatewayReturnedWithoutDispatch = true
+        throw createSafeAttemptError('upstream', 'AiAssistanceAttemptFailed')
+      }
+      providerReturnedResult = true
       modelResult = {
-        ...modelResult,
-        usage: parseAiAssistanceUsage(modelResult.usage),
+        ...generatedModelResult,
+        usage: parseAiAssistanceUsage(generatedModelResult.usage),
       }
       const output = parseAiAssistanceModelOutput({
         draft: modelResult.draft,
@@ -701,55 +776,73 @@ export function createAiAssistanceService(
           ? {}
           : { authorizationConditions: commitAuthorizationState.authorizationConditions }),
       }
-      const stored = await options.store.createGeneration({
+      const attemptEndedAt = now()
+      const successfulUsage = modelResult.usage
+      generationCommitAttempted = true
+      const stored = await options.store.commitGeneration({
         workspaceId: actor.workspaceId,
         memberId: actor.memberId,
         generation: validatedGeneration,
         request: providerRequest,
         authorizationToken: context.authorizationToken,
         auditedInput: context.promptContext,
-      }, generationCommitFence)
-      generationPersisted = true
-      await options.store.finalizeGenerationAttempt({
+      }, {
         ...completion,
         outcome: 'succeeded',
-        endedAt: now().toISOString(),
-        latencyMs: modelResult.usage.latencyMs,
-        usage: modelResult.usage,
+        endedAt: attemptEndedAt.toISOString(),
+        latencyMs: successfulUsage.latencyMs,
+        usage: successfulUsage,
+        providerOutcome: 'succeeded',
         ...(modelResult.providerTraceId === undefined
           ? {}
           : { providerTraceId: modelResult.providerTraceId }),
-      })
-      return await projectStoredGeneration(
-        actor,
-        stored,
-        await readPolicy(actor),
-        authorization,
-        now,
-      )
+      }, generationCommitFence)
+      generationPersisted = true
+      return {
+        generation: await projectStoredGeneration(
+          actor,
+          stored,
+          await readPolicy(actor),
+          authorization,
+          now,
+        ),
+        replayed: false,
+      }
     } catch (error) {
       const safeError = toSafeAttemptError(error)
       const reportedUsage = modelResult?.usage ??
         (error instanceof AiAssistanceError ? error.usage : undefined)
       const providerTraceId = modelResult?.providerTraceId ??
         (error instanceof AiAssistanceError ? error.providerTraceId : undefined)
-      if (!generationPersisted) {
+      if (!generationPersisted && !safeError.idempotencyReplayed) {
         const failedAt = now()
         if (attemptStartedAt) {
+          const providerOutcome = !providerDispatchConfirmed &&
+              (providerDispatchMarkerAttempted || gatewayReturnedWithoutDispatch)
+            ? 'indeterminate'
+            : providerDispatchConfirmed
+              ? classifyProviderAttemptOutcome(safeError, providerReturnedResult)
+              : undefined
+          const latencyStartedAt = providerStartedAt ?? attemptStartedAt
           const failedAttempt = {
             ...completion,
             outcome: 'failed',
             endedAt: failedAt.toISOString(),
-            latencyMs: reportedUsage?.latencyMs ?? Math.max(
-              0,
-              Math.round(failedAt.getTime() - attemptStartedAt.getTime()),
-            ),
-            ...(reportedUsage === undefined
-              ? { usageUnavailableReason: 'provider-did-not-report' }
-              : { usage: reportedUsage }),
+            ...(providerOutcome === 'indeterminate'
+              ? { usageUnavailableReason: 'attempt-outcome-indeterminate' }
+              : {
+                  latencyMs: reportedUsage?.latencyMs ?? Math.max(
+                    0,
+                    Math.round(failedAt.getTime() - latencyStartedAt.getTime()),
+                  ),
+                  ...(reportedUsage === undefined
+                    ? { usageUnavailableReason: 'provider-did-not-report' }
+                    : { usage: reportedUsage }),
+                }),
             ...(providerTraceId === undefined
               ? {}
               : { providerTraceId }),
+            ...(providerOutcome === undefined ? {} : { providerOutcome }),
             failureCategory: safeError.category,
             failureCode: safeError.code,
           } satisfies FinalizeAiAssistanceGenerationAttemptInput
@@ -760,13 +853,20 @@ export function createAiAssistanceService(
             // started receipt pending forever. Adapters may expose a separate
             // repair call that retries only this terminal marker; it never
             // invokes the provider or reserves budget again.
+            // If the generation commit itself was uncertain, terminalization
+            // cannot disprove a committed success. Preserve that retryable
+            // error so the client reuses this key and reconciles the receipt.
+            const surfacedError = generationCommitAttempted &&
+                safeError.code === 'AiAssistancePersistenceError'
+              ? safeError
+              : finalizationError
             if (options.store.recoverGenerationAttempt === undefined) {
-              throw finalizationError
+              throw surfacedError
             }
             try {
               await options.store.recoverGenerationAttempt(failedAttempt)
             } catch {
-              throw finalizationError
+              throw surfacedError
             }
           }
         } else {
@@ -780,6 +880,71 @@ export function createAiAssistanceService(
       }
       throw safeError
     }
+  }
+
+  /** Generates one draft and exposes durable replay metadata to transports. */
+  async function generateWithMetadata(
+    actor: AiAssistanceActor,
+    input: GenerateAiAssistanceRequest,
+    authorization: AiAssistanceAuthorizationCallbacks,
+    idempotencyKeyValue: string,
+    requestStartedAtMs?: number,
+  ): Promise<AiAssistanceGenerationExecution> {
+    const observationStartedAtMs = Date.now()
+    let request: GenerateAiAssistanceRequest | undefined
+    try {
+      request = parseGenerateAiAssistanceRequest(input)
+      const result = await generateExecution(
+        actor,
+        request,
+        authorization,
+        idempotencyKeyValue,
+        requestStartedAtMs,
+      )
+      const observedTask = request.task
+      recordAiAssistanceObservation(options.observability, (observability) => {
+        observability.recordGenerationRequest({
+          task: observedTask,
+          outcome: result.replayed ? 'replayed' : 'succeeded',
+          latencyMs: Math.max(0, Date.now() - observationStartedAtMs),
+          replayed: result.replayed,
+        })
+      })
+      return result
+    } catch (error) {
+      if (request !== undefined) {
+        const safeError = toSafeAttemptError(error)
+        const observedTask = request.task
+        recordAiAssistanceObservation(options.observability, (observability) => {
+          observability.recordGenerationRequest({
+            task: observedTask,
+            outcome: 'failed',
+            latencyMs: Math.max(0, Date.now() - observationStartedAtMs),
+            replayed: safeError.idempotencyReplayed,
+            failureCategory: safeError.category,
+            failureCode: safeError.code,
+          })
+        })
+      }
+      throw error
+    }
+  }
+
+  /** Generates one draft for application callers that do not need replay metadata. */
+  async function generate(
+    actor: AiAssistanceActor,
+    input: GenerateAiAssistanceRequest,
+    authorization: AiAssistanceAuthorizationCallbacks,
+    idempotencyKeyValue: string,
+    requestStartedAtMs?: number,
+  ): Promise<AiAssistanceGeneration> {
+    return (await generateWithMetadata(
+      actor,
+      input,
+      authorization,
+      idempotencyKeyValue,
+      requestStartedAtMs,
+    )).generation
   }
 
   /** Reads one owner-scoped generation and rechecks disclosure authorization. */
@@ -879,13 +1044,14 @@ export function createAiAssistanceService(
         ? {}
         : { authorizationConditions: decisionAuthorizationState.authorizationConditions }),
     }
-    const decided = await options.store.decideGeneration(
+    const decisionResult = await options.store.decideGeneration(
       actor.workspaceId,
       generationId,
       request,
       decisionCommitAt.toISOString(),
       decisionCommitFence,
     )
+    const decided = decisionResult.record
     return await projectStoredGeneration(
       actor,
       decided,
@@ -902,7 +1068,7 @@ export function createAiAssistanceService(
     input: CreateAiAssistanceFeedbackRequest,
     authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKeyValue: string,
-  ): Promise<void> {
+  ): Promise<AiAssistanceFeedbackWriteResult> {
     const parsedFeedback = parseCreateAiAssistanceFeedbackRequest(input)
     const redactedFeedback = {
       rating: parsedFeedback.rating,
@@ -915,8 +1081,9 @@ export function createAiAssistanceService(
     const feedback: CreateAiAssistanceFeedbackRequest =
       parseCreateAiAssistanceFeedbackRequest(redactedFeedback)
     const idempotencyKey = requireIdempotencyKey(idempotencyKeyValue)
-    const feedbackIdentity = createFeedbackIdentity(
-      actor,
+    const feedbackIdentity = createAiAssistanceFeedbackIdentity(
+      actor.workspaceId,
+      actor.memberId,
       generationId,
       feedback,
       idempotencyKey,
@@ -972,7 +1139,7 @@ export function createAiAssistanceService(
         ? {}
         : { authorizationConditions: authorizationState.authorizationConditions }),
     }
-    await options.store.putFeedback({
+    return await options.store.putFeedback({
       workspaceId: actor.workspaceId,
       feedbackId: feedbackIdentity.feedbackId,
       generationId,
@@ -990,6 +1157,7 @@ export function createAiAssistanceService(
     getPreference,
     updatePreference,
     generate,
+    generateWithMetadata,
     getGeneration,
     decideGeneration,
     createFeedback,
@@ -1397,7 +1565,7 @@ function validateDraftForRequest(
   const expectedKind = request.task === 'search' ? 'search' : request.task
   if (draft.kind !== expectedKind) {
     throw new AiAssistanceError(
-      'validation',
+      'upstream',
       'InvalidAiAssistanceOutput',
       'The model returned a draft for a different task.',
     )
@@ -1414,7 +1582,7 @@ function validateDraftForRequest(
   if (request.source.type === 'planning-target') {
     if (draft.statusUpdate === undefined || hasWorkItemDraft) {
       throw new AiAssistanceError(
-        'validation',
+        'upstream',
         'InvalidAiAssistanceOutput',
         'The model returned Work Item planning fields for a Planning target.',
       )
@@ -1423,14 +1591,14 @@ function validateDraftForRequest(
   }
   if (draft.statusUpdate !== undefined) {
     throw new AiAssistanceError(
-      'validation',
+      'upstream',
       'InvalidAiAssistanceOutput',
       'The model returned a Planning status update for a Work Item source.',
     )
   }
   if (!hasWorkItemDraft) {
     throw new AiAssistanceError(
-      'validation',
+      'upstream',
       'InvalidAiAssistanceOutput',
       'The model returned an empty Work Item planning draft.',
     )
@@ -1471,7 +1639,7 @@ function validateDraftReferences(
   for (const citationId of collectDraftCitationIds(draft)) {
     if (!citationIds.has(citationId)) {
       throw new AiAssistanceError(
-        'validation',
+        'upstream',
         'AiAssistanceCitationInvalid',
         'The model referenced an unknown citation.',
       )
@@ -1585,7 +1753,7 @@ function validateAiPlanningDependencies(
     const edgeKey = `${createEndpointKey(dependency.predecessor)}->${createEndpointKey(dependency.successor)}`
     if (seenEdges.has(edgeKey)) {
       throw new AiAssistanceError(
-        'validation',
+        'upstream',
         'AiAssistanceOutputNotAllowed',
         'The model returned a Planning dependency that already exists.',
       )
@@ -1593,7 +1761,7 @@ function validateAiPlanningDependencies(
     addEdge(dependency.predecessor, dependency.successor)
     if (hasDirectedEndpointCycle(outgoing)) {
       throw new AiAssistanceError(
-        'validation',
+        'upstream',
         'AiAssistanceOutputNotAllowed',
         'The model returned a Planning dependency that creates a cycle.',
       )
@@ -1647,7 +1815,7 @@ function validateTriageCustomFields(
     )
     if (matches.length !== 1) {
       throw new AiAssistanceError(
-        'validation',
+        'upstream',
         'AiAssistanceOutputNotAllowed',
         'The model returned a custom field that is not defined for the destination Team and Project.',
       )
@@ -1668,7 +1836,7 @@ function validateSearchCustomFields(
     const matches = definitions.filter((definition) => definition.fieldId === filter.fieldId)
     if (matches.length !== 1) {
       throw new AiAssistanceError(
-        'validation',
+        'upstream',
         'AiAssistanceOutputNotAllowed',
         'The model returned an ambiguous or unknown custom field filter.',
       )
@@ -1799,7 +1967,7 @@ function isValidAiCalendarDate(value: string): boolean {
 /** Throws the stable output-boundary error for an invalid custom-field proposal. */
 function rejectAiCustomFieldValue(message: string): never {
   throw new AiAssistanceError(
-    'validation',
+    'upstream',
     'AiAssistanceOutputNotAllowed',
     message,
   )
@@ -1825,7 +1993,7 @@ function validateTriageRoutingTuple(
     (assigneeUserId === undefined || tuple.assigneeUserIds.includes(assigneeUserId))
   )) return
   throw new AiAssistanceError(
-    'validation',
+    'upstream',
     'AiAssistanceOutputNotAllowed',
     'The model returned an incompatible triage routing combination.',
   )
@@ -2049,7 +2217,7 @@ function requireAllowedMany(
 function requireAllowed(value: string, allowed: readonly string[], label: string): void {
   if (!allowed.includes(value)) {
     throw new AiAssistanceError(
-      'validation',
+      'upstream',
       'AiAssistanceOutputNotAllowed',
       `The model returned an unknown ${label} identifier.`,
     )
@@ -2064,7 +2232,7 @@ function requireAllowedEndpoint(
   const key = createEndpointKey(endpoint)
   if (!allowed.some((candidate) => createEndpointKey(candidate) === key)) {
     throw new AiAssistanceError(
-      'validation',
+      'upstream',
       'AiAssistanceOutputNotAllowed',
       'The model returned an unknown Work Item dependency endpoint.',
     )
@@ -2105,15 +2273,62 @@ function toSafeAttemptError(error: unknown): AiAssistanceError {
     : createSafeAttemptError('upstream', 'AiAssistanceAttemptFailed')
 }
 
+/**
+ * Maps a stable terminal error and provider boundary state to a provider outcome.
+ *
+ * @param error - Stable terminal generation error.
+ * @param providerReturnedResult - Whether the provider returned a result before the failure.
+ * @returns Provider-specific outcome that excludes downstream application failures.
+ */
+function classifyProviderAttemptOutcome(
+  error: AiAssistanceError,
+  providerReturnedResult: boolean,
+): AiAssistanceProviderAttemptOutcome {
+  if (
+    error.code === 'InvalidAiAssistanceOutput' ||
+    error.code === 'AiAssistanceCitationInvalid' ||
+    error.code === 'AiAssistanceOutputNotAllowed'
+  ) return 'invalid-output'
+  if (providerReturnedResult) return 'succeeded'
+  if (error.code === 'AiAssistanceModelRefused') return 'refused'
+  if (error.code === 'AiAssistanceProviderRateLimited') return 'throttled'
+  if (error.code === 'AiAssistanceProviderTimeout') return 'timeout'
+  return 'failed'
+}
+
+/**
+ * Invokes one operational recorder without allowing telemetry failure to alter
+ * generation or decision behavior.
+ *
+ * @param observability - Optional observation boundary supplied by composition.
+ * @param record - One bounded observation callback.
+ */
+function recordAiAssistanceObservation(
+  observability: AiAssistanceObservability | undefined,
+  record: (observability: AiAssistanceObservability) => void,
+): void {
+  if (observability === undefined) return
+  try {
+    record(observability)
+  } catch {
+    // Operational telemetry is intentionally failure-isolated from user results.
+  }
+}
+
 /** Reconstructs a stable attempt error without persisting provider messages or causes. */
 function createSafeAttemptError(
   category: AiAssistanceErrorCategory,
   code: AiAssistanceErrorCode,
+  idempotencyReplayed = false,
 ): AiAssistanceError {
   return new AiAssistanceError(
     category,
     code,
     'The AI assistance generation attempt failed. Use a new Idempotency-Key to retry.',
+    undefined,
+    undefined,
+    undefined,
+    idempotencyReplayed,
   )
 }
 
@@ -2164,30 +2379,48 @@ function requireIdempotencyKey(value: string): string {
   return normalized
 }
 
-/** Creates an operation, actor, and validated client-input-bound fingerprint. */
-function createGenerationInputFingerprint(
-  actor: AiAssistanceActor,
+/**
+ * Creates the canonical operation-, Workspace-, member-, and request-bound generation fingerprint.
+ *
+ * @param workspaceId - Canonical Workspace identifier resolved by the server.
+ * @param memberId - Canonical member identifier resolved by the server.
+ * @param request - Strictly validated generation request.
+ * @returns Lowercase SHA-256 generation input fingerprint.
+ */
+export function createAiAssistanceGenerationInputFingerprint(
+  workspaceId: string,
+  memberId: string,
   request: GenerateAiAssistanceRequest,
 ): string {
   return createHash('sha256').update(JSON.stringify({
     operation: 'ai-assistance.generate',
-    workspaceId: actor.workspaceId,
-    memberId: actor.memberId,
+    workspaceId,
+    memberId,
     request,
   })).digest('hex')
 }
 
-/** Creates a deterministic feedback record key and a redacted-payload-bound fingerprint. */
-function createFeedbackIdentity(
-  actor: AiAssistanceActor,
+/**
+ * Creates the deterministic feedback identifier and redacted-payload-bound fingerprint.
+ *
+ * @param workspaceId - Canonical Workspace identifier resolved by the server.
+ * @param memberId - Canonical member identifier resolved by the server.
+ * @param generationId - Canonical generation receiving feedback.
+ * @param feedback - Strictly validated and redacted feedback payload.
+ * @param idempotencyKey - Validated client idempotency key.
+ * @returns Deterministic feedback row identifier and input fingerprint.
+ */
+export function createAiAssistanceFeedbackIdentity(
+  workspaceId: string,
+  memberId: string,
   generationId: string,
   feedback: CreateAiAssistanceFeedbackRequest,
   idempotencyKey: string,
 ): { feedbackId: string; inputFingerprint: string } {
   const ownership = {
     operation: 'ai-assistance.feedback',
-    workspaceId: actor.workspaceId,
-    memberId: actor.memberId,
+    workspaceId,
+    memberId,
     generationId,
   }
   const feedbackId = createHash('sha256').update(JSON.stringify({

@@ -25,6 +25,7 @@ import {
   type TriageBulkTarget,
   type TriageConfiguration,
   type TriageEntry,
+  type TriageEntryEvent,
   type TriageEntryListInput,
   type TriageEntryPage,
   type TriageMutationReceipt,
@@ -36,6 +37,7 @@ import {
   type TriageSlaPolicy,
   type TriageSourceKind,
   type TriageWorkItemSourcePage,
+  type UpdateTriageCustomerAssociationInput,
   type UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 import {
@@ -55,18 +57,21 @@ import {
 import {
   createTriageBulkTargetIdempotencyKey,
   createTriageInputFingerprint,
+  type TriageCustomerAssociationOperation,
 } from '../../triage'
 import type {
   ResolveTriageWorkItemAction,
   TriageActor,
   TriageAuditContextFactory,
   TriageAuthorizationConditionChecks,
+  TriageCustomerAssociationAuthorizationFactory,
   TriageClient,
   TriageIdempotency,
 } from '../../triage'
 import {
   createTriageAcceptanceTransactionItems,
   createTriageActionTransactionItems,
+  createTriageCustomerAssociationTransactionItems,
   createTriageConfigurationRevisionConditionCheck,
   createTriageEntryKey,
   createTriageEntryTransactionItems,
@@ -79,6 +84,7 @@ import {
   decodeTriageEntryRow,
   DEFAULT_TRIAGE_WAKE_SHARD_COUNT,
   type TriageTransactionContribution,
+  type TriageTransactionItem,
   type TriageTransactionItems,
 } from './triage-transactions'
 import type { TriageAuditOutboxConfiguration } from './triage-audit-events'
@@ -111,6 +117,8 @@ export type DynamoDbTriageClientOptions = {
   documentClient?: DynamoDBDocumentClient
   /** Low-level client used when no DocumentClient is supplied. */
   dynamoDbClient?: DynamoDBClient
+  /** Customer table whose operation marker fences Customer associations. */
+  customerTableName?: string
   /** Number of deterministic sparse wake partitions. */
   wakeShardCount?: number
   /** Secret authenticating scope-bound pagination cursors. */
@@ -257,6 +265,9 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Request Intake DocumentClient. */
   private readonly documentClient: DynamoDBDocumentClient
 
+  /** Optional Customer table used for cross-store operation conditions. */
+  private readonly customerTableName?: string
+
   /** Number of deterministic sparse wake partitions. */
   private readonly wakeShardCount: number
 
@@ -305,6 +316,10 @@ export class DynamoDbTriageClient implements TriageClient {
     this.documentClient = options.documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
       marshallOptions: { removeUndefinedValues: true },
     })
+    const configuredCustomerTableName = options.customerTableName?.trim() ?? readEnvironment('CUSTOMERS_TABLE_NAME')
+    this.customerTableName = configuredCustomerTableName
+      ? requireText(configuredCustomerTableName, 'Customer table name', 1_000)
+      : undefined
     this.tableName = requireText(
       options.tableName ?? readEnvironment('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
       'Request Intake table name',
@@ -478,6 +493,436 @@ export class DynamoDbTriageClient implements TriageClient {
     idempotency: TriageIdempotency,
   ): Promise<TriageMutationReceipt | undefined> {
     return await this.readReceipt(workspaceId, entryId, 'action', idempotency, teamId)
+  }
+
+  /** Associates a Triage Entry with a Customer graph under an optimistic revision fence.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param teamId The expected Team ID.
+   * @param entryId The target Triage Entry identifier.
+   * @param actor The authenticated mutation actor.
+   * @param input The customer association and expected revision.
+   * @param authorizationConditionChecks Live Team, Project, and actor fences joined to the transaction.
+   * @param customerOperation Durable Customer operation that owns a cleanup or repoint mutation.
+   * @returns The updated permission-safe Triage Entry.
+   */
+  async associateCustomer(
+    workspaceId: string,
+    teamId: string,
+    entryId: string,
+    actor: TriageActor,
+    input: UpdateTriageCustomerAssociationInput,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
+    customerOperation?: TriageCustomerAssociationOperation,
+  ): Promise<TriageEntry> {
+    requireUserId(actor.id, 'Triage actor ID')
+    const current = await this.getEntryForMutation(workspaceId, teamId, entryId)
+    if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
+      throw new TriageError(400, 'InvalidTriageInput', 'Triage revision is invalid.')
+    }
+    if (current.revision !== input.expectedRevision) {
+      throw new TriageError(409, 'TriageRevisionConflict', 'The triage entry changed.')
+    }
+    const now = this.now().toISOString()
+    const nextCustomerId = input.customerId === null
+      ? undefined
+      : input.customerId ?? current.customerId
+    const customerChanged = nextCustomerId !== current.customerId
+    const nextContactId = input.contactId === null
+      ? undefined
+      : input.contactId ?? (customerChanged ? undefined : current.contactId)
+    const nextCustomerRequestId = input.customerRequestId === null
+      ? undefined
+      : input.customerRequestId ?? (customerChanged ? undefined : current.customerRequestId)
+    if (
+      nextCustomerId === current.customerId &&
+      nextContactId === current.contactId &&
+      nextCustomerRequestId === current.customerRequestId
+    ) return projectTriageEntryForResponse(current, now)
+    const associationEvent: TriageEntryEvent = {
+      id: this.id(),
+      type: 'customer-associated',
+      actorId: actor.id,
+      summary: 'Customer association updated.',
+      createdAt: now,
+    }
+    const next: TriageEntry = {
+      ...current,
+      ...(nextCustomerId === undefined ? { customerId: undefined } : { customerId: nextCustomerId }),
+      ...(nextContactId === undefined ? { contactId: undefined } : { contactId: nextContactId }),
+      ...(nextCustomerRequestId === undefined ? { customerRequestId: undefined } : { customerRequestId: nextCustomerRequestId }),
+      events: [...current.events, associationEvent].slice(-50),
+      revision: current.revision + 1,
+      updatedAt: now,
+    }
+    validateTriageCustomerAssociation(next)
+    const customerOperationConditionCheck = this.createCustomerOperationConditionCheck(
+      workspaceId,
+      nextCustomerId,
+      customerOperation,
+    )
+    const customerAssociationConditionChecks = this.createCustomerAssociationConditionChecks(
+      workspaceId,
+      customerOperation === undefined ? next : current,
+      customerOperation,
+    )
+    const combinedAuthorizationConditionChecks = [
+      ...(authorizationConditionChecks ?? []),
+      ...customerAssociationConditionChecks,
+    ]
+    const transactItems = createTriageCustomerAssociationTransactionItems({
+      tableName: this.tableName,
+      current,
+      next,
+      event: associationEvent,
+      authorizationConditionChecks: combinedAuthorizationConditionChecks,
+      customerOperationConditionCheck,
+    })
+    if (transactItems.length > 100) {
+      throw new TriageError(409, 'TriageTransactionTooLarge', 'The Customer association is too large.')
+    }
+    const customerOperationIndex = customerOperationConditionCheck
+      ? combinedAuthorizationConditionChecks.length
+      : undefined
+    const triageEntryRevisionIndex = findTriageEntryRevisionConditionIndex(
+      transactItems,
+      this.tableName,
+      workspaceId,
+      entryId,
+    )
+    if (triageEntryRevisionIndex === undefined) {
+      throw new TriageError(
+        500,
+        'TriageAssociationTransactionInvalid',
+        'The Triage association transaction is missing its revision fence.',
+      )
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      const conditionalFailureIndexes = readConditionalFailureIndexes(error)
+      if (conditionalFailureIndexes === undefined) throw error
+      const knownFailureCategories = new Set(
+        conditionalFailureIndexes.map((itemIndex) =>
+          classifyTriageAssociationConditionFailure(
+            itemIndex,
+            authorizationConditionChecks?.length ?? 0,
+            customerAssociationConditionChecks.length,
+            customerOperationIndex,
+            triageEntryRevisionIndex,
+          )
+        ),
+      )
+      knownFailureCategories.delete(undefined)
+      const hasUnknownFailure = conditionalFailureIndexes.some((itemIndex) =>
+        classifyTriageAssociationConditionFailure(
+          itemIndex,
+          authorizationConditionChecks?.length ?? 0,
+          customerAssociationConditionChecks.length,
+          customerOperationIndex,
+          triageEntryRevisionIndex,
+        ) === undefined
+      )
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('revision')) {
+        throw new TriageError(409, 'TriageRevisionConflict', 'The triage entry changed.', {
+          cause: error,
+        })
+      }
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('authorization')) {
+        throw new TriageError(
+          409,
+          'TriageAuthorizationChanged',
+          'Triage authorization changed during the association.',
+          { cause: error },
+        )
+      }
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('customer-operation')) {
+        throw new TriageError(
+          409,
+          'TriageCustomerOperationConflict',
+          'The Customer operation changed during the association.',
+          { cause: error },
+        )
+      }
+      if (!hasUnknownFailure && knownFailureCategories.size === 1 && knownFailureCategories.has('customer-graph')) {
+        throw new TriageError(
+          409,
+          'TriageCustomerAssociationConflict',
+          'The Customer association changed during the mutation.',
+          { cause: error },
+        )
+      }
+      if (isConditionalConflict(error)) {
+        throw new TriageError(
+          409,
+          'TriageAssociationConflict',
+          'The Customer association transaction could not be applied safely.',
+          { cause: error },
+        )
+      }
+      throw error
+    }
+    return projectTriageEntryForResponse(next, now)
+  }
+
+  /** Lists every Triage Entry currently associated with a Customer.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose reverse links should be listed.
+   * @returns The currently associated Triage Entries.
+   */
+  async listCustomerAssociations(workspaceId: string, customerId: string): Promise<TriageEntry[]> {
+    requireWorkspaceId(workspaceId)
+    requireIdentifier(customerId, 'Customer ID')
+    const entries: TriageEntry[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':scopeKey': createWorkspaceScopeKey(workspaceId),
+          ':prefix': 'TRIAGE#',
+        },
+        ConsistentRead: true,
+        Limit: 100,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of response.Items ?? []) {
+        const key = readPrimaryKey(item)
+        if (!key) {
+          throw new TriageError(
+            503,
+            'TriagePersistenceCorrupt',
+            'A Triage Entry row has an invalid primary key.',
+          )
+        }
+        const entry = decodeTriageEntryRow(item, key)
+        if (!entry) {
+          throw new TriageError(
+            503,
+            'TriagePersistenceCorrupt',
+            'A Triage Entry row is malformed.',
+          )
+        }
+        if (entry.customerId === customerId) entries.push(entry)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey !== undefined)
+    return entries
+  }
+
+  /** Clears reverse Customer links before a Customer graph is deleted.
+   *
+   * The Customer deletion route supplies the already-authorized Workspace
+   * operation. Every matching entry is nevertheless reread and updated through
+   * the normal revision-fenced association path so concurrent Triage changes
+   * cannot be silently overwritten.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose links must be cleared.
+   * @param actorId The authenticated actor performing the cleanup.
+   * @returns A promise that resolves after all matching links are cleared.
+   */
+  async clearCustomerAssociations(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+    createAuthorizationConditionChecks?: TriageCustomerAssociationAuthorizationFactory,
+  ): Promise<void> {
+    requireUserId(actorId, 'Triage actor ID')
+    const entries = await this.listCustomerAssociations(workspaceId, customerId)
+
+    for (const entry of entries) {
+      const authorizationConditionChecks = createAuthorizationConditionChecks
+        ? await createAuthorizationConditionChecks(entry)
+        : undefined
+      await this.associateCustomer(
+        workspaceId,
+        entry.teamId,
+        entry.id,
+        { id: actorId },
+        {
+          expectedRevision: entry.revision,
+          customerId: null,
+          contactId: null,
+          customerRequestId: null,
+        },
+        authorizationConditionChecks,
+        { kind: 'deletion', customerId },
+      )
+    }
+  }
+
+  /** Builds the Customer META condition shared by association and deletion flows.
+   *
+   * @param workspaceId Workspace containing the Customer metadata row.
+   * @param customerId Customer assigned by the resulting association, when any.
+   * @param operation Cross-store operation that owns the mutation, when any.
+   * @returns A transaction condition or undefined when the Customer table is not configured.
+   */
+  private createCustomerOperationConditionCheck(
+    workspaceId: string,
+    customerId: string | undefined,
+    operation: TriageCustomerAssociationOperation | undefined,
+  ): TriageTransactionItem | undefined {
+    if (!this.customerTableName) return undefined
+    const names: Record<string, string> = {
+      '#workspaceId': 'workspaceId',
+      '#recordKey': 'recordKey',
+    }
+    const values: Record<string, unknown> = {}
+    let conditionExpression = 'attribute_exists(#workspaceId) AND attribute_exists(#recordKey)'
+    if (operation?.kind === 'deletion') {
+      if (customerId !== undefined && customerId !== operation.customerId) {
+        throw new TriageError(400, 'InvalidTriageInput', 'The deletion operation does not own this Customer association.')
+      }
+      conditionExpression += ' AND #deletion.#customerId = :customerId AND #deletion.#phase = :triagePhase AND attribute_not_exists(#contactOperation) AND attribute_not_exists(#requestOperation)'
+      names['#deletion'] = 'deletion'
+      names['#contactOperation'] = 'contactOperation'
+      names['#requestOperation'] = 'requestOperation'
+      names['#customerId'] = 'customerId'
+      names['#phase'] = 'phase'
+      values[':customerId'] = operation.customerId
+      values[':triagePhase'] = 'triage'
+    } else if (operation?.kind === 'merge') {
+      if (customerId !== operation.targetCustomerId) {
+        throw new TriageError(400, 'InvalidTriageInput', 'The merge operation does not target this Customer association.')
+      }
+      conditionExpression += ' AND #merge.#mergeSource = :mergeSource AND #merge.#mergeTarget = :mergeTarget AND attribute_not_exists(#contactOperation) AND attribute_not_exists(#requestOperation)'
+      names['#merge'] = 'merge'
+      names['#contactOperation'] = 'contactOperation'
+      names['#requestOperation'] = 'requestOperation'
+      names['#mergeSource'] = 'sourceCustomerId'
+      names['#mergeTarget'] = 'targetCustomerId'
+      values[':mergeSource'] = operation.sourceCustomerId
+      values[':mergeTarget'] = operation.targetCustomerId
+    } else if (customerId !== undefined) {
+      conditionExpression += ' AND attribute_not_exists(#deletion) AND attribute_not_exists(#merge) AND attribute_not_exists(#contactOperation) AND attribute_not_exists(#requestOperation)'
+      names['#deletion'] = 'deletion'
+      names['#merge'] = 'merge'
+      names['#contactOperation'] = 'contactOperation'
+      names['#requestOperation'] = 'requestOperation'
+    } else {
+      return undefined
+    }
+    return {
+      ConditionCheck: {
+        TableName: this.customerTableName,
+        Key: { workspaceId, recordKey: 'META' },
+        ConditionExpression: conditionExpression,
+        ExpressionAttributeNames: names,
+        ...(Object.keys(values).length > 0 ? { ExpressionAttributeValues: values } : {}),
+      },
+    }
+  }
+
+  /** Builds live Customer graph row conditions for an association.
+   *
+   * @param workspaceId Workspace containing the Customer graph.
+   * @param entry Triage Entry whose next association must remain valid.
+   * @param operation Cross-store Customer operation that owns the mutation, when any. A merge
+   *   also accepts source-owned Contact and Request rows, and any operation skips the active
+   *   Contact status requirement.
+   * @returns Customer row conditions, or an empty list when Customer storage is not configured.
+   */
+  private createCustomerAssociationConditionChecks(
+    workspaceId: string,
+    entry: TriageEntry,
+    operation?: TriageCustomerAssociationOperation,
+  ): TriageAuthorizationConditionChecks {
+    if (!this.customerTableName || entry.customerId === undefined) return []
+    const checks: TriageAuthorizationConditionChecks = []
+    if (operation?.kind === 'deletion' && entry.customerId !== operation.customerId) {
+      throw new TriageError(
+        400,
+        'InvalidTriageInput',
+        'The deletion operation does not own this Customer association.',
+      )
+    }
+    if (operation?.kind === 'merge' && entry.customerId !== operation.sourceCustomerId) {
+      throw new TriageError(
+        400,
+        'InvalidTriageInput',
+        'The merge operation does not own this Customer association.',
+      )
+    }
+    const associationCustomerId = operation?.kind === 'merge'
+      ? operation.sourceCustomerId
+      : entry.customerId
+    const customerRootIds = operation?.kind === 'merge'
+      ? [...new Set([operation.sourceCustomerId, operation.targetCustomerId])]
+      : [associationCustomerId]
+    for (const customerId of customerRootIds) {
+      checks.push({
+        ConditionCheck: {
+          TableName: this.customerTableName,
+          Key: { workspaceId, recordKey: 'CUSTOMER#' + customerId },
+          ConditionExpression: 'attribute_exists(#customer) AND #customer.#id = :customerId',
+          ExpressionAttributeNames: {
+            '#customer': 'customer',
+            '#id': 'id',
+          },
+          ExpressionAttributeValues: {
+            ':customerId': customerId,
+          },
+        },
+      })
+    }
+    const sourceCustomerId = operation?.kind === 'merge'
+      ? operation.sourceCustomerId
+      : undefined
+    const contactCustomerIdExpression = sourceCustomerId === undefined
+      ? '#contact.#customerId = :customerId'
+      : '(#contact.#customerId = :customerId OR #contact.#customerId = :sourceCustomerId)'
+    const requestCustomerIdExpression = sourceCustomerId === undefined
+      ? '#request.#customerId = :customerId'
+      : '(#request.#customerId = :customerId OR #request.#customerId = :sourceCustomerId)'
+    const customerIdValues = sourceCustomerId === undefined
+      ? { ':customerId': associationCustomerId }
+      : { ':customerId': associationCustomerId, ':sourceCustomerId': sourceCustomerId }
+    const contactStatusCondition = operation === undefined
+      ? ' AND #contact.#status = :activeStatus'
+      : ''
+    if (entry.contactId !== undefined) {
+      checks.push({
+        ConditionCheck: {
+          TableName: this.customerTableName,
+          Key: { workspaceId, recordKey: `CONTACT#${associationCustomerId}#${entry.contactId}` },
+          ConditionExpression:
+            `attribute_exists(#contact) AND ${contactCustomerIdExpression}${contactStatusCondition}`,
+          ExpressionAttributeNames: {
+            '#contact': 'contact',
+            '#customerId': 'customerId',
+            ...(operation === undefined ? { '#status': 'status' } : {}),
+          },
+          ExpressionAttributeValues: {
+            ...customerIdValues,
+            ...(operation === undefined ? { ':activeStatus': 'active' } : {}),
+          },
+        },
+      })
+    }
+    if (entry.customerRequestId !== undefined) {
+      checks.push({
+        ConditionCheck: {
+          TableName: this.customerTableName,
+          Key: { workspaceId, recordKey: `REQUEST#${associationCustomerId}#${entry.customerRequestId}` },
+          ConditionExpression:
+            `attribute_exists(#request) AND ${requestCustomerIdExpression} AND #request.#triageEntryId = :entryId`,
+          ExpressionAttributeNames: {
+            '#request': 'request',
+            '#customerId': 'customerId',
+            '#triageEntryId': 'triageEntryId',
+          },
+          ExpressionAttributeValues: {
+            ...customerIdValues,
+            ':entryId': entry.id,
+          },
+        },
+      })
+    }
+    return checks
   }
 
   /** Strongly reads one canonical stored entry without applying a response projection. */
@@ -2450,6 +2895,30 @@ function readPrimaryKey(value: unknown): { scopeKey: string; recordKey: string }
   return { scopeKey: value.scopeKey, recordKey: value.recordKey }
 }
 
+/** Finds the revision-fenced canonical Triage Entry update in an association transaction.
+ *
+ * @param items Transaction actions composed for the association.
+ * @param tableName Request Intake table name.
+ * @param workspaceId Workspace containing the entry.
+ * @param entryId Entry whose revision is being advanced.
+ * @returns The transaction position of the entry update, or undefined for an invalid composition.
+ */
+function findTriageEntryRevisionConditionIndex(
+  items: TriageTransactionItems,
+  tableName: string,
+  workspaceId: string,
+  entryId: string,
+): number | undefined {
+  const key = createTriageEntryKey(workspaceId, entryId)
+  const index = items.findIndex((item) => {
+    const update = item.Update
+    return update?.TableName === tableName &&
+      update.Key?.scopeKey === key.scopeKey &&
+      update.Key?.recordKey === key.recordKey
+  })
+  return index >= 0 ? index : undefined
+}
+
 /** Reads an entry ID from a reverse source association. */
 function readAssociationEntryId(value: unknown): string | undefined {
   return isRecord(value) && value.entryType === 'triage-work-item-source' &&
@@ -2460,19 +2929,53 @@ function readAssociationEntryId(value: unknown): string | undefined {
 function isConditionalConflict(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   if (error.name === 'ConditionalCheckFailedException') return true
-  if (error.name !== 'TransactionCanceledException') return false
+  const conditionalFailureIndexes = readConditionalFailureIndexes(error)
+  return conditionalFailureIndexes !== undefined && conditionalFailureIndexes.length > 0
+}
+
+/** Reads conditional-failure transaction positions while rejecting mixed infrastructure failures.
+ *
+ * @param error Untrusted DynamoDB transaction failure.
+ * @returns Conditional-failure item indexes, or undefined when the cancellation is not safely classifiable.
+ */
+function readConditionalFailureIndexes(error: unknown): number[] | undefined {
+  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') return undefined
   const cancellationReasons = Reflect.get(error, 'CancellationReasons')
-  if (!Array.isArray(cancellationReasons) || cancellationReasons.length === 0) return false
-  let hasConditionalFailure = false
-  for (const reason of cancellationReasons) {
+  if (!Array.isArray(cancellationReasons) || cancellationReasons.length === 0) return undefined
+  const indexes: number[] = []
+  for (const [index, reason] of cancellationReasons.entries()) {
     const code = isRecord(reason) ? reason.Code : undefined
     if (code === 'ConditionalCheckFailed') {
-      hasConditionalFailure = true
+      indexes.push(index)
       continue
     }
-    if (code !== 'None') return false
+    if (code !== 'None') return undefined
   }
-  return hasConditionalFailure
+  return indexes
+}
+
+/** Maps one association transaction position to its semantic condition category.
+ *
+ * @param itemIndex Transaction position reported by DynamoDB.
+ * @param callerAuthorizationCount Number of caller-supplied authorization conditions.
+ * @param customerGraphCount Number of generated Customer root/child conditions.
+ * @param customerOperationIndex Optional Customer operation marker position.
+ * @param triageEntryRevisionIndex Triage root revision condition position.
+ * @returns The condition category, or undefined for an unrecognized transaction item.
+ */
+function classifyTriageAssociationConditionFailure(
+  itemIndex: number,
+  callerAuthorizationCount: number,
+  customerGraphCount: number,
+  customerOperationIndex: number | undefined,
+  triageEntryRevisionIndex: number,
+): 'authorization' | 'customer-graph' | 'customer-operation' | 'revision' | undefined {
+  if (itemIndex < callerAuthorizationCount) return 'authorization'
+  const customerGraphStartIndex = callerAuthorizationCount
+  if (itemIndex < customerGraphStartIndex + customerGraphCount) return 'customer-graph'
+  if (customerOperationIndex === itemIndex) return 'customer-operation'
+  if (triageEntryRevisionIndex === itemIndex) return 'revision'
+  return undefined
 }
 
 /** Classifies a transaction cancellation caused only by expected admission guards.
@@ -2534,6 +3037,18 @@ function requireIdentifier(value: string, label: string): string {
     throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`)
   }
   return identifier
+}
+
+/** Validates optional Customer graph identifiers embedded in a Triage Entry. */
+function validateTriageCustomerAssociation(entry: TriageEntry): void {
+  if (entry.customerId === undefined && (entry.contactId !== undefined || entry.customerRequestId !== undefined)) {
+    throw new TriageError(400, 'InvalidTriageInput', 'A Customer is required when a Contact or Customer Request is associated.')
+  }
+  if (entry.customerId !== undefined) requireIdentifier(entry.customerId, 'Customer ID')
+  if (entry.contactId !== undefined) requireIdentifier(entry.contactId, 'Customer contact ID')
+  if (entry.customerRequestId !== undefined) {
+    requireIdentifier(entry.customerRequestId, 'Customer Request ID')
+  }
 }
 
 /** Validates a canonical Workspace identifier that may contain Cognito delimiters. */

@@ -185,6 +185,7 @@ export type TriageEntryEvent = {
     | 'assigned'
     | 'accepted'
     | 'linked'
+    | 'customer-associated'
     | 'duplicate'
     | 'declined'
     | 'snoozed'
@@ -260,6 +261,12 @@ export type TriageEntry = {
   snoozedUntil?: string
   /** The source and queue retention boundary. */
   retention: TriageRetention
+  /** The Customer organization associated with this entry, when known. */
+  customerId?: string
+  /** The Customer contact associated with this entry, when known. */
+  contactId?: string
+  /** The Customer Request created from this entry, when known. */
+  customerRequestId?: string
   /** The canonical Work Item after acceptance or duplicate resolution. */
   canonicalWorkItem?: TriageWorkItemReference
   /** Proof that duplicate context was preserved. */
@@ -274,6 +281,18 @@ export type TriageEntry = {
   createdAt: string
   /** The ISO 8601 last mutation instant. */
   updatedAt: string
+}
+
+/** Customer association replacement applied to a Triage Entry. */
+export type UpdateTriageCustomerAssociationInput = {
+  /** Revision observed before the association update. */
+  expectedRevision: number
+  /** Customer organization to associate, or null to clear it. */
+  customerId?: string | null
+  /** Customer contact to associate, or null to clear it. */
+  contactId?: string | null
+  /** Customer Request to associate, or null to clear it. */
+  customerRequestId?: string | null
 }
 
 /** Cursor-paginated Team triage queue response. */

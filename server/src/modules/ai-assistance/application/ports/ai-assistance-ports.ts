@@ -136,6 +136,9 @@ export type ResolvedAiAssistanceContext = {
   authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
 }
 
+/** Maximum unique source fences that fit beside four fixed generation transaction items. */
+export const AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS = 96
+
 /** One source-of-truth persistence row checked at an AI commit boundary. */
 export type AiAssistanceAuthorizationCondition = {
   /** Semantic source used for safe transaction-failure classification. */
@@ -305,6 +308,11 @@ export type AiModelGenerationInput = {
   maxOutputTokens: number
   /** Maximum complete provider call duration. */
   timeoutMs: number
+  /**
+   * Persists the exact provider-dispatch marker after the provider runner has
+   * been invoked and before its result may be processed.
+   */
+  onProviderDispatch(): Promise<void>
 }
 
 /** Strict model result returned by the replaceable gateway. */
@@ -330,6 +338,102 @@ export interface AiModelGateway {
   generate(input: AiModelGenerationInput): Promise<AiModelGenerationResult>
 }
 
+/** Bounded outcomes emitted for one AI generation request. */
+export type AiAssistanceGenerationRequestOutcome =
+  | 'succeeded'
+  | 'replayed'
+  | 'failed'
+
+/** Bounded outcomes emitted for one durable provider-boundary attempt. */
+export type AiAssistanceProviderAttemptOutcome =
+  | 'succeeded'
+  | 'failed'
+  | 'throttled'
+  | 'timeout'
+  | 'refused'
+  | 'invalid-output'
+  | 'indeterminate'
+
+/** Safe metadata recorded after one generation request completes. */
+export type AiAssistanceGenerationRequestObservation = {
+  /** Requested product workflow. */
+  task: AiAssistanceTask
+  /** Bounded terminal request outcome. */
+  outcome: AiAssistanceGenerationRequestOutcome
+  /** End-to-end service latency in milliseconds. */
+  latencyMs: number
+  /** Whether the response or stable failure came from a durable idempotency receipt. */
+  replayed: boolean
+  /** Stable error category for a failed request. */
+  failureCategory?: AiAssistanceErrorCategory
+  /** Stable error code for a failed request. */
+  failureCode?: AiAssistanceErrorCode
+}
+
+/** Safe metadata recorded only after one provider-boundary attempt is durably terminal. */
+export type AiAssistanceProviderAttemptObservation = {
+  /** Requested product workflow. */
+  task: AiAssistanceTask
+  /** Exact deployment-allowlisted model identifier. */
+  modelId: string
+  /** Bounded terminal provider-attempt outcome. */
+  outcome: AiAssistanceProviderAttemptOutcome
+  /** Non-negative provider latency, absent when crash recovery cannot determine it. */
+  latencyMs?: number
+  /** Provider-reported usage and deployment-side cost estimate, when available. */
+  usage?: AiAssistanceUsage
+  /** Stable reason provider usage or one of its billing fields was unavailable. */
+  usageUnavailableReason?:
+    | 'provider-did-not-report'
+    | 'token-or-cost-missing'
+    | 'attempt-outcome-indeterminate'
+  /** Stable error category for a failed attempt. */
+  failureCategory?: AiAssistanceErrorCategory
+  /** Stable error code for a failed attempt. */
+  failureCode?: AiAssistanceErrorCode
+}
+
+/** Safe metadata recorded after one new human decision is durable. */
+export type AiAssistanceDecisionObservation = {
+  /** Product workflow whose draft was reviewed. */
+  task: AiAssistanceTask
+  /** Durable human review outcome. */
+  outcome: 'approved' | 'rejected'
+}
+
+/** Failure-isolated operational observation boundary for AI assistance. */
+export interface AiAssistanceObservability {
+  /** Records one completed generation request without identifiers or content. */
+  recordGenerationRequest(
+    observation: AiAssistanceGenerationRequestObservation,
+  ): void
+  /** Records one provider attempt after its terminal receipt update is durable. */
+  recordProviderAttempt(
+    observation: AiAssistanceProviderAttemptObservation,
+  ): void
+  /** Records one newly persisted human review decision. */
+  recordDecision(observation: AiAssistanceDecisionObservation): void
+}
+
+/** Operational observation boundary used by the terminal-row stream projection. */
+export interface AiAssistanceProjectionObservability
+  extends AiAssistanceObservability {
+  /**
+   * Records rows returned for partial-batch retry without identifiers or content.
+   *
+   * @param failureCount Number of failed records in the completed invocation batch.
+   */
+  recordProjectionFailures(failureCount: number): void
+}
+
+/** Generation response together with transport-safe idempotency metadata. */
+export type AiAssistanceGenerationExecution = {
+  /** Generated or durably replayed draft. */
+  generation: AiAssistanceGeneration
+  /** Whether this response came from an existing durable receipt. */
+  replayed: boolean
+}
+
 /** Internal durable generation record with authorization and audit input. */
 export type StoredAiAssistanceGeneration = {
   /** Workspace partition that owns the generation. */
@@ -344,6 +448,20 @@ export type StoredAiAssistanceGeneration = {
   authorizationToken: string
   /** Redacted prompt input retained under Workspace retention policy. */
   auditedInput: string
+}
+
+/** Durable decision write result used to distinguish a new commit from reconciliation. */
+export type AiAssistanceDecisionStoreResult = {
+  /** Current durable generation after the requested decision. */
+  record: StoredAiAssistanceGeneration
+  /** Whether an identical decision already existed or won a concurrent race. */
+  replayed: boolean
+}
+
+/** Durable feedback write result exposed to the idempotency-aware transport. */
+export type AiAssistanceFeedbackWriteResult = {
+  /** Whether an identical feedback record already existed. */
+  replayed: boolean
 }
 
 /** Durable feedback record used by offline evaluation. */
@@ -451,6 +569,8 @@ export type AiAssistanceGenerationReservation =
       status: 'pending'
       /** Reserved generation identifier, used for crash recovery checks. */
       generationId: string
+      /** ISO instant after which a started attempt may be failed without recalling the provider. */
+      leaseExpiresAt: string
       /** ISO retention deadline copied from the durable idempotency receipt. */
       expiresAt?: string
     }
@@ -519,7 +639,7 @@ export type AiAssistanceFeedbackCommitFence = {
   authorizationConditions?: readonly AiAssistanceAuthorizationCondition[]
 }
 
-/** Provider attempt metadata persisted before any paid model call starts. */
+/** Provider attempt metadata persisted after pre-provider fences and before any paid model call. */
 export type StartAiAssistanceGenerationAttemptInput =
   CompleteAiAssistanceGenerationReservationInput & {
     /** Requested AI workflow. */
@@ -536,6 +656,15 @@ export type StartAiAssistanceGenerationAttemptInput =
     audit: AiAssistanceGenerationAttemptAuditEnvelope
   }
 
+/** Provider dispatch marker persisted after the provider runner is invoked. */
+export type MarkAiAssistanceGenerationProviderStartedInput =
+  CompleteAiAssistanceGenerationReservationInput & {
+    /** Exact admission marker timestamp already stored on the owning attempt. */
+    attemptStartedAt: string
+    /** ISO 8601 instant sampled immediately after provider runner invocation. */
+    providerStartedAt: string
+  }
+
 /** Terminal provider attempt outcome persisted on the owning idempotency receipt. */
 export type FinalizeAiAssistanceGenerationAttemptInput =
   CompleteAiAssistanceGenerationReservationInput & {
@@ -543,18 +672,29 @@ export type FinalizeAiAssistanceGenerationAttemptInput =
     outcome: 'succeeded' | 'failed'
     /** ISO 8601 instant when the attempt reached a terminal outcome. */
     endedAt: string
-    /** Non-negative measured provider latency in milliseconds. */
-    latencyMs: number
+    /** Measured provider latency, absent only when dispatch outcome is indeterminate. */
+    latencyMs?: number
     /** Provider-reported usage and deployment-side cost estimate when available. */
     usage?: AiAssistanceUsage
     /** Safe reason provider usage was unavailable for a failed attempt. */
-    usageUnavailableReason?: 'provider-did-not-report'
+    usageUnavailableReason?:
+      | 'provider-did-not-report'
+      | 'attempt-outcome-indeterminate'
     /** Provider or Mastra trace identifier when available. */
     providerTraceId?: string
+    /** Provider-specific outcome, omitted when no paid provider call was known to start. */
+    providerOutcome?: AiAssistanceProviderAttemptOutcome
     /** Safe stable error category for a failed attempt. */
     failureCategory?: AiAssistanceErrorCategory
     /** Safe stable error code for a failed attempt. */
     failureCode?: AiAssistanceErrorCode
+  }
+
+/** Lease-expiry recovery input for one crashed started generation attempt. */
+export type ExpireAiAssistanceGenerationAttemptInput =
+  CompleteAiAssistanceGenerationReservationInput & {
+    /** ISO instant at or after the durable attempt lease deadline. */
+    failedAt: string
   }
 
 /** Terminal failure persisted when generation stops before a provider attempt starts. */
@@ -578,9 +718,18 @@ export interface AiAssistanceStore {
   reserveGeneration(
     input: ReserveAiAssistanceGenerationInput,
   ): Promise<AiAssistanceGenerationReservation>
-  /** Persists safe attempt metadata before provider execution. */
+  /** Persists safe attempt metadata after pre-provider fences and before provider execution. */
   startGenerationAttempt(
     input: StartAiAssistanceGenerationAttemptInput,
+  ): Promise<void>
+  /**
+   * Marks provider dispatch through an exact receipt CAS before result handling.
+   *
+   * @param input - Owning receipt identity and post-invocation timestamp.
+   * @returns Completion after the durable provider dispatch marker is reconciled.
+   */
+  markGenerationProviderStarted(
+    input: MarkAiAssistanceGenerationProviderStartedInput,
   ): Promise<void>
   /** Finalizes one provider attempt and its receipt after success or failure. */
   finalizeGenerationAttempt(
@@ -595,6 +744,15 @@ export interface AiAssistanceStore {
   recoverGenerationAttempt?(
     input: FinalizeAiAssistanceGenerationAttemptInput,
   ): Promise<void>
+  /**
+   * Fails one expired started attempt through a receipt CAS without invoking the provider.
+   *
+   * @param input - Receipt identity and lease-expiry recovery instant.
+   * @returns Current terminal or pending receipt classification after reconciliation.
+   */
+  expireGenerationAttempt(
+    input: ExpireAiAssistanceGenerationAttemptInput,
+  ): Promise<AiAssistanceGenerationReservation>
   /** Finalizes one receipt that failed before the provider attempt started. */
   failGenerationReservation(
     input: FailAiAssistanceGenerationReservationInput,
@@ -625,6 +783,19 @@ export interface AiAssistanceStore {
     record: StoredAiAssistanceGeneration,
     commitFence?: AiAssistanceGenerationCommitFence,
   ): Promise<StoredAiAssistanceGeneration>
+  /**
+   * Atomically creates one generation and terminalizes its owning provider receipt.
+   *
+   * @param record - Canonical generation row to persist.
+   * @param completion - Successful provider-attempt accounting and receipt identity.
+   * @param commitFence - Governance and source authorization conditions checked in the transaction.
+   * @returns The newly committed or exactly reconciled generation.
+   */
+  commitGeneration(
+    record: StoredAiAssistanceGeneration,
+    completion: FinalizeAiAssistanceGenerationAttemptInput,
+    commitFence: AiAssistanceGenerationCommitFence,
+  ): Promise<StoredAiAssistanceGeneration>
   /** Strongly reads one generation by Workspace and identifier. */
   getGeneration(
     workspaceId: string,
@@ -637,12 +808,12 @@ export interface AiAssistanceStore {
     request: DecideAiAssistanceGenerationRequest,
     decidedAt: string,
     commitFence?: AiAssistanceDecisionCommitFence,
-  ): Promise<StoredAiAssistanceGeneration>
+  ): Promise<AiAssistanceDecisionStoreResult>
   /** Appends immutable bounded feedback. */
   putFeedback(
     record: StoredAiAssistanceFeedback,
     commitFence?: AiAssistanceFeedbackCommitFence,
-  ): Promise<void>
+  ): Promise<AiAssistanceFeedbackWriteResult>
 }
 
 /** Configuration required to construct the AI assistance application service. */
@@ -659,6 +830,8 @@ export type AiAssistanceServiceOptions = {
   promptVersion: string
   /** Optional append-only audit boundary for successful policy transitions. */
   policyAudit?: AiAssistancePolicyAudit
+  /** Optional failure-isolated operational observation boundary. */
+  observability?: AiAssistanceObservability
   /** Maximum permission-safe source context length. */
   maxPromptContextCharacters?: number
   /** Maximum provider output tokens. */
@@ -667,7 +840,7 @@ export type AiAssistanceServiceOptions = {
   providerTimeoutMs?: number
   /** End-to-end generation deadline, including source resolution and persistence headroom. */
   generationDeadlineMs?: number
-  /** Duration of one in-flight generation reservation before crash recovery takeover. */
+  /** Duration of one in-flight reservation, including post-deadline recovery headroom. */
   reservationLeaseMs?: number
   /** Maximum unique generation keys accepted per Workspace in each UTC minute. */
   workspaceGenerationLimitPerMinute?: number
@@ -727,6 +900,23 @@ export interface AiAssistanceService {
     idempotencyKey: string,
     requestStartedAtMs?: number,
   ): Promise<AiAssistanceGeneration>
+  /**
+   * Generates one draft while exposing durable replay metadata to transports.
+   *
+   * @param actor - Authenticated Workspace member requesting the draft.
+   * @param request - Strictly validated generation request.
+   * @param authorization - Source resolver and current-authorization callbacks.
+   * @param idempotencyKey - Client key bound to the generation fingerprint.
+   * @param requestStartedAtMs - Optional HTTP request-boundary epoch timestamp.
+   * @returns Generated draft and whether it was served from a durable receipt.
+   */
+  generateWithMetadata(
+    actor: AiAssistanceActor,
+    request: GenerateAiAssistanceRequest,
+    authorization: AiAssistanceAuthorizationCallbacks,
+    idempotencyKey: string,
+    requestStartedAtMs?: number,
+  ): Promise<AiAssistanceGenerationExecution>
   /** Reads a generation and withholds content when current access changed. */
   getGeneration(
     actor: AiAssistanceActor,
@@ -748,7 +938,7 @@ export interface AiAssistanceService {
    * @param request - Strictly validated feedback payload.
    * @param authorization - Current source and actor authorization callbacks.
    * @param idempotencyKey - Client key bound to the feedback identity.
-   * @returns A promise that resolves after the feedback write is durable.
+   * @returns Durable feedback write metadata for the response header.
    */
   createFeedback(
     actor: AiAssistanceActor,
@@ -756,5 +946,5 @@ export interface AiAssistanceService {
     request: CreateAiAssistanceFeedbackRequest,
     authorization: AiAssistanceAuthorizationCallbacks,
     idempotencyKey: string,
-  ): Promise<void>
+  ): Promise<AiAssistanceFeedbackWriteResult>
 }

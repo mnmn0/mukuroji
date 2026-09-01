@@ -1375,6 +1375,50 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
   })
 })
 
+test('DynamoDB Work Item creation persists a Customer preparation marker for completed items', async () => {
+  let workItemTransaction: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'TransactWriteCommand') {
+        workItemTransaction = command.input
+      }
+      return command.constructor.name === 'QueryCommand' ? { Items: [] } : {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Already completed',
+      assigneeUserId: 'demo@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'done',
+      statusCategory: 'completed',
+      customFieldValues: {},
+      schedule: createDueDateSchedule('2026-07-20'),
+      priority: 'medium',
+    },
+    'demo@example.com',
+  )
+
+  const item = workItemTransaction
+    ? readTransactionPutItem(workItemTransaction, 'WorkItemsTable')
+    : undefined
+  expect(item).toMatchObject({
+    statusCategory: 'completed',
+    customerCompletionPreparationAt: expect.any(String),
+    customerCompletionPreparationRevision: 1,
+  })
+})
+
 test('duplicate Triage context is atomically guarded and de-identified on the Work Item', () => {
   const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
   const contribution = client.createTriageDuplicateContextTransactionItems({
@@ -2266,7 +2310,16 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
           mode: 'due-date',
           dueDate: '2026-06-05',
         },
+        ':customerCompletionPreparationRevision': 2,
+        ':customerCompletionPreparationAt': expect.any(String),
       },
+      ExpressionAttributeNames: expect.objectContaining({
+        '#customerCompletionPreparationAt': 'customerCompletionPreparationAt',
+        '#customerCompletionPreparationRevision': 'customerCompletionPreparationRevision',
+      }),
+      UpdateExpression: expect.stringContaining(
+        '#customerCompletionPreparationRevision = :customerCompletionPreparationRevision',
+      ),
       ConditionExpression:
         'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
         '#revision = :expectedRevision',
@@ -2278,6 +2331,89 @@ test('DynamoDB Work Item client increments revision with an atomic CAS update', 
   expect(preparedResponse).toMatchObject({
     status: 200,
     body: { id: 'wireframe', revision: 2, workflowStatusId: 'done' },
+  })
+})
+
+test('DynamoDB Work Item clears the Customer completion marker when leaving completion', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  const currentIssue = {
+    ...createScheduleCascadeIssue('core-team', 'reopened'),
+    revision: 3,
+    workflowStatusId: 'done',
+    statusCategory: 'completed',
+    customerCompletionPreparationAt: '2026-07-20T00:00:00.000Z',
+    customerCompletionPreparationRevision: 3,
+  }
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'demo@example.com', kind: 'user' },
+    idempotencyKey: 'reopen-customer-notifications',
+    occurredAt: '2026-07-20T00:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/teams/core-team/issues/reopened' },
+    source: { kind: 'api', requestId: 'reopen-customer-notifications' },
+  })
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'AuditTable',
+  )
+
+  const updated = await client.updateTeamIssue(
+    'workspace-1',
+    'core-team',
+    'reopened',
+    {
+      expectedRevision: 3,
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'started',
+    },
+    'demo@example.com',
+    auditContext,
+  )
+
+  expect(updated.issue).toMatchObject({
+    revision: 4,
+    workflowStatusId: 'todo',
+    statusCategory: 'started',
+  })
+  expect(updated.issue).not.toHaveProperty('customerCompletionPreparationAt')
+  expect(updated.issue).not.toHaveProperty('customerCompletionPreparationRevision')
+
+  const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
+  const transactItems = transaction?.input.TransactItems
+  expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toMatchObject({
+    Update: {
+      ExpressionAttributeNames: expect.objectContaining({
+        '#customerCompletionPreparationAt': 'customerCompletionPreparationAt',
+        '#customerCompletionPreparationRevision': 'customerCompletionPreparationRevision',
+      }),
+      UpdateExpression: expect.stringContaining(
+        'REMOVE #customerCompletionPreparationAt, #customerCompletionPreparationRevision',
+      ),
+    },
+  })
+  expect(Array.isArray(transactItems)
+    ? transactItems.find((item) => {
+        if (!isUnknownRecord(item) || !isUnknownRecord(item.Put)) return false
+        return item.Put.TableName === 'AuditTable'
+      })
+    : undefined).toMatchObject({
+    Put: {
+      Item: {
+        metadata: { completionReopened: true },
+      },
+    },
   })
 })
 

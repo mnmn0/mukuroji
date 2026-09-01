@@ -83,7 +83,7 @@ test('marks a workspace audit export as truncated when the 1,000 event cap leave
 
   expect(response.status).toBe(200)
   expect(response.headers.get('Access-Control-Expose-Headers')).toBe(
-    'X-Audit-Truncated,X-Audit-Next-Cursor,X-Correlation-Id,X-Request-Id',
+    'Idempotency-Replayed,X-Audit-Truncated,X-Audit-Next-Cursor,X-Correlation-Id,X-Request-Id',
   )
   expect(response.headers.get('X-Audit-Truncated')).toBe('true')
   expect(response.headers.get('X-Audit-Next-Cursor')).toBe('cursor-10')

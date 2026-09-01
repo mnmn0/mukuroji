@@ -185,6 +185,9 @@ test('summarizes methods and routes without client-controlled values', () => {
     '/api/unmatched',
   )
   expect(summarizeApiRoute('/api/work-items/private-id')).toBe('/api/work-items')
+  expect(summarizeApiRoute('/api/ai-assistance/generations/private-id')).toBe(
+    '/api/ai-assistance',
+  )
   expect(summarizeApiRoute('/api/ready?token=secret')).toBe('/api/ready')
   expect(summarizeApiRoute('/api/customer-secret')).toBe('/api/unmatched')
   expect(summarizeApiRoute('/customer-secret')).toBe('/unmatched')

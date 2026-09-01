@@ -68,12 +68,31 @@ function createAiService(
   async function unsupported(): Promise<never> {
     throw new Error('Unexpected AI assistance service call.')
   }
+  const generate = overrides.generate ?? unsupported
   return {
     getPolicy: unsupported,
     updatePolicy: unsupported,
     getPreference: unsupported,
     updatePreference: unsupported,
-    generate: unsupported,
+    generate,
+    async generateWithMetadata(
+      actor,
+      request,
+      authorization,
+      idempotencyKey,
+      requestStartedAtMs,
+    ) {
+      return {
+        generation: await generate(
+          actor,
+          request,
+          authorization,
+          idempotencyKey,
+          requestStartedAtMs,
+        ),
+        replayed: false,
+      }
+    },
     getGeneration: unsupported,
     decideGeneration: unsupported,
     createFeedback: unsupported,
@@ -2684,7 +2703,7 @@ describe('AI assistance API composition', () => {
     expect(responseText).not.toContain('Sensitive customer escalation')
   })
 
-  test('discards a Work Item draft when its comment window changes after provider use', async () => {
+  test('excludes unfenced Work Item comments and activity from provider context', async () => {
     configureFakeProjectClients(true, {
       projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
       role: 'viewer',
@@ -2697,31 +2716,32 @@ describe('AI assistance API composition', () => {
       priority: 'high',
       source: 'dynamodb',
     }
-    let commentVersion = 1
     let providerCalls = 0
+    let collaborationCalls = 0
+    const detailEventLimits: Array<number | undefined> = []
+    const detailIncludesComments: Array<boolean | undefined> = []
     const teamIssues = createTeamIssuesFake({
       async getTeamIssues() {
         return { teamId: issue.teamId, issues: [issue] }
       },
-      async getTeamIssueDetail() {
+      async getTeamIssueDetail(_directoryId, _teamId, _issueId, options) {
+        detailEventLimits.push(options?.eventLimit)
+        detailIncludesComments.push(options?.includeComments)
         return {
           issue,
-          comments: [],
-          // The production Work Item adapter returns newest-first for this
-          // request. Keep the fixture ordered the same way to guard the
-          // resolver's latest-activity selection.
-          activity: Array.from({ length: 40 }, (_, index) => {
-            const age = index
-            return {
-              id: `activity-${age + 1}`,
-              type: 'updated',
-              actorUserId: 'demo@example.com',
-              summary: age === 0 ? 'Newest activity.' : `Older activity ${age}.`,
-              createdAt: new Date(
-                Date.parse(NOW) - age * 60_000,
-              ).toISOString(),
-            }
-          }),
+          comments: [{
+            id: 'legacy-comment-1',
+            actorUserId: 'demo@example.com',
+            body: 'UNFENCED_LEGACY_COMMENT',
+            createdAt: NOW,
+          }],
+          activity: [{
+            id: 'activity-1',
+            type: 'updated',
+            actorUserId: 'demo@example.com',
+            summary: 'UNFENCED_WORK_ITEM_ACTIVITY',
+            createdAt: NOW,
+          }],
         }
       },
     })
@@ -2752,38 +2772,17 @@ describe('AI assistance API composition', () => {
       workItemConfigurations,
       collaboration: createCollaborationStub({
         async getThread() {
-          return {
-            comments: [{
-              id: 'comment-1',
-              rootCommentId: 'comment-1',
-              authorMemberKey: 'demo@example.com',
-              bodyMarkdown: commentVersion === 1 ? 'Initial comment' : 'Edited comment',
-              version: commentVersion,
-              mentionMemberKeys: [],
-              createdAt: NOW,
-              updatedAt: commentVersion === 1
-                ? NOW
-                : '2026-08-25T00:01:00.000Z',
-              acceptedResolutions: [],
-              reactions: [],
-            }],
-            watch: {
-              subscribed: false,
-              explicit: false,
-              automatic: false,
-              reasons: [],
-              watcherCount: 0,
-            },
-            presence: [],
-          }
+          collaborationCalls += 1
+          throw new Error('Work Item AI context must not read Collaboration comments.')
         },
       }),
       aiAssistanceService: createAiService({
         async generate(actor, request, authorization) {
           const resolved = await authorization.resolveContext({ actor, request })
-          expect(resolved.promptContext).toContain('Initial comment')
-          expect(resolved.promptContext).toContain('Newest activity.')
-          expect(resolved.promptContext).not.toContain('Older activity 20.')
+          expect(resolved.promptContext).not.toContain('UNFENCED_LEGACY_COMMENT')
+          expect(resolved.promptContext).not.toContain('UNFENCED_WORK_ITEM_ACTIVITY')
+          expect(resolved.promptContext).not.toContain('"comments"')
+          expect(resolved.promptContext).not.toContain('"activity"')
           for (const endpoint of resolved.allowedValues.workItemEndpoints) {
             expect(resolved.promptContext).toContain(endpoint.teamId)
             expect(resolved.promptContext).toContain(endpoint.workItemId)
@@ -2792,16 +2791,13 @@ describe('AI assistance API composition', () => {
           expect(resolved.promptContext).not.toContain('"members"')
           expect(resolved.promptContext).not.toContain('"customFields"')
           providerCalls += 1
-          commentVersion = 2
           const current = await authorization.isAuthorizationCurrent({
             actor,
             request,
             authorizationToken: resolved.authorizationToken,
           })
-          if (current.current) {
-            throw new Error('Edited comment window did not invalidate authorization.')
-          }
-          return createWithheldGeneration(request.task, current.reason)
+          expect(current.current).toBe(true)
+          return createWithheldGeneration(request.task, 'source-changed')
         },
       }),
     })
@@ -2824,9 +2820,12 @@ describe('AI assistance API composition', () => {
 
     expect(response.status).toBe(201)
     expect(providerCalls).toBe(1)
+    expect(collaborationCalls).toBe(0)
+    expect(detailEventLimits).toEqual([0, 0, 0, 0])
+    expect(detailIncludesComments).toEqual([false, false, false, false])
     expect(responseText).toContain('source-changed')
-    expect(responseText).not.toContain('Initial comment')
-    expect(responseText).not.toContain('Edited comment')
+    expect(responseText).not.toContain('UNFENCED_LEGACY_COMMENT')
+    expect(responseText).not.toContain('UNFENCED_WORK_ITEM_ACTIVITY')
   })
 
   test('omits a deactivated Work Item assignee from provider-bound context', async () => {

@@ -73,6 +73,7 @@ import type {
   CanonicalWorkItem,
   ConfirmedWorkItemSchedule,
   CustomFieldValue,
+  CustomerImpactSignal,
   RequestSubmissionEvent,
   ResolvedWorkItemConfiguration,
   TriageEntry,
@@ -517,6 +518,10 @@ type TeamIssueItem = {
   archivedAt?: string
   /** Archive mutation を実行した Workspace member key です。 */
   archivedBy?: string
+  /** Durable marker timestamp for Customer completion notification preparation. */
+  customerCompletionPreparationAt?: string
+  /** Work Item revision captured by the Customer completion preparation marker. */
+  customerCompletionPreparationRevision?: number
 }
 
 /**
@@ -687,6 +692,8 @@ export type ProjectIssuesResponse = {
    * プロジェクトにアサインされた Issue 一覧です。
    */
   issues: TeamIssueResponseItem[]
+  /** Whether the caller may request Customer impact for this Project resource. */
+  canReadCustomerImpact?: boolean
 }
 
 /**
@@ -716,6 +723,8 @@ export type TeamIssueDetailResponse = {
   relations?: WorkItemRelation[]
   /** Relation mutation の optimistic concurrency に使う graph revision です。 */
   relationGraphRevision?: number
+  /** Customer Requests aggregated onto this Work Item. */
+  customerImpact?: CustomerImpactSignal
 }
 
 /**
@@ -1920,6 +1929,10 @@ export class DynamoDbTeamIssuesClient {
         item.assignedProjectId = assignedProjectId
         item.directoryProjectId = createDirectoryProjectId(directoryId, assignedProjectId)
       }
+      if (statusCategory === 'completed') {
+        item.customerCompletionPreparationAt = now
+        item.customerCompletionPreparationRevision = item.revision
+      }
 
       const eventItem = this.createIssueEventItem({
         directoryId,
@@ -2584,6 +2597,35 @@ export class DynamoDbTeamIssuesClient {
         expressionAttributeValues[':priorityUpdatedAt'] = expressionAttributeValues[':updatedAt']
         setExpressions.push('#priorityUpdatedAt = :priorityUpdatedAt')
       }
+      const nextStatusCategory = expressionAttributeValues[':statusCategory'] === undefined
+        ? beforeIssue.statusCategory
+        : readWorkflowStatusCategory(expressionAttributeValues[':statusCategory'])
+      const completionTransition =
+        beforeIssue.statusCategory !== 'completed' && nextStatusCategory === 'completed'
+      const leavesCompletion =
+        beforeIssue.statusCategory === 'completed' && nextStatusCategory !== 'completed'
+      if (completionTransition) {
+        expressionAttributeNames['#customerCompletionPreparationAt'] =
+          'customerCompletionPreparationAt'
+        expressionAttributeNames['#customerCompletionPreparationRevision'] =
+          'customerCompletionPreparationRevision'
+        expressionAttributeValues[':customerCompletionPreparationAt'] = updatedAt
+        expressionAttributeValues[':customerCompletionPreparationRevision'] = nextRevision
+        setExpressions.push(
+          '#customerCompletionPreparationAt = :customerCompletionPreparationAt',
+          '#customerCompletionPreparationRevision = :customerCompletionPreparationRevision',
+        )
+      }
+      if (leavesCompletion) {
+        expressionAttributeNames['#customerCompletionPreparationAt'] =
+          'customerCompletionPreparationAt'
+        expressionAttributeNames['#customerCompletionPreparationRevision'] =
+          'customerCompletionPreparationRevision'
+        removeExpressions.push(
+          '#customerCompletionPreparationAt',
+          '#customerCompletionPreparationRevision',
+        )
+      }
       const updateExpression = [
         `SET ${setExpressions.join(', ')}`,
         removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
@@ -2672,6 +2714,8 @@ export class DynamoDbTeamIssuesClient {
           notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
+          ...(completionTransition ? { completionTransition: true } : {}),
+          ...(leavesCompletion ? { completionReopened: true } : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({
@@ -4094,6 +4138,7 @@ const TRIAGE_CONTEXT_EVENT_SUMMARIES = {
   assigned: 'Triage assignment changed.',
   accepted: 'Triage entry was accepted.',
   linked: 'Triage entry was linked to a Work Item.',
+  'customer-associated': 'Triage Customer association changed.',
   duplicate: 'Triage entry was marked as duplicate.',
   declined: 'Triage entry was declined.',
   snoozed: 'Triage entry was snoozed.',

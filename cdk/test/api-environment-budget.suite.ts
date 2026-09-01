@@ -215,6 +215,7 @@ const expectedDataConfiguration = {
   CONNECTOR_RUNTIME_CONFIGURATION_SECRET_ARN: base64(
     ref('ConnectorRuntimeSecret7993B96D'),
   ),
+  CUSTOMERS_TABLE_NAME: base64(ref('CustomersTableB554B793')),
   DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: base64(
     getAtt('DeveloperPlatformConnectorKey7AD18512', 'Arn'),
   ),
@@ -773,6 +774,7 @@ describe('API runtime configuration externalization', () => {
       AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE: '32',
       AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE: '32000000',
       AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION: '1000000',
+      MUKUROJI_APPLICATION_COMMIT_SHA: ref('ApplicationCommitSha'),
       MUKUROJI_API_CORE_CONFIG_SECRET_ARN:
         ref(API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
       MUKUROJI_API_DATA_CONFIG_SECRET_ARN:
@@ -811,6 +813,8 @@ describe('API runtime configuration externalization', () => {
       join(' ', [
         'API runtime configuration revision',
         ref('ApiRuntimeConfigurationRevision'),
+        'application commit',
+        ref('ApplicationCommitSha'),
       ]),
     );
 

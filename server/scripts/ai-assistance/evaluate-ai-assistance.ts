@@ -92,6 +92,9 @@ export type AiAssistanceOfflineReviewDigestReport = {
   }>
 }
 
+/** Completes the provider-dispatch callback for the network-free evaluator. */
+async function markOfflineProviderDispatch(): Promise<void> {}
+
 /**
  * Calculates candidate prompt digests without printing or returning prompt content.
  *
@@ -112,6 +115,7 @@ export function createAiAssistanceOfflineReviewDigests(
         traceId: createOfflineTraceId(evaluationCase.id),
         maxOutputTokens: evaluationCase.budgets.maxOutputTokens,
         timeoutMs: evaluationCase.budgets.maxLatencyMs,
+        onProviderDispatch: markOfflineProviderDispatch,
       })),
     })),
   }
@@ -395,6 +399,7 @@ async function replayProductionGateway(
       traceId: createOfflineTraceId(evaluationCase.id),
       maxOutputTokens: evaluationCase.budgets.maxOutputTokens,
       timeoutMs: evaluationCase.budgets.maxLatencyMs,
+      onProviderDispatch: markOfflineProviderDispatch,
     })
     return { ...(captured ? { captured } : {}), generation }
   } catch (error) {

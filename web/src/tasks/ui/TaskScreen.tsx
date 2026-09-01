@@ -8,6 +8,7 @@ import {
   type BulkOperation,
   type BulkOperationPreview,
   type BulkOperationRequest,
+  type CustomerImpactSignal,
   type PlanningSnapshot,
   type ResolvedWorkItemConfiguration,
   type TaskViewDefinition,
@@ -160,6 +161,7 @@ import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane, type TaskDetailAiAssistanceRenderer } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
 import { TaskWorkspace } from './TaskWorkspace'
+import { CustomerImpactPanel } from '../../customers/ui'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
@@ -350,6 +352,8 @@ export type TaskScreenProps = {
   initialSelectedTaskId?: string
   /** Detail, relations, and activity for the selected Work Item. */
   selectedIssueDetail?: TeamIssueDetail
+  /** Customer Request impact aggregated across the current Project. */
+  projectCustomerImpact?: CustomerImpactSignal
   /** Single-Team Work Item configuration used by list and create controls. */
   resolvedConfiguration?: ResolvedWorkItemConfiguration
   /** Team-scoped Work Item configurations used by aggregate Project views. */
@@ -515,6 +519,7 @@ export function TaskScreen({
   resolvedConfigurationsByTeam = emptyResolvedWorkItemConfigurations,
   configurationFailedTeamIds = emptyConfigurationTeamIds,
   selectedIssueDetail,
+  projectCustomerImpact,
   tasks = [],
   taskErrorMessage,
   taskViewToolbar,
@@ -2497,6 +2502,9 @@ export function TaskScreen({
                   </button>
                 ) : null}
               </div>
+            ) : null}
+            {projectCustomerImpact && projectCustomerImpact.requestCount > 0 ? (
+              <CustomerImpactPanel signal={projectCustomerImpact} t={t} />
             ) : null}
             {planningErrorMessage ? (
               <div

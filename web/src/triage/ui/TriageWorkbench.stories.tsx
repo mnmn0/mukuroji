@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type {
   AiAssistanceGeneration,
+  CreateCustomerRequestFromTriageInput,
+  CustomerRequest,
   GenerateAiAssistanceRequest,
 } from '@mukuroji/contracts'
 import { useState } from 'react'
@@ -28,6 +30,31 @@ const eligibleAssigneeIdsByProject = new Map([
 const onAction = fn(async () => triageEntryFixtures[0] ?? Promise.reject(new Error('Missing fixture')))
 const onBulkAction = fn(async () => [])
 const onSaveConfiguration = fn(async () => triageConfigurationFixture)
+const customerOptions = [
+  { id: 'acme', name: 'Acme Corporation' },
+  { id: 'globex', name: 'Globex Industries' },
+]
+const onCreateCustomerRequest = fn(async (
+  _entryId: string,
+  input: CreateCustomerRequestFromTriageInput,
+): Promise<CustomerRequest> => ({
+  createdAt: '2026-08-09T00:20:00.000Z',
+  customerId: input.customerId,
+  id: 'customer-request-1',
+  importance: input.importance,
+  originalMessage: 'Create a shared launch follow-up item.',
+  projectLinks: [],
+  receivedAt: '2026-08-08T23:40:00.000Z',
+  revision: 1,
+  schemaVersion: 1,
+  source: { canNotify: false, kind: 'form' },
+  status: 'requested',
+  triageEntryId: 'triage-form-1',
+  updatedAt: '2026-08-09T00:20:00.000Z',
+  workItemLinks: [],
+  workspaceId: 'workspace-demo',
+}))
+const onRetryCustomerOptions = fn()
 
 const meta = {
   title: 'Application/Triage/Team Workbench',
@@ -160,6 +187,54 @@ export const MobileDetail: Story = {
   },
 }
 
+/** Accepted Triage Entry can be retained as a Customer Request with an explicit Customer. */
+export const CustomerRequestAssociation: Story = {
+  args: {
+    customerOptions,
+    explicitEntryId: 'triage-form-1',
+    onCreateCustomerRequest,
+    selectedEntry: entryViews[2],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.selectOptions(
+      canvas.getByRole('combobox', { name: 'Customer organization' }),
+      'acme',
+    )
+    await userEvent.selectOptions(
+      canvas.getByRole('combobox', { name: 'Importance signal' }),
+      'high',
+    )
+    await userEvent.click(canvas.getByRole('button', { name: 'Save as Customer Request' }))
+    await expect(onCreateCustomerRequest).toHaveBeenCalledWith('triage-form-1', {
+      customerId: 'acme',
+      expectedRevision: 4,
+      importance: 'high',
+    })
+  },
+}
+
+/** Accepted Triage Entry keeps an explicit retry state when Customer options fail to load.
+ *
+ * The play function verifies the safe alert and the explicit reload callback.
+ */
+export const CustomerRequestAssociationError: Story = {
+  args: {
+    customerOptionsErrorMessage: 'Customers could not be loaded.',
+    explicitEntryId: 'triage-form-1',
+    onCreateCustomerRequest,
+    onRetryCustomerOptions,
+    selectedEntry: entryViews[2],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onRetryCustomerOptions.mockClear()
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Customers could not be loaded.')
+    await userEvent.click(canvas.getByRole('button', { name: 'Reload' }))
+    await expect(onRetryCustomerOptions).toHaveBeenCalledTimes(1)
+  },
+}
+
 const onAiTriageAction = fn(async () => triageEntryFixtures[0] ?? Promise.reject(new Error('Missing fixture')))
 const onTeamTriageAiGenerate = fn(async (input: GenerateAiAssistanceRequest) => {
   void input
@@ -285,6 +360,7 @@ function AiTriageWorkbenchStory(props: TriageWorkbenchProps) {
     isFeedbackPending: false,
     isGenerating: false,
     reset: () => setGeneration(undefined),
+    revalidateGeneration: async () => generation,
     sendFeedback: async () => undefined,
   }
 

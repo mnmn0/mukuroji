@@ -139,14 +139,17 @@ export function createAiAssistanceRouter<Principal>(
       const idempotencyKey = requireIdempotencyKey(
         context.req.header('Idempotency-Key'),
       )
-      const generation = await dependencies.service.generate(
+      const execution = await dependencies.service.generateWithMetadata(
         actor,
         request,
         authorization,
         idempotencyKey,
         requestStartedAtMs,
       )
-      return context.json(generation, 201)
+      if (execution.replayed) {
+        context.header('Idempotency-Replayed', 'true')
+      }
+      return context.json(execution.generation, 201)
     } catch (error) {
       return mapRouterError(context, error, dependencies.mapError)
     }
@@ -200,13 +203,16 @@ export function createAiAssistanceRouter<Principal>(
         const idempotencyKey = requireIdempotencyKey(
           context.req.header('Idempotency-Key'),
         )
-        await dependencies.service.createFeedback(
+        const feedbackResult = await dependencies.service.createFeedback(
           actor,
           generationId,
           request,
           authorization,
           idempotencyKey,
         )
+        if (feedbackResult.replayed) {
+          context.header('Idempotency-Replayed', 'true')
+        }
         return context.body(null, 204)
       } catch (error) {
         return mapRouterError(context, error, dependencies.mapError)
@@ -386,6 +392,9 @@ function mapRouterError(
   if (!(error instanceof AiAssistanceError)) {
     return mapExternalError(context, error)
   }
+  if (error.idempotencyReplayed) {
+    context.header('Idempotency-Replayed', 'true')
+  }
   return context.json(
     { code: error.code, message: error.message },
     toHttpStatus(error),
@@ -395,9 +404,12 @@ function mapRouterError(
 /** Maps one stable application error category to an HTTP status. */
 function toHttpStatus(
   error: AiAssistanceError,
-): 400 | 401 | 403 | 404 | 409 | 422 | 429 | 502 | 504 {
-  if (error.code === 'AiAssistanceCitationInvalid' ||
-      error.code === 'AiAssistanceOutputNotAllowed') return 422
+): 400 | 401 | 403 | 404 | 409 | 429 | 502 | 504 {
+  if (
+    error.code === 'InvalidAiAssistanceOutput' ||
+    error.code === 'AiAssistanceCitationInvalid' ||
+    error.code === 'AiAssistanceOutputNotAllowed'
+  ) return 502
   if (error.category === 'validation') return 400
   if (error.category === 'authentication') return 401
   if (error.category === 'authorization') return 403

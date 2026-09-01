@@ -30,6 +30,9 @@ import {
 import { buildStackOutputs } from './subsystems/outputs';
 import { buildRestoreDrill } from './subsystems/restore-drill';
 import { buildRuntimeControls } from './subsystems/runtime-controls';
+import {
+  buildAiAssistanceObservabilityWorker,
+} from './subsystems/workers/ai-assistance-observability';
 import { buildAuditProjectionWorker } from './subsystems/workers/audit-projection';
 import { buildAutomationWorkers } from './subsystems/workers/automation';
 import { buildWorkerChannels } from './subsystems/workers/channels';
@@ -170,6 +173,14 @@ export class CdkStack extends cdk.Stack {
       runtimeControls,
       workerChannels,
     });
+    const aiAssistanceObservabilityWorker = buildAiAssistanceObservabilityWorker(
+      this,
+      {
+        applicationCommitSha: parameters.applicationCommitSha.valueAsString,
+        dataStores,
+        lambdaBuildPaths,
+      },
+    );
     const automationWorkers = buildAutomationWorkers(this, {
       dataStores,
       fileStorage,
@@ -259,6 +270,7 @@ export class CdkStack extends cdk.Stack {
       ...apiTransports,
       ...enterpriseIdentityWorkers,
       ...auditProjection,
+      ...aiAssistanceObservabilityWorker,
       ...automationWorkers,
       ...scheduleWorkers,
       ...requestEmailWorker,

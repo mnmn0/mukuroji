@@ -12,6 +12,7 @@ import type {
   TriageMutationReceipt,
   TriageWorkItemReference,
   TriageWorkItemSourcePage,
+  UpdateTriageCustomerAssociationInput,
   UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
@@ -90,6 +91,28 @@ export type TriageAuditContextFactory = (
   entryId: string,
   idempotency: TriageIdempotency,
 ) => MutationAuditContext
+
+/** Cross-store Customer operation that owns a Triage association mutation. */
+export type TriageCustomerAssociationOperation =
+  | {
+      /** Operation type represented by the Customer deletion marker. */
+      kind: 'deletion'
+      /** Customer whose association is being cleared. */
+      customerId: string
+    }
+  | {
+      /** Operation type represented by the Customer merge marker. */
+      kind: 'merge'
+      /** Customer being merged away. */
+      sourceCustomerId: string
+      /** Customer that retains the merged graph. */
+      targetCustomerId: string
+    }
+
+/** Builds live authorization conditions for one Customer association cleanup mutation. */
+export type TriageCustomerAssociationAuthorizationFactory = (
+  entry: TriageEntry,
+) => Promise<TriageAuthorizationConditionChecks | undefined>
 
 /** Work Item resolution contributed by application composition. */
 export type TriageWorkItemActionResolution = {
@@ -261,6 +284,54 @@ export interface TriageClient {
     cursor?: string,
     visibleProjectIds?: readonly string[],
   ): Promise<TriageWorkItemSourcePage>
+  /** Associates a Triage Entry with a Customer graph using a revision fence.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param teamId The expected Team ID.
+   * @param entryId The Triage Entry identifier.
+   * @param actor The authenticated actor performing the association.
+   * @param input The association and expected revision.
+   * @param authorizationConditionChecks Live Team, Project, and actor fences joined to the association transaction.
+   * @param customerOperation Durable Customer operation that owns a cleanup or repoint mutation.
+   * @returns The updated permission-safe entry, when the adapter supports the operation.
+   */
+  associateCustomer?(
+    workspaceId: string,
+    teamId: string,
+    entryId: string,
+    actor: TriageActor,
+    input: UpdateTriageCustomerAssociationInput,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
+    customerOperation?: TriageCustomerAssociationOperation,
+  ): Promise<TriageEntry>
+  /** Lists every Triage Entry currently associated with a Customer.
+   *
+   * The result is intended for resumable cross-store Customer merge orchestration;
+   * callers must revision-fence each subsequent association mutation.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose reverse links should be listed.
+   * @returns The currently associated Triage Entries.
+   */
+  listCustomerAssociations?(workspaceId: string, customerId: string): Promise<TriageEntry[]>
+  /** Clears every Customer association in one Workspace before Customer deletion.
+   *
+   * The caller must already hold the Workspace-level Customer management
+   * permission. Each changed entry is still revision-fenced and records an
+   * immutable association-cleared event.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param customerId The Customer whose reverse links must be removed.
+   * @param actorId The authenticated actor performing the cleanup.
+   * @param createAuthorizationConditionChecks Builds live Team and Project fences for each entry.
+   * @returns A promise that resolves after all matching links are cleared.
+   */
+  clearCustomerAssociations?(
+    workspaceId: string,
+    customerId: string,
+    actorId: string,
+    createAuthorizationConditionChecks?: TriageCustomerAssociationAuthorizationFactory,
+  ): Promise<void>
 }
 
 /** Recursively sorts object keys for a stable semantic fingerprint.

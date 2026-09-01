@@ -86,6 +86,50 @@ export type TriageTransactionContribution = {
   transactItems: TriageTransactionItems
 }
 
+/** Input for atomically associating a Triage Entry with a Customer graph. */
+export type CreateTriageCustomerAssociationTransactionItemsInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Canonical entry read before the revision-fenced association. */
+  current: TriageEntry
+  /** Canonical entry after the Customer association event is appended. */
+  next: TriageEntry
+  /** Immutable event describing the association mutation. */
+  event: TriageEntryEvent
+  /** Live authorization fences supplied by the HTTP composition boundary. */
+  authorizationConditionChecks?: TriageTransactionItems
+  /** Customer operation condition that fences the cross-store association. */
+  customerOperationConditionCheck?: TriageTransactionItem
+}
+
+/** Builds the root update and immutable event for a Customer association.
+ *
+ * @param input The current entry, next entry, event, table, and live authorization fences.
+ * @returns Transaction actions that commit the association and its immutable audit projection.
+ */
+export function createTriageCustomerAssociationTransactionItems(
+  input: CreateTriageCustomerAssociationTransactionItemsInput,
+): TriageTransactionItems {
+  if (input.next.revision !== input.current.revision + 1) {
+    throw new TriageError(
+      400,
+      'InvalidTriageInput',
+      'The Customer association revision must advance exactly once.',
+    )
+  }
+  return [
+    ...(input.authorizationConditionChecks ?? []),
+    ...(input.customerOperationConditionCheck ? [input.customerOperationConditionCheck] : []),
+    createEntryUpdate(
+      input.tableName,
+      input.next,
+      input.current.revision,
+      DEFAULT_TRIAGE_WAKE_SHARD_COUNT,
+    ),
+    createEventPut(input.tableName, input.next, input.event),
+  ]
+}
+
 /** Input for an operation receipt composed by an external owner transaction. */
 export type CreateTriageOperationReceiptTransactionPutInput = {
   /** Request Intake table name. */
@@ -977,6 +1021,9 @@ function isTriageEntry(value: unknown): value is TriageEntry {
     'sla',
     'snoozedUntil',
     'retention',
+    'customerId',
+    'contactId',
+    'customerRequestId',
     'canonicalWorkItem',
     'mergeReceipt',
     'capabilities',
@@ -1004,6 +1051,9 @@ function isTriageEntry(value: unknown): value is TriageEntry {
       ? isIsoInstant(value.snoozedUntil)
       : value.snoozedUntil === undefined) &&
     isRetention(value.retention) &&
+    (value.customerId === undefined || isIdentifier(value.customerId)) &&
+    (value.contactId === undefined || isIdentifier(value.contactId)) &&
+    (value.customerRequestId === undefined || isIdentifier(value.customerRequestId)) &&
     (value.canonicalWorkItem === undefined || isWorkItemReference(value.canonicalWorkItem)) &&
     (value.mergeReceipt === undefined || isMergeReceipt(value.mergeReceipt)) &&
     isCapabilities(value.capabilities) &&
@@ -1217,7 +1267,7 @@ function isEvent(value: unknown): value is TriageEntryEvent {
 /** Validates a persisted event discriminator. */
 function isEventType(value: unknown): value is TriageEntryEvent['type'] {
   return value === 'created' || value === 'assigned' || value === 'accepted' ||
-    value === 'linked' || value === 'duplicate' || value === 'declined' ||
+    value === 'linked' || value === 'customer-associated' || value === 'duplicate' || value === 'declined' ||
     value === 'snoozed' || value === 'information-requested' ||
     value === 'activity-received' || value === 'resurfaced' ||
     value === 'sla-breached' || value === 'escalated' ||

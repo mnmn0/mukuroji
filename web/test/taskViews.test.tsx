@@ -835,6 +835,7 @@ describe('independent task views', () => {
       isFeedbackPending: false,
       isGenerating: false,
       reset: () => undefined,
+      revalidateGeneration: async () => undefined,
       sendFeedback: async () => undefined,
     }
     const html = renderToStaticMarkup(

@@ -102,13 +102,29 @@ function createService(): AiAssistanceService {
       }
       return createGeneration()
     },
+    async generateWithMetadata(actor, request, authorization) {
+      const context = await authorization.resolveContext({ actor, request })
+      const state = await authorization.isAuthorizationCurrent({
+        actor,
+        request,
+        authorizationToken: context.authorizationToken,
+      })
+      if (!state.current) {
+        throw new AiAssistanceError(
+          'conflict',
+          'AiAssistanceAuthorizationChanged',
+          'Authorization changed.',
+        )
+      }
+      return { generation: createGeneration(), replayed: false }
+    },
     async getGeneration() {
       return createGeneration()
     },
     async decideGeneration() {
       return createGeneration()
     },
-    async createFeedback() {},
+    async createFeedback() { return { replayed: false } },
   }
 }
 
@@ -320,6 +336,7 @@ describe('createAiAssistanceRouter', () => {
     })
 
     expect(response.status).toBe(201)
+    expect(response.headers.get('Idempotency-Replayed')).toBeNull()
     expect(harness.authenticateCount()).toBe(2)
     expect(harness.currentCheckCount()).toBe(1)
   })
@@ -427,10 +444,34 @@ describe('createAiAssistanceRouter', () => {
     })
   })
 
+  test('marks an identical durable feedback replay', async () => {
+    const service: AiAssistanceService = {
+      ...createService(),
+      async createFeedback() {
+        return { replayed: true }
+      },
+    }
+    const response = await createHarness(false, service).router.request(
+      '/api/ai-assistance/generations/generation-1/feedback',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer token-1',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'feedback-request-1',
+        },
+        body: JSON.stringify({ rating: 'helpful' }),
+      },
+    )
+
+    expect(response.status).toBe(204)
+    expect(response.headers.get('Idempotency-Replayed')).toBe('true')
+  })
+
   test('maps an exhausted generation budget to a stable 429 response', async () => {
     const service: AiAssistanceService = {
       ...createService(),
-      async generate() {
+      async generateWithMetadata() {
         throw new AiAssistanceError(
           'rate-limit',
           'AiAssistanceRateLimitExceeded',
@@ -454,5 +495,112 @@ describe('createAiAssistanceRouter', () => {
       code: 'AiAssistanceRateLimitExceeded',
       message: 'AI assistance generation capacity is exhausted for this one-minute window.',
     })
+  })
+
+  test('marks completed and terminal failed idempotency replays', async () => {
+    const completedService: AiAssistanceService = {
+      ...createService(),
+      async generateWithMetadata() {
+        return { generation: createGeneration(), replayed: true }
+      },
+    }
+    const completed = await createHarness(false, completedService).router.request(
+      '/api/ai-assistance/generations',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer token-1',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'generation-request-1',
+        },
+        body: JSON.stringify(GENERATION_REQUEST),
+      },
+    )
+
+    expect(completed.status).toBe(201)
+    expect(completed.headers.get('Idempotency-Replayed')).toBe('true')
+
+    const failedService: AiAssistanceService = {
+      ...createService(),
+      async generateWithMetadata() {
+        throw new AiAssistanceError(
+          'timeout',
+          'AiAssistanceProviderTimeout',
+          'The AI assistance generation attempt failed.',
+          undefined,
+          undefined,
+          undefined,
+          true,
+        )
+      },
+    }
+    const failed = await createHarness(false, failedService).router.request(
+      '/api/ai-assistance/generations',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer token-1',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'generation-request-1',
+        },
+        body: JSON.stringify(GENERATION_REQUEST),
+      },
+    )
+
+    expect(failed.status).toBe(504)
+    expect(failed.headers.get('Idempotency-Replayed')).toBe('true')
+  })
+
+  test('maps provider throttling to 429 and provider refusal or output failures to 502', async () => {
+    const errors = [
+      new AiAssistanceError(
+        'rate-limit',
+        'AiAssistanceProviderRateLimited',
+        'Bedrock Runtime rate limit was exceeded.',
+      ),
+      new AiAssistanceError(
+        'upstream',
+        'InvalidAiAssistanceOutput',
+        'The provider returned invalid structured output.',
+      ),
+      new AiAssistanceError(
+        'upstream',
+        'AiAssistanceCitationInvalid',
+        'The provider returned an unknown citation.',
+      ),
+      new AiAssistanceError(
+        'upstream',
+        'AiAssistanceOutputNotAllowed',
+        'The provider returned a value outside the allowlist.',
+      ),
+      new AiAssistanceError(
+        'upstream',
+        'AiAssistanceModelRefused',
+        'The provider refused generation because its content filter was activated.',
+      ),
+    ]
+
+    for (const [index, error] of errors.entries()) {
+      const service: AiAssistanceService = {
+        ...createService(),
+        async generateWithMetadata() {
+          throw error
+        },
+      }
+      const response = await createHarness(false, service).router.request(
+        '/api/ai-assistance/generations',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer token-1',
+            'Content-Type': 'application/json',
+            'Idempotency-Key': `generation-request-${index}`,
+          },
+          body: JSON.stringify(GENERATION_REQUEST),
+        },
+      )
+
+      expect(response.status).toBe(index === 0 ? 429 : 502)
+    }
   })
 })

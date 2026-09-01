@@ -77,6 +77,11 @@ revision、effective期限を同じCAS境界へbindするため、再読直後�
 Feedbackも書き込み直前のcommit時刻をeffective期限へbindし、対象generationの期限がその時刻を過ぎている場合は
 DynamoDB transactionのgeneration condition checkで拒否します。
 
+Work Itemのprovider contextはcanonical revisioned rowとPlanning/configuration fenceだけを使い、別tableの
+comment/activityは含めません。現在のCollaboration/Event storeにはgeneration transactionへbindできる共通revisionが
+ないため、read直後のcomment編集をatomicに検出できないためです。Document commentは既存のcomment window/row
+conditionをcommit fenceへ含められるため、引き続きpermission-filtered contextとして利用します。
+
 Policy更新時のtable scan、TTL rewrite、同期delete、backup purgeは行いません。DynamoDB TTL削除は非同期なので、
 論理期限後も元rowが物理的に残る期間があります。また、短縮後にpolicyを再延長した場合、まだTTL削除されて
 いないrowはimmutableなstored deadlineまで再び現在policyの対象になり得ます。不可逆な短縮が必要な運用では、
@@ -148,25 +153,39 @@ persistence failureとしてfail closedにします。
 再加算しません。Resolver/provider/persistence failureでも窓内counterを減算しないため、障害時は課金側へ
 安全に倒れます。
 
-ReceiptはBedrock呼び出し直前に、generation ID、Workspace/member、task、exact model ID、prompt version、
-application trace、開始時刻と、実際にProviderへ渡すrequest、permission-filtered source context、citationの
-bounded audit envelopeを一つのattemptへCAS更新します。Request/context/citationはsecret・直接識別子をredactし、
+Receiptは全pre-provider recheck後に、generation ID、Workspace/member、task、exact model ID、prompt version、
+application trace、admission開始時刻と、実際にProviderへ渡すrequest、permission-filtered source context、citationの
+bounded audit envelopeを一つのattemptへCAS更新します。Provider runnerをinvokeした直後は、別のexact receipt CASで
+`providerStartedAt`を保存します。Gatewayはこのdispatch callbackがdurableになるまでprovider resultをparse、保存、公開せず、
+marker失敗時はin-flight callをabortします。Request/context/citationはsecret・直接識別子をredactし、
 private member ID/display nameはrequest-local random aliasへ置換した後の値だけを保存します。Aliasとcanonical IDの
 mappingや乱数seedはProvider、audit、generation rowへ保存しません。DynamoDB adapterも書込前に
 同じredactionとstrict schemaを再適用します。Attemptは独立したTTLを持たず、親receiptのimmutable `expiresAt` で
 成功・失敗とも同じretention deadlineまで保持されます。Authorization snapshot、raw `Idempotency-Key`、Providerの
 error message/causeやcredentialはattemptへ保存しません。
 
-Provider完了後は同じreceiptを成功または失敗へfinalizeし、終了時刻、latency、safeなstable failure category/code、
-provider trace、token usageとreview済み単価によるcostを取得できた範囲で保存します。Providerがusageを返す前に
-timeout/invalid outputとなった場合は、推測token/costを記録せず `provider-did-not-report` と明示します。Generation
+Provider成功時はgeneration row作成とreceipt成功化を一つのDynamoDB transactionでcommitし、lease-expiry回復との
+競合でfailed receiptとorphan generationが共存しないようにします。失敗時は同じreceiptを条件付きでfinalizeし、
+終了時刻、latency、safeなstable failure category/code、provider trace、token usageとreview済み単価によるcostを
+取得できた範囲で保存します。Providerがusageを返す前に
+timeout/invalid outputとなった場合は、推測token/costを記録せず `provider-did-not-report` と明示します。AI SDKが
+`finishReason=content-filter`を返したmodel refusalは、自由文を保存せずstable
+`AiAssistanceModelRefused` / `providerOutcome=refused`としてusageとともにterminal化します。Generation
 rowの永続化に失敗した場合も、provider resultが返っていればそのusage/costを失敗attemptに残し、開始前に保存した
 request/context/citationはreceiptのTTLまで監査できます。
 
 Failed receiptは削除せずretention deadlineまでterminalに保持します。同じ `Idempotency-Key` と同じinputの
 再送は保存済みsafe failureを返し、providerを再実行せずcounterも再加算しません。原因を修正して意図的に
 再試行するclientは新しい `Idempotency-Key` を使い、新しいattemptとbudget reservationとして計上します。
-Provider開始済みattemptはlease expiryだけでtakeoverせず、重複した有料呼び出しへ安全側に倒します。
+Provider開始済みattemptはlease expiryだけでtakeoverせず、重複した有料呼び出しへ安全側に倒します。Process deathで
+generationもterminal receiptも残らなかったstarted attemptは、lease expiryまではin-progressを返し、expiry後は
+receipt/attemptを`AiAssistanceAttemptFailed`へCASで一度だけterminal化します。この回復はProviderを呼ばず、budgetも
+再加算せず、同じkeyの応答には`Idempotency-Replayed: true`を付けます。Dispatch markerのresponse-lossを含むcrash windowでは
+providerのterminal outcomeを断定せず、`providerOutcome=indeterminate`と
+`usageUnavailableReason=attempt-outcome-indeterminate`を保存します。Stream projectionはこれをcontent-freeな
+`ProviderAttemptCount`、`ProviderFailureCount`、`UsageUnavailableCount`へ加算し、未知のlatency、token、costを0や推測値で
+記録しません。Deadline超過などprovider未呼び出しが確定したterminalizationはprovider outcomeを持たず、provider metricへ
+投影しないため、indeterminateなcrash recoveryと区別できます。
 
 独立したin-flight semaphoreは設けません。12秒provider timeoutと1分固定窓の件数/token capにより、
 一つの窓で開始できる有料呼び出しはmember 4件、Workspace 32件に有限化されます。窓境界では直前の窓の
@@ -266,17 +285,421 @@ context、request、citation excerpt、生成本文を含めず、content-free p
    content-free report、quality/safety/cost budget、全caseの`promptDigestMatched: true`を確認する。期待値やbudgetを
    緩める変更もmodel/prompt/schema変更と同じreview対象にする。
 
-実Bedrock evaluationは通常のPR/CI testから分離し、scheduledまたはoperatorが明示したmanual jobで
-実行します。評価jobは次を固定します。
+### Release gate
 
-- reviewed dataset revision、exact model ID/profile ARN、prompt/schema revision、application commit SHA
-- AWS account、source region、destination profile inventory、開始/終了時刻
-- schema validation率、grounding/citation、tool error、latency、input/output token、推定cost
-- max case数、max token、max cost、timeout、失敗時の停止条件
+`Quality gates / application-unit-tests` はServer testの後に `bun run ai-assistance:eval` を明示実行します。
+Offline evaluatorのexit codeが非0なら、既存required contextである`application-unit-tests`が失敗するため、
+別のrequired checkを追加せずにPRとmain pushを自動で停止します。Workflowからこのstepを削除したりjob名を
+変更したりする変更は、repository rulesetと同じreleaseでreviewします。
 
-結果はPIIやprompt本文を含まない集計とsample locatorだけをrelease evidenceへ保存します。Model変更は
-scheduled evalの比較結果、IAM/parameter diff、cost/latency reviewが揃うまでproduction allowlistへ
-追加しません。
+実Bedrockを使うproduction-like評価は
+`.github/workflows/ai-assistance-live-eval.yml` の `production-like-live-eval` jobで、毎週月曜03:17 UTCと
+default branch上のmanual dispatchにだけ実行します。Pull request code、fork、任意refをprotected credentialで
+実行しません。Deploy/promotionは、offline gateに加え、対象full commit SHAと同じSHAのlive jobと後段の
+`metric-evidence-approval` jobが両方成功してから進めます。新しいpush、再deploy、model/profile/pricing変更があれば、
+以前のlive結果やmetric承認を再利用しません。
+
+### Protected live-evaluation environment
+
+GitHub Environment `ai-assistance-live-evaluation` を作り、deployment branchを`main`だけに制限します。
+Manual approvalを要求する場合はreviewerを通常のdeploy actorと分離します。API base URLを含む次の設定はprotected
+environmentへ登録し、repository variableへ格下げしません。
+
+| Kind | Name | Contract |
+| --- | --- | --- |
+| Environment variable | `AI_ASSISTANCE_LIVE_EVAL_API_BASE_URL` | 下記checked-in allowlistのexact normalized entryと一致するproduction-like HTTPS API base URL |
+| Environment variable | `AI_ASSISTANCE_LIVE_EVAL_AWS_ROLE_ARN` | 別途provisionしたsynthetic partition専用read-only OIDC roleのexact ARN |
+| Environment variable | `AI_ASSISTANCE_LIVE_EVAL_AWS_REGION` | 対象Workspace Search tableのexact AWS region |
+| Environment variable | `AI_ASSISTANCE_LIVE_EVAL_TABLE_NAME` | 対象Workspace Search tableのexact physical name |
+| Secret | `AI_ASSISTANCE_LIVE_EVAL_EMAIL` | Synthetic evaluation operatorの非SSO email |
+| Secret | `AI_ASSISTANCE_LIVE_EVAL_PASSWORD` | MFA/challengeを要求しないsynthetic operator password |
+| Secret | `AI_ASSISTANCE_LIVE_EVAL_FIXTURE_JSON` | 下記のsource ID、revision、drill専用Work Itemと交互title、expected model/prompt、canary、budgetを持つfixture |
+
+Protected variableはtarget authenticityを単独では保証しません。Evaluator内の
+`REVIEWED_AI_ASSISTANCE_LIVE_API_BASE_URLS`をreviewed commitに固定し、設定されたURLをこのallowlistのexact
+normalized entryへ一致させます。Approved entryはHTTPS、default port 443、DNS hostnameでなければならず、userinfo、
+query、fragment、IP literal、`localhost`またはそのsubdomainを拒否します。Base URLのpathも一致対象であり、別pathを
+同じoriginとして許可しません。Production既定のallowlistは意図的に空なので、初回onboardingではoperatorが確認した
+exact URLをcode review付きcommitで追加してからenvironment variableを設定します。Fixtureやenvironment variableで
+allowlistを拡張できず、runtime allowlist注入はlibrary単体テストだけに使います。これによりallowlist未登録、URL不一致、
+不正entryはhealth/login/DynamoDB requestより前にfail closedになります。
+
+Access token、AWS access key、Bedrock API keyはsecretへ保存しません。Credential境界となる最初の二つのjobは次のように
+分離します。最初の
+`commit-preflight` jobは同じprotected environmentからAPI base URLだけを読みますが、`contents: read`だけを持ち、
+`id-token: write`、role/region/table variable、login/fixture secretへアクセスしません。Dependency install後、commit-only
+processでunauthenticated `GET /api/health`を行い、HTTPS responseの`applicationCommitSha`とworkflowのfull
+`GITHUB_SHA`が一致しなければ終了します。その後だけ`needs: commit-preflight`のprotected
+`production-like-live-eval` jobを開始します。このjobもcheckout SHAを再確認し、
+ここだけが`contents: read`と`id-token: write`を持ち、SHA確認後に1800秒のSTS sessionを取得します。Full CLIも
+DynamoDB readやlogin requestの前に同じcommit probeを繰り返し、commit一致後だけ
+`POST /api/auth/login`へemail/passwordを送り、login responseはmemory内でstrictに検証し、
+10分以上24時間以下有効なBearer access tokenだけを後続requestに使います。Health不一致、login challenge、期限不一致、
+malformed responseは本文を出力せずfail closedにします。Library APIは単体テスト用にaccess token注入を許しますが、
+protected CLIはtoken secretを受け付けません。DynamoDB検証後のschema validationとartifact uploadではAWS credential/region
+environmentを空に上書きし、OIDC actionのpost cleanupだけにcredential隔離を依存しません。
+Environment protectionでmanual approvalを要求すると、GitHubのjob単位の保護によりpreflightとlive jobでそれぞれ
+approvalが必要になり得ます。承認回数を減らすためにAPI targetを保護されていないrepository variableへ移しません。
+
+OIDC roleはapplication Lambda roleやこのrepositoryのstackから暗黙に流用せず、environment ownerが別途provisionします。
+Trust policyは`aud=sts.amazonaws.com`と
+`sub=repo:mnmn0/mukuroji:environment:ai-assistance-live-evaluation`のexact一致だけを許可します。
+
+```json
+{
+  "Effect": "Allow",
+  "Principal": {
+    "Federated": "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
+  },
+  "Action": "sts:AssumeRoleWithWebIdentity",
+  "Condition": {
+    "StringEquals": {
+      "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+      "token.actions.githubusercontent.com:sub": "repo:mnmn0/mukuroji:environment:ai-assistance-live-evaluation"
+    }
+  }
+}
+```
+
+Permission policyは対象AI tableのexact ARNに対する`dynamodb:GetItem`だけを持ち、fixtureのsynthetic Workspace IDを
+`dynamodb:LeadingKeys`でexactに固定します。Condition key欠落を許さないため`Null=false`も必須です。
+
+```json
+{
+  "Effect": "Allow",
+  "Action": "dynamodb:GetItem",
+  "Resource": "arn:aws:dynamodb:<region>:<account-id>:table/<exact-ai-table-name>",
+  "Condition": {
+    "ForAllValues:StringEquals": {
+      "dynamodb:LeadingKeys": ["<synthetic-workspace-id>"]
+    },
+    "Null": {
+      "dynamodb:LeadingKeys": "false"
+    }
+  }
+}
+```
+
+このroleへ`Scan`、`Query`、`BatchGetItem`、`DescribeTable`、任意のwrite action、wildcard resourceを追加しません。
+GitHub Environmentのbranch restrictionと上記exact `sub`は両方を維持し、片方をもう片方の代用にしません。
+
+### Synthetic fixture preparation
+
+評価専用Workspaceとoperatorを作り、operatorをactive non-guest memberにします。Workspace policyでexact deployed
+modelと4 taskを有効にし、preferenceも有効にします。Request submission、Triage entry、Work Item、Planning target、
+Documentはcanonical APIから作成し、operatorへ各sourceのread権限を付与します。実tenantのrow、実在人物、customer
+本文、credentialを流用しません。各sourceにはfixtureの`forbiddenSubstrings`に入れる一意なsynthetic canaryを配置し、
+model response、citation、uncertaintyのいずれにもraw canaryが戻らないことを検査します。
+さらに6 journeyのWork Itemとは別のdrill専用Work Itemを作り、現在titleをexactな`titleA`または`titleB`のどちらかに
+し、operatorへそのTeamのmember write権限を付与します。このdrillはrun開始時にcanonical GETで現在revision/titleを
+読み、反対titleへ一度だけPATCHするため、revisionが
+単調増加しても次のscheduled runは逆方向へ戻せます。Fixtureのrevisionやtitleをrunごとに手更新しません。
+
+Fixtureは次のshapeを使います。`request`と`triage`、`work-item`と`document`を同じcaseへまとめず、必ず6件を
+一つずつ指定します。Planning caseはWork Item caseと別にPlanning targetを解決します。Placeholderは実環境で作った
+synthetic identifier/revisionへ置換し、JSON自体はrepository、artifact、issue、job logへ保存しません。
+
+```json
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "journey": "request",
+      "request": {
+        "task": "triage",
+        "locale": "ja",
+        "source": {
+          "type": "request-submission",
+          "formId": "<synthetic-form-id>",
+          "submissionId": "<synthetic-submission-id>",
+          "expectedRevision": 1
+        }
+      }
+    },
+    {
+      "journey": "triage",
+      "request": {
+        "task": "triage",
+        "locale": "ja",
+        "source": {
+          "type": "triage-entry",
+          "teamId": "<synthetic-team-id>",
+          "triageEntryId": "<synthetic-triage-id>",
+          "expectedRevision": 1
+        }
+      }
+    },
+    {
+      "journey": "work-item",
+      "request": {
+        "task": "summary",
+        "locale": "ja",
+        "sources": [{
+          "type": "work-item",
+          "teamId": "<synthetic-team-id>",
+          "workItemId": "<synthetic-work-item-id>",
+          "expectedRevision": 1
+        }]
+      }
+    },
+    {
+      "journey": "planning",
+      "request": {
+        "task": "planning",
+        "locale": "ja",
+        "source": {
+          "type": "planning-target",
+          "target": {
+            "type": "initiative",
+            "entityId": "<synthetic-initiative-id>"
+          },
+          "expectedRevision": 1
+        }
+      }
+    },
+    {
+      "journey": "document",
+      "request": {
+        "task": "summary",
+        "locale": "ja",
+        "sources": [{
+          "type": "document",
+          "documentId": "<synthetic-document-id>",
+          "expectedRevision": 1
+        }]
+      }
+    },
+    {
+      "journey": "search",
+      "request": {
+        "task": "search",
+        "locale": "ja",
+        "query": "<synthetic-search-intent>"
+      }
+    }
+  ],
+  "staleRevisionRequest": {
+    "task": "triage",
+    "locale": "ja",
+    "source": {
+      "type": "triage-entry",
+      "teamId": "<synthetic-team-id>",
+      "triageEntryId": "<synthetic-triage-id>",
+      "expectedRevision": 1
+    }
+  },
+  "postProviderSourceFence": {
+    "teamId": "<synthetic-drill-team-id>",
+    "workItemId": "<synthetic-drill-work-item-id>",
+    "locale": "ja",
+    "titleA": "Synthetic provider fence title A",
+    "titleB": "Synthetic provider fence title B"
+  },
+  "withheld": [
+    {
+      "generationId": "<permission-changed-generation-id>",
+      "reasonCode": "permission-changed"
+    },
+    {
+      "generationId": "<source-changed-generation-id>",
+      "reasonCode": "source-changed"
+    },
+    {
+      "generationId": "<retention-expired-generation-id>",
+      "reasonCode": "retention-expired"
+    }
+  ],
+  "forbiddenSubstrings": ["<seeded-sensitive-canary>"],
+  "expectedModelId": "jp.anthropic.claude-sonnet-4-6",
+  "expectedPromptVersion": "ai-assistance-v1",
+  "budgets": {
+    "maxLatencyMsPerGeneration": 12000,
+    "maxInputTokensPerGeneration": 2000,
+    "maxOutputTokensPerGeneration": 1000,
+    "maxCostUsdPerGeneration": 0.1,
+    "maxTotalInputTokens": 14000,
+    "maxTotalOutputTokens": 7000,
+    "maxTotalCostUsd": 0.7
+  },
+  "durability": {
+    "workspaceId": "<synthetic-workspace-id>",
+    "memberId": "<synthetic-member-id>"
+  }
+}
+```
+
+`expectedModelId`と`expectedPromptVersion`はdeploy parameterと同じexact値を固定し、別model/profileまたは古いpromptを
+同じrunの証拠として扱いません。`durability.workspaceId`はroleの`dynamodb:LeadingKeys`とexactに一致させ、
+`memberId`は全journeyを実行するsynthetic operatorのcanonical member IDにします。Fixture object、各case wrapper、
+`postProviderSourceFence`、withheld、budget、durabilityに未知fieldや欠落fieldがある場合もfail closedにします。
+Drillのteam/Work Itemは6 journeyとstale requestの全Work Item sourceからdistinctで、titleは異なる2つのbounded exact値に
+します。Aggregate budgetは6件の成功generationだけでなく、source fenceで意図的に破棄する7件目のpaid attemptも含めます。
+7件目を開始する前に、6件の実測totalへper-generation上限を加えてもaggregate上限内に収まるheadroomを必須にし、
+不足時はproviderを呼ばずstableな失敗証拠を返します。
+`staleRevisionRequest`は現在値より古いpositive revisionを固定します。`withheld`には同じoperatorで事前作成した
+generationをexact 3件指定し、source accessを外した`permission-changed`、source revisionを進めた`source-changed`、
+effective retentionを期限切れにした`retention-expired`を各1件ずつ準備します。Reasonの欠落、重複、追加はfixture parse
+時点でfail closedにします。DynamoDB TTL削除は非同期なので、retention caseはrowの物理削除ではなくlogical
+`retention-expired`を合格条件にします。Fixture更新後はmanual jobを実行し、scheduled runを待って初回検証にしません。
+
+### Live checks and response-loss drill
+
+Evaluatorはunique paid keyを16秒間隔にして既定member rate limit内に保ち、次をfail closedで確認します。
+
+- Request、Triage、Work Item、Planning、Document、Searchをdeployed API経由で実modelへ送る。
+- 全generationをproduction parserで検証し、source-backed caseのcitation、全caseのuncertainty、task、exact model/prompt、provider、
+  positive input/output token、cost、latencyとper-case/aggregate budgetを確認する。
+- Responseを512 KiBまでstreamingで読み、超過時はcancelする。全responseにseeded canary、実access token、JWT、email、
+  AWS access-key形、Authorization header、署名URL credentialがないことを確認する。
+- Work Item generationの最初のresponse bodyを読まずにstream cancelし、同じ`Idempotency-Key`で再送する。再送は
+  strict generationに加えserver-owned `Idempotency-Replayed: true`を必須にする。
+- 他の5 journeyも最初のresponseにreplay headerがなく、同じkeyの2回目がexact同一generationかつ
+  `Idempotency-Replayed: true`であることを必須にする。
+- Approvalも最初のbodyを読まずに再送し、同じ`outcome`と古い`expectedRevision`が同じapproved generationへ
+  replayすることを確認する。これはdomain resourceを自動更新しないreview decisionだけである。
+- Feedbackも最初のbodyを読まず同じkey/bodyで再送し、最初はreplay headerなし、2回目は`204`、empty body、
+  `Idempotency-Replayed: true`になることを確認する。同じprocessのexact-key readでdeterministic feedback identityのrowが
+  一つだけになることも確認する。
+- Stale source requestを同じkeyで2回送り、両方`409/AiAssistanceSourceChanged`、2回目に
+  `Idempotency-Replayed: true`があることを確認する。Providerを再実行できるnew keyへ自動変更しない。
+- 上記の安全なHTTP checkがすべて成功した場合だけ、drill専用Work Itemをcanonical GETしてcurrent revisionと`titleA`/`titleB`
+  をstrictに確認し、7件目のsummary generationを開始する。同じreceiptをstrong `GetItem`でbounded pollし、全pre-provider
+  recheck後にmodel runnerをinvokeしてからexact CASで永続化されるsingleton `attempt.providerStartedAt`を確認してから、同じ
+  Work Itemを反対titleへrevision-fenced PATCHする。Admission用の`attempt.status=started`だけではprovider開始の証拠にしない。
+  PATCHは`Idempotency-Key`/`X-Correlation-Id`を持ち、response-loss時だけ同じkeyで再送し、
+  replay responseまたはcanonical GETのexact `revision + 1`/反対titleでcommitを照合する。
+- 7件目は`409`とbounded exact code set `{AiAssistanceSourceChanged, AiAssistanceAuthorizationChanged}`のいずれかで失敗し、
+  receipt outer/attemptのcategory/codeがHTTPと一致し、singleton failed attemptの`providerOutcome=succeeded`、positive usage/cost/
+  latency、redacted audit、future TTL、generation row absenceを必須にする。Replay前後にreceiptとgeneration absenceをstrong readし、
+  同じgeneration keyのreplayがexact同一errorと`Idempotency-Replayed: true`を返しreceiptを一切変えないことを確認する。
+- 7件目のHTTP待ちを局所的にcancelしてもAPI Gateway/Lambdaや有料Provider呼び出しが停止したとはみなさない。開始後のpoll、
+  mutation、response検証のいずれかが失敗した場合は、同じkey/bodyのsafe replayとstrong `GetItem`をboundedに継続し、terminal
+  failed receiptとgeneration absence、またはcompleted receiptとcanonical generation linkageまで照合する。後から判明したpositive
+  usage/costは失敗reportの7件目とaggregate totalsへ加算する。期限内にpendingがterminal化しない、rowがmalformed、usageを
+  回収できない場合は`post-provider-source-fence-unreconciled`でpromotionを停止し、client abortを取消証拠として扱わない。
+- Pre-arranged generation 3件をすべてGETし、`permission-changed`、`source-changed`、`retention-expired`それぞれの
+  expected `withheld` reasonだけが返り、draft/citationが返らないことを個別に確認する。Aggregate checkだけでなく
+  reasonごとのfixed booleanもreportへ残す。この3 GETがpermission/source/retentionのdisclosure/apply fail-closedを引き続き
+  担当し、active drillはpost-provider source revision/commit fenceだけを担当する。
+- HTTP transcript完了後、canonical helperから導出したkeyだけを`DynamoDBDocumentClient`のstrongly consistent
+  `GetItem`で読む。6件のcompleted receipt、各receipt内のsingleton succeeded attempt、`providerOutcome=succeeded`、
+  public usage、redacted request/context/citation audit、対応する6 generation rowを照合する。Work Item rowは元generationの
+  content/detailsを維持してrevisionが一つ進み、approved decisionが保存されていることを必須にする。
+- 各completed receiptとgeneration rowのtop-level DynamoDB TTLはpublic `generation.expiresAt`をepoch秒へ切り捨てた
+  exact値と一致し、一つのevaluation時刻より未来でなければならない。Feedback rowも対象Work Item generationと同じ
+  retention deadlineを継承し、stale failed receiptのTTLもevaluation時刻より未来であることを確認する。
+- Stale receiptは`failed/AiAssistanceSourceChanged`でattemptなし、receiptが割り当てたcanonical generation keyにもrowなしを
+  必須にする。Feedbackはsubmitted body/keyから導出したdeterministic identity、fingerprint、canonical rowをexactに照合する。
+  `attempt.audit`とgeneration rowの`request`/`auditedInput`はproduction parser/redactorで再検証し、seeded canary、Bearer/JWT、
+  AWS access key、authorization header、署名URL credential、email shapeがあれば失敗させる。
+- Durability確認後にunauthenticated healthを再確認し、開始時と終了時の両方が
+  workflowの同じfull commit SHAでなければ混在deployとして失敗させる。
+
+CLIはschema v2のcontent-free reportだけをstdoutへraw fileとして書き、workflowはlogへ表示しません。後続`jq`が
+schemaを完全に検証できた場合だけ別のvalidated fileを作り、そのvalidated fileだけを30日artifactとして保存します。
+Validationまたはlive evaluationが失敗したrunではartifact uploadを実行せず、未検証raw fileを公開しません。
+Reportに許可するのはfixed journey名、stable failure code、boolean check、token/cost/latency/citation countの集計と、
+fixed durability boolean/countだけです。成功時のdurability値はreceipt `7`、successful attempt/audit/generation各`6`、
+feedback `1`、stale attempt/generation absenceとapproved decisionがすべて`true`です。加えてpost-provider failed receipt、
+failed attempt、audit envelopeが各`1`、post-provider generation absenceが`true`です。Totalsは6件の成功generationと
+破棄した7件目のpaid attemptを一度ずつ加算し、same-key replayは加算しません。
+API URL、account、Workspace/member/source/generation/idempotency/model/trace ID、commit SHA、email、token、request、
+response、citation、生成本文、table名、raw AWS errorは含めません。Workflowはreportのtop-level、journey、checks、
+durability、totalsのkey集合と上記exact値を`jq`で検証し、未知fieldも拒否します。Journeyとtotalの全numeric fieldは
+JSON numberを必須にし、token、citation、latencyはintegerも必須にします。Checksはcommit/replay/stale、post-provider source fenceとwithheld aggregate、
+`permission-changed`、`source-changed`、`retention-expired`の個別booleanがすべて`true`でなければなりません。
+
+```sh
+bun server/scripts/ai-assistance/evaluate-ai-assistance-live.ts \
+  > ai-assistance-live-eval-report.raw.json
+```
+
+### Blocking metric evidence approval
+
+Live jobが成功した後だけ、`needs: live-evaluation`の`metric-evidence-approval` jobを開始します。このjobは
+`permissions: {}`でcheckout、OIDC、AWS credential、secretを持たず、CloudWatch read権限も追加しません。GitHub
+Environment `ai-assistance-live-metric-evidence-approval`を事前に作成し、deployment branchを`main`だけに制限し、
+deploy actorとは分離したrequired reviewerを設定します。未作成environmentは無保護でauto-createされ得るため、protected
+environment variable `AI_ASSISTANCE_LIVE_METRIC_EVIDENCE_GATE=required-reviewers-enabled`も必須にします。Variableが欠落または
+別値ならjobはfail closedになりますが、このsentinelはrequired reviewerとmain-only protectionの代用ではありません。
+Environment設定のscreenshot/export、reviewer roster revision、branch protectionをrelease evidenceへ残します。
+
+Required reviewerはlive reportの開始から後述のstream安定化確認までを同一runのUTC windowとし、CloudWatch namespace
+`Mukuroji/AIAssistance`、dimensionをexactに`Service=mukuroji-ai-assistance`と
+`ApplicationCommitSha=<workflowのfull GITHUB_SHA>`の2つだけへ固定します。次のgeneration、provider、token/cost、decision
+metricがすべてこのexact dimension setで到着していることを確認してからjobを承認します。`Service`だけのaggregateや別SHAの
+datapointは対象runの証拠として扱いません。
+
+- `GenerationRequestCount`、`GenerationSuccessCount`、`GenerationReplayCount`、`GenerationFailureCount`、
+  `GenerationLatency`
+- `ProviderAttemptCount`、`ProviderSuccessCount`、`ProviderFailureCount`、`ProviderThrottledCount`、
+  `ProviderTimeoutCount`、`ProviderRefusedCount`、`ProviderInvalidOutputCount`、`ProviderLatency`
+- `InputTokenCount`、`OutputTokenCount`、`EstimatedCostUsd`、`UsageUnavailableCount`
+- `DecisionCount`、`DecisionApprovedCount`、`DecisionRejectedCount`
+
+Failure-onlyの`ProjectionFailureCount`は正常runでdatapointが存在しないため到着必須metricには含めませんが、
+同じexact dimension setでlive開始からstream安定化確認まで正のdatapointがないことを確認します。正のdatapointがあれば
+partial-batch retryが発生しており、live reportが成功していてもpromotionを停止して調査します。正常runの合格条件は
+`ProjectionFailureCount`の到着ではなく正値がないことであり、`>= 1`はalarmとpromotion停止条件です。
+
+Provider attemptとdecisionはstreamから非同期投影されるため、live job終了だけではwindowを閉じません。Expected metricの
+最終datapointを確認した後、最新5分periodが閉じてから再queryし、`IteratorAge`が低下して300,000 ms未満へ収束していること、
+同じwindowのworker `Errors` / `Throttles`が0であること、`AiAssistanceObservabilityDlq`のvisible / in-flight / delayed
+messageがすべて0であることを確認してwindowを閉じます。IteratorAgeが増加中または閾値以上、late datapoint、retry、DLQ、
+未解決のpending projectionが一つでもある場合は承認せず、drainと原因調査を完了してから新しい確認windowを取り直します。
+
+Evidence recordにはworkflow run URL/ID、対象full SHA、live UTC開始/終了、stream安定化時刻、確認したfixed metric名と
+最終datapoint UTC、IteratorAge、Errors / Throttles、DLQ depthの確認結果、reviewerとapproval時刻を残します。
+Generation/Workspace/member/source ID、本文、model/trace、credential、raw CloudWatch responseは残しません。別run、別SHA、
+別windowのmetricや以前の承認を流用せず、このblocking jobが未承認ならworkflow全体を成功扱いにしません。
+
+Generation completionのEMF/logは本文やidentifierを含めず、boundedな`failureCategory`/`failureCode`だけを持つため、
+失敗理由を安全にqueryできます。Provider throttle/timeout/model refusal/invalid outputはそれぞれ専用metricで集計し、
+model refusalはboundedな`refusalReason=content-filter`、人間によるrejectは`DecisionRejectedCount`で追跡します。
+Providerやmodelが返す自由文を失敗理由として記録しません。
+
+Generation request metricはrequest境界で同期記録し、provider attemptとdecision metricはterminal
+receipt/generationの`WorkspaceSearchTable` NEW_IMAGE streamから専用Lambdaが投影します。Terminal mutationは
+transaction/CASで一度だけcommitされますが、DynamoDB Streamsはat-least-once配送なので、成功応答喪失、
+partial-batch retry、承認済みmanual replayでmetricが稀に重複し得ます。処理できないrecordはretry後に
+14日保持・Retainの`AiAssistanceObservabilityDlq`へ隔離します。このSQS Bodyはraw recordではなく
+`DDBStreamBatchInfo`だけなので、queueやenvelopeをworkerへ直接redriveしません。24時間以内にexact
+stream/shard/sequence範囲を復元し、filter件数とendpointを照合してから限定invokeする手順と、期限超過時の
+metric gap処理は[Operational readiness](./operational-readiness.md#ai-assistance-observability-failure-destination)に従います。
+Partial batch response自体はLambda `Errors`を増やさないため、workerはpartial-batch failureとして返したrecord数を
+`ProjectionFailureCount`として集約し、専用alarmで検出します。DynamoDB Streamsが実際に再試行する範囲はlowest failed
+sequence以降を含み得るため、このmetricをretry総record数とは解釈しません。Content-free failure logとEMFは90日保持・
+Retainの明示LogGroupへ保存し、raw stream imageやidentifierは書きません。Event-source mappingは初回作成時に`LATEST`から
+開始し、worker導入前のterminal rowを対象SHAのmetricとしてhistorical replayしません。`LATEST`は作成後のretryやDLQを
+drainした証拠にはならないため、上記のstream安定化確認を省略しません。
+
+Release rehearsalは上記の別provision read-only OIDC roleを使い、同じfull evaluator process内でsynthetic partitionの
+receipt/generation/attempt audit/feedbackを自動検証します。このreadはcanonical primary keyごとの`GetItem`だけであり、
+table-wide inventoryやpolicy mutationの証拠を集めません。今回のrunはAI policyを変更しないため、別のAudit tableや
+`ai-assistance.policy.updated` eventを読みません。OIDC role、exact table ARN、synthetic `LeadingKeys`条件が未設定ならjobを
+fail closedとし、HTTP replayだけのrunを完全なdurability evidenceとして合格させません。
+
+### AI-specific rollback
+
+`GenerationFailureCount`、`ProjectionFailureCount`、`ProviderFailureCount`、`ProviderTimeoutCount`、`ProviderRefusedCount`、
+`ProviderInvalidOutputCount`の増加、
+latency/cost budget超過、citation/redaction/withheld/replay failure、commit不一致のいずれかでpromotionを停止します。
+
+1. 新しいAI generationを停止する。影響Workspaceをpolicyでdisableし、横断的な機密性incidentでは既存global runtime
+   controlをdisableにする。現在はdeployment-wide AI専用kill switchがないため、全Workspaceを安全に止められない場合は
+   global API停止またはreview済みforward deployを選び、その制約をincident recordへ残す。
+2. Lambda timeout以上待ってin-flight provider callを終了させ、content-free report、metric、alarm、deploy parameter、
+   artifact digestを固定する。Prompt/source/output/credentialをincident ticketへ複製しない。
+3. 直前の成功codeをrevertした新しいmain commitとして作り、前回のexact model ID/profile ARN、destination ARN、region、
+   input/output price、budget、retention設定を使って、新しい`ApiRuntimeConfigurationRevision`とそのfull
+   `ApplicationCommitSha`でforward deployする。古いconfiguration revisionを別内容へ再利用しない。
+4. Retained Workspace Search/Audit table、generation、receipt、attempt、counter、feedback、policy auditを削除・巻き戻し
+   しない。新schemaを旧codeが安全に読めない場合は旧binaryへ戻さずforward-fixする。
+5. Health/ready、offline gate、同じnew commit SHAのmanual live evaluation、上記CloudWatch metricとsynthetic
+   receipt/audit確認を再実行してからAI policy/global runtime controlを再enableする。
+
+Model変更はscheduled/manual eval、IAM/parameter diff、cost/latency review、rollback parameter inventoryが揃うまで
+production allowlistへ追加しません。
 
 AWS一次情報:
 

@@ -405,6 +405,14 @@ import {
   createAdminRequestIntakeRouter,
 } from '../modules/request-intake/adapter-in/http/admin-request-intake-router'
 import {
+  CustomerError,
+  createCustomerRouter,
+  projectCustomerImpactSignal,
+  type CustomerAuthorizationScope,
+  type CustomerAuthorizationConditionChecks,
+  type CustomerPrincipal,
+} from '../modules/customers'
+import {
   createPublicRequestIntakeRouter,
 } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
 import {
@@ -426,6 +434,7 @@ import {
   type TriageTeamAccess,
 } from '../modules/triage'
 import {
+  AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS,
   AiAssistanceError,
   aliasAiAssistanceTextIdentifiers,
   classifyAiAssistanceSensitivePromptField,
@@ -1217,6 +1226,21 @@ const aiAssistanceService: AiAssistanceService = {
       idempotencyKey,
       requestStartedAtMs,
     ),
+  generateWithMetadata: (
+    actor,
+    request,
+    authorization,
+    idempotencyKey,
+    requestStartedAtMs,
+  ) => {
+    return requireAppDependencies().aiAssistance.aiAssistanceService.generateWithMetadata(
+      actor,
+      request,
+      authorization,
+      idempotencyKey,
+      requestStartedAtMs,
+    )
+  },
   getGeneration: (actor, generationId, authorization) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.getGeneration(
       actor,
@@ -1240,6 +1264,9 @@ const aiAssistanceService: AiAssistanceService = {
     ),
 }
 const workspaceDependencies: WorkspaceDependencies = {
+  get customers() {
+    return requireAppDependencies().workspace.customers
+  },
   get dashboardSummary() {
     return requireAppDependencies().workspace.dashboardSummary
   },
@@ -1731,9 +1758,51 @@ const enterpriseRoutePermissionRules = [
   { method: 'GET', pathPattern: '/api/request-submissions*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-submissions*', permission: 'requests.manage' },
   {
+    method: 'GET',
+    pathPattern: '/api/customers/export',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/customers*',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/customers*',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/customer-requests*',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/customer-requests*',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/customer-contacts*',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
+  },
+  {
     method: 'PUT',
     pathPattern: '/api/teams/:teamId/triage-settings',
     permission: 'teams.manage',
+  },
+  {
+    method: 'POST',
+    pathPattern: '/api/teams/:teamId/triage-entries/:entryId/customer-request',
+    permission: 'requests.manage',
+    alternativePermissions: ['workspace.manage'],
   },
   {
     method: 'GET',
@@ -1835,6 +1904,12 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: 'GET',
+    pathPattern: '/api/teams/:teamId/issues/:issueId/customer-impact',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
+  {
+    method: 'GET',
     pathPattern: '/api/teams/:teamId/issues*',
     permission: 'work-items.read',
   },
@@ -1845,6 +1920,12 @@ const enterpriseRoutePermissionRules = [
   },
   { method: 'GET', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.read' },
   { method: '*', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.write' },
+  {
+    method: 'GET',
+    pathPattern: '/api/projects/:projectId/customer-impact',
+    permission: 'requests.read',
+    alternativePermissions: ['requests.manage', 'workspace.manage'],
+  },
   {
     method: 'GET',
     pathPattern: '/api/projects/:projectId/users*',
@@ -2855,6 +2936,10 @@ routeApp.get('/api/auth/me', async (c) => {
       workspaceRole: principal.workspaceRole,
       workspaceMemberStatus: principal.workspaceMemberStatus,
       canManageAiAssistance: canManageAiAssistanceWorkspace(principal),
+      canReadCustomers: hasCustomerReadAccess(principal),
+      canManageCustomerRequests: hasCustomerManagementAccess(principal),
+      canViewCustomerSensitiveData: hasCustomerManagementAccess(principal),
+      canManageCustomerViews: canManageCustomerViews(principal),
     })
   } catch (error) {
     if (error instanceof WorkspaceAccessError) {
@@ -5983,6 +6068,179 @@ routeApp.route('/', createTriageRouter({
   mapError: toTriageErrorResponse,
 }))
 
+/** Builds commit-time Team, Project, and actor fences for Customer mutations.
+ *
+ * @param principal Authenticated Workspace principal performing the mutation.
+ * @param teamId Team whose live authorization must remain valid.
+ * @param projectIds Projects whose live ownership and authorization must remain valid.
+ * @returns DynamoDB condition checks to join to the Customer transaction.
+ */
+const createCustomerTriageAuthorizationConditionChecks = async (
+  principal: WorkspacePrincipal & CustomerPrincipal,
+  teamId: string,
+  projectIds: readonly (string | undefined)[],
+): Promise<TriageAuthorizationConditionChecks> => {
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  const createActiveReferenceConditionChecks = workspaceDependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  if (!createActiveReferenceConditionChecks) {
+    throw new TriageError(
+      503,
+      'TriageAuthorizationFenceUnavailable',
+      'Triage authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const checks: TriageAuthorizationConditionChecks = []
+  const uniqueProjectIds = new Set(projectIds.filter((projectId): projectId is string => projectId !== undefined))
+  for (const projectId of uniqueProjectIds) {
+    checks.push(...await createActiveReferenceConditionChecks.call(
+      workspaceDependencies.projectDirectory,
+      principal.directoryId,
+      teamId,
+      projectId,
+    ))
+    checks.push(...await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      teamId,
+      projectId,
+    ))
+  }
+  if (uniqueProjectIds.size === 0) {
+    checks.push(...await createActiveReferenceConditionChecks.call(
+      workspaceDependencies.projectDirectory,
+      principal.directoryId,
+      teamId,
+    ))
+    checks.push(...await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      teamId,
+      undefined,
+    ))
+  }
+  return mergeTriageConditionChecks(checks)
+}
+
+routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>({
+  getCustomers: () => workspaceDependencies.customers,
+  requireWorkspaceAccess: requireCustomerWorkspaceAccess,
+  verifyTriageAccess: async (principal, teamId, minimum) => {
+    await requireTeamPermission(principal, teamId, minimum)
+  },
+  verifyCustomerOwner: async (principal, ownerUserId): Promise<CustomerAuthorizationConditionChecks> => {
+    const owner = await workspaceDependencies.workspaceAccess.getActiveMember(
+      principal.directoryId,
+      ownerUserId,
+    )
+    if (!owner || owner.role === 'guest') {
+      throw new CustomerError(
+        409,
+        'CustomerOwnerInactive',
+        'Customer owner must be an active non-guest Workspace member.',
+      )
+    }
+    const createActiveMemberConditionCheck = workspaceDependencies.workspaceAccess
+      .createActiveMemberConditionCheck
+    if (!createActiveMemberConditionCheck) {
+      throw new CustomerError(
+        503,
+        'CustomerOwnerAuthorizationFenceUnavailable',
+        'Customer owner authorization fencing is unavailable. Retry the request.',
+      )
+    }
+    const conditionCheck = await createActiveMemberConditionCheck.call(
+      workspaceDependencies.workspaceAccess,
+      principal.directoryId,
+      owner.memberKey,
+      { allowedRoles: ['owner', 'admin', 'member'] },
+    )
+    if (!conditionCheck) {
+      throw new CustomerError(
+        409,
+        'CustomerOwnerInactive',
+        'Customer owner must be an active non-guest Workspace member.',
+      )
+    }
+    return [conditionCheck]
+  },
+  createTriageAuthorizationConditionChecks: createCustomerTriageAuthorizationConditionChecks,
+  verifyWorkItemAccess: async (principal, teamId, workItemId, minimum) => {
+    const context = await requireTeamPermission(principal, teamId, minimum)
+    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      workItemId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    )
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, minimum)
+    const authorizationConditionChecks = minimum === 'member'
+      ? [
+          ...await createCustomerTriageAuthorizationConditionChecks(
+            principal,
+            teamId,
+            [detail.issue.assignedProjectId],
+          ),
+          createWorkItemRevisionConditionCheck(
+            getTeamIssuesTableName(),
+            principal.directoryId,
+            teamId,
+            workItemId,
+            detail.issue.revision,
+          ),
+        ]
+      : undefined
+    return detail.issue.assignedProjectId
+      ? {
+          projectId: detail.issue.assignedProjectId,
+          isCompleted: detail.issue.statusCategory === 'completed',
+          ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
+        }
+      : {
+          isCompleted: detail.issue.statusCategory === 'completed',
+          ...(authorizationConditionChecks ? { authorizationConditionChecks } : {}),
+        }
+  },
+  verifyProjectAccess: async (principal, projectId, minimum) => {
+    await requireProjectPermission(principal, projectId, minimum)
+    if (minimum === 'viewer') return {}
+    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+      principal.directoryId,
+      'ja',
+      true,
+    )
+    const ownerTeams = directory.teams.filter((team) =>
+      team.projects.some((project) => project.id === projectId)
+    )
+    if (ownerTeams.length === 0) {
+      throw new ProjectDataError(404, 'ProjectNotFound', 'The Project was not found.')
+    }
+    if (ownerTeams.length > 1) {
+      throw new ProjectDataError(
+        409,
+        'AmbiguousProjectOwnerTeam',
+        'The Project has multiple active owner Teams.',
+      )
+    }
+    const ownerTeam = ownerTeams[0]
+    if (!ownerTeam) {
+      throw new ProjectDataError(404, 'ProjectNotFound', 'The Project was not found.')
+    }
+    return {
+      authorizationConditionChecks: await createCustomerTriageAuthorizationConditionChecks(
+        principal,
+        ownerTeam.id,
+        [projectId],
+      ),
+    }
+  },
+  getTriage: () => workItemDependencies.triage,
+  readJson,
+  mapError: toCustomerErrorResponse,
+}))
+
 routeApp.route('/', createAiAssistanceRouter<WorkspacePrincipal>({
   service: aiAssistanceService,
   readBearerAccessToken,
@@ -9061,6 +9319,26 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
+    let customerImpact: TeamIssueDetailResponse['customerImpact']
+    if (hasCustomerReadAccess(principal, { teamId })) {
+      try {
+        customerImpact = projectCustomerImpactSignal(
+          await workspaceDependencies.customers.getWorkItemImpact(
+            principal.directoryId,
+            teamId,
+            issueId,
+          ),
+          hasCustomerManagementAccess(principal, { teamId }),
+        )
+      } catch (error) {
+        console.error('Customer impact was unavailable while loading Work Item detail.', {
+          workspaceId: principal.directoryId,
+          teamId,
+          issueId,
+          errorCode: error instanceof CustomerError ? error.code : 'CustomerImpactUnavailable',
+        })
+      }
+    }
     const allCollaborationComments = collaborationComments.sort(
       compareMigrationAwareComments,
     )
@@ -9087,6 +9365,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         resolvedConfiguration,
         relations: visibleRelations,
         relationGraphRevision: relationPage.graphRevision,
+        customerImpact,
       },
       principal.directoryId,
     )
@@ -11397,11 +11676,13 @@ routeApp.get('/api/projects/:projectId/issues', async (c) => {
     const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
     const workItemTypeId = readOptionalWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
 
-    return c.json(
-      await hydrateProjectIssuesResponse(
-        await readProjectIssues(principal.directoryId, projectId, includeArchived, workItemTypeId),
-      ),
+    const response = await hydrateProjectIssuesResponse(
+      await readProjectIssues(principal.directoryId, projectId, includeArchived, workItemTypeId),
     )
+    return c.json({
+      ...response,
+      canReadCustomerImpact: hasCustomerReadAccess(principal, { projectId }),
+    })
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -13582,6 +13863,8 @@ export interface AutomationActionExecutorDependencies {
   auditEvents: WorkspaceDependencies['auditEvents']
   /** Provides canonical Work Item persistence. */
   teamIssues: WorkItemDependencies['teamIssues']
+  /** Prepares Customer Request completion notification candidates. */
+  customers: WorkspaceDependencies['customers']
   /** Provides canonical Work Item collaboration persistence. */
   collaboration: WorkItemDependencies['collaboration']
   /** Provides Work Item workflow and relation configuration. */
@@ -13613,6 +13896,9 @@ const ambientAutomationActionExecutorDependencies: AutomationActionExecutorDepen
   },
   get teamIssues() {
     return workItemDependencies.teamIssues
+  },
+  get customers() {
+    return workspaceDependencies.customers
   },
   get collaboration() {
     return workItemDependencies.collaboration
@@ -19985,6 +20271,80 @@ function hasEnterpriseWorkspaceRequestPermission(principal: WorkspacePrincipal):
   )
 }
 
+/** Checks whether the authenticated principal may receive Customer impact data. */
+function hasCustomerReadAccess(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): boolean {
+  if (principal.workspaceRole === 'guest') return false
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) return principal.enterprisePermissions === undefined
+  const customerReadPermissions: readonly EnterprisePermissionId[] = [
+    'requests.read',
+    'requests.manage',
+    'workspace.manage',
+  ]
+  return customerReadPermissions.some((permission) =>
+    hasEnterpriseCustomerPermission(principal, permission, scope)
+  )
+}
+
+/** Checks one Customer capability against the same Enterprise resource as the route. */
+function hasEnterpriseCustomerPermission(
+  principal: WorkspacePrincipal,
+  permission: EnterprisePermissionId,
+  scope?: CustomerAuthorizationScope,
+): boolean {
+  const resource: EnterpriseAuthorizationResource = scope === undefined
+    ? {
+        workspaceId: principal.directoryId,
+        kind: 'workspace',
+      }
+    : 'teamId' in scope
+      ? {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: scope.teamId,
+        }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: scope.projectId,
+          ...(principal.enterpriseAuthorizationResource?.kind === 'project' &&
+            principal.enterpriseAuthorizationResource.targetId === scope.projectId &&
+            principal.enterpriseAuthorizationResource.parentTeamId !== undefined
+            ? { parentTeamId: principal.enterpriseAuthorizationResource.parentTeamId }
+            : {}),
+        }
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation !== undefined) {
+    return evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource,
+    }).allowed
+  }
+  if (!scope) return hasEnterpriseWorkspacePermission(principal, permission)
+  return principal.enterpriseRouteAuthorizedAtResource === true &&
+    isSameEnterpriseAuthorizationResource(principal.enterpriseAuthorizationResource, resource) &&
+    principal.enterprisePermissions?.includes(permission) === true
+}
+
+/** Compares two resource descriptors without widening their scoped target. */
+function isSameEnterpriseAuthorizationResource(
+  left: EnterpriseAuthorizationResource | undefined,
+  right: EnterpriseAuthorizationResource,
+): boolean {
+  if (!left || left.workspaceId !== right.workspaceId || left.kind !== right.kind) return false
+  if (right.kind === 'workspace') return true
+  return left.targetId === right.targetId && (
+    right.kind === 'team' || left.parentTeamId === right.parentTeamId
+  )
+}
+
 /**
  * Checks exact Workspace management access without trusting a weaker route authorization.
  *
@@ -20047,17 +20407,6 @@ const AI_ASSISTANCE_WORK_ITEM_CANDIDATE_LIMIT = 20
 
 /** Maximum number of AI prompt sources resolved concurrently in one request. */
 const AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY = 4
-
-/** Maximum operations accepted by a DynamoDB transaction write. */
-const AI_ASSISTANCE_DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
-
-/** Generation and decision transactions reserve one Put plus two revision checks. */
-const AI_ASSISTANCE_GENERATION_TRANSACTION_FIXED_ITEM_COUNT = 3
-
-/** Maximum authorization conditions that fit beside the fixed transaction operations. */
-const AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS =
-  AI_ASSISTANCE_DYNAMODB_TRANSACTION_ITEM_LIMIT -
-  AI_ASSISTANCE_GENERATION_TRANSACTION_FIXED_ITEM_COUNT
 
 /** Conservative non-source condition reserve for Workspace, Planning, Document, and Enterprise rows. */
 const AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE = 4
@@ -21898,7 +22247,7 @@ async function resolveAiRequestSubmissionSource(
   }
 }
 
-/** Resolves one current-scope Work Item with bounded comments and activity. */
+/** Resolves one revisioned Work Item with Planning and configuration context. */
 async function resolveAiWorkItemSource(
   principal: WorkspacePrincipal,
   source: Extract<AiAssistanceSource, { type: 'work-item' }>,
@@ -21910,7 +22259,7 @@ async function resolveAiWorkItemSource(
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, eventLimit: 40, newestEventsFirst: true },
+    { consistentIssueRead: true, includeComments: false, eventLimit: 0 },
   )
   if (detail.issue.teamId !== source.teamId || detail.issue.id !== source.workItemId) {
     throw new AiAssistanceError(
@@ -21955,64 +22304,12 @@ async function resolveAiWorkItemSource(
         left.id.localeCompare(right.id)
     })
     .slice(0, AI_ASSISTANCE_WORK_ITEM_CANDIDATE_LIMIT)
-  const collaborationPage = await workItemDependencies.collaboration.getThread({
-    entityKey: createWorkItemCollaborationEntityKey(
-      principal.directoryId,
-      source.teamId,
-      source.workItemId,
-    ),
-    viewerMemberKey: principal.userKey,
-    ...(detail.issue.assignedProjectId
-      ? {
-          projectEntityKey: createProjectCollaborationEntityKey(
-            principal.directoryId,
-            detail.issue.assignedProjectId,
-          ),
-        }
-      : {}),
-    includeReplies: true,
-    includeScopeState: false,
-    limit: AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT,
-  })
-  const canonicalComments = [...collaborationPage.comments]
-    .sort(compareMigrationAwareComments)
-  const canonicalCommentIds = new Set(canonicalComments.map((comment) => comment.id))
-  const promptComments = [
-    ...(detail.comments ?? [])
-      .filter((comment) => !canonicalCommentIds.has(comment.id))
-      .map((comment) => ({
-        id: comment.id,
-        body: truncateAiAssistanceText(comment.body, 800, state.privacyAliases),
-        createdAt: comment.createdAt,
-        source: 'legacy',
-      })),
-    ...canonicalComments
-      .filter((comment) => comment.deletedAt === undefined)
-      .map((comment) => ({
-        id: comment.id,
-        body: truncateAiAssistanceText(
-          comment.bodyMarkdown,
-          800,
-          state.privacyAliases,
-        ),
-        createdAt: comment.createdAt,
-        updatedAt: comment.updatedAt,
-        resolved: comment.resolvedAt !== undefined,
-        source: 'collaboration',
-      })),
-  ]
-    .sort(compareMigrationAwareComments)
-    .slice(-AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
-  // The detail adapter returns this page newest-first for the AI source read;
-  // take the head of that page so the prompt contains the latest activity.
-  const promptActivity = detail.activity
-    .slice(0, AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
   const current = await loadAuthorizedTeamIssue(
     principal,
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeComments: false, eventLimit: 0 },
   )
   requireAiAssistanceSourceRevision(current.detail.issue.revision, source.expectedRevision)
   if (
@@ -22086,14 +22383,6 @@ async function resolveAiWorkItemSource(
       source.teamId,
       state,
     ),
-    comments: promptComments,
-    commentsTruncated: collaborationPage.nextCursor !== undefined,
-    activity: promptActivity.map((event) => ({
-      type: event.type,
-      summary: event.summary,
-      createdAt: event.createdAt,
-    })),
-    activityTruncated: detail.nextEventCursor !== undefined,
   }, AI_ASSISTANCE_SOURCE_PROMPT_CHARACTER_LIMIT, state.privacyAliases)
   return {
     prompt,
@@ -22124,27 +22413,6 @@ async function resolveAiWorkItemSource(
       revision: detail.issue.revision,
       projectId: detail.issue.assignedProjectId,
       planningRevision: planning.revision,
-      commentWindow: {
-        rows: canonicalComments.map((comment) => ({
-          id: comment.id,
-          version: comment.version,
-          updatedAt: comment.updatedAt,
-          deletedAt: comment.deletedAt,
-          resolvedAt: comment.resolvedAt,
-        })),
-        legacyRows: (detail.comments ?? [])
-          .filter((comment) => !canonicalCommentIds.has(comment.id))
-          .map((comment) => ({ id: comment.id, createdAt: comment.createdAt })),
-        nextCursor: collaborationPage.nextCursor,
-      },
-      activityWindow: {
-        rows: promptActivity.map((event) => ({
-          id: event.id,
-          type: event.type,
-          createdAt: event.createdAt,
-        })),
-        nextCursor: detail.nextEventCursor,
-      },
     },
     relationIds: detail.issue.relationIds,
     workItemEndpoints: filterAiWorkItemEndpointsVisibleInPrompt(prompt, shownEndpoints),
@@ -23450,6 +23718,7 @@ async function requireTriageTeamAccess(
     ...(visibleProjectIds !== undefined ? { visibleProjectIds } : {}),
     ...(writableProjectIds !== undefined ? { writableProjectIds } : {}),
     canManageConfiguration,
+    canReadCustomerAssociations: hasCustomerReadAccess(principal, { teamId }),
   }
 }
 
@@ -25236,6 +25505,24 @@ function toTriageErrorResponse(context: Context, error: unknown) {
   return context.json({ code: error.code, message: error.message }, status)
 }
 
+/** Converts Customer, authorization, and persistence failures into the API envelope. */
+function toCustomerErrorResponse(context: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) return toAuthErrorResponse(context, error)
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(context, error)
+  if (error instanceof ProjectDataError) return toProjectDataErrorResponse(context, error)
+  if (!(error instanceof CustomerError)) {
+    console.error(error)
+    return context.json({ code: 'CustomerUnavailable', message: 'Customer data is unavailable.' }, 503)
+  }
+  if (error.status >= 500) console.error(error)
+  const status = error.status === 400 || error.status === 401 || error.status === 403 ||
+      error.status === 404 || error.status === 409 || error.status === 413 ||
+      error.status === 422 || error.status === 429 || error.status === 503
+    ? error.status
+    : 502
+  return context.json({ code: error.code, message: error.message }, status)
+}
+
 function requireSystemAdmin(principal: ProjectPrincipal) {
   if (
     principal.isSystemAdmin ||
@@ -25318,6 +25605,88 @@ function requireWorkspaceBusinessRead(principal: WorkspacePrincipal) {
       'A read-capable Workspace permission is required.',
     )
   }
+}
+
+/** Authenticates a Customer route and applies its Workspace-level capability. */
+async function requireCustomerWorkspaceAccess(
+  context: Context,
+  minimum: 'read' | 'write' | 'manage',
+  scope?: CustomerAuthorizationScope,
+): Promise<WorkspacePrincipal & CustomerPrincipal> {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new WorkspaceAccessError(401, 'WorkspaceAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (minimum === 'manage') {
+    requireCustomerManagement(principal, scope)
+  } else if (minimum === 'write') {
+    requireWorkspaceBusinessWrite(principal)
+    if (principal.enterprisePermissions === undefined) {
+      requireCustomerManagement(principal, scope)
+    } else {
+      requireCustomerReadAccess(principal, scope)
+    }
+  } else {
+    requireWorkspaceBusinessRead(principal)
+    requireCustomerReadAccess(principal, scope)
+  }
+  return {
+    ...principal,
+    canViewSensitiveData: hasCustomerManagementAccess(principal, scope),
+  }
+}
+
+/** Requires the Workspace-scoped Customer read capability. */
+function requireCustomerReadAccess(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): void {
+  if (hasCustomerReadAccess(principal, scope)) return
+  throw new WorkspaceAccessError(
+    403,
+    'CustomerReadDenied',
+    'Customer read permission is required.',
+  )
+}
+
+/** Requires Customer merge, export, and deletion management authority. */
+function requireCustomerManagement(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): void {
+  if (hasCustomerManagementAccess(principal, scope)) return
+  throw new WorkspaceAccessError(
+    403,
+    'CustomerManagementDenied',
+    'Customer management permission is required.',
+  )
+}
+
+/** Checks whether the principal has the authority required to expose Customer internals or mutate them. */
+function hasCustomerManagementAccess(
+  principal: WorkspacePrincipal,
+  scope?: CustomerAuthorizationScope,
+): boolean {
+  if (principal.isSystemAdmin && (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin')) return true
+  if (principal.enterprisePermissions !== undefined) {
+    const customerManagementPermissions: readonly EnterprisePermissionId[] = [
+      'requests.manage',
+      'workspace.manage',
+    ]
+    return customerManagementPermissions.some((permission) =>
+      hasEnterpriseCustomerPermission(principal, permission, scope)
+    )
+  } else if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return true
+  }
+  return false
+}
+
+/** Checks whether the principal may create or update Customer saved views. */
+function canManageCustomerViews(principal: WorkspacePrincipal): boolean {
+  if (principal.workspaceRole === 'guest') return false
+  return canWorkspaceBusinessWrite(principal) && hasCustomerManagementAccess(principal)
 }
 
 /**

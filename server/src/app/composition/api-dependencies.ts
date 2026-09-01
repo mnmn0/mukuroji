@@ -28,6 +28,7 @@ import type {
 } from './app-dependencies'
 import {
   createAiAssistanceService,
+  createAiAssistanceEmfObservability,
   createMastraBedrockAiModelGateway,
   DynamoDbAiAssistanceStore,
   type AiAssistancePolicyAudit,
@@ -55,6 +56,10 @@ import {
   createProductionRuntimeControlObservationRecorder,
 } from './runtime-control'
 import { createCognitoClient } from '../../modules/authentication'
+import {
+  DynamoDbCustomerClient,
+  InMemoryCustomerClient,
+} from '../../modules/customers'
 import {
   DynamoDbDashboardSummaryClient,
 } from '../../modules/analytics'
@@ -487,6 +492,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const { tenantAdministration, workspaceAccess } =
     createProductionTenantMeteredWorkspaceAccess()
   return {
+    customers: new DynamoDbCustomerClient(),
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents: createAuditEventsClient(),
@@ -596,6 +602,21 @@ function createLazyAiAssistanceService(
         idempotencyKey,
         requestStartedAtMs,
       ),
+    generateWithMetadata: (
+      actor,
+      request,
+      authorization,
+      idempotencyKey,
+      requestStartedAtMs,
+    ) => {
+      return resolveService().generateWithMetadata(
+        actor,
+        request,
+        authorization,
+        idempotencyKey,
+        requestStartedAtMs,
+      )
+    },
     getGeneration: (actor, generationId, authorization) =>
       resolveService().getGeneration(actor, generationId, authorization),
     decideGeneration: (actor, generationId, request, authorization) =>
@@ -902,6 +923,11 @@ function createProductionAiAssistanceService(
     deploymentAllowedModelIds: allowedModelIds,
     promptVersion: AI_ASSISTANCE_PROMPT_VERSION,
     policyAudit: createAiAssistancePolicyAudit(auditEvents, store),
+    observability: createAiAssistanceEmfObservability(
+      config.applicationCommitSha === undefined
+        ? {}
+        : { applicationCommitSha: config.applicationCommitSha },
+    ),
     workspaceGenerationLimitPerMinute,
     memberGenerationLimitPerMinute,
     workspaceTokenLimitPerMinute,
@@ -1421,7 +1447,11 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
  * @returns Operational dependencies backed by fail-closed DynamoDB readiness probes.
  */
 export function createProductionOperationalDependencies(): OperationalDependencies {
+  const config = loadServerConfig()
   return {
+    ...(config.applicationCommitSha === undefined
+      ? {}
+      : { applicationCommitSha: config.applicationCommitSha }),
     recordRuntimeControl:
       createProductionRuntimeControlObservationRecorder(),
     readiness: createDynamoDbReadinessProbe(),
@@ -1597,6 +1627,7 @@ export function createTestAppDependencies(): AppDependencies {
     operational: createTestOperationalDependencies(),
     workspace: {
       ...production.workspace,
+      customers: new InMemoryCustomerClient(),
       tenantEntitlementEnforcement: createTestTenantEntitlementEnforcement(),
     },
     workItems: {
@@ -1631,6 +1662,9 @@ export function overrideAppDependencies(
   return {
     operational: {
       ...dependencies.operational,
+      ...(overrides.applicationCommitSha
+        ? { applicationCommitSha: overrides.applicationCommitSha }
+        : {}),
       ...(overrides.recordRuntimeControl
         ? { recordRuntimeControl: overrides.recordRuntimeControl }
         : {}),
@@ -1649,6 +1683,7 @@ export function overrideAppDependencies(
     },
     workspace: {
       ...dependencies.workspace,
+      ...(overrides.customers ? { customers: overrides.customers } : {}),
       ...(overrides.dashboardSummary
         ? { dashboardSummary: overrides.dashboardSummary }
         : {}),

@@ -113,6 +113,8 @@ export interface StackParameters {
   readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter;
   /** Operator-incremented immutable API configuration revision. */
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
+  /** Full Git commit SHA bundled into the deployed API runtime. */
+  readonly applicationCommitSha: cdk.CfnParameter;
   /** Exact Bedrock model identifier allowed for AI assistance. */
   readonly aiBedrockModelId: cdk.CfnParameter;
   /** Reviewed Bedrock input-token price in USD per one million tokens. */
@@ -313,6 +315,20 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         'ApiRuntimeConfigurationRevision must be a 1-32 character deployment revision.',
       description:
         'Operator-incremented revision that replaces immutable API configuration secrets and publishes a matching Lambda version.',
+    },
+  );
+  const applicationCommitSha = new cdk.CfnParameter(
+    stack,
+    'ApplicationCommitSha',
+    {
+      type: 'String',
+      minLength: 40,
+      maxLength: 40,
+      allowedPattern: '^[0-9a-f]{40}$',
+      constraintDescription:
+        'ApplicationCommitSha must be one full lowercase 40-character Git commit SHA.',
+      description:
+        'Full reviewed Git commit SHA bundled into the deployed API and exposed by its liveness endpoint.',
     },
   );
   const aiBedrockModelId = new cdk.CfnParameter(stack, 'AiBedrockModelId', {
@@ -618,6 +634,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     workspaceAuditPseudonymKey,
     restoreDrillCleanupApproverRoleArn,
     apiRuntimeConfigurationRevision,
+    applicationCommitSha,
     aiBedrockModelId,
     aiBedrockInputPricePerMillionTokensUsd,
     aiBedrockOutputPricePerMillionTokensUsd,

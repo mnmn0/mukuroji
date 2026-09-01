@@ -8,6 +8,7 @@ const secretPaths = [
   'DocumentPublicShareTokenSecret/Resource',
 ] as const;
 const deadLetterQueuePaths = [
+  'AiAssistanceObservabilityDlq/Resource',
   'ConnectorPollDlq/Resource',
   'CollaborationProjectionDlq/Resource',
   'AutomationEventDlq/Resource',
@@ -17,6 +18,7 @@ const deadLetterQueuePaths = [
   'RequestEmailIngestionDlq/Resource',
 ] as const;
 const lambdaPaths = [
+  'AiAssistanceObservabilityFunction/Resource',
   'FileBucketIncarnationMarkerFunction/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
   'ListProjectTasksFunction/Resource',
@@ -35,6 +37,7 @@ const lambdaPaths = [
   'RequestEmailIngestionFunction/Resource',
 ] as const;
 const managedPolicyRolePaths = [
+  'AiAssistanceObservabilityFunction/ServiceRole/Resource',
   'BucketNotificationsHandler050a0587b7544547bf325f094a3db834/Role/Resource',
   'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
@@ -214,6 +217,15 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
+    [
+      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     [
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
@@ -268,6 +280,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<CustomersTableB554B793>/export/*]',
   ].map((id) => [
     id,
     ['RestoreDrillRunnerRole/DefaultPolicy/Resource'],
@@ -391,6 +404,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
     'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
@@ -404,6 +418,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<CustomersTableB554B793>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/mukuroji-restore-drill-*]',
     'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/restore-drill/*]',
     'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/workspaces/*]',

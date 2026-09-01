@@ -8,6 +8,7 @@ test('loads stable local server defaults without mutating the environment', () =
   const config = loadServerConfig(environment, { localBun: true })
 
   expect(config).toMatchObject({
+    applicationCommitSha: undefined,
     awsRegion: 'us-east-1',
     cognitoEndpoint: 'http://localhost:4566',
     dynamoDbEndpoint: 'http://localhost:4566',
@@ -20,6 +21,27 @@ test('loads stable local server defaults without mutating the environment', () =
   })
   expect(config.allowedOrigins).toContain('http://localhost:5173')
   expect(environment).toEqual({ NODE_ENV: 'test' })
+})
+
+test('validates optional deployment commit provenance', () => {
+  const applicationCommitSha = '0123456789abcdef0123456789abcdef01234567'
+
+  expect(loadServerConfig({
+    MUKUROJI_APPLICATION_COMMIT_SHA: applicationCommitSha,
+  }, { localBun: true }).applicationCommitSha).toBe(applicationCommitSha)
+
+  for (const invalid of [
+    '',
+    '0123456789abcdef0123456789abcdef0123456',
+    '0123456789ABCDEF0123456789ABCDEF01234567',
+    'not-a-commit-sha',
+  ]) {
+    expect(() => loadServerConfig({
+      MUKUROJI_APPLICATION_COMMIT_SHA: invalid,
+    }, { localBun: true })).toThrow(
+      'MUKUROJI_APPLICATION_COMMIT_SHA must be one full lowercase 40-character Git commit SHA.',
+    )
+  }
 })
 
 for (const legacyName of [
@@ -42,7 +64,7 @@ test('normalizes explicit endpoints, origins, and production cursor validation',
     AWS_DEFAULT_REGION: 'ap-northeast-1',
     AWS_LAMBDA_FUNCTION_NAME: 'api',
     COGNITO_ENDPOINT: 'https://cognito.example.com///',
-    DYNAMODB_ENDPOINT: 'https://dynamodb.example.com',
+    DYNAMODB_ENDPOINT: 'https://dynamodb.ap-northeast-1.amazonaws.com',
     SECRETS_MANAGER_ENDPOINT: ' https://secretsmanager.ap-northeast-1.amazonaws.com ',
     SQS_ENDPOINT: 'https://sqs.example.com',
     PORT: '8080',
@@ -53,7 +75,7 @@ test('normalizes explicit endpoints, origins, and production cursor validation',
     allowedOrigins: ['https://app.example.com', 'https://admin.example.com'],
     awsRegion: 'ap-northeast-1',
     cognitoEndpoint: 'https://cognito.example.com',
-    dynamoDbEndpoint: 'https://dynamodb.example.com',
+    dynamoDbEndpoint: 'https://dynamodb.ap-northeast-1.amazonaws.com',
     secretsManagerEndpoint: 'https://secretsmanager.ap-northeast-1.amazonaws.com',
     secretsManagerEndpointIsLocal: false,
     sqsEndpoint: 'https://sqs.example.com',
@@ -84,6 +106,7 @@ test('preserves legacy blank Cognito endpoint, runtime role, and port semantics'
 test('preserves Secrets Manager endpoint precedence and accepts regional FIPS endpoints', () => {
   const config = loadServerConfig({
     AWS_REGION: 'us-east-1',
+    DYNAMODB_ENDPOINT: 'https://dynamodb.us-east-1.amazonaws.com',
     SECRETS_MANAGER_ENDPOINT: ' https://secretsmanager-fips.us-east-1.amazonaws.com ',
     AWS_ENDPOINT_URL_SECRETS_MANAGER: 'https://secretsmanager.us-east-1.amazonaws.com',
     AWS_ENDPOINT_URL_SECRETSMANAGER: 'https://secretsmanager.us-east-1.amazonaws.com',
@@ -99,6 +122,7 @@ test('preserves Secrets Manager endpoint precedence and accepts regional FIPS en
 test('uses the next non-blank Secrets Manager endpoint without changing legacy precedence', () => {
   const config = loadServerConfig({
     AWS_REGION: 'cn-north-1',
+    DYNAMODB_ENDPOINT: 'https://dynamodb.cn-north-1.amazonaws.com.cn',
     SECRETS_MANAGER_ENDPOINT: ' ',
     AWS_ENDPOINT_URL_SECRETS_MANAGER:
       ' https://secretsmanager.cn-north-1.amazonaws.com.cn ',
@@ -114,6 +138,7 @@ test('uses the next non-blank Secrets Manager endpoint without changing legacy p
 test('uses the shared AWS endpoint only after service-specific values are blank', () => {
   const config = loadServerConfig({
     AWS_REGION: 'us-east-1',
+    DYNAMODB_ENDPOINT: 'https://dynamodb.us-east-1.amazonaws.com',
     SECRETS_MANAGER_ENDPOINT: '',
     AWS_ENDPOINT_URL_SECRETS_MANAGER: ' ',
     AWS_ENDPOINT_URL_SECRETSMANAGER: '\t',
@@ -128,9 +153,51 @@ test('uses the shared AWS endpoint only after service-specific values are blank'
 test('fails closed on a malformed higher-precedence endpoint', () => {
   expect(() => loadServerConfig({
     AWS_REGION: 'us-east-1',
+    DYNAMODB_ENDPOINT: 'https://dynamodb.us-east-1.amazonaws.com',
     SECRETS_MANAGER_ENDPOINT: 'not a URL',
     AWS_ENDPOINT_URL: 'https://secretsmanager.us-east-1.amazonaws.com',
   }, { localBun: false })).toThrow('Secrets Manager endpoint')
+})
+
+for (const endpoint of [
+  'not a URL',
+  'http://dynamodb.us-east-1.amazonaws.com',
+  'https://dynamodb.us-west-2.amazonaws.com',
+  'https://dynamodb.example.com',
+  'https://dynamodb.us-east-1.amazonaws.com.evil.example',
+  'https://user@dynamodb.us-east-1.amazonaws.com',
+  'https://dynamodb.us-east-1.amazonaws.com:443',
+  'https://dynamodb.us-east-1.amazonaws.com/v1',
+  'https://dynamodb.us-east-1.amazonaws.com?table=customers',
+  'https://dynamodb.us-east-1.amazonaws.com#fragment',
+]) {
+  test(`rejects an unsafe DynamoDB endpoint: ${endpoint}`, () => {
+    expect(() => loadServerConfig({
+      AWS_REGION: 'us-east-1',
+      DYNAMODB_ENDPOINT: endpoint,
+    }, { localBun: false })).toThrow('DynamoDB endpoint')
+  })
+}
+
+for (const endpoint of [
+  'http://localhost:4566',
+  'http://127.0.0.1:4566',
+  'http://[::1]:4566',
+  'http://0.0.0.0:4566',
+  'http://floci:4566',
+  'http://localstack:4566',
+]) {
+  test(`allows an explicit local DynamoDB endpoint: ${endpoint}`, () => {
+    const config = loadServerConfig({ DYNAMODB_ENDPOINT: endpoint }, { localBun: false })
+    expect(config.dynamoDbEndpoint).toBe(endpoint)
+  })
+}
+
+test('requires the Floci marker for local DynamoDB endpoints in an AWS runtime', () => {
+  expect(() => loadServerConfig({
+    AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-backend-local',
+    DYNAMODB_ENDPOINT: 'http://floci:4566',
+  }, { localBun: false })).toThrow('DynamoDB endpoint')
 })
 
 for (const endpoint of [

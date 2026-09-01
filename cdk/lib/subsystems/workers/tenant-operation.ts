@@ -432,6 +432,7 @@ function buildTenantOperationCapabilityFunction(
       REALTIME_SESSIONS_TABLE_NAME:
         input.dataStores.realtimeSessionsTable.tableName,
       REQUEST_INTAKE_TABLE_NAME: input.dataStores.requestIntakeTable.tableName,
+      CUSTOMERS_TABLE_NAME: input.dataStores.customersTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME:
         input.tenantAdministrationTable.tableName,
       TENANT_EXPORT_BUCKET_NAME: input.tenantExportBucket.bucketName,
@@ -502,6 +503,7 @@ function grantTenantResourceOwner(
     stores.capacityPlanningTable,
     stores.analyticsTable,
     stores.requestIntakeTable,
+    stores.customersTable,
     stores.projectDirectoryTable,
     stores.documentsTable,
     stores.collaborationTable,

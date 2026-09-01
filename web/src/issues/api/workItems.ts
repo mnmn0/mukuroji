@@ -2,6 +2,7 @@ import type {
   CanonicalWorkItem,
   ConfirmWorkItemScheduleChangeInput,
   CreateWorkItemInput,
+  CustomerImpactSignal,
   PreviewWorkItemScheduleInput,
   PreviewWorkItemTypeChangeInput,
   ResolvedWorkItemConfiguration,
@@ -62,6 +63,8 @@ export type TeamIssueDetail = {
    * Relation mutation の optimistic concurrency に使う Team graph revision です。
    */
   relationGraphRevision?: number
+  /** Customer Requests aggregated onto this Work Item. */
+  customerImpact?: CustomerImpactSignal
 }
 
 /**
@@ -105,6 +108,8 @@ type ProjectIssuesResponse = {
    * プロジェクトにアサインされた Issue 一覧です。
    */
   issues: TeamIssue[]
+  /** Whether Customer impact may be requested for this Project resource. */
+  canReadCustomerImpact?: boolean
 }
 
 /**
@@ -178,6 +183,23 @@ export async function getProjectIssues(
   accessToken?: string,
   includeArchived = false,
 ) {
+  const response = await getProjectIssuesPage(projectId, accessToken, includeArchived)
+  return response.issues
+}
+
+/**
+ * Loads a Project Work Item page together with its resource-scoped Customer capability.
+ *
+ * @param projectId - Project whose assigned Work Items should be loaded.
+ * @param accessToken - Optional bearer token for the Work Item API.
+ * @param includeArchived - Whether archived Work Items should be included.
+ * @returns Project-assigned Work Items and the Customer impact capability.
+ */
+export async function getProjectIssuesPage(
+  projectId: string,
+  accessToken?: string,
+  includeArchived = false,
+): Promise<ProjectIssuesResponse> {
   const response = await requestJson<ProjectIssuesResponse>(
     createWorkItemListUrl(
       `${issuesApiBaseUrl}/projects/${encodeURIComponent(projectId)}/issues`,
@@ -186,7 +208,7 @@ export async function getProjectIssues(
     accessToken,
   )
 
-  return response.issues
+  return response
 }
 
 /**

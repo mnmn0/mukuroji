@@ -72,15 +72,14 @@ export type SidebarTeam = {
   projects?: SidebarProject[]
 }
 
-/**
- * サイドバーの主要ナビゲーション項目です。
- */
+/** Identifiers for the primary sidebar navigation items. */
 export type SidebarNavId =
   | 'home'
   | 'focus'
   | 'my-tasks'
   | 'inbox'
   | 'requests'
+  | 'customers'
   | 'documents'
   | 'dashboard'
   | 'planning'
@@ -535,6 +534,7 @@ const primaryNavItems: MainNavItem[] = [
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
   { id: 'requests', icon: PanelIcon },
+  { id: 'customers', icon: BuildingIcon },
 ]
 
 const secondaryNavItems: MainNavItem[] = [
@@ -627,6 +627,7 @@ const defaultLabels: SidebarLabels = {
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
     requests: 'リクエスト',
+    customers: '顧客',
     documents: 'ドキュメント',
     dashboard: 'ダッシュボード',
     planning: 'プランニング',
@@ -2540,6 +2541,17 @@ function PanelIcon({ className }: SidebarIconProps) {
       <path d="M8 9h8" />
       <path d="M8 13h5" />
       <path d="M8 17h8" />
+    </SvgBase>
+  )
+}
+
+/** Renders the organization icon used for the Customer directory. */
+function BuildingIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M4 21V5l8-2 8 2v16" />
+      <path d="M2 21h20" />
+      <path d="M8 8h1M15 8h1M8 12h1M15 12h1M8 16h1M15 16h1" />
     </SvgBase>
   )
 }

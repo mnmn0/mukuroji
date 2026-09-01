@@ -2541,7 +2541,7 @@ describe('restore drill external-operation intents', () => {
       )
       localWaits.push(result.waitSeconds)
     }
-    expect(localWaits).toHaveLength(31)
+    expect(localWaits).toHaveLength(36)
     expect(new Set(localWaits)).toEqual(new Set([0]))
     expect(exportStartCount).toBe(RESTORE_DRILL_TABLE_TARGETS.length)
     expect(restoreStartCount).toBe(RESTORE_DRILL_TABLE_TARGETS.length)

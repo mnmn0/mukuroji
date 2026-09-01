@@ -37,6 +37,55 @@ const mismatchedIssueDetail = {
   },
 } satisfies TeamIssueDetail
 
+const customerImpactIssueDetail = {
+  ...taskViewStorySelectedIssueDetail,
+  customerImpact: {
+    businessValueTotal: 165,
+    customerCount: 2,
+    customers: [
+      {
+        businessValue: 90,
+        customerId: 'acme',
+        health: 'watch',
+        name: 'Acme Corporation',
+        requestCount: 2,
+        tier: 'enterprise',
+      },
+      {
+        businessValue: 75,
+        customerId: 'globex',
+        health: 'healthy',
+        name: 'Globex Inc.',
+        requestCount: 1,
+        tier: 'growth',
+      },
+    ],
+    highestBusinessValue: 90,
+    highestImportance: 'high',
+    openRequestCount: 2,
+    prioritySignal: 'high',
+    requests: [
+      {
+        customerId: 'acme',
+        importance: 'high',
+        receivedAt: '2026-08-01T00:00:00.000Z',
+        requestId: 'request-1',
+        sourceKind: 'email',
+        status: 'requested',
+      },
+      {
+        customerId: 'globex',
+        importance: 'normal',
+        receivedAt: '2026-07-31T00:00:00.000Z',
+        requestId: 'request-2',
+        sourceKind: 'portal',
+        status: 'in-progress',
+      },
+    ],
+    requestCount: 3,
+  },
+} satisfies TeamIssueDetail
+
 /**
  * Creates an isolated successful update spy for an interactive detail-pane story.
  *
@@ -268,6 +317,21 @@ export const Default: Story = {
         workflowStatusId: 'review',
       }),
     )
+  },
+}
+
+/** Detail pane with an explainable Customer impact signal and contributing accounts. */
+export const CustomerImpact: Story = {
+  args: {
+    detail: customerImpactIssueDetail,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByTestId('customer-impact-panel')).toBeVisible()
+    await expect(canvas.getByText('顧客 2 社 · Request 3 件')).toBeVisible()
+    await expect(canvas.getByText('Acme Corporation')).toBeVisible()
+    await expect(canvas.getByText('優先シグナル: high')).toBeVisible()
   },
 }
 

@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router'
+import { CustomerApiError } from '../../customers/api'
+import { useCustomers } from '../../customers/queries/useCustomers'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { isActiveProjectAssignmentCandidate } from '../../projects/api/members'
 import { useTeamProjectMembers } from '../../projects/queries/useProjectMembers'
@@ -72,6 +74,18 @@ export function TeamTriagePage() {
     workspace.canLoadWorkspaceData && Boolean(activeTeam) && routeState.view === 'queue',
   )
   const selectedEntry = detail.data ? createTriageEntryView(detail.data) : undefined
+  const customerPickerEnabled = workspace.canLoadWorkspaceData &&
+    workspace.canReadCustomers &&
+    workspace.canManageCustomerRequests &&
+    Boolean(activeTeam) &&
+    routeState.view === 'queue' &&
+    selectedEntry?.entry.state === 'accepted' &&
+    selectedEntry?.entry.customerRequestId === undefined
+  const customerDirectory = useCustomers(
+    workspace.accessToken,
+    { limit: 100, sortBy: 'name', sortDirection: 'ascending' },
+    customerPickerEnabled,
+  )
   const projectMembers = useTeamProjectMembers(
     workspace.accessToken,
     activeTeam?.id,
@@ -101,6 +115,7 @@ export function TeamTriagePage() {
     refreshEntry: () => detail.mutate(),
     refreshQueue: () => queue.mutate(),
     refreshSettings: () => settings.mutate(),
+    refreshCustomerDirectory: () => customerDirectory.mutate(),
     teamId,
     updateEntry: (entry) => detail.mutate(entry, { revalidate: false }),
     updateSettings: (configuration) => settings.mutate(configuration, { revalidate: false }),
@@ -156,6 +171,11 @@ export function TeamTriagePage() {
         configuration={settings.data}
         workItemConfiguration={workItemConfigurationQuery.data?.configuration}
         configurationErrorMessage={configurationErrorMessage}
+        customerOptions={customerDirectory.data?.customers.map((customer) => ({
+          id: customer.id,
+          name: customer.name,
+        }))}
+        customerOptionsErrorMessage={customerDirectory.error ? t('customers.loadError') : undefined}
         counts={countTriageEntryViews(entryViews)}
         detailErrorMessage={detailErrorMessage}
         didSaveConfiguration={mutation.didSaveSettings}
@@ -163,7 +183,10 @@ export function TeamTriagePage() {
         explicitEntryId={routeState.entryId}
         filters={routeState.filters}
         hasMore={Boolean(lastQueuePage?.nextCursor)}
+        hasMoreCustomerOptions={customerDirectory.hasMore}
         isBulkPending={mutation.isBulkPending}
+        isCustomerOptionsLoading={customerDirectory.isLoading}
+        isLoadingMoreCustomerOptions={customerDirectory.isLoadingMore}
         isConfigurationLoading={settings.isLoading}
         isDetailLoading={Boolean(selectedEntryId && detail.isLoading)}
         isQueueLoading={queue.isLoading}
@@ -188,6 +211,9 @@ export function TeamTriagePage() {
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}
         onBulkAction={mutation.applyBulkAction}
+        onCreateCustomerRequest={workspace.canManageCustomerRequests
+          ? mutation.createCustomerRequest
+          : undefined}
         onClearSelection={() => {
           setSelectedEntryIds([])
           mutation.clearFeedback()
@@ -203,8 +229,10 @@ export function TeamTriagePage() {
           replaceRouteState('queue', null, filters)
         }}
         onLoadMore={() => void queue.setSize(queue.size + 1)}
+        onLoadMoreCustomerOptions={customerDirectory.loadMore}
         onRetryConfiguration={() => void settings.mutate()}
         onRetryDetail={() => void detail.mutate()}
+        onRetryCustomerOptions={() => void customerDirectory.mutate()}
         onRetryQueue={() => void queue.mutate()}
         onSaveConfiguration={mutation.saveSettings}
         onSelectEntry={(entryId) => replaceRouteState('queue', entryId)}
@@ -230,10 +258,10 @@ function readMutationErrorMessage(
   error: unknown,
   t: ReturnType<typeof createTranslator>,
 ) {
-  if (error instanceof TriageApiError && error.status === 409) {
+  if ((error instanceof TriageApiError || error instanceof CustomerApiError) && error.status === 409) {
     return t('triage.action.conflict')
   }
-  if (error instanceof TriageApiError && error.status === 403) {
+  if ((error instanceof TriageApiError || error instanceof CustomerApiError) && error.status === 403) {
     return t('triage.action.permissionDenied')
   }
   return t('triage.action.error')

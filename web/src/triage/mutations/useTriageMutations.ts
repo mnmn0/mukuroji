@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type {
+  CreateCustomerRequestFromTriageInput,
+  CustomerRequest,
+} from '@mukuroji/contracts'
+import {
+  createCustomerRequestFromTriage,
+  CustomerApiError,
+} from '../../customers/api'
 import {
   createMutationFingerprint,
   createMutationRequestRunner,
@@ -28,6 +36,8 @@ export type TriageMutationRefreshers = {
   readonly updateEntry: (entry: TriageEntry) => Promise<unknown>
   /** Updates the Team settings cache after a successful save. */
   readonly updateSettings: (settings: TriageConfiguration) => Promise<unknown>
+  /** Revalidates the Customer directory after a Customer Request is created. */
+  readonly refreshCustomerDirectory?: () => Promise<unknown>
 }
 
 /** Inputs required to operate one Team triage mutation controller. */
@@ -67,6 +77,11 @@ export type TriageMutationController = {
   readonly saveSettings: (
     input: UpdateTriageConfigurationInput,
   ) => Promise<TriageConfiguration>
+  /** Saves one accepted Triage Entry as a Customer Request. */
+  readonly createCustomerRequest: (
+    entryId: string,
+    input: CreateCustomerRequestFromTriageInput,
+  ) => Promise<CustomerRequest>
 }
 
 /**
@@ -249,6 +264,64 @@ export function useTriageMutations(
     }
   }, [options, runner])
 
+  const createCustomerRequest = useCallback(async (
+    entryId: string,
+    input: CreateCustomerRequestFromTriageInput,
+  ) => {
+    if (!options.accessToken || !options.teamId) {
+      throw new TriageApiError(401, 'Customer Request creation requires an authenticated session.')
+    }
+    const teamId = options.teamId
+    const scope = activeScope.current
+    const isCurrentScope = () => activeScope.current === scope && scope.active && scope.teamId === teamId
+
+    setStateTeamId(teamId)
+    setError(undefined)
+    setIsBulkPending(false)
+    setIsSavingSettings(false)
+    setDidSaveSettings(false)
+    setBulkResults([])
+    setPendingEntryId(entryId)
+    try {
+      const fingerprint = await createMutationFingerprint(
+        teamId,
+        entryId,
+        JSON.stringify(input),
+      )
+      const request = await runner.run(
+        `triage-customer-request:${teamId}:${entryId}`,
+        fingerprint,
+        (context) => createCustomerRequestFromTriage(
+          options.accessToken ?? '',
+          teamId,
+          entryId,
+          input,
+          context,
+        ),
+        shouldRetainMutationContext,
+      )
+      if (isCurrentScope()) {
+        await Promise.allSettled([
+          options.refreshEntry(),
+          options.refreshQueue(),
+          options.refreshCustomerDirectory?.() ?? Promise.resolve(),
+        ])
+      }
+      return request
+    } catch (requestError) {
+      if (isCurrentScope()) setError(requestError)
+      if (isCurrentScope() && isConflict(requestError)) {
+        await Promise.all([
+          options.refreshEntry().catch(() => undefined),
+          options.refreshQueue().catch(() => undefined),
+        ])
+      }
+      throw requestError
+    } finally {
+      if (isCurrentScope()) setPendingEntryId(undefined)
+    }
+  }, [options, runner])
+
   return {
     applyAction,
     applyBulkAction,
@@ -265,13 +338,14 @@ export function useTriageMutations(
     isBulkPending: stateTeamId === options.teamId && isBulkPending,
     isSavingSettings: stateTeamId === options.teamId && isSavingSettings,
     pendingEntryId: stateTeamId === options.teamId ? pendingEntryId : undefined,
+    createCustomerRequest,
     saveSettings,
   }
 }
 
 /** Checks whether a mutation failed its revision fence. */
 function isConflict(error: unknown) {
-  return error instanceof TriageApiError && error.status === 409
+  return (error instanceof TriageApiError || error instanceof CustomerApiError) && error.status === 409
 }
 
 /** Retains idempotency context only when retry safety is uncertain. */
