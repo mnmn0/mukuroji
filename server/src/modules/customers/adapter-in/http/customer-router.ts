@@ -1028,18 +1028,29 @@ function projectTriageAssociation(entry: TriageEntry): Pick<TriageEntry, 'id' | 
 
 /** Reads customer list filters from query parameters. */
 function readCustomerListInput(context: Context) {
+  const search = readOptionalQuery(context, 'search')
+  const tier = readOptionalEnum(context.req.query('tier'), ['strategic', 'enterprise', 'growth', 'standard', 'trial'] as const)
+  const size = readOptionalEnum(context.req.query('size'), ['startup', 'small', 'mid-market', 'enterprise'] as const)
+  const status = readOptionalEnum(context.req.query('status'), ['prospect', 'active', 'inactive', 'churned'] as const)
+  const health = readOptionalEnum(context.req.query('health'), ['healthy', 'watch', 'at-risk', 'critical', 'unknown'] as const)
+  const minBusinessValue = readOptionalBusinessValue(context.req.query('minBusinessValue'), 'Minimum business value')
+  const minRequestCount = readOptionalNonnegativeInteger(context.req.query('minRequestCount'), 'Minimum request count')
+  const sortBy = readOptionalEnum(context.req.query('sortBy'), ['name', 'tier', 'size', 'status', 'health', 'businessValue', 'requestCount', 'openRequestCount', 'updatedAt'] as const)
+  const sortDirection = readOptionalEnum(context.req.query('sortDirection'), ['ascending', 'descending'] as const)
+  const limit = readOptionalInteger(context.req.query('limit'), 'Customer page limit')
+  const cursor = readOptionalQuery(context, 'cursor')
   return {
-    ...(readOptionalQuery(context, 'search') ? { search: readOptionalQuery(context, 'search') } : {}),
-    ...(readOptionalEnum(context.req.query('tier'), ['strategic', 'enterprise', 'growth', 'standard', 'trial'] as const) ? { tier: readOptionalEnum(context.req.query('tier'), ['strategic', 'enterprise', 'growth', 'standard', 'trial'] as const) } : {}),
-    ...(readOptionalEnum(context.req.query('size'), ['startup', 'small', 'mid-market', 'enterprise'] as const) ? { size: readOptionalEnum(context.req.query('size'), ['startup', 'small', 'mid-market', 'enterprise'] as const) } : {}),
-    ...(readOptionalEnum(context.req.query('status'), ['prospect', 'active', 'inactive', 'churned'] as const) ? { status: readOptionalEnum(context.req.query('status'), ['prospect', 'active', 'inactive', 'churned'] as const) } : {}),
-    ...(readOptionalEnum(context.req.query('health'), ['healthy', 'watch', 'at-risk', 'critical', 'unknown'] as const) ? { health: readOptionalEnum(context.req.query('health'), ['healthy', 'watch', 'at-risk', 'critical', 'unknown'] as const) } : {}),
-    ...(readOptionalBusinessValue(context.req.query('minBusinessValue'), 'Minimum business value') === undefined ? {} : { minBusinessValue: readOptionalBusinessValue(context.req.query('minBusinessValue'), 'Minimum business value') }),
-    ...(readOptionalNonnegativeInteger(context.req.query('minRequestCount'), 'Minimum request count') === undefined ? {} : { minRequestCount: readOptionalNonnegativeInteger(context.req.query('minRequestCount'), 'Minimum request count') }),
-    ...(readOptionalEnum(context.req.query('sortBy'), ['name', 'tier', 'size', 'status', 'health', 'businessValue', 'requestCount', 'openRequestCount', 'updatedAt'] as const) ? { sortBy: readOptionalEnum(context.req.query('sortBy'), ['name', 'tier', 'size', 'status', 'health', 'businessValue', 'requestCount', 'openRequestCount', 'updatedAt'] as const) } : {}),
-    ...(readOptionalEnum(context.req.query('sortDirection'), ['ascending', 'descending'] as const) ? { sortDirection: readOptionalEnum(context.req.query('sortDirection'), ['ascending', 'descending'] as const) } : {}),
-    ...(readOptionalInteger(context.req.query('limit'), 'Customer page limit') === undefined ? {} : { limit: readOptionalInteger(context.req.query('limit'), 'Customer page limit') }),
-    ...(readOptionalQuery(context, 'cursor') ? { cursor: readOptionalQuery(context, 'cursor') } : {}),
+    ...(search ? { search } : {}),
+    ...(tier ? { tier } : {}),
+    ...(size ? { size } : {}),
+    ...(status ? { status } : {}),
+    ...(health ? { health } : {}),
+    ...(minBusinessValue === undefined ? {} : { minBusinessValue }),
+    ...(minRequestCount === undefined ? {} : { minRequestCount }),
+    ...(sortBy ? { sortBy } : {}),
+    ...(sortDirection ? { sortDirection } : {}),
+    ...(limit === undefined ? {} : { limit }),
+    ...(cursor ? { cursor } : {}),
   }
 }
 
