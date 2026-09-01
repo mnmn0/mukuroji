@@ -28,6 +28,7 @@ import type {
 } from './app-dependencies'
 import {
   createAiAssistanceService,
+  createAiAssistanceEmfObservability,
   createMastraBedrockAiModelGateway,
   DynamoDbAiAssistanceStore,
   type AiAssistancePolicyAudit,
@@ -601,6 +602,21 @@ function createLazyAiAssistanceService(
         idempotencyKey,
         requestStartedAtMs,
       ),
+    generateWithMetadata: (
+      actor,
+      request,
+      authorization,
+      idempotencyKey,
+      requestStartedAtMs,
+    ) => {
+      return resolveService().generateWithMetadata(
+        actor,
+        request,
+        authorization,
+        idempotencyKey,
+        requestStartedAtMs,
+      )
+    },
     getGeneration: (actor, generationId, authorization) =>
       resolveService().getGeneration(actor, generationId, authorization),
     decideGeneration: (actor, generationId, request, authorization) =>
@@ -907,6 +923,11 @@ function createProductionAiAssistanceService(
     deploymentAllowedModelIds: allowedModelIds,
     promptVersion: AI_ASSISTANCE_PROMPT_VERSION,
     policyAudit: createAiAssistancePolicyAudit(auditEvents, store),
+    observability: createAiAssistanceEmfObservability(
+      config.applicationCommitSha === undefined
+        ? {}
+        : { applicationCommitSha: config.applicationCommitSha },
+    ),
     workspaceGenerationLimitPerMinute,
     memberGenerationLimitPerMinute,
     workspaceTokenLimitPerMinute,
@@ -1423,7 +1444,11 @@ export function createProductionDeveloperPlatformDependencies(): DeveloperPlatfo
  * @returns Operational dependencies backed by fail-closed DynamoDB readiness probes.
  */
 export function createProductionOperationalDependencies(): OperationalDependencies {
+  const config = loadServerConfig()
   return {
+    ...(config.applicationCommitSha === undefined
+      ? {}
+      : { applicationCommitSha: config.applicationCommitSha }),
     recordRuntimeControl:
       createProductionRuntimeControlObservationRecorder(),
     readiness: createDynamoDbReadinessProbe(),
@@ -1634,6 +1659,9 @@ export function overrideAppDependencies(
   return {
     operational: {
       ...dependencies.operational,
+      ...(overrides.applicationCommitSha
+        ? { applicationCommitSha: overrides.applicationCommitSha }
+        : {}),
       ...(overrides.recordRuntimeControl
         ? { recordRuntimeControl: overrides.recordRuntimeControl }
         : {}),

@@ -430,6 +430,7 @@ import {
   type TriageTeamAccess,
 } from '../modules/triage'
 import {
+  AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS,
   AiAssistanceError,
   aliasAiAssistanceTextIdentifiers,
   classifyAiAssistanceSensitivePromptField,
@@ -1214,6 +1215,21 @@ const aiAssistanceService: AiAssistanceService = {
       idempotencyKey,
       requestStartedAtMs,
     ),
+  generateWithMetadata: (
+    actor,
+    request,
+    authorization,
+    idempotencyKey,
+    requestStartedAtMs,
+  ) => {
+    return requireAppDependencies().aiAssistance.aiAssistanceService.generateWithMetadata(
+      actor,
+      request,
+      authorization,
+      idempotencyKey,
+      requestStartedAtMs,
+    )
+  },
   getGeneration: (actor, generationId, authorization) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.getGeneration(
       actor,
@@ -20233,17 +20249,6 @@ const AI_ASSISTANCE_WORK_ITEM_CANDIDATE_LIMIT = 20
 /** Maximum number of AI prompt sources resolved concurrently in one request. */
 const AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY = 4
 
-/** Maximum operations accepted by a DynamoDB transaction write. */
-const AI_ASSISTANCE_DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
-
-/** Generation and decision transactions reserve one Put plus two revision checks. */
-const AI_ASSISTANCE_GENERATION_TRANSACTION_FIXED_ITEM_COUNT = 3
-
-/** Maximum authorization conditions that fit beside the fixed transaction operations. */
-const AI_ASSISTANCE_MAX_GENERATION_AUTHORIZATION_CONDITIONS =
-  AI_ASSISTANCE_DYNAMODB_TRANSACTION_ITEM_LIMIT -
-  AI_ASSISTANCE_GENERATION_TRANSACTION_FIXED_ITEM_COUNT
-
 /** Conservative non-source condition reserve for Workspace, Planning, Document, and Enterprise rows. */
 const AI_ASSISTANCE_NON_SOURCE_AUTHORIZATION_CONDITION_RESERVE = 4
 
@@ -22083,7 +22088,7 @@ async function resolveAiRequestSubmissionSource(
   }
 }
 
-/** Resolves one current-scope Work Item with bounded comments and activity. */
+/** Resolves one revisioned Work Item with Planning and configuration context. */
 async function resolveAiWorkItemSource(
   principal: WorkspacePrincipal,
   source: Extract<AiAssistanceSource, { type: 'work-item' }>,
@@ -22095,7 +22100,7 @@ async function resolveAiWorkItemSource(
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, eventLimit: 40, newestEventsFirst: true },
+    { consistentIssueRead: true, includeComments: false, eventLimit: 0 },
   )
   if (detail.issue.teamId !== source.teamId || detail.issue.id !== source.workItemId) {
     throw new AiAssistanceError(
@@ -22140,64 +22145,12 @@ async function resolveAiWorkItemSource(
         left.id.localeCompare(right.id)
     })
     .slice(0, AI_ASSISTANCE_WORK_ITEM_CANDIDATE_LIMIT)
-  const collaborationPage = await workItemDependencies.collaboration.getThread({
-    entityKey: createWorkItemCollaborationEntityKey(
-      principal.directoryId,
-      source.teamId,
-      source.workItemId,
-    ),
-    viewerMemberKey: principal.userKey,
-    ...(detail.issue.assignedProjectId
-      ? {
-          projectEntityKey: createProjectCollaborationEntityKey(
-            principal.directoryId,
-            detail.issue.assignedProjectId,
-          ),
-        }
-      : {}),
-    includeReplies: true,
-    includeScopeState: false,
-    limit: AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT,
-  })
-  const canonicalComments = [...collaborationPage.comments]
-    .sort(compareMigrationAwareComments)
-  const canonicalCommentIds = new Set(canonicalComments.map((comment) => comment.id))
-  const promptComments = [
-    ...(detail.comments ?? [])
-      .filter((comment) => !canonicalCommentIds.has(comment.id))
-      .map((comment) => ({
-        id: comment.id,
-        body: truncateAiAssistanceText(comment.body, 800, state.privacyAliases),
-        createdAt: comment.createdAt,
-        source: 'legacy',
-      })),
-    ...canonicalComments
-      .filter((comment) => comment.deletedAt === undefined)
-      .map((comment) => ({
-        id: comment.id,
-        body: truncateAiAssistanceText(
-          comment.bodyMarkdown,
-          800,
-          state.privacyAliases,
-        ),
-        createdAt: comment.createdAt,
-        updatedAt: comment.updatedAt,
-        resolved: comment.resolvedAt !== undefined,
-        source: 'collaboration',
-      })),
-  ]
-    .sort(compareMigrationAwareComments)
-    .slice(-AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
-  // The detail adapter returns this page newest-first for the AI source read;
-  // take the head of that page so the prompt contains the latest activity.
-  const promptActivity = detail.activity
-    .slice(0, AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
   const current = await loadAuthorizedTeamIssue(
     principal,
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeComments: false, eventLimit: 0 },
   )
   requireAiAssistanceSourceRevision(current.detail.issue.revision, source.expectedRevision)
   if (
@@ -22271,14 +22224,6 @@ async function resolveAiWorkItemSource(
       source.teamId,
       state,
     ),
-    comments: promptComments,
-    commentsTruncated: collaborationPage.nextCursor !== undefined,
-    activity: promptActivity.map((event) => ({
-      type: event.type,
-      summary: event.summary,
-      createdAt: event.createdAt,
-    })),
-    activityTruncated: detail.nextEventCursor !== undefined,
   }, AI_ASSISTANCE_SOURCE_PROMPT_CHARACTER_LIMIT, state.privacyAliases)
   return {
     prompt,
@@ -22309,27 +22254,6 @@ async function resolveAiWorkItemSource(
       revision: detail.issue.revision,
       projectId: detail.issue.assignedProjectId,
       planningRevision: planning.revision,
-      commentWindow: {
-        rows: canonicalComments.map((comment) => ({
-          id: comment.id,
-          version: comment.version,
-          updatedAt: comment.updatedAt,
-          deletedAt: comment.deletedAt,
-          resolvedAt: comment.resolvedAt,
-        })),
-        legacyRows: (detail.comments ?? [])
-          .filter((comment) => !canonicalCommentIds.has(comment.id))
-          .map((comment) => ({ id: comment.id, createdAt: comment.createdAt })),
-        nextCursor: collaborationPage.nextCursor,
-      },
-      activityWindow: {
-        rows: promptActivity.map((event) => ({
-          id: event.id,
-          type: event.type,
-          createdAt: event.createdAt,
-        })),
-        nextCursor: detail.nextEventCursor,
-      },
     },
     relationIds: detail.issue.relationIds,
     workItemEndpoints: filterAiWorkItemEndpointsVisibleInPrompt(prompt, shownEndpoints),

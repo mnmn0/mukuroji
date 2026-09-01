@@ -11,6 +11,7 @@
     "work-items:integrity": "bun run scripts/data-integrity/verify-work-items-integrity.ts",
     "cross-domain:integrity": "bun run scripts/data-integrity/verify-cross-domain-integrity.ts",
     "ai-assistance:eval": "bun run scripts/ai-assistance/evaluate-ai-assistance.ts",
+    "ai-assistance:eval:live": "bun run scripts/ai-assistance/evaluate-ai-assistance-live.ts",
     "restore-drill:approve-cleanup": "bun run scripts/restore-drill/create-cleanup-approval.ts"
   },
   "dependencies": {

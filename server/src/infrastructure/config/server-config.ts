@@ -39,6 +39,8 @@ export interface ServerConfig {
   readonly runtimeRole: string | undefined
   /** Whether the process is running with production validation enabled. */
   readonly production: boolean
+  /** Full Git commit SHA identifying the deployed application, when configured. */
+  readonly applicationCommitSha: string | undefined
   /** Secret used to sign opaque Public API cursors. */
   readonly publicApiCursorSecret: string
 }
@@ -143,6 +145,9 @@ export function loadServerConfig(
     ),
     runtimeRole: environment.MUKUROJI_RUNTIME_ROLE,
     production,
+    applicationCommitSha: resolveApplicationCommitSha(
+      environment.MUKUROJI_APPLICATION_COMMIT_SHA,
+    ),
     get publicApiCursorSecret() {
       return resolvePublicApiCursorSecret(environment, production)
     },
@@ -156,6 +161,22 @@ function validateOptionalDynamoDbEndpoint(
   environment: ServerEnvironment,
 ): string | undefined {
   return value === undefined ? undefined : validateDynamoDbEndpoint(value, awsRegion, environment)
+}
+
+/**
+ * Validates an optional full Git commit SHA used as deployment provenance.
+ *
+ * @param value - Raw environment value supplied by the deployment.
+ * @returns The validated full SHA, or undefined when deployment provenance is absent.
+ */
+function resolveApplicationCommitSha(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  if (!/^[0-9a-f]{40}$/.test(value)) {
+    throw new Error(
+      'MUKUROJI_APPLICATION_COMMIT_SHA must be one full lowercase 40-character Git commit SHA.',
+    )
+  }
+  return value
 }
 
 /** Rejects removed Work Items table aliases instead of silently selecting a default table. */

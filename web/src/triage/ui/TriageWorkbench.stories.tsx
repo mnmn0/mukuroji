@@ -360,6 +360,7 @@ function AiTriageWorkbenchStory(props: TriageWorkbenchProps) {
     isFeedbackPending: false,
     isGenerating: false,
     reset: () => setGeneration(undefined),
+    revalidateGeneration: async () => generation,
     sendFeedback: async () => undefined,
   }
 

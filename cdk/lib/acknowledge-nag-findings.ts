@@ -8,6 +8,7 @@ const secretPaths = [
   'DocumentPublicShareTokenSecret/Resource',
 ] as const;
 const deadLetterQueuePaths = [
+  'AiAssistanceObservabilityDlq/Resource',
   'ConnectorPollDlq/Resource',
   'CollaborationProjectionDlq/Resource',
   'AutomationEventDlq/Resource',
@@ -17,6 +18,7 @@ const deadLetterQueuePaths = [
   'RequestEmailIngestionDlq/Resource',
 ] as const;
 const lambdaPaths = [
+  'AiAssistanceObservabilityFunction/Resource',
   'FileBucketIncarnationMarkerFunction/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
   'ListProjectTasksFunction/Resource',
@@ -35,6 +37,7 @@ const lambdaPaths = [
   'RequestEmailIngestionFunction/Resource',
 ] as const;
 const managedPolicyRolePaths = [
+  'AiAssistanceObservabilityFunction/ServiceRole/Resource',
   'BucketNotificationsHandler050a0587b7544547bf325f094a3db834/Role/Resource',
   'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',

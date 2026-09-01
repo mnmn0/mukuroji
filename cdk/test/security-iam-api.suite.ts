@@ -61,6 +61,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'MUKUROJI_API_DATA_CONFIG_SECRET_ARN',
     'MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN',
     'MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN',
+    'MUKUROJI_APPLICATION_COMMIT_SHA',
     'TENANT_EXPORT_BUCKET_NAME',
   ]);
   expect(variables)
@@ -222,6 +223,8 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
         [
           'API runtime configuration revision',
           { Ref: 'ApiRuntimeConfigurationRevision' },
+          'application commit',
+          { Ref: 'ApplicationCommitSha' },
         ],
       ],
     },
@@ -1195,6 +1198,77 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     Threshold: 1,
     TreatMissingData: 'notBreaching',
   });
+  for (const alarm of [
+    {
+      description:
+        'Detects failed AI assistance provider attempts after durable attempt finalization.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metricName: 'ProviderFailureCount',
+      statistic: 'Sum',
+      threshold: 1,
+    },
+    {
+      description:
+        'Detects repeated upstream AI provider throttling separately from local budget admission.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metricName: 'ProviderThrottledCount',
+      statistic: 'Sum',
+      threshold: 3,
+    },
+    {
+      description:
+        'Detects AI provider responses rejected by the strict structured-output boundary.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metricName: 'ProviderInvalidOutputCount',
+      statistic: 'Sum',
+      threshold: 1,
+    },
+    {
+      description:
+        'Detects sustained p95 AI provider latency above the generation budget.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 2,
+      evaluationPeriods: 3,
+      extendedStatistic: 'p95',
+      metricName: 'ProviderLatency',
+      threshold: 12000,
+    },
+    {
+      description:
+        'Detects provider attempts without complete token or cost accounting.',
+      comparisonOperator: 'GreaterThanOrEqualToThreshold',
+      datapointsToAlarm: 1,
+      evaluationPeriods: 1,
+      metricName: 'UsageUnavailableCount',
+      statistic: 'Sum',
+      threshold: 1,
+    },
+  ]) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      AlarmDescription: alarm.description,
+      ComparisonOperator: alarm.comparisonOperator,
+      DatapointsToAlarm: alarm.datapointsToAlarm,
+      Dimensions: [{
+        Name: 'Service',
+        Value: 'mukuroji-ai-assistance',
+      }],
+      EvaluationPeriods: alarm.evaluationPeriods,
+      ...(alarm.extendedStatistic === undefined
+        ? { Statistic: alarm.statistic }
+        : { ExtendedStatistic: alarm.extendedStatistic }),
+      MetricName: alarm.metricName,
+      Namespace: 'Mukuroji/AIAssistance',
+      Period: 300,
+      Threshold: alarm.threshold,
+      TreatMissingData: 'notBreaching',
+    });
+  }
   for (const burnWindow of [
     {
       description:

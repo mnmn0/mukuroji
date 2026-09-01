@@ -17,6 +17,7 @@ const aiController: AiAssistanceController = {
   isFeedbackPending: false,
   isGenerating: false,
   reset: () => undefined,
+  revalidateGeneration: async () => undefined,
   sendFeedback: async () => undefined,
 }
 

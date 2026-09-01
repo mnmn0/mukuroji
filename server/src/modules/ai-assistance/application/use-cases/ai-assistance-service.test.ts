@@ -12,15 +12,18 @@ import type {
   AiAssistanceAuthorizationState,
   AiAssistanceCustomFieldDefinition,
   AiAssistanceGenerationBudgetReservation,
+  AiAssistanceGenerationRequestObservation,
   AiAssistancePolicyAuditInput,
   AiAssistancePlanningDependency,
   AiAssistancePrivateMemberIdentifiers,
+  AiAssistanceObservability,
   AiAssistanceTriageRoutingTuple,
   AiAssistanceTriageSourceRouting,
   AiAssistanceStore,
   AiModelGenerationInput,
   FailAiAssistanceGenerationReservationInput,
   FinalizeAiAssistanceGenerationAttemptInput,
+  MarkAiAssistanceGenerationProviderStartedInput,
   StartAiAssistanceGenerationAttemptInput,
   StoredAiAssistanceFeedback,
   StoredAiAssistanceGeneration,
@@ -153,8 +156,14 @@ type HarnessConfiguration = {
   generationDeadlineMs?: number
   /** Optional provider timeout used with the end-to-end deadline. */
   providerTimeoutMs?: number
+  /** Optional durable receipt lease used to exercise crash-recovery safety. */
+  reservationLeaseMs?: number
   /** Milliseconds advanced after context resolution and before provider admission. */
   advanceBeforeProviderMs?: number
+  /** Milliseconds consumed while the durable provider-attempt marker is written. */
+  advanceDuringAttemptStartMs?: number
+  /** Makes the fake gateway violate the provider-dispatch callback contract. */
+  omitProviderDispatchCallback?: boolean
   /** Changes the policy revision while source context is being resolved. */
   changePolicyBeforeProvider?: boolean
   /** Changes the policy revision after the provider returns. */
@@ -173,6 +182,14 @@ type HarnessConfiguration = {
   policyAuditRecords?: AiAssistancePolicyAuditInput[]
   /** Changes retention after the initial replay policy read. */
   shortenPolicyBeforeReplayProjection?: boolean
+  /** Optional operational recorder used to verify durable observation ordering. */
+  observability?: AiAssistanceObservability
+  /** Simulates a concurrent identical decision that the store reconciles as a replay. */
+  decisionStoreReplay?: boolean
+  /** Error returned after the fake generation transaction has already committed. */
+  generationCommitResponseError?: unknown
+  /** Enables the adapter-style provider-attempt recovery call. */
+  recoverGenerationAttempts?: boolean
 }
 
 /** Creates a service harness with deterministic fake ports. */
@@ -183,9 +200,14 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let policyRetentionDays = 30
   let policyRevision = 0
   let policyReadCount = 0
+  let preferenceReadCount = 0
   let currentTime = NOW
   let resolveContextCount = 0
   let gatewayBarrier: Promise<void> | undefined
+  let signalDurableAttemptStarted: (() => void) | undefined
+  const durableAttemptStarted = new Promise<void>((resolve) => {
+    signalDurableAttemptStarted = resolve
+  })
   let signalGatewayStarted: (() => void) | undefined
   const gatewayStarted = new Promise<void>((resolve) => {
     signalGatewayStarted = resolve
@@ -209,12 +231,14 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   const feedbackRecords: StoredAiAssistanceFeedback[] = []
   const feedbackCommitFences: unknown[] = []
   const startedAttempts: StartAiAssistanceGenerationAttemptInput[] = []
+  const providerStartMarkers: MarkAiAssistanceGenerationProviderStartedInput[] = []
   const finalizedAttempts: FinalizeAiAssistanceGenerationAttemptInput[] = []
   const generationCommitFences: unknown[] = []
   const decisionCommitFences: unknown[] = []
   const failedReservations: FailAiAssistanceGenerationReservationInput[] = []
   let attemptStarted = false
   let attemptStartError: unknown
+  let providerStartMarkerError: unknown
   let finalizeAttemptError: unknown
   let finalizeAttemptFailuresRemaining = 0
   let finalizeAttemptCallCount = 0
@@ -255,6 +279,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         return {
           status: 'pending',
           generationId: reservationGenerationId ?? '',
+          leaseExpiresAt: reservationLeaseExpiresAt ?? NOW,
           expiresAt: reservationExpiresAt,
         }
       }
@@ -324,6 +349,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       return {
         status: 'pending',
         generationId: reservationGenerationId ?? '',
+        leaseExpiresAt: reservationLeaseExpiresAt ?? NOW,
         expiresAt: reservationExpiresAt,
       }
     },
@@ -336,16 +362,41 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       if (attemptStartError !== undefined) throw attemptStartError
       startedAttempts.push(input)
       attemptStarted = true
+      if (configuration.advanceDuringAttemptStartMs !== undefined) {
+        currentTime = new Date(
+          Date.parse(currentTime) + configuration.advanceDuringAttemptStartMs,
+        ).toISOString()
+      }
+      signalDurableAttemptStarted?.()
+    },
+    async markGenerationProviderStarted(input) {
+      if (
+        reservationKey !== input.idempotencyKey ||
+        reservationFingerprint !== input.inputFingerprint ||
+        reservationGenerationId !== input.generationId ||
+        !attemptStarted
+      ) throw new Error('Unexpected provider start marker.')
+      if (providerStartMarkerError !== undefined) throw providerStartMarkerError
+      providerStartMarkers.push(input)
     },
     async finalizeGenerationAttempt(input) {
       if (
         reservationKey !== input.idempotencyKey ||
         reservationFingerprint !== input.inputFingerprint ||
         reservationGenerationId !== input.generationId ||
-        reservationStatus !== 'pending' ||
         !attemptStarted
       ) throw new Error('Unexpected attempt completion.')
       finalizeAttemptCallCount += 1
+      if (reservationStatus === 'completed') {
+        throw new AiAssistanceError(
+          'conflict',
+          'AiAssistanceIdempotencyConflict',
+          'The generation receipt is already completed.',
+        )
+      }
+      if (reservationStatus !== 'pending') {
+        throw new Error('Unexpected attempt completion.')
+      }
       if (finalizeAttemptFailuresRemaining > 0) {
         finalizeAttemptFailuresRemaining -= 1
         throw finalizeAttemptError ?? new Error('Injected attempt finalization failure.')
@@ -354,6 +405,62 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       reservationStatus = input.outcome === 'succeeded' ? 'completed' : 'failed'
       reservationFailureCategory = input.failureCategory
       reservationFailureCode = input.failureCode
+    },
+    ...(configuration.recoverGenerationAttempts
+      ? {
+          /** Retries the same fake terminal receipt write without invoking the provider. */
+          async recoverGenerationAttempt(input) {
+            await store.finalizeGenerationAttempt(input)
+          },
+        }
+      : {}),
+    async expireGenerationAttempt(input) {
+      if (
+        reservationKey !== input.idempotencyKey ||
+        reservationFingerprint !== input.inputFingerprint ||
+        reservationGenerationId !== input.generationId
+      ) throw new Error('Unexpected expired attempt recovery.')
+      if (reservationStatus !== 'pending') {
+        if (
+          reservationStatus === 'failed' &&
+          reservationFailureCategory !== undefined &&
+          reservationFailureCode !== undefined
+        ) {
+          return {
+            status: 'failed',
+            generationId: reservationGenerationId,
+            expiresAt: reservationExpiresAt,
+            failureCategory: reservationFailureCategory,
+            failureCode: reservationFailureCode,
+          }
+        }
+        if (reservationStatus === 'completed') {
+          return {
+            status: 'replay',
+            generationId: reservationGenerationId,
+            expiresAt: reservationExpiresAt,
+          }
+        }
+      }
+      const leaseExpiresAt = reservationLeaseExpiresAt ?? NOW
+      if (Date.parse(leaseExpiresAt) > Date.parse(input.failedAt)) {
+        return {
+          status: 'pending',
+          generationId: reservationGenerationId ?? '',
+          leaseExpiresAt,
+          expiresAt: reservationExpiresAt,
+        }
+      }
+      reservationStatus = 'failed'
+      reservationFailureCategory = 'upstream'
+      reservationFailureCode = 'AiAssistanceAttemptFailed'
+      return {
+        status: 'failed',
+        generationId: reservationGenerationId ?? '',
+        expiresAt: reservationExpiresAt,
+        failureCategory: reservationFailureCategory,
+        failureCode: reservationFailureCode,
+      }
     },
     async failGenerationReservation(input) {
       if (
@@ -386,6 +493,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       return policy
     },
     async getPreference() {
+      preferenceReadCount += 1
       return preferenceEnabled
         ? undefined
         : {
@@ -407,6 +515,28 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       }
       return record
     },
+    async commitGeneration(record, completion, commitFence) {
+      if (generationPersistenceError !== undefined) throw generationPersistenceError
+      if (reservationStatus !== 'pending' || !attemptStarted) {
+        throw new Error('Unexpected atomic generation commit.')
+      }
+      generationCommitFences.push(commitFence)
+      finalizeAttemptCallCount += 1
+      if (finalizeAttemptFailuresRemaining > 0) {
+        finalizeAttemptFailuresRemaining -= 1
+        throw finalizeAttemptError ?? new Error('Injected atomic commit failure.')
+      }
+      storedGeneration = record
+      finalizedAttempts.push(completion)
+      reservationStatus = 'completed'
+      if (configuration.revokeAuthorizationAfterPersistence) {
+        authorizationState = { current: false, reason: 'permission-changed' }
+      }
+      if (configuration.generationCommitResponseError !== undefined) {
+        throw configuration.generationCommitResponseError
+      }
+      return record
+    },
     async getGeneration() {
       return storedGeneration
     },
@@ -421,13 +551,18 @@ function createHarness(configuration: HarnessConfiguration = {}) {
           decision: { outcome: request.outcome, decidedAt },
         },
       }
-      return storedGeneration
+      return {
+        record: storedGeneration,
+        replayed: configuration.decisionStoreReplay ?? false,
+      }
     },
     async putFeedback(record, commitFence) {
       feedbackCommitFences.push(commitFence)
       const existing = feedbackRecords.find((candidate) =>
         candidate.feedbackId === record.feedbackId)
-      if (existing?.inputFingerprint === record.inputFingerprint) return
+      if (existing?.inputFingerprint === record.inputFingerprint) {
+        return { replayed: true }
+      }
       if (existing) {
         throw new AiAssistanceError(
           'conflict',
@@ -436,12 +571,16 @@ function createHarness(configuration: HarnessConfiguration = {}) {
         )
       }
       feedbackRecords.push(record)
+      return { replayed: false }
     },
   }
   const service = createAiAssistanceService({
     gateway: {
       async generate(input) {
         gatewayInputs.push(input)
+        if (!configuration.omitProviderDispatchCallback) {
+          await input.onProviderDispatch()
+        }
         signalGatewayStarted?.()
         if (gatewayBarrier) await gatewayBarrier
         if (gatewayError !== undefined) throw gatewayError
@@ -475,6 +614,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     defaultPolicy: createPolicy(),
     deploymentAllowedModelIds: ['model-1'],
     promptVersion: 'ai-assistance-v1',
+    ...(configuration.observability === undefined
+      ? {}
+      : { observability: configuration.observability }),
     ...(configuration.policyAuditRecords === undefined
       ? {}
       : {
@@ -490,6 +632,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     ...(configuration.providerTimeoutMs === undefined
       ? {}
       : { providerTimeoutMs: configuration.providerTimeoutMs }),
+    ...(configuration.reservationLeaseMs === undefined
+      ? {}
+      : { reservationLeaseMs: configuration.reservationLeaseMs }),
     now: () => new Date(currentTime),
     createId: () => 'generation-1',
   })
@@ -591,11 +736,16 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     decisionCommitFences,
     budgetReservationCount: () => budgetReservationCount,
     lastBudget: () => lastBudget,
+    reservationLeaseExpiresAt: () => reservationLeaseExpiresAt,
     policyPutCalls: () => policyPutCalls,
     resolveContextCount: () => resolveContextCount,
     authorizationCheckCount: () => authorizationCheckCount,
+    durableAttemptStarted,
+    policyReadCount: () => policyReadCount,
+    preferenceReadCount: () => preferenceReadCount,
     service,
     startedAttempts,
+    providerStartMarkers,
     setAuthorizationState(value: AiAssistanceAuthorizationState) {
       authorizationState = value
     },
@@ -604,6 +754,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     },
     setAttemptStartError(value: unknown) {
       attemptStartError = value
+    },
+    setProviderStartMarkerError(value: unknown) {
+      providerStartMarkerError = value
     },
     setFinalizeAttemptFailures(count: number, error: unknown) {
       finalizeAttemptFailuresRemaining = count
@@ -780,6 +933,7 @@ describe('createAiAssistanceService', () => {
       inputFingerprint: expect.any(String),
       generationId: 'generation-1',
       outcome: 'succeeded',
+      providerOutcome: 'succeeded',
       endedAt: NOW,
       latencyMs: 30,
       usage: {
@@ -1006,7 +1160,16 @@ describe('createAiAssistanceService', () => {
   })
 
   test('durably finalizes a provider timeout and terminally replays the safe failure', async () => {
-    const harness = createHarness()
+    const requestObservations: AiAssistanceGenerationRequestObservation[] = []
+    const harness = createHarness({
+      observability: {
+        recordGenerationRequest(observation) {
+          requestObservations.push(observation)
+        },
+        recordProviderAttempt() {},
+        recordDecision() {},
+      },
+    })
     harness.setGatewayError(new AiAssistanceError(
       'timeout',
       'AiAssistanceProviderTimeout',
@@ -1031,6 +1194,7 @@ describe('createAiAssistanceService', () => {
     expectSafeSummaryAttemptAudit(harness.startedAttempts[0])
     expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
       outcome: 'failed',
+      providerOutcome: 'timeout',
       latencyMs: 0,
       usageUnavailableReason: 'provider-did-not-report',
       failureCategory: 'timeout',
@@ -1041,10 +1205,102 @@ describe('createAiAssistanceService', () => {
       attempts: harness.startedAttempts,
       outcomes: harness.finalizedAttempts,
     })).not.toContain('Provider detail')
+    expect(requestObservations).toEqual([
+      expect.objectContaining({ outcome: 'failed', replayed: false }),
+      expect.objectContaining({ outcome: 'failed', replayed: true }),
+    ])
+  })
+
+  test('durably classifies provider throttling without double-counting its replay', async () => {
+    const harness = createHarness({
+      observability: {
+        recordGenerationRequest() {},
+        recordProviderAttempt() {},
+        recordDecision() {},
+      },
+    })
+    harness.setGatewayError(new AiAssistanceError(
+      'rate-limit',
+      'AiAssistanceProviderRateLimited',
+      'Provider detail that must not be persisted.',
+    ))
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-provider-rate-limit',
+    )).rejects.toMatchObject({
+      category: 'rate-limit',
+      code: 'AiAssistanceProviderRateLimited',
+      idempotencyReplayed: false,
+    })
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-provider-rate-limit',
+    )).rejects.toMatchObject({
+      category: 'rate-limit',
+      code: 'AiAssistanceProviderRateLimited',
+      idempotencyReplayed: true,
+    })
+
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      providerOutcome: 'throttled',
+      failureCategory: 'rate-limit',
+      failureCode: 'AiAssistanceProviderRateLimited',
+    })])
+  })
+
+  test('durably classifies a content-filter refusal with provider usage', async () => {
+    const harness = createHarness()
+    harness.setGatewayError(new AiAssistanceError(
+      'upstream',
+      'AiAssistanceModelRefused',
+      'Model response content must not be persisted.',
+      undefined,
+      {
+        inputTokens: 10,
+        outputTokens: 0,
+        latencyMs: 30,
+        costUnavailableReason: 'pricing-not-configured',
+      },
+      'provider-refusal-trace',
+    ))
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-model-refused',
+    )).rejects.toMatchObject({
+      category: 'upstream',
+      code: 'AiAssistanceModelRefused',
+    })
+
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      providerOutcome: 'refused',
+      usage: expect.objectContaining({ inputTokens: 10, outputTokens: 0 }),
+      providerTraceId: 'provider-refusal-trace',
+      failureCategory: 'upstream',
+      failureCode: 'AiAssistanceModelRefused',
+    })])
+    expect(JSON.stringify(harness.finalizedAttempts)).not.toContain('Model response')
   })
 
   test('retains provider usage when generation persistence fails after inference', async () => {
-    const harness = createHarness()
+    const requestObservations: AiAssistanceGenerationRequestObservation[] = []
+    const harness = createHarness({
+      observability: {
+        recordGenerationRequest(observation) {
+          requestObservations.push(observation)
+        },
+        recordProviderAttempt() {},
+        recordDecision() {},
+      },
+    })
     harness.setGenerationPersistenceError(new AiAssistanceError(
       'upstream',
       'AiAssistancePersistenceError',
@@ -1060,6 +1316,7 @@ describe('createAiAssistanceService', () => {
 
     expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
       outcome: 'failed',
+      providerOutcome: 'succeeded',
       latencyMs: 30,
       usage: {
         inputTokens: 10,
@@ -1073,6 +1330,52 @@ describe('createAiAssistanceService', () => {
     expectSafeSummaryAttemptAudit(harness.startedAttempts[0])
     expect(JSON.stringify(harness.finalizedAttempts)).not.toContain('must-not-persist')
     expect(harness.storedGeneration()).toBeUndefined()
+    expect(requestObservations).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      replayed: false,
+      failureCode: 'AiAssistancePersistenceError',
+    })])
+  })
+
+  test('preserves retryable uncertainty when an ambiguous commit is already complete', async () => {
+    const harness = createHarness({
+      generationCommitResponseError: new AiAssistanceError(
+        'upstream',
+        'AiAssistancePersistenceError',
+        'Injected response and reconciliation read failure.',
+      ),
+      recoverGenerationAttempts: true,
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-ambiguous-generation-commit',
+    )).rejects.toMatchObject({
+      category: 'upstream',
+      code: 'AiAssistancePersistenceError',
+      idempotencyReplayed: false,
+    })
+
+    const replay = await harness.service.generateWithMetadata(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-ambiguous-generation-commit',
+    )
+
+    expect(replay).toMatchObject({
+      generation: { id: 'generation-1' },
+      replayed: true,
+    })
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.budgetReservationCount()).toBe(1)
+    expect(harness.finalizeAttemptCallCount()).toBe(3)
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'succeeded',
+      providerOutcome: 'succeeded',
+    })])
   })
 
   test('does not invoke the provider when the durable attempt start write fails', async () => {
@@ -1100,7 +1403,110 @@ describe('createAiAssistanceService', () => {
     expect(harness.budgetReservationCount()).toBe(1)
   })
 
-  test('keeps a started receipt pending when failure finalization fails', async () => {
+  test('persists provider dispatch before accepting a gateway result', async () => {
+    const harness = createHarness()
+
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-provider-dispatch-marker',
+    )
+
+    expect(harness.providerStartMarkers).toEqual([expect.objectContaining({
+      workspaceId: 'workspace-1',
+      memberId: 'operator-1',
+      idempotencyKey: 'request-provider-dispatch-marker',
+      generationId: 'generation-1',
+      attemptStartedAt: NOW,
+      providerStartedAt: NOW,
+    })])
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'succeeded',
+      providerOutcome: 'succeeded',
+    })])
+  })
+
+  test('terminalizes a provider-dispatch marker failure as indeterminate', async () => {
+    const harness = createHarness()
+    harness.setProviderStartMarkerError(new AiAssistanceError(
+      'upstream',
+      'AiAssistancePersistenceError',
+      'Injected provider dispatch marker failure.',
+    ))
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-provider-start-marker-failure',
+    )).rejects.toMatchObject({ code: 'AiAssistancePersistenceError' })
+
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.startedAttempts).toHaveLength(1)
+    expect(harness.providerStartMarkers).toHaveLength(0)
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      providerOutcome: 'indeterminate',
+      usageUnavailableReason: 'attempt-outcome-indeterminate',
+      failureCategory: 'upstream',
+      failureCode: 'AiAssistancePersistenceError',
+    })])
+    expect(harness.finalizedAttempts[0]).not.toHaveProperty('latencyMs')
+    expect(harness.finalizedAttempts[0]).not.toHaveProperty('usage')
+  })
+
+  test('surfaces terminalization failure for a pre-commit persistence error', async () => {
+    const harness = createHarness({ recoverGenerationAttempts: true })
+    harness.setProviderStartMarkerError(new AiAssistanceError(
+      'upstream',
+      'AiAssistancePersistenceError',
+      'Injected provider dispatch marker failure.',
+    ))
+    harness.setFinalizeAttemptFailures(2, new AiAssistanceError(
+      'conflict',
+      'AiAssistanceIdempotencyConflict',
+      'Injected terminalization conflict.',
+    ))
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-pre-commit-terminalization-conflict',
+    )).rejects.toMatchObject({
+      category: 'conflict',
+      code: 'AiAssistanceIdempotencyConflict',
+    })
+
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.finalizeAttemptCallCount()).toBe(2)
+    expect(harness.finalizedAttempts).toHaveLength(0)
+    expect(harness.storedGeneration()).toBeUndefined()
+  })
+
+  test('does not process a gateway result without its dispatch callback', async () => {
+    const harness = createHarness({ omitProviderDispatchCallback: true })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-missing-provider-dispatch-callback',
+    )).rejects.toMatchObject({ code: 'AiAssistanceAttemptFailed' })
+
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.providerStartMarkers).toHaveLength(0)
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      providerOutcome: 'indeterminate',
+      usageUnavailableReason: 'attempt-outcome-indeterminate',
+      failureCode: 'AiAssistanceAttemptFailed',
+    })])
+    expect(harness.finalizedAttempts[0]).not.toHaveProperty('latencyMs')
+  })
+
+  test('fails an expired started receipt without recalling the provider or charging budget', async () => {
     const harness = createHarness()
     harness.setGatewayError(new AiAssistanceError(
       'timeout',
@@ -1119,13 +1525,27 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-failure-finalize',
     )).rejects.toMatchObject({ code: 'AiAssistancePersistenceError' })
-    harness.setNow('2026-08-25T00:01:00.000Z')
+    harness.setNow('2026-08-25T00:00:29.000Z')
     await expect(harness.service.generate(
       createActor(),
       createSummaryRequest(),
       harness.authorization,
       'request-failure-finalize',
     )).rejects.toMatchObject({ code: 'AiAssistanceGenerationInProgress' })
+    harness.setBudgetLimited(true)
+    harness.setNow('2026-08-25T00:00:31.000Z')
+    for (let replay = 0; replay < 2; replay += 1) {
+      await expect(harness.service.generate(
+        createActor(),
+        createSummaryRequest(),
+        harness.authorization,
+        'request-failure-finalize',
+      )).rejects.toMatchObject({
+        category: 'upstream',
+        code: 'AiAssistanceAttemptFailed',
+        idempotencyReplayed: true,
+      })
+    }
 
     expect(harness.gatewayInputs).toHaveLength(1)
     expect(harness.startedAttempts).toHaveLength(1)
@@ -1134,38 +1554,35 @@ describe('createAiAssistanceService', () => {
     expect(harness.budgetReservationCount()).toBe(1)
   })
 
-  test('repairs success finalization before a changed preference gate without another provider call', async () => {
+  test('fails closed when an atomic generation commit cannot become terminal', async () => {
     const harness = createHarness()
-    harness.setFinalizeAttemptFailures(1, new AiAssistanceError(
+    harness.setFinalizeAttemptFailures(2, new AiAssistanceError(
       'upstream',
       'AiAssistancePersistenceError',
-      'Injected success finalization failure.',
+      'Injected atomic commit failure.',
     ))
 
     await expect(harness.service.generate(
       createActor(),
       createSummaryRequest(),
       harness.authorization,
-      'request-success-repair',
+      'request-atomic-commit-failure',
     )).rejects.toMatchObject({ code: 'AiAssistancePersistenceError' })
-    harness.setPreferenceEnabled(false)
-    const repaired = await harness.service.generate(
+    harness.setNow('2026-08-25T00:00:31.000Z')
+    await expect(harness.service.generateWithMetadata(
       createActor(),
       createSummaryRequest(),
       harness.authorization,
-      'request-success-repair',
-    )
-
-    expect(repaired.id).toBe('generation-1')
+      'request-atomic-commit-failure',
+    )).rejects.toMatchObject({
+      code: 'AiAssistanceAttemptFailed',
+      idempotencyReplayed: true,
+    })
     expect(harness.gatewayInputs).toHaveLength(1)
     expect(harness.budgetReservationCount()).toBe(1)
     expect(harness.finalizeAttemptCallCount()).toBe(2)
-    expect(harness.finalizedAttempts).toHaveLength(1)
-    expect(harness.finalizedAttempts[0]).toEqual(expect.objectContaining({
-      outcome: 'succeeded',
-      usage: expect.objectContaining({ inputTokens: 10, outputTokens: 20 }),
-    }))
-    expect(Object.hasOwn(harness.finalizedAttempts[0] ?? {}, 'providerTraceId')).toBeFalse()
+    expect(harness.finalizedAttempts).toHaveLength(0)
+    expect(harness.storedGeneration()).toBeUndefined()
   })
 
   test('uses UTF-8 bytes to reject multibyte context before provider execution', async () => {
@@ -1214,7 +1631,13 @@ describe('createAiAssistanceService', () => {
   })
 
   test('rejects an unknown model citation before persistence', async () => {
-    const harness = createHarness()
+    const harness = createHarness({
+      observability: {
+        recordGenerationRequest() {},
+        recordProviderAttempt() {},
+        recordDecision() {},
+      },
+    })
     harness.setOutputCitationId('S999')
 
     await expect(harness.service.generate(
@@ -1226,8 +1649,9 @@ describe('createAiAssistanceService', () => {
     expect(harness.storedGeneration()).toBeUndefined()
     expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
       outcome: 'failed',
+      providerOutcome: 'invalid-output',
       usage: expect.objectContaining({ inputTokens: 10, outputTokens: 20 }),
-      failureCategory: 'validation',
+      failureCategory: 'upstream',
       failureCode: 'AiAssistanceCitationInvalid',
     })])
     expectSafeSummaryAttemptAudit(harness.startedAttempts[0])
@@ -1303,7 +1727,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-planning-target-work-item-fields',
     )).rejects.toMatchObject({
-      category: 'validation',
+      category: 'upstream',
       code: 'InvalidAiAssistanceOutput',
     })
     expect(harness.storedGeneration()).toBeUndefined()
@@ -1339,7 +1763,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-work-item-status-update',
     )).rejects.toMatchObject({
-      category: 'validation',
+      category: 'upstream',
       code: 'InvalidAiAssistanceOutput',
     })
     expect(harness.storedGeneration()).toBeUndefined()
@@ -1364,7 +1788,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-empty-work-item-planning',
     )).rejects.toMatchObject({
-      category: 'validation',
+      category: 'upstream',
       code: 'InvalidAiAssistanceOutput',
     })
     expect(harness.storedGeneration()).toBeUndefined()
@@ -1421,7 +1845,7 @@ describe('createAiAssistanceService', () => {
         harness.authorization,
         `request-planning-${testCase.key}`,
       )).rejects.toMatchObject({
-        category: 'validation',
+        category: 'upstream',
         code: 'AiAssistanceOutputNotAllowed',
       })
       expect(harness.storedGeneration()).toBeUndefined()
@@ -1509,23 +1933,65 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
-  test('rechecks source authorization before invoking the provider', async () => {
+  test('terminalizes a pre-provider source change without an attempt or gateway call', async () => {
     const harness = createHarness()
-    harness.setAuthorizationState({ current: false, reason: 'permission-changed' })
+    harness.setAuthorizationState({ current: false, reason: 'source-changed' })
 
-    await expect(harness.service.generate(
+    for (let replay = 0; replay < 2; replay += 1) {
+      await expect(harness.service.generate(
+        createActor(),
+        createSummaryRequest(),
+        harness.authorization,
+        'request-pre-provider-source-change',
+      )).rejects.toMatchObject({
+        code: 'AiAssistanceSourceChanged',
+        idempotencyReplayed: replay === 1,
+      })
+    }
+    expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.gatewayInputs).toHaveLength(0)
+    expect(harness.startedAttempts).toHaveLength(0)
+    expect(harness.finalizedAttempts).toHaveLength(0)
+    expect(harness.failedReservations).toEqual([expect.objectContaining({
+      failureCategory: 'conflict',
+      failureCode: 'AiAssistanceSourceChanged',
+    })])
+  })
+
+  test('starts the durable attempt only after prechecks and retains a later source race', async () => {
+    const harness = createHarness()
+    let releaseGateway = () => {}
+    const gatewayBarrier = new Promise<void>((resolve) => {
+      releaseGateway = resolve
+    })
+    harness.blockGatewayUntil(gatewayBarrier)
+
+    const generation = harness.service.generate(
       createActor(),
       createSummaryRequest(),
       harness.authorization,
-      'request-1',
-    )).rejects.toMatchObject({ code: 'AiAssistanceAuthorizationChanged' })
-    expect(harness.storedGeneration()).toBeUndefined()
-    expect(harness.gatewayInputs).toHaveLength(0)
+      'request-post-attempt-source-change',
+    )
+    await harness.durableAttemptStarted
+
     expect(harness.startedAttempts).toHaveLength(1)
+    expect(harness.authorizationCheckCount()).toBe(1)
+    expect(harness.policyReadCount()).toBe(2)
+    expect(harness.preferenceReadCount()).toBe(2)
+    harness.setAuthorizationState({ current: false, reason: 'source-changed' })
+    releaseGateway()
+
+    await expect(generation).rejects.toMatchObject({
+      category: 'conflict',
+      code: 'AiAssistanceSourceChanged',
+    })
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.failedReservations).toHaveLength(0)
     expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
       outcome: 'failed',
+      providerOutcome: 'succeeded',
       failureCategory: 'conflict',
-      failureCode: 'AiAssistanceAuthorizationChanged',
+      failureCode: 'AiAssistanceSourceChanged',
     })])
   })
 
@@ -1611,12 +2077,54 @@ describe('createAiAssistanceService', () => {
       'request-1',
     )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
     expect(harness.gatewayInputs).toHaveLength(0)
+    expect(harness.startedAttempts).toHaveLength(0)
+    expect(harness.finalizedAttempts).toHaveLength(0)
+    expect(harness.failedReservations).toEqual([expect.objectContaining({
+      failureCategory: 'timeout',
+      failureCode: 'AiAssistanceProviderTimeout',
+    })])
+  })
+
+  test('terminalizes a started attempt when its marker write exhausts the deadline', async () => {
+    const harness = createHarness({
+      generationDeadlineMs: 2_000,
+      providerTimeoutMs: 500,
+      advanceDuringAttemptStartMs: 2_000,
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-attempt-start-deadline',
+    )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+    expect(harness.gatewayInputs).toHaveLength(0)
+    expect(harness.startedAttempts).toHaveLength(1)
     expect(harness.failedReservations).toHaveLength(0)
     expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
       outcome: 'failed',
       failureCategory: 'timeout',
       failureCode: 'AiAssistanceProviderTimeout',
     })])
+    expect(harness.finalizedAttempts[0]).not.toHaveProperty('providerOutcome')
+  })
+
+  test('subtracts durable attempt-write latency from the provider timeout', async () => {
+    const harness = createHarness({
+      generationDeadlineMs: 5_000,
+      providerTimeoutMs: 3_000,
+      advanceDuringAttemptStartMs: 1_250,
+    })
+
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-attempt-start-latency',
+    )
+
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.gatewayInputs[0]?.timeoutMs).toBe(2_750)
   })
 
   test('measures the end-to-end deadline from the request boundary', async () => {
@@ -1633,6 +2141,24 @@ describe('createAiAssistanceService', () => {
       Date.parse(NOW) - 2_000,
     )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
     expect(harness.gatewayInputs).toHaveLength(0)
+  })
+
+  test('keeps the durable attempt lease beyond a customized generation deadline', async () => {
+    const harness = createHarness({
+      generationDeadlineMs: 35_000,
+      providerTimeoutMs: 12_000,
+    })
+
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-long-deadline',
+    )
+
+    expect(harness.reservationLeaseExpiresAt()).toBe(
+      '2026-08-25T00:00:40.000Z',
+    )
   })
 
   test('projects the persisted generation through a final authorization check', async () => {
@@ -1698,8 +2224,9 @@ describe('createAiAssistanceService', () => {
       code: 'AiAssistanceAuthorizationChanged',
     })
     expect(harness.gatewayInputs).toHaveLength(0)
-    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
-      outcome: 'failed',
+    expect(harness.startedAttempts).toHaveLength(0)
+    expect(harness.finalizedAttempts).toHaveLength(0)
+    expect(harness.failedReservations).toEqual([expect.objectContaining({
       failureCategory: 'conflict',
       failureCode: 'AiAssistanceAuthorizationChanged',
     })])
@@ -1737,6 +2264,7 @@ describe('createAiAssistanceService', () => {
       gateway: {
         async generate(input) {
           gatewayInputs.push(input)
+          await input.onProviderDispatch()
           return {
             draft: {
               kind: 'triage',
@@ -1886,7 +2414,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-incompatible-routing',
     )).rejects.toMatchObject({
-      category: 'validation',
+      category: 'upstream',
       code: 'AiAssistanceOutputNotAllowed',
     })
     expect(harness.storedGeneration()).toBeUndefined()
@@ -1950,7 +2478,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-source-project-routing',
     )).rejects.toMatchObject({
-      category: 'validation',
+      category: 'upstream',
       code: 'AiAssistanceOutputNotAllowed',
     })
     expect(harness.storedGeneration()).toBeUndefined()
@@ -1995,7 +2523,7 @@ describe('createAiAssistanceService', () => {
     expect(JSON.stringify(harness.finalizedAttempts)).not.toContain('9012345678')
     expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
       outcome: 'failed',
-      failureCategory: 'validation',
+      failureCategory: 'upstream',
       failureCode: 'AiAssistanceOutputNotAllowed',
     })])
   })
@@ -2058,7 +2586,7 @@ describe('createAiAssistanceService', () => {
         harness.authorization,
         `request-custom-field-${key}`,
       )).rejects.toMatchObject({
-        category: 'validation',
+        category: 'upstream',
         code: 'AiAssistanceOutputNotAllowed',
       })
       expect(harness.storedGeneration()).toBeUndefined()
@@ -2192,7 +2720,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-currency-precision',
     )).rejects.toMatchObject({
-      category: 'validation',
+      category: 'upstream',
       code: 'AiAssistanceOutputNotAllowed',
     })
     expect(harness.storedGeneration()).toBeUndefined()
@@ -2247,7 +2775,7 @@ describe('createAiAssistanceService', () => {
         harness.authorization,
         `request-required-custom-field-${testCase.label.replaceAll(' ', '-')}`,
       )).rejects.toMatchObject({
-        category: 'validation',
+        category: 'upstream',
         code: 'AiAssistanceOutputNotAllowed',
       })
       expect(harness.storedGeneration()).toBeUndefined()
@@ -2296,7 +2824,16 @@ describe('createAiAssistanceService', () => {
   })
 
   test('replays the same generation key without invoking the provider again', async () => {
-    const harness = createHarness()
+    const requestObservations: AiAssistanceGenerationRequestObservation[] = []
+    const harness = createHarness({
+      observability: {
+        recordGenerationRequest(observation) {
+          requestObservations.push(observation)
+        },
+        recordProviderAttempt() {},
+        recordDecision() {},
+      },
+    })
 
     const first = await harness.service.generate(
       createActor(),
@@ -2324,6 +2861,10 @@ describe('createAiAssistanceService', () => {
       workspaceTokenLimit: 32_000_000,
       memberTokenLimit: 4_000_000,
     })
+    expect(requestObservations).toEqual([
+      expect.objectContaining({ outcome: 'succeeded', replayed: false }),
+      expect.objectContaining({ outcome: 'replayed', replayed: true }),
+    ])
   })
 
   test('replays a completed generation after the member opts out', async () => {
@@ -2445,14 +2986,14 @@ describe('createAiAssistanceService', () => {
       comment: 'Contact feedback@example.com token=feedback-secret',
     }
 
-    await harness.service.createFeedback(
+    const firstFeedback = await harness.service.createFeedback(
       createActor(),
       'generation-1',
       feedback,
       harness.authorization,
       'feedback-1',
     )
-    await harness.service.createFeedback(
+    const replayedFeedback = await harness.service.createFeedback(
       createActor(),
       'generation-1',
       feedback,
@@ -2461,6 +3002,8 @@ describe('createAiAssistanceService', () => {
     )
 
     expect(harness.feedbackRecords).toHaveLength(1)
+    expect(firstFeedback).toEqual({ replayed: false })
+    expect(replayedFeedback).toEqual({ replayed: true })
     expect(harness.feedbackRecords[0]?.feedback.comment).toBe(
       'Contact [REDACTED_EMAIL] token=[REDACTED_SECRET]',
     )
@@ -2648,7 +3191,16 @@ describe('createAiAssistanceService', () => {
   })
 
   test('treats the same decision outcome as replay despite a stale expected revision', async () => {
-    const harness = createHarness()
+    let decisionObservationCount = 0
+    const harness = createHarness({
+      observability: {
+        recordGenerationRequest() {},
+        recordProviderAttempt() {},
+        recordDecision() {
+          decisionObservationCount += 1
+        },
+      },
+    })
     await harness.service.generate(
       createActor(),
       createSummaryRequest(),
@@ -2675,6 +3227,70 @@ describe('createAiAssistanceService', () => {
       { outcome: 'rejected', expectedRevision: 1 },
       harness.authorization,
     )).rejects.toMatchObject({ code: 'AiAssistanceDecisionAlreadyRecorded' })
+    expect(decisionObservationCount).toBe(0)
+  })
+
+  test('does not let observation failures alter generation or decision results', async () => {
+    const harness = createHarness({
+      observability: {
+        recordGenerationRequest() {
+          throw new Error('Injected request observation failure.')
+        },
+        recordProviderAttempt() {
+          throw new Error('Injected provider observation failure.')
+        },
+        recordDecision() {
+          throw new Error('Injected decision observation failure.')
+        },
+      },
+    })
+
+    const generation = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-observation-failure',
+    )
+    const decided = await harness.service.decideGeneration(
+      createActor(),
+      generation.id,
+      { outcome: 'rejected', expectedRevision: 1 },
+      harness.authorization,
+    )
+
+    expect(generation.id).toBe('generation-1')
+    expect(decided.decision?.outcome).toBe('rejected')
+    expect(harness.finalizedAttempts).toHaveLength(1)
+  })
+
+  test('does not double-count a decision reconciled after a concurrent identical write', async () => {
+    let decisionObservationCount = 0
+    const harness = createHarness({
+      decisionStoreReplay: true,
+      observability: {
+        recordGenerationRequest() {},
+        recordProviderAttempt() {},
+        recordDecision() {
+          decisionObservationCount += 1
+        },
+      },
+    })
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-concurrent-decision',
+    )
+
+    const decided = await harness.service.decideGeneration(
+      createActor(),
+      'generation-1',
+      { outcome: 'approved', expectedRevision: 1 },
+      harness.authorization,
+    )
+
+    expect(decided.decision?.outcome).toBe('approved')
+    expect(decisionObservationCount).toBe(0)
   })
 
   test('withholds an idempotent decision replay after source authorization changes', async () => {
@@ -2787,6 +3403,17 @@ describe('createAiAssistanceService', () => {
       memberTokenLimitPerMinute: 999_999,
       worstCaseTokensPerGeneration: 1_000_000,
     })).toThrow('generation budget configuration is invalid')
+
+    expect(() => createAiAssistanceService({
+      gateway,
+      store: neverStore(),
+      defaultPolicy: createPolicy(),
+      deploymentAllowedModelIds: ['model-1'],
+      promptVersion: 'ai-assistance-v1',
+      generationDeadlineMs: 35_000,
+      providerTimeoutMs: 12_000,
+      reservationLeaseMs: 30_000,
+    })).toThrow('reservation lease must include recovery headroom')
   })
 })
 
@@ -2798,13 +3425,23 @@ function neverStore(): AiAssistanceStore {
       return { status: 'reserved', generationId: input.generationId }
     },
     async startGenerationAttempt() {},
+    async markGenerationProviderStarted() {},
     async finalizeGenerationAttempt() {},
+    async expireGenerationAttempt(input) {
+      return {
+        status: 'failed',
+        generationId: input.generationId,
+        failureCategory: 'upstream',
+        failureCode: 'AiAssistanceAttemptFailed',
+      }
+    },
     async failGenerationReservation() {},
     async getPolicy() { return undefined },
     async putPolicy(_workspaceId, policy) { return policy },
     async getPreference() { return undefined },
     async putPreference(_workspaceId, _memberId, preference) { return preference },
     async createGeneration() { throw new Error('Generation must not be persisted.') },
+    async commitGeneration() { throw new Error('Generation must not be persisted.') },
     async getGeneration() { return undefined },
     async decideGeneration() { throw new Error('Decision is not expected.') },
     async putFeedback() { throw new Error('Feedback is not expected.') },
