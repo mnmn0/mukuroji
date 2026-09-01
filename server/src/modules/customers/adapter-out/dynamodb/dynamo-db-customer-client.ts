@@ -298,8 +298,8 @@ export class DynamoDbCustomerClient implements CustomerClient {
   }
 
   /** Creates a saved customer directory view. */
-  async createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput): Promise<CustomerSavedView> {
-    return await this.mutate(workspaceId, (memory) => memory.createSavedView(workspaceId, actorId, input), [VIEW_RECORD_PREFIX])
+  async createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput, idempotencyKey?: string): Promise<CustomerSavedView> {
+    return await this.mutate(workspaceId, (memory) => memory.createSavedView(workspaceId, actorId, input, idempotencyKey), [VIEW_RECORD_PREFIX])
   }
 
   /** Updates a saved customer directory view. */

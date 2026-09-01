@@ -10,6 +10,7 @@ export {
   createCustomerRequestRecord,
   deriveCustomerProjectSummaries,
   deriveCustomerWorkItemSummaries,
+  projectCustomerImpactSignal,
   redactExpiredCustomerData,
   updateCustomerContactRecord,
   updateCustomerRecord,

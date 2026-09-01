@@ -133,6 +133,76 @@ test('makes generic Customer Request retries idempotent when the caller supplies
   })).rejects.toMatchObject({ code: 'CustomerRequestAlreadyExists' })
 })
 
+test('does not let an omitted retention deadline reuse a key created with an explicit deadline', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const firstInput = {
+    ...requestInput(customer.id),
+    idempotencyKey: 'explicit-retention-1',
+    retentionExpiresAt: '2030-08-01T00:00:00.000Z',
+  }
+  const retryInput = {
+    ...requestInput(customer.id),
+    idempotencyKey: firstInput.idempotencyKey,
+  }
+
+  await client.createRequest('workspace-1', 'member-1', firstInput)
+  await expect(client.createRequest('workspace-1', 'member-1', retryInput)).rejects.toMatchObject({
+    code: 'CustomerRequestAlreadyExists',
+  })
+})
+
+test('replays a keyed Customer Request when an omitted retention deadline is recomputed after a response loss', async () => {
+  let now = new Date(NOW)
+  const client = new InMemoryCustomerClient({
+    id: () => 'request-record',
+    now: () => new Date(now),
+  })
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const input = {
+    ...requestInput(customer.id),
+    idempotencyKey: 'response-loss-1',
+  }
+
+  const first = await client.createRequest('workspace-1', 'member-1', input)
+  now = new Date(NOW.getTime() + 60_000)
+  const repeated = await client.createRequest('workspace-1', 'member-1', input)
+
+  expect(repeated).toEqual(first)
+  expect((await client.listRequests('workspace-1')).requests).toHaveLength(1)
+})
+
+test('makes saved Customer view retries idempotent when the caller supplies a retry key', async () => {
+  const client = createClient()
+  const input = {
+    name: 'Support accounts',
+    filters: { status: 'active' as const },
+    groupBy: 'tier' as const,
+  }
+
+  const first = await client.createSavedView('workspace-1', 'member-1', input, 'saved-view-1')
+  const repeated = await client.createSavedView('workspace-1', 'member-1', input, 'saved-view-1')
+
+  expect(repeated).toEqual(first)
+  expect(await client.listSavedViews('workspace-1')).toHaveLength(1)
+  await expect(client.createSavedView('workspace-1', 'member-1', {
+    ...input,
+    name: 'A different view must not reuse the retry key.',
+  }, 'saved-view-1')).rejects.toMatchObject({ code: 'CustomerSavedViewAlreadyExists' })
+})
+
 test('rejects inactive contacts for new Customer Requests and contact assignment updates', async () => {
   const client = createClient()
   const customer = await client.createCustomer('workspace-1', 'member-1', {

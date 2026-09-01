@@ -8,8 +8,11 @@ import type {
   Customer,
   CustomerContact,
   CustomerDetail,
+  CustomerImpactSignal,
+  CustomerListInput,
   CustomerRequest,
   CustomerRequestSource,
+  CustomerSavedView,
   CustomerWorkspaceExport,
   LinkCustomerRequestProjectInput,
   LinkCustomerRequestWorkItemInput,
@@ -25,6 +28,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   CustomerError,
+  projectCustomerImpactSignal,
 } from '../../domain/customer'
 import type { CustomerClient } from '../../customers'
 import type { TriageAuthorizationConditionChecks, TriageClient } from '../../../triage'
@@ -88,7 +92,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const input = readCustomerListInput(context)
-      requireRestrictedSearch(principal, input.search)
+      requireRestrictedCustomerFilters(principal, input)
       const page = await dependencies.getCustomers().listCustomers(principal.directoryId, input)
       return context.json({
         ...page,
@@ -102,7 +106,8 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.get('/api/customers/views', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
-      return context.json({ views: await dependencies.getCustomers().listSavedViews(principal.directoryId) })
+      const views = await dependencies.getCustomers().listSavedViews(principal.directoryId)
+      return context.json({ views: views.map((view) => projectSavedView(principal, view)) })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -111,10 +116,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customers/views', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const input = readCreateSavedViewInput(await dependencies.readJson(context.req))
+      requireRestrictedCustomerFilters(principal, input.filters)
       return context.json(await dependencies.getCustomers().createSavedView(
         principal.directoryId,
         principal.userKey,
-        readCreateSavedViewInput(await dependencies.readJson(context.req)),
+        input,
+        readIdempotencyKey(context.req.header('Idempotency-Key')),
       ), 201)
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -124,11 +132,13 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.patch('/api/customers/views/:viewId', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const input = readUpdateSavedViewInput(await dependencies.readJson(context.req))
+      if (input.filters) requireRestrictedCustomerFilters(principal, input.filters)
       return context.json(await dependencies.getCustomers().updateSavedView(
         principal.directoryId,
         context.req.param('viewId') ?? '',
         principal.userKey,
-        readUpdateSavedViewInput(await dependencies.readJson(context.req)),
+        input,
       ))
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -154,7 +164,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const input = readCustomerListInput(context)
-      requireRestrictedSearch(principal, input.search)
+      requireRestrictedCustomerFilters(principal, input)
       const page = await dependencies.getCustomers().listCustomers(principal.directoryId, input)
       return context.json({
         ...page,
@@ -634,7 +644,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const teamId = requirePathValue(context.req.param('teamId'), 'Team ID')
       const issueId = requirePathValue(context.req.param('issueId'), 'Work Item ID')
       await dependencies.verifyWorkItemAccess(principal, teamId, issueId, 'viewer')
-      return context.json(await dependencies.getCustomers().getWorkItemImpact(principal.directoryId, teamId, issueId))
+      return context.json(projectCustomerImpact(principal, await dependencies.getCustomers().getWorkItemImpact(principal.directoryId, teamId, issueId)))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -645,7 +655,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const principal = await dependencies.requireWorkspaceAccess(context, 'read')
       const projectId = requirePathValue(context.req.param('projectId'), 'Project ID')
       await dependencies.verifyProjectAccess(principal, projectId, 'viewer')
-      return context.json(await dependencies.getCustomers().getProjectImpact(principal.directoryId, projectId))
+      return context.json(projectCustomerImpact(principal, await dependencies.getCustomers().getProjectImpact(principal.directoryId, projectId)))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -664,6 +674,30 @@ function projectCustomer(principal: CustomerPrincipal, customer: Customer): Cust
     businessValue: undefined,
     notes: undefined,
   }
+}
+
+/** Projects a Customer impact signal according to the current principal. */
+function projectCustomerImpact(principal: CustomerPrincipal, signal: CustomerImpactSignal): CustomerImpactSignal {
+  return projectCustomerImpactSignal(signal, principal.canViewSensitiveData)
+}
+
+/** Projects a saved Customer directory view according to the current principal. */
+function projectSavedView(principal: CustomerPrincipal, view: CustomerSavedView): CustomerSavedView {
+  if (principal.canViewSensitiveData) return view
+  return {
+    ...view,
+    filters: projectCustomerFilters(principal, view.filters),
+  }
+}
+
+/** Projects Customer filters without exposing business-value predicates to restricted readers. */
+function projectCustomerFilters(principal: CustomerPrincipal, filters: CustomerListInput): CustomerListInput {
+  if (principal.canViewSensitiveData) return filters
+  const projected: CustomerListInput = { ...filters }
+  delete projected.search
+  delete projected.minBusinessValue
+  if (projected.sortBy === 'businessValue') projected.sortBy = 'name'
+  return projected
 }
 
 /** Projects internal Contact fields according to the current principal. */
@@ -1132,19 +1166,28 @@ function readExpectedRevision(value: string | undefined): number {
   return readInteger(value === undefined ? undefined : Number(value), 'Expected revision')
 }
 
-/** Rejects searches that would require scanning fields hidden from a restricted reader.
+/** Rejects filters that would require scanning or ordering by fields hidden from a restricted reader.
  *
  * @param principal Authenticated Customer route principal.
- * @param search Optional search text supplied by the caller.
- * @throws CustomerError when a restricted principal supplies search text.
+ * @param input Customer directory filters supplied by the caller.
+ * @throws CustomerError when a restricted principal supplies a sensitive filter.
  */
-function requireRestrictedSearch(principal: CustomerPrincipal, search: string | undefined): void {
-  if (!search || principal.canViewSensitiveData) return
+function requireRestrictedCustomerFilters(
+  principal: CustomerPrincipal,
+  input: Pick<CustomerListInput, 'search' | 'minBusinessValue' | 'sortBy'>,
+): void {
+  if (principal.canViewSensitiveData) return
+  if (!input.search && input.minBusinessValue === undefined && input.sortBy !== 'businessValue') return
   throw new CustomerError(
     403,
     'CustomerSearchRestricted',
-    'Customer search requires Customer management access.',
+    'Customer search and business-value filters require Customer management access.',
   )
+}
+
+/** Rejects request searches that would require scanning hidden source content. */
+function requireRestrictedSearch(principal: CustomerPrincipal, search: string | undefined): void {
+  requireRestrictedCustomerFilters(principal, { search })
 }
 
 /** Reads the caller-selected key required for generic Customer Request creation.

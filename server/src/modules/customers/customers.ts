@@ -28,6 +28,7 @@ import type {
   UpdateCustomerSavedViewInput,
 } from '@mukuroji/contracts'
 import {
+  CUSTOMER_DEFAULT_RETENTION_DAYS,
   calculateCustomerImpactSignal,
   createCustomerContactRecord,
   createCustomerRecord,
@@ -109,8 +110,15 @@ export interface CustomerClient {
   listCustomerWorkItems(workspaceId: string, customerId: string): Promise<CustomerWorkItemSummary[]>
   /** Lists saved customer directory views. */
   listSavedViews(workspaceId: string): Promise<CustomerSavedView[]>
-  /** Creates a saved customer directory view. */
-  createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput): Promise<CustomerSavedView>
+  /** Creates a saved customer directory view.
+   *
+   * @param workspaceId Workspace that owns the view.
+   * @param actorId Authenticated actor creating the view.
+   * @param input View name, filters, and grouping.
+   * @param idempotencyKey Optional caller-selected retry key.
+   * @returns The created or idempotently replayed view.
+   */
+  createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput, idempotencyKey?: string): Promise<CustomerSavedView>
   /** Updates a saved customer directory view. */
   updateSavedView(workspaceId: string, viewId: string, actorId: string, input: UpdateCustomerSavedViewInput): Promise<CustomerSavedView>
   /** Deletes a saved customer directory view. */
@@ -509,7 +517,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     const request = createCustomerRequestRecord(workspaceId, requestId, input, this.now().toISOString())
     const existing = state.requests.get(request.id)
     if (existing) {
-      if (!sameRequestOrigin(existing, request)) {
+      if (!sameRequestOrigin(existing, request, input)) {
         throw new CustomerError(409, 'CustomerRequestAlreadyExists', 'A Customer Request already exists for this retry key or Triage Entry.')
       }
       if (existing.status === 'merged') {
@@ -724,13 +732,25 @@ export class InMemoryCustomerClient implements CustomerClient {
   }
 
   /** Creates a saved customer directory view. */
-  async createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput): Promise<CustomerSavedView> {
+  async createSavedView(workspaceId: string, actorId: string, input: CreateCustomerSavedViewInput, idempotencyKey?: string): Promise<CustomerSavedView> {
     requireActor(actorId)
+    const state = this.state(workspaceId)
+    const name = requireViewName(input.name)
+    const viewId = idempotencyKey === undefined
+      ? this.id()
+      : createIdempotentSavedViewId(workspaceId, idempotencyKey)
+    const existing = state.views.get(viewId)
+    if (existing) {
+      if (!sameSavedViewOrigin(existing, name, input)) {
+        throw new CustomerError(409, 'CustomerSavedViewAlreadyExists', 'A saved Customer view already exists for this retry key.')
+      }
+      return clone(existing)
+    }
     const now = this.now().toISOString()
     const view: CustomerSavedView = {
-      id: this.id(),
+      id: viewId,
       workspaceId,
-      name: requireViewName(input.name),
+      name,
       filters: clone(input.filters),
       ...(input.groupBy === undefined ? {} : { groupBy: input.groupBy }),
       revision: 1,
@@ -1018,8 +1038,26 @@ function createIdempotentRequestId(workspaceId: string, idempotencyKey: string):
   return `request-${createHash('sha256').update(`${workspaceId}\u0000${normalizedKey}`, 'utf8').digest('hex')}`
 }
 
-/** Compares immutable origin fields for a deterministic Customer Request retry. */
-function sameRequestOrigin(left: CustomerRequest, right: CustomerRequest): boolean {
+/** Creates the deterministic ID used to make saved Customer view retries safe. */
+function createIdempotentSavedViewId(workspaceId: string, idempotencyKey: string): string {
+  const normalizedKey = idempotencyKey.trim()
+  if (!normalizedKey) {
+    throw new CustomerError(400, 'InvalidCustomerInput', 'Saved Customer view idempotency key is invalid.')
+  }
+  return `view-${createHash('sha256').update(`${workspaceId}\u0000${normalizedKey}`, 'utf8').digest('hex')}`
+}
+
+/** Compares immutable origin fields for a deterministic Customer Request retry.
+ *
+ * @param left Previously persisted request.
+ * @param right Request reconstructed for the retry.
+ * @param input Original request input, used to distinguish omitted defaults from explicit values.
+ * @returns Whether the retry represents the same request origin.
+ */
+function sameRequestOrigin(left: CustomerRequest, right: CustomerRequest, input: CreateCustomerRequestInput): boolean {
+  const retentionMatches = input.retentionExpiresAt === undefined
+    ? left.retention?.expiresAt === defaultRequestRetentionExpiresAt(left.createdAt)
+    : left.retention?.expiresAt === right.retention?.expiresAt
   return left.workspaceId === right.workspaceId &&
     left.customerId === right.customerId &&
     left.contactId === right.contactId &&
@@ -1028,8 +1066,26 @@ function sameRequestOrigin(left: CustomerRequest, right: CustomerRequest): boole
     left.originalMessage === right.originalMessage &&
     left.receivedAt === right.receivedAt &&
     left.importance === right.importance &&
-    left.retention?.expiresAt === right.retention?.expiresAt &&
+    retentionMatches &&
     JSON.stringify(left.externalReference) === JSON.stringify(right.externalReference)
+}
+
+/** Computes the retention deadline that an omitted Customer Request input would have produced. */
+function defaultRequestRetentionExpiresAt(createdAt: string): string {
+  const expiresAt = new Date(createdAt)
+  expiresAt.setUTCDate(expiresAt.getUTCDate() + CUSTOMER_DEFAULT_RETENTION_DAYS)
+  return expiresAt.toISOString()
+}
+
+/** Compares immutable origin fields for a deterministic saved Customer view retry. */
+function sameSavedViewOrigin(
+  existing: CustomerSavedView,
+  name: string,
+  input: CreateCustomerSavedViewInput,
+): boolean {
+  return existing.name === name &&
+    JSON.stringify(existing.filters) === JSON.stringify(input.filters) &&
+    existing.groupBy === input.groupBy
 }
 
 /** Merges link arrays without duplicating a Work Item relation. */

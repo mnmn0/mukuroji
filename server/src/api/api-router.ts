@@ -404,6 +404,7 @@ import {
 import {
   CustomerError,
   createCustomerRouter,
+  projectCustomerImpactSignal,
 } from '../modules/customers'
 import type { CustomerPrincipal } from '../modules/customers/adapter-in/http/customer-router'
 import {
@@ -9147,7 +9148,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
             principal.directoryId,
             teamId,
             issueId,
-          )
+          ).then((signal) => projectCustomerImpactSignal(signal, hasCustomerManagementAccess(principal)))
         : Promise.resolve(undefined),
     ])
     const allCollaborationComments = collaborationComments.sort(

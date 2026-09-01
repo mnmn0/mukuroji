@@ -178,7 +178,16 @@ test('requires an idempotency key and validates optional Customer Request fields
 
 test('rejects restricted Customer searches before scanning sensitive fields', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
-  await createCustomer(client)
+  const customer = await createCustomer(client)
+  await client.createSavedView('workspace-1', 'member-1', {
+    name: 'Sensitive saved view',
+    filters: { search: 'acme.example', minBusinessValue: 80, sortBy: 'businessValue' },
+  })
+  const request = await createRequest(client, customer.id)
+  await client.linkRequestToWorkItem('workspace-1', request.id, 'member-1', {
+    teamId: 'support',
+    workItemId: 'work-item-1',
+  })
   const app = createTestApp(client, {
     directoryId: 'workspace-1',
     userKey: 'guest-1',
@@ -186,12 +195,36 @@ test('rejects restricted Customer searches before scanning sensitive fields', as
   })
 
   const customerResponse = await app.request('/api/customers?search=acme')
+  const reportBusinessValueFilterResponse = await app.request('/api/customers/report?minBusinessValue=80')
+  const businessValueFilterResponse = await app.request('/api/customers?minBusinessValue=80')
+  const businessValueSortResponse = await app.request('/api/customers?sortBy=businessValue')
   const requestResponse = await app.request('/api/customer-requests?search=sso')
+  const viewsResponse = await app.request('/api/customers/views')
+  const impactResponse = await app.request('/api/teams/support/issues/work-item-1/customer-impact')
 
   expect(customerResponse.status).toBe(403)
   expect(await customerResponse.json()).toMatchObject({ code: 'CustomerSearchRestricted' })
+  expect(reportBusinessValueFilterResponse.status).toBe(403)
+  expect(await reportBusinessValueFilterResponse.json()).toMatchObject({ code: 'CustomerSearchRestricted' })
+  expect(businessValueFilterResponse.status).toBe(403)
+  expect(await businessValueFilterResponse.json()).toMatchObject({ code: 'CustomerSearchRestricted' })
+  expect(businessValueSortResponse.status).toBe(403)
+  expect(await businessValueSortResponse.json()).toMatchObject({ code: 'CustomerSearchRestricted' })
   expect(requestResponse.status).toBe(403)
   expect(await requestResponse.json()).toMatchObject({ code: 'CustomerSearchRestricted' })
+  expect(viewsResponse.status).toBe(200)
+  expect(await viewsResponse.json()).toMatchObject({
+    views: [{ filters: { sortBy: 'name' } }],
+  })
+  expect(impactResponse.status).toBe(200)
+  const impactBody: { highestBusinessValue?: number; customers: Array<{ customerId: string; businessValue?: number; requestCount: number }> } = await impactResponse.json()
+  expect(impactBody).toMatchObject({
+    businessValueTotal: 0,
+    prioritySignal: 'high',
+    customers: [{ customerId: customer.id, requestCount: 1 }],
+  })
+  expect(impactBody.highestBusinessValue).toBeUndefined()
+  expect(impactBody.customers[0]?.businessValue).toBeUndefined()
 })
 
 test('projects sensitive Customer fields and request content for restricted readers', async () => {
@@ -210,6 +243,39 @@ test('projects sensitive Customer fields and request content for restricted read
   expect(response.status).toBe(200)
   expect(body.customer.domain).toBeUndefined()
   expect(body.requests[0]).toMatchObject({ originalMessage: '', source: { canNotify: false } })
+})
+
+test('replays saved Customer view creation with the same idempotency key', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  })
+  const request = {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'Idempotency-Key': 'saved-view-1',
+    },
+    body: JSON.stringify({ name: 'Support', filters: { status: 'active' } }),
+  }
+
+  const missingKey = await app.request('/api/customers/views', {
+    method: request.method,
+    headers: { 'content-type': 'application/json' },
+    body: request.body,
+  })
+  const first = await app.request('/api/customers/views', request)
+  const firstBody = await first.clone().json()
+  const repeated = await app.request('/api/customers/views', request)
+
+  expect(missingKey.status).toBe(400)
+  expect(await missingKey.json()).toMatchObject({ code: 'InvalidCustomerInput' })
+  expect(first.status).toBe(201)
+  expect(repeated.status).toBe(201)
+  expect(await repeated.json()).toEqual(firstBody)
+  expect((await client.listSavedViews('workspace-1'))).toHaveLength(1)
 })
 
 test('saves an accepted Triage Entry as a Customer Request and preserves its source trace', async () => {

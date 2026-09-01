@@ -317,6 +317,31 @@ export function calculateCustomerImpactSignal(
   }
 }
 
+/** Projects a Customer impact signal for a principal without Customer management access.
+ *
+ * @param signal Impact signal containing the internal business-value fields.
+ * @param canViewSensitiveData Whether the caller may receive Customer management data.
+ * @returns A safe impact signal with business-value data and its derived priority threshold removed.
+ */
+export function projectCustomerImpactSignal(
+  signal: CustomerImpactSignal,
+  canViewSensitiveData: boolean,
+): CustomerImpactSignal {
+  if (canViewSensitiveData) return signal
+  const projected: CustomerImpactSignal = {
+    ...signal,
+    businessValueTotal: 0,
+    prioritySignal: resolveRestrictedPrioritySignal(signal),
+    customers: signal.customers.map((customer) => {
+      const projectedCustomer = { ...customer }
+      delete projectedCustomer.businessValue
+      return projectedCustomer
+    }),
+  }
+  delete projected.highestBusinessValue
+  return projected
+}
+
 /** Builds unique Customer Work Item summaries from request links. */
 export function deriveCustomerWorkItemSummaries(
   requests: readonly CustomerRequest[],
@@ -482,6 +507,20 @@ function resolvePrioritySignal(
     requests.some((request) => request.importance === 'high') ||
     healths.includes('at-risk') ||
     (openRequestCount > 0 && businessValueTotal >= 75)
+  ) return 'high'
+  return 'watch'
+}
+
+/** Resolves the impact signal using only fields allowed to restricted readers. */
+function resolveRestrictedPrioritySignal(signal: CustomerImpactSignal): CustomerImpactSignal['prioritySignal'] {
+  if (signal.requestCount === 0) return 'none'
+  if (
+    signal.requests.some((request) => request.importance === 'urgent') ||
+    signal.customers.some((customer) => customer.health === 'critical')
+  ) return 'critical'
+  if (
+    signal.requests.some((request) => request.importance === 'high') ||
+    signal.customers.some((customer) => customer.health === 'at-risk')
   ) return 'high'
   return 'watch'
 }
