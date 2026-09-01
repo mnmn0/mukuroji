@@ -39389,6 +39389,7 @@ async function validateWorkItemConfigurationUsage(
       targetTeamId,
       {
         consistentRead: true,
+        includeArchived: true,
         ...(readLimit === undefined ? {} : { limit: readLimit }),
       },
     )

@@ -5,7 +5,9 @@ const {
   app,
   configureFakeProjectClients,
   createFakeWorkItemConfigurationClient,
+  createTeamIssuesFake,
   createTestWorkItemConfiguration,
+  getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
@@ -225,7 +227,15 @@ test('denies Work Item configuration writes outside the required administration 
 test('rejects a configuration change that conflicts with an existing Work Item', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   let writes = 0
+  let usageReadOptions: { consistentRead?: boolean; includeArchived?: boolean } | undefined
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
   setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues(directoryId, teamId, options) {
+        usageReadOptions = options
+        return existingTeamIssues.getTeamIssues(directoryId, teamId, options)
+      },
+    }),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
         await compatibilityCheck()
@@ -255,6 +265,10 @@ test('rejects a configuration change that conflicts with an existing Work Item',
   expect(response.status).toBe(409)
   expect(await response.json()).toMatchObject({
     code: 'WorkItemConfigurationInUse',
+  })
+  expect(usageReadOptions).toMatchObject({
+    consistentRead: true,
+    includeArchived: true,
   })
   expect(writes).toBe(0)
 })
