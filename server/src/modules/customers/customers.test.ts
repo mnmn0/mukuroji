@@ -608,6 +608,33 @@ test('retains Customer Request provenance when duplicate requests are merged', a
   })).rejects.toMatchObject({ code: 'CustomerRequestMerged' })
 })
 
+test('does not merge a Customer Request that is associated with a Triage Entry', async () => {
+  const client = createClient()
+  const customer = await client.createCustomer('workspace-1', 'member-1', {
+    name: 'Acme',
+    tier: 'enterprise',
+    size: 'enterprise',
+    status: 'active',
+    health: 'healthy',
+  })
+  const target = await client.createRequest('workspace-1', 'member-1', requestInput(customer.id))
+  const source = await client.createRequest('workspace-1', 'member-1', {
+    ...requestInput(customer.id),
+    triageEntryId: 'triage-entry-1',
+  })
+
+  await expect(client.mergeRequest('workspace-1', source.id, 'member-1', {
+    targetRequestId: target.id,
+    sourceExpectedRevision: source.revision,
+    targetExpectedRevision: target.revision,
+  })).rejects.toMatchObject({ code: 'CustomerRequestTriageAssociation' })
+  await expect(client.getRequest('workspace-1', source.id)).resolves.toMatchObject({
+    id: source.id,
+    status: 'requested',
+    triageEntryId: 'triage-entry-1',
+  })
+})
+
 test('does not delete a Customer Request retained by another Request merge', async () => {
   const client = createClient()
   const customer = await client.createCustomer('workspace-1', 'member-1', {

@@ -1167,6 +1167,13 @@ export class InMemoryCustomerClient implements CustomerClient {
     if (source.status === 'merged' || target.status === 'merged') {
       throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot participate in another merge.')
     }
+    if (source.triageEntryId !== undefined) {
+      throw new CustomerError(
+        409,
+        'CustomerRequestTriageAssociation',
+        'A Customer Request associated with a Triage Entry cannot be merged.',
+      )
+    }
     assertRevision(source.revision, input.sourceExpectedRevision, 'Source Customer Request')
     assertRevision(target.revision, input.targetExpectedRevision, 'Target Customer Request')
     const mergedAt = this.now().toISOString()
