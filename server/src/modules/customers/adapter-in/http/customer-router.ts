@@ -220,6 +220,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
   router.post('/api/customers', async (context) => {
     try {
       const principal = await dependencies.requireWorkspaceAccess(context, 'write')
+      const idempotencyKey = readIdempotencyKey(context.req.header('Idempotency-Key'))
       const input = readCreateCustomerInput(await dependencies.readJson(context.req))
       const authorizationConditionChecks = input.ownerUserId === undefined
         ? undefined
@@ -229,6 +230,7 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         principal.userKey,
         input,
         authorizationConditionChecks,
+        idempotencyKey,
       )
       return context.json(projectCustomer(principal, customer), 201)
     } catch (error) {
@@ -627,18 +629,32 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
       const customers = dependencies.getCustomers()
       const requestId = context.req.param('requestId') ?? ''
       const request = await customers.getRequest(principal.directoryId, requestId)
+      let allowOrphanedTriageAssociation = false
       if (request.triageEntryId !== undefined) {
-        throw new CustomerError(
-          409,
-          'CustomerRequestTriageAssociation',
-          'A Customer Request associated with a Triage Entry cannot be deleted.',
-        )
+        const listCustomerAssociations = dependencies.getTriage().listCustomerAssociations
+        if (!listCustomerAssociations) {
+          throw new CustomerError(
+            503,
+            'TriageCustomerAssociationUnavailable',
+            'Triage Customer association is unavailable. Retry the request.',
+          )
+        }
+        const associations = await listCustomerAssociations(principal.directoryId, request.customerId)
+        if (associations.some((entry) => entry.id === request.triageEntryId && entry.customerRequestId === request.id)) {
+          throw new CustomerError(
+            409,
+            'CustomerRequestTriageAssociation',
+            'A Customer Request associated with a Triage Entry cannot be deleted.',
+          )
+        }
+        allowOrphanedTriageAssociation = true
       }
       await customers.deleteRequest(
         principal.directoryId,
         requestId,
         principal.userKey,
         readExpectedRevision(context.req.query('expectedRevision')),
+        allowOrphanedTriageAssociation,
       )
       return context.body(null, 204)
     } catch (error) {
@@ -845,11 +861,19 @@ export function createCustomerRouter<Principal extends CustomerPrincipal = Custo
         [entry.projectId, workItemAuthorization?.projectId],
       )
       const contactId = input.contactId ?? entry.contactId
+      const requestInput = createRequestInputFromTriage(entry, { ...input, ...(contactId ? { contactId } : {}) })
       let request = await dependencies.getCustomers().createRequest(
         principal.directoryId,
         principal.userKey,
-        createRequestInputFromTriage(entry, { ...input, ...(contactId ? { contactId } : {}) }),
+        requestInput,
       )
+      if (!isSameTriageRequestOrigin(request, requestInput)) {
+        throw new CustomerError(
+          409,
+          'CustomerRequestAssociationRecoveryRequired',
+          'The existing Triage Customer Request no longer matches this Entry. Delete the orphaned Request after verifying the Triage association, then retry.',
+        )
+      }
       if (canonicalWorkItem && workItemAuthorization) {
         request = await dependencies.getCustomers().linkRequestToWorkItem(
           principal.directoryId,
@@ -1327,6 +1351,22 @@ function createRequestInputFromTriage(
     },
     retentionExpiresAt: entry.retention.expiresAt,
   }
+}
+
+/** Checks whether a recovered Triage-originated Request still matches its source Entry. */
+function isSameTriageRequestOrigin(
+  request: CustomerRequest,
+  input: CreateCustomerRequestInput,
+): boolean {
+  return request.customerId === input.customerId &&
+    request.contactId === input.contactId &&
+    request.triageEntryId === input.triageEntryId &&
+    JSON.stringify(request.source) === JSON.stringify(input.source) &&
+    request.originalMessage === input.originalMessage &&
+    request.receivedAt === input.receivedAt &&
+    request.importance === input.importance &&
+    JSON.stringify(request.externalReference) === JSON.stringify(input.externalReference) &&
+    request.retention?.expiresAt === input.retentionExpiresAt
 }
 
 /** Reads a Customer Request update body. */

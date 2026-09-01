@@ -39,9 +39,26 @@ function createRequest(
 function createRequestRow(request: CustomerRequest) {
   return {
     workspaceId: request.workspaceId,
-    recordKey: `REQUEST#${request.id}`,
+    recordKey: `REQUEST#${request.customerId}#${request.id}`,
     entityType: 'request',
     request,
+  }
+}
+
+/** Creates the directory index fields expected on a persisted Customer root. */
+function createCustomerDirectoryFields(customer: Customer) {
+  const tieBreaker = `\u0000${customer.id}`
+  const encodeNumber = (value: number, width: number) => String(Math.max(0, Math.round(value * (width === 9 ? 1_000_000 : 1)))).padStart(width, '0')
+  return {
+    customerDirectoryName: `${customer.name.toLocaleLowerCase('en-US')}${tieBreaker}`,
+    customerDirectoryTier: `${customer.tier}${tieBreaker}`,
+    customerDirectorySize: `${customer.size}${tieBreaker}`,
+    customerDirectoryStatus: `${customer.status}${tieBreaker}`,
+    customerDirectoryHealth: `${customer.health}${tieBreaker}`,
+    customerDirectoryBusinessValue: `${encodeNumber(customer.businessValue ?? -1, 9)}${tieBreaker}`,
+    customerDirectoryRequestCount: `${encodeNumber(customer.requestCount, 12)}${tieBreaker}`,
+    customerDirectoryOpenRequestCount: `${encodeNumber(customer.openRequestCount, 12)}${tieBreaker}`,
+    customerDirectoryUpdatedAt: `${customer.updatedAt}${tieBreaker}`,
   }
 }
 
@@ -50,6 +67,7 @@ function createCustomerRow(
   customerId = 'customer-1',
   name = 'Acme Corporation',
   counts: Partial<Pick<Customer, 'contactCount' | 'requestCount' | 'openRequestCount'>> = {},
+  retentionExpiresAt = '2027-08-01T00:00:00.000Z',
 ) {
   const customer = createCustomerRecord(
     'workspace-1',
@@ -60,14 +78,19 @@ function createCustomerRow(
       size: 'enterprise',
       status: 'active',
       health: 'healthy',
+      retentionExpiresAt,
     },
     NOW,
   )
+  const storedCustomer = { ...customer, ...counts }
   return {
     workspaceId: customer.workspaceId,
     recordKey: `CUSTOMER#${customer.id}`,
     entityType: 'customer',
-    customer: { ...customer, ...counts },
+    customer: storedCustomer,
+    ...createCustomerDirectoryFields(storedCustomer),
+    retentionPartition: 'CUSTOMER_RETENTION',
+    retentionDueAt: retentionExpiresAt,
   }
 }
 
@@ -82,7 +105,7 @@ function createContactRow(customerId: string, contactId: string) {
   )
   return {
     workspaceId: contact.workspaceId,
-    recordKey: `CONTACT#${contact.id}`,
+    recordKey: `CONTACT#${customerId}#${contact.id}`,
     entityType: 'contact',
     contact,
   }
@@ -153,6 +176,63 @@ function createHarness(requestRows: readonly unknown[], options: HarnessOptions 
           Items: items,
           ...(startIndex + items.length < retentionRows.length && isRecord(lastItem) && typeof lastItem.recordKey === 'string'
             ? { LastEvaluatedKey: { workspaceId: 'workspace-1', recordKey: lastItem.recordKey } }
+            : {}),
+        }
+      }
+      if (typeof normalizedInput.IndexName === 'string') {
+        const directorySortAttributes: Record<string, string> = {
+          CustomerDirectoryNameIndex: 'customerDirectoryName',
+          CustomerDirectoryTierIndex: 'customerDirectoryTier',
+          CustomerDirectorySizeIndex: 'customerDirectorySize',
+          CustomerDirectoryStatusIndex: 'customerDirectoryStatus',
+          CustomerDirectoryHealthIndex: 'customerDirectoryHealth',
+          CustomerDirectoryBusinessValueIndex: 'customerDirectoryBusinessValue',
+          CustomerDirectoryRequestCountIndex: 'customerDirectoryRequestCount',
+          CustomerDirectoryOpenRequestCountIndex: 'customerDirectoryOpenRequestCount',
+          CustomerDirectoryUpdatedAtIndex: 'customerDirectoryUpdatedAt',
+        }
+        const sortAttribute = directorySortAttributes[normalizedInput.IndexName]
+        if (!sortAttribute) throw new Error('The Customer adapter issued an unknown directory index query.')
+        const matchingRows = [...rows.values()]
+          .filter((row) => isRecord(row) && row.entityType === 'customer' && typeof row[sortAttribute] === 'string')
+          .filter((row) => {
+            const values = normalizedInput.ExpressionAttributeValues
+            const cutoff = values && typeof values === 'object' && !Array.isArray(values)
+              ? Reflect.get(values, ':retentionCutoff')
+              : undefined
+            const dueAt = isRecord(row) ? row.retentionDueAt : undefined
+            return typeof cutoff !== 'string' || typeof dueAt !== 'string' || dueAt > cutoff
+          })
+          .sort((left, right) => {
+            if (!isRecord(left) || !isRecord(right)) return 0
+            const leftValue = left[sortAttribute]
+            const rightValue = right[sortAttribute]
+            if (typeof leftValue !== 'string' || typeof rightValue !== 'string') return 0
+            const comparison = leftValue.localeCompare(rightValue)
+            return normalizedInput.ScanIndexForward === false ? -comparison : comparison
+          })
+        const exclusiveStartKey = normalizedInput.ExclusiveStartKey
+        const startRecordKey = isRecord(exclusiveStartKey) && typeof exclusiveStartKey.recordKey === 'string'
+          ? exclusiveStartKey.recordKey
+          : undefined
+        const startIndex = startRecordKey === undefined
+          ? 0
+          : matchingRows.findIndex((row) => isRecord(row) && row.recordKey === startRecordKey) + 1
+        const requestedLimit = typeof normalizedInput.Limit === 'number' ? normalizedInput.Limit : matchingRows.length
+        const pageSize = Math.min(options.queryPageSize ?? requestedLimit, requestedLimit)
+        const items = matchingRows.slice(startIndex, startIndex + pageSize)
+        const lastItem = items.at(-1)
+        return {
+          Items: items,
+          ...(startIndex + items.length < matchingRows.length && isRecord(lastItem) &&
+            typeof lastItem.recordKey === 'string' && typeof lastItem[sortAttribute] === 'string'
+            ? {
+                LastEvaluatedKey: {
+                  workspaceId: 'workspace-1',
+                  recordKey: lastItem.recordKey,
+                  [sortAttribute]: lastItem[sortAttribute],
+                },
+              }
             : {}),
         }
       }
@@ -306,23 +386,129 @@ test('lists Customer roots with persisted counts without loading child records',
     const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
     expect(queryCommands).toHaveLength(1)
     expect(queryCommands[0]?.input).toMatchObject({
-      ExpressionAttributeValues: { ':recordPrefix': 'CUSTOMER#' },
+      IndexName: 'CustomerDirectoryUpdatedAtIndex',
+      KeyConditionExpression: 'workspaceId = :workspaceId',
+      ExpressionAttributeValues: { ':workspaceId': 'workspace-1' },
+      Limit: 1,
     })
   } finally {
     harness.restore()
   }
 })
 
-test('bounds a paginated Customer read before accumulating an oversized dataset', async () => {
+test('does not expose an expired Customer root before the retention sweep redacts it', async () => {
+  const harness = createHarness([
+    createCustomerRow('customer-expired', 'Expired Customer', {}, '2026-07-01T00:00:00.000Z'),
+    createCustomerRow('customer-current', 'Current Customer'),
+  ])
+  try {
+    await expect(harness.client.listCustomers('workspace-1', { limit: 100 })).resolves.toMatchObject({
+      customers: [{ id: 'customer-current', name: 'Current Customer' }],
+    })
+    const query = harness.commands.find((command) => command.name === 'QueryCommand')
+    expect(query?.input).toMatchObject({
+      FilterExpression: 'attribute_not_exists(#retentionDueAt) OR #retentionDueAt > :retentionCutoff',
+      ExpressionAttributeValues: { ':retentionCutoff': NOW },
+    })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('persists and replays a keyed Customer creation', async () => {
+  const harness = createHarness([])
+  const input = {
+    name: 'Idempotent Customer',
+    tier: 'enterprise' as const,
+    size: 'enterprise' as const,
+    status: 'active' as const,
+    health: 'healthy' as const,
+  }
+  try {
+    const first = await harness.client.createCustomer('workspace-1', 'member-1', input, undefined, 'customer-create-1')
+    const repeated = await harness.client.createCustomer('workspace-1', 'member-1', input, undefined, 'customer-create-1')
+
+    expect(repeated).toEqual(first)
+    expect([...harness.rows.values()].filter((row) => isRecord(row) && row.entityType === 'customer')).toHaveLength(1)
+    expect([...harness.rows.values()].filter((row) => isRecord(row) && row.entityType === 'customer-idempotency-receipt')).toHaveLength(1)
+    expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(1)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('loads only the selected Customer graph for a Customer detail read', async () => {
+  const targetRequest = createRequest('request-target', '2027-08-01T00:00:00.000Z', 'customer-1')
+  const unrelatedRequest = createRequest('request-unrelated', '2027-08-01T00:00:00.000Z', 'customer-2')
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation'),
+    createCustomerRow('customer-2', 'Globex Industries'),
+    createContactRow('customer-1', 'contact-target'),
+    createContactRow('customer-2', 'contact-unrelated'),
+    createRequestRow(targetRequest),
+    createRequestRow(unrelatedRequest),
+  ])
+  try {
+    await expect(harness.client.getCustomer('workspace-1', 'customer-1')).resolves.toMatchObject({
+      customer: { id: 'customer-1' },
+      contacts: [{ id: 'contact-target' }],
+      requests: [{ id: 'request-target' }],
+    })
+    const queryCommands = harness.commands.filter((command) => command.name === 'QueryCommand')
+    expect(queryCommands.map((command) => command.input.ExpressionAttributeValues)).toEqual([
+      { ':workspaceId': 'workspace-1', ':recordPrefix': 'CUSTOMER#customer-1' },
+      { ':workspaceId': 'workspace-1', ':recordPrefix': 'CONTACT#customer-1#' },
+      { ':workspaceId': 'workspace-1', ':recordPrefix': 'REQUEST#customer-1#' },
+    ])
+  } finally {
+    harness.restore()
+  }
+})
+
+test('pages a large Customer directory without accumulating the full dataset', async () => {
   const customerRows = Array.from(
     { length: CUSTOMER_MAX_OPERATION_ROWS + 1 },
     (_, index) => createCustomerRow(`customer-${index + 1}`, `Customer ${index + 1}`),
   )
   const harness = createHarness(customerRows, { queryPageSize: 250 })
   try {
-    await expect(harness.client.listCustomers('workspace-1')).rejects.toMatchObject({
-      code: 'CustomerOperationTooLarge',
-      status: 413,
+    await expect(harness.client.listCustomers('workspace-1')).resolves.toMatchObject({
+      customers: expect.any(Array),
+    })
+    expect(harness.commands.filter((command) => command.name === 'QueryCommand')).toHaveLength(1)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('binds Customer directory cursors to the DynamoDB index boundary', async () => {
+  const harness = createHarness([
+    createCustomerRow('customer-1', 'Acme Corporation'),
+    createCustomerRow('customer-2', 'Globex Industries'),
+    createCustomerRow('customer-3', 'Initech'),
+  ])
+  try {
+    const first = await harness.client.listCustomers('workspace-1', {
+      limit: 1,
+      sortBy: 'name',
+      sortDirection: 'ascending',
+    })
+    expect(first.customers.map((customer) => customer.id)).toEqual(['customer-1'])
+    expect(first.nextCursor).toBeString()
+
+    const second = await harness.client.listCustomers('workspace-1', {
+      limit: 1,
+      sortBy: 'name',
+      sortDirection: 'ascending',
+      cursor: first.nextCursor,
+    })
+    expect(second.customers.map((customer) => customer.id)).toEqual(['customer-2'])
+    const directoryQueries = harness.commands.filter((command) => command.name === 'QueryCommand' && command.input.IndexName === 'CustomerDirectoryNameIndex')
+    expect(directoryQueries).toHaveLength(2)
+    expect(directoryQueries[1]?.input.ExclusiveStartKey).toMatchObject({
+      workspaceId: 'workspace-1',
+      recordKey: 'CUSTOMER#customer-1',
+      customerDirectoryName: expect.any(String),
     })
   } finally {
     harness.restore()
@@ -377,7 +563,7 @@ test('rejects an oversized ordinary Customer graph mutation before writing', asy
       code: 'CustomerTransactionTooLarge',
       status: 409,
     })
-    expect(harness.rows.has(`CONTACT#${contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#customer-1#${contact.id}`)).toBeTrue()
     expect([...harness.rows.keys()].filter((recordKey) => recordKey.startsWith('REQUEST#'))).toHaveLength(100)
     expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
   } finally {
@@ -409,7 +595,7 @@ test('keeps a Contact deletion fenced until the cross-store check completes', as
         expectedRevision: contactRow.contact.revision,
       },
     })
-    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeTrue()
 
     await expect(harness.client.completeCustomerContactDeletion(
       'workspace-1',
@@ -419,8 +605,8 @@ test('keeps a Contact deletion fenced until the cross-store check completes', as
       contactRow.contact.revision,
     )).resolves.toBeUndefined()
 
-    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeFalse()
-    expect(harness.rows.get('REQUEST#request-1')).toMatchObject({ request: { contactId: undefined } })
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeFalse()
+    expect(harness.rows.get('REQUEST#customer-1#request-1')).toMatchObject({ request: { contactId: undefined } })
     expect(harness.rows.get('CUSTOMER#customer-1')).toMatchObject({ customer: { contactCount: 0 } })
     expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
     expect(findMetadataPut(harness.commands, '#contactOperation.#contactOperationKind')).toMatchObject({
@@ -456,8 +642,8 @@ test('cancels a matching Contact merge marker without changing the graph', async
       'member-1',
       input,
     )).resolves.toBeUndefined()
-    expect(harness.rows.has(`CONTACT#${sourceRow.contact.id}`)).toBeTrue()
-    expect(harness.rows.has(`CONTACT#${targetRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#customer-1#${sourceRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#customer-1#${targetRow.contact.id}`)).toBeTrue()
     expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
   } finally {
     harness.restore()
@@ -479,7 +665,7 @@ test('rejects an oversized Contact deletion before fencing the graph', async () 
       'member-1',
       contactRow.contact.revision,
     )).rejects.toMatchObject({ code: 'CustomerTransactionTooLarge', status: 409 })
-    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeTrue()
     expect([...harness.rows.keys()].filter((recordKey) => recordKey.startsWith('REQUEST#'))).toHaveLength(100)
     expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
     expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
@@ -507,7 +693,7 @@ test('counts the Customer root when rejecting a Contact deletion at the transact
       'member-1',
       contactRow.contact.revision,
     )).rejects.toMatchObject({ code: 'CustomerTransactionTooLarge', status: 409 })
-    expect(harness.rows.has(`CONTACT#${contactRow.contact.id}`)).toBeTrue()
+    expect(harness.rows.has(`CONTACT#customer-1#${contactRow.contact.id}`)).toBeTrue()
     expect(harness.rows.get('META')).not.toHaveProperty('contactOperation')
     expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
   } finally {
@@ -575,8 +761,8 @@ test('processes a retention page before failing on the configured page limit', a
   const request = createRequest('request-1')
   const harness = createHarness([createRequestRow(request)], {
     retentionIndexRows: [
-      { workspaceId: 'workspace-1', recordKey: 'REQUEST#request-1' },
-      { workspaceId: 'workspace-1', recordKey: 'REQUEST#request-2' },
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-1#request-1' },
+      { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-1#request-2' },
     ],
     queryPageSize: 1,
   })
@@ -585,7 +771,7 @@ test('processes a retention page before failing on the configured page limit', a
       code: 'CustomerRetentionSweepIncomplete',
       status: 503,
     })
-    expect(harness.rows.get('REQUEST#request-1')).toMatchObject({
+    expect(harness.rows.get('REQUEST#customer-1#request-1')).toMatchObject({
       request: { retention: { redactedAt: NOW } },
     })
   } finally {
@@ -639,7 +825,7 @@ test('persists a deleted keyed Customer Request retry receipt', async () => {
     const request = await harness.client.createRequest('workspace-1', 'member-1', input)
     await harness.client.deleteRequest('workspace-1', request.id, 'member-1', request.revision)
 
-    expect(harness.rows.has(`REQUEST#${request.id}`)).toBeFalse()
+    expect(harness.rows.has(`REQUEST#${request.customerId}#${request.id}`)).toBeFalse()
     const receiptRow = harness.rows.get(`REQUEST_RECEIPT#${request.id}`)
     expect(receiptRow).toMatchObject({ entityType: 'request-idempotency-receipt' })
     if (!isRecord(receiptRow) || !isRecord(receiptRow.receipt)) throw new Error('The Customer receipt row is malformed.')
@@ -681,7 +867,7 @@ test('persists a deleted keyed Customer Contact retry receipt', async () => {
       contact.revision,
     )
 
-    expect(harness.rows.has(`CONTACT#${contact.id}`)).toBeFalse()
+    expect(harness.rows.has(`CONTACT#customer-1#${contact.id}`)).toBeFalse()
     const receiptRow = harness.rows.get(`CONTACT_RECEIPT#${contact.id}`)
     expect(receiptRow).toMatchObject({ entityType: 'contact-idempotency-receipt' })
     if (!isRecord(receiptRow) || !isRecord(receiptRow.receipt)) throw new Error('The Customer Contact receipt row is malformed.')
@@ -924,7 +1110,7 @@ test('uses the supplied timestamp for retention evaluation', async () => {
       contactsRedacted: 0,
       requestsRedacted: 0,
     })
-    expect(harness.rows.get('REQUEST#request-1')).toEqual(requestRow)
+    expect(harness.rows.get('REQUEST#customer-1#request-1')).toEqual(requestRow)
     expect(harness.commands.filter((command) => command.name === 'TransactWriteCommand')).toHaveLength(0)
   } finally {
     harness.restore()
@@ -945,7 +1131,7 @@ test('resumes Customer retention after a later transaction fails', async () => {
       revision: 5,
       retention: {
         evaluatedAt: NOW,
-        cursor: 'REQUEST#request-93',
+        cursor: 'REQUEST#customer-1#request-93',
       },
     })
 
@@ -1017,7 +1203,7 @@ test('does not mix unrelated retention writes into a Customer deletion', async (
 
     const transactions = harness.commands.filter((command) => command.name === 'TransactWriteCommand')
     expect(transactions).toHaveLength(1)
-    expect(harness.rows.get('REQUEST#request-unrelated')).toEqual(unrelatedExpiredRequest)
+    expect(harness.rows.get('REQUEST#customer-2#request-unrelated')).toEqual(unrelatedExpiredRequest)
   } finally {
     harness.restore()
   }

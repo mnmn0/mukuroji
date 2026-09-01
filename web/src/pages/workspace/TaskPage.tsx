@@ -246,13 +246,25 @@ export function TaskPage() {
   const canAccessTriage = workspaceAccess?.currentMember.status === 'active' &&
     workspaceAccess.currentMember.role !== 'guest'
   const {
+    data: projectIssues = emptyTeamIssues,
+    error: taskError,
+    isLoading: isProjectTasksLoading,
+    mutate: mutateProjectTasks,
+    canReadCustomerImpact,
+  } = useProjectIssues(
+    accessToken,
+    projectId,
+    Boolean(user && !currentUserError),
+    true,
+  )
+  const {
     data: projectCustomerImpact,
     error: projectCustomerImpactError,
     key: projectCustomerImpactKey,
   } = useProjectCustomerImpact(
     accessToken,
     projectId,
-    Boolean(user && !currentUserError && canAccessTriage),
+    Boolean(user && !currentUserError && canAccessTriage && canReadCustomerImpact),
   )
   const {
     data: planningSnapshot,
@@ -271,17 +283,6 @@ export function TaskPage() {
     enabled: Boolean(user && !currentUserError),
     locale,
   })
-  const {
-    data: projectIssues = emptyTeamIssues,
-    error: taskError,
-    isLoading: isProjectTasksLoading,
-    mutate: mutateProjectTasks,
-  } = useProjectIssues(
-    accessToken,
-    projectId,
-    Boolean(user && !currentUserError),
-    true,
-  )
   const {
     data: projectMembersData,
     error: projectMembersError,

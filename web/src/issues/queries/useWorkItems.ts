@@ -1,10 +1,33 @@
 import useSWR from 'swr'
+import type { Arguments, KeyedMutator, MutatorCallback, MutatorOptions } from 'swr'
 import {
-  getProjectIssues,
+  getProjectIssuesPage,
   getTeamIssueDetail,
   getTeamIssues,
   getWorkspaceWorkItems,
 } from '../api/workItems'
+
+/** Complete Project issue response stored in the SWR cache. */
+type ProjectIssuesPage = Awaited<ReturnType<typeof getProjectIssuesPage>>
+
+/** Project issue list exposed to existing optimistic cache mutations. */
+type ProjectIssueList = ProjectIssuesPage['issues']
+
+/** Rebuilds a Project response while preserving its resource capability. */
+function createProjectIssuesPage(
+  projectId: string | undefined,
+  issues: ProjectIssueList | undefined,
+  current?: ProjectIssuesPage,
+): ProjectIssuesPage | undefined {
+  if (issues === undefined) return undefined
+  return {
+    projectId: current?.projectId ?? projectId ?? '',
+    issues,
+    ...(current?.canReadCustomerImpact === undefined
+      ? {}
+      : { canReadCustomerImpact: current.canReadCustomerImpact }),
+  }
+}
 
 const workItemQueryConfig = {
   dedupingInterval: 10_000,
@@ -64,11 +87,43 @@ export function useProjectIssues(
   const query = useSWR(
     key,
     ([, token, currentProjectId, shouldIncludeArchived]) =>
-      getProjectIssues(currentProjectId, token, shouldIncludeArchived),
+      getProjectIssuesPage(currentProjectId, token, shouldIncludeArchived),
     workItemQueryConfig,
   )
 
-  return { ...query, key }
+  /** Adapts the response-shaped SWR cache back to the legacy issue-list mutator. */
+  const mutateProjectIssues: KeyedMutator<ProjectIssueList> = async <MutationData = ProjectIssueList>(
+    data?: ProjectIssueList | Promise<ProjectIssueList | undefined> | MutatorCallback<ProjectIssueList>,
+    options?: boolean | MutatorOptions<ProjectIssueList, MutationData>,
+  ): Promise<ProjectIssueList | MutationData | undefined> => {
+    const responseData = data === undefined
+      ? undefined
+      : typeof data === 'function'
+        ? async (current?: ProjectIssuesPage) => createProjectIssuesPage(projectId, await data(current?.issues), current)
+        : data instanceof Promise
+          ? async (current?: ProjectIssuesPage) => createProjectIssuesPage(projectId, await data, current)
+          : async (current?: ProjectIssuesPage) => createProjectIssuesPage(projectId, data, current)
+    const revalidate = options === undefined || typeof options === 'boolean' ? undefined : options.revalidate
+    const responseOptions = options === undefined || typeof options === 'boolean'
+      ? options
+      : revalidate === undefined
+        ? undefined
+        : {
+            revalidate: typeof revalidate === 'function'
+              ? (current: ProjectIssuesPage, key: Arguments) => revalidate(current.issues, key)
+              : revalidate,
+          }
+    const response = await query.mutate(responseData, responseOptions)
+    return response?.issues
+  }
+
+  return {
+    ...query,
+    data: query.data?.issues,
+    canReadCustomerImpact: query.data?.canReadCustomerImpact === true,
+    mutate: mutateProjectIssues,
+    key,
+  }
 }
 
 /**

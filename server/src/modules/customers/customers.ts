@@ -54,6 +54,8 @@ export type CustomerWorkspaceState = {
   contacts: Map<string, CustomerContact>
   /** Customer Request records keyed by ID. */
   requests: Map<string, CustomerRequest>
+  /** Durable receipts for keyed Customer creation, keyed by deterministic Customer ID. */
+  customerIdempotencyReceipts: Map<string, CustomerIdempotencyReceipt>
   /** Deletion receipts for keyed Customer Requests, keyed by request ID. */
   requestIdempotencyReceipts: Map<string, CustomerRequestIdempotencyReceipt>
   /** Deletion receipts for keyed Customer Contacts, keyed by contact ID. */
@@ -62,6 +64,14 @@ export type CustomerWorkspaceState = {
   views: Map<string, CustomerSavedView>
   /** Prepared completion notification candidates keyed by deterministic ID. */
   notifications: Map<string, CustomerCompletionNotification>
+}
+
+/** Durable receipt that binds a Customer creation retry key to its immutable input. */
+export type CustomerIdempotencyReceipt = {
+  /** Customer ID derived from the original idempotency key. */
+  customerId: string
+  /** Hash of the immutable Customer creation fields. */
+  fingerprint: string
 }
 
 /** Durable, content-free receipt that prevents a deleted keyed Request from being recreated. */
@@ -187,6 +197,7 @@ export interface CustomerClient {
    * @param actorId Authenticated actor creating the Customer.
    * @param input Customer creation fields.
    * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
+   * @param idempotencyKey Caller-selected key that scopes a durable Customer creation retry.
    * @returns The created Customer.
    */
   createCustomer(
@@ -194,6 +205,7 @@ export interface CustomerClient {
     actorId: string,
     input: CreateCustomerInput,
     authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+    idempotencyKey?: string,
   ): Promise<Customer>
   /** Updates a customer under an optimistic revision fence.
    *
@@ -443,9 +455,17 @@ export interface CustomerClient {
    * @param requestId Request to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Request revision required for deletion.
+   * @param allowOrphanedTriageAssociation Whether a caller that verified the
+   * reverse Triage association is gone may remove an orphaned Triage Request.
    * @returns A promise that resolves after deletion completes.
    */
-  deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void>
+  deleteRequest(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    expectedRevision: number,
+    allowOrphanedTriageAssociation?: boolean,
+  ): Promise<void>
   /** Merges a source request into a retained request.
    *
    * @param workspaceId Workspace containing both requests.
@@ -689,6 +709,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       customers: new Map([...state.customers].map(([id, customer]) => [id, clone(customer)])),
       contacts: new Map([...state.contacts].map(([id, contact]) => [id, clone(contact)])),
       requests: new Map([...state.requests].map(([id, request]) => [id, clone(request)])),
+      customerIdempotencyReceipts: new Map([...state.customerIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       requestIdempotencyReceipts: new Map([...state.requestIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       contactIdempotencyReceipts: new Map([...state.contactIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       views: new Map([...state.views].map(([id, view]) => [id, clone(view)])),
@@ -706,6 +727,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       customers: new Map([...state.customers].map(([id, customer]) => [id, clone(customer)])),
       contacts: new Map([...state.contacts].map(([id, contact]) => [id, clone(contact)])),
       requests: new Map([...state.requests].map(([id, request]) => [id, clone(request)])),
+      customerIdempotencyReceipts: new Map([...state.customerIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       requestIdempotencyReceipts: new Map([...state.requestIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       contactIdempotencyReceipts: new Map([...state.contactIdempotencyReceipts].map(([id, receipt]) => [id, clone(receipt)])),
       views: new Map([...state.views].map(([id, view]) => [id, clone(view)])),
@@ -731,6 +753,9 @@ export class InMemoryCustomerClient implements CustomerClient {
     }
     for (const [contactId, receipt] of state.contactIdempotencyReceipts) {
       if (hiddenCustomerIds.has(receipt.customerId)) state.contactIdempotencyReceipts.delete(contactId)
+    }
+    for (const [customerId, receipt] of state.customerIdempotencyReceipts) {
+      if (hiddenCustomerIds.has(receipt.customerId)) state.customerIdempotencyReceipts.delete(customerId)
     }
     for (const [notificationId, notification] of state.notifications) {
       if (hiddenCustomerIds.has(notification.customerId)) state.notifications.delete(notificationId)
@@ -793,9 +818,8 @@ export class InMemoryCustomerClient implements CustomerClient {
     input: CustomerListInput,
     useStoredCounts: boolean,
   ): Promise<CustomerPage> {
-    const limit = normalizeLimit(input.limit)
-    const normalizedInput = { ...input, limit }
-    const queryFingerprint = createListQueryFingerprint(normalizedInput)
+    const normalizedInput = normalizeCustomerListInput(input)
+    const queryFingerprint = createCustomerListQueryFingerprint(normalizedInput)
     const datasetRevision = createCustomerDatasetRevision(state)
     const filtered = [...state.customers.values()]
       .filter((customer) => !this.isCustomerUnavailable(workspaceId, customer.id))
@@ -809,7 +833,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       queryFingerprint,
       datasetRevision,
     )
-    const page = filtered.slice(offset, offset + limit).map(clone)
+    const page = filtered.slice(offset, offset + normalizedInput.limit).map(clone)
     return {
       customers: page,
       ...(offset + page.length < filtered.length
@@ -844,6 +868,7 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param actorId Authenticated actor creating the Customer.
    * @param input Customer creation fields.
    * @param _authorizationConditionChecks Live-resource conditions ignored by the in-memory implementation.
+   * @param idempotencyKey Caller-selected key used for a durable creation retry.
    * @returns The created Customer.
    */
   async createCustomer(
@@ -851,15 +876,42 @@ export class InMemoryCustomerClient implements CustomerClient {
     actorId: string,
     input: CreateCustomerInput,
     _authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+    idempotencyKey?: string,
   ): Promise<Customer> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
-    const customer = createCustomerRecord(workspaceId, this.id(), input, this.now().toISOString())
+    const customerId = idempotencyKey === undefined
+      ? this.id()
+      : createCustomerIdempotencyRecordId(workspaceId, idempotencyKey)
+    const customer = createCustomerRecord(workspaceId, customerId, input, this.now().toISOString())
+    const idempotencyFingerprint = idempotencyKey === undefined
+      ? undefined
+      : createCustomerIdempotencyFingerprint(customer, input)
+    const existing = state.customers.get(customer.id)
+    const receipt = state.customerIdempotencyReceipts.get(customer.id)
+    if (idempotencyFingerprint !== undefined) {
+      if (existing && receipt?.fingerprint === idempotencyFingerprint) return clone(existing)
+      if (existing || receipt) {
+        throw new CustomerError(
+          409,
+          'CustomerIdempotencyConflict',
+          'A Customer creation retry key is already bound to different input.',
+        )
+      }
+    } else if (existing) {
+      throw new CustomerError(409, 'CustomerAlreadyExists', 'A customer with the same identifier already exists.')
+    }
     if ([...state.customers.values()].some((candidate) =>
       customerIdentityKey(candidate.name, candidate.domain) === customerIdentityKey(customer.name, customer.domain)
     )) throw new CustomerError(409, 'CustomerAlreadyExists', 'A customer with the same name and domain already exists.')
     state.customers.set(customer.id, customer)
+    if (idempotencyFingerprint !== undefined) {
+      state.customerIdempotencyReceipts.set(customer.id, {
+        customerId: customer.id,
+        fingerprint: idempotencyFingerprint,
+      })
+    }
     return clone(this.state(workspaceId).customers.get(customer.id) ?? customer)
   }
 
@@ -1486,6 +1538,14 @@ export class InMemoryCustomerClient implements CustomerClient {
     const request = createCustomerRequestRecord(workspaceId, requestId, input, this.now().toISOString())
     const existing = state.requests.get(request.id)
     if (existing) {
+      if (input.triageEntryId !== undefined &&
+        existing.triageEntryId === input.triageEntryId &&
+        existing.customerId === input.customerId) {
+        if (existing.status === 'merged') {
+          throw new CustomerError(409, 'CustomerRequestMerged', 'A merged Customer Request cannot be reused.')
+        }
+        return clone(existing)
+      }
       if (!sameRequestOrigin(existing, request, input)) {
         throw new CustomerError(409, 'CustomerRequestAlreadyExists', 'A Customer Request already exists for this retry key or Triage Entry.')
       }
@@ -1560,9 +1620,16 @@ export class InMemoryCustomerClient implements CustomerClient {
    * @param requestId Request to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Request revision required for deletion.
+   * @param allowOrphanedTriageAssociation Whether a verified orphan may be removed.
    * @returns A promise that resolves after deletion completes.
    */
-  async deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void> {
+  async deleteRequest(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    expectedRevision: number,
+    allowOrphanedTriageAssociation = false,
+  ): Promise<void> {
     requireActor(actorId)
     this.assertNoCustomerOperation(workspaceId)
     const state = this.state(workspaceId)
@@ -1570,7 +1637,7 @@ export class InMemoryCustomerClient implements CustomerClient {
     if (!request) throw notFound('CustomerRequestNotFound', 'The customer request was not found.')
     this.assertCustomerAvailable(workspaceId, request.customerId)
     assertRevision(request.revision, expectedRevision, 'Customer Request')
-    if (request.triageEntryId !== undefined) {
+    if (request.triageEntryId !== undefined && !allowOrphanedTriageAssociation) {
       throw new CustomerError(
         409,
         'CustomerRequestTriageAssociation',
@@ -2108,6 +2175,7 @@ export class InMemoryCustomerClient implements CustomerClient {
       customers: new Map(),
       contacts: new Map(),
       requests: new Map(),
+      customerIdempotencyReceipts: new Map(),
       requestIdempotencyReceipts: new Map(),
       contactIdempotencyReceipts: new Map(),
       views: new Map(),
@@ -2297,6 +2365,8 @@ export class InMemoryCustomerClient implements CustomerClient {
     for (const [notificationId, notification] of state.notifications) {
       if (notification.customerId === customerId) state.notifications.delete(notificationId)
     }
+    // Customer creation receipts are intentionally retained after deletion so
+    // a response-loss retry cannot silently create a second Customer.
     for (const [requestId, receipt] of state.requestIdempotencyReceipts) {
       if (receipt.customerId === customerId) state.requestIdempotencyReceipts.delete(requestId)
     }
@@ -2585,8 +2655,13 @@ function normalizeContactEmail(email: string | undefined): string | undefined {
   return normalized || undefined
 }
 
-/** Matches one Customer directory query. */
-function matchesCustomer(customer: Customer, input: CustomerListInput): boolean {
+/** Matches one Customer directory query.
+ *
+ * @param customer Customer candidate to inspect.
+ * @param input Normalized directory filters.
+ * @returns Whether the Customer satisfies every supplied filter.
+ */
+export function matchesCustomer(customer: Customer, input: CustomerListInput): boolean {
   const search = input.search?.trim().toLocaleLowerCase('en-US')
   return (!search || customer.name.toLocaleLowerCase('en-US').includes(search) || customer.domain?.includes(search) === true) &&
     (input.tier === undefined || customer.tier === input.tier) &&
@@ -2638,6 +2713,46 @@ function isOpenRequest(status: CustomerRequest['status']): boolean {
 /** Creates the deterministic ID used to make Triage-originated Request retries safe. */
 function createTriageRequestId(workspaceId: string, triageEntryId: string): string {
   return `triage-${createHash('sha256').update(`${workspaceId}\u0000${triageEntryId}`, 'utf8').digest('hex')}`
+}
+
+/** Creates the deterministic ID used to make Customer creation retries safe.
+ *
+ * @param workspaceId Workspace scope for the retry key.
+ * @param idempotencyKey Caller-selected retry key.
+ * @returns A deterministic physical-safe Customer identifier.
+ */
+export function createCustomerIdempotencyRecordId(workspaceId: string, idempotencyKey: string): string {
+  const normalizedKey = idempotencyKey.trim()
+  if (!normalizedKey || normalizedKey.length > 256 || [...normalizedKey].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 31 || codePoint === 127
+  })) {
+    throw new CustomerError(400, 'InvalidCustomerInput', 'Customer Idempotency-Key is required and invalid.')
+  }
+  return `customer-${createHash('sha256').update(`${workspaceId}\u0000${normalizedKey}`, 'utf8').digest('hex')}`
+}
+
+/** Hashes the immutable creation fields used to validate a Customer retry.
+ *
+ * @param customer Customer reconstructed from the creation input.
+ * @param input Original input, used to distinguish an omitted retention deadline.
+ * @returns A content-free SHA-256 fingerprint of the Customer origin.
+ */
+function createCustomerIdempotencyFingerprint(customer: Customer, input: CreateCustomerInput): string {
+  return createHash('sha256').update(stableSerialize({
+    name: customer.name,
+    domain: customer.domain,
+    ownerUserId: customer.ownerUserId,
+    tier: customer.tier,
+    size: customer.size,
+    status: customer.status,
+    health: customer.health,
+    businessValue: customer.businessValue,
+    notes: customer.notes,
+    retentionExpiresAt: input.retentionExpiresAt === undefined
+      ? undefined
+      : customer.retention?.expiresAt,
+  }), 'utf8').digest('hex')
 }
 
 /** Creates the deterministic ID used to make keyed Customer Request retries safe.
@@ -2839,6 +2954,15 @@ function normalizeLimit(value: number | undefined): number {
   return value
 }
 
+/** Normalizes a Customer directory query and applies its default page limit.
+ *
+ * @param input Raw Customer directory filters.
+ * @returns A query with a validated page limit.
+ */
+export function normalizeCustomerListInput(input: CustomerListInput = {}): CustomerListInput & { limit: number } {
+  return { ...input, limit: normalizeLimit(input.limit) }
+}
+
 /** Normalizes the query fields that determine one Customer list result.
  *
  * @param input Customer or Customer Request list input.
@@ -2857,6 +2981,15 @@ function normalizeListQuery(input: CustomerListInput | CustomerRequestListInput)
  */
 function createListQueryFingerprint(input: CustomerListInput | CustomerRequestListInput): string {
   return createHash('sha256').update(JSON.stringify(normalizeListQuery(input)), 'utf8').digest('hex')
+}
+
+/** Creates a query fingerprint for a Customer directory cursor.
+ *
+ * @param input Normalized Customer directory filters.
+ * @returns A stable SHA-256 query fingerprint.
+ */
+export function createCustomerListQueryFingerprint(input: CustomerListInput): string {
+  return createListQueryFingerprint(input)
 }
 
 /** Creates a revision digest for Customer rows that affect directory counts and sorting.

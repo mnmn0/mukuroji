@@ -31,6 +31,7 @@ import type {
   CustomerRetention,
   CustomerRetentionResult,
   CustomerSavedView,
+  CustomerSortField,
   CustomerWorkspaceExport,
   CustomerWorkItemSummary,
   LinkCustomerRequestWorkItemInput,
@@ -50,6 +51,11 @@ import {
   InMemoryCustomerClient,
   type CustomerAuthorizationConditionChecks,
   type CustomerClient,
+  createCustomerIdempotencyRecordId,
+  createCustomerListQueryFingerprint,
+  matchesCustomer,
+  normalizeCustomerListInput,
+  type CustomerIdempotencyReceipt,
   type CustomerContactIdempotencyReceipt,
   type CustomerContactDeletionOperation,
   type CustomerContactMergeOperation,
@@ -70,6 +76,22 @@ const CUSTOMER_TRANSACTION_RECORD_LIMIT = 99
 /** GSI used to wake retention processing for records whose expiry is due. */
 const CUSTOMER_RETENTION_INDEX_NAME = 'CustomerRetentionIndex'
 
+/** GSI definitions used to page the Customer directory without materializing the graph. */
+const CUSTOMER_DIRECTORY_INDEXES: Record<CustomerSortField, CustomerDirectoryIndex> = {
+  name: { indexName: 'CustomerDirectoryNameIndex', sortAttribute: 'customerDirectoryName' },
+  tier: { indexName: 'CustomerDirectoryTierIndex', sortAttribute: 'customerDirectoryTier' },
+  size: { indexName: 'CustomerDirectorySizeIndex', sortAttribute: 'customerDirectorySize' },
+  status: { indexName: 'CustomerDirectoryStatusIndex', sortAttribute: 'customerDirectoryStatus' },
+  health: { indexName: 'CustomerDirectoryHealthIndex', sortAttribute: 'customerDirectoryHealth' },
+  businessValue: { indexName: 'CustomerDirectoryBusinessValueIndex', sortAttribute: 'customerDirectoryBusinessValue' },
+  requestCount: { indexName: 'CustomerDirectoryRequestCountIndex', sortAttribute: 'customerDirectoryRequestCount' },
+  openRequestCount: { indexName: 'CustomerDirectoryOpenRequestCountIndex', sortAttribute: 'customerDirectoryOpenRequestCount' },
+  updatedAt: { indexName: 'CustomerDirectoryUpdatedAtIndex', sortAttribute: 'customerDirectoryUpdatedAt' },
+}
+
+/** Version marker for opaque Customer directory cursors. */
+const CUSTOMER_DIRECTORY_CURSOR_VERSION = 2
+
 /** Sparse partition value shared by all Customer retention index rows. */
 const CUSTOMER_RETENTION_INDEX_PARTITION = 'CUSTOMER_RETENTION'
 
@@ -83,6 +105,7 @@ const CUSTOMER_UNBOUNDED_READ_LIMIT = Number.POSITIVE_INFINITY
 const CUSTOMER_RECORD_PREFIX = 'CUSTOMER#'
 const CONTACT_RECORD_PREFIX = 'CONTACT#'
 const REQUEST_RECORD_PREFIX = 'REQUEST#'
+const CUSTOMER_IDEMPOTENCY_RECEIPT_RECORD_PREFIX = 'CUSTOMER_RECEIPT#'
 const REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX = 'REQUEST_RECEIPT#'
 const CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX = 'CONTACT_RECEIPT#'
 const VIEW_RECORD_PREFIX = 'VIEW#'
@@ -169,8 +192,105 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @returns The filtered customer page.
    */
   async listCustomers(workspaceId: string, input?: CustomerListInput): Promise<CustomerPage> {
-    const { memory } = await this.readMemoryForRead(workspaceId, [CUSTOMER_RECORD_PREFIX])
-    return await memory.listCustomersUsingStoredCounts(workspaceId, input)
+    return await this.listCustomersFromDirectoryIndex(workspaceId, input)
+  }
+
+  /** Lists Customer roots through the sort-specific directory index.
+   *
+   * The directory query never loads Contacts, Requests, or the complete set of
+   * Customer roots. DynamoDB's exclusive-start key is carried by an opaque,
+   * query- and revision-bound cursor so a repeated page resumes at the index
+   * boundary instead of rereading earlier roots.
+   *
+   * @param workspaceId Workspace containing the customers.
+   * @param input Optional filters and a query-bound cursor.
+   * @returns The filtered customer page.
+   */
+  private async listCustomersFromDirectoryIndex(
+    workspaceId: string,
+    input: CustomerListInput = {},
+  ): Promise<CustomerPage> {
+    const normalizedInput = normalizeCustomerListInput(input)
+    const sortField: CustomerSortField = normalizedInput.sortBy ?? 'updatedAt'
+    const directoryIndex = CUSTOMER_DIRECTORY_INDEXES[sortField]
+    const metadata = await this.readWorkspaceMetadata(workspaceId)
+    if (metadata.pendingDeletion?.phase === 'customer') {
+      await this.resumePendingDeletion(workspaceId, metadata.pendingDeletion)
+      return await this.listCustomersFromDirectoryIndex(workspaceId, input)
+    }
+    if (metadata.pendingRetention) {
+      await this.resumePendingRetention(workspaceId, metadata.pendingRetention)
+      return await this.listCustomersFromDirectoryIndex(workspaceId, input)
+    }
+    const queryFingerprint = createCustomerListQueryFingerprint(normalizedInput)
+    const directoryCursor = decodeCustomerDirectoryCursor(
+      input.cursor,
+      workspaceId,
+      queryFingerprint,
+      metadata.revision,
+      directoryIndex,
+    )
+    const retentionCutoff = directoryCursor?.retentionCutoff ?? this.now().toISOString()
+    let exclusiveStartKey = directoryCursor?.exclusiveStartKey
+    const hiddenCustomerIds = new Set<string>()
+    if (metadata.pendingDeletion?.phase === 'triage') {
+      hiddenCustomerIds.add(metadata.pendingDeletion.customerId)
+    }
+    if (metadata.pendingMerge) {
+      hiddenCustomerIds.add(metadata.pendingMerge.sourceCustomerId)
+      hiddenCustomerIds.add(metadata.pendingMerge.targetCustomerId)
+    }
+    const customers: Customer[] = []
+    let lastEvaluatedKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        IndexName: directoryIndex.indexName,
+        KeyConditionExpression: 'workspaceId = :workspaceId',
+        FilterExpression: 'attribute_not_exists(#retentionDueAt) OR #retentionDueAt > :retentionCutoff',
+        ExpressionAttributeNames: { '#retentionDueAt': 'retentionDueAt' },
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':retentionCutoff': retentionCutoff,
+        },
+        ScanIndexForward: normalizedInput.sortDirection === 'ascending',
+        Limit: Math.max(normalizedInput.limit - customers.length, 1),
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      for (const item of response.Items ?? []) {
+        const decoded = decodeStoredRow(item, workspaceId)
+        if (!decoded || decoded.kind !== 'customer') {
+          throw new CustomerError(503, 'CustomerPersistenceCorrupt', 'A Customer directory row is malformed.')
+        }
+        if (hiddenCustomerIds.has(decoded.value.id) || !matchesCustomer(decoded.value, normalizedInput)) continue
+        customers.push(decoded.value)
+      }
+      lastEvaluatedKey = response.LastEvaluatedKey
+      exclusiveStartKey = lastEvaluatedKey
+    } while (customers.length < normalizedInput.limit && lastEvaluatedKey !== undefined)
+    const finalMetadata = await this.readWorkspaceMetadata(workspaceId)
+    if (!sameCustomerMetadata(metadata, finalMetadata)) {
+      throw new CustomerError(
+        409,
+        'CustomerSnapshotChanged',
+        'Customer data changed while the read was in progress. Retry the read.',
+      )
+    }
+    return {
+      customers,
+      ...(lastEvaluatedKey === undefined
+        ? {}
+        : {
+            nextCursor: encodeCustomerDirectoryCursor(
+              workspaceId,
+              queryFingerprint,
+              metadata.revision,
+              directoryIndex,
+              retentionCutoff,
+              lastEvaluatedKey,
+            ),
+          }),
+    }
   }
 
   /** Redacts every due Customer record found by the sparse retention index.
@@ -285,9 +405,9 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    */
   async getCustomer(workspaceId: string, customerId: string): Promise<CustomerDetail> {
     const { memory } = await this.readMemoryForRead(workspaceId, [
-      CUSTOMER_RECORD_PREFIX,
-      CONTACT_RECORD_PREFIX,
-      REQUEST_RECORD_PREFIX,
+      customerRecordPrefix(customerId),
+      customerContactRecordPrefix(customerId),
+      customerRequestRecordPrefix(customerId),
     ])
     return await memory.getCustomer(workspaceId, customerId)
   }
@@ -297,6 +417,8 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param workspaceId Workspace that will own the Customer.
    * @param actorId Authenticated actor creating the Customer.
    * @param input Customer creation fields.
+   * @param authorizationConditionChecks Live-resource conditions to evaluate with the durable mutation.
+   * @param idempotencyKey Caller-selected key used for a durable creation retry.
    * @returns The created Customer.
    */
   async createCustomer(
@@ -304,11 +426,18 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
     actorId: string,
     input: CreateCustomerInput,
     authorizationConditionChecks?: CustomerAuthorizationConditionChecks,
+    idempotencyKey?: string,
   ): Promise<Customer> {
+    const recordPrefixes = idempotencyKey === undefined
+      ? [CUSTOMER_RECORD_PREFIX]
+      : [
+          CUSTOMER_RECORD_PREFIX,
+          `${CUSTOMER_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${createCustomerIdempotencyRecordId(workspaceId, idempotencyKey)}`,
+        ]
     return await this.mutate(
       workspaceId,
-      (memory) => memory.createCustomer(workspaceId, actorId, input),
-      [CUSTOMER_RECORD_PREFIX],
+      (memory) => memory.createCustomer(workspaceId, actorId, input, undefined, idempotencyKey),
+      recordPrefixes,
       false,
       authorizationConditionChecks,
     )
@@ -985,10 +1114,23 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
    * @param requestId Request to delete.
    * @param actorId Authenticated actor performing the deletion.
    * @param expectedRevision Request revision required for deletion.
+   * @param allowOrphanedTriageAssociation Whether a verified orphan may be removed.
    * @returns A promise that resolves after deletion completes.
    */
-  async deleteRequest(workspaceId: string, requestId: string, actorId: string, expectedRevision: number): Promise<void> {
-    await this.mutate(workspaceId, async (memory) => await memory.deleteRequest(workspaceId, requestId, actorId, expectedRevision), [
+  async deleteRequest(
+    workspaceId: string,
+    requestId: string,
+    actorId: string,
+    expectedRevision: number,
+    allowOrphanedTriageAssociation = false,
+  ): Promise<void> {
+    await this.mutate(workspaceId, async (memory) => await memory.deleteRequest(
+      workspaceId,
+      requestId,
+      actorId,
+      expectedRevision,
+      allowOrphanedTriageAssociation,
+    ), [
       CUSTOMER_RECORD_PREFIX,
       CONTACT_RECORD_PREFIX,
       REQUEST_RECORD_PREFIX,
@@ -1449,6 +1591,8 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
         if (recordPrefixes === undefined) continue
       } else if (decoded.kind === 'customer') {
         state.customers.set(decoded.value.id, decoded.value)
+      } else if (decoded.kind === 'customer-receipt') {
+        state.customerIdempotencyReceipts.set(decoded.value.customerId, decoded.value)
       } else if (decoded.kind === 'contact') {
         state.contacts.set(decoded.value.id, decoded.value)
       } else if (decoded.kind === 'request') {
@@ -1686,17 +1830,37 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
       `CUSTOMER#${expectedMerge.targetCustomerId}`,
     ])
     const rootItems = recordItems.filter((item) => rootKeys.has(readRecordKey(item)))
-    const childItems = recordItems
-      .filter((item) => !rootKeys.has(readRecordKey(item)))
-      .filter((item) => expectedMerge.cursor === undefined || compareCustomerRecordKeys(readRecordKey(item), expectedMerge.cursor) > 0)
-      .sort((left, right) => compareCustomerRecordKeys(readRecordKey(left), readRecordKey(right)))
+    const childGroups = new Map<string, NonNullable<TransactWriteCommandInput['TransactItems']>[number][]>()
+    for (const item of recordItems) {
+      const recordKey = readRecordKey(item)
+      if (rootKeys.has(recordKey)) continue
+      const logicalKey = customerMergeLogicalChildKey(
+        recordKey,
+        expectedMerge.sourceCustomerId,
+        expectedMerge.targetCustomerId,
+      )
+      if (expectedMerge.cursor !== undefined && compareCustomerRecordKeys(logicalKey, expectedMerge.cursor) <= 0) continue
+      const group = childGroups.get(logicalKey) ?? []
+      group.push(item)
+      childGroups.set(logicalKey, group)
+    }
+    const childGroupsInOrder = [...childGroups.entries()].sort(([left], [right]) => compareCustomerRecordKeys(left, right))
+    const childItems = childGroupsInOrder.flatMap(([, items]) => items)
     const maxChildItems = CUSTOMER_TRANSACTION_RECORD_LIMIT - rootItems.length
     if (maxChildItems < 0) {
       throw new CustomerError(409, 'CustomerTransactionTooLarge', 'The Customer merge root graph is too large to commit atomically.')
     }
     if (childItems.length > maxChildItems) {
-      const batch = childItems.slice(0, Math.max(maxChildItems, 1))
-      const cursor = readRecordKey(batch.at(-1))
+      const batch: NonNullable<TransactWriteCommandInput['TransactItems']>[number][] = []
+      let cursor: string | undefined
+      for (const [logicalKey, items] of childGroupsInOrder) {
+        if (batch.length > 0 && batch.length + items.length > maxChildItems) break
+        batch.push(...items)
+        cursor = logicalKey
+      }
+      if (batch.length === 0 || cursor === undefined) {
+        throw new CustomerError(409, 'CustomerTransactionTooLarge', 'A Customer merge child group is too large to commit atomically.')
+      }
       await this.writeTransaction(workspaceId, startingRevision, batch, {
         expectedMerge,
         nextMerge: { ...expectedMerge, cursor },
@@ -2093,19 +2257,38 @@ export class DynamoDbCustomerClient implements CustomerClient, CustomerRetention
           { AttributeName: 'recordKey', AttributeType: 'S' },
           { AttributeName: 'retentionPartition', AttributeType: 'S' },
           { AttributeName: 'retentionDueAt', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryName', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryTier', AttributeType: 'S' },
+          { AttributeName: 'customerDirectorySize', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryStatus', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryHealth', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryBusinessValue', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryRequestCount', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryOpenRequestCount', AttributeType: 'S' },
+          { AttributeName: 'customerDirectoryUpdatedAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'workspaceId', KeyType: 'HASH' },
           { AttributeName: 'recordKey', KeyType: 'RANGE' },
         ],
-        GlobalSecondaryIndexes: [{
-          IndexName: CUSTOMER_RETENTION_INDEX_NAME,
-          KeySchema: [
-            { AttributeName: 'retentionPartition', KeyType: 'HASH' },
-            { AttributeName: 'retentionDueAt', KeyType: 'RANGE' },
-          ],
-          Projection: { ProjectionType: 'KEYS_ONLY' },
-        }],
+        GlobalSecondaryIndexes: [
+          {
+            IndexName: CUSTOMER_RETENTION_INDEX_NAME,
+            KeySchema: [
+              { AttributeName: 'retentionPartition', KeyType: 'HASH' },
+              { AttributeName: 'retentionDueAt', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'KEYS_ONLY' },
+          },
+          ...Object.values(CUSTOMER_DIRECTORY_INDEXES).map((index) => ({
+            IndexName: index.indexName,
+            KeySchema: [
+              { AttributeName: 'workspaceId', KeyType: 'HASH' as const },
+              { AttributeName: index.sortAttribute, KeyType: 'RANGE' as const },
+            ],
+            Projection: { ProjectionType: 'ALL' as const },
+          })),
+        ],
       }))
     } catch (error) {
       if (!isAwsNamedError(error, 'ResourceInUseException')) throw error
@@ -2223,6 +2406,36 @@ type CustomerTransactionOptions = {
   nextContactOperation?: CustomerContactOperation
 }
 
+/** Physical index definition for one Customer directory sort field. */
+type CustomerDirectoryIndex = {
+  /** DynamoDB global secondary index name. */
+  indexName: string
+  /** Customer row attribute used as the index sort key. */
+  sortAttribute: keyof StoredCustomerDirectoryIndexFields
+}
+
+/** Sort-key attributes projected onto every Customer root. */
+type StoredCustomerDirectoryIndexFields = {
+  /** Name sort key. */
+  customerDirectoryName: string
+  /** Tier sort key. */
+  customerDirectoryTier: string
+  /** Size sort key. */
+  customerDirectorySize: string
+  /** Status sort key. */
+  customerDirectoryStatus: string
+  /** Health sort key. */
+  customerDirectoryHealth: string
+  /** Business-value sort key. */
+  customerDirectoryBusinessValue: string
+  /** Request-count sort key. */
+  customerDirectoryRequestCount: string
+  /** Open-request-count sort key. */
+  customerDirectoryOpenRequestCount: string
+  /** Updated-at sort key. */
+  customerDirectoryUpdatedAt: string
+}
+
 /** Optional sparse-index attributes carried by unredacted Customer-owned rows. */
 type StoredRetentionIndexFields = {
   /** Constant sparse-index partition value. */
@@ -2260,7 +2473,17 @@ type StoredCustomerRow =
       entityType: 'customer'
       /** Persisted Customer value. */
       customer: Customer
-    } & StoredRetentionIndexFields)
+    } & StoredRetentionIndexFields & StoredCustomerDirectoryIndexFields)
+  | {
+      /** Workspace partition key. */
+      workspaceId: string
+      /** Customer creation receipt sort key. */
+      recordKey: string
+      /** Row discriminator. */
+      entityType: 'customer-idempotency-receipt'
+      /** Content-free receipt for a keyed Customer creation. */
+      receipt: CustomerIdempotencyReceipt
+    }
   | ({
       /** Workspace partition key. */
       workspaceId: string
@@ -2346,6 +2569,12 @@ type DecodedCustomerRow =
     }
   | {
       /** Narrowed row discriminator. */
+      kind: 'customer-receipt'
+      /** Decoded receipt for a keyed Customer creation. */
+      value: CustomerIdempotencyReceipt
+    }
+  | {
+      /** Narrowed row discriminator. */
       kind: 'contact'
       /** Decoded Contact value. */
       value: CustomerContact
@@ -2387,6 +2616,7 @@ function createEmptyState(): CustomerWorkspaceState {
     customers: new Map(),
     contacts: new Map(),
     requests: new Map(),
+    customerIdempotencyReceipts: new Map(),
     requestIdempotencyReceipts: new Map(),
     contactIdempotencyReceipts: new Map(),
     views: new Map(),
@@ -2402,21 +2632,28 @@ function serializeState(workspaceId: string, state: CustomerWorkspaceState): Sto
       recordKey: `CUSTOMER#${customer.id}`,
       entityType: 'customer',
       customer,
+      ...createCustomerDirectoryIndexFields(customer),
       ...createRetentionIndexFields(customer.retention),
     })),
     ...[...state.contacts.values()].map((contact): StoredCustomerRow => ({
       workspaceId,
-      recordKey: `CONTACT#${contact.id}`,
+      recordKey: customerContactRecordKey(contact.customerId, contact.id),
       entityType: 'contact',
       contact,
       ...createRetentionIndexFields(contact.retention),
     })),
     ...[...state.requests.values()].map((request): StoredCustomerRow => ({
       workspaceId,
-      recordKey: `REQUEST#${request.id}`,
+      recordKey: customerRequestRecordKey(request.customerId, request.id),
       entityType: 'request',
       request,
       ...createRetentionIndexFields(request.retention),
+    })),
+    ...[...state.customerIdempotencyReceipts.values()].map((receipt): StoredCustomerRow => ({
+      workspaceId,
+      recordKey: `${CUSTOMER_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${receipt.customerId}`,
+      entityType: 'customer-idempotency-receipt',
+      receipt,
     })),
     ...[...state.requestIdempotencyReceipts.values()].map((receipt): StoredCustomerRow => ({
       workspaceId,
@@ -2450,6 +2687,124 @@ function createRetentionIndexFields(
   }
 }
 
+/** Creates sort-key values for every Customer directory index. */
+function createCustomerDirectoryIndexFields(customer: Customer): StoredCustomerDirectoryIndexFields {
+  const tieBreaker = `\u0000${customer.id}`
+  return {
+    customerDirectoryName: `${customer.name.toLocaleLowerCase('en-US')}${tieBreaker}`,
+    customerDirectoryTier: `${customer.tier}${tieBreaker}`,
+    customerDirectorySize: `${customer.size}${tieBreaker}`,
+    customerDirectoryStatus: `${customer.status}${tieBreaker}`,
+    customerDirectoryHealth: `${customer.health}${tieBreaker}`,
+    customerDirectoryBusinessValue: `${encodeSortableNumber(customer.businessValue ?? -1, 9)}${tieBreaker}`,
+    customerDirectoryRequestCount: `${encodeSortableNumber(customer.requestCount, 12)}${tieBreaker}`,
+    customerDirectoryOpenRequestCount: `${encodeSortableNumber(customer.openRequestCount, 12)}${tieBreaker}`,
+    customerDirectoryUpdatedAt: `${customer.updatedAt}${tieBreaker}`,
+  }
+}
+
+/** Encodes a bounded nonnegative sort value as a fixed-width string. */
+function encodeSortableNumber(value: number, width: number): string {
+  const normalized = Math.max(0, Math.round(value * (width === 9 ? 1_000_000 : 1)))
+  return String(normalized).padStart(width, '0')
+}
+
+/** Builds the physical Contact key scoped to its owning Customer. */
+function customerContactRecordKey(customerId: string, contactId: string): string {
+  return `${CONTACT_RECORD_PREFIX}${customerId}#${contactId}`
+}
+
+/** Builds the exact physical Customer root prefix used by a focused detail read. */
+function customerRecordPrefix(customerId: string): string {
+  return `${CUSTOMER_RECORD_PREFIX}${customerId}`
+}
+
+/** Builds the physical Request key scoped to its owning Customer. */
+function customerRequestRecordKey(customerId: string, requestId: string): string {
+  return `${REQUEST_RECORD_PREFIX}${customerId}#${requestId}`
+}
+
+/** Builds the prefix for all Contacts owned by one Customer. */
+function customerContactRecordPrefix(customerId: string): string {
+  return `${CONTACT_RECORD_PREFIX}${customerId}#`
+}
+
+/** Builds the prefix for all Requests owned by one Customer. */
+function customerRequestRecordPrefix(customerId: string): string {
+  return `${REQUEST_RECORD_PREFIX}${customerId}#`
+}
+
+/** Encodes a DynamoDB directory continuation key with its query fences. */
+function encodeCustomerDirectoryCursor(
+  workspaceId: string,
+  queryFingerprint: string,
+  revision: number,
+  directoryIndex: CustomerDirectoryIndex,
+  retentionCutoff: string,
+  exclusiveStartKey: Record<string, unknown>,
+): string {
+  return Buffer.from(JSON.stringify({
+    version: CUSTOMER_DIRECTORY_CURSOR_VERSION,
+    workspaceId,
+    queryFingerprint,
+    revision,
+    indexName: directoryIndex.indexName,
+    retentionCutoff,
+    exclusiveStartKey,
+  }), 'utf8').toString('base64url')
+}
+
+/** Decoded continuation state for one Customer directory page. */
+type CustomerDirectoryCursor = {
+  /** Retention cutoff frozen for the complete cursor chain. */
+  retentionCutoff: string
+  /** DynamoDB index key from which the next page starts. */
+  exclusiveStartKey: Record<string, unknown>
+}
+
+/** Decodes and validates a DynamoDB directory continuation key. */
+function decodeCustomerDirectoryCursor(
+  value: string | undefined,
+  workspaceId: string,
+  queryFingerprint: string,
+  revision: number,
+  directoryIndex: CustomerDirectoryIndex,
+): CustomerDirectoryCursor | undefined {
+  if (value === undefined) return undefined
+  try {
+    if (value.length > 8_192) throw new Error('cursor-too-long')
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecord(parsed) ||
+      parsed.version !== CUSTOMER_DIRECTORY_CURSOR_VERSION ||
+      parsed.workspaceId !== workspaceId ||
+      parsed.queryFingerprint !== queryFingerprint ||
+      parsed.revision !== revision ||
+      parsed.indexName !== directoryIndex.indexName ||
+      typeof parsed.retentionCutoff !== 'string' ||
+      !isIsoInstant(parsed.retentionCutoff) ||
+      !isRecord(parsed.exclusiveStartKey)) {
+      throw new Error('cursor-fence-mismatch')
+    }
+    const recordKey = parsed.exclusiveStartKey.recordKey
+    const sortValue = parsed.exclusiveStartKey[directoryIndex.sortAttribute]
+    if (parsed.exclusiveStartKey.workspaceId !== workspaceId ||
+      typeof recordKey !== 'string' || !recordKey.startsWith(CUSTOMER_RECORD_PREFIX) ||
+      typeof sortValue !== 'string') {
+      throw new Error('cursor-key-invalid')
+    }
+    return {
+      retentionCutoff: parsed.retentionCutoff,
+      exclusiveStartKey: {
+        workspaceId,
+        recordKey,
+        [directoryIndex.sortAttribute]: sortValue,
+      },
+    }
+  } catch (error) {
+    throw new CustomerError(400, 'InvalidCustomerCursor', 'The customer cursor is invalid.', { cause: error })
+  }
+}
+
 /** Strictly decodes one untrusted DynamoDB row. */
 function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRow | undefined {
   if (!isRecord(value) || value.workspaceId !== workspaceId || typeof value.recordKey !== 'string') return undefined
@@ -2478,8 +2833,9 @@ function decodeStoredRow(value: unknown, workspaceId: string): DecodedCustomerRo
     }
   }
   if (value.entityType === 'customer' && isCustomer(value.customer) && value.customer.workspaceId === workspaceId && value.recordKey === `CUSTOMER#${value.customer.id}`) return { kind: 'customer', value: value.customer }
-  if (value.entityType === 'contact' && isContact(value.contact) && value.contact.workspaceId === workspaceId && value.recordKey === `CONTACT#${value.contact.id}`) return { kind: 'contact', value: value.contact }
-  if (value.entityType === 'request' && isRequest(value.request) && value.request.workspaceId === workspaceId && value.recordKey === `REQUEST#${value.request.id}`) return { kind: 'request', value: value.request }
+  if (value.entityType === 'customer-idempotency-receipt' && isCustomerIdempotencyReceipt(value.receipt) && value.recordKey === `${CUSTOMER_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${value.receipt.customerId}`) return { kind: 'customer-receipt', value: value.receipt }
+  if (value.entityType === 'contact' && isContact(value.contact) && value.contact.workspaceId === workspaceId && value.recordKey === customerContactRecordKey(value.contact.customerId, value.contact.id)) return { kind: 'contact', value: value.contact }
+  if (value.entityType === 'request' && isRequest(value.request) && value.request.workspaceId === workspaceId && value.recordKey === customerRequestRecordKey(value.request.customerId, value.request.id)) return { kind: 'request', value: value.request }
   if (value.entityType === 'request-idempotency-receipt' && isRequestIdempotencyReceipt(value.receipt) && value.recordKey === `${REQUEST_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${value.receipt.requestId}`) return { kind: 'request-receipt', value: value.receipt }
   if (value.entityType === 'contact-idempotency-receipt' && isContactIdempotencyReceipt(value.receipt) && value.recordKey === `${CONTACT_IDEMPOTENCY_RECEIPT_RECORD_PREFIX}${value.receipt.contactId}`) return { kind: 'contact-receipt', value: value.receipt }
   if (value.entityType === 'view' && isSavedView(value.view) && value.view.workspaceId === workspaceId && value.recordKey === `VIEW#${value.view.id}`) return { kind: 'view', value: value.view }
@@ -2500,6 +2856,12 @@ function isCustomer(value: unknown): value is Customer {
     isSafeNonnegativeInteger(value.contactCount) && isSafeNonnegativeInteger(value.requestCount) &&
     isSafeNonnegativeInteger(value.openRequestCount) && isSafeRevision(value.revision) &&
     isIsoInstant(value.createdAt) && isIsoInstant(value.updatedAt)
+}
+
+/** Performs a small structural Customer creation receipt validation. */
+function isCustomerIdempotencyReceipt(value: unknown): value is CustomerIdempotencyReceipt {
+  return isRecord(value) && isString(value.customerId) &&
+    isString(value.fingerprint) && /^[a-f0-9]{64}$/.test(value.fingerprint)
 }
 
 /** Performs a small structural Contact validation at the persistence boundary. */
@@ -2817,6 +3179,21 @@ function compareCustomerDeletionRecordKeys(left: string, right: string): number 
 /** Orders physical Customer keys for a resumable retention operation. */
 function compareCustomerRecordKeys(left: string, right: string): number {
   return comparePhysicalRecordKeys(left, right)
+}
+
+/** Groups source deletes and target puts by logical child during a Customer merge. */
+function customerMergeLogicalChildKey(
+  recordKey: string,
+  sourceCustomerId: string,
+  targetCustomerId: string,
+): string {
+  for (const prefix of [CONTACT_RECORD_PREFIX, REQUEST_RECORD_PREFIX]) {
+    const sourcePrefix = `${prefix}${sourceCustomerId}#`
+    const targetPrefix = `${prefix}${targetCustomerId}#`
+    if (recordKey.startsWith(sourcePrefix)) return `${prefix}${recordKey.slice(sourcePrefix.length)}`
+    if (recordKey.startsWith(targetPrefix)) return `${prefix}${recordKey.slice(targetPrefix.length)}`
+  }
+  return recordKey
 }
 
 /** Compares ASCII physical keys by code unit, matching DynamoDB string ordering. */

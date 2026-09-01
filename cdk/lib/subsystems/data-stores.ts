@@ -258,6 +258,26 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 
+  const customerDirectoryIndexes = [
+    ['CustomerDirectoryNameIndex', 'customerDirectoryName'],
+    ['CustomerDirectoryTierIndex', 'customerDirectoryTier'],
+    ['CustomerDirectorySizeIndex', 'customerDirectorySize'],
+    ['CustomerDirectoryStatusIndex', 'customerDirectoryStatus'],
+    ['CustomerDirectoryHealthIndex', 'customerDirectoryHealth'],
+    ['CustomerDirectoryBusinessValueIndex', 'customerDirectoryBusinessValue'],
+    ['CustomerDirectoryRequestCountIndex', 'customerDirectoryRequestCount'],
+    ['CustomerDirectoryOpenRequestCountIndex', 'customerDirectoryOpenRequestCount'],
+    ['CustomerDirectoryUpdatedAtIndex', 'customerDirectoryUpdatedAt'],
+  ] as const;
+  for (const [indexName, sortAttribute] of customerDirectoryIndexes) {
+    customersTable.addGlobalSecondaryIndex({
+      indexName,
+      partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: sortAttribute, type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+  }
+
   developerPlatformTable.addGlobalSecondaryIndex({
     indexName: 'LookupKeyIndex',
     partitionKey: { name: 'lookupKey', type: dynamodb.AttributeType.STRING },

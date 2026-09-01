@@ -695,7 +695,7 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
         expect.objectContaining({
           ConditionCheck: expect.objectContaining({
             TableName: 'CustomersTable',
-            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#contact-1' },
+            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#customer-1#contact-1' },
             ConditionExpression: 'attribute_exists(#contact) AND #contact.#customerId = :customerId AND #contact.#status = :activeStatus',
             ExpressionAttributeNames: {
               '#contact': 'contact',
@@ -714,7 +714,7 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
         expect.objectContaining({
           ConditionCheck: expect.objectContaining({
             TableName: 'CustomersTable',
-            Key: { workspaceId: 'workspace-1', recordKey: 'REQUEST#request-1' },
+            Key: { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-1#request-1' },
             ConditionExpression: 'attribute_exists(#request) AND #request.#customerId = :customerId AND #request.#triageEntryId = :entryId',
             ExpressionAttributeNames: {
               '#request': 'request',
@@ -783,11 +783,22 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
         }),
         expect.objectContaining({
           ConditionCheck: expect.objectContaining({
-            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#contact-1' },
+            Key: { workspaceId: 'workspace-1', recordKey: 'CONTACT#customer-target#contact-1' },
             ConditionExpression: 'attribute_exists(#contact) AND (#contact.#customerId = :customerId OR #contact.#customerId = :sourceCustomerId)',
             ExpressionAttributeValues: {
               ':customerId': 'customer-target',
               ':sourceCustomerId': 'customer-source',
+            },
+          }),
+        }),
+        expect.objectContaining({
+          ConditionCheck: expect.objectContaining({
+            Key: { workspaceId: 'workspace-1', recordKey: 'REQUEST#customer-target#request-1' },
+            ConditionExpression: 'attribute_exists(#request) AND (#request.#customerId = :customerId OR #request.#customerId = :sourceCustomerId) AND #request.#triageEntryId = :entryId',
+            ExpressionAttributeValues: {
+              ':customerId': 'customer-target',
+              ':sourceCustomerId': 'customer-source',
+              ':entryId': 'triage-1',
             },
           }),
         }),
@@ -834,7 +845,7 @@ describe('DynamoDbTriageClient Customer cleanup', () => {
         : []
       const contactCheck = transactionItems.find((item) => {
         if (!isRecord(item) || !isRecord(item.ConditionCheck) || !isRecord(item.ConditionCheck.Key)) return false
-        return item.ConditionCheck.Key.recordKey === 'CONTACT#contact-1'
+        return item.ConditionCheck.Key.recordKey === 'CONTACT#customer-1#contact-1'
       })
       if (!isRecord(contactCheck) || !isRecord(contactCheck.ConditionCheck)) {
         throw new TypeError('Expected a Contact condition check.')

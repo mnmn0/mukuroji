@@ -11569,11 +11569,13 @@ routeApp.get('/api/projects/:projectId/issues', async (c) => {
     await requireProjectPermission(principal, projectId, 'viewer')
     const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
 
-    return c.json(
-      await hydrateProjectIssuesResponse(
-        await readProjectIssues(principal.directoryId, projectId, includeArchived),
-      ),
+    const response = await hydrateProjectIssuesResponse(
+      await readProjectIssues(principal.directoryId, projectId, includeArchived),
     )
+    return c.json({
+      ...response,
+      canReadCustomerImpact: hasCustomerReadAccess(principal, { projectId }),
+    })
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)

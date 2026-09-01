@@ -867,7 +867,7 @@ export class DynamoDbTriageClient implements TriageClient {
       checks.push({
         ConditionCheck: {
           TableName: this.customerTableName,
-          Key: { workspaceId, recordKey: 'CONTACT#' + entry.contactId },
+          Key: { workspaceId, recordKey: `CONTACT#${entry.customerId}#${entry.contactId}` },
           ConditionExpression:
             `attribute_exists(#contact) AND ${contactCustomerIdExpression}${contactStatusCondition}`,
           ExpressionAttributeNames: {
@@ -886,7 +886,7 @@ export class DynamoDbTriageClient implements TriageClient {
       checks.push({
         ConditionCheck: {
           TableName: this.customerTableName,
-          Key: { workspaceId, recordKey: 'REQUEST#' + entry.customerRequestId },
+          Key: { workspaceId, recordKey: `REQUEST#${entry.customerId}#${entry.customerRequestId}` },
           ConditionExpression:
             `attribute_exists(#request) AND ${requestCustomerIdExpression} AND #request.#triageEntryId = :entryId`,
           ExpressionAttributeNames: {

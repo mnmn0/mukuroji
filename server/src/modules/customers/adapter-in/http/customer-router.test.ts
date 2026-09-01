@@ -86,7 +86,7 @@ test('fences Customer owner assignment through the authorization boundary', asyn
 
   const response = await app.request('/api/customers', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'Idempotency-Key': 'customer-owner-1' },
     body: JSON.stringify({
       name: 'Acme Corporation',
       ownerUserId: 'owner-1',
@@ -168,6 +168,59 @@ function createCustomerAssociationEntry(customerId: string, contactId?: string):
     events: [],
   }
 }
+
+test('requires and replays Customer creation idempotency keys', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  })
+  const request = {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'Idempotency-Key': 'customer-create-1',
+    },
+    body: JSON.stringify({
+      name: 'Acme Corporation',
+      domain: 'acme.example',
+      tier: 'enterprise',
+      size: 'enterprise',
+      status: 'active',
+      health: 'healthy',
+    }),
+  }
+
+  const missingKey = await app.request('/api/customers', {
+    method: request.method,
+    headers: { 'content-type': 'application/json' },
+    body: request.body,
+  })
+  const first = await app.request('/api/customers', request)
+  const firstBody: { id: string } = await first.clone().json()
+  const repeated = await app.request('/api/customers', request)
+  const conflicting = await app.request('/api/customers', {
+    ...request,
+    body: JSON.stringify({
+      name: 'Different Corporation',
+      domain: 'different.example',
+      tier: 'enterprise',
+      size: 'enterprise',
+      status: 'active',
+      health: 'healthy',
+    }),
+  })
+
+  expect(missingKey.status).toBe(400)
+  expect(await missingKey.json()).toMatchObject({ code: 'InvalidCustomerInput' })
+  expect(first.status).toBe(201)
+  expect(repeated.status).toBe(201)
+  expect(await repeated.json()).toEqual(firstBody)
+  expect(conflicting.status).toBe(409)
+  expect(await conflicting.json()).toMatchObject({ code: 'CustomerIdempotencyConflict' })
+  await expect(client.listCustomers('workspace-1')).resolves.toMatchObject({ customers: [{ id: firstBody.id }] })
+})
 
 test('links a Customer Request directly to a Project through the authorized route', async () => {
   const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
@@ -965,10 +1018,15 @@ test('rejects deletion of a Customer Request that still points to Triage', async
     receivedAt: NOW,
     importance: 'normal',
   })
+  const entry = { ...createCustomerAssociationEntry(customer.id), customerRequestId: request.id }
   const app = createTestApp(client, {
     directoryId: 'workspace-1',
     userKey: 'member-1',
     canViewSensitiveData: true,
+  }, {
+    getEntry: async () => entry,
+    listCustomerAssociations: async () => [entry],
+    clearCustomerAssociations: async () => undefined,
   })
 
   const response = await app.request(`/api/customer-requests/${request.id}?expectedRevision=${request.revision}`, {
@@ -978,6 +1036,37 @@ test('rejects deletion of a Customer Request that still points to Triage', async
   expect(response.status).toBe(409)
   expect(await response.json()).toMatchObject({ code: 'CustomerRequestTriageAssociation' })
   await expect(client.getRequest('workspace-1', request.id)).resolves.toMatchObject({ id: request.id })
+})
+
+test('deletes a Triage Request orphan after its reverse association is gone', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  const request = await client.createRequest('workspace-1', 'member-1', {
+    customerId: customer.id,
+    triageEntryId: 'triage-orphan-1',
+    source: { kind: 'email', provider: 'mail', canNotify: true },
+    originalMessage: 'Please support SSO.',
+    receivedAt: NOW,
+    importance: 'normal',
+  })
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, {
+    getEntry: async () => {
+      throw new Error('The orphaned Triage Entry should not be read by team.')
+    },
+    listCustomerAssociations: async () => [],
+    clearCustomerAssociations: async () => undefined,
+  })
+
+  const response = await app.request(`/api/customer-requests/${request.id}?expectedRevision=${request.revision}`, {
+    method: 'DELETE',
+  })
+
+  expect(response.status).toBe(204)
+  await expect(client.getRequest('workspace-1', request.id)).rejects.toMatchObject({ code: 'CustomerRequestNotFound' })
 })
 
 test('passes the Project scope into Customer impact authorization', async () => {
@@ -1173,6 +1262,72 @@ test('saves an accepted Triage Entry as a Customer Request and preserves its sou
   })
   expect(customerScope).toEqual({ teamId: 'support' })
   expect((await client.getRequest('workspace-1', body.id)).customerId).toBe(customer.id)
+})
+
+test('resumes a Triage Customer Request after the association commit fails', async () => {
+  const client = new InMemoryCustomerClient({ now: () => new Date(NOW) })
+  const customer = await createCustomer(client)
+  let entry: TriageEntry = {
+    ...createCustomerAssociationEntry(customer.id),
+    id: 'triage-retry-1',
+    revision: 1,
+    customerRequestId: undefined,
+  }
+  let associationCalls = 0
+  const triage: CustomerTestTriage = {
+    getEntry: async () => entry,
+    associateCustomer: async (_workspaceId, _teamId, _entryId, _actor, input) => {
+      associationCalls += 1
+      if (associationCalls === 1) {
+        entry = { ...entry, revision: entry.revision + 1 }
+        throw new CustomerError(409, 'TriageRevisionConflict', 'The Triage Entry changed.')
+      }
+      entry = {
+        ...entry,
+        customerId: input.customerId ?? undefined,
+        contactId: input.contactId ?? undefined,
+        customerRequestId: input.customerRequestId ?? undefined,
+        revision: entry.revision + 1,
+      }
+      return entry
+    },
+  }
+  const app = createTestApp(client, {
+    directoryId: 'workspace-1',
+    userKey: 'member-1',
+    canViewSensitiveData: true,
+  }, triage)
+  const body = JSON.stringify({
+    expectedRevision: 1,
+    customerId: customer.id,
+    importance: 'normal',
+  })
+
+  const firstResponse = await app.request('/api/teams/support/triage-entries/triage-retry-1/customer-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+  })
+  expect(firstResponse.status).toBe(409)
+  expect(await firstResponse.json()).toMatchObject({ code: 'TriageRevisionConflict' })
+
+  const savedRequests = await client.listRequests('workspace-1', { customerId: customer.id })
+  expect(savedRequests.requests).toHaveLength(1)
+
+  const retryResponse = await app.request('/api/teams/support/triage-entries/triage-retry-1/customer-request', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      expectedRevision: 2,
+      customerId: customer.id,
+      importance: 'normal',
+    }),
+  })
+
+  expect(retryResponse.status).toBe(201)
+  expect(associationCalls).toBe(2)
+  expect((await client.listRequests('workspace-1', { customerId: customer.id })).requests).toHaveLength(1)
+  expect(entry.customerRequestId).toBe(savedRequests.requests[0]?.id)
 })
 
 test('rejects an accepted Triage retry when its existing request points to another Triage Entry', async () => {

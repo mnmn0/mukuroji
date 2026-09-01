@@ -685,6 +685,8 @@ export type ProjectIssuesResponse = {
    * プロジェクトにアサインされた Issue 一覧です。
    */
   issues: TeamIssueResponseItem[]
+  /** Whether the caller may request Customer impact for this Project resource. */
+  canReadCustomerImpact?: boolean
 }
 
 /**
