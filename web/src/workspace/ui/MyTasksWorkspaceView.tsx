@@ -17,6 +17,7 @@ import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
+  resolveWorkItemTypeLabel,
   resolveWorkItemWorkflowStatusLabel,
 } from '../../work-items/model/workItemDisplay'
 import {
@@ -530,6 +531,7 @@ function resolveMyTaskGroupValue(
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'workItemType': value = resolveWorkItemTypeLabel(task, configuration); break
     case 'project': value = resolveMyTaskProjectLabel(task, teams) ?? '—'; break
     case 'team': value = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId; break
     default: {

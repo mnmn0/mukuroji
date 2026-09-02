@@ -2610,6 +2610,7 @@ test('applies a Workflow template atomically while preserving custom fields and 
     revision: 1,
     payload: {
       ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION.workflow),
+      id: 'delivery-workflow',
       name: 'Delivery workflow',
     },
     createdAt: now,
@@ -2637,6 +2638,18 @@ test('applies a Workflow template atomically while preserving custom fields and 
       type: 'text',
       sortOrder: 10,
       required: false,
+    }],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['customer'],
+      requiredCustomFieldIds: [],
+      detailSections: ['overview', 'custom-fields', 'activity'],
+      allowedChildTypeIds: ['default', 'incident'],
+      sortOrder: 10,
     }],
   }
   let savedConfiguration: WorkItemConfiguration | undefined
@@ -2735,8 +2748,9 @@ test('applies a Workflow template atomically while preserving custom fields and 
   })
   expect(savedConfiguration).toMatchObject({
     revision: 2,
-    workflow: { name: 'Delivery workflow' },
+    workflow: { id: 'delivery-workflow', name: 'Delivery workflow' },
     customFields: existingConfiguration.customFields,
+    workItemTypes: [{ id: 'incident', defaultWorkflowId: 'delivery-workflow' }],
   })
   expect(completionCount).toBe(1)
 })

@@ -23,6 +23,7 @@ import type { TriageRouteView } from '../model/queryState'
 import type { TriageEntryView } from '../model/triageView'
 import { TriageBulkToolbar } from './TriageBulkToolbar'
 import { TriageEntryDetail } from './TriageEntryDetail'
+import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import { TriageQueue } from './TriageQueue'
 import { TriageSettingsPanel } from './TriageSettingsPanel'
 
@@ -46,6 +47,8 @@ export type TriageWorkbenchProps = {
   readonly visibleProjectIds?: readonly string[]
   /** Active non-guest members keyed by their current Team-qualified Project. */
   readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
+  /** Active Project members available to person custom fields in the accept form. */
+  readonly workItemPersonOptions?: readonly WorkItemPersonOption[]
   /** Active queue or settings surface. */
   readonly routeView: TriageRouteView
   /** Visible permission-safe queue entries. */
@@ -218,6 +221,7 @@ export function TriageWorkbench({
   eligibleAssigneeIdsByProject,
   visibleProjectIds,
   workItemConfiguration,
+  workItemPersonOptions,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
@@ -374,6 +378,7 @@ export function TriageWorkbench({
                   eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
                   visibleProjectIds={visibleProjectIds}
                   workItemConfiguration={workItemConfiguration}
+                  workItemPersonOptions={workItemPersonOptions}
                   view={selectedEntry}
                 />
               </div>

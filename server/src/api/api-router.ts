@@ -13133,6 +13133,15 @@ async function executeAutomationTemplateApplication(
       scopeId: target.scopeId,
       revision: target.expectedRevision,
       workflow: template.payload,
+      ...(resolved.configuration.workItemTypes === undefined
+        ? {}
+        : {
+            workItemTypes: remapWorkItemTypeWorkflowReferences(
+              resolved.configuration.workItemTypes,
+              resolved.configuration.workflow.id,
+              template.payload.id,
+            ),
+          }),
       ...(target.expectedRevision === 0 ? { updatedAt: undefined } : {}),
     }, {
       scopeType: target.scopeType,
@@ -13191,6 +13200,20 @@ async function executeAutomationTemplateApplication(
     }
     throw error
   }
+}
+
+/** Remaps explicit Work Item Types from a replaced primary Workflow to its template Workflow. */
+function remapWorkItemTypeWorkflowReferences(
+  workItemTypes: WorkItemConfiguration['workItemTypes'],
+  replacedWorkflowId: string,
+  replacementWorkflowId: string,
+): WorkItemConfiguration['workItemTypes'] {
+  if (workItemTypes === undefined || replacedWorkflowId === replacementWorkflowId) {
+    return workItemTypes
+  }
+  return workItemTypes.map((type) => type.defaultWorkflowId === replacedWorkflowId
+    ? { ...type, defaultWorkflowId: replacementWorkflowId }
+    : type)
 }
 
 function assertTemplateApplicationNotFailed(application: AutomationTemplateApplication) {
@@ -25520,12 +25543,16 @@ async function acceptTriageEntryAsNewWorkItem(
     idempotentIssueId: issueId,
     idempotentRequestDigest: request.idempotency.fingerprint,
   }, teamContext.team)
+  const customFieldValues = mergeTriageCustomFieldValues(
+    'customFieldValues' in normalized ? normalized.customFieldValues : undefined,
+    request.action.customFieldValues,
+  )
   const conversionInput = {
     ...normalized,
     customFieldValues: filterRequestConversionCustomFieldValues(
       resolvedConfiguration.configuration,
       normalized.workItemTypeId,
-      'customFieldValues' in normalized ? normalized.customFieldValues : undefined,
+      customFieldValues,
       assignedProjectId ?? undefined,
     ),
   }
@@ -39104,6 +39131,21 @@ function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBody | Upd
     ...input,
     assignedProjectId,
   }
+}
+
+/** Merges explicit Triage custom-field overrides without mutating Request mappings. */
+function mergeTriageCustomFieldValues(
+  baseValues: Record<string, CustomFieldValue> | undefined,
+  overrides: Readonly<Record<string, CustomFieldValue | null>> | undefined,
+): Record<string, CustomFieldValue> | undefined {
+  if (baseValues === undefined && overrides === undefined) return undefined
+
+  const values = new Map(Object.entries(baseValues ?? {}))
+  for (const [fieldId, value] of Object.entries(overrides ?? {})) {
+    if (value === null) values.delete(fieldId)
+    else values.set(fieldId, value)
+  }
+  return Object.fromEntries(values)
 }
 
 /** Removes Request mapping values that are outside the selected Work Item Type scope. */

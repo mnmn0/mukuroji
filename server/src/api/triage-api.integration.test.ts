@@ -1073,6 +1073,16 @@ describe('Team Triage API composition', () => {
 
   test('accept-create commits one source-linked Work Item and replays after response loss', async () => {
     const pendingEntry = createEntry()
+    const teamConfiguration = {
+      ...createTestWorkItemConfiguration('team', 'core-team'),
+      customFields: [{
+        id: 'request-kind',
+        name: 'Request kind',
+        type: 'text' as const,
+        sortOrder: 10,
+        required: true,
+      }],
+    }
     let acceptedEntry: TriageEntry | undefined
     let createdWorkItem: TeamIssueResponseItem | undefined
     let createCount = 0
@@ -1088,6 +1098,9 @@ describe('Team Triage API composition', () => {
     configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
     setTestAppDependencies({
       triage,
+      workItemConfigurations: createFakeWorkItemConfigurationClient({
+        getTeamConfiguration: async () => ({ configuration: teamConfiguration }),
+      }),
       teamIssues: createTeamIssuesFake({
         async getTeamIssueDetail() {
           if (!createdWorkItem) {
@@ -1115,6 +1128,7 @@ describe('Team Triage API composition', () => {
           expect(input.authorizationConditionChecks?.some((item) =>
             item.ConditionCheck?.Key?.entryKey === 'PROJECT_MEMBER#refero#demo@example.com'
           )).toBe(true)
+          expect(input.customFieldValues).toEqual({ 'request-kind': 'incident' })
           if (typeof input.idempotentIssueId !== 'string' || !triageAcceptance) {
             throw new Error('Triage acceptance did not supply a deterministic Work Item write.')
           }
@@ -1150,6 +1164,7 @@ describe('Team Triage API composition', () => {
         mode: 'create',
         expectedRevision: 1,
         projectId: 'refero',
+        customFieldValues: { 'request-kind': 'incident' },
       }),
     }
     const first = await app.request(path, request)

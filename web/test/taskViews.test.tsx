@@ -348,6 +348,7 @@ describe('independent task views', () => {
           columns: [
             { field: 'title' },
             { field: 'assignee' },
+            { field: 'workItemType' },
             { field: 'project' },
             { field: 'team' },
           ],
@@ -380,6 +381,8 @@ describe('independent task views', () => {
     expect(html).toContain('data-testid="work-item-assignee-avatar"')
     expect(html).toContain('data-task-view-focused="true"')
     expect(html).toContain('data-task-view-selected="true"')
+    expect(html).toContain('data-work-item-type-id="default"')
+    expect(html).toContain('>Work Item</span>')
     expect(html).toContain(t('tasks.row.selected'))
     expect(html).toContain('Refero')
     expect(html).toContain('コアチーム')

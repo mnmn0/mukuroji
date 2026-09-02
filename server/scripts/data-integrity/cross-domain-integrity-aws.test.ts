@@ -1095,6 +1095,37 @@ describe('cross-domain integrity AWS composition bridge', () => {
     }
   })
 
+  test('joins Work Item statuses from additional configured Workflows', async () => {
+    const rows = createHealthyNativeRows()
+    rows['work-items'] = [{
+      ...createWorkItemRow(),
+      statusCategory: 'started',
+      workflowStatusId: 'secondary-status',
+    }]
+    rows['work-item-configuration'] = [{
+      ...createConfigurationRow(),
+      workflows: [{
+        id: 'secondary-workflow',
+        name: 'Secondary workflow',
+        initialStatusId: 'secondary-status',
+        statuses: [{
+          id: 'secondary-status',
+          name: 'In progress',
+          category: 'started',
+          sortOrder: 10,
+          color: 'blue',
+        }],
+        transitions: [],
+      }],
+    }]
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('pass')
+    expect(result.failureCodes).not.toContain('WORK_ITEM_WORKFLOW_STATUS_UNKNOWN')
+  })
+
   test('recognizes current Project Directory Webhook rows as auxiliary', async () => {
     const rows = createHealthyNativeRows()
     rows['project-directory'] = [

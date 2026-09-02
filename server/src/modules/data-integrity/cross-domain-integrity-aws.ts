@@ -873,11 +873,13 @@ function normalizeConfigurationRow(row: Record<string, unknown>): CrossDomainInt
     )
     if (configuration.revision < 1) return normalizationFailure()
     const scope = parseConfigurationScope(requireText(row.scopeKey), scopeType, scopeId)
+    const workflowStatuses = [configuration.workflow, ...(configuration.workflows ?? [])]
+      .flatMap((workflow) => workflow.statuses)
     return [{
       kind: 'configuration',
       workspaceId: scope.workspaceId,
       teamId: scope.teamId,
-      workflowStatuses: configuration.workflow.statuses.map((status) => ({
+      workflowStatuses: workflowStatuses.map((status) => ({
         statusId: status.id,
         category: status.category,
       })),

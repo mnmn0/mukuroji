@@ -255,7 +255,12 @@ describe('triage HTTP router', () => {
         'X-Correlation-Id': 'correlation-triage-1',
         'X-Request-Id': 'request-triage-1',
       },
-      body: JSON.stringify({ action: 'accept', mode: 'create', expectedRevision: 1 }),
+      body: JSON.stringify({
+        action: 'accept',
+        mode: 'create',
+        expectedRevision: 1,
+        customFieldValues: { 'request-kind': 'incident' },
+      }),
     })
 
     expect(response.status).toBe(200)
@@ -265,7 +270,12 @@ describe('triage HTTP router', () => {
       teamId: 'support',
       entryId: 'triage-1',
       actor: { id: 'member-1' },
-      action: { action: 'accept', mode: 'create', expectedRevision: 1 },
+      action: {
+        action: 'accept',
+        mode: 'create',
+        expectedRevision: 1,
+        customFieldValues: { 'request-kind': 'incident' },
+      },
     })
     expect(actions[0]?.context.req.path).toBe(
       '/api/teams/support/triage-entries/triage-1/actions',

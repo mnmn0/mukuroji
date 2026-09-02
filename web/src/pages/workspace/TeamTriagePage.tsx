@@ -25,6 +25,7 @@ import {
 } from '../../triage/queries/useTriageQueries'
 import { TriageWorkbench } from '../../triage/ui/TriageWorkbench'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
+import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -104,6 +105,18 @@ export function TeamTriagePage() {
       membersByProject.set(projectKey, memberKeys)
     }
     return membersByProject
+  }, [projectMembers.data?.members])
+  const workItemPersonOptions = useMemo<readonly WorkItemPersonOption[]>(() => {
+    const membersById = new Map<string, WorkItemPersonOption>()
+    for (const access of projectMembers.data?.members ?? []) {
+      if (!isActiveProjectAssignmentCandidate(access.member)) continue
+      membersById.set(access.member.id, {
+        email: access.member.email,
+        id: access.member.id,
+        name: access.member.name ?? access.member.email,
+      })
+    }
+    return [...membersById.values()]
   }, [projectMembers.data?.members])
   const settings = useTriageSettings(
     workspace.accessToken,
@@ -208,6 +221,7 @@ export function TeamTriagePage() {
         teamName={activeTeam?.name ?? t('workspace.team.missing')}
         visibleProjectIds={activeTeam?.projects.map((project) => project.id)}
         eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
+        workItemPersonOptions={workItemPersonOptions}
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}
         onBulkAction={mutation.applyBulkAction}

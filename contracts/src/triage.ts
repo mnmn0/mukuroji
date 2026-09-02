@@ -1,3 +1,5 @@
+import type { CustomFieldValue } from './work-item-configuration'
+
 /** Current persisted and public schema version for triage entries. */
 export const TRIAGE_ENTRY_SCHEMA_VERSION = 1
 
@@ -356,6 +358,8 @@ export type AcceptCreateTriageAction = {
   projectId?: string
   /** The active Work Item Type to use for the new Work Item. */
   workItemTypeId?: string
+  /** Explicit custom field values supplied when the entry is converted into a Work Item. */
+  customFieldValues?: Record<string, CustomFieldValue | null>
 }
 
 /** Accepts an entry by linking it to an existing canonical Work Item. */
