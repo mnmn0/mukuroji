@@ -24,9 +24,10 @@ import {
   useTriageSettings,
 } from '../../triage/queries/useTriageQueries'
 import { TriageWorkbench } from '../../triage/ui/TriageWorkbench'
+import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
 import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
-import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
+import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 /**
@@ -49,6 +50,13 @@ export function TeamTriagePage() {
     workspace.accessToken,
     teamId,
     workspace.canLoadWorkspaceData && Boolean(activeTeam),
+  )
+  const hasPersonCustomFields = workItemConfigurationQuery.data?.configuration.customFields.some(
+    (definition) => definition.type === 'person',
+  ) ?? false
+  const { data: workspaceAccess, error: workspaceAccessError } = useWorkspaceAccess(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam) && hasPersonCustomFields,
   )
   const queue = useTriageQueue(
     workspace.accessToken,
@@ -106,18 +114,10 @@ export function TeamTriagePage() {
     }
     return membersByProject
   }, [projectMembers.data?.members])
-  const workItemPersonOptions = useMemo<readonly WorkItemPersonOption[]>(() => {
-    const membersById = new Map<string, WorkItemPersonOption>()
-    for (const access of projectMembers.data?.members ?? []) {
-      if (!isActiveProjectAssignmentCandidate(access.member)) continue
-      membersById.set(access.member.id, {
-        email: access.member.email,
-        id: access.member.id,
-        name: access.member.name ?? access.member.email,
-      })
-    }
-    return [...membersById.values()]
-  }, [projectMembers.data?.members])
+  const workItemPersonOptions = useMemo(
+    () => resolveWorkItemPersonOptions(workspaceAccess?.members ?? []),
+    [workspaceAccess?.members],
+  )
   const settings = useTriageSettings(
     workspace.accessToken,
     teamId,
@@ -172,6 +172,7 @@ export function TeamTriagePage() {
         detail.error,
         settings.error,
         workItemConfigurationQuery.error,
+        workspaceAccessError,
         mutation.error,
       ]}
     >
