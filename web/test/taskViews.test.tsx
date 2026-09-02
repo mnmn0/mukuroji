@@ -698,6 +698,35 @@ describe('independent task views', () => {
     expect(html).not.toContain('name="scheduleDueDate"')
   })
 
+  test('disables task creation when every Work Item Type is archived', () => {
+    const archivedConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+        status: 'archived',
+      }],
+    }
+    const html = renderToStaticMarkup(
+      <CreateTaskPanel
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={archivedConfiguration}
+        isAssigneeOptionsLoading={false}
+        isSubmitting={false}
+        locale="ja"
+        projectId="refero"
+        t={t}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+        onCancel={() => undefined}
+        onSubmit={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('すべての Work Item Type がアーカイブ済みです')
+    expect(html).toContain('data-testid="create-task-work-item-type" disabled=""')
+    expect(html).toContain('disabled="" type="submit"')
+  })
+
   test('carries view context into quick capture and exposes shared inline editors', () => {
     const quickHtml = renderToStaticMarkup(
       <CreateTaskPanel

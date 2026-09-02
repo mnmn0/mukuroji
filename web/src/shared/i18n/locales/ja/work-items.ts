@@ -349,6 +349,7 @@ export const workItemsMessages = {
   'tasks.create.context': '作業中の列・日付・担当者を引き継いでいます。',
   'tasks.create.workItemType': 'Work Item Type',
   'tasks.create.archived': 'アーカイブ済み',
+  'tasks.create.noActiveWorkItemTypes': 'すべての Work Item Type がアーカイブ済みです。新しく登録するにはいずれかを復元してください。',
   'tasks.board.addInColumn': 'この列に追加',
   'tasks.board.dragHint': 'ドラッグまたはステータス選択で移動',
   'tasks.calendar.addOnDate': 'この日に追加',

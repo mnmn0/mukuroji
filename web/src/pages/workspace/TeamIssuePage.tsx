@@ -2648,6 +2648,7 @@ function CreateIssuePanel({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
+  const hasCreatableWorkItemType = creatableWorkItemTypes.length > 0
   const contextualWorkItemTypeId = workItemTypeId && creatableWorkItemTypes.some((type) =>
     type.id === workItemTypeId,
   )
@@ -2745,6 +2746,7 @@ function CreateIssuePanel({
               <select
                 className="workbench-input h-10 w-full min-w-0 px-3"
                 data-testid="create-issue-work-item-type"
+                disabled={!hasCreatableWorkItemType}
                 name="workItemTypeId"
                 onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
                 value={effectiveWorkItemTypeId}
@@ -2758,6 +2760,11 @@ function CreateIssuePanel({
               {selectedWorkItemType?.description ? (
                 <span className="text-xs font-medium text-[var(--workbench-muted)]">
                   {selectedWorkItemType.description}
+                </span>
+              ) : null}
+              {!hasCreatableWorkItemType ? (
+                <span className="text-xs font-semibold text-amber-700">
+                  {t('tasks.create.noActiveWorkItemTypes')}
                 </span>
               ) : null}
             </label>
@@ -2844,7 +2851,7 @@ function CreateIssuePanel({
           </div>
         ) : null}
         <div className="flex flex-wrap items-center gap-2">
-          <button className="workbench-button-primary h-10 px-4" type="submit">
+          <button className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300" disabled={!hasCreatableWorkItemType} type="submit">
             {t('issues.create.submit')}
           </button>
           <button className="workbench-button-secondary h-10 px-4" onClick={onCancel} type="button">

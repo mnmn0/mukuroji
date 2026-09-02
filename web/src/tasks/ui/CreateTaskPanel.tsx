@@ -97,6 +97,7 @@ export function CreateTaskPanel({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
+  const hasCreatableWorkItemType = creatableWorkItemTypes.length > 0
   const contextualWorkItemTypeId = context?.workItemTypeId && creatableWorkItemTypes.some((type) =>
     type.id === context.workItemTypeId,
   )
@@ -248,7 +249,7 @@ export function CreateTaskPanel({
             <select
               className="workbench-input h-10 px-3"
               data-testid="create-task-work-item-type"
-              disabled={isSubmitting}
+              disabled={isSubmitting || !hasCreatableWorkItemType}
               name="workItemTypeId"
               onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
               value={effectiveWorkItemTypeId}
@@ -262,6 +263,11 @@ export function CreateTaskPanel({
             {selectedWorkItemType?.description ? (
               <span className="text-xs font-medium text-[var(--workbench-muted)]">
                 {selectedWorkItemType.description}
+              </span>
+            ) : null}
+            {!hasCreatableWorkItemType ? (
+              <span className="text-xs font-semibold text-amber-700">
+                {t('tasks.create.noActiveWorkItemTypes')}
               </span>
             ) : null}
           </label>
@@ -293,7 +299,7 @@ export function CreateTaskPanel({
             <div className="flex items-center gap-2">
               <button
                 className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
-                disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || !quickCaptureAssigneeUserId}
+                disabled={isSubmitting || !hasCreatableWorkItemType || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || !quickCaptureAssigneeUserId}
                 type="submit"
               >
                 {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
@@ -372,6 +378,7 @@ export function CreateTaskPanel({
                 className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
                 disabled={
                   isSubmitting ||
+                  !hasCreatableWorkItemType ||
                   isAssigneeOptionsLoading ||
                   Boolean(assigneeErrorMessage) ||
                   assigneeOptions.length === 0
