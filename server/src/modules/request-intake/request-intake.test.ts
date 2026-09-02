@@ -834,6 +834,7 @@ test('uses the first matching routing rule and maps a submission into a canonica
     title: 'Manual title',
     workItemTypeId: 'incident',
     assignedProjectId: 'project-manual',
+    workflowStatusId: 'triage',
     schedule: { dueDate: '2026-07-19', mode: 'due-date' },
     priority: 'low',
   })

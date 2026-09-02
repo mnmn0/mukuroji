@@ -9,7 +9,10 @@ import type { AiAssistanceController } from '../../features/ai-assistance/mutati
 import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageDraftComposer'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
-import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
+import {
+  resolveWorkItemTypeWorkflow,
+  resolveWorkItemTypes,
+} from '../../work-items/model/workItemDisplay'
 import {
   type RequestSubmissionModel,
 } from '../model/requestForm'
@@ -454,6 +457,16 @@ function RequestSubmissionDetail({
       : createTeamIssuesPath(submission.workItem.teamId, submission.workItem.id)
     : undefined
   const effectiveRouting = { ...submission.routing, ...conversionTargetOverride }
+  const effectiveWorkItemWorkflow = workItemConfiguration
+    ? resolveWorkItemTypeWorkflow(workItemConfiguration, effectiveWorkItemTypeId)
+    : undefined
+  const effectiveWorkflowStatusId = conversionTargetOverride.workflowStatusId !== undefined
+    ? effectiveRouting.workflowStatusId
+    : effectiveRouting.workflowStatusId && effectiveWorkItemWorkflow?.statuses.some(
+        (status) => status.id === effectiveRouting.workflowStatusId,
+      )
+      ? effectiveRouting.workflowStatusId
+      : effectiveWorkItemWorkflow?.initialStatusId ?? effectiveRouting.workflowStatusId
 
   return (
     <aside className="workbench-panel min-w-0 overflow-hidden" data-testid="request-submission-detail">
@@ -650,7 +663,7 @@ function RequestSubmissionDetail({
                   setConversionOverrideDirty(nextDirtyState)
                 }} />
                 <p className="break-words text-xs font-medium text-[var(--workbench-muted)]">
-                  {effectiveRouting.teamId} · {effectiveRouting.projectId ?? t('requests.routing.teamBacklog')} · {effectiveRouting.workflowStatusId ?? t('requests.routing.initialStatus')} · {effectiveRouting.assigneeUserId} · {t(`requests.priority.${effectiveRouting.priority}`)}
+                  {effectiveRouting.teamId} · {effectiveRouting.projectId ?? t('requests.routing.teamBacklog')} · {effectiveWorkflowStatusId ?? t('requests.routing.initialStatus')} · {effectiveRouting.assigneeUserId} · {t(`requests.priority.${effectiveRouting.priority}`)}
                 </p>
               </>
             ) : actionMode === 'assign' || actionMode === 'mark-duplicate' ? (

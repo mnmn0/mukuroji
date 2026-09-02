@@ -6347,7 +6347,11 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       conversion.target.projectId,
       'member',
     )
-    await validateRequestRoutingTarget(principal.directoryId, conversion.target)
+    await validateRequestRoutingTarget(
+      principal.directoryId,
+      conversion.target,
+      body.target?.workflowStatusId === undefined ? undefined : body.workItemTypeId,
+    )
     if (triageEntry && conversion.target.teamId !== triageEntry.teamId) {
       throw new RequestIntakeError(
         409,
@@ -6410,6 +6414,7 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       conversion.target.teamId,
       normalized,
       resolvedConfiguration,
+      { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
     )
     const authorizationConditionChecks = triageEntry
       ? await createTriageProjectAuthorizationConditionChecks(
@@ -23551,9 +23556,18 @@ function isCompatibleRequestCustomField(
   return false
 }
 
+/**
+ * Validates a Request routing target against the active Team directory and workflow.
+ *
+ * @param workspaceId - Workspace that owns the routing target.
+ * @param target - Routing target to validate.
+ * @param workflowTypeId - Optional Work Item Type whose workflow owns an explicit status override.
+ * @returns The resolved Team Work Item configuration.
+ */
 async function validateRequestRoutingTarget(
   workspaceId: string,
   target: RequestFormRoutingTarget,
+  workflowTypeId?: string,
 ) {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
   const team = directory.teams.find((candidate) => candidate.id === target.teamId)
@@ -23565,7 +23579,7 @@ async function validateRequestRoutingTarget(
   }
   await requireActiveWorkspaceAssignee(workspaceId, target.assigneeUserId)
   const resolved = await workItemDependencies.workItemConfigurations.getTeamConfiguration(workspaceId, target.teamId)
-  resolveWorkflowStatus(resolved.configuration, target.workflowStatusId)
+  resolveWorkflowStatus(resolved.configuration, target.workflowStatusId, workflowTypeId)
   return resolved.configuration
 }
 
@@ -25401,6 +25415,7 @@ async function acceptTriageEntryAsNewWorkItem(
     request.teamId,
     normalized,
     resolvedConfiguration,
+    { fallbackToTypeInitialStatus: formConversion !== undefined },
   )
   const acceptanceReferenceConditionChecks =
     await createTriageAcceptanceReferenceConditionChecks(
@@ -39110,11 +39125,22 @@ function rejectDerivedWorkItemScheduleFields(input: unknown): void {
   }
 }
 
+/**
+ * Resolves and validates a Work Item create body against the active configuration.
+ *
+ * @param directoryId - Workspace that owns the Work Item.
+ * @param teamId - Team whose configuration is authoritative.
+ * @param input - Normalized create body.
+ * @param resolved - Current Team or inherited Work Item configuration.
+ * @param options - Context-specific status resolution options.
+ * @returns A create body with canonical type, workflow, fields, and concurrency guards.
+ */
 async function prepareConfiguredCreateWorkItem(
   directoryId: string,
   teamId: string,
   input: CreateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
+  options: { fallbackToTypeInitialStatus?: boolean } = {},
 ): Promise<CreateTeamIssueRequestBody> {
   const { quickCapture, ...inputWithoutQuickCapture } = input
   if (quickCapture !== undefined && typeof quickCapture !== 'boolean') {
@@ -39128,9 +39154,20 @@ async function prepareConfiguredCreateWorkItem(
     resolved.configuration,
     input.workItemTypeId,
   )
+  const requestedWorkflowStatusId = typeof input.workflowStatusId === 'string'
+    ? input.workflowStatusId.trim()
+    : undefined
+  const typeWorkflow = resolveWorkItemTypeWorkflow(resolved.configuration, workItemType.id)
+  const workflowStatusId = options.fallbackToTypeInitialStatus &&
+    requestedWorkflowStatusId !== undefined &&
+    !typeWorkflow.statuses.some(
+      (status) => status.id === requestedWorkflowStatusId,
+    )
+    ? undefined
+    : input.workflowStatusId
   const workflowStatus = resolveWorkflowStatus(
     resolved.configuration,
-    input.workflowStatusId,
+    workflowStatusId,
     workItemType.id,
   )
   const isQuickCapture = quickCapture === true

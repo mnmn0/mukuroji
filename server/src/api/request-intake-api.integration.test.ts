@@ -4,7 +4,9 @@ import {
 const {
   app,
   configureFakeProjectClients,
+  createFakeWorkItemConfigurationClient,
   createTeamIssuesFake,
+  createTestWorkItemConfiguration,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
@@ -46,6 +48,7 @@ import {
   REQUEST_FORM_SCHEMA_VERSION,
   REQUEST_SUBMISSION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE,
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultUnscheduledWorkItemSchedule,
 } from '@mukuroji/contracts'
@@ -683,6 +686,135 @@ test('does not copy expired Form answers during legacy conversion', async () => 
   })
   expect(createdInput?.description).toBeUndefined()
   expect(createdInput?.title).not.toBe('Expired source answer')
+})
+
+test('uses the selected Work Item Type initial status when routing status is not in its workflow', async () => {
+  const submission = createLegacySubmission()
+  const entry = createLegacyTriageEntry(submission)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflows = [{
+    id: 'incident-workflow',
+    name: 'Incident workflow',
+    initialStatusId: 'incident-open',
+    statuses: [{
+      id: 'incident-open',
+      name: 'Open',
+      category: 'unstarted',
+      sortOrder: 10,
+    }],
+    transitions: [],
+  }]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'incident',
+    name: 'Incident',
+    defaultWorkflowId: 'incident-workflow',
+    allowedChildTypeIds: ['incident'],
+    sortOrder: 10,
+  }]
+  let createdInput: CreateTeamIssueRequestBody | undefined
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+  })
+  setTestAppDependencies({
+    triage: createLegacyTriageClient(entry),
+    requestIntake: createRequestIntakeClient({
+      getSubmission: async () => submission,
+      completeConversion: async () => ({
+        ...submission,
+        status: 'converted',
+        revision: submission.revision + 1,
+        workItem: {
+          teamId: 'core-team',
+          workItemId: 'incident-work-item',
+          projectId: 'refero',
+        },
+      }),
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(
+        _directoryId,
+        teamId,
+        input,
+        actorUserId,
+      ) {
+        createdInput = input
+        return {
+          issue: {
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+            revision: 1,
+            id: 'incident-work-item',
+            teamId,
+            assignedProjectId: 'refero',
+            title: String(input.title),
+            assigneeUserId: String(input.assigneeUserId),
+            creatorMemberKey: actorUserId,
+            workflowSchemaVersion: 1,
+            workflowStatusId: String(input.workflowStatusId),
+            statusCategory: 'unstarted',
+            customFieldValues: {},
+            relationIds: [],
+            dueDate: '',
+            schedule: createDefaultUnscheduledWorkItemSchedule(),
+            priority: 'medium',
+            createdAt: TRIAGE_NOW,
+            updatedAt: TRIAGE_NOW,
+            source: 'dynamodb',
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    `/api/request-submissions/${submission.id}/actions`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'typed-workflow-conversion',
+      },
+      body: JSON.stringify({
+        action: 'convert',
+        expectedRevision: 1,
+        workItemTypeId: 'incident',
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(createdInput).toMatchObject({
+    workItemTypeId: 'incident',
+    workflowStatusId: 'incident-open',
+  })
+
+  const explicitStatusResponse = await app.request(
+    `/api/request-submissions/${submission.id}/actions`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'typed-workflow-explicit-status-conversion',
+      },
+      body: JSON.stringify({
+        action: 'convert',
+        expectedRevision: 1,
+        workItemTypeId: 'incident',
+        target: { workflowStatusId: 'incident-open' },
+      }),
+    },
+  )
+
+  expect(explicitStatusResponse.status).toBe(200)
+  expect(createdInput?.workflowStatusId).toBe('incident-open')
 })
 
 test.each([
