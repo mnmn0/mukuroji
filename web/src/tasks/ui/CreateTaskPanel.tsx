@@ -11,6 +11,7 @@ import {
 import {
   createCustomFieldErrorMessages,
   resolveCreateWorkflowStatuses,
+  resolveCreatableWorkItemTypeId,
   resolveWorkItemPersonOptions,
   resolveWorkItemTypeDefinition,
   resolveWorkItemTypeFormFields,
@@ -107,9 +108,12 @@ export function CreateTaskPanel({
     creatableWorkItemTypes[0]?.id ??
     'default'
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(initialWorkItemTypeId)
-  const selectedWorkItemType = resolveWorkItemTypeDefinition(configuration, selectedWorkItemTypeId) ??
+  const effectiveWorkItemTypeId = resolveCreatableWorkItemTypeId(
+    workItemTypes,
+    selectedWorkItemTypeId,
+  )
+  const selectedWorkItemType = resolveWorkItemTypeDefinition(configuration, effectiveWorkItemTypeId) ??
     creatableWorkItemTypes[0]
-  const effectiveWorkItemTypeId = selectedWorkItemType?.id ?? 'default'
   const customFieldDefinitions = resolveWorkItemTypeFormFields(configuration, effectiveWorkItemTypeId)
   const workflowStatuses = resolveCreateWorkflowStatuses(configuration, effectiveWorkItemTypeId)
   const selectedWorkflow = resolveWorkItemTypeWorkflow(configuration, effectiveWorkItemTypeId)

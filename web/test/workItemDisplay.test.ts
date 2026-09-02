@@ -3,6 +3,8 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
+  DEFAULT_WORK_ITEM_TYPE,
+  type WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import {
@@ -10,6 +12,7 @@ import {
   createVisibleCustomFieldValuePatch,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
+  resolveCreatableWorkItemTypeId,
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../src/work-items/model/workItemDisplay'
@@ -42,6 +45,15 @@ describe('Work Item display helpers', () => {
       { id: 'issue-a', teamId: 'team-a' },
       { id: 'issue-b', teamId: 'team-b' },
     ], 'team-b')).toEqual([{ id: 'issue-b', teamId: 'team-b' }])
+  })
+
+  test('falls back to an active Work Item Type for creation', () => {
+    const workItemTypes = [
+      { ...DEFAULT_WORK_ITEM_TYPE, status: 'archived' } satisfies WorkItemTypeDefinition,
+      { ...DEFAULT_WORK_ITEM_TYPE, id: 'incident', name: 'Incident', sortOrder: 1 } satisfies WorkItemTypeDefinition,
+    ]
+    expect(resolveCreatableWorkItemTypeId(workItemTypes, 'default')).toBe('incident')
+    expect(resolveCreatableWorkItemTypeId(workItemTypes, 'missing')).toBe('incident')
   })
 
   test('translates and combines custom field validation messages', () => {

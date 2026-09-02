@@ -176,6 +176,7 @@ import {
   resolveWorkItemTypeCustomFields,
   resolveWorkItemTypeDefinition,
   resolveWorkItemTypeFormFields,
+  resolveCreatableWorkItemTypeId,
   resolveWorkItemTypes,
   resolveWorkItemTypeWorkflow,
   resolveWorkItemWorkflowStatusId,
@@ -2657,9 +2658,12 @@ function CreateIssuePanel({
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
     contextualWorkItemTypeId ?? creatableWorkItemTypes[0]?.id ?? 'default',
   )
-  const selectedWorkItemType = resolveWorkItemTypeDefinition(configuration, selectedWorkItemTypeId) ??
+  const effectiveWorkItemTypeId = resolveCreatableWorkItemTypeId(
+    workItemTypes,
+    selectedWorkItemTypeId,
+  )
+  const selectedWorkItemType = resolveWorkItemTypeDefinition(configuration, effectiveWorkItemTypeId) ??
     creatableWorkItemTypes[0]
-  const effectiveWorkItemTypeId = selectedWorkItemType?.id ?? 'default'
   const customFieldDefinitions = resolveWorkItemTypeFormFields(
     configuration,
     effectiveWorkItemTypeId,

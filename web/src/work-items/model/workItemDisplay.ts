@@ -121,6 +121,22 @@ export function resolveWorkItemTypeDefinition(
   )
 }
 
+/**
+ * Resolves a requested Work Item Type to an active creation option.
+ *
+ * @param workItemTypes - Work Item Types visible to the creation form.
+ * @param requestedTypeId - Previously selected or contextual Work Item Type ID.
+ * @returns An active Work Item Type ID, or the built-in fallback when none is active.
+ */
+export function resolveCreatableWorkItemTypeId(
+  workItemTypes: readonly WorkItemTypeDefinition[],
+  requestedTypeId?: string,
+): string {
+  return workItemTypes.find((type) =>
+    type.status === 'active' && type.id === requestedTypeId,
+  )?.id ?? workItemTypes.find((type) => type.status === 'active')?.id ?? DEFAULT_WORK_ITEM_TYPE_ID
+}
+
 /** Resolves the workflow selected by a Work Item Type for client-side forms. */
 export function resolveWorkItemTypeWorkflow(
   configuration: WorkItemConfigurationLike,
