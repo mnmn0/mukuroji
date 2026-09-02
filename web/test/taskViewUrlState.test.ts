@@ -81,7 +81,11 @@ describe('task view URL state', () => {
       scope: { kind: 'team', teamId: 'team-1' },
       viewId: 'view-1',
       override: {
-        filters: { teamIds: ['team-1'], keyword: 'alpha' },
+        filters: {
+          teamIds: ['team-1'],
+          workItemTypeIds: ['bug'],
+          keyword: 'alpha',
+        },
         layout: {
           columns: [{ field: 'title', width: 240 }, { field: 'status' }],
           displayOptions: { wrapText: true, showCompleted: false },
@@ -100,7 +104,11 @@ describe('task view URL state', () => {
           displayOptions: { showCompleted: false, wrapText: true },
           columns: [{ width: 240, field: 'title' }, { field: 'status' }],
         },
-        filters: { keyword: 'alpha', teamIds: ['team-1'] },
+        filters: {
+          keyword: 'alpha',
+          teamIds: ['team-1'],
+          workItemTypeIds: ['bug'],
+        },
       },
     } satisfies TaskViewUrlState
     const unrelated = [
