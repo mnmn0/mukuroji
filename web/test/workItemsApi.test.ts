@@ -66,6 +66,8 @@ describe('canonical Work Item API', () => {
           updatedAt: '2026-07-11T23:59:59.999Z',
         },
       },
+      { ...valid, workItemTypeId: 42 },
+      { ...valid, workItemTypeId: { id: 'bug' } },
     ]
     for (const candidate of invalidCandidates) {
       expect(isCanonicalWorkItem(candidate)).toBeFalse()

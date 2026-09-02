@@ -396,6 +396,7 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     typeof value.assigneeUserId === 'string' &&
     typeof value.creatorMemberKey === 'string' &&
     typeof value.workflowStatusId === 'string' &&
+    isOptionalString(value.workItemTypeId) &&
     isWorkItemStatusCategory(value.statusCategory) &&
     value.workflowSchemaVersion === WORK_ITEM_CONFIGURATION_SCHEMA_VERSION &&
     isRecord(value.customFieldValues) &&
