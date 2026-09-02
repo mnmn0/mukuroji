@@ -4190,6 +4190,7 @@ function IssueDetailContent({
         {
           expectedRevision: issue.revision,
           targetWorkItemTypeId,
+          assignedProjectId: selectedProjectId || null,
         },
       )
       if (typeChangeRequestSequenceRef.current !== requestSequence) return

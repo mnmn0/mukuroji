@@ -130,6 +130,7 @@ import {
 import {
   DynamoDbTeamIssuesClient,
   createWorkItemRevisionConditionCheck,
+  isTeamIssueNotFoundError,
   type TeamIssuesClient,
   type TriageDuplicateContextTransactionContribution,
   type WorkItemImportQueue,
@@ -429,6 +430,9 @@ export function createDefaultWorkItemConfigurationClient(): WorkItemConfiguratio
       }
     },
     async listRelations() {
+      return { relations: [], graphRevision: 0 }
+    },
+    async listRelationGraph() {
       return { relations: [], graphRevision: 0 }
     },
     async createRelation(_workspaceId, _teamId, input) {
@@ -975,6 +979,27 @@ function createTriageClient(
     validateAdmission,
     validateConfigurationReferences,
     validateActionReferences,
+    readCanonicalWorkItem: async (workspaceId, teamId, workItemId) => {
+      try {
+        const detail = await teamIssues.getTeamIssueDetail(
+          workspaceId,
+          teamId,
+          workItemId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        )
+        return {
+          ...(detail.issue.assignedProjectId === undefined
+            ? {}
+            : { projectId: detail.issue.assignedProjectId }),
+          ...(detail.issue.workItemTypeId === undefined
+            ? {}
+            : { workItemTypeId: detail.issue.workItemTypeId }),
+        }
+      } catch (error) {
+        if (isTeamIssueNotFoundError(error)) return undefined
+        throw error
+      }
+    },
     resolveWorkItemAction: async (workspaceId, entry, actor, action, now) => {
       if (action.action === 'accept' && action.mode === 'create') {
         throw new TriageError(

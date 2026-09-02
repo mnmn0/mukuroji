@@ -1,4 +1,5 @@
 import type { WorkItemPriority } from './work-items'
+import type { CustomFieldValue } from './work-item-configuration'
 
 /** 現在の Request Form schema version です。 */
 export const REQUEST_FORM_SCHEMA_VERSION = 1 as const
@@ -663,6 +664,8 @@ export type ConvertRequestSubmissionAction = {
   title?: string
   /** Mapping から生成した description を上書きする値です。 */
   description?: string
+  /** Selected Work Item Type の custom field values; null explicitly clears a mapped value. */
+  customFieldValues?: Record<string, CustomFieldValue | null>
 }
 
 /** Intake queue で許可する明示的な state transition input です。 */

@@ -509,6 +509,7 @@ import {
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
+  createWorkItemRelationGraphRevisionIncrementTransactionItem,
   getWorkItemConfigurationWorkflows,
   getWorkItemTypeCustomFieldDefinitions,
   normalizeCustomFieldValues,
@@ -517,6 +518,7 @@ import {
   resolveWorkItemTypeWorkflow,
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
+  type WorkItemConfigurationTransactionItems,
 } from '../modules/work-items/work-item-configuration'
 import { createWorkItemConfigurationScopeKey } from '../modules/work-items'
 import {
@@ -6409,10 +6411,19 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       principal.directoryId,
       conversion.target.teamId,
     )
+    const conversionInput = {
+      ...normalized,
+      customFieldValues: filterRequestConversionCustomFieldValues(
+        resolvedConfiguration.configuration,
+        normalized.workItemTypeId,
+        normalized.customFieldValues,
+        conversion.target.projectId,
+      ),
+    }
     const configured = await prepareConfiguredCreateWorkItem(
       principal.directoryId,
       conversion.target.teamId,
-      normalized,
+      conversionInput,
       resolvedConfiguration,
       { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
     )
@@ -9568,6 +9579,17 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/work-item-type-preview', async
       )
     }
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+    const proposedAssignedProjectId = 'assignedProjectId' in input
+      ? readAssignedProjectId(input.assignedProjectId)
+      : detail.issue.assignedProjectId
+    if ('assignedProjectId' in input) {
+      requireAssignedProjectPermission(
+        principal,
+        context,
+        proposedAssignedProjectId,
+        'member',
+      )
+    }
     const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
       principal.directoryId,
       teamId,
@@ -9578,7 +9600,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/work-item-type-preview', async
       detail.issue.workflowStatusId,
       detail.issue.customFieldValues,
       targetWorkItemTypeId,
-      detail.issue.assignedProjectId,
+      proposedAssignedProjectId ?? undefined,
       expectedRevision,
     )
     return c.json(preview)
@@ -13131,7 +13153,7 @@ async function executeAutomationTemplateApplication(
         configuration,
         async () => {
           await validateWorkItemConfigurationReferences(application.workspaceId, configuration)
-          await validateWorkItemConfigurationUsage(application.workspaceId, configuration)
+          return validateWorkItemConfigurationUsage(application.workspaceId, configuration)
         },
         completionTransactItems,
       )
@@ -13146,7 +13168,7 @@ async function executeAutomationTemplateApplication(
             configuration,
             target.scopeId,
           )
-          await validateWorkItemConfigurationUsage(
+          return validateWorkItemConfigurationUsage(
             application.workspaceId,
             configuration,
             target.scopeId,
@@ -14030,6 +14052,7 @@ async function executeAutomationWorkItemUpdate(
       context.execution.workspaceId,
       target.teamId,
     ),
+    { relationDependencies: dependencies },
   )
   if ('assigneeUserId' in configuredBody) {
     await requireActiveWorkspaceAssignee(
@@ -20489,8 +20512,33 @@ type AiAssistanceResolverState = {
     string,
     readonly AiAssistanceAuthorizationCondition[]
   >
-  /** Current workflow definitions keyed by each visible Team. */
-  workflowsByTeamId: ReadonlyMap<string, WorkItemConfiguration['workflow']>
+  /** Workflow definitions keyed by Team and Work Item Type. */
+  workItemTypeWorkflowsByTeamId: ReadonlyMap<
+    string,
+    ReadonlyMap<string, WorkItemConfiguration['workflow']>
+  >
+}
+
+/** Returns every stored or built-in Work Item Type identifier for a configuration. */
+function getAiWorkItemTypeIds(configuration: WorkItemConfiguration): readonly string[] {
+  return [
+    DEFAULT_WORK_ITEM_TYPE_ID,
+    ...(configuration.workItemTypes?.map((type) => type.id) ?? []),
+  ].filter((typeId, index, typeIds) => typeIds.indexOf(typeId) === index)
+}
+
+/** Resolves every Work Item Type to its selected workflow for AI planning and search. */
+function resolveAiWorkItemTypeWorkflows(
+  configuration: WorkItemConfiguration,
+): ReadonlyMap<string, WorkItemConfiguration['workflow']> {
+  return new Map(
+    getAiWorkItemTypeIds(configuration).map(
+      (typeId): [string, WorkItemConfiguration['workflow']] => [
+        typeId,
+        resolveWorkItemTypeWorkflow(configuration, typeId, { allowArchived: true }),
+      ],
+    ),
+  )
 }
 
 /**
@@ -20888,6 +20936,10 @@ async function resolveAiAssistanceContext(
       promptContext,
       candidateAllowedValues.projectIds,
     ),
+    workItemTypeIds: filterAiAllowedValuesVisibleInPrompt(
+      promptContext,
+      candidateAllowedValues.workItemTypeIds,
+    ),
     customFieldDefinitions: filterAiCustomFieldDefinitionsVisibleInPrompt(
       promptContext,
       candidateAllowedValues.customFieldDefinitions ?? [],
@@ -21276,9 +21328,27 @@ async function createAiAssistanceResolverState(
   )
   const modelTeamIds = task === 'triage' ? triageTeamIds : teamIds
   const modelProjectIds = task === 'triage' ? triageProjectIds : projectIds
+  const workItemTypeWorkflowsByTeamId = new Map<
+    string,
+    ReadonlyMap<string, WorkItemConfiguration['workflow']>
+  >(
+    configurations.map(({ team, resolved }): [
+      string,
+      ReadonlyMap<string, WorkItemConfiguration['workflow']>
+    ] => [
+      team.id,
+      resolveAiWorkItemTypeWorkflows(resolved.configuration),
+    ]),
+  )
+  const workItemTypeIds = uniqueAiAllowedValues(
+    [...workItemTypeWorkflowsByTeamId.values()].flatMap((workflows) => [...workflows.keys()]),
+    AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
+  )
   const statuses = uniqueAiAllowedValues(
-    configurations.flatMap(({ resolved }) =>
-      resolved.configuration.workflow.statuses.map((status) => status.id)
+    [...workItemTypeWorkflowsByTeamId.values()].flatMap((workflows) =>
+      [...workflows.values()].flatMap((workflow) =>
+        workflow.statuses.map((status) => status.id)
+      )
     ),
     AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
   )
@@ -21340,6 +21410,7 @@ async function createAiAssistanceResolverState(
     creatorUserIds: memberIds,
     teamIds: modelTeamIds,
     projectIds: modelProjectIds,
+    workItemTypeIds,
     customFieldIds,
     customFieldDefinitions: providerCustomFieldDefinitions.filter((definition) =>
       customFieldIds.includes(definition.fieldId)
@@ -21357,42 +21428,63 @@ async function createAiAssistanceResolverState(
           : { members: visibleMembers.map((member) => ({ id: member.id })) }),
         teams: configurations
           .filter(({ team }) => modelTeamIds.includes(team.id))
-          .map(({ team, resolved }) => ({
-            id: team.id,
-            ...(task === 'planning' ? {} : { name: team.name }),
-            ...(task === 'planning'
-              ? {}
-              : {
-                  projects: team.projects.flatMap((project) =>
-                    modelProjectIds.includes(project.id)
-                      ? [{ id: project.id, name: project.name }]
-                      : []
-                  ),
-                }),
-            workflow: resolved.configuration.workflow.statuses.map((status) => ({
-              id: status.id,
-              name: status.name,
-              category: status.category,
-            })),
-            ...(task === 'planning'
-              ? {}
-              : {
-                  customFields: resolved.configuration.customFields.flatMap((field) =>
-                    field.type === 'formula' || sensitiveCustomFieldIds.has(field.id) ||
-                      (task === 'search' && customFieldDefinitionCounts.get(field.id) !== 1)
-                      ? []
-                      : [{
-                          id: field.id,
-                          name: field.name,
-                          type: field.type,
-                          required: field.required,
-                          options: field.options?.map((option) => ({
-                            id: option.id,
-                          })),
-                        }]
-                  ),
-                }),
-          })),
+          .map(({ team, resolved }) => {
+            const typeWorkflows = workItemTypeWorkflowsByTeamId.get(team.id) ??
+              new Map<string, WorkItemConfiguration['workflow']>()
+            return {
+              id: team.id,
+              ...(task === 'planning' ? {} : { name: team.name }),
+              ...(task === 'planning'
+                ? {}
+                : {
+                    projects: team.projects.flatMap((project) =>
+                      modelProjectIds.includes(project.id)
+                        ? [{ id: project.id, name: project.name }]
+                        : []
+                    ),
+                  }),
+              workItemTypes: [...typeWorkflows.entries()].map(([typeId, workflow]) => {
+                const type = resolveWorkItemType(
+                  resolved.configuration,
+                  typeId,
+                  { allowArchived: true },
+                )
+                return {
+                  id: type.id,
+                  name: type.name,
+                  status: type.status,
+                  workflow: {
+                    id: workflow.id,
+                    name: workflow.name,
+                    initialStatusId: workflow.initialStatusId,
+                    statuses: workflow.statuses.map((status) => ({
+                      id: status.id,
+                      name: status.name,
+                      category: status.category,
+                    })),
+                  },
+                }
+              }),
+              ...(task === 'planning'
+                ? {}
+                : {
+                    customFields: resolved.configuration.customFields.flatMap((field) =>
+                      field.type === 'formula' || sensitiveCustomFieldIds.has(field.id) ||
+                        (task === 'search' && customFieldDefinitionCounts.get(field.id) !== 1)
+                        ? []
+                        : [{
+                            id: field.id,
+                            name: field.name,
+                            type: field.type,
+                            required: field.required,
+                            options: field.options?.map((option) => ({
+                              id: option.id,
+                            })),
+                          }]
+                    ),
+                  }),
+            }
+          }),
         ...(task === 'search'
           ? {
               supportedEntityTypes: [
@@ -21429,10 +21521,7 @@ async function createAiAssistanceResolverState(
         resolved,
       ),
     ])),
-    workflowsByTeamId: new Map(configurations.map(({ team, resolved }) => [
-      team.id,
-      resolved.configuration.workflow,
-    ])),
+    workItemTypeWorkflowsByTeamId,
     triageRoutingFence,
     fence: {
       workspaceId: principal.directoryId,
@@ -21460,25 +21549,34 @@ async function createAiAssistanceResolverState(
         version: member.version,
         updatedAt: member.updatedAt,
       })),
-      configurations: configurations.map(({ team, resolved }) => ({
-        teamId: team.id,
-        scopeType: resolved.configuration.scopeType,
-        scopeId: resolved.configuration.scopeId,
-        revision: resolved.configuration.revision,
-        statusIds: resolved.configuration.workflow.statuses
-          .map((status) => status.id)
-          .sort(),
-        transitions: resolved.configuration.workflow.transitions
-          .map((transition) => ({
-            fromStatusId: transition.fromStatusId,
-            toStatusId: transition.toStatusId,
-          }))
-          .sort((left, right) => left.fromStatusId.localeCompare(right.fromStatusId) ||
-            left.toStatusId.localeCompare(right.toStatusId)),
-        customFieldIds: resolved.configuration.customFields
-          .map((field) => field.id)
-          .sort(),
-      })),
+      configurations: configurations.map(({ team, resolved }) => {
+        const typeWorkflows = workItemTypeWorkflowsByTeamId.get(team.id) ??
+          new Map<string, WorkItemConfiguration['workflow']>()
+        return {
+          teamId: team.id,
+          scopeType: resolved.configuration.scopeType,
+          scopeId: resolved.configuration.scopeId,
+          revision: resolved.configuration.revision,
+          workItemTypes: [...typeWorkflows.entries()]
+            .map(([typeId, workflow]) => ({
+              typeId,
+              workflowId: workflow.id,
+              initialStatusId: workflow.initialStatusId,
+              statusIds: workflow.statuses.map((status) => status.id).sort(),
+              transitions: workflow.transitions
+                .map((transition) => ({
+                  fromStatusId: transition.fromStatusId,
+                  toStatusId: transition.toStatusId,
+                }))
+                .sort((left, right) => left.fromStatusId.localeCompare(right.fromStatusId) ||
+                  left.toStatusId.localeCompare(right.toStatusId)),
+            }))
+            .sort((left, right) => left.typeId.localeCompare(right.typeId)),
+          customFieldIds: resolved.configuration.customFields
+            .map((field) => field.id)
+            .sort(),
+        }
+      }),
     },
   }
 }
@@ -21642,15 +21740,21 @@ async function createAiAssistanceSelectedDraftAuthorizationConditions(
       }
     }
     const selectedStatusIds = new Set(draft.filters.statuses ?? [])
+    const selectedWorkItemTypeIds = new Set(draft.filters.workItemTypeIds ?? [])
     const selectedCustomFieldIds = new Set(
       (draft.filters.customFields ?? []).map((filter) => filter.fieldId),
     )
-    for (const [teamId, workflow] of state.workflowsByTeamId) {
-      const statusMatches = workflow.statuses.some((status) => selectedStatusIds.has(status.id))
+    for (const [teamId, workflows] of state.workItemTypeWorkflowsByTeamId) {
+      const typeMatches = [...workflows.keys()].some((typeId) =>
+        selectedWorkItemTypeIds.has(typeId)
+      )
+      const statusMatches = [...workflows.values()].some((workflow) =>
+        workflow.statuses.some((status) => selectedStatusIds.has(status.id))
+      )
       const customFieldMatches = [...selectedCustomFieldIds].some((fieldId) =>
         state.customFieldIdsByTeamId.get(teamId)?.has(fieldId) === true
       )
-      if (statusMatches || customFieldMatches) selectedConfigurationTeamIds.add(teamId)
+      if (typeMatches || statusMatches || customFieldMatches) selectedConfigurationTeamIds.add(teamId)
     }
     for (const teamId of selectedConfigurationTeamIds) {
       const configurationConditions = state.configurationAuthorizationConditionsByTeamId.get(
@@ -22342,7 +22446,9 @@ async function resolveAiWorkItemSource(
       workItemId: candidate.id,
     })),
   ])
-  const workflow = state.workflowsByTeamId.get(source.teamId)
+  const workflow = state.workItemTypeWorkflowsByTeamId
+    .get(source.teamId)
+    ?.get(detail.issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID)
   const workflowStatusIds = uniqueAiAllowedValues([
     detail.issue.workflowStatusId,
     ...(workflow?.transitions
@@ -22359,7 +22465,11 @@ async function resolveAiWorkItemSource(
     workItem: {
       id: detail.issue.id,
       teamId: detail.issue.teamId,
+      workItemTypeId: detail.issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
       projectId: detail.issue.assignedProjectId,
+      ...(workflow === undefined
+        ? {}
+        : { workflowStatusIds: workflow.statuses.map((status) => status.id) }),
       title: detail.issue.title,
       priority: detail.issue.priority,
       ...(safeAssigneeUserId === undefined
@@ -25410,10 +25520,19 @@ async function acceptTriageEntryAsNewWorkItem(
     idempotentIssueId: issueId,
     idempotentRequestDigest: request.idempotency.fingerprint,
   }, teamContext.team)
+  const conversionInput = {
+    ...normalized,
+    customFieldValues: filterRequestConversionCustomFieldValues(
+      resolvedConfiguration.configuration,
+      normalized.workItemTypeId,
+      'customFieldValues' in normalized ? normalized.customFieldValues : undefined,
+      assignedProjectId ?? undefined,
+    ),
+  }
   const configured = await prepareConfiguredCreateWorkItem(
     request.workspaceId,
     request.teamId,
-    normalized,
+    conversionInput,
     resolvedConfiguration,
     { fallbackToTypeInitialStatus: formConversion !== undefined },
   )
@@ -38987,6 +39106,29 @@ function normalizeTeamIssueInput<TInput extends CreateTeamIssueRequestBody | Upd
   }
 }
 
+/** Removes Request mapping values that are outside the selected Work Item Type scope. */
+function filterRequestConversionCustomFieldValues(
+  configuration: WorkItemConfiguration,
+  typeId: unknown,
+  values: unknown,
+  projectId?: string,
+): unknown {
+  if (!isRecord(values)) return values
+  const type = resolveWorkItemType(configuration, typeId)
+  const allowedFieldIds = new Set(
+    getWorkItemTypeCustomFieldDefinitions(configuration, type.id)
+      .filter((definition) =>
+        definition.type !== 'formula' &&
+        (!definition.projectIds || definition.projectIds.length === 0 ||
+          Boolean(projectId && definition.projectIds.includes(projectId)))
+      )
+      .map((definition) => definition.id),
+  )
+  return Object.fromEntries(Object.entries(values).filter(([fieldId]) =>
+    allowedFieldIds.has(fieldId),
+  ))
+}
+
 /** Parses the explicit acknowledgement sent with a Work Item Type change. */
 function readWorkItemTypeChangeResolution(
   value: unknown,
@@ -39220,6 +39362,9 @@ async function prepareConfiguredUpdateWorkItem(
   current: TeamIssueResponseItem,
   input: UpdateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
+  options: {
+    relationDependencies?: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>
+  } = {},
 ): Promise<UpdateTeamIssueRequestBody> {
   const currentWorkItemType = resolveWorkItemType(
     resolved.configuration,
@@ -39321,6 +39466,16 @@ async function prepareConfiguredUpdateWorkItem(
     projectId,
     targetWorkItemType.id,
   )
+  const relationTransactionItems = typeChanged
+    ? await createWorkItemTypeRelationConfigurationTransactionItems(
+        directoryId,
+        teamId,
+        current,
+        targetWorkItemType.id,
+        resolved.configuration,
+        options.relationDependencies,
+      )
+    : []
   return {
     ...inputWithoutTypeChangeResolution,
     workItemTypeId: targetWorkItemType.id,
@@ -39333,8 +39488,73 @@ async function prepareConfiguredUpdateWorkItem(
       directoryId,
       teamId,
       resolved,
-    ),
+    ).concat(relationTransactionItems),
   }
+}
+
+/** Reads a Work Item's parent/child relations and fences their graph revision during a type change. */
+async function createWorkItemTypeRelationConfigurationTransactionItems(
+  directoryId: string,
+  teamId: string,
+  current: TeamIssueResponseItem,
+  targetTypeId: string,
+  configuration: WorkItemConfiguration,
+  relationDependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'> =
+    workItemDependencies,
+): Promise<WorkItemConfigurationTransactionItems> {
+  const relationPage = await relationDependencies.workItemConfigurations.listRelationGraph(
+    directoryId,
+    teamId,
+  )
+  const typeChangedRelations = relationPage.relations.filter((relation) =>
+    (relation.sourceWorkItemId === current.id || relation.targetWorkItemId === current.id) &&
+      (relation.type === 'parent' || relation.type === 'child'),
+  )
+  await Promise.all(typeChangedRelations.map(async (relation) => {
+    const currentIsSource = relation.sourceWorkItemId === current.id
+    const relatedWorkItemId = currentIsSource
+      ? relation.targetWorkItemId
+      : relation.sourceWorkItemId
+    let targetDetail: TeamIssueDetailResponse
+    try {
+      targetDetail = await relationDependencies.teamIssues.getTeamIssueDetail(
+        directoryId,
+        teamId,
+        relatedWorkItemId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      )
+    } catch (error) {
+      if (isTeamIssueNotFoundError(error)) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemRelationInconsistent',
+          'A Work Item relation points to a missing endpoint.',
+        )
+      }
+      throw error
+    }
+    if (relation.type === 'parent') {
+      assertWorkItemChildTypeAllowed(
+        configuration,
+        currentIsSource ? targetDetail.issue.workItemTypeId : targetTypeId,
+        currentIsSource ? targetTypeId : targetDetail.issue.workItemTypeId,
+      )
+      return
+    }
+    assertWorkItemChildTypeAllowed(
+      configuration,
+      currentIsSource ? targetTypeId : targetDetail.issue.workItemTypeId,
+      currentIsSource ? targetDetail.issue.workItemTypeId : targetTypeId,
+    )
+  }))
+  return typeChangedRelations.length === 0
+    ? []
+    : [createWorkItemRelationGraphRevisionIncrementTransactionItem(
+        getWorkItemConfigurationTableName(),
+        directoryId,
+        teamId,
+        relationPage.graphRevision,
+      )]
 }
 
 async function requireActiveCustomFieldPeople(
@@ -39403,11 +39623,12 @@ async function validateWorkItemConfigurationUsage(
   directoryId: string,
   configuration: WorkItemConfiguration,
   teamId?: string,
-) {
+): Promise<WorkItemConfigurationTransactionItems> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(directoryId, 'ja')
   const targetTeamIds = teamId
     ? [teamId]
     : directory.teams.map((team) => team.id)
+  const relationConditionChecks: WorkItemConfigurationTransactionItems = []
 
   for (const targetTeamId of targetTeamIds) {
     if (!teamId) {
@@ -39420,6 +39641,10 @@ async function validateWorkItemConfigurationUsage(
       }
     }
 
+    const relationGraph = await workItemDependencies.workItemConfigurations.listRelationGraph(
+      directoryId,
+      targetTeamId,
+    )
     const readLimit = createWorkItemListProbeLimit(WORK_ITEMS_PARTITION_SCAN_LIMIT)
     const response = await workItemDependencies.teamIssues.getTeamIssues(
       directoryId,
@@ -39438,7 +39663,40 @@ async function validateWorkItemConfigurationUsage(
     for (const workItem of response.issues) {
       assertWorkItemConfigurationUsage(workItem, configuration)
     }
+    const workItemsById = new Map(response.issues.map((workItem) => [workItem.id, workItem]))
+    for (const relation of relationGraph.relations) {
+      if (relation.type !== 'parent' && relation.type !== 'child') continue
+      const source = workItemsById.get(relation.sourceWorkItemId)
+      const target = workItemsById.get(relation.targetWorkItemId)
+      if (!source || !target) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemConfigurationInUse',
+          `Team "${targetTeamId}" contains a relation to a missing Work Item.`,
+        )
+      }
+      if (relation.type === 'parent') {
+        assertWorkItemChildTypeAllowed(
+          configuration,
+          target.workItemTypeId,
+          source.workItemTypeId,
+        )
+      } else {
+        assertWorkItemChildTypeAllowed(
+          configuration,
+          source.workItemTypeId,
+          target.workItemTypeId,
+        )
+      }
+    }
+    relationConditionChecks.push(createWorkItemRelationGraphRevisionConditionCheck(
+      getWorkItemConfigurationTableName(),
+      directoryId,
+      targetTeamId,
+      relationGraph.graphRevision,
+    ))
   }
+  return relationConditionChecks
 }
 
 function assertWorkItemConfigurationUsage(

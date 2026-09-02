@@ -86,6 +86,8 @@ export type PreviewWorkItemTypeChangeInput = {
   expectedRevision: number
   /** Type that would replace the current Work Item Type. */
   targetWorkItemTypeId: string
+  /** Proposed Project assignment; `null` previews clearing the assignment. */
+  assignedProjectId?: string | null
 }
 
 /** Server-calculated impact of changing a Work Item Type. */

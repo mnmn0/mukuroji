@@ -75,6 +75,7 @@ function createDependencies(
       return resolvedConfiguration
     },
     listRelations: unsupportedOperation,
+    listRelationGraph: unsupportedOperation,
     createRelation: unsupportedOperation,
     deleteRelation: unsupportedOperation,
   } satisfies WorkItemConfigurationClient

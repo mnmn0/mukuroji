@@ -673,6 +673,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
           creatorUserIds: ['creator@example.com'],
           teamIds: configuration.teamIds ?? ['team-1'],
           projectIds: configuration.projectIds ?? ['project-1'],
+          workItemTypeIds: ['default'],
           customFieldIds: configuration.customFieldDefinitions === undefined
             ? ['field-1']
             : [...new Set(configuration.customFieldDefinitions.map((definition) =>

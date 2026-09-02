@@ -51,6 +51,7 @@ const RELATION_GRAPH_RECORD_KEY = 'RELATION_GRAPH'
 const RELATION_RECORD_PREFIX = 'REL#'
 const RELATION_SCAN_LIMIT = 2_000
 const WORK_ITEM_RELATION_ID_LIMIT = 100
+const DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
 const MAX_CUSTOM_FIELD_TEXT_LENGTH = 10_000
 const MAX_FORMULA_EXPRESSION_LENGTH = 1_024
 const CONFIGURATION_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
@@ -139,8 +140,70 @@ export function createWorkItemRelationGraphRevisionConditionCheck(
   }
 }
 
-/** Configuration lock 取得後に実行する既存 Work Item の参照整合性検査です。 */
-export type WorkItemConfigurationUsageCheck = () => Promise<void>
+/**
+ * Creates an atomic relation graph revision increment for a Work Item Type change.
+ *
+ * The relation graph revision covers endpoint Work Item Types as well as relation edges,
+ * so configuration validation and concurrent endpoint type changes can share one fence.
+ *
+ * @param tableName - Work Item configuration table containing relation metadata.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team whose relation graph is being changed.
+ * @param expectedRevision - Positive graph revision observed by the caller's strong read.
+ * @returns One DynamoDB Update ready for a Work Item mutation transaction.
+ */
+export function createWorkItemRelationGraphRevisionIncrementTransactionItem(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  expectedRevision: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (
+    !Number.isSafeInteger(expectedRevision) ||
+    expectedRevision < 1 ||
+    expectedRevision >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemRelationGraphRevision',
+      'Work Item relation graph revision must be a positive safe integer below the maximum.',
+    )
+  }
+  return {
+    Update: {
+      TableName: tableName,
+      Key: {
+        scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+        recordKey: RELATION_GRAPH_RECORD_KEY,
+      },
+      UpdateExpression: 'SET #revision = :nextRevision',
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        '#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'relation-graph',
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedRevision': expectedRevision,
+        ':nextRevision': expectedRevision + 1,
+      },
+    },
+  }
+}
+
+/** DynamoDB transaction items contributed by a configuration validation boundary. */
+export type WorkItemConfigurationTransactionItems = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>
+
+/** Runs existing Work Item validation and contributes commit-time condition checks. */
+export type WorkItemConfigurationUsageCheck = () => Promise<
+  WorkItemConfigurationTransactionItems | void
+>
 
 /** Custom field value の正規化条件です。 */
 export type NormalizeCustomFieldValuesOptions = {
@@ -218,7 +281,7 @@ export type WorkItemConfigurationClient = {
    * @param teamId - Team whose complete relation graph is read.
    * @returns All directed relations and their stable graph revision.
    */
-  listRelationGraph?(workspaceId: string, teamId: string): Promise<WorkItemRelationsResponse>
+  listRelationGraph(workspaceId: string, teamId: string): Promise<WorkItemRelationsResponse>
   /**
    * Reads the current canonical relation graph revision for recurrence-sensitive projections.
    *
@@ -1074,11 +1137,22 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         console.error('Failed to release Work Item configuration write lock.', releaseError)
       }
     }
+    let usageConditionChecks: WorkItemConfigurationTransactionItems = []
     try {
-      await usageCheck()
+      usageConditionChecks = (await usageCheck()) ?? []
     } catch (error) {
       await releaseLock()
       throw error
+    }
+
+    const transactionItemCount = 2 + usageConditionChecks.length + completionTransactItems.length
+    if (transactionItemCount > DYNAMODB_TRANSACTION_ITEM_LIMIT) {
+      await releaseLock()
+      throw new WorkItemConfigurationError(
+        413,
+        'WorkItemConfigurationTransactionTooLarge',
+        'Work Item configuration changes exceed the transaction limit.',
+      )
     }
 
     const currentEpochSeconds = Math.floor(Date.now() / 1_000)
@@ -1116,6 +1190,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
               },
             },
           },
+          ...usageConditionChecks,
           ...completionTransactItems,
         ],
       }))
@@ -1123,7 +1198,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       await releaseLock()
       if (
         isNamedError(error, 'ConditionalCheckFailedException') ||
-        isConfigurationConditionalTransactionCancellation(error)
+        isConfigurationConditionalTransactionCancellation(error) ||
+        usageConditionChecks.some((_, index) =>
+          isTransactionConditionalFailureAt(error, 2 + index),
+        )
       ) {
         throw new WorkItemConfigurationError(
           409,
@@ -2594,10 +2672,10 @@ function isConfigurationConditionalTransactionCancellation(error: unknown) {
     return false
   }
   const reasons = error.CancellationReasons
-  if (!Array.isArray(reasons) || reasons.length !== 2) {
+  if (!Array.isArray(reasons) || reasons.length < 2) {
     return false
   }
-  const reasonCodes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
+  const reasonCodes = reasons.slice(0, 2).map((reason) => isRecord(reason) ? reason.Code : undefined)
   return reasonCodes.includes('ConditionalCheckFailed') &&
     reasonCodes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')
 }

@@ -79,6 +79,7 @@ export {
   type TriageAdmissionValidationContribution,
   type TriageAdmissionValidator,
   type TriageActionReferenceValidator,
+  type TriageCanonicalWorkItemReader,
   type TriageConfigurationReferenceValidator,
 } from './adapter-out/dynamodb/dynamo-db-triage-client'
 

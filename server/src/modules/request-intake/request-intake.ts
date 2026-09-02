@@ -719,6 +719,13 @@ export function createRequestWorkItemInput(
       },
     ),
   )
+  for (const [fieldId, value] of Object.entries(overrides.customFieldValues ?? {})) {
+    if (value === null) {
+      delete customFieldValues[fieldId]
+    } else {
+      customFieldValues[fieldId] = value
+    }
+  }
   const dueDate = new Date(`${submission.createdAt.slice(0, 10)}T00:00:00.000Z`)
   dueDate.setUTCDate(dueDate.getUTCDate() + target.dueDateOffsetDays)
   const scheduleDueDate = dueDate.toISOString().slice(0, 10)

@@ -12,6 +12,7 @@ import {
   createWorkItemConfigurationScopeKey,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
+  createWorkItemRelationGraphRevisionIncrementTransactionItem,
   isCanonicalWorkItemRelationIds,
   normalizeCustomFieldValues,
   previewWorkItemTypeChange,
@@ -787,12 +788,21 @@ test('saves configuration with revision CAS and returns the incremented revision
       UpdateExpression: 'SET #status = :succeeded',
     },
   }
+  const usageConditionCheck = {
+    ConditionCheck: {
+      TableName: 'configuration-table',
+      Key: { scopeKey: 'workspace-1#team#core-team#work-item-configuration', recordKey: 'RELATION_GRAPH' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 4 },
+    },
+  }
 
   const response = await client.saveTeamConfiguration(
     'workspace-1',
     'core-team',
     createConfiguration({ scopeType: 'team', scopeId: 'core-team', revision: 2 }),
-    async () => undefined,
+    async () => [usageConditionCheck],
     [completion],
   )
 
@@ -814,8 +824,41 @@ test('saves configuration with revision CAS and returns the incremented revision
           ConditionExpression: '#token = :token AND #expiresAt >= :now',
         },
       },
+      usageConditionCheck,
       completion,
     ],
+  })
+})
+
+test('creates an atomic relation graph revision fence for a related Work Item type change', () => {
+  expect(createWorkItemRelationGraphRevisionIncrementTransactionItem(
+    'configuration-table',
+    'workspace-1',
+    'core-team',
+    4,
+  )).toEqual({
+    Update: {
+      TableName: 'configuration-table',
+      Key: {
+        scopeKey: 'workspace-1#team#core-team#work-item-configuration',
+        recordKey: 'RELATION_GRAPH',
+      },
+      UpdateExpression: 'SET #revision = :nextRevision',
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        '#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'relation-graph',
+        ':schemaVersion': 1,
+        ':expectedRevision': 4,
+        ':nextRevision': 5,
+      },
+    },
   })
 })
 

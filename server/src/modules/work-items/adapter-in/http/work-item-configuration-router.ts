@@ -1,6 +1,9 @@
 import { Hono, type Context } from 'hono'
 import type { WorkItemConfiguration } from '@mukuroji/contracts'
-import type { WorkItemConfigurationClient } from '../../work-item-configuration'
+import type {
+  WorkItemConfigurationClient,
+  WorkItemConfigurationTransactionItems,
+} from '../../work-item-configuration'
 
 /** The minimum principal boundary required by the Work Item configuration adapter. */
 export type WorkItemConfigurationPrincipal = {
@@ -53,7 +56,7 @@ export type WorkItemConfigurationRouterDependencies<
     workspaceId: string,
     configuration: WorkItemConfiguration,
     teamId?: string,
-  ): Promise<void>
+  ): Promise<WorkItemConfigurationTransactionItems | void>
   /** Converts a Work Item configuration error into an HTTP response. */
   mapError(context: Context, error: unknown): Response
 }
@@ -107,7 +110,7 @@ export function createWorkItemConfigurationRouter<
         configuration,
         async () => {
           await dependencies.validateReferences(principal.directoryId, configuration)
-          await dependencies.validateUsage(principal.directoryId, configuration)
+          return dependencies.validateUsage(principal.directoryId, configuration)
         },
       ))
     } catch (error) {
@@ -166,7 +169,7 @@ export function createWorkItemConfigurationRouter<
         configuration,
         async () => {
           await dependencies.validateReferences(principal.directoryId, configuration, teamId)
-          await dependencies.validateUsage(principal.directoryId, configuration, teamId)
+          return dependencies.validateUsage(principal.directoryId, configuration, teamId)
         },
       ))
     } catch (error) {

@@ -50,6 +50,7 @@ export {
   assertWorkItemTypeChangeResolution,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationGraphRevisionConditionCheck,
+  createWorkItemRelationGraphRevisionIncrementTransactionItem,
   createWorkItemConfigurationScopeKey,
   createWorkItemRelationIds,
   getWorkItemConfigurationWorkflows,
@@ -68,6 +69,7 @@ export {
   type ResolvedWorkflowStatus,
   type WorkItemConfigurationClient,
   type WorkItemConfigurationGuard,
+  type WorkItemConfigurationTransactionItems,
   type WorkItemConfigurationUsageCheck,
 } from './work-item-configuration'
 export {

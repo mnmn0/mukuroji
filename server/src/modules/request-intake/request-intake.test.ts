@@ -828,6 +828,10 @@ test('uses the first matching routing rule and maps a submission into a canonica
         dueDateOffsetDays: 3,
         priority: 'low',
       },
+      customFieldValues: {
+        'request-channel': null,
+        estimate: 13,
+      },
     },
   )
   expect(overridden.input).toMatchObject({
@@ -838,6 +842,7 @@ test('uses the first matching routing rule and maps a submission into a canonica
     schedule: { dueDate: '2026-07-19', mode: 'due-date' },
     priority: 'low',
   })
+  expect(overridden.input.customFieldValues).toEqual({ estimate: 13 })
 })
 
 test('creates a form with a digest-keyed link lookup and CAS-protected form row', async () => {

@@ -291,6 +291,8 @@ export type RequestSubmissionModel = {
   capabilities: RequestSubmission['capabilities']
   /** Submit 時点で固定した routing target です。 */
   routing: RequestSubmission['routingTarget']
+  /** Submit 時点で固定した Work Item field mapping です。 */
+  workItemMapping: RequestSubmission['workItemMapping']
 }
 
 /**
@@ -683,6 +685,15 @@ export function normalizeRequestSubmission(submission: RequestSubmission): Reque
     source: submission.source,
     status: submission.status,
     summary: typeof summary === 'string' ? summary : submission.receiptId,
+    workItemMapping: {
+      ...submission.workItemMapping,
+      ...(submission.workItemMapping.descriptionFieldIds === undefined
+        ? {}
+        : { descriptionFieldIds: [...submission.workItemMapping.descriptionFieldIds] }),
+      ...(submission.workItemMapping.customFieldMappings === undefined
+        ? {}
+        : { customFieldMappings: { ...submission.workItemMapping.customFieldMappings } }),
+    },
     workItem: submission.workItem
       ? {
           id: submission.workItem.workItemId,

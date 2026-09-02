@@ -855,6 +855,9 @@ function createFakeWorkItemConfigurationClient(
     async listRelations() {
       return { relations: [], graphRevision: 0 }
     },
+    async listRelationGraph() {
+      return { relations: [], graphRevision: 0 }
+    },
     async createRelation(_workspaceId, _teamId, input) {
       return createFakeRelationMutationResponse(input)
     },
