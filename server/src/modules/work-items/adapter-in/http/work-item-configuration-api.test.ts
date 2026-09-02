@@ -21,6 +21,7 @@ import {
   WorkItemConfigurationError,
 } from '../../work-item-configuration'
 import {
+  DEFAULT_WORK_ITEM_TYPE,
   createDefaultDueDateWorkItemSchedule,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -489,6 +490,95 @@ test('rejects a disallowed configured workflow transition before updating a Work
     message: 'Transition from "in-progress" to "done" is not allowed.',
   })
   expect(calls.issueUpdates).toEqual([])
+})
+
+test('validates parent relation type restrictions from the child source perspective', async () => {
+  configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workItemTypes = [
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: configuration.workflow.id,
+      sortOrder: 0,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'parent',
+      name: 'Parent',
+      iconToken: 'folder',
+      allowedChildTypeIds: ['child'],
+      sortOrder: 10,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'child',
+      name: 'Child',
+      iconToken: 'check',
+      allowedChildTypeIds: [],
+      sortOrder: 20,
+    },
+  ]
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
+  const creates: unknown[] = []
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssueDetail(directoryId, teamId, issueId, readOptions) {
+        const detail = await existingTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          readOptions,
+        )
+        return {
+          ...detail,
+          issue: {
+            ...detail.issue,
+            workItemTypeId: issueId === 'onboarding-friction' ? 'child' : 'parent',
+          },
+        }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async createRelation(_workspaceId, _teamId, input) {
+        creates.push(input)
+        return {
+          relation: {
+            sourceWorkItemId: input.sourceWorkItemId,
+            targetWorkItemId: input.targetWorkItemId,
+            type: input.type,
+          },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'child',
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'parent',
+        targetWorkItemId: 'parent-issue',
+        expectedGraphRevision: 0,
+      }),
+    },
+  )
+
+  expect(response.status).toBe(201)
+  expect(creates).toHaveLength(1)
 })
 
 test('calls reciprocal relation mutations and preserves their stable conflict response', async () => {

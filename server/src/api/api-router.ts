@@ -6568,8 +6568,8 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/relations', async (c) => {
     if (resolvedConfiguration) {
       assertWorkItemChildTypeAllowed(
         resolvedConfiguration.configuration,
-        endpoints.source.workItemTypeId,
         endpoints.target.workItemTypeId,
+        endpoints.source.workItemTypeId,
       )
     }
     const response = await workItemDependencies.workItemConfigurations.createRelation(
