@@ -9,11 +9,13 @@ import { RequestQueue } from '../src/requests/ui/RequestQueue'
 import {
   canAdoptRequestTriageDraft,
   createSafeTriageRoutingOverride,
+  resolveRequestWorkItemConfiguration,
 } from '../src/requests/model/requestTriageRouting'
 import {
   isRequestAiOperationPendingForSubmission,
   updateRequestAiOperationFence,
 } from '../src/requests/model/requestAiOperationFence'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 const aiController: AiAssistanceController = {
   cancelGeneration: () => undefined,
@@ -66,6 +68,30 @@ describe('RequestQueue', () => {
     expect(html).toContain('aria-current="true"')
     expect(html).toContain('aria-label="Open request details: プロダクトサポート依頼 v1"')
     expect(submission.formId).toBe(requestSubmissionFixture.formId)
+  })
+
+  /** Uses the AI-adopted Team when resolving the conversion Work Item configuration. */
+  test('resolves the conversion configuration for the effective Team', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const sourceConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: submission.routing.teamId,
+    }
+    const targetConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: 'new-team',
+    }
+    const configurations = {
+      [submission.routing.teamId]: sourceConfiguration,
+      'new-team': targetConfiguration,
+    }
+
+    expect(resolveRequestWorkItemConfiguration(configurations, submission)).toBe(sourceConfiguration)
+    expect(resolveRequestWorkItemConfiguration(
+      configurations,
+      submission,
+      { teamId: 'new-team' },
+    )).toBe(targetConfiguration)
   })
 
   test('renders every known multi-select option label and preserves unknown legacy values', () => {

@@ -20,6 +20,7 @@ import { resolveRequestLocalizedText } from '../model/requestFormLogic'
 import {
   canAdoptRequestTriageDraft,
   createSafeTriageRoutingOverride,
+  resolveRequestWorkItemConfiguration,
   type RequestRoutingAssigneeDirectory,
   type RequestRoutingProjectDirectory,
 } from '../model/requestTriageRouting'
@@ -268,9 +269,7 @@ export function RequestQueue({
         onOpenAttachment={onOpenAttachment}
         assigneeDirectory={assigneeDirectory}
         projectDirectory={projectDirectory}
-        workItemConfiguration={selectedSubmission
-          ? workItemConfigurations?.[selectedSubmission.routing.teamId]
-          : undefined}
+        workItemConfigurations={workItemConfigurations}
       />
     </div>
   )
@@ -288,7 +287,7 @@ function RequestSubmissionDetail({
   onOperationPendingChange,
   assigneeDirectory,
   projectDirectory,
-  workItemConfiguration,
+  workItemConfigurations,
   submission,
 }: {
   accessToken?: string
@@ -302,15 +301,29 @@ function RequestSubmissionDetail({
   locale: Locale
   projectDirectory?: RequestRoutingProjectDirectory
   assigneeDirectory?: RequestRoutingAssigneeDirectory
-  workItemConfiguration?: WorkItemConfiguration
+  /** Team-scoped Work Item configurations used by the effective conversion target. */
+  workItemConfigurations?: Readonly<Record<string, WorkItemConfiguration>>
   onAction?: RequestQueueProps['onAction']
   onOpenAttachment?: RequestQueueProps['onOpenAttachment']
   submission?: RequestSubmissionModel
 }) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const [conversionTargetOverride, setConversionTargetOverride] =
+    useState<Partial<RequestFormRoutingTarget>>({})
+  const effectiveRouting: Partial<RequestFormRoutingTarget> = {
+    ...submission?.routing,
+    ...conversionTargetOverride,
+  }
+  const effectiveWorkItemConfiguration = submission
+    ? resolveRequestWorkItemConfiguration(
+        workItemConfigurations,
+        submission,
+        conversionTargetOverride,
+      )
+    : undefined
   const workItemTypes = useMemo(
-    () => resolveWorkItemTypes(workItemConfiguration).filter((type) => type.status === 'active'),
-    [workItemConfiguration],
+    () => resolveWorkItemTypes(effectiveWorkItemConfiguration).filter((type) => type.status === 'active'),
+    [effectiveWorkItemConfiguration],
   )
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
     () => workItemTypes[0]?.id ?? 'default',
@@ -322,8 +335,6 @@ function RequestSubmissionDetail({
   const [actionValue, setActionValue] = useState('')
   const [titleOverride, setTitleOverride] = useState('')
   const [descriptionOverride, setDescriptionOverride] = useState('')
-  const [conversionTargetOverride, setConversionTargetOverride] =
-    useState<Partial<RequestFormRoutingTarget>>({})
   const [, setConversionOverrideDirty] =
     useState<ConversionOverrideDirtyState>({ title: false, description: false })
   const conversionOverrideDirtyRef = useRef<ConversionOverrideDirtyState>({
@@ -456,9 +467,8 @@ function RequestSubmissionDetail({
         )
       : createTeamIssuesPath(submission.workItem.teamId, submission.workItem.id)
     : undefined
-  const effectiveRouting = { ...submission.routing, ...conversionTargetOverride }
-  const effectiveWorkItemWorkflow = workItemConfiguration
-    ? resolveWorkItemTypeWorkflow(workItemConfiguration, effectiveWorkItemTypeId)
+  const effectiveWorkItemWorkflow = effectiveWorkItemConfiguration
+    ? resolveWorkItemTypeWorkflow(effectiveWorkItemConfiguration, effectiveWorkItemTypeId)
     : undefined
   const effectiveWorkflowStatusId = conversionTargetOverride.workflowStatusId !== undefined
     ? effectiveRouting.workflowStatusId
@@ -663,7 +673,7 @@ function RequestSubmissionDetail({
                   setConversionOverrideDirty(nextDirtyState)
                 }} />
                 <p className="break-words text-xs font-medium text-[var(--workbench-muted)]">
-                  {effectiveRouting.teamId} · {effectiveRouting.projectId ?? t('requests.routing.teamBacklog')} · {effectiveWorkflowStatusId ?? t('requests.routing.initialStatus')} · {effectiveRouting.assigneeUserId} · {t(`requests.priority.${effectiveRouting.priority}`)}
+                  {effectiveRouting.teamId} · {effectiveRouting.projectId ?? t('requests.routing.teamBacklog')} · {effectiveWorkflowStatusId ?? t('requests.routing.initialStatus')} · {effectiveRouting.assigneeUserId} · {t(`requests.priority.${effectiveRouting.priority ?? 'medium'}`)}
                 </p>
               </>
             ) : actionMode === 'assign' || actionMode === 'mark-duplicate' ? (
