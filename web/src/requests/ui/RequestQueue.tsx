@@ -325,6 +325,7 @@ function RequestSubmissionDetail({
     () => resolveWorkItemTypes(effectiveWorkItemConfiguration).filter((type) => type.status === 'active'),
     [effectiveWorkItemConfiguration],
   )
+  const hasCreatableWorkItemType = workItemTypes.length > 0
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
     () => workItemTypes[0]?.id ?? 'default',
   )
@@ -651,6 +652,7 @@ function RequestSubmissionDetail({
                   <select
                     aria-label={t('requests.action.workItemType')}
                     className="workbench-input min-h-10 px-3"
+                    disabled={actionIsPending || !hasCreatableWorkItemType}
                     name="workItemTypeId"
                     onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
                     value={effectiveWorkItemTypeId}
@@ -659,6 +661,11 @@ function RequestSubmissionDetail({
                       <option key={type.id} value={type.id}>{type.name}</option>
                     ))}
                   </select>
+                  {!hasCreatableWorkItemType ? (
+                    <span className="text-xs font-semibold text-amber-700">
+                      {t('tasks.create.noActiveWorkItemTypes')}
+                    </span>
+                  ) : null}
                 </label>
                 <input aria-label={t('requests.action.titleOverride')} className="workbench-input min-h-10 px-3" disabled={actionIsPending} placeholder={t('requests.action.titleOverride')} value={titleOverride} onChange={(event) => {
                   setTitleOverride(event.target.value)
@@ -698,7 +705,7 @@ function RequestSubmissionDetail({
             {actionError ? <p className="text-sm font-semibold text-red-700" role="alert">{t('requests.action.error')}</p> : null}
             <div className="flex justify-end gap-2">
               <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={() => setActionMode(undefined)} type="button">{t('requests.action.cancel')}</button>
-              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">{isSubmitting ? t('requests.action.pending') : t('requests.action.submit')}</button>
+              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending || (actionMode === 'convert' && !hasCreatableWorkItemType)} type="submit">{isSubmitting ? t('requests.action.pending') : t('requests.action.submit')}</button>
             </div>
           </form>
         ) : null}

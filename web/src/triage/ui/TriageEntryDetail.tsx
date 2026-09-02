@@ -162,6 +162,7 @@ export function TriageEntryDetail({
     () => resolveWorkItemTypes(workItemConfiguration).filter((type) => type.status === 'active'),
     [workItemConfiguration],
   )
+  const hasCreatableWorkItemType = workItemTypes.length > 0
   const [actionMode, setActionMode] = useState<TriageActionMode>()
   const [acceptMode, setAcceptMode] = useState<'create' | 'link'>('create')
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
@@ -782,6 +783,7 @@ export function TriageEntryDetail({
                       {t('triage.action.workItemType')}
                       <select
                         className="workbench-input min-h-10 px-3"
+                        disabled={actionIsPending || !hasCreatableWorkItemType}
                         name="workItemTypeId"
                         onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
                         value={selectedWorkItemType?.id ?? 'default'}
@@ -790,6 +792,11 @@ export function TriageEntryDetail({
                           <option key={type.id} value={type.id}>{type.name}</option>
                         ))}
                       </select>
+                      {!hasCreatableWorkItemType ? (
+                        <span className="text-xs font-semibold text-amber-700">
+                          {t('tasks.create.noActiveWorkItemTypes')}
+                        </span>
+                      ) : null}
                       {selectedWorkItemType?.description ? (
                         <span className="text-xs font-medium text-[var(--workbench-muted)]">
                           {selectedWorkItemType.description}
@@ -848,7 +855,7 @@ export function TriageEntryDetail({
               <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={closeAction} type="button">
                 {t('triage.action.cancel')}
               </button>
-              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">
+              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending || (actionMode === 'accept' && acceptMode === 'create' && !hasCreatableWorkItemType)} type="submit">
                 {actionIsPending ? t('triage.action.pending') : t('triage.action.submit')}
               </button>
             </div>
