@@ -4,6 +4,7 @@ import type {
   WorkItemScheduleChangePreview,
   WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
@@ -23,6 +24,7 @@ import { TaskCalendarView } from '../src/tasks/ui/TaskCalendarView'
 import { TaskDetailPane } from '../src/tasks/ui/TaskDetailPane'
 import { TaskFileView } from '../src/tasks/ui/TaskFileView'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
+import { TaskInlineCustomFields } from '../src/tasks/ui/TaskInlineCustomFields'
 import { TaskPermissionsView } from '../src/tasks/ui/TaskPermissionsView'
 import { TaskSchedulePreviewMetadata } from '../src/tasks/ui/TaskSchedulePreviewMetadata'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
@@ -823,6 +825,42 @@ describe('independent task views', () => {
     expect(errorHtml).toContain('Lambda returned 500.')
     expect(errorHtml).toContain('disabled="" type="submit"')
     expect(emptyHtml).toContain(t('tasks.detail.empty'))
+  })
+
+  test('limits inline custom fields to the selected Work Item Type', () => {
+    const incidentType = {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'incident',
+      name: 'Incident',
+      customFieldIds: ['risk-level'],
+      allowedChildTypeIds: ['incident'],
+      defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+      sortOrder: 10,
+    }
+    const configuration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [incidentType],
+    }
+    const task = {
+      ...taskViewStoryTasks[0]!,
+      customFieldValues: workItemCustomFieldValueFixture,
+      workItemTypeId: incidentType.id,
+    }
+    const html = renderToStaticMarkup(
+      <TaskInlineCustomFields
+        configuration={configuration}
+        locale="ja"
+        personLabels={personLabels}
+        personOptions={[]}
+        t={t}
+        task={task}
+        onUpdateTask={async (candidate) => candidate}
+      />,
+    )
+
+    expect(html).toContain('Risk level')
+    expect(html).not.toContain('Customer impact')
+    expect(html).not.toContain('Story points')
   })
 
   test('mounts the complete Work Item planning review in the editable detail form', () => {
