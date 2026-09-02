@@ -740,10 +740,12 @@ export function TaskDetailPane({
           )
           const nextIssueInput: UpdateTeamIssueInput = {
             assignedProjectId: nextAssignedProjectId || null,
-            description: String(formData.get('description') ?? '').trim(),
             priority: resolveTaskPriority(formData.get('priority')),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
+            ...(isDetailSectionVisible('description')
+              ? { description: String(formData.get('description') ?? '').trim() }
+              : {}),
             ...(customFieldValues === undefined ? {} : { customFieldValues }),
           }
 

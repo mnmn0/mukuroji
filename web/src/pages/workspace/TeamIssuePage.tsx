@@ -161,7 +161,7 @@ import {
 } from '../../work-items/ui/WorkItemRelationsEditor'
 import {
   createCustomFieldErrorMessages,
-  createCustomFieldValuePatch,
+  createVisibleCustomFieldValuePatch,
   formatWorkItemCustomFieldValue,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
@@ -4266,18 +4266,22 @@ function IssueDetailContent({
           }
 
           setFieldErrors({})
+          const customFieldValues = createVisibleCustomFieldValuePatch(
+            isDetailSectionVisible('custom-fields'),
+            selectedTypeCustomFieldDefinitions,
+            issue.customFieldValues,
+            parsedCustomFields.values,
+            assignedProjectId || undefined,
+          )
           const nextIssueInput: UpdateTeamIssueInput = {
             assignedProjectId: assignedProjectId || null,
-            customFieldValues: createCustomFieldValuePatch(
-              selectedTypeCustomFieldDefinitions,
-              issue.customFieldValues,
-              parsedCustomFields.values,
-              assignedProjectId || undefined,
-            ),
-            description: String(formData.get('description') ?? '').trim(),
             priority: resolveIssuePriority(formData.get('priority')),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
+            ...(isDetailSectionVisible('description')
+              ? { description: String(formData.get('description') ?? '').trim() }
+              : {}),
+            ...(customFieldValues === undefined ? {} : { customFieldValues }),
           }
 
           if (isWorkItemTypeChangeRequested && typeChangePreview) {
