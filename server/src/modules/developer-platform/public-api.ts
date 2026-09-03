@@ -129,7 +129,15 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
-  /** Current RBAC/CAS を確認して Work Item Type 変更の影響を計算します。 */
+  /**
+   * Calculates the impact of a Work Item Type change after current authorization and revision checks.
+   *
+   * @param credential - Authenticated developer credential that owns the request.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item whose type would change.
+   * @param input - Target type, optional Project proposal, and expected revision.
+   * @returns Server-calculated field and workflow impact without mutating the Work Item.
+   */
   previewTypeChange(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,

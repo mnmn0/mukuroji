@@ -1359,6 +1359,7 @@ test('binds legacy Request conversion idempotency to custom field overrides', as
     }),
   })
 
+  /** Sends one conversion request with the supplied custom-field overrides. */
   const request = (customFieldValues: Record<string, string>) => app.request(
     `/api/request-submissions/${submission.id}/actions`,
     {

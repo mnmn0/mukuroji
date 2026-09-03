@@ -41148,6 +41148,15 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       )).detail.issue)
     },
 
+    /**
+     * Revalidates public access and calculates a non-mutating Work Item Type preview.
+     *
+     * @param credential - Authenticated developer credential.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item whose type would change.
+     * @param input - Target type, optional Project proposal, and expected revision.
+     * @returns Server-calculated field and workflow impact.
+     */
     async previewTypeChange(credential, teamId, workItemId, input) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
