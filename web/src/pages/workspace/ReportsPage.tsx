@@ -1,4 +1,4 @@
-import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import type {
   AnalyticsEvidenceInput,
   AnalyticsEvidenceResponse,
@@ -7,7 +7,6 @@ import type {
   AnalyticsSchedule,
   AnalyticsWidget,
   CreateAnalyticsReportInput,
-  WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
 import {
   useCallback,
@@ -61,7 +60,10 @@ import {
   createDefaultAnalyticsWidgets,
   getDefaultAnalyticsTimeZone,
 } from '../../analytics/model/defaults'
-import { AnalyticsWorkbench } from '../../analytics/ui/AnalyticsWorkbench'
+import {
+  AnalyticsWorkbench,
+  type AnalyticsWorkItemTypeOption,
+} from '../../analytics/ui/AnalyticsWorkbench'
 import { createAnalyticsLiveQueryRunner } from '../../analytics/liveQuery'
 import {
   createAnalyticsQueryInput,
@@ -143,19 +145,16 @@ export function ReportsPage() {
     teams.map((team) => team.id).sort(),
     Boolean(user && !currentUserError && !isProjectDirectoryLoading),
   )
-  const workItemTypes = useMemo<WorkItemTypeDefinition[]>(() => {
-    const types = new Map<string, WorkItemTypeDefinition>([
-      [DEFAULT_WORK_ITEM_TYPE.id, DEFAULT_WORK_ITEM_TYPE],
-    ])
-    for (const resolved of Object.values(workItemConfigurationLoadResult?.configurationsByTeam ?? {})) {
-      for (const type of resolveWorkItemTypes(resolved)) {
-        if (!types.has(type.id)) types.set(type.id, type)
-      }
-    }
-    return [...types.values()].sort((left, right) =>
-      left.sortOrder - right.sortOrder || left.name.localeCompare(right.name),
-    )
-  }, [workItemConfigurationLoadResult?.configurationsByTeam])
+  const workItemTypes = useMemo<AnalyticsWorkItemTypeOption[]>(() =>
+    teams
+      .flatMap((team) => resolveWorkItemTypes(
+        workItemConfigurationLoadResult?.configurationsByTeam[team.id],
+      ).map((type) => ({
+        filterValue: createSearchWorkItemTypeKey(team.id, type.id),
+        label: `${team.name} · ${type.name}`,
+      })))
+      .sort((left, right) => left.label.localeCompare(right.label)),
+  [teams, workItemConfigurationLoadResult?.configurationsByTeam])
   const {
     data: reportResponse,
     error: reportsError,

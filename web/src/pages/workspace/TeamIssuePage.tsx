@@ -342,8 +342,8 @@ type TeamIssueCreateContext = {
 type TeamIssueTypeChangeState = {
   /** Field IDs whose removal has been acknowledged by the operator. */
   acknowledgedLostCustomFieldIds: string[]
-  /** Issue revision represented by this preview. */
-  revision: number
+  /** Exact Issue revision and Project selection represented by this preview. */
+  identity: string
   /** Whether the latest preview request is in flight. */
   isPreviewing: boolean
   /** Server-authoritative preview result. */
@@ -4094,6 +4094,9 @@ function IssueDetailContent({
     revision: issue.revision,
     value: issue.assignedProjectId ?? '',
   })
+  const selectedProjectId = selectedProject.revision === issue.revision
+    ? selectedProject.value
+    : issue.assignedProjectId ?? ''
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const currentWorkItemTypeId = issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
   const workItemTypes = resolveWorkItemTypes(configuration)
@@ -4105,19 +4108,21 @@ function IssueDetailContent({
   const selectedWorkItemTypeId = selectedWorkItemType.revision === issue.revision
     ? selectedWorkItemType.value
     : currentWorkItemTypeId
+  const workItemTypeSelectionIdentity = `${issue.teamId}:${issue.id}:${issue.revision}`
+  const typeChangePreviewIdentity = `${workItemTypeSelectionIdentity}:${selectedProjectId}`
   const [typeChangeState, setTypeChangeState] = useState<TeamIssueTypeChangeState>({
     acknowledgedLostCustomFieldIds: [],
+    identity: typeChangePreviewIdentity,
     isPreviewing: false,
-    revision: issue.revision,
     targetWorkItemTypeId: currentWorkItemTypeId,
   })
-  const activeTypeChangeState = typeChangeState.revision === issue.revision &&
+  const activeTypeChangeState = typeChangeState.identity === typeChangePreviewIdentity &&
       typeChangeState.targetWorkItemTypeId === selectedWorkItemTypeId
     ? typeChangeState
     : {
         acknowledgedLostCustomFieldIds: [],
+        identity: typeChangePreviewIdentity,
         isPreviewing: false,
-        revision: issue.revision,
         targetWorkItemTypeId: selectedWorkItemTypeId,
       }
   const documentContextPromotion = useDocumentContextPromotion(
@@ -4125,10 +4130,6 @@ function IssueDetailContent({
     `${issue.teamId}:${issue.id}`,
     collaborationRoute?.onCollaborationTabChange,
   )
-  const selectedProjectId = selectedProject.revision === issue.revision
-    ? selectedProject.value
-    : issue.assignedProjectId ?? ''
-
   const isIssueReadOnly = !onUpdateIssue
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
   const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue)
@@ -4146,6 +4147,9 @@ function IssueDetailContent({
     configuration,
     selectedWorkItemTypeId,
   )
+  const customFieldEditorDefinitions = isDetailSectionVisible('custom-fields')
+    ? selectedTypeCustomFieldDefinitions
+    : selectedTypeCustomFieldDefinitions.filter((definition) => definition.required)
   const selectedTypeWorkflow = resolveWorkItemTypeWorkflow(
     configuration,
     selectedWorkItemTypeId,
@@ -4167,8 +4171,8 @@ function IssueDetailContent({
   const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
-  const hasCustomFields = selectedTypeCustomFieldDefinitions.some((definition) =>
-    isCustomFieldApplicable(definition, selectedProjectId || undefined)
+  const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
+    isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
 
   /** Requests a server-authoritative preview before saving a Team Issue type change. */
@@ -4178,8 +4182,8 @@ function IssueDetailContent({
     if (!onUpdateIssue || !accessToken || targetWorkItemTypeId === currentWorkItemTypeId) return
     setTypeChangeState({
       acknowledgedLostCustomFieldIds: [],
+      identity: typeChangePreviewIdentity,
       isPreviewing: true,
-      revision: issue.revision,
       targetWorkItemTypeId,
     })
     try {
@@ -4197,11 +4201,11 @@ function IssueDetailContent({
       setTypeChangeState({
         acknowledgedLostCustomFieldIds: [],
         isPreviewing: false,
+        identity: typeChangePreviewIdentity,
         preview,
         replacementWorkflowStatusId: preview.invalidWorkflowStatusId === undefined
           ? undefined
           : preview.targetInitialWorkflowStatusId,
-        revision: issue.revision,
         targetWorkItemTypeId,
       })
     } catch {
@@ -4209,8 +4213,8 @@ function IssueDetailContent({
       setTypeChangeState({
         acknowledgedLostCustomFieldIds: [],
         errorMessage: t('tasks.detail.typeChange.previewError'),
+        identity: typeChangePreviewIdentity,
         isPreviewing: false,
-        revision: issue.revision,
         targetWorkItemTypeId,
       })
     }
@@ -4250,7 +4254,7 @@ function IssueDetailContent({
               ).trim()
             : formWorkflowStatusId
           const parsedCustomFields = configuration
-            ? parseCustomFieldFormData(formData, selectedTypeCustomFieldDefinitions, {
+            ? parseCustomFieldFormData(formData, customFieldEditorDefinitions, {
                 projectId: assignedProjectId || undefined,
               })
             : { errors: [], values: {} }
@@ -4258,7 +4262,7 @@ function IssueDetailContent({
           if (parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
-              selectedTypeCustomFieldDefinitions,
+              customFieldEditorDefinitions,
               locale,
             ))
             return
@@ -4280,7 +4284,7 @@ function IssueDetailContent({
           setFieldErrors({})
           const customFieldValues = createVisibleCustomFieldValuePatch(
             isDetailSectionVisible('custom-fields'),
-            selectedTypeCustomFieldDefinitions,
+            customFieldEditorDefinitions,
             issue.customFieldValues,
             parsedCustomFields.values,
             assignedProjectId || undefined,
@@ -4342,8 +4346,8 @@ function IssueDetailContent({
                       typeChangeRequestSequenceRef.current += 1
                       setTypeChangeState({
                         acknowledgedLostCustomFieldIds: [],
+                        identity: typeChangePreviewIdentity,
                         isPreviewing: false,
-                        revision: issue.revision,
                         targetWorkItemTypeId: nextWorkItemTypeId,
                       })
                       return
@@ -4518,16 +4522,16 @@ function IssueDetailContent({
               </div>
             ) : null}
           </div>
-          {isDetailSectionVisible('custom-fields') && hasCustomFields ? (
+          {hasCustomFields ? (
             <div className="workbench-panel-muted p-4">
               <WorkItemFieldsEditor
-                definitions={selectedTypeCustomFieldDefinitions}
+                definitions={customFieldEditorDefinitions}
                 errors={fieldErrors}
                 locale={locale}
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue.customFieldValues}
-                key={`${issue.revision}:${selectedWorkItemTypeId}`}
+                key={`${issue.revision}:${selectedWorkItemTypeId}:${selectedProjectId}`}
               />
             </div>
           ) : null}

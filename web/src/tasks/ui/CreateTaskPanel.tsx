@@ -96,6 +96,7 @@ export function CreateTaskPanel({
   workspaceMembers,
 }: CreateTaskPanelProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const [title, setTitle] = useState('')
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
   const hasCreatableWorkItemType = creatableWorkItemTypes.length > 0
@@ -286,6 +287,8 @@ export function CreateTaskPanel({
                 name="title"
                 placeholder={t('tasks.create.titlePlaceholder')}
                 required
+                onChange={(event) => setTitle(event.target.value)}
+                value={title}
               />
             </label>
             <p className="text-sm font-medium text-[var(--workbench-muted)]">
@@ -320,7 +323,7 @@ export function CreateTaskPanel({
           </div>
         ) : null}
         {effectiveMode === 'detailed' ? (
-          <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1" key={effectiveWorkItemTypeId}>
+          <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1">
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.create.title')}
               <input
@@ -328,6 +331,8 @@ export function CreateTaskPanel({
                 name="title"
                 placeholder={t('tasks.create.titlePlaceholder')}
                 required
+                onChange={(event) => setTitle(event.target.value)}
+                value={title}
               />
             </label>
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
@@ -353,6 +358,7 @@ export function CreateTaskPanel({
               {t('tasks.column.status')}
               <select
                 className="workbench-input h-10 px-3"
+                key={effectiveWorkItemTypeId}
                 defaultValue={initialWorkflowStatusId}
                 name="workflowStatusId"
               >
@@ -469,7 +475,7 @@ export function CreateTaskPanel({
           </fieldset>
         ) : null}
         {effectiveMode === 'detailed' && hasCustomFields ? (
-          <div className="workbench-panel-muted p-4">
+          <div className="workbench-panel-muted p-4" key={effectiveWorkItemTypeId}>
             <WorkItemFieldsEditor
               definitions={customFieldDefinitions}
               errors={fieldErrors}

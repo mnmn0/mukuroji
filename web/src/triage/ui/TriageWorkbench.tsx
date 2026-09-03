@@ -3,6 +3,7 @@ import type {
   CreateCustomerRequestFromTriageInput,
   Customer,
   CustomerRequest,
+  CustomFieldValue,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
@@ -49,6 +50,8 @@ export type TriageWorkbenchProps = {
   readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
   /** Active Project members available to person custom fields in the accept form. */
   readonly workItemPersonOptions?: readonly WorkItemPersonOption[]
+  /** Mapped custom field values loaded from a form-backed Request submission. */
+  readonly initialAcceptCustomFieldValues?: Readonly<Record<string, CustomFieldValue>>
   /** Active queue or settings surface. */
   readonly routeView: TriageRouteView
   /** Visible permission-safe queue entries. */
@@ -222,6 +225,7 @@ export function TriageWorkbench({
   visibleProjectIds,
   workItemConfiguration,
   workItemPersonOptions,
+  initialAcceptCustomFieldValues,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
@@ -379,6 +383,7 @@ export function TriageWorkbench({
                   visibleProjectIds={visibleProjectIds}
                   workItemConfiguration={workItemConfiguration}
                   workItemPersonOptions={workItemPersonOptions}
+                  initialAcceptCustomFieldValues={initialAcceptCustomFieldValues}
                   view={selectedEntry}
                 />
               </div>

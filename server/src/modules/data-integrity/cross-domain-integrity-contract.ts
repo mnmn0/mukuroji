@@ -18,6 +18,7 @@ export type CrossDomainIntegrityFailureCode =
   | 'RELATION_RECIPROCAL_MISSING'
   | 'RELATION_TEAM_MISSING'
   | 'RELATION_TENANT_MISMATCH'
+  | 'RELATION_WORK_ITEM_TYPE_MISMATCH'
   | 'RESTORE_AUDIT_DIFFERENCE'
   | 'RESTORE_CHECK_FAILED'
   | 'RESTORE_CONFIGURATION_DIFFERENCE'
@@ -69,6 +70,8 @@ export type CrossDomainWorkItemTypeWorkflow = {
   workItemTypeId: string
   /** Workflow selected by the Work Item Type. */
   workflowId: string
+  /** Work Item Type IDs accepted as direct children of this type. */
+  allowedChildTypeIds: readonly string[]
 }
 
 /** A normalized workflow configuration row. */

@@ -26,6 +26,7 @@ import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
   type RequestSubmissionModel,
 } from '../model/requestForm'
+import { createMappedConversionCustomFieldValues } from '../model/requestConversion'
 import { resolveRequestLocalizedText } from '../model/requestFormLogic'
 import {
   canAdoptRequestTriageDraft,
@@ -794,34 +795,6 @@ function resolveConversionFieldDefinitions(
   return resolveWorkItemTypeFormFields(configuration, typeId).filter((definition) =>
     definition.type !== 'formula' && isCustomFieldApplicable(definition, projectId),
   )
-}
-
-/**
- * Maps the submission answers selected by the immutable Work Item mapping.
- *
- * @param submission - Submission being converted, when available.
- * @returns Mapped custom field values keyed by Work Item custom field ID.
- */
-function createMappedConversionCustomFieldValues(
-  submission?: RequestSubmissionModel,
-): Record<string, CustomFieldValue> {
-  if (!submission) return {}
-
-  const answersByFieldId = new Map(
-    submission.answers.map((answer) => [answer.fieldId, answer.value]),
-  )
-  const values: Record<string, CustomFieldValue> = {}
-
-  for (const [formFieldId, customFieldId] of Object.entries(
-    submission.workItemMapping.customFieldMappings ?? {},
-  )) {
-    const value = answersByFieldId.get(formFieldId)
-    if (value !== undefined) {
-      values[customFieldId] = value
-    }
-  }
-
-  return values
 }
 
 /**

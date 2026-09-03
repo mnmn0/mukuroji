@@ -1,3 +1,4 @@
+import { readSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import type {
   AiAssistanceCitation,
   AiAssistanceDraft,
@@ -534,7 +535,19 @@ function isWorkspaceSearchFilters(value: unknown): boolean {
     (value.date === undefined || isSearchDate(value.date)) &&
     isOptionalStringArray(value.projectIds, 100, 512) &&
     isOptionalStringArray(value.teamIds, 100, 512) &&
+    isOptionalSearchWorkItemTypeKeyArray(value.workItemTypeIds) &&
     isSearchFilterTransportWithinGetBudget(value)
+}
+
+/** Validates optional Team-qualified Work Item Type keys produced by AI Search. */
+function isOptionalSearchWorkItemTypeKeyArray(value: unknown): boolean {
+  return value === undefined || (
+    Array.isArray(value) &&
+    value.length <= 100 &&
+    value.every((item) =>
+      isBoundedString(item, 512) && readSearchWorkItemTypeKey(item) !== undefined
+    )
+  )
 }
 
 /** Validates a Workspace search date boundary. */

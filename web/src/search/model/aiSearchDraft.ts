@@ -6,6 +6,7 @@ import type {
   WorkspaceSearchDateField,
   WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
+import { readSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import { isSearchFilterTransportWithinGetBudget } from './searchFilterTransportBudget'
 
 /** Search entity types that can be edited in an AI filter draft. */
@@ -145,7 +146,7 @@ export function hasReviewableAiSearchFilterBounds(
   if (!hasBoundedStringList(filters.relationIds)) return false
   if (!hasBoundedStringList(filters.projectIds)) return false
   if (!hasBoundedStringList(filters.teamIds)) return false
-  if (!hasBoundedStringList(filters.workItemTypeIds)) return false
+  if (!hasBoundedSearchWorkItemTypeKeyList(filters.workItemTypeIds)) return false
   if (filters.entityTypes !== undefined && (
     !Array.isArray(filters.entityTypes) ||
     filters.entityTypes.length > aiSearchEntityTypes.length ||
@@ -157,6 +158,16 @@ export function hasReviewableAiSearchFilterBounds(
     !filters.customFields.every(isBoundedCustomFieldFilter)
   )) return false
   return true
+}
+
+/** Validates locally edited Work Item Type filters as Team-qualified Search keys. */
+function hasBoundedSearchWorkItemTypeKeyList(
+  values: readonly string[] | undefined,
+): boolean {
+  return values === undefined || (
+    hasBoundedStringList(values) &&
+    values.every((value) => readSearchWorkItemTypeKey(value) !== undefined)
+  )
 }
 
 /**

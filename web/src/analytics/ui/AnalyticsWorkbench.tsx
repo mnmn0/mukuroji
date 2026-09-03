@@ -13,7 +13,6 @@ import type {
   AnalyticsWidget,
   AnalyticsWidgetResult,
   CreateAnalyticsReportInput,
-  WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
 import {
   useCallback,
@@ -104,8 +103,8 @@ export type AnalyticsWorkbenchProps = {
    * Sidebar filter 候補に使う Team / Project directory です。
    */
   teams: ProjectDirectoryTeam[]
-  /** Work Item Type definitions available across the visible Teams. */
-  workItemTypes?: WorkItemTypeDefinition[]
+  /** Team-qualified Work Item Type options available across the visible Teams. */
+  workItemTypes?: AnalyticsWorkItemTypeOption[]
   /**
    * Report 一覧または snapshot の初回読み込み中表示です。
    */
@@ -220,6 +219,14 @@ export type AnalyticsWorkbenchProps = {
    * Load error を再試行する callback です。
    */
   onRetry?: () => void
+}
+
+/** One Team-qualified Work Item Type option shown by Analytics filters. */
+export type AnalyticsWorkItemTypeOption = {
+  /** Canonical filter value containing the Team and Work Item Type IDs. */
+  filterValue: string
+  /** Human-readable Team and Work Item Type label. */
+  label: string
 }
 
 const metricKeys = [
@@ -340,7 +347,7 @@ export function AnalyticsWorkbench({
 }: AnalyticsWorkbenchProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const workItemTypeLabels = useMemo(
-    () => new Map(workItemTypes.map((type) => [type.id, type.name])),
+    () => new Map(workItemTypes.map((type) => [type.filterValue, type.label])),
     [workItemTypes],
   )
   const selectedReport = reports.find((report) => report.id === selectedReportId)
@@ -815,7 +822,7 @@ function AnalyticsFilterToolbar({
   t: ReturnType<typeof createTranslator>
   teams: ProjectDirectoryTeam[]
   timeZone: string
-  workItemTypes: WorkItemTypeDefinition[]
+  workItemTypes: AnalyticsWorkItemTypeOption[]
 }) {
   const projects = uniqueProjects(teams)
   const teamOptions = includeSelectedFilterOptions(
@@ -834,7 +841,7 @@ function AnalyticsFilterToolbar({
     filter.statusCategories,
   )
   const workItemTypeOptions = includeSelectedFilterOptions(
-    workItemTypes.map((type) => ({ label: type.name, value: type.id })),
+    workItemTypes.map((type) => ({ label: type.label, value: type.filterValue })),
     filter.workItemTypeIds,
   )
   const assigneeDraft = useDebouncedDraft(
@@ -2436,7 +2443,7 @@ function normalizeWidgetPoints(
 
   return result.groups.map((group) => ({
     key: group.key,
-    label: workItemTypeLabels?.get(group.label) ?? group.label,
+    label: workItemTypeLabels?.get(group.key) ?? group.label,
     sampleSize: group.sampleSize,
     value: group.value,
   }))

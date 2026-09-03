@@ -1,4 +1,11 @@
-import { DEFAULT_WORK_ITEM_TYPE_ID, type SearchEntityType, type SearchViewLayout, type WorkspaceSearchResult } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemTypeKey,
+  type SearchEntityType,
+  type SearchViewLayout,
+  type WorkspaceSearchResult,
+} from '@mukuroji/contracts'
 import { useMemo, type ReactNode } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { resolveSearchResultPath } from '../api'
@@ -78,7 +85,8 @@ export function SearchResultCollection({
   const formatStatus = (status: string) => formatSearchStatus(status, statusLabels, t)
   const formatWorkItemType = (result: WorkspaceSearchResult) =>
     formatSearchWorkItemType(result, workItemTypeLabels)
-  const formatWorkItemTypeId = (typeId: string) => workItemTypeLabels[typeId] ?? typeId
+  const formatWorkItemTypeId = (typeId: string) =>
+    workItemTypeLabels[typeId] ?? readSearchWorkItemTypeKey(typeId)?.workItemTypeId ?? typeId
   const formatSubtitle = (result: WorkspaceSearchResult) => formatSearchSubtitle(result, t)
   const mode = getSearchLayoutMode(layout)
   const sortedResults = useMemo(
@@ -458,7 +466,7 @@ function groupResults(results: WorkspaceSearchResult[], field: string) {
   for (const result of results) {
     const value = formatResultFieldValue(
       field === 'workItemType' && result.entityType === 'work-item'
-        ? result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+        ? resolveSearchWorkItemTypeKey(result)
         : resolveWorkspaceSearchResultFieldValue(result, field),
     ) ?? '—'
     groups.set(value, [...(groups.get(value) ?? []), result])
@@ -567,7 +575,16 @@ function formatSearchWorkItemType(
 ): string | undefined {
   if (result.entityType !== 'work-item') return undefined
   const typeId = result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
-  return labels[typeId] ?? typeId
+  const filterValue = resolveSearchWorkItemTypeKey(result)
+  return labels[filterValue] ?? labels[typeId] ?? typeId
+}
+
+/** Resolves a Work Item result to its collision-safe Team-qualified type key. */
+function resolveSearchWorkItemTypeKey(result: WorkspaceSearchResult): string {
+  const typeId = result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+  return result.teamId
+    ? createSearchWorkItemTypeKey(result.teamId, typeId)
+    : typeId
 }
 
 function formatSearchStatus(

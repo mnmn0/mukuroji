@@ -57,7 +57,7 @@ export type AnalyticsFilter = {
   assigneeUserIds?: string[]
   /** 対象 workflow status category の許可一覧です。 */
   statusCategories?: string[]
-  /** 対象 Work Item Type の許可一覧です。 */
+  /** Team-qualified Work Item Type keys (`teamId\0workItemTypeId`) の許可一覧です。 */
   workItemTypeIds?: string[]
   /** Custom field value に適用する条件一覧です。 */
   customFields?: AnalyticsCustomFieldFilter[]

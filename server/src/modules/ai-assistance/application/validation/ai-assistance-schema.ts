@@ -16,6 +16,8 @@ import { z } from 'zod'
 import { AiAssistanceError } from '../../errors'
 
 const identifierSchema = z.string().trim().min(1).max(256)
+/** Search Work Item Type keys include a NUL separator and may exceed generic identifier length. */
+const searchWorkItemTypeKeySchema = z.string().trim().min(1).max(512)
 /** Member identifiers may be longer than generic resource identifiers (for example, long emails). */
 const memberIdentifierSchema = z.string().trim().min(1).max(320)
 const boundedTextSchema = createSafeTextSchema(2_000)
@@ -301,7 +303,7 @@ const workspaceSearchFiltersSchema = z.object({
   ).optional(),
   projectIds: z.array(identifierSchema).max(100).optional(),
   teamIds: z.array(identifierSchema).max(100).optional(),
-  workItemTypeIds: z.array(identifierSchema).max(100).optional(),
+  workItemTypeIds: z.array(searchWorkItemTypeKeySchema).max(100).optional(),
 }).strict().superRefine((filters, context) => {
   if (!isSearchFilterTransportWithinGetBudget(filters)) {
     context.addIssue({

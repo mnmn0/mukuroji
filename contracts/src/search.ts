@@ -80,6 +80,52 @@ export type WorkspaceSearchDateFilter = {
   to?: string
 }
 
+/** Parts of a collision-safe Team-qualified Work Item Type filter key. */
+export type SearchWorkItemTypeKeyParts = {
+  /** Team that owns the Work Item Type. */
+  teamId: string
+  /** Stable Work Item Type identifier within the Team. */
+  workItemTypeId: string
+}
+
+/**
+ * Creates the canonical Team-qualified Work Item Type key used by Workspace Search.
+ *
+ * @param teamId - Team that owns the Work Item Type.
+ * @param workItemTypeId - Stable Work Item Type identifier within the Team.
+ * @returns Collision-safe filter key containing both identities.
+ */
+export function createSearchWorkItemTypeKey(
+  teamId: string,
+  workItemTypeId: string,
+): string {
+  return `${teamId}\0${workItemTypeId}`
+}
+
+/**
+ * Reads a Team-qualified Work Item Type key without accepting malformed values.
+ *
+ * @param value - Candidate Search filter key.
+ * @returns Parsed Team and Work Item Type identities, or undefined for an invalid key.
+ */
+export function readSearchWorkItemTypeKey(
+  value: string,
+): SearchWorkItemTypeKeyParts | undefined {
+  const separatorIndex = value.indexOf('\0')
+  if (
+    separatorIndex <= 0 ||
+    separatorIndex === value.length - 1 ||
+    value.indexOf('\0', separatorIndex + 1) !== -1
+  ) {
+    return undefined
+  }
+
+  return {
+    teamId: value.slice(0, separatorIndex),
+    workItemTypeId: value.slice(separatorIndex + 1),
+  }
+}
+
 /**
  * Workspace 横断検索で組み合わせられる filter set です。
  */
@@ -125,7 +171,8 @@ export type WorkspaceSearchFilters = {
    */
   teamIds?: string[]
   /**
-   * Work Item Type の候補です。Work Item 以外の entity には一致しません。
+   * Team-qualified Work Item Type keys (`teamId\0workItemTypeId`) の候補です。
+   * Work Item 以外の entity には一致しません。
    */
   workItemTypeIds?: string[]
 }

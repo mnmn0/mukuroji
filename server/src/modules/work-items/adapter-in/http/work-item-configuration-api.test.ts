@@ -492,6 +492,56 @@ test('rejects a disallowed configured workflow transition before updating a Work
   expect(calls.issueUpdates).toEqual([])
 })
 
+test('rejects a disallowed status transition when changing type within one workflow', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.transitions = configuration.workflow.transitions.filter((transition) =>
+    !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+  )
+  configuration.workItemTypes = [
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: configuration.workflow.id,
+      sortOrder: 0,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'bug',
+      name: 'Bug',
+      defaultWorkflowId: configuration.workflow.id,
+      sortOrder: 10,
+    },
+  ]
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      workItemTypeId: 'bug',
+      workflowStatusId: 'done',
+      typeChangeResolution: { discardCustomFieldIds: [] },
+      expectedRevision: 1,
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkflowTransitionDenied',
+    message: 'Transition from "in-progress" to "done" is not allowed.',
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
 test('validates parent relation type restrictions from the child source perspective', async () => {
   configureFakeProjectClients(true)
   const configuration = createTestWorkItemConfiguration('team', 'core-team')

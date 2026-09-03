@@ -1,5 +1,7 @@
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE,
+  readSearchWorkItemTypeKey,
   SAVED_VIEW_SCHEMA_VERSION,
   type CreateSavedWorkspaceViewInput,
   type ResolvedWorkItemConfiguration,
@@ -115,6 +117,18 @@ const selectableColumns = ['type', 'workItemType', 'status', 'assignee', 'creato
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 
+/** One Team-qualified Work Item Type option shown by Workspace Search. */
+type SearchWorkItemTypeOption = {
+  /** Canonical filter value containing the owning Team and Work Item Type IDs. */
+  filterValue: string
+  /** Team that owns the configured Work Item Type. */
+  teamId: string
+  /** Configuration-derived or fallback Work Item Type definition. */
+  type: WorkItemTypeDefinition
+  /** Human-readable Team and Work Item Type label. */
+  label: string
+}
+
 /**
  * Renders permission-aware Workspace search, saved views, and cursor pagination.
  *
@@ -221,36 +235,56 @@ export function SearchPage() {
     () => Object.fromEntries(statusOptions.map((status) => [status.id, status.label])),
     [statusOptions],
   )
-  const workItemTypes = useMemo<WorkItemTypeDefinition[]>(() => {
-    const definitions = new Map<string, WorkItemTypeDefinition>([
-      [DEFAULT_WORK_ITEM_TYPE.id, DEFAULT_WORK_ITEM_TYPE],
-    ])
-    for (const resolvedConfiguration of Object.values(workItemConfigurationsByTeam)) {
-      for (const type of resolveWorkItemTypes(resolvedConfiguration)) {
-        if (!definitions.has(type.id)) definitions.set(type.id, type)
+  const workItemTypes = useMemo<SearchWorkItemTypeOption[]>(() => {
+    const teamNamesById = new Map(teams.map((team) => [team.id, team.name]))
+    const optionsByFilterValue = new Map<string, SearchWorkItemTypeOption>()
+    for (const team of teams) {
+      const resolvedConfiguration = workItemConfigurationsByTeam[team.id]
+      const types = resolvedConfiguration
+        ? resolveWorkItemTypes(resolvedConfiguration)
+        : [DEFAULT_WORK_ITEM_TYPE]
+      for (const type of types) {
+        const filterValue = createSearchWorkItemTypeKey(team.id, type.id)
+        optionsByFilterValue.set(filterValue, {
+          filterValue,
+          label: `${team.name} · ${type.name}`,
+          teamId: team.id,
+          type,
+        })
       }
     }
-    const visibleTypeIds = [
+    const visibleFilterValues = [
       ...getSearchFilterValues(routeState.filters, 'workItemTypeIds'),
       ...results
-        .filter((result) => result.entityType === 'work-item')
-        .map((result) => result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE.id),
+        .filter((result) => result.entityType === 'work-item' && result.teamId)
+        .map((result) => createSearchWorkItemTypeKey(
+          result.teamId ?? '',
+          result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE.id,
+        )),
     ]
-    for (const typeId of visibleTypeIds) {
-      if (!typeId || definitions.has(typeId)) continue
-      definitions.set(typeId, {
+    for (const filterValue of visibleFilterValues) {
+      const parts = readSearchWorkItemTypeKey(filterValue)
+      if (!parts || optionsByFilterValue.has(filterValue)) continue
+      const type: WorkItemTypeDefinition = {
         ...DEFAULT_WORK_ITEM_TYPE,
-        id: typeId,
-        name: typeId,
+        id: parts.workItemTypeId,
+        name: parts.workItemTypeId,
         sortOrder: Number.MAX_SAFE_INTEGER,
+      }
+      const teamName = teamNamesById.get(parts.teamId) ?? parts.teamId
+      optionsByFilterValue.set(filterValue, {
+        filterValue,
+        label: `${teamName} · ${type.name}`,
+        teamId: parts.teamId,
+        type,
       })
     }
-    return [...definitions.values()].sort((left, right) =>
-      left.sortOrder - right.sortOrder || left.name.localeCompare(right.name),
+    return [...optionsByFilterValue.values()].sort((left, right) =>
+      left.label.localeCompare(right.label) || left.filterValue.localeCompare(right.filterValue),
     )
-  }, [results, routeState.filters, workItemConfigurationsByTeam])
+  }, [results, routeState.filters, teams, workItemConfigurationsByTeam])
   const workItemTypeLabels = useMemo(
-    () => Object.fromEntries(workItemTypes.map((type) => [type.id, type.name])),
+    () => Object.fromEntries(workItemTypes.map((option) => [option.filterValue, option.label])),
     [workItemTypes],
   )
   const visibleSearchErrorMessage = currentUserErrorAction?.kind === 'stay'
@@ -739,8 +773,8 @@ type SearchToolbarProps = {
   selectedSavedView?: SavedWorkspaceView
   /** Server-authorized workflow status options. */
   statusOptions: readonly SearchStatusOption[]
-  /** Work Item Types available in the visible Team configurations. */
-  workItemTypes: readonly WorkItemTypeDefinition[]
+  /** Team-qualified Work Item Types available in the visible Team configurations. */
+  workItemTypes: readonly SearchWorkItemTypeOption[]
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -893,13 +927,13 @@ function SearchToolbar({
           <div className="grid gap-2">
             <span className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('search.filters.workItemType')}</span>
             <div className="flex flex-wrap gap-2">
-              {workItemTypes.map((type) => (
+              {workItemTypes.map((option) => (
                 <ToggleChip
-                  active={selectedWorkItemTypeIds.includes(type.id)}
-                  key={type.id}
-                  label={type.name}
+                  active={selectedWorkItemTypeIds.includes(option.filterValue)}
+                  key={option.filterValue}
+                  label={option.label}
                   onToggle={() => onFiltersChange({
-                    workItemTypeIds: toggleValue(selectedWorkItemTypeIds, type.id),
+                    workItemTypeIds: toggleValue(selectedWorkItemTypeIds, option.filterValue),
                   })}
                 />
               ))}

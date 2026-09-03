@@ -189,6 +189,7 @@ const KNOWN_FAILURE_CODES = new Set<string>([
   'RELATION_RECIPROCAL_MISSING',
   'RELATION_TEAM_MISSING',
   'RELATION_TENANT_MISMATCH',
+  'RELATION_WORK_ITEM_TYPE_MISMATCH',
   'RESTORE_AUDIT_DIFFERENCE',
   'RESTORE_CHECK_FAILED',
   'RESTORE_CONFIGURATION_DIFFERENCE',
@@ -222,7 +223,7 @@ export const CROSS_DOMAIN_INTEGRITY_TARGETS = Object.freeze([
   'audit-known-resource-tenant',
   'configuration-workflow-status',
   'file-metadata-work-item-project-tenant',
-  'relation-work-item-team-project',
+  'relation-work-item-type-team-project',
   'work-item-creator-membership',
 ])
 
@@ -1986,9 +1987,7 @@ function checkWorkItems(
   failures: Set<CrossDomainIntegrityFailureCode>,
 ): void {
   for (const item of indexes.workItems.values()) {
-    const teamConfiguration = indexes.configurations.get(configurationKey(item.workspaceId, item.teamId))
-    const workspaceConfiguration = indexes.configurations.get(configurationKey(item.workspaceId, null))
-    const configuration = teamConfiguration ?? workspaceConfiguration
+    const configuration = findEffectiveConfiguration(indexes, item.workspaceId, item.teamId)
     let statuses: readonly CrossDomainWorkflowStatus[] = []
     let shouldCheckStatus = true
     if (configuration) {
@@ -2073,6 +2072,9 @@ function checkRelations(
     const target = findRelationEndpoint(indexes, relation, relation.targetWorkItemId, failures)
     if (source) checkRelationProject(indexes, source, failures)
     if (target) checkRelationProject(indexes, target, failures)
+    if (source && target) {
+      checkRelationWorkItemTypes(indexes, relation, source, target, failures)
+    }
     const reciprocal: CrossDomainRelation = {
       kind: 'relation',
       workspaceId: relation.workspaceId,
@@ -2084,6 +2086,41 @@ function checkRelations(
     if (!indexes.relations.has(relationKey(reciprocal))) {
       failures.add('RELATION_RECIPROCAL_MISSING')
     }
+  }
+}
+
+/** Resolves the Team override before falling back to the Workspace configuration. */
+function findEffectiveConfiguration(
+  indexes: CrossDomainIndexes,
+  workspaceId: string,
+  teamId: string,
+): CrossDomainConfigurationItem | undefined {
+  return indexes.configurations.get(configurationKey(workspaceId, teamId)) ??
+    indexes.configurations.get(configurationKey(workspaceId, null))
+}
+
+/** Verifies parent-child Work Item Type compatibility against effective configuration. */
+function checkRelationWorkItemTypes(
+  indexes: CrossDomainIndexes,
+  relation: CrossDomainRelation,
+  source: CrossDomainWorkItem,
+  target: CrossDomainWorkItem,
+  failures: Set<CrossDomainIntegrityFailureCode>,
+): void {
+  if (relation.relationType !== 'parent' && relation.relationType !== 'child') return
+  const parent = relation.relationType === 'parent' ? target : source
+  const child = relation.relationType === 'parent' ? source : target
+  const configuration = findEffectiveConfiguration(indexes, relation.workspaceId, relation.teamId)
+  const parentType = configuration?.workItemTypeWorkflows.find((candidate) =>
+    candidate.workItemTypeId === parent.workItemTypeId,
+  )
+  const allowedChildTypeIds = parentType?.allowedChildTypeIds ?? (
+    configuration === undefined && parent.workItemTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+      ? [DEFAULT_WORK_ITEM_TYPE_ID]
+      : undefined
+  )
+  if (allowedChildTypeIds !== undefined && !allowedChildTypeIds.includes(child.workItemTypeId)) {
+    failures.add('RELATION_WORK_ITEM_TYPE_MISMATCH')
   }
 }
 
@@ -2393,7 +2430,12 @@ function canonicalizeItem(item: CrossDomainIntegrityItem): string {
       item.workspaceId,
       item.teamId ?? '',
       ...item.workItemTypeWorkflows
-        .map((mapping) => `${mapping.workItemTypeId}\0${mapping.workflowId}`)
+        .flatMap((mapping) => [
+          `${mapping.workItemTypeId}\0${mapping.workflowId}`,
+          ...mapping.allowedChildTypeIds.map((childTypeId) =>
+            `${mapping.workItemTypeId}\0child\0${childTypeId}`
+          ),
+        ])
         .sort(compareUtf8Ordinal),
       ...item.workflowStatuses
         .map((status) => `${status.workflowId}\0${status.statusId}\0${status.category}`)

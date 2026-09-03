@@ -11,8 +11,10 @@ import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   ENTERPRISE_PERMISSION_IDS,
+  createSearchWorkItemTypeKey,
   createDefaultUnscheduledWorkItemSchedule,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemTypeKey,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -21372,7 +21374,11 @@ async function createAiAssistanceResolverState(
     ]),
   )
   const workItemTypeIds = uniqueAiAllowedValues(
-    [...workItemTypeWorkflowsByTeamId.values()].flatMap((workflows) => [...workflows.keys()]),
+    task === 'search'
+      ? [...workItemTypeWorkflowsByTeamId.entries()].flatMap(([teamId, workflows]) =>
+          [...workflows.keys()].map((typeId) => createSearchWorkItemTypeKey(teamId, typeId))
+        )
+      : [...workItemTypeWorkflowsByTeamId.values()].flatMap((workflows) => [...workflows.keys()]),
     AI_ASSISTANCE_ALLOWED_VALUE_LIMIT,
   )
   const statuses = uniqueAiAllowedValues(
@@ -21481,7 +21487,9 @@ async function createAiAssistanceResolverState(
                   { allowArchived: true },
                 )
                 return {
-                  id: type.id,
+                  id: task === 'search'
+                    ? createSearchWorkItemTypeKey(team.id, type.id)
+                    : type.id,
                   name: type.name,
                   status: type.status,
                   workflow: {
@@ -21771,13 +21779,25 @@ async function createAiAssistanceSelectedDraftAuthorizationConditions(
       }
     }
     const selectedStatusIds = new Set(draft.filters.statuses ?? [])
-    const selectedWorkItemTypeIds = new Set(draft.filters.workItemTypeIds ?? [])
+    const selectedWorkItemTypeIdsByTeamId = new Map<string, Set<string>>()
+    for (const value of draft.filters.workItemTypeIds ?? []) {
+      const keyParts = readSearchWorkItemTypeKey(value)
+      const workflows = state.workItemTypeWorkflowsByTeamId.get(keyParts?.teamId ?? '')
+      if (!keyParts || !workflows?.has(keyParts.workItemTypeId)) {
+        throw aiAssistanceAuthorizationChangedError()
+      }
+      const selectedTypeIds = selectedWorkItemTypeIdsByTeamId.get(keyParts.teamId) ??
+        new Set<string>()
+      selectedTypeIds.add(keyParts.workItemTypeId)
+      selectedWorkItemTypeIdsByTeamId.set(keyParts.teamId, selectedTypeIds)
+      selectedConfigurationTeamIds.add(keyParts.teamId)
+    }
     const selectedCustomFieldIds = new Set(
       (draft.filters.customFields ?? []).map((filter) => filter.fieldId),
     )
     for (const [teamId, workflows] of state.workItemTypeWorkflowsByTeamId) {
       const typeMatches = [...workflows.keys()].some((typeId) =>
-        selectedWorkItemTypeIds.has(typeId)
+        selectedWorkItemTypeIdsByTeamId.get(teamId)?.has(typeId) === true
       )
       const statusMatches = [...workflows.values()].some((workflow) =>
         workflow.statuses.some((status) => selectedStatusIds.has(status.id))
@@ -39519,6 +39539,11 @@ async function prepareConfiguredUpdateWorkItem(
     current.workflowStatusId,
     currentWorkItemType.id,
   )
+  const currentWorkflow = resolveWorkItemTypeWorkflow(
+    resolved.configuration,
+    currentWorkItemType.id,
+    { allowArchived: true },
+  )
   const typeChanged = currentWorkItemType.id !== targetWorkItemType.id
   if (typeChanged && targetWorkItemType.status === 'archived') {
     resolveWorkItemType(resolved.configuration, targetWorkItemType.id)
@@ -39553,7 +39578,12 @@ async function prepareConfiguredUpdateWorkItem(
     requestedWorkflowStatusId,
     targetWorkItemType.id,
   )
-  if (!typeChanged) {
+  const targetWorkflow = resolveWorkItemTypeWorkflow(
+    resolved.configuration,
+    targetWorkItemType.id,
+    { allowArchived: true },
+  )
+  if (!typeChanged || currentWorkflow.id === targetWorkflow.id) {
     assertWorkflowTransitionAllowed(
       resolved.configuration,
       currentWorkflowStatus.workflowStatusId,

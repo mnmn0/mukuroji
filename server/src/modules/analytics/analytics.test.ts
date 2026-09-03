@@ -16,6 +16,7 @@ import {
   type AnalyticsSnapshotRecord,
   type CanonicalWorkItem,
   type CreateAnalyticsReportInput,
+  createSearchWorkItemTypeKey,
   createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import {
@@ -932,8 +933,62 @@ describe('Analytics metric engine', () => {
     })
 
     expect(snapshot.widgets[0]?.groups.map((group) => group.key)).toEqual([
-      DEFAULT_WORK_ITEM_TYPE_ID,
+      createSearchWorkItemTypeKey('core', DEFAULT_WORK_ITEM_TYPE_ID),
     ])
+  })
+
+  test('keeps Work Item Type filters and groups isolated by Team', () => {
+    const first = createWorkItem('shared-type-a', {
+      teamId: 'team-a',
+      workItemTypeId: 'shared',
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+    })
+    const second = createWorkItem('shared-type-b', {
+      teamId: 'team-b',
+      workItemTypeId: 'shared',
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+    })
+    const selectedKey = createSearchWorkItemTypeKey('team-a', 'shared')
+    const filtered = createTestAnalyticsSnapshot({
+      workItems: [first, second],
+      events: [],
+      query: createQuery([{
+        id: 'filtered-shared-type',
+        title: 'Filtered shared type',
+        type: 'metric',
+        metric: 'wip',
+      }], {
+        filter: { period, workItemTypeIds: [selectedKey] },
+      }),
+    })
+    const grouped = createTestAnalyticsSnapshot({
+      workItems: [first, second],
+      events: [],
+      query: createQuery([{
+        id: 'grouped-shared-type',
+        title: 'Grouped shared type',
+        type: 'metric',
+        metric: 'wip',
+        groupBy: { dimension: 'work-item-type' },
+      }]),
+    })
+
+    expect(filtered.widgets[0]?.value).toBe(1)
+    expect(grouped.widgets[0]?.groups.map((group) => group.key)).toEqual([
+      createSearchWorkItemTypeKey('team-a', 'shared'),
+      createSearchWorkItemTypeKey('team-b', 'shared'),
+    ])
+  })
+
+  test('rejects bare Work Item Type IDs at the Analytics filter boundary', () => {
+    expect(() => normalizeAnalyticsQueryInput(createQuery([], {
+      filter: { period, workItemTypeIds: ['shared'] },
+    }))).toThrow(expect.objectContaining({
+      code: 'AnalyticsFilterInvalid',
+      status: 400,
+    }))
   })
 
   test('rewinds a custom-field removal that also contains an empty container marker', () => {

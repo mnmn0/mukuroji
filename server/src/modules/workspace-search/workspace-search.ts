@@ -15,7 +15,9 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemTypeKey,
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
   TASK_VIEW_SCHEMA_VERSION,
@@ -4113,7 +4115,23 @@ async function waitForWorkspaceSearchTable(
   throw new Error(`Local DynamoDB table "${tableName}" did not become active.`)
 }
 
-function normalizeWorkspaceSearchFilters(filters: unknown) {
+/** Options controlling normalization of Workspace Search filter identifiers. */
+type WorkspaceSearchFilterNormalizationOptions = {
+  /** Whether task-view callers may retain legacy bare Work Item Type identifiers. */
+  allowUnqualifiedWorkItemTypeIds?: boolean
+}
+
+/**
+ * Validates and normalizes Workspace Search filters.
+ *
+ * @param filters - Untrusted filter object received from an API or persisted view.
+ * @param options - Compatibility options for task-view-specific filter scopes.
+ * @returns Canonical filters accepted by the selected search surface.
+ */
+function normalizeWorkspaceSearchFilters(
+  filters: unknown,
+  options: WorkspaceSearchFilterNormalizationOptions = {},
+) {
   if (!isRecordValue(filters)) {
     return invalidFilters('Search filters must be an object.')
   }
@@ -4132,7 +4150,22 @@ function normalizeWorkspaceSearchFilters(filters: unknown) {
   copyFilterStringList(normalized, filters, 'relationIds')
   copyFilterStringList(normalized, filters, 'projectIds')
   copyFilterStringList(normalized, filters, 'teamIds')
-  copyFilterStringList(normalized, filters, 'workItemTypeIds')
+  if (filters.workItemTypeIds !== undefined) {
+    if (!Array.isArray(filters.workItemTypeIds)) {
+      invalidFilters('Search workItemTypeIds is invalid.')
+    }
+    const workItemTypeIds = normalizeStringList(
+      filters.workItemTypeIds,
+      'Search workItemTypeIds',
+      100,
+    )
+    if (!options.allowUnqualifiedWorkItemTypeIds && workItemTypeIds.some((value) =>
+      readSearchWorkItemTypeKey(value) === undefined
+    )) {
+      invalidFilters('Search work item type IDs must be Team-qualified.')
+    }
+    normalized.workItemTypeIds = workItemTypeIds
+  }
   if (filters.customFields) {
     if (!Array.isArray(filters.customFields) || filters.customFields.length > 50) {
       throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Custom field filters are invalid.')
@@ -4174,7 +4207,11 @@ function matchesWorkspaceSearchFilters(
     filters.workItemTypeIds?.length &&
     (
       document.entityType !== 'work-item' ||
-      !filters.workItemTypeIds.includes(document.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID)
+      !document.teamId ||
+      !filters.workItemTypeIds.includes(createSearchWorkItemTypeKey(
+        document.teamId,
+        document.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      ))
     )
   ) return false
   if (filters.relationIds?.length && !filters.relationIds.every((relationId) => document.relationIds?.includes(relationId))) return false
@@ -5006,7 +5043,9 @@ function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
   if (!isRecordValue(filters)) {
     return invalidTaskView('Task view filters are invalid.')
   }
-  const base = normalizeWorkspaceSearchFilters(filters)
+  const base = normalizeWorkspaceSearchFilters(filters, {
+    allowUnqualifiedWorkItemTypeIds: true,
+  })
   const workflowStatuses = filters.workflowStatuses === undefined
     ? undefined
     : normalizeTaskViewWorkflowStatuses(filters.workflowStatuses)

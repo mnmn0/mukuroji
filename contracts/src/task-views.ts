@@ -96,7 +96,7 @@ export type TaskViewFilters = WorkspaceSearchFilters & {
   dueDatePreset?: TaskViewDueDatePreset
   /** Whether archived Work Items may be included after permission filtering. */
   includeArchived?: boolean
-  /** Stable Work Item Type identifiers to retain. */
+  /** Bare Work Item Type identifiers resolved within each task-view scope. */
   workItemTypeIds?: string[]
 }
 

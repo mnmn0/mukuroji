@@ -228,6 +228,21 @@ type TaskUpdateResult = {
   task: CanonicalWorkItem
 }
 
+/**
+ * Determines whether a task update can be represented by the generic inverse patch.
+ *
+ * Work Item Type changes require a type-specific reverse resolution, so they must not
+ * enter the generic task undo/redo history.
+ *
+ * @param input - Update patch to classify.
+ * @returns Whether the update is safe for generic undo and redo.
+ */
+function isReversibleTaskUpdate(
+  input: Pick<UpdateTeamIssueInput, 'workItemTypeId'>,
+): boolean {
+  return input.workItemTypeId === undefined
+}
+
 /** Persisted Project Create outcome returned by the route-level mutation. */
 type CreatedProjectTaskMutation = {
   /** Canonical Work Item created by persistence. */
@@ -1098,12 +1113,16 @@ export function TaskScreen({
 
     try {
       const updatedTask = await onUpdateTask(task, input)
-      setTaskUndo({
-        forwardPatch: input,
-        inversePatch: createTaskInversePatch(task, input),
-        task: updatedTask,
-        undoToken: createTaskUpdateUndoToken(updatedTask),
-      })
+      if (isReversibleTaskUpdate(input)) {
+        setTaskUndo({
+          forwardPatch: input,
+          inversePatch: createTaskInversePatch(task, input),
+          task: updatedTask,
+          undoToken: createTaskUpdateUndoToken(updatedTask),
+        })
+      } else {
+        setTaskUndo(undefined)
+      }
       setTaskRedo(undefined)
       setTaskAction({
         kind: 'success',
@@ -1290,6 +1309,11 @@ export function TaskScreen({
 
   /** Reverses the most recent successful inline task update. */
   const handleUndoTask = async () => {
+    if (taskUndo && !isReversibleTaskUpdate(taskUndo.forwardPatch)) {
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      return
+    }
     if (
       !taskUndo ||
       !onUpdateTask ||
@@ -1333,6 +1357,11 @@ export function TaskScreen({
 
   /** Reapplies the most recently undone inline task update. */
   const handleRedoTask = async () => {
+    if (taskRedo && !isReversibleTaskUpdate(taskRedo.forwardPatch)) {
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      return
+    }
     if (!taskRedo || !onUpdateTask || isRestoringTask) {
       return
     }
@@ -1412,12 +1441,16 @@ export function TaskScreen({
             const result = await onUpdateIssue(teamId, issueId, input)
             if (result) {
               updatedTask = result
-              setTaskUndo({
-                forwardPatch: input,
-                inversePatch: createTaskInversePatch(detailTask, input),
-                task: result,
-                undoToken: createTaskUpdateUndoToken(result),
-              })
+              if (isReversibleTaskUpdate(input)) {
+                setTaskUndo({
+                  forwardPatch: input,
+                  inversePatch: createTaskInversePatch(detailTask, input),
+                  task: result,
+                  undoToken: createTaskUpdateUndoToken(result),
+                })
+              } else {
+                setTaskUndo(undefined)
+              }
               setTaskRedo(undefined)
               setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
             }

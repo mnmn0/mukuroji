@@ -65,6 +65,7 @@ describe('restore drill opaque semantic claims', () => {
         workflowId: 'default-workflow',
       }],
       workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
         workItemTypeId: 'default',
         workflowId: 'default-workflow',
       }],
@@ -75,6 +76,7 @@ describe('restore drill opaque semantic claims', () => {
       teamId: 'team-1',
       workflowStatuses: [],
       workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
         workItemTypeId: 'default',
         workflowId: 'default-workflow',
       }],
@@ -102,6 +104,7 @@ describe('restore drill opaque semantic claims', () => {
         workflowId: 'default-workflow',
       }],
       workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
         workItemTypeId: 'default',
         workflowId: 'default-workflow',
       }],
@@ -116,6 +119,7 @@ describe('restore drill opaque semantic claims', () => {
         workflowId: 'default-workflow',
       }],
       workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
         workItemTypeId: 'default',
         workflowId: 'default-workflow',
       }],
@@ -146,6 +150,7 @@ describe('restore drill opaque semantic claims', () => {
         workflowId: 'type-b-workflow',
       }],
       workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['type-a'],
         workItemTypeId: 'type-a',
         workflowId: 'type-a-workflow',
       }],

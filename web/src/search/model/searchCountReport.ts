@@ -1,4 +1,8 @@
-import { DEFAULT_WORK_ITEM_TYPE_ID, type WorkspaceSearchResult } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type WorkspaceSearchResult,
+} from '@mukuroji/contracts'
 import { resolveWorkspaceSearchResultFieldValue } from './sortResults'
 
 /** One count bucket derived from the currently loaded permission-filtered results. */
@@ -38,7 +42,7 @@ export function createLoadedSearchCountReport(
     for (const result of results) {
       const value = formatGroupValue(
         groupBy === 'workItemType' && result.entityType === 'work-item'
-          ? result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+          ? resolveSearchWorkItemTypeKey(result)
           : resolveWorkspaceSearchResultFieldValue(result, groupBy),
       )
       counts.set(value, (counts.get(value) ?? 0) + 1)
@@ -52,6 +56,14 @@ export function createLoadedSearchCountReport(
     isComplete: !hasMore,
     loadedCount: results.length,
   }
+}
+
+/** Resolves a Work Item result to its collision-safe Team-qualified type key. */
+function resolveSearchWorkItemTypeKey(result: WorkspaceSearchResult): string {
+  const typeId = result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+  return result.teamId
+    ? createSearchWorkItemTypeKey(result.teamId, typeId)
+    : typeId
 }
 
 /** Converts a supported built-in result field value into a compact review label. */

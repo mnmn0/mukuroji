@@ -9,6 +9,8 @@ import {
 import {
   ANALYTICS_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  createSearchWorkItemTypeKey,
+  readSearchWorkItemTypeKey,
   type AnalyticsCustomFieldFilter,
   type AnalyticsDateRange,
   type AnalyticsEvidenceInput,
@@ -1288,11 +1290,7 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
       'Analytics status categories',
       'statusCategories',
     ),
-    ...normalizeIdentifierListProperty(
-      filter.workItemTypeIds,
-      'Analytics Work Item Type IDs',
-      'workItemTypeIds',
-    ),
+    ...normalizeAnalyticsWorkItemTypeIds(filter.workItemTypeIds),
     ...(filter.customFields === undefined
       ? {}
       : { customFields: normalizeCustomFieldFilters(filter.customFields) }),
@@ -1300,6 +1298,34 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
       ? {}
       : { includeArchived: readBoolean(filter.includeArchived, 'Analytics includeArchived') }),
   }
+}
+
+/** Normalizes Team-qualified Work Item Type keys used by Analytics filters. */
+function normalizeAnalyticsWorkItemTypeIds(
+  value: unknown,
+): Partial<Pick<AnalyticsFilter, 'workItemTypeIds'>> {
+  if (value === undefined) return {}
+  if (!Array.isArray(value)) {
+    throw invalid('AnalyticsFilterInvalid', 'Analytics Work Item Type IDs must be an array.')
+  }
+  const values = [...new Set(value.map((candidate) => {
+    if (typeof candidate !== 'string') {
+      throw invalid('AnalyticsFilterInvalid', 'Analytics Work Item Type ID is invalid.')
+    }
+    const normalized = candidate.trim()
+    if (
+      normalized.length === 0 ||
+      normalized.length > 512 ||
+      readSearchWorkItemTypeKey(normalized) === undefined
+    ) {
+      throw invalid(
+        'AnalyticsFilterInvalid',
+        'Analytics Work Item Type IDs must be Team-qualified.',
+      )
+    }
+    return normalized
+  }))].sort()
+  return { workItemTypeIds: values }
 }
 
 function normalizeIdentifierListProperty(
@@ -1764,7 +1790,13 @@ function matchesAnalyticsFilter(
   ) return false
   if (filter.assigneeUserIds && !filter.assigneeUserIds.includes(state.assigneeUserId)) return false
   if (filter.statusCategories && !filter.statusCategories.includes(state.statusCategory)) return false
-  if (filter.workItemTypeIds && !filter.workItemTypeIds.includes(state.workItemTypeId)) return false
+  if (
+    filter.workItemTypeIds &&
+    !filter.workItemTypeIds.includes(createSearchWorkItemTypeKey(
+      state.teamId,
+      state.workItemTypeId,
+    ))
+  ) return false
   return (filter.customFields ?? []).every((customFilter) =>
     matchesCustomFieldFilter(state.customFieldValues[customFilter.fieldId], customFilter)
   )
@@ -2035,7 +2067,10 @@ function analyticsGroupIdentity(state: AnalyticsWorkItemState, groupBy: Analytic
     return { key: state.statusCategory, label: state.statusCategory }
   }
   if (groupBy.dimension === 'work-item-type') {
-    return { key: state.workItemTypeId, label: state.workItemTypeId }
+    return {
+      key: createSearchWorkItemTypeKey(state.teamId, state.workItemTypeId),
+      label: `${state.teamId} · ${state.workItemTypeId}`,
+    }
   }
   if (groupBy.dimension === 'custom-field') {
     const value = state.customFieldValues[groupBy.customFieldId]

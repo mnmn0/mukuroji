@@ -5,6 +5,9 @@ import { useCustomers } from '../../customers/queries/useCustomers'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { isActiveProjectAssignmentCandidate } from '../../projects/api/members'
 import { useTeamProjectMembers } from '../../projects/queries/useProjectMembers'
+import { normalizeRequestSubmission } from '../../requests/model/requestForm'
+import { createMappedConversionCustomFieldValues } from '../../requests/model/requestConversion'
+import { useRequestSubmission } from '../../requests/queries/useRequestIntakeQueries'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TriageApiError } from '../../triage/api'
 import { useTriageMutations } from '../../triage/mutations/useTriageMutations'
@@ -83,6 +86,25 @@ export function TeamTriagePage() {
     workspace.canLoadWorkspaceData && Boolean(activeTeam) && routeState.view === 'queue',
   )
   const selectedEntry = detail.data ? createTriageEntryView(detail.data) : undefined
+  const formSubmissionId = selectedEntry?.entry.source.kind === 'form'
+    ? selectedEntry.entry.source.submissionId
+    : undefined
+  const formSubmissionQuery = useRequestSubmission(
+    workspace.accessToken,
+    formSubmissionId,
+    workspace.canLoadWorkspaceData &&
+      Boolean(activeTeam) &&
+      routeState.view === 'queue' &&
+      selectedEntry?.entry.capabilities.canAcceptCreate === true,
+  )
+  const initialAcceptCustomFieldValues = useMemo(
+    () => createMappedConversionCustomFieldValues(
+      formSubmissionQuery.data
+        ? normalizeRequestSubmission(formSubmissionQuery.data)
+        : undefined,
+    ),
+    [formSubmissionQuery.data],
+  )
   const customerPickerEnabled = workspace.canLoadWorkspaceData &&
     workspace.canReadCustomers &&
     workspace.canManageCustomerRequests &&
@@ -223,6 +245,7 @@ export function TeamTriagePage() {
         visibleProjectIds={activeTeam?.projects.map((project) => project.id)}
         eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
         workItemPersonOptions={workItemPersonOptions}
+        initialAcceptCustomFieldValues={initialAcceptCustomFieldValues}
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}
         onBulkAction={mutation.applyBulkAction}

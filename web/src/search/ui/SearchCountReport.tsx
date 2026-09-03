@@ -1,4 +1,4 @@
-import type { WorkspaceSearchResult } from '@mukuroji/contracts'
+import { readSearchWorkItemTypeKey, type WorkspaceSearchResult } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createLoadedSearchCountReport } from '../model/searchCountReport'
 
@@ -66,7 +66,8 @@ export function SearchCountReport({
             <div className="rounded-lg bg-[var(--workbench-surface-muted)] px-3 py-2" key={group.value ?? '__not-set__'}>
               <dt className="break-words text-app-caption font-semibold leading-5 text-[var(--workbench-muted)]">
                 {groupBy === 'workItemType' && group.value
-                  ? workItemTypeLabels[group.value] ?? group.value
+                  ? workItemTypeLabels[group.value] ??
+                    readSearchWorkItemTypeKey(group.value)?.workItemTypeId ?? group.value
                   : group.value ?? t('ai.search.report.notSet')}
               </dt>
               <dd className="mt-1 text-lg font-semibold text-[var(--workbench-text)]">{group.count}</dd>

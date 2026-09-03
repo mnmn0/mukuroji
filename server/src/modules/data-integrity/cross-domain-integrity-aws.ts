@@ -7,6 +7,7 @@ import type {
   Tag,
 } from '@aws-sdk/client-s3'
 import {
+  DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -883,11 +884,15 @@ function normalizeConfigurationRow(row: Record<string, unknown>): CrossDomainInt
     const workItemTypeWorkflows: CrossDomainWorkItemTypeWorkflow[] = [
       {
         workItemTypeId: DEFAULT_WORK_ITEM_TYPE_ID,
+        allowedChildTypeIds: [...(
+          explicitDefaultType?.allowedChildTypeIds ?? DEFAULT_WORK_ITEM_TYPE.allowedChildTypeIds
+        )],
         workflowId: explicitDefaultType?.defaultWorkflowId ?? configuration.workflow.id,
       },
       ...(configuration.workItemTypes ?? [])
         .filter((type) => type.id !== DEFAULT_WORK_ITEM_TYPE_ID)
         .map((type) => ({
+          allowedChildTypeIds: [...type.allowedChildTypeIds],
           workItemTypeId: type.id,
           workflowId: type.defaultWorkflowId,
         })),

@@ -231,7 +231,7 @@ type WorkItemEditorDirtyState = {
 type WorkItemTypeChangeEditorState = {
   /** Field identifiers whose removal the operator has acknowledged. */
   acknowledgedLostCustomFieldIds: string[]
-  /** Exact Work Item revision represented by this preview. */
+  /** Exact Work Item revision and Project selection represented by this preview. */
   identity: string
   /** Whether the preview request is currently running. */
   isPreviewing: boolean
@@ -346,22 +346,6 @@ export function TaskDetailPane({
   const selectedWorkItemTypeId = selectedWorkItemType.identity === workItemTypeSelectionIdentity
     ? selectedWorkItemType.value
     : currentWorkItemTypeId
-  const [typeChangeState, setTypeChangeState] = useState<WorkItemTypeChangeEditorState>({
-    acknowledgedLostCustomFieldIds: [],
-    identity: workItemTypeSelectionIdentity,
-    isPreviewing: false,
-    targetWorkItemTypeId: currentWorkItemTypeId,
-  })
-  const typeChangeRequestSequenceRef = useRef(0)
-  const activeTypeChangeState = typeChangeState.identity === workItemTypeSelectionIdentity &&
-      typeChangeState.targetWorkItemTypeId === selectedWorkItemTypeId
-    ? typeChangeState
-    : {
-        acknowledgedLostCustomFieldIds: [],
-        identity: workItemTypeSelectionIdentity,
-        isPreviewing: false,
-        targetWorkItemTypeId: selectedWorkItemTypeId,
-      }
   const resolvedAssignedProjectId = selectedIssue?.assignedProjectId ?? task?.assignedProjectId ?? ''
   const projectSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
   const [selectedProject, setSelectedProject] = useState({
@@ -371,6 +355,23 @@ export function TaskDetailPane({
   const selectedProjectId = selectedProject.identity === projectSelectionIdentity
     ? selectedProject.value
     : resolvedAssignedProjectId
+  const typeChangePreviewIdentity = `${workItemTypeSelectionIdentity}:${selectedProjectId}`
+  const [typeChangeState, setTypeChangeState] = useState<WorkItemTypeChangeEditorState>({
+    acknowledgedLostCustomFieldIds: [],
+    identity: typeChangePreviewIdentity,
+    isPreviewing: false,
+    targetWorkItemTypeId: currentWorkItemTypeId,
+  })
+  const typeChangeRequestSequenceRef = useRef(0)
+  const activeTypeChangeState = typeChangeState.identity === typeChangePreviewIdentity &&
+      typeChangeState.targetWorkItemTypeId === selectedWorkItemTypeId
+    ? typeChangeState
+    : {
+        acknowledgedLostCustomFieldIds: [],
+        identity: typeChangePreviewIdentity,
+        isPreviewing: false,
+        targetWorkItemTypeId: selectedWorkItemTypeId,
+      }
   const resolvedSchedule = selectedIssue?.schedule ?? task?.schedule
   const scheduleSelectionIdentity = `${task?.teamId ?? ''}:${task?.id ?? ''}:${selectedIssue?.revision ?? task?.revision ?? 'loading'}`
   const [scheduleSelection, setScheduleSelection] = useState<{
@@ -422,6 +423,9 @@ export function TaskDetailPane({
     resolvedConfiguration,
     selectedWorkItemTypeId,
   )
+  const customFieldEditorDefinitions = isDetailSectionVisible('custom-fields')
+    ? selectedTypeCustomFieldDefinitions
+    : selectedTypeCustomFieldDefinitions.filter((definition) => definition.required)
   const selectedTypeWorkflow = resolveWorkItemTypeWorkflow(
     resolvedConfiguration,
     selectedWorkItemTypeId,
@@ -451,10 +455,9 @@ export function TaskDetailPane({
   const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
-  const hasCustomFields = resolvedConfiguration?.customFields.some((definition) =>
-    selectedTypeCustomFieldDefinitions.some((selectedDefinition) => selectedDefinition.id === definition.id) &&
-      isCustomFieldApplicable(definition, selectedProjectId || undefined),
-  ) ?? false
+  const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
+    isCustomFieldApplicable(definition, selectedProjectId || undefined),
+  )
   const relations = hasMatchingIssueDetail ? detail?.relations ?? [] : []
   const canonicalRelationCandidates = relationCandidates.filter((candidate) =>
     candidate.teamId === task.teamId,
@@ -563,7 +566,7 @@ export function TaskDetailPane({
     if (!issue || !accessToken || targetWorkItemTypeId === currentWorkItemTypeId) {
       return
     }
-    const requestIdentity = workItemTypeSelectionIdentity
+    const requestIdentity = typeChangePreviewIdentity
     setTypeChangeState({
       acknowledgedLostCustomFieldIds: [],
       identity: requestIdentity,
@@ -705,14 +708,14 @@ export function TaskDetailPane({
               ).trim()
             : formWorkflowStatusId
           const parsedCustomFields = resolvedConfiguration
-            ? parseCustomFieldFormData(formData, selectedTypeCustomFieldDefinitions, {
+            ? parseCustomFieldFormData(formData, customFieldEditorDefinitions, {
                 projectId: nextAssignedProjectId || undefined,
               })
             : { errors: [], values: {} }
           if (parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
-              selectedTypeCustomFieldDefinitions,
+              customFieldEditorDefinitions,
               locale,
             ))
             return
@@ -734,7 +737,7 @@ export function TaskDetailPane({
           setFieldErrors({})
           const customFieldValues = createVisibleCustomFieldValuePatch(
             isDetailSectionVisible('custom-fields'),
-            selectedTypeCustomFieldDefinitions,
+            customFieldEditorDefinitions,
             issue?.customFieldValues ?? task.customFieldValues,
             parsedCustomFields.values,
             nextAssignedProjectId || undefined,
@@ -913,7 +916,7 @@ export function TaskDetailPane({
                       typeChangeRequestSequenceRef.current += 1
                       setTypeChangeState({
                         acknowledgedLostCustomFieldIds: [],
-                        identity: workItemTypeSelectionIdentity,
+                        identity: typeChangePreviewIdentity,
                         isPreviewing: false,
                         targetWorkItemTypeId: nextWorkItemTypeId,
                       })
@@ -1184,16 +1187,16 @@ export function TaskDetailPane({
               </>
             ) : null}
           </div>
-          {isDetailSectionVisible('custom-fields') && hasCustomFields ? (
+          {hasCustomFields ? (
             <div className="workbench-panel-muted p-4">
               <WorkItemFieldsEditor
-                definitions={selectedTypeCustomFieldDefinitions}
+                definitions={customFieldEditorDefinitions}
                 errors={fieldErrors}
                 locale={locale}
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue?.customFieldValues ?? task.customFieldValues}
-                key={`${editorIdentity}:${selectedWorkItemTypeId}`}
+                key={`${editorIdentity}:${selectedWorkItemTypeId}:${selectedProjectId}`}
               />
             </div>
           ) : null}

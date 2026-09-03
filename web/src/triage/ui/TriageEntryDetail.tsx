@@ -68,6 +68,8 @@ export type TriageEntryDetailProps = {
   readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
   /** Active Project members available to person custom fields in the accept form. */
   readonly workItemPersonOptions?: readonly WorkItemPersonOption[]
+  /** Mapped custom field values loaded from a form-backed Request submission. */
+  readonly initialAcceptCustomFieldValues?: Readonly<Record<string, CustomFieldValue>>
   /** Selected permission-safe entry view. */
   readonly view?: TriageEntryView
   /** Work Item configuration used to label an accepted canonical Work Item. */
@@ -168,6 +170,7 @@ export function TriageEntryDetail({
   visibleProjectIds = [],
   workItemConfiguration,
   workItemPersonOptions = [],
+  initialAcceptCustomFieldValues,
   view,
 }: TriageEntryDetailProps) {
   const workItemTypes = useMemo(
@@ -205,17 +208,24 @@ export function TriageEntryDetail({
   const isActionMutationPendingRef = useRef(false)
   const actionIsPending = isPending || isActionMutationPending || isAiOperationPending
   const acceptCustomFieldDefinitions = useMemo(() => {
-    if (!workItemConfiguration || view?.entry.source.kind === 'form') return []
+    if (!workItemConfiguration) return []
     const selectedType = workItemTypes.find((type) => type.id === selectedWorkItemTypeId) ??
       workItemTypes[0]
     return resolveWorkItemTypeFormFields(workItemConfiguration, selectedType?.id)
-  }, [selectedWorkItemTypeId, view?.entry.source.kind, workItemConfiguration, workItemTypes])
+  }, [selectedWorkItemTypeId, workItemConfiguration, workItemTypes])
   const acceptDefaultCustomFieldValues = useMemo(
     () => createDefaultCustomFieldValues(
       acceptCustomFieldDefinitions,
       projectId || undefined,
     ),
     [acceptCustomFieldDefinitions, projectId],
+  )
+  const acceptCustomFieldValues = useMemo(
+    () => ({
+      ...acceptDefaultCustomFieldValues,
+      ...initialAcceptCustomFieldValues,
+    }),
+    [acceptDefaultCustomFieldValues, initialAcceptCustomFieldValues],
   )
   const hasAcceptCustomFields = acceptCustomFieldDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, projectId || undefined),
@@ -371,8 +381,7 @@ export function TriageEntryDetail({
     if (
       actionMode === 'accept' &&
       acceptMode === 'create' &&
-      entry.capabilities.canAcceptCreate &&
-      entry.source.kind !== 'form'
+      entry.capabilities.canAcceptCreate
     ) {
       const parsedCustomFields = parseCustomFieldFormData(
         formData,
@@ -889,12 +898,12 @@ export function TriageEntryDetail({
                           definitions={acceptCustomFieldDefinitions}
                           disabled={actionIsPending}
                           errors={acceptFieldErrors}
-                          key={`${entry.revision}:${selectedWorkItemType?.id ?? 'default'}:${projectId}`}
+                          key={`${entry.revision}:${selectedWorkItemType?.id ?? 'default'}:${projectId}:${JSON.stringify(initialAcceptCustomFieldValues)}`}
                           locale={locale}
                           personOptions={workItemPersonOptions}
                           projectId={projectId || undefined}
                           testId="triage-accept-custom-fields"
-                          values={acceptDefaultCustomFieldValues}
+                          values={acceptCustomFieldValues}
                         />
                       </div>
                     ) : null}

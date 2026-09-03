@@ -7,7 +7,10 @@ import {
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { COLLABORATION_CONTEXT_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  createSearchWorkItemTypeKey,
+} from '@mukuroji/contracts'
 import type { TaskViewDefinition } from '@mukuroji/contracts'
 import {
   type CreateTaskViewRequest,
@@ -63,6 +66,54 @@ test('keeps the unprocessed DynamoDB page behind the opaque search cursor', asyn
     cursor: first.nextCursor,
     filters: { keyword: 'different query' },
   })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+})
+
+test('requires Team-qualified Work Item Type filters for Workspace Search', async () => {
+  const documents = [
+    createWorkItemWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      teamId: 'team-a',
+      issueId: 'issue-a',
+      title: 'Team A bug',
+      workItemTypeId: 'bug',
+    }),
+    createWorkItemWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      teamId: 'team-b',
+      issueId: 'issue-b',
+      title: 'Team B bug',
+      workItemTypeId: 'bug',
+    }),
+  ]
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(documents),
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['team-a', 'team-b']),
+    },
+  }
+
+  await expect(client.search({
+    ...input,
+    filters: { workItemTypeIds: [createSearchWorkItemTypeKey('team-a', 'bug')] },
+  })).resolves.toMatchObject({
+    results: [expect.objectContaining({ id: 'team/team-a/issue/issue-a' })],
+  })
+  await expect(client.search({
+    ...input,
+    filters: { workItemTypeIds: ['bug'] },
+  })).rejects.toMatchObject({
+    code: 'InvalidSearchFilters',
+    status: 400,
+  })
 })
 
 test('skips an invalid index row without failing or skipping the remaining page', async () => {

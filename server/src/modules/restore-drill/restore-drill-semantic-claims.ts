@@ -291,6 +291,13 @@ function configurationClaims(
       'configuration-work-item-type',
       [...scope, mapping.workItemTypeId],
     ), originToken))
+    for (const childTypeId of mapping.allowedChildTypeIds) {
+      claims.push(fact(token(
+        digestKey,
+        'configuration-work-item-child-type',
+        [...scope, mapping.workItemTypeId, childTypeId],
+      ), originToken))
+    }
     for (const status of item.workflowStatuses) {
       if (status.workflowId !== mapping.workflowId) continue
       claims.push(
