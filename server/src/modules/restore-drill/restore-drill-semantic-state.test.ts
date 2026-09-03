@@ -259,4 +259,29 @@ describe('restore drill durable semantic state', () => {
       state.close()
     }
   })
+
+  test('accepts semantic claims for an unknown Work Item Type failure', async () => {
+    const state = new AwsRestoreDrillStateStore('restore-drill-state', 'ap-northeast-1')
+    installSemanticDocument(state)
+    try {
+      await expect(state.writeVerificationSemanticClaims(
+        DRILL_ID,
+        createRestoreDrillSemanticItemClaims({
+          creatorMemberKey: 'member-1',
+          kind: 'work-item',
+          projectId: null,
+          relationIds: [],
+          statusCategory: 'unstarted',
+          teamId: 'team-1',
+          workItemId: 'item-1',
+          workItemTypeId: 'unknown-type',
+          workflowStatusId: 'todo',
+          workspaceId: 'workspace-1',
+        }, DIGEST_KEY, 'a'.repeat(64)),
+        DIGEST_KEY,
+      )).resolves.toBeUndefined()
+    } finally {
+      state.close()
+    }
+  })
 })
