@@ -167,6 +167,10 @@ export type CrossDomainRelation = {
   targetWorkItemId: string
   /** Directional relation type. */
   relationType: CrossDomainRelationType
+  /** Source Work Item Type, when the normalized reader joined the endpoint row. */
+  sourceWorkItemTypeId?: string
+  /** Target Work Item Type, when the normalized reader joined the endpoint row. */
+  targetWorkItemTypeId?: string
 }
 
 /** Current resource kinds whose audit references can be joined mechanically. */

@@ -89,6 +89,8 @@ export type CrossDomainIntegrityNormalizedPageRequest = {
   readonly signal: AbortSignal
   /** Canonical isolated table target. */
   readonly target: CrossDomainIntegrityTableTarget
+  /** Whether relation rows should include strongly read endpoint Work Item Types. */
+  readonly includeRelationEndpointTypes?: boolean
 }
 
 /** One bounded SDK-independent normalized page. */

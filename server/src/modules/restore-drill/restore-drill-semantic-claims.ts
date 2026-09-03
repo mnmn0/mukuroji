@@ -606,7 +606,73 @@ function relationClaims(
       'RELATION_ENDPOINT_MISSING',
     ))
   }
+  const parentTypeId = item.relationType === 'parent'
+    ? item.targetWorkItemTypeId
+    : item.relationType === 'child'
+      ? item.sourceWorkItemTypeId
+      : undefined
+  const childTypeId = item.relationType === 'parent'
+    ? item.sourceWorkItemTypeId
+    : item.relationType === 'child'
+      ? item.targetWorkItemTypeId
+      : undefined
+  if (parentTypeId !== undefined && childTypeId !== undefined) {
+    claims.push(createWorkItemTypeRelationRequirement(
+      item,
+      parentTypeId,
+      childTypeId,
+      digestKey,
+      originToken,
+    ))
+  }
   return claims
+}
+
+/** Creates the effective-configuration requirement for one typed parent-child relation. */
+function createWorkItemTypeRelationRequirement(
+  item: Extract<CrossDomainIntegrityItem, { readonly kind: 'relation' }>,
+  parentTypeId: string,
+  childTypeId: string,
+  digestKey: Uint8Array,
+  originToken: string,
+): RestoreDrillSemanticRequirement {
+  const configuredBranch = (
+    scope: readonly string[],
+  ): RestoreDrillSemanticRequirementBranch => ({
+    defaultFailureCode: 'WORK_ITEM_TYPE_UNKNOWN',
+    fallbacks: [{
+      factToken: token(digestKey, 'configuration-work-item-type', [
+        ...scope,
+        parentTypeId,
+      ]),
+      failureCode: 'RELATION_WORK_ITEM_TYPE_MISMATCH',
+    }],
+    guardToken: token(digestKey, 'configuration-scope', scope),
+    satisfied: false,
+    successTokens: [token(digestKey, 'configuration-work-item-child-type', [
+      ...scope,
+      parentTypeId,
+      childTypeId,
+    ])],
+  })
+  const builtInMatches = parentTypeId === DEFAULT_WORK_ITEM_TYPE_ID &&
+    childTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+  return {
+    branches: [
+      configuredBranch([item.workspaceId, item.teamId]),
+      configuredBranch([item.workspaceId, '']),
+      {
+        defaultFailureCode: parentTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+          ? 'RELATION_WORK_ITEM_TYPE_MISMATCH'
+          : 'WORK_ITEM_TYPE_UNKNOWN',
+        fallbacks: [],
+        satisfied: builtInMatches,
+        successTokens: [],
+      },
+    ],
+    kind: 'requirement',
+    requirementToken: token(digestKey, 'requirement', [originToken, 'relation-work-item-types']),
+  }
 }
 
 /** Creates lifecycle-aware audit resource requirements from normalized references. */

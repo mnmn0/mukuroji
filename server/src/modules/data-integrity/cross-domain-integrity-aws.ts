@@ -189,6 +189,8 @@ type RowNormalizationBridgeInput = {
   readonly deadline?: CrossDomainIntegrityCheckBridgeInput['deadline']
   /** Narrow raw AWS read port. */
   readonly reader: CrossDomainIntegrityCheckBridgeInput['reader']
+  /** Whether relation rows should include strongly read endpoint Work Item Types. */
+  readonly includeRelationEndpointTypes?: boolean
   /** Optional finite signal for standalone normalized-page reads. */
   readonly signal?: AbortSignal
 }
@@ -299,6 +301,8 @@ export type CrossDomainIntegrityAwsNormalizedPageInput = {
   readonly signal: AbortSignal
   /** Canonical isolated table target. */
   readonly target: CrossDomainIntegrityTableTarget
+  /** Whether relation rows should include strongly read endpoint Work Item Types. */
+  readonly includeRelationEndpointTypes?: boolean
 }
 
 /** One bounded normalized AWS page retained only inside one caller invocation. */
@@ -808,7 +812,7 @@ async function normalizeRow(
   preparedFileRow?: PreparedFileRow,
 ): Promise<CrossDomainIntegrityItem[]> {
   if (target === 'work-items') return normalizeWorkItem(row)
-  if (target === 'work-item-configuration') return normalizeConfigurationRow(row)
+  if (target === 'work-item-configuration') return normalizeConfigurationRow(row, input)
   if (target === 'project-directory') return normalizeProjectDirectoryRow(row)
   if (target === 'workspace-access') {
     const items = normalizeWorkspaceAccessRow(row)
@@ -866,7 +870,10 @@ function normalizeWorkItem(row: Record<string, unknown>): CrossDomainIntegrityIt
 }
 
 /** Strictly normalizes Configuration and relation-graph rows. */
-function normalizeConfigurationRow(row: Record<string, unknown>): CrossDomainIntegrityItem[] {
+async function normalizeConfigurationRow(
+  row: Record<string, unknown>,
+  input: RowNormalizationBridgeInput,
+): Promise<CrossDomainIntegrityItem[]> {
   const recordKey = requireText(row.recordKey)
   if (recordKey === 'CONFIG') {
     const scopeType = row.scopeType
@@ -921,6 +928,14 @@ function normalizeConfigurationRow(row: Record<string, unknown>): CrossDomainInt
     const expectedRecordKey = `REL#${encodeURIComponent(sourceWorkItemId)}#` +
       `${encodeURIComponent(relationType)}#${encodeURIComponent(targetWorkItemId)}`
     if (recordKey !== expectedRecordKey || scope.teamId === null) return normalizationFailure()
+    const endpointTypeIds = input.includeRelationEndpointTypes
+      ? await readRelationEndpointWorkItemTypes(
+          input,
+          scope.workspaceId,
+          scope.teamId,
+          [sourceWorkItemId, targetWorkItemId],
+        )
+      : undefined
     return [{
       kind: 'relation',
       workspaceId: scope.workspaceId,
@@ -928,6 +943,12 @@ function normalizeConfigurationRow(row: Record<string, unknown>): CrossDomainInt
       sourceWorkItemId,
       targetWorkItemId,
       relationType,
+      ...(endpointTypeIds?.get(sourceWorkItemId) === undefined
+        ? {}
+        : { sourceWorkItemTypeId: endpointTypeIds.get(sourceWorkItemId) }),
+      ...(endpointTypeIds?.get(targetWorkItemId) === undefined
+        ? {}
+        : { targetWorkItemTypeId: endpointTypeIds.get(targetWorkItemId) }),
     }]
   }
   if (row.entryType === 'relation-graph') {
@@ -948,6 +969,31 @@ function normalizeConfigurationRow(row: Record<string, unknown>): CrossDomainInt
     return []
   }
   return normalizationFailure()
+}
+
+/** Reads the non-deleted canonical Types for relation endpoints through exact-key reads. */
+async function readRelationEndpointWorkItemTypes(
+  input: RowNormalizationBridgeInput,
+  workspaceId: string,
+  teamId: string,
+  workItemIds: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  const readWorkItemTypes = input.reader.readWorkItemTypes
+  if (readWorkItemTypes === undefined) {
+    throw new CrossDomainIntegrityAwsBridgeFailure('AWS_PAGE_INVALID')
+  }
+  const read = (signal?: AbortSignal) => readWorkItemTypes(
+    workspaceId,
+    teamId,
+    workItemIds,
+    signal,
+  )
+  return input.deadline === undefined
+    ? await read(input.signal)
+    : await runCrossDomainIntegrityRequestWithinDeadline(
+        input.deadline,
+        (signal) => read(signal),
+      )
 }
 
 /** Parses a canonical Configuration table scope key. */

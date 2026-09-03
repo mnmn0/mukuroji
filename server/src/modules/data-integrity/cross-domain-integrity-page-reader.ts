@@ -1,5 +1,6 @@
 import {
   DynamoDBClient,
+  GetItemCommand,
   ScanCommand,
   type AttributeValue,
 } from '@aws-sdk/client-dynamodb'
@@ -18,7 +19,10 @@ import { NodeHttpHandler } from '@smithy/node-http-handler'
 import {
   parseCanonicalAttributeMap,
   serializeCanonicalAttributeMap,
+  decodeAttributeMapToNativeRecord,
 } from '../../infrastructure/aws/dynamodb-attribute-codec'
+import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
+import { isCanonicalWorkItemRecord } from '../work-items'
 import {
   readCrossDomainIntegrityAwsNormalizedPage,
 } from './cross-domain-integrity-aws'
@@ -171,6 +175,9 @@ class AwsCrossDomainIntegrityNormalizedPageReader
         remainingItemCapacity: request.remainingItemCapacity,
         signal: request.signal,
         target: request.target,
+        ...(request.includeRelationEndpointTypes === undefined
+          ? {}
+          : { includeRelationEndpointTypes: request.includeRelationEndpointTypes }),
       })
       return {
         auditCandidates: normalized.auditCandidates,
@@ -296,6 +303,50 @@ class RawAwsReadPort implements CrossDomainIntegrityManagedAwsReadPort {
       )
     }
     return output.Account
+  }
+
+  /** @inheritdoc */
+  async readWorkItemTypes(
+    workspaceId: string,
+    teamId: string,
+    workItemIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<ReadonlyMap<string, string>> {
+    const directoryTeamId = `${workspaceId}#team#${teamId}`
+    const outputs = await Promise.all(workItemIds.map((workItemId) =>
+      this.dynamodb.send(new GetItemCommand({
+        ConsistentRead: true,
+        Key: {
+          directoryTeamId: { S: directoryTeamId },
+          issueId: { S: workItemId },
+        },
+        TableName: resolveTableName(this.tableNames, 'work-items'),
+      }), { abortSignal: requireNormalizedPageSignal(signal) })
+    ))
+    const types = new Map<string, string>()
+    for (let index = 0; index < outputs.length; index += 1) {
+      const row = outputs[index]?.Item
+      const workItemId = workItemIds[index]
+      if (!row || workItemId === undefined) continue
+      let decoded: Record<string, unknown>
+      try {
+        decoded = decodeAttributeMapToNativeRecord(row)
+      } catch {
+        throw new CrossDomainIntegrityNormalizedPageReaderFailure('AWS_RESPONSE_INVALID')
+      }
+      if (
+        !isCanonicalWorkItemRecord(decoded) ||
+        decoded.directoryId !== workspaceId ||
+        decoded.teamId !== teamId ||
+        decoded.issueId !== workItemId
+      ) {
+        throw new CrossDomainIntegrityNormalizedPageReaderFailure('AWS_RESPONSE_INVALID')
+      }
+      if (decoded.deletedAt === undefined) {
+        types.set(workItemId, decoded.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID)
+      }
+    }
+    return types
   }
 
   /** @inheritdoc */

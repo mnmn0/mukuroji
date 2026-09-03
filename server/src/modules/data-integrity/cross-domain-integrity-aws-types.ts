@@ -127,6 +127,22 @@ export interface CrossDomainIntegrityManagedAwsReadPort {
   readCallerAccount(signal?: AbortSignal): Promise<string>
 
   /**
+   * Reads endpoint Work Item Types with strongly consistent exact-key reads.
+   *
+   * @param workspaceId - Workspace owning the endpoint rows.
+   * @param teamId - Team owning the endpoint rows.
+   * @param workItemIds - Endpoint Work Item IDs to resolve.
+   * @param signal - Invocation-wide cancellation for these finite requests.
+   * @returns A map containing the non-deleted canonical endpoint Type IDs.
+   */
+  readonly readWorkItemTypes?: (
+    workspaceId: string,
+    teamId: string,
+    workItemIds: readonly string[],
+    signal?: AbortSignal,
+  ) => Promise<ReadonlyMap<string, string>>
+
+  /**
    * Reads one bounded, unfiltered, strongly consistent DynamoDB page.
    *
    * @param target - Logical table target.

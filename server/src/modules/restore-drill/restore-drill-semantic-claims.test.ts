@@ -208,6 +208,52 @@ describe('restore drill opaque semantic claims', () => {
     )).toBeUndefined()
   })
 
+  test('detects disallowed parent-child Work Item Types from opaque endpoint joins', async () => {
+    const relationClaims = createRestoreDrillSemanticItemClaims({
+      kind: 'relation',
+      relationType: 'parent',
+      sourceWorkItemId: 'child-item',
+      sourceWorkItemTypeId: 'child',
+      targetWorkItemId: 'parent-item',
+      targetWorkItemTypeId: 'parent',
+      teamId: 'team-1',
+      workspaceId: 'workspace-1',
+    }, DIGEST_KEY, 'd'.repeat(64))
+    const configurationClaims = createRestoreDrillSemanticItemClaims({
+      kind: 'configuration',
+      teamId: 'team-1',
+      workflowStatuses: [],
+      workItemTypeWorkflows: [
+        {
+          allowedChildTypeIds: [],
+          workItemTypeId: 'parent',
+          workflowId: 'parent-workflow',
+        },
+        {
+          allowedChildTypeIds: [],
+          workItemTypeId: 'child',
+          workflowId: 'child-workflow',
+        },
+      ],
+      workspaceId: 'workspace-1',
+    }, DIGEST_KEY, 'e'.repeat(64))
+    const relationTypeRequirement = relationClaims.find(
+      (claim): claim is RestoreDrillSemanticRequirement =>
+        claim.kind === 'requirement' && claim.branches.some((branch) =>
+          branch.fallbacks.some((fallback) =>
+            fallback.failureCode === 'RELATION_WORK_ITEM_TYPE_MISMATCH'
+          )
+        ),
+    )
+    if (!relationTypeRequirement) throw new Error('relation type requirement missing')
+
+    const facts = collectFacts(configurationClaims)
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      relationTypeRequirement,
+      (factToken) => facts.has(factToken),
+    )).toBe('RELATION_WORK_ITEM_TYPE_MISMATCH')
+  })
+
   test('classifies a File target that exists only in another Workspace as cross-tenant', async () => {
     const metadataClaims = createRestoreDrillSemanticItemClaims({
       contentType: 'text/plain',

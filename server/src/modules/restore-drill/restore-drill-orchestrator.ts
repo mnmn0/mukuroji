@@ -6124,6 +6124,7 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
         remainingItemCapacity,
         signal: pageSignal,
         target: toCrossDomainTableTarget(target),
+        includeRelationEndpointTypes: true,
       })
       const claims: RestoreDrillSemanticClaim[] = []
       for (const entry of normalized.items) {
