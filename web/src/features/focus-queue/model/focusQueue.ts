@@ -1,5 +1,6 @@
 import {
   createDefaultDueDateWorkItemSchedule,
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type FocusActionabilityReason,
   type FocusEffectivePolicy,
@@ -47,18 +48,21 @@ export type FocusQueueNavigationKey =
  *
  * @param response - Server-ranked Focus queue snapshot.
  * @param section - Section currently selected by the user.
- * @param workItemTypeId - Optional canonical Work Item Type filter.
+ * @param workItemTypeKey - Optional Team-qualified Work Item Type filter key.
  * @returns The original rank-ordered item array, or an empty array.
  */
 export function getFocusQueueItems(
   response: FocusQueueResponse | undefined,
   section: FocusQueueSection,
-  workItemTypeId?: string,
+  workItemTypeKey?: string,
 ): readonly FocusItem[] {
   const items = response?.sections.find((group) => group.section === section)?.items ?? []
-  return workItemTypeId
+  return workItemTypeKey
     ? items.filter((item) =>
-        (item.workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === workItemTypeId)
+        createSearchWorkItemTypeKey(
+          item.workItem.teamId,
+          item.workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+        ) === workItemTypeKey)
     : items
 }
 
@@ -66,19 +70,19 @@ export function getFocusQueueItems(
  * Counts items in every queue section while preserving absent groups as zero.
  *
  * @param response - Current Focus queue snapshot.
- * @param workItemTypeId - Optional canonical Work Item Type filter.
+ * @param workItemTypeKey - Optional Team-qualified Work Item Type filter key.
  * @returns Item counts keyed by stable section name.
  */
 export function getFocusQueueSectionCounts(
   response: FocusQueueResponse | undefined,
-  workItemTypeId?: string,
+  workItemTypeKey?: string,
 ): Readonly<Record<FocusQueueSection, number>> {
   return {
-    now: getFocusQueueItems(response, 'now', workItemTypeId).length,
-    next: getFocusQueueItems(response, 'next', workItemTypeId).length,
-    waiting: getFocusQueueItems(response, 'waiting', workItemTypeId).length,
-    snoozed: getFocusQueueItems(response, 'snoozed', workItemTypeId).length,
-    done: getFocusQueueItems(response, 'done', workItemTypeId).length,
+    now: getFocusQueueItems(response, 'now', workItemTypeKey).length,
+    next: getFocusQueueItems(response, 'next', workItemTypeKey).length,
+    waiting: getFocusQueueItems(response, 'waiting', workItemTypeKey).length,
+    snoozed: getFocusQueueItems(response, 'snoozed', workItemTypeKey).length,
+    done: getFocusQueueItems(response, 'done', workItemTypeKey).length,
   }
 }
 

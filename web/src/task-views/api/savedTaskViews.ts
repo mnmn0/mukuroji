@@ -1,4 +1,5 @@
 import {
+  readSearchWorkItemTypeKey,
   TASK_VIEW_SCHEMA_VERSION,
   TASK_VIEW_SURFACES,
   type CreateSavedTaskViewInput,
@@ -460,7 +461,7 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
   if (!hasOptionalStringArray(value.relationIds)) return false
   if (!hasOptionalStringArray(value.projectIds)) return false
   if (!hasOptionalStringArray(value.teamIds)) return false
-  if (!hasOptionalStringArray(value.workItemTypeIds)) return false
+  if (!hasOptionalSearchWorkItemTypeKeyArray(value.workItemTypeIds)) return false
   if (!hasOptionalStringArrayFrom(value.workflowCategories, workflowCategories)) return false
   if (!hasOptionalStringArrayFrom(value.priorities, priorities)) return false
   if (value.dueDatePreset !== undefined && !includesString(dueDatePresets, value.dueDatePreset)) {
@@ -657,6 +658,13 @@ function hasOptionalString(value: unknown): value is string | undefined {
 /** Returns whether an optional value is a string array. */
 function hasOptionalStringArray(value: unknown): value is string[] | undefined {
   return value === undefined || isStringArray(value)
+}
+
+/** Returns whether an optional array contains only Team-qualified Work Item Type keys. */
+function hasOptionalSearchWorkItemTypeKeyArray(value: unknown): value is string[] | undefined {
+  return value === undefined || (
+    isStringArray(value) && value.every((entry) => readSearchWorkItemTypeKey(entry) !== undefined)
+  )
 }
 
 /** Returns whether an optional value is an array drawn from an allowed string set. */

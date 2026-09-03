@@ -11,6 +11,7 @@ import type {
   WorkItemScheduleDependencyPatch,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import {
   useEffect,
   useMemo,
@@ -29,6 +30,7 @@ import type {
 import type { ProjectTaskDirectScheduleHandle } from '../../task-views/model/projectTaskDirectActionRequest'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type {
+  ProjectDirectoryTeam,
   ProjectMember,
   ProjectUser,
   UpdateProjectMemberInput,
@@ -124,7 +126,7 @@ export type TaskWorkspaceProps = {
   personOptions: WorkItemPersonOption[]
   /** Selected priority filter. */
   priorityFilter: PriorityFilter
-  /** Selected Work Item Type filter. */
+  /** Selected Team-qualified Work Item Type filter key. */
   workItemTypeFilter: string | 'all'
   /** Current project id. */
   projectId: string
@@ -138,6 +140,8 @@ export type TaskWorkspaceProps = {
   projectMembersErrorMessage?: string
   /** Current project name. */
   projectName: string
+  /** Team and Project directory used to label Team-qualified filter options. */
+  teams: readonly ProjectDirectoryTeam[]
   /** Search query used to find project user candidates. */
   projectUserQuery: string
   /** Project user candidates loaded so far. */
@@ -196,7 +200,7 @@ export type TaskWorkspaceProps = {
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Changes the selected priority filter. */
   onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
-  /** Changes the selected Work Item Type filter. */
+  /** Changes the selected Team-qualified Work Item Type filter key. */
   onWorkItemTypeFilterChange: (workItemTypeFilter: string | 'all') => void
   /** Resets every task filter in one state transition. */
   onResetFilters?: () => void
@@ -301,6 +305,7 @@ export function TaskWorkspace({
   projectMembers,
   projectMembersErrorMessage,
   projectName,
+  teams,
   projectUserQuery,
   projectUsers,
   projectUsersErrorMessage,
@@ -362,19 +367,21 @@ export function TaskWorkspace({
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
   const assigneeFilterOptions = createAssigneeFilterOptions(allTasks, t)
   const workItemTypeOptions = useMemo(() => {
-    const typeById = new Map<string, { id: string; name: string }>()
-    for (const type of [
-      ...resolveWorkItemTypes(configuration),
-      ...Object.values(configurationsByTeam).flatMap((resolved) =>
-        resolveWorkItemTypes(resolved.configuration),
-      ),
-    ]) {
-      typeById.set(type.id, { id: type.id, name: type.name })
+    const teamNames = new Map(teams.map((team) => [team.id, team.name]))
+    const typeByKey = new Map<string, { id: string; name: string }>()
+    for (const [teamId, resolved] of Object.entries(configurationsByTeam)) {
+      for (const type of resolveWorkItemTypes(resolved.configuration)) {
+        const filterValue = createSearchWorkItemTypeKey(teamId, type.id)
+        typeByKey.set(filterValue, {
+          id: filterValue,
+          name: `${teamNames.get(teamId) ?? teamId} · ${type.name}`,
+        })
+      }
     }
-    return [...typeById.values()].sort((first, second) =>
+    return [...typeByKey.values()].sort((first, second) =>
       first.name.localeCompare(second.name),
     )
-  }, [configuration, configurationsByTeam])
+  }, [configurationsByTeam, teams])
   const workItemTypeFilterLabel = workItemTypeFilter === 'all'
     ? t('tasks.filter.workItemType')
     : workItemTypeOptions.find((type) => type.id === workItemTypeFilter)?.name ??

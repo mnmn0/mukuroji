@@ -2781,6 +2781,7 @@ export function TaskScreen({
                 projectMembers={projectMembers}
                 projectMembersErrorMessage={projectMembersErrorMessage}
                 projectName={resolvedProjectName}
+                teams={teams}
                 planningSnapshot={planningSnapshot}
                 projectUserQuery={projectUserQuery}
                 projectUsers={projectUsers}

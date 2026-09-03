@@ -5,12 +5,12 @@ import type {
   FocusQueueResponse,
   FocusQueueSection,
   ResolvedWorkItemConfiguration,
-  WorkItemTypeDefinition,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
   WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
 } from '@mukuroji/contracts'
@@ -94,8 +94,8 @@ export type FocusQueueProps = {
   ) => Promise<WorkItemScheduleChangePreview>
   /** Changes the queue section represented in the URL. */
   onSectionChange: (section: FocusQueueSection) => void
-  /** Changes the canonical Work Item Type filter represented in the URL. */
-  onWorkItemTypeChange?: (workItemTypeId?: string) => void
+  /** Changes the Team-qualified Work Item Type filter represented in the URL. */
+  onWorkItemTypeChange?: (workItemTypeKey?: string) => void
   /** Snoozes or unsnoozes one Focus item. */
   onSnooze?: (item: FocusItem, snoozedUntil: string | null) => Promise<void>
   /** Changes one authorized Work Item workflow status. */
@@ -118,8 +118,8 @@ export type FocusQueueProps = {
   requestedItemId?: string
   /** Currently selected queue section. */
   section: FocusQueueSection
-  /** Optional canonical Work Item Type filter. */
-  workItemTypeId?: string
+  /** Optional Team-qualified Work Item Type filter key. */
+  workItemTypeKey?: string
   /** Latest successful snooze available for Undo. */
   snoozeFeedback?: FocusQueueSnoozeFeedback
   /** Localized message resolver. */
@@ -160,12 +160,12 @@ export function FocusQueue({
   response,
   section,
   snoozeFeedback,
-  workItemTypeId,
+  workItemTypeKey,
   t,
 }: FocusQueueProps) {
   const workItemTypes = resolveFocusWorkItemTypes(configurationsByTeam)
-  const items = getFocusQueueItems(response, section, workItemTypeId)
-  const counts = getFocusQueueSectionCounts(response, workItemTypeId)
+  const items = getFocusQueueItems(response, section, workItemTypeKey)
+  const counts = getFocusQueueSectionCounts(response, workItemTypeKey)
   const groups = groupFocusItems(items, workItemTypes)
   const orderedItems = groups.flatMap((group) => group.items.map(({ item }) => item))
   const [selectedItemId, setSelectedItemId] = useState<string>()
@@ -306,12 +306,12 @@ export function FocusQueue({
             <span>{t('workspace.focus.filter.workItemType')}</span>
             <select
               className="workbench-input min-h-10 min-w-40 px-2 text-sm"
-              value={workItemTypeId ?? ''}
+              value={workItemTypeKey ?? ''}
               onChange={(event) => onWorkItemTypeChange(event.target.value || undefined)}
             >
               <option value="">{t('workspace.focus.filter.allTypes')}</option>
               {workItemTypes.map((type) => (
-                <option key={type.id} value={type.id}>{type.name}</option>
+                <option key={type.filterValue} value={type.filterValue}>{type.label}</option>
               ))}
             </select>
           </label>
@@ -387,7 +387,7 @@ export function FocusQueue({
         {!isLoading && !hasError && items.length > 0 ? (
           <ol className="divide-y divide-[var(--workbench-border)]" onKeyDown={handleQueueKeyDown}>
             {groups.map((group) => (
-              <li className="list-none" key={group.typeId}>
+              <li className="list-none" key={group.typeKey}>
                 <div className="flex items-center justify-between gap-3 bg-[var(--workbench-surface-muted)] px-4 py-2 text-xs font-bold uppercase tracking-[0.06em] text-[var(--workbench-muted)]">
                   <h3>{group.label}</h3>
                   <span className="tabular-nums">{group.items.length}</span>
@@ -453,9 +453,9 @@ type FocusQueueTypeGroupEntry = {
 
 /** A type group preserving server rank and rendered navigation position. */
 type FocusQueueTypeGroup = {
-  /** Stable Work Item Type identifier. */
-  typeId: string
-  /** Display name resolved from the visible Team configuration. */
+  /** Team-qualified Work Item Type key. */
+  typeKey: string
+  /** Display label resolved from the visible Team configuration. */
   label: string
   /** Items in rendered order with their server rank and navigation position. */
   items: Array<FocusQueueTypeGroupEntry & { position: number }>
@@ -466,39 +466,58 @@ type FocusQueueTypeGroupDraft = Omit<FocusQueueTypeGroup, 'items'> & {
   items: FocusQueueTypeGroupEntry[]
 }
 
-/** Resolves the distinct Work Item Types available across the visible Focus Teams. */
+/** Selectable Team-qualified Work Item Type option exposed by the Focus filter. */
+type FocusQueueWorkItemTypeOption = {
+  /** Team-qualified Work Item Type key used as the filter value. */
+  filterValue: string
+  /** Label that keeps the owning Team visible when names collide. */
+  label: string
+  /** Definition order used for deterministic option sorting. */
+  sortOrder: number
+}
+
+/** Resolves the distinct Team-qualified Work Item Types available across visible Focus Teams. */
 function resolveFocusWorkItemTypes(
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
-): WorkItemTypeDefinition[] {
-  const definitions = new Map<string, WorkItemTypeDefinition>([
-    [DEFAULT_WORK_ITEM_TYPE_ID, DEFAULT_WORK_ITEM_TYPE],
-  ])
-  for (const configuration of Object.values(configurationsByTeam)) {
-    for (const definition of resolveWorkItemTypes(configuration.configuration)) {
-      if (!definitions.has(definition.id)) definitions.set(definition.id, definition)
+): FocusQueueWorkItemTypeOption[] {
+  const options = new Map<string, FocusQueueWorkItemTypeOption>()
+  for (const [teamId, configuration] of Object.entries(configurationsByTeam)) {
+    for (const definition of [
+      DEFAULT_WORK_ITEM_TYPE,
+      ...resolveWorkItemTypes(configuration.configuration),
+    ]) {
+      const filterValue = createSearchWorkItemTypeKey(teamId, definition.id)
+      if (!options.has(filterValue)) {
+        options.set(filterValue, {
+          filterValue,
+          label: `${teamId} · ${definition.name}`,
+          sortOrder: definition.sortOrder,
+        })
+      }
     }
   }
-  return [...definitions.values()].sort(
-    (first, second) => first.sortOrder - second.sortOrder || first.name.localeCompare(second.name),
+  return [...options.values()].sort(
+    (first, second) => first.sortOrder - second.sortOrder || first.label.localeCompare(second.label),
   )
 }
 
 /** Groups Focus items by Work Item Type without changing item order within a group. */
 function groupFocusItems(
   items: readonly FocusItem[],
-  definitions: readonly WorkItemTypeDefinition[],
+  definitions: readonly FocusQueueWorkItemTypeOption[],
 ): FocusQueueTypeGroup[] {
-  const labels = new Map(definitions.map((definition) => [definition.id, definition.name]))
+  const labels = new Map(definitions.map((definition) => [definition.filterValue, definition.label]))
   const groups = new Map<string, FocusQueueTypeGroupDraft>()
   items.forEach((item, index) => {
     const typeId = item.workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
-    const group = groups.get(typeId) ?? {
+    const typeKey = createSearchWorkItemTypeKey(item.workItem.teamId, typeId)
+    const group = groups.get(typeKey) ?? {
       items: [],
-      label: labels.get(typeId) ?? typeId,
-      typeId,
+      label: labels.get(typeKey) ?? `${item.workItem.teamId} · ${typeId}`,
+      typeKey,
     }
     group.items.push({ item, rank: index + 1 })
-    groups.set(typeId, group)
+    groups.set(typeKey, group)
   })
   let position = 0
   return [...groups.values()].map((group) => ({

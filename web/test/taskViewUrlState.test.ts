@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createSearchWorkItemTypeKey,
   TASK_VIEW_URL_STATE_SCHEMA_VERSION,
   type TaskViewUrlState,
 } from '@mukuroji/contracts'
@@ -83,7 +84,7 @@ describe('task view URL state', () => {
       override: {
         filters: {
           teamIds: ['team-1'],
-          workItemTypeIds: ['bug'],
+          workItemTypeIds: [createSearchWorkItemTypeKey('team-1', 'bug')],
           keyword: 'alpha',
         },
         layout: {
@@ -107,7 +108,7 @@ describe('task view URL state', () => {
         filters: {
           keyword: 'alpha',
           teamIds: ['team-1'],
-          workItemTypeIds: ['bug'],
+          workItemTypeIds: [createSearchWorkItemTypeKey('team-1', 'bug')],
         },
       },
     } satisfies TaskViewUrlState

@@ -52,6 +52,7 @@ import type {
   SavedTaskViewCapabilities,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -1412,7 +1413,7 @@ test('task view endpoints forward the complete lifecycle with current permission
     surface: 'project',
     scope: { kind: 'project', projectId: 'refero', teamId: 'core-team' },
     filters: {
-      workItemTypeIds: ['bug'],
+      workItemTypeIds: [createSearchWorkItemTypeKey('core-team', 'bug')],
       workflowStatuses: [{
         teamId: 'core-team',
         workItemTypeId: 'bug',
@@ -1635,9 +1636,24 @@ test('task view endpoints forward the complete lifecycle with current permission
   expect(listInput?.access.manageableTeamIds.has('restricted-team')).toBeFalse()
   expect(listInput?.access.activeCustomFieldIds?.has('score')).toBeTrue()
   expect(listInput?.access.activeCustomFieldIds?.has('restricted-score')).toBeTrue()
-  expect(listInput?.access.activeWorkItemTypeIds?.has('default')).toBeTrue()
-  expect(listInput?.access.activeWorkItemTypeIds?.has('bug')).toBeTrue()
-  expect(listInput?.access.activeWorkItemTypeIds?.has('legacy')).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'default'),
+  )).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'bug'),
+  )).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'legacy'),
+  )).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('restricted-team', 'bug'),
+  )).toBeTrue()
+  expect(listInput?.access.readableWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'bug'),
+  )).toBeTrue()
+  expect(listInput?.access.readableWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('restricted-team', 'bug'),
+  )).toBeFalse()
   expect(listInput?.access.readableCustomFieldIds?.has('score')).toBeTrue()
   expect(listInput?.access.readableCustomFieldIds?.has('restricted-score')).toBeFalse()
   expect(listInput?.access.activeStatusIds?.has('core-team\0review')).toBeTrue()

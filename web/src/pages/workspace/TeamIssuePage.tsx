@@ -19,7 +19,10 @@ import type {
   WorkItemScheduleDependencyPatch,
   WorkItemTypeChangePreview,
 } from '@mukuroji/contracts'
-import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+} from '@mukuroji/contracts'
 import {
   Fragment,
   useCallback,
@@ -1441,7 +1444,10 @@ export function TeamIssueScreen({
         const matchesStatus = effectiveStatusFilter === 'all' ||
           resolveWorkItemWorkflowStatusId(issue) === effectiveStatusFilter
         const matchesWorkItemType = workItemTypeFilter === 'all' ||
-          (issue.workItemTypeId ?? 'default') === workItemTypeFilter
+          createSearchWorkItemTypeKey(
+            issue.teamId,
+            issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+          ) === workItemTypeFilter
         const matchesDefinition = matchesWorkItemDefinitionFilter(
           issue,
           configuration,
@@ -2332,6 +2338,7 @@ export function TeamIssueScreen({
                   })}
                   searchQuery={searchQuery}
                   statusFilter={effectiveStatusFilter}
+                  teamId={teamId}
                   t={t}
                   viewMode={viewMode}
                   workItemTypeFilter={workItemTypeFilter}
@@ -2509,6 +2516,7 @@ function IssueToolbar({
   onViewModeChange,
   searchQuery,
   statusFilter,
+  teamId,
   t,
   viewMode,
   workItemTypeFilter,
@@ -2523,8 +2531,8 @@ function IssueToolbar({
    * Workflow status filter を更新する callback です。
    */
   onStatusFilterChange: (status: string) => void
-  /** Work Item Type filter callback. */
-  onWorkItemTypeFilterChange: (workItemTypeId: string) => void
+  /** Team-qualified Work Item Type filter callback. */
+  onWorkItemTypeFilterChange: (workItemTypeKey: string) => void
   /**
    * Issue 表示 mode を更新する callback です。
    */
@@ -2537,8 +2545,10 @@ function IssueToolbar({
    * Status select の現在値です。
    */
   statusFilter: string
-  /** Work Item Type identifier or the all-type sentinel. */
+  /** Team-qualified Work Item Type key or the all-type sentinel. */
   workItemTypeFilter: string
+  /** Team owning the Work Item Type definitions shown in this toolbar. */
+  teamId: string
   /**
    * 画面文言を解決する翻訳関数です。
    */
@@ -2589,7 +2599,12 @@ function IssueToolbar({
         >
           <option value="all">{t('tasks.filter.workItemTypeAll')}</option>
           {workItemTypes.map((type) => (
-            <option key={type.id} value={type.id}>{type.name}</option>
+            <option
+              key={createSearchWorkItemTypeKey(teamId, type.id)}
+              value={createSearchWorkItemTypeKey(teamId, type.id)}
+            >
+              {type.name}
+            </option>
           ))}
         </select>
       </div>

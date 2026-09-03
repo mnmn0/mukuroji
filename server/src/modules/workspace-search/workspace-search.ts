@@ -348,8 +348,10 @@ export type TaskViewAccessScope = {
   writableProjectScopeKeys: ReadonlySet<string>
   /** 現在存在する custom field ID です。未指定時は削除判定を保留します。 */
   activeCustomFieldIds?: ReadonlySet<string>
-  /** Currently active Work Item Type identifiers. Omit to defer deletion migration. */
+  /** Currently active Team-qualified Work Item Type keys. Omit to defer deletion migration. */
   activeWorkItemTypeIds?: ReadonlySet<string>
+  /** Team-qualified Work Item Type keys readable by the current viewer. */
+  readableWorkItemTypeIds?: ReadonlySet<string>
   /** Current viewer が値を参照できる custom field ID です。未指定時は active field をすべて許可します。 */
   readableCustomFieldIds?: ReadonlySet<string>
   /** 現在存在する `${teamId}\0${statusId}` 形式の Team-qualified workflow status key です。 */
@@ -3736,6 +3738,7 @@ async function sanitizeTaskViewDefinition(
           workItemTypeIds: retainTaskViewWorkItemTypeIds(
             definition.filters.workItemTypeIds,
             access.activeWorkItemTypeIds,
+            access.readableWorkItemTypeIds,
             warnings,
           ),
         }),
@@ -3841,16 +3844,32 @@ function retainTaskViewReferenceIds(
 }
 
 /** Removes Work Item Type filters that no longer exist in the active configuration. */
+/**
+ * Retains task-view Work Item Type filters that still exist and are readable.
+ *
+ * @param typeIds - Team-qualified Work Item Type keys stored by the view.
+ * @param activeTypeIds - Currently configured keys, when deletion migration is available.
+ * @param readableTypeIds - Keys visible to the current viewer, when authorization data is available.
+ * @param warnings - Migration warnings collected for removed filters.
+ * @returns The readable active keys in their original order.
+ */
 function retainTaskViewWorkItemTypeIds(
   typeIds: readonly string[],
   activeTypeIds: ReadonlySet<string> | undefined,
+  readableTypeIds: ReadonlySet<string> | undefined,
   warnings: TaskViewMigrationWarning[],
 ): string[] {
-  if (!activeTypeIds) return [...typeIds]
+  if (!activeTypeIds && !readableTypeIds) return [...typeIds]
   return typeIds.filter((typeId) => {
-    if (activeTypeIds.has(typeId)) return true
-    addTaskViewMigrationWarning(warnings, 'deleted-work-item-type', 'filter', 'removed')
-    return false
+    if (activeTypeIds && !activeTypeIds.has(typeId)) {
+      addTaskViewMigrationWarning(warnings, 'deleted-work-item-type', 'filter', 'removed')
+      return false
+    }
+    if (readableTypeIds && !readableTypeIds.has(typeId)) {
+      addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+      return false
+    }
+    return true
   })
 }
 
@@ -4118,6 +4137,12 @@ async function waitForWorkspaceSearchTable(
 /** Options controlling normalization of Workspace Search filter identifiers. */
 type WorkspaceSearchFilterNormalizationOptions = {
   /** Whether task-view callers may retain legacy bare Work Item Type identifiers. */
+  allowUnqualifiedWorkItemTypeIds?: boolean
+}
+
+/** Options controlling normalization of a persisted task-view definition. */
+type TaskViewDefinitionNormalizationOptions = {
+  /** Whether read-time migration may temporarily accept legacy bare Work Item Type identifiers. */
   allowUnqualifiedWorkItemTypeIds?: boolean
 }
 
@@ -4988,7 +5013,10 @@ function createTaskViewCopyName(sourceName: string) {
 }
 
 /** Validates a complete task view definition and returns its canonical representation. */
-function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
+function normalizeTaskViewDefinition(
+  definition: unknown,
+  options: TaskViewDefinitionNormalizationOptions = {},
+): TaskViewDefinition {
   if (!isRecordValue(definition)) {
     return invalidTaskView('Task view definition is required.')
   }
@@ -4998,7 +5026,7 @@ function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
   return {
     surface,
     scope,
-    filters: normalizeTaskViewFilters(definition.filters),
+    filters: normalizeTaskViewFilters(definition.filters, options),
     layout: normalizeTaskViewLayout(definition.layout),
   }
 }
@@ -5039,13 +5067,14 @@ function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewS
 }
 
 /** Validates filters shared by all task surfaces. */
-function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
+function normalizeTaskViewFilters(
+  filters: unknown,
+  options: TaskViewDefinitionNormalizationOptions = {},
+): TaskViewFilters {
   if (!isRecordValue(filters)) {
     return invalidTaskView('Task view filters are invalid.')
   }
-  const base = normalizeWorkspaceSearchFilters(filters, {
-    allowUnqualifiedWorkItemTypeIds: true,
-  })
+  const base = normalizeWorkspaceSearchFilters(filters, options)
   const workflowStatuses = filters.workflowStatuses === undefined
     ? undefined
     : normalizeTaskViewWorkflowStatuses(filters.workflowStatuses)
@@ -5481,7 +5510,9 @@ function readStoredTaskView(value: Record<string, unknown>): StoredTaskView {
       ...(createIdempotencyKeyHash ? { createIdempotencyKeyHash } : {}),
       ...(createRequestFingerprint ? { createRequestFingerprint } : {}),
       ...(teamId ? { teamId } : {}),
-      definition: normalizeTaskViewDefinition(value.definition),
+      definition: normalizeTaskViewDefinition(value.definition, {
+        allowUnqualifiedWorkItemTypeIds: true,
+      }),
       revision: requirePositiveInteger(value.revision, 'Task view revision'),
       createdAt: requireText(value.createdAt, 'Task view createdAt', 128),
       updatedAt: requireText(value.updatedAt, 'Task view updatedAt', 128),

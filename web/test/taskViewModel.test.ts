@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
@@ -618,6 +619,38 @@ describe('task custom-field display, filters, and sorting', () => {
     )
 
     expect(result.map((task) => task.id)).toEqual(['matching'])
+  })
+
+  test('matches Project Work Item Type filters by Team-qualified identity', () => {
+    const coreTask = createTask({
+      id: 'core-bug',
+      teamId: 'core-team',
+      workItemTypeId: 'bug',
+    })
+    const designTask = createTask({
+      id: 'design-bug',
+      teamId: 'design-team',
+      workItemTypeId: 'bug',
+    })
+
+    const result = filterAndSortProjectTasks([coreTask, designTask], {
+      assigneeFilter: 'all',
+      configuration,
+      configurationsByTeam: resolvedConfigurations,
+      definitionFilter: { category: 'all', customFieldId: '' },
+      dueDateFilter: 'all',
+      locale: 'en',
+      personLabels: {},
+      priorityFilter: 'all',
+      searchQuery: '',
+      sortOrder: 'due-date-asc',
+      statusColumns: columns,
+      statusFilter: 'all',
+      t: translateTaskLabel,
+      workItemTypeFilter: createSearchWorkItemTypeKey('core-team', 'bug'),
+    })
+
+    expect(result.map((task) => task.id)).toEqual(['core-bug'])
   })
 
   test('matches Project task display labels, schedule dates, and formatted custom fields', () => {

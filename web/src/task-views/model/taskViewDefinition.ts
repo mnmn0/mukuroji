@@ -1,4 +1,5 @@
 import {
+  readSearchWorkItemTypeKey,
   TASK_VIEW_SURFACES,
   type SearchCustomFieldFilter,
   type SearchCustomFieldOperator,
@@ -727,7 +728,7 @@ function readTaskViewFilters(value: unknown): TaskViewFilters | undefined {
     !copyStringArray(value, 'relationIds', filters) ||
     !copyStringArray(value, 'projectIds', filters) ||
     !copyStringArray(value, 'teamIds', filters) ||
-    !copyStringArray(value, 'workItemTypeIds', filters)
+    !copyQualifiedWorkItemTypeIds(value, filters)
   ) return undefined
 
   if (Object.hasOwn(value, 'customFields')) {
@@ -1099,6 +1100,15 @@ function copyStringArray(
   if (!values) return false
   target[key] = values
   return true
+}
+
+/** Copies only Team-qualified Work Item Type keys into a parsed task-view filter. */
+function copyQualifiedWorkItemTypeIds(
+  source: Record<string, unknown>,
+  target: TaskViewFilters,
+): boolean {
+  if (!copyStringArray(source, 'workItemTypeIds', target)) return false
+  return !target.workItemTypeIds?.some((value) => readSearchWorkItemTypeKey(value) === undefined)
 }
 
 /**

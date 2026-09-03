@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { TaskViewDefinition } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey, type TaskViewDefinition } from '@mukuroji/contracts'
 import {
   applyTaskViewDefinitionToTasks,
   canSetTeamTaskViewDefault,
@@ -183,6 +183,29 @@ describe('task-view surface adapters', () => {
       ...definition,
       filters: { workflowStatuses: [{ teamId: 'core:team', statusId: 'active' }] },
     }).map((task) => task.id)).toEqual(['default-active', 'bug-active'])
+  })
+
+  test('matches Work Item Type filters by Team and type identity', () => {
+    const coreTask = {
+      ...taskViewStoryTasks[0],
+      id: 'core-bug',
+      teamId: 'core-team',
+      workItemTypeId: 'bug',
+    }
+    const designTask = {
+      ...coreTask,
+      id: 'design-bug',
+      teamId: 'design-team',
+    }
+    const definition = {
+      ...createBuiltInTaskViewDefinition('my-tasks', { kind: 'viewer' }, 'board'),
+      filters: {
+        workItemTypeIds: [createSearchWorkItemTypeKey('core-team', 'bug')],
+      },
+    } satisfies TaskViewDefinition
+
+    expect(applyTaskViewDefinitionToTasks([coreTask, designTask], definition)
+      .map((task) => task.id)).toEqual(['core-bug'])
   })
 
   test('retains an existing Project custom-field predicate when another control changes', () => {

@@ -1,4 +1,5 @@
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type CustomFieldDefinition,
   type ResolvedWorkItemConfiguration,
@@ -80,7 +81,7 @@ export type AssigneeFilter = string | 'all'
 /** Task priority filter value or the all-priority sentinel. */
 export type PriorityFilter = WorkItemPriority | 'all'
 
-/** Work Item Type filter value or the all-type sentinel. */
+/** Team-qualified Work Item Type filter key or the all-type sentinel. */
 export type WorkItemTypeFilter = string | 'all'
 
 /** Due-date bucket selected in the task list. */
@@ -964,7 +965,10 @@ export function filterAndSortProjectTasks(
       task.priority === options.priorityFilter
     const matchesWorkItemType = options.workItemTypeFilter === undefined ||
       options.workItemTypeFilter === 'all' ||
-      (task.workItemTypeId ?? 'default') === options.workItemTypeFilter
+      createSearchWorkItemTypeKey(
+        task.teamId,
+        task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      ) === options.workItemTypeFilter
     const matchesDueDate = matchesTaskDueDateFilter(task, options.dueDateFilter, today)
     const matchesDefinition = matchesWorkItemDefinitionFilter(
       task,

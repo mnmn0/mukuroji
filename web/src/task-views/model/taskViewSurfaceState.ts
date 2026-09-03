@@ -1,4 +1,5 @@
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type SearchCustomFieldFilter,
   type SearchCustomFieldValue,
@@ -59,7 +60,7 @@ export type TeamIssueViewState = {
   definitionFilter: WorkItemDefinitionFilter
   /** Case-insensitive Issue search query. */
   searchQuery: string
-  /** Work Item Type identifier or the all-type sentinel. */
+  /** Team-qualified Work Item Type key or the all-type sentinel. */
   workItemTypeFilter: string
   /** Workflow status identifier or the all-status sentinel. */
   statusFilter: string
@@ -577,7 +578,10 @@ export function filterTasksByTaskViewDefinition(
     ) return false
     if (
       definition.filters.workItemTypeIds?.length &&
-      !definition.filters.workItemTypeIds.includes(task.workItemTypeId ?? 'default')
+      !definition.filters.workItemTypeIds.includes(createSearchWorkItemTypeKey(
+        task.teamId,
+        task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      ))
     ) return false
     if (
       definition.filters.assigneeUserIds?.length &&

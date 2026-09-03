@@ -49,7 +49,7 @@ export function FocusPage() {
   const requestedSourceEventId = searchParams.get('sourceEventId')?.trim() || undefined
   const requestedTeamId = searchParams.get('teamId')?.trim() || undefined
   const requestedWorkItemId = searchParams.get('workItemId')?.trim() || undefined
-  const workItemTypeId = searchParams.get('workItemTypeId')?.trim() || undefined
+  const workItemTypeKey = searchParams.get('workItemTypeId')?.trim() || undefined
   const deepLinkedItem = findDeepLinkedFocusItem(focusQuery.data, {
     sourceEventId: requestedSourceEventId,
     teamId: requestedTeamId,
@@ -79,9 +79,9 @@ export function FocusPage() {
   }
 
   /** Writes the selected Work Item Type filter to the URL. */
-  const selectWorkItemType = (nextWorkItemTypeId?: string) => {
+  const selectWorkItemType = (nextWorkItemTypeKey?: string) => {
     const nextParams = new URLSearchParams(searchParams)
-    if (nextWorkItemTypeId) nextParams.set('workItemTypeId', nextWorkItemTypeId)
+    if (nextWorkItemTypeKey) nextParams.set('workItemTypeId', nextWorkItemTypeKey)
     else nextParams.delete('workItemTypeId')
     setSearchParams(nextParams, { replace: true })
   }
@@ -150,7 +150,7 @@ export function FocusPage() {
           section={selectedSection}
           snoozeFeedback={mutations.snoozeFeedback}
           t={t}
-          workItemTypeId={workItemTypeId}
+          workItemTypeKey={workItemTypeKey}
         />
       </div>
     </WorkspaceRouteContent>

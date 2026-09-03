@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { TaskViewDefinition } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey, type TaskViewDefinition } from '@mukuroji/contracts'
 import {
   applyTaskViewUrlOverride,
   resolveTaskViewDefinition,
@@ -213,11 +213,13 @@ describe('task view definition migration and sanitization', () => {
     const result = sanitizeTaskViewDefinition({
       ...builtInDefinition,
       filters: {
-        workItemTypeIds: ['incident'],
+        workItemTypeIds: [createSearchWorkItemTypeKey('team-1', 'incident')],
       },
     }, options)
 
-    expect(result.definition.filters.workItemTypeIds).toEqual(['incident'])
+    expect(result.definition.filters.workItemTypeIds).toEqual([
+      createSearchWorkItemTypeKey('team-1', 'incident'),
+    ])
   })
 
   test('keeps custom filters while removing raw custom layout fields from a URL override', () => {

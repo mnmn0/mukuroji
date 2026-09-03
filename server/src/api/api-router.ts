@@ -27382,10 +27382,7 @@ async function createTaskViewAccessScope(
     workspaceConfiguration.configuration.customFields.map((field) => field.id),
   )
   const activeWorkItemTypeIds = new Set<string>()
-  addActiveTaskViewWorkItemTypeIds(
-    activeWorkItemTypeIds,
-    workspaceConfiguration.configuration,
-  )
+  const readableWorkItemTypeIds = new Set<string>()
   const readableCustomFieldIds = new Set(activeCustomFieldIds)
   const activeStatusIds = new Set<string>()
   const activeWorkflowStatusIds = new Set<string>()
@@ -27409,7 +27406,18 @@ async function createTaskViewAccessScope(
       if (canReadTeam) readableCustomFieldIds.add(field.id)
     }
     const configuration = teamConfiguration.resolved.configuration
-    addActiveTaskViewWorkItemTypeIds(activeWorkItemTypeIds, configuration)
+    addActiveTaskViewWorkItemTypeIds(
+      activeWorkItemTypeIds,
+      teamConfiguration.teamId,
+      configuration,
+    )
+    if (canReadTeam) {
+      addActiveTaskViewWorkItemTypeIds(
+        readableWorkItemTypeIds,
+        teamConfiguration.teamId,
+        configuration,
+      )
+    }
     for (const workflow of getWorkItemConfigurationWorkflows(configuration)) {
       for (const status of workflow.statuses) {
         activeStatusIds.add(createTaskViewStatusKey(teamConfiguration.teamId, status.id))
@@ -27439,6 +27447,7 @@ async function createTaskViewAccessScope(
     ...context.taskViewAccess,
     activeCustomFieldIds,
     activeWorkItemTypeIds,
+    readableWorkItemTypeIds,
     readableCustomFieldIds,
     activeStatusIds,
     activeWorkflowStatusIds,
@@ -27457,14 +27466,15 @@ async function createTaskViewAccessScope(
   }
 }
 
-/** Adds the currently defined Work Item Type identifiers represented by one configuration. */
+/** Adds the currently defined Team-qualified Work Item Type keys for one Team configuration. */
 function addActiveTaskViewWorkItemTypeIds(
   activeTypeIds: Set<string>,
+  teamId: string,
   configuration: WorkItemConfiguration,
 ): void {
-  activeTypeIds.add(DEFAULT_WORK_ITEM_TYPE_ID)
+  activeTypeIds.add(createSearchWorkItemTypeKey(teamId, DEFAULT_WORK_ITEM_TYPE_ID))
   for (const type of configuration.workItemTypes ?? []) {
-    activeTypeIds.add(type.id)
+    activeTypeIds.add(createSearchWorkItemTypeKey(teamId, type.id))
   }
 }
 

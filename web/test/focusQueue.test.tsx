@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { FocusQueueResponse } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey, type FocusQueueResponse } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   focusConfigurationFixture,
@@ -42,6 +42,37 @@ describe('Focus queue', () => {
       teamId: 'core-team',
       workItemId: 'WI-202',
     })).toBeUndefined()
+  })
+
+  test('qualifies Focus Work Item Type filters by owning Team', () => {
+    const coreItem = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
+    if (!coreItem) throw new Error('The Focus fixture requires one Now item.')
+    const designItem = {
+      ...coreItem,
+      id: 'focus-design-WI-194',
+      workItem: {
+        ...coreItem.workItem,
+        id: 'design-WI-194',
+        teamId: 'design-team',
+      },
+    }
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => group.section === 'now'
+        ? { ...group, items: [coreItem, designItem] }
+        : group),
+    }
+
+    expect(getFocusQueueItems(
+      response,
+      'now',
+      createSearchWorkItemTypeKey('core-team', 'default'),
+    ).map((item) => item.workItem.teamId)).toEqual(['core-team'])
+    expect(getFocusQueueItems(
+      response,
+      'now',
+      createSearchWorkItemTypeKey('design-team', 'default'),
+    ).map((item) => item.workItem.teamId)).toEqual(['design-team'])
   })
 
   test('clamps roving keyboard navigation without wrapping server order', () => {
