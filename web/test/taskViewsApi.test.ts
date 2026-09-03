@@ -91,9 +91,9 @@ describe('saved task-view API', () => {
     const view = {
       ...createSavedTaskViewFixture('migrated-view'),
       migrationWarnings: [{
-        code: 'invalid-layout',
-        fallback: 'reset-to-default',
-        section: 'layout',
+        code: 'deleted-work-item-type',
+        fallback: 'removed',
+        section: 'filter',
       }],
     } satisfies SavedTaskView
     const requests = installJsonResponses([{ view }])

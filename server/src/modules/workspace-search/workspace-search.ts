@@ -346,6 +346,8 @@ export type TaskViewAccessScope = {
   writableProjectScopeKeys: ReadonlySet<string>
   /** 現在存在する custom field ID です。未指定時は削除判定を保留します。 */
   activeCustomFieldIds?: ReadonlySet<string>
+  /** Currently active Work Item Type identifiers. Omit to defer deletion migration. */
+  activeWorkItemTypeIds?: ReadonlySet<string>
   /** Current viewer が値を参照できる custom field ID です。未指定時は active field をすべて許可します。 */
   readableCustomFieldIds?: ReadonlySet<string>
   /** 現在存在する `${teamId}\0${statusId}` 形式の Team-qualified workflow status key です。 */
@@ -3726,6 +3728,15 @@ async function sanitizeTaskViewDefinition(
             retainTaskViewCustomField(filter.fieldId, access, warnings, 'filter')
           ),
         }),
+    ...(definition.filters.workItemTypeIds === undefined
+      ? {}
+      : {
+          workItemTypeIds: retainTaskViewWorkItemTypeIds(
+            definition.filters.workItemTypeIds,
+            access.activeWorkItemTypeIds,
+            warnings,
+          ),
+        }),
     ...(definition.filters.statuses === undefined
       ? {}
       : {
@@ -3823,6 +3834,20 @@ function retainTaskViewReferenceIds(
   return referenceIds.filter((referenceId) => {
     if (readableIds.has(referenceId)) return true
     addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+    return false
+  })
+}
+
+/** Removes Work Item Type filters that no longer exist in the active configuration. */
+function retainTaskViewWorkItemTypeIds(
+  typeIds: readonly string[],
+  activeTypeIds: ReadonlySet<string> | undefined,
+  warnings: TaskViewMigrationWarning[],
+): string[] {
+  if (!activeTypeIds) return [...typeIds]
+  return typeIds.filter((typeId) => {
+    if (activeTypeIds.has(typeId)) return true
+    addTaskViewMigrationWarning(warnings, 'deleted-work-item-type', 'filter', 'removed')
     return false
   })
 }

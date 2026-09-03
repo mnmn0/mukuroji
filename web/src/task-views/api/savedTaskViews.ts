@@ -36,6 +36,7 @@ const taskViewDensities = ['compact', 'comfortable', 'spacious']
 const sortDirections = ['asc', 'desc']
 const migrationCodes = [
   'deleted-custom-field',
+  'deleted-work-item-type',
   'deleted-workflow-status',
   'permission-redacted',
   'inaccessible-scope',

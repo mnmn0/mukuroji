@@ -2482,6 +2482,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
     projectScopeKeys: new Set(['core\0project-1']),
     writableProjectScopeKeys: new Set(['core\0project-1']),
     activeCustomFieldIds: new Set(['kept', 'private']),
+    activeWorkItemTypeIds: new Set(['bug']),
     readableCustomFieldIds: new Set(['kept']),
     activeStatusIds: new Set(['core\0todo']),
     activeWorkflowStatusIds: new Set(['core\0bug\0todo']),
@@ -2502,6 +2503,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
           assigneeUserIds: ['owner@example.com', 'hidden@example.com'],
           creatorUserIds: ['hidden@example.com'],
           relationIds: ['visible-relation', 'hidden-relation'],
+          workItemTypeIds: ['bug', 'deleted-type'],
           teamIds: ['core', 'secret'],
           projectIds: ['project-1', 'project-2'],
           statuses: ['todo', 'gone'],
@@ -2546,6 +2548,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
     assigneeUserIds: ['owner@example.com'],
     creatorUserIds: [],
     relationIds: ['visible-relation'],
+    workItemTypeIds: ['bug'],
     teamIds: ['core'],
     projectIds: ['project-1'],
     statuses: ['todo'],
@@ -2567,6 +2570,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
   expect(created.definition.layout.subgroup).toBeUndefined()
   expect(new Set(created.migrationWarnings?.map((warning) => warning.code))).toEqual(new Set([
     'deleted-custom-field',
+    'deleted-work-item-type',
     'deleted-workflow-status',
     'permission-redacted',
     'invalid-layout',

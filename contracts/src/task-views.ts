@@ -226,6 +226,7 @@ export type TaskViewDefaultSelection = {
 /** Stable reason that a persisted or URL-provided task view required migration. */
 export type TaskViewMigrationWarningCode =
   | 'deleted-custom-field'
+  | 'deleted-work-item-type'
   | 'deleted-workflow-status'
   | 'permission-redacted'
   | 'inaccessible-scope'

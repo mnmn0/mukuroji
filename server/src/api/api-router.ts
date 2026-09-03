@@ -27353,6 +27353,11 @@ async function createTaskViewAccessScope(
   const activeCustomFieldIds = new Set(
     workspaceConfiguration.configuration.customFields.map((field) => field.id),
   )
+  const activeWorkItemTypeIds = new Set<string>()
+  addActiveTaskViewWorkItemTypeIds(
+    activeWorkItemTypeIds,
+    workspaceConfiguration.configuration,
+  )
   const readableCustomFieldIds = new Set(activeCustomFieldIds)
   const activeStatusIds = new Set<string>()
   const activeWorkflowStatusIds = new Set<string>()
@@ -27376,6 +27381,7 @@ async function createTaskViewAccessScope(
       if (canReadTeam) readableCustomFieldIds.add(field.id)
     }
     const configuration = teamConfiguration.resolved.configuration
+    addActiveTaskViewWorkItemTypeIds(activeWorkItemTypeIds, configuration)
     for (const workflow of getWorkItemConfigurationWorkflows(configuration)) {
       for (const status of workflow.statuses) {
         activeStatusIds.add(createTaskViewStatusKey(teamConfiguration.teamId, status.id))
@@ -27404,6 +27410,7 @@ async function createTaskViewAccessScope(
   return {
     ...context.taskViewAccess,
     activeCustomFieldIds,
+    activeWorkItemTypeIds,
     readableCustomFieldIds,
     activeStatusIds,
     activeWorkflowStatusIds,
@@ -27419,6 +27426,17 @@ async function createTaskViewAccessScope(
         return planningAuthorizationStatePromise
       },
     ),
+  }
+}
+
+/** Adds the currently defined Work Item Type identifiers represented by one configuration. */
+function addActiveTaskViewWorkItemTypeIds(
+  activeTypeIds: Set<string>,
+  configuration: WorkItemConfiguration,
+): void {
+  activeTypeIds.add(DEFAULT_WORK_ITEM_TYPE_ID)
+  for (const type of configuration.workItemTypes ?? []) {
+    activeTypeIds.add(type.id)
   }
 }
 
