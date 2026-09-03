@@ -869,7 +869,14 @@ function normalizeWorkItem(row: Record<string, unknown>): CrossDomainIntegrityIt
   }]
 }
 
-/** Strictly normalizes Configuration and relation-graph rows. */
+/**
+ * Strictly normalizes Configuration and relation-graph rows.
+ *
+ * @param row - Decoded row from the isolated configuration table.
+ * @param input - Invocation-local bridge state and optional endpoint-type reader.
+ * @returns Normalized configuration or relation items.
+ * @throws CrossDomainIntegrityAwsBridgeFailure when a relation endpoint type cannot be read.
+ */
 async function normalizeConfigurationRow(
   row: Record<string, unknown>,
   input: RowNormalizationBridgeInput,
@@ -971,7 +978,16 @@ async function normalizeConfigurationRow(
   return normalizationFailure()
 }
 
-/** Reads the non-deleted canonical Types for relation endpoints through exact-key reads. */
+/**
+ * Reads the non-deleted canonical Types for relation endpoints through exact-key reads.
+ *
+ * @param input - Invocation-local bridge state and raw AWS reader.
+ * @param workspaceId - Workspace owning both relation endpoints.
+ * @param teamId - Team owning both relation endpoints.
+ * @param workItemIds - Endpoint Work Item IDs to resolve.
+ * @returns A map of non-deleted endpoint IDs to canonical Work Item Type IDs.
+ * @throws CrossDomainIntegrityAwsBridgeFailure when the endpoint reader is unavailable.
+ */
 async function readRelationEndpointWorkItemTypes(
   input: RowNormalizationBridgeInput,
   workspaceId: string,

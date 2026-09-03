@@ -448,7 +448,12 @@ export function validateWorkflowDefinition(value: unknown): WorkItemConfiguratio
   }
 }
 
-/** Resolves every workflow available to a Work Item Type. */
+/**
+ * Resolves every workflow available to a Work Item Type.
+ *
+ * @param configuration - Work Item configuration whose workflows are resolved.
+ * @returns The primary workflow followed by every distinct additional workflow.
+ */
 export function getWorkItemConfigurationWorkflows(
   configuration: WorkItemConfiguration,
 ): readonly WorkItemConfiguration['workflow'][] {
@@ -459,7 +464,15 @@ export function getWorkItemConfigurationWorkflows(
       )]
 }
 
-/** Resolves the active or archived Work Item Type for a configuration. */
+/**
+ * Resolves the active or archived Work Item Type for a configuration.
+ *
+ * @param configuration - Work Item configuration that owns the type definition.
+ * @param requestedTypeId - Untrusted requested type identifier; omitted values use the built-in type.
+ * @param options - Whether an archived type may be returned.
+ * @returns The validated Work Item Type definition.
+ * @throws WorkItemConfigurationError when the type is unknown or archived without permission.
+ */
 export function resolveWorkItemType(
   configuration: WorkItemConfiguration,
   requestedTypeId?: unknown,
@@ -516,7 +529,15 @@ export function assertWorkItemChildTypeAllowed(
   )
 }
 
-/** Resolves the workflow selected by a Work Item Type. */
+/**
+ * Resolves the workflow selected by a Work Item Type.
+ *
+ * @param configuration - Work Item configuration that owns the workflow definitions.
+ * @param typeId - Untrusted Work Item Type identifier.
+ * @param options - Whether an archived type may be used for resolution.
+ * @returns The validated workflow selected by the type.
+ * @throws WorkItemConfigurationError when the type or selected workflow is invalid.
+ */
 export function resolveWorkItemTypeWorkflow(
   configuration: WorkItemConfiguration,
   typeId?: unknown,
@@ -538,7 +559,15 @@ export function resolveWorkItemTypeWorkflow(
   return workflow
 }
 
-/** Returns the custom fields visible to a Work Item Type in definition order. */
+/**
+ * Returns the custom fields visible to a Work Item Type in definition order.
+ *
+ * @param configuration - Work Item configuration containing field definitions.
+ * @param typeId - Untrusted Work Item Type identifier.
+ * @param options - Whether an archived type may be used for resolution.
+ * @returns Applicable custom field definitions in configuration order.
+ * @throws WorkItemConfigurationError when the type is unknown or archived without permission.
+ */
 export function getWorkItemTypeCustomFieldDefinitions(
   configuration: WorkItemConfiguration,
   typeId?: unknown,
@@ -553,7 +582,19 @@ export function getWorkItemTypeCustomFieldDefinitions(
   return configuration.customFields.filter((definition) => fieldIds.has(definition.id))
 }
 
-/** Calculates the data and workflow impact of a Work Item Type change. */
+/**
+ * Calculates the data and workflow impact of a Work Item Type change.
+ *
+ * @param configuration - Work Item configuration used to resolve both types.
+ * @param currentTypeId - Current stored Work Item Type identifier.
+ * @param currentWorkflowStatusId - Current stored workflow status identifier.
+ * @param currentCustomFieldValues - Current stored custom field values.
+ * @param targetTypeId - Requested replacement Work Item Type identifier.
+ * @param projectId - Optional Project used for field applicability.
+ * @param expectedRevision - Revision that must still hold when applying the change.
+ * @returns Server-calculated type-change impact and resolution requirements.
+ * @throws WorkItemConfigurationError when either type cannot be resolved.
+ */
 export function previewWorkItemTypeChange(
   configuration: WorkItemConfiguration,
   currentTypeId: unknown,
@@ -638,7 +679,15 @@ export function assertWorkItemTypeChangeResolution(
   )
 }
 
-/** Work Item custom field値へdefault/patchを適用し、全definitionに対して検証します。 */
+/**
+ * Applies defaults or patches to Work Item custom field values and validates every definition.
+ *
+ * @param configuration - Work Item configuration that owns the definitions.
+ * @param input - Untrusted create values or update patch values.
+ * @param options - Operation mode and Work Item Type scope used for validation.
+ * @returns Canonical custom field values suitable for persistence.
+ * @throws WorkItemConfigurationError when a value is malformed or violates its definition.
+ */
 export function normalizeCustomFieldValues(
   configuration: WorkItemConfiguration,
   input: unknown,
@@ -774,7 +823,15 @@ export function normalizeCustomFieldValues(
   return values
 }
 
-/** Requested status、未指定時は initial status を解決します。 */
+/**
+ * Resolves a requested workflow status, or the workflow's initial status when omitted.
+ *
+ * @param configuration - Work Item configuration that owns the workflow.
+ * @param requestedStatusId - Optional untrusted requested status identifier.
+ * @param workItemTypeId - Optional Work Item Type selecting the workflow.
+ * @returns The canonical status identifier and its category.
+ * @throws WorkItemConfigurationError when the status or workflow is invalid.
+ */
 export function resolveWorkflowStatus(
   configuration: WorkItemConfiguration,
   requestedStatusId?: unknown,
@@ -806,7 +863,15 @@ export function resolveWorkflowStatus(
   }
 }
 
-/** Workflow transition が許可されているか判定します。 */
+/**
+ * Determines whether a workflow transition is allowed for a Work Item Type.
+ *
+ * @param configuration - Work Item configuration that owns the workflow.
+ * @param fromStatusId - Current workflow status identifier.
+ * @param toStatusId - Requested workflow status identifier.
+ * @param workItemTypeId - Optional Work Item Type selecting the workflow.
+ * @returns Whether the transition is allowed.
+ */
 export function isWorkflowTransitionAllowed(
   configuration: WorkItemConfiguration,
   fromStatusId: string,
@@ -824,7 +889,15 @@ export function isWorkflowTransitionAllowed(
   )
 }
 
-/** 許可されていない workflow transition を安定した409で拒否します。 */
+/**
+ * Rejects a workflow transition that is not allowed for a Work Item Type.
+ *
+ * @param configuration - Work Item configuration that owns the workflow.
+ * @param fromStatusId - Current workflow status identifier.
+ * @param toStatusId - Requested workflow status identifier.
+ * @param workItemTypeId - Optional Work Item Type selecting the workflow.
+ * @throws WorkItemConfigurationError when the transition is not allowed.
+ */
 export function assertWorkflowTransitionAllowed(
   configuration: WorkItemConfiguration,
   fromStatusId: string,

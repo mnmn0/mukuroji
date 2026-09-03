@@ -628,7 +628,16 @@ function relationClaims(
   return claims
 }
 
-/** Creates the effective-configuration requirement for one typed parent-child relation. */
+/**
+ * Creates the effective-configuration requirement for one typed parent-child relation.
+ *
+ * @param item - Relation whose endpoint types were joined by the normalized reader.
+ * @param parentTypeId - Process-local parent Work Item Type identifier.
+ * @param childTypeId - Process-local child Work Item Type identifier.
+ * @param digestKey - Invocation-local restore-drill HMAC key.
+ * @param originToken - Opaque physical source-row identity.
+ * @returns An opaque deferred requirement for the effective configuration.
+ */
 function createWorkItemTypeRelationRequirement(
   item: Extract<CrossDomainIntegrityItem, { readonly kind: 'relation' }>,
   parentTypeId: string,
