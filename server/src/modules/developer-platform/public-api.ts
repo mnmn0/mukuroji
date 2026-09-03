@@ -23,6 +23,7 @@ import {
   type ImportDryRunReport,
   type ImportJob,
   type ImportSource,
+  type PreviewPublicWorkItemTypeChangeRequest,
   type ResolveWorkItemSyncConflictInput,
   type UpdatePublicWorkItemRequest,
   type UpdateWebhookSubscriptionInput,
@@ -30,6 +31,7 @@ import {
   type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleWeekday,
   type WorkItemSyncConflict,
+  type WorkItemTypeChangePreview,
   type WorkItemTypeChangeResolution,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
@@ -127,6 +129,13 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
+  /** Current RBAC/CAS を確認して Work Item Type 変更の影響を計算します。 */
+  previewTypeChange(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: PreviewPublicWorkItemTypeChangeRequest,
+  ): Promise<WorkItemTypeChangePreview>
   /** Work Item 作成 receipt の replay 前に current create RBAC を再評価します。 */
   authorizeCreate(
     credential: AuthenticatedDeveloperCredential,
@@ -557,6 +566,19 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.post('/v1/work-items/:workItemId/work-item-type-preview', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const body = readPreviewPublicWorkItemTypeChangeRequest(await readJson(c))
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return c.json(await dependencies.workItems.previewTypeChange(
+      credential,
+      teamId,
+      workItemId,
+      body,
     ))
   })
 
@@ -2524,6 +2546,34 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     )
   }
   return result
+}
+
+/**
+ * Reads a public Work Item Type change preview request.
+ *
+ * @param value - Untrusted JSON request body.
+ * @returns A validated preview request.
+ */
+function readPreviewPublicWorkItemTypeChangeRequest(
+  value: unknown,
+): PreviewPublicWorkItemTypeChangeRequest {
+  const body = requireRecord(value, 'Work Item Type preview body is required.')
+  assertAllowedFields(
+    body,
+    ['expectedRevision', 'targetWorkItemTypeId', 'assignedProjectId'],
+    'Work Item Type preview body',
+  )
+  return {
+    expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
+    targetWorkItemTypeId: readIdentifier(body.targetWorkItemTypeId, 'targetWorkItemTypeId'),
+    ...(body.assignedProjectId === undefined
+      ? {}
+      : {
+          assignedProjectId: body.assignedProjectId === null
+            ? null
+            : readIdentifier(body.assignedProjectId, 'assignedProjectId'),
+        }),
+  }
 }
 
 function readDeletePublicWorkItemRequest(value: unknown) {

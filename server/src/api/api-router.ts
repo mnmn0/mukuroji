@@ -6289,6 +6289,11 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         'Work Item Type ID is invalid.',
       )
     }
+    if (body.action === 'convert' && body.customFieldValues !== undefined) {
+      body.customFieldValues = normalizeRequestConversionCustomFieldValues(
+        body.customFieldValues,
+      )
+    }
     if (body.action !== 'convert') {
       if (body.action === 'assign') {
         if (
@@ -6377,6 +6382,9 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
           ...(conversion.input.workItemTypeId
             ? { workItemTypeId: conversion.input.workItemTypeId }
             : {}),
+          ...(body.customFieldValues === undefined
+            ? {}
+            : { customFieldValues: body.customFieldValues }),
         }
       : undefined
     const triageIdempotency = triageAction
@@ -39166,6 +39174,73 @@ function mergeTriageCustomFieldValues(
   return Object.fromEntries(values)
 }
 
+/**
+ * Validates and canonicalizes explicit Request conversion custom-field overrides.
+ *
+ * @param value - Untrusted custom-field override map from the Request action body.
+ * @returns A bounded map with normalized field identifiers and JSON-compatible values.
+ */
+function normalizeRequestConversionCustomFieldValues(
+  value: unknown,
+): Record<string, CustomFieldValue | null> {
+  if (!isRecord(value)) {
+    throw new RequestIntakeError(
+      400,
+      'InvalidRequestIntakeInput',
+      'Request conversion custom field values are invalid.',
+    )
+  }
+  const entries = Object.entries(value)
+  if (entries.length > 100) {
+    throw new RequestIntakeError(
+      400,
+      'InvalidRequestIntakeInput',
+      'Request conversion custom field values are limited to 100 entries.',
+    )
+  }
+  const normalized: Record<string, CustomFieldValue | null> = {}
+  for (const [fieldId, fieldValue] of entries) {
+    const normalizedFieldId = fieldId.trim()
+    if (!/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(normalizedFieldId)) {
+      throw new RequestIntakeError(
+        400,
+        'InvalidRequestIntakeInput',
+        'Request conversion custom field ID is invalid.',
+      )
+    }
+    if (fieldValue === null) {
+      normalized[normalizedFieldId] = null
+    } else if (typeof fieldValue === 'string') {
+      if (fieldValue.length > 10_000) {
+        throw new RequestIntakeError(
+          400,
+          'InvalidRequestIntakeInput',
+          'Request conversion custom field value is too long.',
+        )
+      }
+      normalized[normalizedFieldId] = fieldValue
+    } else if (typeof fieldValue === 'number' && Number.isFinite(fieldValue)) {
+      normalized[normalizedFieldId] = fieldValue
+    } else if (typeof fieldValue === 'boolean') {
+      normalized[normalizedFieldId] = fieldValue
+    } else if (
+      Array.isArray(fieldValue) &&
+      fieldValue.length <= 100 &&
+      fieldValue.every((entry): entry is string => typeof entry === 'string') &&
+      fieldValue.every((entry) => entry.length <= 10_000)
+    ) {
+      normalized[normalizedFieldId] = [...fieldValue]
+    } else {
+      throw new RequestIntakeError(
+        400,
+        'InvalidRequestIntakeInput',
+        'Request conversion custom field value is invalid.',
+      )
+    }
+  }
+  return normalized
+}
+
 /** Removes Request mapping values that are outside the selected Work Item Type scope. */
 function filterRequestConversionCustomFieldValues(
   configuration: WorkItemConfiguration,
@@ -41071,6 +41146,59 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId,
         'viewer',
       )).detail.issue)
+    },
+
+    async previewTypeChange(credential, teamId, workItemId, input) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.write',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      requireWorkspaceBusinessWrite(principal)
+      const permission = await requireTeamPermission(principal, teamId, 'member')
+      const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        workItemId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      )
+      if (detail.issue.revision !== input.expectedRevision) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemRevisionConflict',
+          'Work Item changed. Reload and try again.',
+        )
+      }
+      requireAssignedProjectPermission(
+        principal,
+        permission,
+        detail.issue.assignedProjectId,
+        'member',
+      )
+      const proposedAssignedProjectId = 'assignedProjectId' in input
+        ? readAssignedProjectId(input.assignedProjectId)
+        : detail.issue.assignedProjectId
+      if ('assignedProjectId' in input) {
+        requireAssignedProjectPermission(
+          principal,
+          permission,
+          proposedAssignedProjectId,
+          'member',
+        )
+      }
+      const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        teamId,
+      )
+      return previewWorkItemTypeChange(
+        resolvedConfiguration.configuration,
+        detail.issue.workItemTypeId,
+        detail.issue.workflowStatusId,
+        detail.issue.customFieldValues,
+        input.targetWorkItemTypeId,
+        proposedAssignedProjectId ?? undefined,
+        input.expectedRevision,
+      )
     },
 
     async authorizeCreate(credential, input) {

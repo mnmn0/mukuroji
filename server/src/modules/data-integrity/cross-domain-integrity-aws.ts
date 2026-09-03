@@ -7,6 +7,7 @@ import type {
   Tag,
 } from '@aws-sdk/client-s3'
 import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -61,6 +62,7 @@ import {
   type CrossDomainIntegrityResourceAttestation,
   type CrossDomainIntegrityResult,
   type CrossDomainRelationType,
+  type CrossDomainWorkItemTypeWorkflow,
 } from './cross-domain-integrity-checker'
 import type {
   CrossDomainIntegrityCheckBridgeInput,
@@ -853,6 +855,7 @@ function normalizeWorkItem(row: Record<string, unknown>): CrossDomainIntegrityIt
     workspaceId: row.directoryId,
     teamId: row.teamId,
     workItemId: row.issueId,
+    workItemTypeId: row.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     creatorMemberKey: row.creatorMemberKey,
     workflowStatusId: row.workflowStatusId,
     statusCategory: row.statusCategory,
@@ -873,16 +876,35 @@ function normalizeConfigurationRow(row: Record<string, unknown>): CrossDomainInt
     )
     if (configuration.revision < 1) return normalizationFailure()
     const scope = parseConfigurationScope(requireText(row.scopeKey), scopeType, scopeId)
-    const workflowStatuses = [configuration.workflow, ...(configuration.workflows ?? [])]
-      .flatMap((workflow) => workflow.statuses)
+    const workflows = [configuration.workflow, ...(configuration.workflows ?? [])]
+    const explicitDefaultType = configuration.workItemTypes?.find((type) =>
+      type.id === DEFAULT_WORK_ITEM_TYPE_ID,
+    )
+    const workItemTypeWorkflows: CrossDomainWorkItemTypeWorkflow[] = [
+      {
+        workItemTypeId: DEFAULT_WORK_ITEM_TYPE_ID,
+        workflowId: explicitDefaultType?.defaultWorkflowId ?? configuration.workflow.id,
+      },
+      ...(configuration.workItemTypes ?? [])
+        .filter((type) => type.id !== DEFAULT_WORK_ITEM_TYPE_ID)
+        .map((type) => ({
+          workItemTypeId: type.id,
+          workflowId: type.defaultWorkflowId,
+        })),
+    ]
+    const workflowStatuses = workflows.flatMap((workflow) =>
+      workflow.statuses.map((status) => ({
+        statusId: status.id,
+        category: status.category,
+        workflowId: workflow.id,
+      })),
+    )
     return [{
       kind: 'configuration',
       workspaceId: scope.workspaceId,
       teamId: scope.teamId,
-      workflowStatuses: workflowStatuses.map((status) => ({
-        statusId: status.id,
-        category: status.category,
-      })),
+      workflowStatuses,
+      workItemTypeWorkflows,
     }]
   }
   if (row.entryType === 'relation') {

@@ -1290,3 +1290,100 @@ test('returns the converted Request on a response-loss conversion retry without 
   expect(triageReadCount).toBe(1)
   expect(triageWriteCount).toBe(0)
 })
+
+test('binds legacy Request conversion idempotency to custom field overrides', async () => {
+  const submission = createLegacySubmission()
+  const entry = createLegacyTriageEntry(submission)
+  let firstDigest: string | undefined
+  let createCount = 0
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+  })
+  setTestAppDependencies({
+    triage: createLegacyTriageClient(entry),
+    requestIntake: createRequestIntakeClient({
+      getSubmission: async () => submission,
+      completeConversion: async () => ({
+        ...submission,
+        status: 'converted',
+        revision: submission.revision + 1,
+        workItem: {
+          teamId: 'core-team',
+          workItemId: 'converted-work-item',
+          projectId: 'refero',
+        },
+      }),
+    }),
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(_directoryId, teamId, input, actorUserId) {
+        createCount += 1
+        const digest = input.idempotentRequestDigest
+        if (typeof digest !== 'string') {
+          throw new Error('Expected a deterministic conversion digest.')
+        }
+        if (firstDigest !== undefined && firstDigest !== digest) {
+          throw new RequestIntakeError(
+            409,
+            'RequestConversionIdempotencyConflict',
+            'The conversion idempotency key was reused with different custom fields.',
+          )
+        }
+        firstDigest = digest
+        return {
+          issue: {
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+            revision: 1,
+            id: input.idempotentIssueId ?? 'converted-work-item',
+            teamId,
+            assignedProjectId: 'refero',
+            title: String(input.title),
+            assigneeUserId: String(input.assigneeUserId),
+            creatorMemberKey: actorUserId,
+            workflowSchemaVersion: 1,
+            workflowStatusId: typeof input.workflowStatusId === 'string'
+              ? input.workflowStatusId
+              : 'todo',
+            statusCategory: 'unstarted',
+            customFieldValues: {},
+            relationIds: [],
+            dueDate: '',
+            schedule: createDefaultUnscheduledWorkItemSchedule(),
+            priority: 'medium',
+            createdAt: TRIAGE_NOW,
+            updatedAt: TRIAGE_NOW,
+            source: 'dynamodb',
+          },
+        }
+      },
+    }),
+  })
+
+  const request = (customFieldValues: Record<string, string>) => app.request(
+    `/api/request-submissions/${submission.id}/actions`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'legacy-conversion-custom-fields',
+      },
+      body: JSON.stringify({
+        action: 'convert',
+        expectedRevision: 1,
+        customFieldValues,
+      }),
+    },
+  )
+
+  const firstResponse = await request({ priority: 'high' })
+  const conflictingResponse = await request({ priority: 'low' })
+
+  expect(firstResponse.status).toBe(200)
+  expect(conflictingResponse.status).toBe(409)
+  expect(await conflictingResponse.json()).toEqual({
+    code: 'RequestConversionIdempotencyConflict',
+    message: 'The conversion idempotency key was reused with different custom fields.',
+  })
+  expect(createCount).toBe(2)
+})

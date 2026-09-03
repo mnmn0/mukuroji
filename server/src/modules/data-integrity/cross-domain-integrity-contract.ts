@@ -42,6 +42,7 @@ export type CrossDomainIntegrityFailureCode =
   | 'WORK_ITEM_STATUS_CATEGORY_MISMATCH'
   | 'WORK_ITEM_TEAM_MISSING'
   | 'WORK_ITEM_TENANT_MISMATCH'
+  | 'WORK_ITEM_TYPE_UNKNOWN'
   | 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN'
 
 /** Canonical workflow status category used by Work Items and configuration. */
@@ -58,6 +59,16 @@ export type CrossDomainWorkflowStatus = {
   statusId: string
   /** Canonical category projected to Work Items. */
   category: CrossDomainWorkflowStatusCategory
+  /** Workflow that owns this status. */
+  workflowId: string
+}
+
+/** One normalized Work Item Type to Workflow assignment. */
+export type CrossDomainWorkItemTypeWorkflow = {
+  /** Stable Work Item Type ID. */
+  workItemTypeId: string
+  /** Workflow selected by the Work Item Type. */
+  workflowId: string
 }
 
 /** A normalized workflow configuration row. */
@@ -70,6 +81,8 @@ export type CrossDomainConfigurationItem = {
   teamId: string | null
   /** Status IDs and canonical categories accepted by this configuration snapshot. */
   workflowStatuses: readonly CrossDomainWorkflowStatus[]
+  /** Workflow selected by each Work Item Type in this configuration snapshot. */
+  workItemTypeWorkflows: readonly CrossDomainWorkItemTypeWorkflow[]
 }
 
 /** A normalized canonical Work Item row. */
@@ -82,6 +95,8 @@ export type CrossDomainWorkItem = {
   teamId: string
   /** Stable Work Item ID. */
   workItemId: string
+  /** Stable Work Item Type ID, including the built-in fallback for legacy rows. */
+  workItemTypeId: string
   /** Workspace member key captured when the Work Item was created. */
   creatorMemberKey: string
   /** Workflow status stored on the Work Item. */

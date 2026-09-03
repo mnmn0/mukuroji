@@ -1539,6 +1539,30 @@
         ],
         "type": "object"
       },
+      "PreviewPublicWorkItemTypeChangeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "assignedProjectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "targetWorkItemTypeId": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "targetWorkItemTypeId"
+        ],
+        "type": "object"
+      },
       "PublicWorkItemPage": {
         "additionalProperties": false,
         "properties": {
@@ -2279,6 +2303,56 @@
           "field",
           "localValue",
           "externalValue"
+        ],
+        "type": "object"
+      },
+      "WorkItemTypeChangePreview": {
+        "additionalProperties": false,
+        "properties": {
+          "currentWorkItemTypeId": {
+            "type": "string"
+          },
+          "currentWorkflowStatusId": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "invalidWorkflowStatusId": {
+            "type": "string"
+          },
+          "lostCustomFieldIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "missingRequiredCustomFieldIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "requiresResolution": {
+            "type": "boolean"
+          },
+          "targetInitialWorkflowStatusId": {
+            "type": "string"
+          },
+          "targetWorkItemTypeId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "currentWorkItemTypeId",
+          "currentWorkflowStatusId",
+          "targetWorkItemTypeId",
+          "lostCustomFieldIds",
+          "targetInitialWorkflowStatusId",
+          "missingRequiredCustomFieldIds",
+          "requiresResolution"
         ],
         "type": "object"
       }
@@ -7090,6 +7164,109 @@
         "summary": "Work Item の外部 resource link を削除する",
         "tags": [
           "External Links"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/work-item-type-preview": {
+      "post": {
+        "operationId": "previewPublicWorkItemTypeChange",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewPublicWorkItemTypeChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemTypeChangePreview"
+                }
+              }
+            },
+            "description": "Work Item Type 変更の影響です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Work Item Type 変更の影響を確認する",
+        "tags": [
+          "Work Items"
         ]
       }
     }

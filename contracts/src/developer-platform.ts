@@ -3,6 +3,9 @@ import type {
   CreateWorkItemInput,
   WorkItemPatch,
 } from './work-items'
+import type {
+  PreviewWorkItemTypeChangeInput,
+} from './work-item-types'
 
 /**
  * Public API client に付与できる最小権限 scope です。
@@ -1335,6 +1338,9 @@ export type UpdatePublicWorkItemRequest = WorkItemPatch & {
    */
   expectedRevision: number
 }
+
+/** Public Work Item Type change preview endpoint の request body です。 */
+export type PreviewPublicWorkItemTypeChangeRequest = PreviewWorkItemTypeChangeInput
 
 /**
  * Public Work Item delete endpoint の request body です。

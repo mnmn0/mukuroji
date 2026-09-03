@@ -123,6 +123,18 @@ function createDefaultWorkItemService(
     async get() {
       return workItem
     },
+    async previewTypeChange() {
+      return {
+        expectedRevision: 1,
+        currentWorkItemTypeId: 'default',
+        currentWorkflowStatusId: 'todo',
+        targetWorkItemTypeId: 'default',
+        lostCustomFieldIds: [],
+        targetInitialWorkflowStatusId: 'todo',
+        missingRequiredCustomFieldIds: [],
+        requiresResolution: false,
+      }
+    },
     async authorizeCreate() {},
     async create() {
       return workItem
@@ -371,6 +383,62 @@ describe('public API router', () => {
     })
   })
 
+  test('exposes a public Work Item Type change preview', async () => {
+    let received: {
+      teamId: string
+      workItemId: string
+      input: Record<string, unknown>
+    } | undefined
+    const preview = {
+      expectedRevision: 4,
+      currentWorkItemTypeId: 'default',
+      currentWorkflowStatusId: 'todo',
+      targetWorkItemTypeId: 'incident',
+      lostCustomFieldIds: ['customer-impact'],
+      invalidWorkflowStatusId: 'todo',
+      targetInitialWorkflowStatusId: 'incident-open',
+      missingRequiredCustomFieldIds: ['severity'],
+      requiresResolution: true,
+    }
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async previewTypeChange(_credential, teamId, workItemId, input) {
+          received = { teamId, workItemId, input }
+          return preview
+        },
+      }),
+    })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request(
+      'http://localhost/v1/work-items/work-item-1/work-item-type-preview?teamId=team-1',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          expectedRevision: 4,
+          targetWorkItemTypeId: 'incident',
+          assignedProjectId: null,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(preview)
+    expect(received).toEqual({
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      input: {
+        expectedRevision: 4,
+        targetWorkItemTypeId: 'incident',
+        assignedProjectId: null,
+      },
+    })
+  })
+
   test('scopes entitlement idempotency by public API payload', async () => {
     const keys: Array<string | undefined> = []
     const { platform, router } = createTestRouter({
@@ -514,6 +582,12 @@ describe('public API router', () => {
     expect(components.schemas.CreateOAuthAppInput.properties).not.toHaveProperty('redirectUris')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('post')
+    expect(paths['/api/v1/work-items/{workItemId}/work-item-type-preview']).toHaveProperty('post')
+    expect(
+      paths['/api/v1/work-items/{workItemId}/work-item-type-preview'].post.requestBody.content[
+        'application/json'
+      ].schema,
+    ).toEqual({ $ref: '#/components/schemas/PreviewPublicWorkItemTypeChangeRequest' })
     expect(paths['/api/developer/external-links/{externalLinkId}']).toHaveProperty('patch')
     expect(
       paths['/api/developer/external-links/{externalLinkId}'].patch.requestBody.content[

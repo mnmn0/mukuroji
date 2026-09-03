@@ -78,9 +78,13 @@ function createHealthyItems(): CrossDomainIntegrityItem[] {
       workspaceId: 'tenant-secret-a',
       teamId: null,
       workflowStatuses: [
-        { statusId: 'done', category: 'completed' },
-        { statusId: 'todo', category: 'unstarted' },
+        { statusId: 'done', category: 'completed', workflowId: 'default-workflow' },
+        { statusId: 'todo', category: 'unstarted', workflowId: 'default-workflow' },
       ],
+      workItemTypeWorkflows: [{
+        workItemTypeId: 'default',
+        workflowId: 'default-workflow',
+      }],
     },
     { kind: 'team', workspaceId: 'tenant-secret-a', teamId: 'team-secret-a' },
     {
@@ -100,6 +104,7 @@ function createHealthyItems(): CrossDomainIntegrityItem[] {
       teamId: 'team-secret-a',
       workItemId: 'work-secret-a',
       creatorMemberKey: 'owner-secret@example.test',
+      workItemTypeId: 'default',
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       projectId: 'project-secret-a',
@@ -111,6 +116,7 @@ function createHealthyItems(): CrossDomainIntegrityItem[] {
       teamId: 'team-secret-a',
       workItemId: 'work-secret-b',
       creatorMemberKey: 'owner-secret@example.test',
+      workItemTypeId: 'default',
       workflowStatusId: 'done',
       statusCategory: 'completed',
       projectId: 'project-secret-a',
@@ -442,6 +448,7 @@ test('checks Work Item Team, Project, and status category without requiring a re
       teamId: 'missing-team',
       workItemId: 'unrelated-work-item',
       creatorMemberKey: 'creator@example.test',
+      workItemTypeId: 'default',
       workflowStatusId: 'todo',
       statusCategory: 'completed',
       projectId: 'missing-project',
@@ -572,7 +579,15 @@ test('compares every same-resource domain aggregate and item count', async () =>
     kind: 'configuration',
     workspaceId: 'another-tenant-secret',
     teamId: null,
-    workflowStatuses: [{ statusId: 'todo', category: 'unstarted' }],
+    workflowStatuses: [{
+      statusId: 'todo',
+      category: 'unstarted',
+      workflowId: 'default-workflow',
+    }],
+    workItemTypeWorkflows: [{
+      workItemTypeId: 'default',
+      workflowId: 'default-workflow',
+    }],
   })
 
   const fileItems = createHealthyItems()

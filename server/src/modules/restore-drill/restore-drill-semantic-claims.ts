@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto'
+import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import type {
   CrossDomainIntegrityFailureCode,
   CrossDomainIntegrityItem,
@@ -272,7 +273,7 @@ function resourceClaims(
   ]
 }
 
-/** Creates configuration scope/status claims. */
+/** Creates configuration scope, Work Item Type, and type-specific status claims. */
 function configurationClaims(
   item: Extract<CrossDomainIntegrityItem, { readonly kind: 'configuration' }>,
   digestKey: Uint8Array,
@@ -284,15 +285,27 @@ function configurationClaims(
     fact(scopeToken, originToken),
     unique(scopeToken, originToken, 'CONFIGURATION_DUPLICATE_SCOPE'),
   ]
-  for (const status of item.workflowStatuses) {
-    claims.push(
-      fact(token(digestKey, 'configuration-status', [...scope, status.statusId]), originToken),
-      fact(token(
-        digestKey,
-        'configuration-status-category',
-        [...scope, status.statusId, status.category],
-      ), originToken),
-    )
+  for (const mapping of item.workItemTypeWorkflows) {
+    claims.push(fact(token(
+      digestKey,
+      'configuration-work-item-type',
+      [...scope, mapping.workItemTypeId],
+    ), originToken))
+    for (const status of item.workflowStatuses) {
+      if (status.workflowId !== mapping.workflowId) continue
+      claims.push(
+        fact(token(digestKey, 'configuration-work-item-type-status', [
+          ...scope,
+          mapping.workItemTypeId,
+          status.statusId,
+        ]), originToken),
+        fact(token(
+          digestKey,
+          'configuration-work-item-type-status-category',
+          [...scope, mapping.workItemTypeId, status.statusId, status.category],
+        ), originToken),
+      )
+    }
   }
   return claims
 }
@@ -416,36 +429,50 @@ function workItemStatusRequirement(
   originToken: string,
 ): RestoreDrillSemanticRequirement {
   const builtInCategory = builtInWorkflowStatusCategory(item.workflowStatusId)
+  const isBuiltInType = item.workItemTypeId === DEFAULT_WORK_ITEM_TYPE_ID
   const teamScope = [item.workspaceId, item.teamId]
   const workspaceScope = [item.workspaceId, '']
   const configuredBranch = (
     scope: readonly string[],
   ): RestoreDrillSemanticRequirementBranch => ({
-    defaultFailureCode: 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN',
-    fallbacks: [{
-      factToken: token(digestKey, 'configuration-status', [
-        ...scope,
-        item.workflowStatusId,
-      ]),
-      failureCode: 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
-    }],
+    defaultFailureCode: 'WORK_ITEM_TYPE_UNKNOWN',
+    fallbacks: [
+      {
+        factToken: token(digestKey, 'configuration-work-item-type-status', [
+          ...scope,
+          item.workItemTypeId,
+          item.workflowStatusId,
+        ]),
+        failureCode: 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
+      },
+      {
+        factToken: token(digestKey, 'configuration-work-item-type', [
+          ...scope,
+          item.workItemTypeId,
+        ]),
+        failureCode: 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN',
+      },
+    ],
     guardToken: token(digestKey, 'configuration-scope', scope),
     satisfied: false,
-    successTokens: [token(digestKey, 'configuration-status-category', [
+    successTokens: [token(digestKey, 'configuration-work-item-type-status-category', [
       ...scope,
+      item.workItemTypeId,
       item.workflowStatusId,
       item.statusCategory,
     ])],
   })
-  const builtInMatches = builtInCategory === item.statusCategory
+  const builtInMatches = isBuiltInType && builtInCategory === item.statusCategory
   return {
     branches: [
       configuredBranch(teamScope),
       configuredBranch(workspaceScope),
       {
-        defaultFailureCode: builtInCategory === undefined
-          ? 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN'
-          : 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
+        defaultFailureCode: !isBuiltInType
+          ? 'WORK_ITEM_TYPE_UNKNOWN'
+          : builtInCategory === undefined
+            ? 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN'
+            : 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
         fallbacks: [],
         satisfied: builtInMatches,
         successTokens: [],

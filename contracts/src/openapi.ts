@@ -517,6 +517,41 @@ const components = {
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
       },
     },
+    PreviewPublicWorkItemTypeChangeRequest: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['expectedRevision', 'targetWorkItemTypeId'],
+      properties: {
+        expectedRevision: { type: 'integer', minimum: 1 },
+        targetWorkItemTypeId: { type: 'string', minLength: 1 },
+        assignedProjectId: { type: ['string', 'null'] },
+      },
+    },
+    WorkItemTypeChangePreview: {
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        'expectedRevision',
+        'currentWorkItemTypeId',
+        'currentWorkflowStatusId',
+        'targetWorkItemTypeId',
+        'lostCustomFieldIds',
+        'targetInitialWorkflowStatusId',
+        'missingRequiredCustomFieldIds',
+        'requiresResolution',
+      ],
+      properties: {
+        expectedRevision: { type: 'integer', minimum: 1 },
+        currentWorkItemTypeId: { type: 'string' },
+        currentWorkflowStatusId: { type: 'string' },
+        targetWorkItemTypeId: { type: 'string' },
+        lostCustomFieldIds: { type: 'array', items: { type: 'string' } },
+        invalidWorkflowStatusId: { type: 'string' },
+        targetInitialWorkflowStatusId: { type: 'string' },
+        missingRequiredCustomFieldIds: { type: 'array', items: { type: 'string' } },
+        requiresResolution: { type: 'boolean' },
+      },
+    },
     DeletePublicWorkItemRequest: {
       type: 'object',
       additionalProperties: false,
@@ -1273,6 +1308,28 @@ const paths = {
       requestBody: jsonRequestBody('DeletePublicWorkItemRequest'),
       responses: {
         '204': emptyResponse('Work Item を削除しました。', true),
+        ...notFoundResponse,
+        ...problemResponses,
+      },
+    },
+  },
+  '/api/v1/work-items/{workItemId}/work-item-type-preview': {
+    post: {
+      operationId: 'previewPublicWorkItemTypeChange',
+      tags: ['Work Items'],
+      summary: 'Work Item Type 変更の影響を確認する',
+      security: publicApiSecurity('work-items:write'),
+      parameters: [
+        idPathParameter('workItemId', 'Work Item ID です。'),
+        {
+          name: 'teamId', in: 'query', required: true,
+          description: 'Work Item を所有する Team ID です。',
+          schema: { type: 'string' },
+        },
+      ],
+      requestBody: jsonRequestBody('PreviewPublicWorkItemTypeChangeRequest'),
+      responses: {
+        '200': jsonResponse('Work Item Type 変更の影響です。', schemaRef('WorkItemTypeChangePreview')),
         ...notFoundResponse,
         ...problemResponses,
       },
