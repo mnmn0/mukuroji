@@ -623,7 +623,7 @@ export function previewWorkItemTypeChange(
   const missingRequiredCustomFieldIds = [...requiredCustomFieldIds]
     .filter((fieldId) =>
       targetDefinitionIds.has(fieldId) &&
-      currentCustomFieldValues[fieldId] === undefined,
+      isMissingCustomFieldValue(currentCustomFieldValues[fieldId]),
     )
     .sort()
 
@@ -640,6 +640,13 @@ export function previewWorkItemTypeChange(
       targetStatus === undefined ||
       missingRequiredCustomFieldIds.length > 0,
   }
+}
+
+/** Determines whether a stored custom field value is absent for required-field preview purposes. */
+function isMissingCustomFieldValue(value: CustomFieldValue | undefined): boolean {
+  return value === undefined ||
+    typeof value === 'string' && value.length === 0 ||
+    Array.isArray(value) && value.length === 0
 }
 
 /** Validates the explicit acknowledgements required before a type change is persisted. */

@@ -247,6 +247,38 @@ test('requires explicit resolution for lost fields and invalid statuses on type 
   })).toBe('review')
 })
 
+test('reports empty required values in a Work Item Type change preview', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('summary', 'text'),
+      field('labels', 'multi-select', { options: options('alpha', 'beta') }),
+    ],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['summary', 'labels'],
+      requiredCustomFieldIds: ['summary', 'labels'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(previewWorkItemTypeChange(
+    configuration,
+    'default',
+    'todo',
+    { summary: '', labels: [] },
+    'incident',
+  )).toMatchObject({
+    missingRequiredCustomFieldIds: ['labels', 'summary'],
+    requiresResolution: true,
+  })
+})
+
 test('does not allow archived types for new Work Items', () => {
   const configuration = createConfiguration({
     workItemTypes: [{
