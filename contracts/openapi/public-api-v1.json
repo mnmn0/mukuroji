@@ -1699,6 +1699,92 @@
         ],
         "type": "object"
       },
+      "PublicCustomFieldDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "currencyCode": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "durationUnit": {
+            "enum": [
+              "minutes",
+              "hours",
+              "days"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldOption"
+            },
+            "type": "array"
+          },
+          "projectIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "enum": [
+              "text",
+              "number",
+              "boolean",
+              "date",
+              "select",
+              "multi-select",
+              "person",
+              "currency",
+              "duration",
+              "formula"
+            ],
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/CustomFieldValidation"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "sortOrder",
+          "required"
+        ],
+        "type": "object"
+      },
       "PublicWorkItemPage": {
         "additionalProperties": false,
         "properties": {
@@ -1718,6 +1804,123 @@
         "required": [
           "items",
           "hasMore"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTypeCatalog": {
+        "additionalProperties": false,
+        "properties": {
+          "configurationRevision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemTypes": {
+            "items": {
+              "$ref": "#/components/schemas/PublicWorkItemTypeSchema"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "teamId",
+          "configurationRevision",
+          "workItemTypes"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTypeSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "customFields": {
+            "items": {
+              "$ref": "#/components/schemas/PublicCustomFieldDefinition"
+            },
+            "type": "array"
+          },
+          "defaultWorkflowId": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "workflow": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "initialStatusId": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "statuses": {
+                "items": {
+                  "$ref": "#/components/schemas/PublicWorkItemWorkflowStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "initialStatusId",
+              "statuses"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "defaultWorkflowId",
+          "workflow",
+          "customFields"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemWorkflowStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "backlog",
+              "unstarted",
+              "started",
+              "completed",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "category",
+          "sortOrder"
         ],
         "type": "object"
       },
@@ -6424,6 +6627,87 @@
         "summary": "OpenAPI 3.1 document を取得する",
         "tags": [
           "Schema"
+        ]
+      }
+    },
+    "/api/v1/work-item-types": {
+      "get": {
+        "description": "指定 Team で利用できる active Work Item Type、workflow status、custom field definition/options を返します。",
+        "operationId": "listPublicWorkItemTypes",
+        "parameters": [
+          {
+            "description": "schema を取得する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemTypeCatalog"
+                }
+              }
+            },
+            "description": "Work Item Type 作成 schema です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Work Item 作成用の active Type schema を取得する",
+        "tags": [
+          "Work Items"
         ]
       }
     },
