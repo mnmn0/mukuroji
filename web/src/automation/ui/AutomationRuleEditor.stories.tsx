@@ -22,6 +22,7 @@ const meta = {
     },
     locale: 'en',
     onCreate: async () => undefined,
+    teams: [{ id: 'core-team', name: 'Core Team' }],
   },
 } satisfies Meta<typeof AutomationRuleEditor>
 
@@ -57,5 +58,13 @@ export const InboundWebhookTrigger: Story = {
       activeInboundWebhookEndpointFixture,
       pausedInboundWebhookEndpointFixture,
     ],
+  },
+}
+
+/** Team-qualified Work Item Type trigger を編集する状態です。 */
+export const WorkItemTypeTrigger: Story = {
+  args: {
+    initialSchedule: undefined,
+    initialTriggerType: 'work-item-type',
   },
 }

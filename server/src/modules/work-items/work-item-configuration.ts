@@ -1772,8 +1772,8 @@ function createScopedDefaultConfiguration(
  * Creates a bounded configuration summary suitable for an immutable audit event.
  *
  * The full configuration can contain user-authored option lists and formulas. Audit events keep
- * stable identifiers and structural counts instead of copying that unbounded payload into the
- * audit table.
+ * stable identifiers, policy lists, and structural counts instead of copying that unbounded
+ * payload into the audit table.
  *
  * @param configuration - Validated Work Item configuration to summarize.
  * @returns A deterministic, bounded summary of the configuration structure.
@@ -1793,6 +1793,10 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
         name: type.name,
         status: type.status,
         defaultWorkflowId: type.defaultWorkflowId,
+        customFieldIds: [...type.customFieldIds].sort(),
+        requiredCustomFieldIds: [...type.requiredCustomFieldIds].sort(),
+        detailSections: [...type.detailSections],
+        allowedChildTypeIds: [...type.allowedChildTypeIds].sort(),
         customFieldCount: type.customFieldIds.length,
         requiredCustomFieldCount: type.requiredCustomFieldIds.length,
       }))

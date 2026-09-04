@@ -39,6 +39,8 @@ export const automationMessages = {
   'automation.rule.trigger': 'トリガー',
   'automation.rule.action': 'アクション',
   'automation.rule.triggerConfiguration': 'トリガー対象 ID / 値',
+  'automation.rule.triggerTeam': 'トリガー対象 Team',
+  'automation.rule.triggerWorkItemType': 'トリガー対象 Work Item Type ID',
   'automation.rule.webhookEndpoint': '受信 Webhook endpoint',
   'automation.rule.webhookEndpointHint': '有効な endpoint のみルールで選択できます。',
   'automation.rule.webhookEndpointEmpty': '有効な Webhook endpoint がありません。',

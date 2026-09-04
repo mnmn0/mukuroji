@@ -1,7 +1,10 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { WorkItemConfiguration } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  type WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   DynamoDbWorkItemConfigurationClient,
@@ -924,6 +927,118 @@ test('writes a configuration audit event in the same transaction as the revision
         entityType: 'work-item-configuration',
         entityId: 'workspace:workspace-1',
         action: 'created',
+      }),
+    },
+  })
+})
+
+test('audits Work Item Type policy changes even when policy counts stay the same', async () => {
+  const previousConfiguration = createConfiguration({
+    customFields: [field('summary', 'text'), field('severity', 'text')],
+    revision: 4,
+    workItemTypes: [{
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'incident',
+      defaultWorkflowId: DEFAULT_WORK_ITEM_CONFIGURATION.workflow.id,
+      customFieldIds: ['summary'],
+      requiredCustomFieldIds: ['summary'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+  const previousType = previousConfiguration.workItemTypes?.[0]
+  if (!previousType) throw new Error('Expected an initial Work Item Type.')
+  const nextConfiguration = createConfiguration({
+    customFields: previousConfiguration.customFields,
+    revision: previousConfiguration.revision,
+    workItemTypes: [{
+      ...previousType,
+      customFieldIds: ['severity'],
+      requiredCustomFieldIds: ['severity'],
+      detailSections: ['description'],
+      allowedChildTypeIds: ['incident'],
+    }],
+  })
+  const sent: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      sent.push(command.input)
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: toStoredConfiguration(previousConfiguration) }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'audit-table',
+  )
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'configuration-policy-audit-1',
+    request: {
+      method: 'PUT',
+      path: '/api/work-item-configuration',
+      body: { revision: previousConfiguration.revision },
+    },
+    source: {
+      kind: 'api',
+      method: 'PUT',
+      route: '/api/work-item-configuration',
+    },
+    occurredAt: '2026-07-16T00:00:00.000Z',
+  })
+
+  await client.saveWorkspaceConfiguration(
+    'workspace-1',
+    nextConfiguration,
+    async () => undefined,
+    [],
+    auditContext,
+  )
+
+  const transaction = sent[2]
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Expected a configuration transaction.')
+  }
+  const auditItem = transaction.TransactItems.find((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null || !('Put' in candidate)) {
+      return false
+    }
+    const put = candidate.Put
+    return typeof put === 'object' && put !== null &&
+      'TableName' in put && put.TableName === 'audit-table'
+  })
+  expect(auditItem).toMatchObject({
+    Put: {
+      Item: expect.objectContaining({
+        changes: expect.arrayContaining([
+          expect.objectContaining({
+            field: 'workItemTypes',
+            before: expect.arrayContaining([
+              expect.objectContaining({
+                allowedChildTypeIds: ['default'],
+                customFieldIds: ['summary'],
+                detailSections: ['overview'],
+                requiredCustomFieldIds: ['summary'],
+              }),
+            ]),
+            after: expect.arrayContaining([
+              expect.objectContaining({
+                allowedChildTypeIds: ['incident'],
+                customFieldIds: ['severity'],
+                detailSections: ['description'],
+                requiredCustomFieldIds: ['severity'],
+              }),
+            ]),
+          }),
+        ]),
       }),
     },
   })

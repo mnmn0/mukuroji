@@ -140,6 +140,7 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
     case 'work-item-type':
       return {
         type: 'work-item-type',
+        teamId: requireBoundedText(trigger.teamId, 'Work Item Type trigger Team ID', 128),
         ...(trigger.fromWorkItemTypeId === undefined ? {} : {
           fromWorkItemTypeId: requireBoundedText(
             trigger.fromWorkItemTypeId,

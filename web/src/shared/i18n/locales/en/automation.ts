@@ -39,6 +39,8 @@ export const automationMessages = {
   'automation.rule.trigger': 'Trigger',
   'automation.rule.action': 'Action',
   'automation.rule.triggerConfiguration': 'Trigger target ID / value',
+  'automation.rule.triggerTeam': 'Trigger Team',
+  'automation.rule.triggerWorkItemType': 'Trigger Work Item Type ID',
   'automation.rule.webhookEndpoint': 'Inbound webhook endpoint',
   'automation.rule.webhookEndpointHint': 'Only active endpoints can be selected by a rule.',
   'automation.rule.webhookEndpointEmpty': 'No active webhook endpoint is available.',

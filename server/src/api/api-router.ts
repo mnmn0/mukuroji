@@ -39809,17 +39809,26 @@ async function validateWorkItemConfigurationReferences(
   }
 }
 
+/**
+ * Validates current Work Items and relations while the configuration scope write lock is held.
+ *
+ * Relation mutations that can be affected by configuration policy carry the same scope lock
+ * condition. Returning one relation-graph condition per Team here would make a Workspace save
+ * exceed DynamoDB's 100-item transaction limit without adding a concurrency guarantee.
+ *
+ * @param directoryId - Workspace whose configuration is being saved.
+ * @param configuration - Candidate configuration being validated.
+ * @param teamId - Team scope being saved, or undefined for a Workspace scope.
+ */
 async function validateWorkItemConfigurationUsage(
   directoryId: string,
   configuration: WorkItemConfiguration,
   teamId?: string,
-): Promise<WorkItemConfigurationTransactionItems> {
+): Promise<void> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(directoryId, 'ja')
   const targetTeamIds = teamId
     ? [teamId]
     : directory.teams.map((team) => team.id)
-  const relationConditionChecks: WorkItemConfigurationTransactionItems = []
-
   for (const targetTeamId of targetTeamIds) {
     if (!teamId) {
       const resolved = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
@@ -39879,14 +39888,7 @@ async function validateWorkItemConfigurationUsage(
         )
       }
     }
-    relationConditionChecks.push(createWorkItemRelationGraphRevisionConditionCheck(
-      getWorkItemConfigurationTableName(),
-      directoryId,
-      targetTeamId,
-      relationGraph.graphRevision,
-    ))
   }
-  return relationConditionChecks
 }
 
 function assertWorkItemConfigurationUsage(
@@ -39924,6 +39926,7 @@ function assertWorkItemConfigurationUsage(
       undefined,
       {
         existingValues: storedValues,
+        allowRequiredMissing: workItem.statusCategory === 'backlog',
         mode: 'update',
         projectId: workItem.assignedProjectId,
         workItemTypeId: workItemType.id,

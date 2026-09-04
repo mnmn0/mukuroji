@@ -51,6 +51,8 @@ export type AutomationCustomFieldTrigger = {
 export type AutomationWorkItemTypeTrigger = {
   /** Trigger discriminator. */
   type: 'work-item-type'
+  /** Team whose Work Item Type changes are observed. */
+  teamId: string
   /** Previous stable type identifier filter. */
   fromWorkItemTypeId?: string
   /** New stable type identifier filter. */

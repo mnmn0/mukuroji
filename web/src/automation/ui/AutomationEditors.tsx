@@ -190,6 +190,8 @@ export type AutomationRuleEditorProps = {
   initialTriggerType?: AutomationTrigger['type']
   /** Webhook trigger で選択できる active endpoint です。 */
   webhookEndpoints?: AutomationInboundWebhookEndpoint[]
+  /** Work Item Type trigger で選択できる Team です。 */
+  teams?: RecurringTeamOption[]
   /** Rule 作成 callback です。 */
   onCreate: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
 }
@@ -201,6 +203,7 @@ export function AutomationRuleEditor({
   isSaving = false,
   locale,
   onCreate,
+  teams = [],
   webhookEndpoints = [],
 }: AutomationRuleEditorProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -216,6 +219,11 @@ export function AutomationRuleEditor({
   const [triggerConfiguration, setTriggerConfiguration] = useState(
     !initialSchedule && initialTriggerType === 'webhook'
       ? activeWebhookEndpoints[0]?.id ?? ''
+      : '',
+  )
+  const [triggerTeamId, setTriggerTeamId] = useState(
+    !initialSchedule && initialTriggerType === 'work-item-type'
+      ? teams[0]?.id ?? ''
       : '',
   )
   const [scheduleTimeZone, setScheduleTimeZone] = useState(initialSchedule?.timeZone ?? 'UTC')
@@ -248,6 +256,11 @@ export function AutomationRuleEditor({
     !activeWebhookEndpoints.some((endpoint) => endpoint.id === triggerConfiguration)
     ? activeWebhookEndpoints[0]?.id ?? ''
     : triggerConfiguration
+  const resolvedTriggerTeamId = triggerType === 'work-item-type' &&
+    teams.length > 0 &&
+    !teams.some((team) => team.id === triggerTeamId)
+    ? teams[0]?.id ?? ''
+    : triggerTeamId
   const isExistenceCondition = conditionOperator === 'exists' || conditionOperator === 'not-exists'
   const isConditionValid = !hasConditionInput || (
     isAutomationConditionField(trimmedConditionField) &&
@@ -255,7 +268,8 @@ export function AutomationRuleEditor({
   )
   const isTriggerValid = triggerType === 'webhook'
     ? activeWebhookEndpoints.some((endpoint) => endpoint.id === resolvedTriggerConfiguration)
-    : isAutomationTriggerConfigurationValid(triggerType, resolvedTriggerConfiguration)
+    : isAutomationTriggerConfigurationValid(triggerType, resolvedTriggerConfiguration) &&
+      (triggerType !== 'work-item-type' || Boolean(resolvedTriggerTeamId.trim()))
   const isActionValid = isAutomationActionConfigurationValid(actionType, actionConfiguration)
   const isScheduleTimeValid = isAutomationScheduleConfigurationValid(
     scheduleTimeZone,
@@ -307,7 +321,11 @@ export function AutomationRuleEditor({
               startDate: currentDateInTimeZone(scheduleTimeZone),
               timeZone: scheduleTimeZone,
             })
-          : createAutomationTrigger(triggerType, resolvedTriggerConfiguration),
+          : createAutomationTrigger(
+              triggerType,
+              resolvedTriggerConfiguration,
+              resolvedTriggerTeamId,
+            ),
       })
     } catch {
       return
@@ -347,6 +365,7 @@ export function AutomationRuleEditor({
             setTriggerConfiguration(
               nextType === 'webhook' ? activeWebhookEndpoints[0]?.id ?? '' : '',
             )
+            setTriggerTeamId(nextType === 'work-item-type' ? teams[0]?.id ?? '' : '')
           }}
         />
         <SelectField
@@ -361,7 +380,46 @@ export function AutomationRuleEditor({
         />
       </div>
       <div className={`grid gap-3 max-[760px]:grid-cols-1 ${triggerType === 'schedule' ? 'grid-cols-1' : 'grid-cols-2'}`}>
-        {triggerType === 'webhook' ? (
+        {triggerType === 'work-item-type' ? (
+          <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
+            <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('automation.rule.triggerTeam')}
+              {teams.length > 0 ? (
+                <select
+                  className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                  data-testid="automation-rule-trigger-team"
+                  required
+                  value={resolvedTriggerTeamId}
+                  onChange={(event) => setTriggerTeamId(event.target.value)}
+                >
+                  {teams.map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {team.name} · {team.id}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                  data-testid="automation-rule-trigger-team"
+                  required
+                  value={resolvedTriggerTeamId}
+                  onChange={(event) => setTriggerTeamId(event.target.value)}
+                />
+              )}
+            </label>
+            <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('automation.rule.triggerWorkItemType')}
+              <input
+                className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                data-testid="automation-rule-trigger-configuration"
+                required
+                value={triggerConfiguration}
+                onChange={(event) => setTriggerConfiguration(event.target.value)}
+              />
+            </label>
+          </div>
+        ) : triggerType === 'webhook' ? (
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('automation.rule.webhookEndpoint')}
             <select
@@ -1325,9 +1383,18 @@ function toRecord(value: unknown): Record<string, unknown> {
     : {}
 }
 
+/**
+ * Builds a non-schedule trigger from the editor's compact configuration values.
+ *
+ * @param type - Trigger discriminator selected in the editor.
+ * @param configuration - Primary trigger identifier or value.
+ * @param teamId - Team identity required by Work Item Type triggers.
+ * @returns A normalized Automation trigger.
+ */
 function createAutomationTrigger(
   type: NonScheduleAutomationTriggerType,
   configuration: string,
+  teamId?: string,
 ): AutomationTrigger {
   const value = configuration.trim()
 
@@ -1339,7 +1406,11 @@ function createAutomationTrigger(
     case 'custom-field':
       return { type, fieldId: value }
     case 'work-item-type':
-      return { type, ...(value ? { toWorkItemTypeId: value } : {}) }
+      return {
+        type,
+        teamId: teamId?.trim() ?? '',
+        ...(value ? { toWorkItemTypeId: value } : {}),
+      }
     case 'due':
       return { type, reason: value === 'changed' || value === 'overdue' ? value : 'due' }
     case 'form':

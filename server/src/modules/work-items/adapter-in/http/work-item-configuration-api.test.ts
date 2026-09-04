@@ -133,6 +133,44 @@ test('reads and saves Workspace Work Item configuration through the authenticate
   }])
 })
 
+test('keeps Workspace configuration validation transaction items bounded across many Teams', async () => {
+  configureFakeProjectClients(true, {
+    additionalTeams: Array.from({ length: 100 }, (_, index) => ({
+      id: `team-${index + 1}`,
+      name: `Team ${index + 1}`,
+      projects: [{ id: `project-${index + 1}`, name: `Project ${index + 1}`, tone: 'blue' as const }],
+    })),
+  })
+  let usageConditionChecks: unknown
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+        usageConditionChecks = await compatibilityCheck()
+        return {
+          configuration: {
+            ...configuration,
+            scopeType: 'workspace',
+            scopeId: workspaceId,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'user#demo@example.com')),
+  })
+
+  expect(response.status).toBe(200)
+  expect(usageConditionChecks).toBeUndefined()
+})
+
 test('reads and saves Team Work Item configuration for a Team manager', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   const stored = createTestWorkItemConfiguration('team', 'core-team', 2)
@@ -272,6 +310,68 @@ test('rejects a configuration change that conflicts with an existing Work Item',
     includeArchived: true,
   })
   expect(writes).toBe(0)
+})
+
+test('allows existing incomplete backlog Work Items during configuration validation', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'effort',
+    name: 'Effort',
+    type: 'number',
+    sortOrder: 10,
+    required: true,
+  }]
+  configuration.workflow.statuses.unshift({
+    id: 'triage',
+    name: 'Triage',
+    category: 'backlog',
+    sortOrder: 5,
+  })
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
+  let writes = 0
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues(directoryId, teamId, options) {
+        const response = await existingTeamIssues.getTeamIssues(directoryId, teamId, options)
+        return {
+          ...response,
+          issues: response.issues.map((issue, index) => index === 0
+            ? { ...issue, statusCategory: 'backlog', workflowStatusId: 'triage' }
+            : issue),
+        }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, teamId, value, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return {
+          configuration: {
+            ...value,
+            scopeType: 'team',
+            scopeId: teamId,
+            revision: value.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(200)
+  expect(writes).toBe(1)
 })
 
 test('rejects missing required custom fields before creating a Work Item', async () => {
