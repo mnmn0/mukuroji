@@ -607,6 +607,7 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
         ...baseWorkItem,
         id: input.command.canonicalWorkItemId,
         teamId: input.command.canonicalTeamId,
+        workItemTypeId: 'incident',
         revision: input.command.expectedCanonicalWorkItemRevision + 1,
         updatedAt: input.storeMutation.mergedAt,
       },
@@ -1311,6 +1312,7 @@ describe('ExternalChatLinkService', () => {
     }, command)
 
     expect(replay.mergedAt).toBe(occurredAt)
+    expect(replay.canonicalWorkItem).toMatchObject({ workItemTypeId: 'incident' })
     expect(replay.movedLinks).toHaveLength(1)
     expect(replay.movedLinks[0]).toMatchObject({
       id: duplicateLink.id,

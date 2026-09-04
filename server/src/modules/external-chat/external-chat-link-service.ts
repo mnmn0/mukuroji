@@ -1588,6 +1588,7 @@ function normalizeCanonicalWorkItemResult(value: unknown): CanonicalWorkItem {
   const assigneeEmail = readOptionalResultText(value.assigneeEmail, 4_096)
   const assigneeName = readOptionalResultText(value.assigneeName, 4_096)
   const sourceRequestId = readOptionalResultIdentifier(value.sourceRequestId)
+  const workItemTypeId = readOptionalResultIdentifier(value.workItemTypeId)
   const archivedAt = readOptionalResultTimestamp(value.archivedAt)
   const archivedBy = readOptionalResultIdentifier(value.archivedBy)
   if ((archivedAt === undefined) !== (archivedBy === undefined)) {
@@ -1623,6 +1624,7 @@ function normalizeCanonicalWorkItemResult(value: unknown): CanonicalWorkItem {
     ...(priorityUpdatedAt === undefined ? {} : { priorityUpdatedAt }),
     ...(dueDateUpdatedAt === undefined ? {} : { dueDateUpdatedAt }),
     workflowStatusId: value.workflowStatusId,
+    ...(workItemTypeId === undefined ? {} : { workItemTypeId }),
     statusCategory: value.statusCategory,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     customFieldValues: normalizeCustomFieldValues(value.customFieldValues),

@@ -173,11 +173,14 @@ export function TriageEntryDetail({
   initialAcceptCustomFieldValues,
   view,
 }: TriageEntryDetailProps) {
+  const hasLoadedWorkItemConfiguration = workItemConfiguration !== undefined
   const workItemTypes = useMemo(
-    () => resolveWorkItemTypes(workItemConfiguration).filter((type) => type.status === 'active'),
-    [workItemConfiguration],
+    () => hasLoadedWorkItemConfiguration
+      ? resolveWorkItemTypes(workItemConfiguration).filter((type) => type.status === 'active')
+      : [],
+    [hasLoadedWorkItemConfiguration, workItemConfiguration],
   )
-  const hasCreatableWorkItemType = workItemTypes.length > 0
+  const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration && workItemTypes.length > 0
   const [actionMode, setActionMode] = useState<TriageActionMode>()
   const [acceptMode, setAcceptMode] = useState<'create' | 'link'>('create')
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
@@ -328,6 +331,7 @@ export function TriageEntryDetail({
   }
 
   const entry = view.entry
+  const canCreateWorkItemFromTriage = entry.capabilities.canAcceptCreate && hasCreatableWorkItemType
   const selectedWorkItemType = workItemTypes.find((type) => type.id === selectedWorkItemTypeId) ??
     workItemTypes[0]
   const canonicalPath = entry.canonicalWorkItem
@@ -365,7 +369,7 @@ export function TriageEntryDetail({
       setActionMode('assign')
       return
     }
-    if (entry.capabilities.canAcceptCreate) {
+    if (canCreateWorkItemFromTriage) {
       setAcceptMode('create')
       setActionMode('accept')
       return
@@ -376,6 +380,7 @@ export function TriageEntryDetail({
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!actionMode || !onAction || actionIsPending || isActionMutationPendingRef.current) return
+    if (actionMode === 'accept' && acceptMode === 'create' && !canCreateWorkItemFromTriage) return
     const formData = new FormData(event.currentTarget)
     let customFieldValues: Record<string, CustomFieldValue> | undefined
     if (
@@ -759,7 +764,18 @@ export function TriageEntryDetail({
               <ActionButton disabled={actionIsPending} label={t('triage.action.assign')} onActivate={activateAction} mode="assign" />
             ) : null}
             {(entry.capabilities.canAcceptCreate || entry.capabilities.canAcceptLink) ? (
-              <ActionButton disabled={actionIsPending} shortcut="A" label={t('triage.action.accept')} primary onActivate={activateAction} mode="accept" />
+              <ActionButton
+                disabled={actionIsPending || (
+                  entry.capabilities.canAcceptCreate &&
+                  !hasCreatableWorkItemType &&
+                  !entry.capabilities.canAcceptLink
+                )}
+                shortcut="A"
+                label={t('triage.action.accept')}
+                primary
+                onActivate={activateAction}
+                mode="accept"
+              />
             ) : null}
             {entry.capabilities.canMarkDuplicate ? (
               <ActionButton disabled={actionIsPending} shortcut="D" label={t('triage.action.duplicate')} onActivate={activateAction} mode="duplicate" />
@@ -864,7 +880,11 @@ export function TriageEntryDetail({
                           <option key={type.id} value={type.id}>{type.name}</option>
                         ))}
                       </select>
-                      {!hasCreatableWorkItemType ? (
+                      {!hasLoadedWorkItemConfiguration ? (
+                        <span className="text-xs font-semibold text-[var(--workbench-muted)]">
+                          {t('tasks.detail.loading')}
+                        </span>
+                      ) : !hasCreatableWorkItemType ? (
                         <span className="text-xs font-semibold text-amber-700">
                           {t('tasks.create.noActiveWorkItemTypes')}
                         </span>

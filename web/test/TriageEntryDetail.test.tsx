@@ -112,6 +112,32 @@ describe('TriageEntryDetail', () => {
     expect(html).toContain('Back to queue')
   })
 
+  test('does not enable Work Item creation before the Team configuration loads', () => {
+    const entry = triageEntryFixtures[0]
+    if (!entry) throw new Error('Expected a triage fixture.')
+    const html = renderToStaticMarkup(
+      <TriageEntryDetail
+        locale="en"
+        t={createTranslator('en')}
+        teamId="core-team"
+        view={createTriageEntryView({
+          ...entry,
+          capabilities: {
+            ...entry.capabilities,
+            canAcceptCreate: true,
+            canAcceptLink: false,
+          },
+        })}
+        onBack={() => undefined}
+      />,
+    )
+
+    const acceptLabel = createTranslator('en')('triage.action.accept')
+    const acceptButton = html.match(new RegExp(`<button[^>]*>${acceptLabel} `))?.[0]
+    expect(acceptButton).toBeDefined()
+    expect(acceptButton).toContain('disabled=""')
+  })
+
   test('does not offer assignee-only adoption without Assign capability', () => {
     const entry = triageEntryFixtures[0]
     if (!entry) throw new Error('Expected a triage fixture.')
