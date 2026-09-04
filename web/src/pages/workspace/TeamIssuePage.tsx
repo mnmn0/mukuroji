@@ -21,8 +21,8 @@ import type {
 } from '@mukuroji/contracts'
 import {
   createSearchWorkItemTypeKey,
-  DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  DEFAULT_WORK_ITEM_TYPE,
 } from '@mukuroji/contracts'
 import {
   Fragment,
@@ -191,6 +191,7 @@ import {
   resolveWorkflowCategoryToneClassName,
   resolveWorkflowStatusCategory,
   resolveWorkflowStatusDefinition,
+  createWorkItemTypeWorkflowStatusKey,
   type WorkItemTypeWorkflowStatus,
 } from '../../work-items/model/workItemDisplay'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
@@ -1378,17 +1379,18 @@ export function TeamIssueScreen({
 
   const configuration = resolvedConfiguration?.configuration
   const workflowStatusFilterOptions = useMemo(
-    () => resolveConfiguredWorkflowStatuses(configuration),
+    () => resolveWorkItemTypeWorkflowStatuses(configuration),
     [configuration],
   )
   const workflowStatuses = useMemo(
     () => resolveWorkItemTypeWorkflowStatuses(configuration),
     [configuration],
   )
-  const effectiveStatusFilter = statusFilter === 'all' ||
-    workflowStatusFilterOptions.some((status) => status.id === statusFilter)
-    ? statusFilter
-    : 'all'
+  const effectiveStatusFilter = resolveTeamIssueStatusFilter(
+    statusFilter,
+    teamId,
+    workflowStatusFilterOptions,
+  )
   const effectiveDefinitionFilter = useMemo(() =>
     !definitionFilter.customFieldId ||
       configuration?.customFields.some((field) => field.id === definitionFilter.customFieldId)
@@ -1446,7 +1448,11 @@ export function TeamIssueScreen({
         })
       : issues.filter((issue) => {
         const matchesStatus = effectiveStatusFilter === 'all' ||
-          resolveWorkItemWorkflowStatusId(issue) === effectiveStatusFilter
+          createWorkItemTypeWorkflowStatusKey(
+            issue.teamId,
+            issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+            resolveWorkItemWorkflowStatusId(issue),
+          ) === effectiveStatusFilter
         const matchesWorkItemType = workItemTypeFilter === 'all' ||
           createSearchWorkItemTypeKey(
             issue.teamId,
@@ -2566,7 +2572,7 @@ function IssueToolbar({
   /**
    * Status filter に表示する workflow status です。
    */
-  workflowStatuses: readonly WorkflowStatusDefinition[]
+  workflowStatuses: readonly WorkItemTypeWorkflowStatus[]
 }) {
   return (
     <div className="workbench-toolbar flex flex-wrap items-center justify-between gap-3 px-3 py-2">
@@ -2589,11 +2595,16 @@ function IssueToolbar({
           value={statusFilter}
         >
           <option value="all">{t('tasks.filter.statusAll')}</option>
-          {workflowStatuses.map((status) => (
-            <option key={status.id} value={status.id}>
-              {status.name}
-            </option>
-          ))}
+          {workflowStatuses.map(({ status, workItemTypeId }) => {
+            const value = createWorkItemTypeWorkflowStatusKey(teamId, workItemTypeId, status.id)
+            const workItemTypeName = workItemTypes.find((type) => type.id === workItemTypeId)?.name ??
+              workItemTypeId
+            return (
+              <option key={value} value={value}>
+                {workItemTypeName} · {status.name}
+              </option>
+            )
+          })}
         </select>
         <select
           aria-label={t('tasks.filter.workItemType')}
@@ -2668,7 +2679,9 @@ function CreateIssuePanel({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
-  const hasCreatableWorkItemType = creatableWorkItemTypes.length > 0
+  const hasLoadedWorkItemConfiguration = configuration !== undefined
+  const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration &&
+    creatableWorkItemTypes.length > 0
   const contextualWorkItemTypeId = workItemTypeId && creatableWorkItemTypes.some((type) =>
     type.id === workItemTypeId,
   )
@@ -2709,6 +2722,7 @@ function CreateIssuePanel({
         data-testid="create-issue-form"
         onSubmit={(event) => {
           event.preventDefault()
+          if (!hasLoadedWorkItemConfiguration || !hasCreatableWorkItemType) return
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()
           const description = String(formData.get('description') ?? '').trim()
@@ -2885,6 +2899,30 @@ function CreateIssuePanel({
       </form>
     </section>
   )
+}
+
+/**
+ * Resolves a Team Issue status filter without conflating equal IDs across Type workflows.
+ *
+ * @param statusFilter - Current UI value, including a legacy bare status ID.
+ * @param teamId - Team owning the current Issue surface.
+ * @param statuses - Type-qualified statuses available to the Team.
+ * @returns A valid Type-qualified filter value or the all-status sentinel.
+ */
+function resolveTeamIssueStatusFilter(
+  statusFilter: string,
+  teamId: string,
+  statuses: readonly WorkItemTypeWorkflowStatus[],
+): string {
+  if (statusFilter === 'all') return 'all'
+  if (statuses.some(({ status, workItemTypeId }) =>
+    createWorkItemTypeWorkflowStatusKey(teamId, workItemTypeId, status.id) === statusFilter
+  )) return statusFilter
+  const legacyMatches = statuses.filter(({ status }) => status.id === statusFilter)
+  const [legacyMatch] = legacyMatches
+  return legacyMatches.length === 1 && legacyMatch
+    ? createWorkItemTypeWorkflowStatusKey(teamId, legacyMatch.workItemTypeId, legacyMatch.status.id)
+    : 'all'
 }
 
 function IssueTable({

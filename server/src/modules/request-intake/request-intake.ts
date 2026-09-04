@@ -172,6 +172,13 @@ export type RequestAttachmentAccess = FileVersionAccess
 export interface RequestIntakeClient {
   /** Workspace の form 一覧を返します。 */
   listForms(workspaceId: string): Promise<{ forms: RequestForm[] }>
+  /**
+   * Lists the immutable versions currently referenced by published forms in a Workspace.
+   *
+   * @param workspaceId - Workspace whose published forms are inspected.
+   * @returns The current immutable version for every published form with a version.
+   */
+  listCurrentPublishedFormVersions(workspaceId: string): Promise<RequestFormVersion[]>
   /** Workspace 内の form を取得します。 */
   getForm(workspaceId: string, formId: string): Promise<RequestForm>
   /** Workspace に form draft と capability link を作成します。 */
@@ -1379,6 +1386,27 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
       .map((form) => this.toFormView(form))
     return { forms }
+  }
+
+  /**
+   * Lists the immutable versions currently referenced by published forms in a Workspace.
+   *
+   * @param workspaceId - Workspace whose published forms are inspected.
+   * @returns The current immutable version for every published form with a version.
+   */
+  async listCurrentPublishedFormVersions(workspaceId: string) {
+    const { forms } = await this.listForms(workspaceId)
+    const versions: RequestFormVersion[] = []
+    for (const form of forms) {
+      if (form.status !== 'published' || form.currentPublishedVersion === undefined) continue
+      const version = await this.getFormVersion(
+        workspaceId,
+        form.id,
+        form.currentPublishedVersion,
+      )
+      versions.push(toRequestFormVersion(version))
+    }
+    return versions
   }
 
   /** Workspace 内の form を strong read します。 */

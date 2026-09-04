@@ -1647,6 +1647,14 @@ export function createProductionAppDependencies(): AppDependencies {
  */
 export function createTestAppDependencies(): AppDependencies {
   const production = createProductionAppDependencies()
+  const requestIntake = new Proxy(production.workItems.requestIntake, {
+    get(target, property, receiver) {
+      if (property === 'listCurrentPublishedFormVersions') {
+        return async () => []
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
   const timeTrackingService = new TimeTrackingService(new InMemoryTimeTrackingRepository())
   return {
     ...production,
@@ -1662,6 +1670,7 @@ export function createTestAppDependencies(): AppDependencies {
       planning: new InMemoryPlanningClient(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
+      requestIntake,
     },
     timeTracking: { timeTrackingService },
     capacityPlanning: {

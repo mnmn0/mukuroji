@@ -64,6 +64,7 @@ import {
   type DocumentRelationTarget,
   type RequestFormDraft,
   type RequestFormField,
+  type RequestFormVersion,
   type RequestLocalizedText,
   type RequestFormRoutingTarget,
   type RequestSubmission,
@@ -23664,14 +23665,32 @@ function readRequestSubmissionStatus(value: string | undefined) {
   throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request status is invalid.')
 }
 
+/**
+ * Validates Request Form routing targets and custom-field mappings against active configuration.
+ *
+ * @param workspaceId - Workspace that owns the Request Form.
+ * @param draft - Draft or immutable published snapshot being checked.
+ * @param configurationOverrides - Candidate configurations keyed by affected Team.
+ * @param targetTeamIds - Optional Team allowlist for partial configuration validation.
+ * @returns A promise that resolves after every selected routing reference is valid.
+ */
 async function validateRequestFormRoutingReferences(
   workspaceId: string,
   draft: RequestFormDraft,
+  configurationOverrides: ReadonlyMap<string, WorkItemConfiguration> = new Map(),
+  targetTeamIds?: ReadonlySet<string>,
 ) {
   const targets = [draft.routing.defaultTarget, ...draft.routing.rules.map((rule) => rule.target)]
+    .filter((target) => targetTeamIds?.has(target.teamId) ?? true)
+  if (targets.length === 0) return
   const configurations = new Map<string, WorkItemConfiguration>()
   for (const target of targets) {
-    const configuration = await validateRequestRoutingTarget(workspaceId, target)
+    const configuration = configurations.get(target.teamId) ?? await validateRequestRoutingTarget(
+      workspaceId,
+      target,
+      undefined,
+      configurationOverrides.get(target.teamId),
+    )
     configurations.set(target.teamId, configuration)
   }
   for (const [formFieldId, customFieldId] of Object.entries(
@@ -23680,7 +23699,14 @@ async function validateRequestFormRoutingReferences(
     const formField = draft.definition.sections.flatMap((section) => section.fields)
       .find((field) => field.id === formFieldId)
     for (const target of targets) {
-      const configuration = configurations.get(target.teamId)!
+      const configuration = configurations.get(target.teamId)
+      if (!configuration) {
+        throw new RequestIntakeError(
+          503,
+          'RequestRoutingUnavailable',
+          `Configuration for Team "${target.teamId}" is unavailable.`,
+        )
+      }
       const customField = getWorkItemTypeCustomFieldDefinitions(
         configuration,
         target.workItemTypeId,
@@ -23747,12 +23773,14 @@ function isCompatibleRequestCustomField(
  * @param workspaceId - Workspace that owns the routing target.
  * @param target - Routing target to validate.
  * @param workflowTypeId - Optional Work Item Type whose workflow owns an explicit status override.
+ * @param configurationOverride - Candidate configuration to validate instead of the persisted one.
  * @returns The resolved Team Work Item configuration.
  */
 async function validateRequestRoutingTarget(
   workspaceId: string,
   target: RequestFormRoutingTarget,
   workflowTypeId?: string,
+  configurationOverride?: WorkItemConfiguration,
 ) {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
   const team = directory.teams.find((candidate) => candidate.id === target.teamId)
@@ -23763,11 +23791,21 @@ async function validateRequestRoutingTarget(
     throw new RequestIntakeError(400, 'InvalidRequestRouting', 'Request routing Project is inactive.')
   }
   await requireActiveWorkspaceAssignee(workspaceId, target.assigneeUserId)
-  const resolved = await workItemDependencies.workItemConfigurations.getTeamConfiguration(workspaceId, target.teamId)
+  const resolved = configurationOverride
+    ? undefined
+    : await workItemDependencies.workItemConfigurations.getTeamConfiguration(workspaceId, target.teamId)
   const workItemTypeId = workflowTypeId ?? target.workItemTypeId
-  resolveWorkItemType(resolved.configuration, workItemTypeId)
-  resolveWorkflowStatus(resolved.configuration, target.workflowStatusId, workItemTypeId)
-  return resolved.configuration
+  const configuration = configurationOverride ?? resolved?.configuration
+  if (!configuration) {
+    throw new RequestIntakeError(
+      503,
+      'RequestRoutingUnavailable',
+      `Configuration for Team "${target.teamId}" is unavailable.`,
+    )
+  }
+  resolveWorkItemType(configuration, workItemTypeId)
+  resolveWorkflowStatus(configuration, target.workflowStatusId, workItemTypeId)
+  return configuration
 }
 
 function toRequestIntakeErrorResponse(
@@ -39858,6 +39896,7 @@ async function validateWorkItemConfigurationUsage(
   const targetTeamIds = teamId
     ? [teamId]
     : directory.teams.map((team) => team.id)
+  const affectedTeamIds: string[] = []
   for (const targetTeamId of targetTeamIds) {
     if (!teamId) {
       const resolved = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
@@ -39868,6 +39907,7 @@ async function validateWorkItemConfigurationUsage(
         continue
       }
     }
+    affectedTeamIds.push(targetTeamId)
 
     const relationGraph = await workItemDependencies.workItemConfigurations.listRelationGraph(
       directoryId,
@@ -39916,6 +39956,87 @@ async function validateWorkItemConfigurationUsage(
           target.workItemTypeId,
         )
       }
+    }
+  }
+  await validatePublishedRequestFormConfigurationUsage(
+    directoryId,
+    affectedTeamIds,
+    configuration,
+  )
+}
+
+/**
+ * Validates immutable routing snapshots still referenced by published Request Forms.
+ *
+ * @param directoryId - Workspace whose configuration is being saved.
+ * @param affectedTeamIds - Teams that will use the candidate configuration after the save.
+ * @param configuration - Candidate configuration to test against those Teams.
+ * @returns A promise that resolves after all affected published snapshots remain usable.
+ */
+async function validatePublishedRequestFormConfigurationUsage(
+  directoryId: string,
+  affectedTeamIds: readonly string[],
+  configuration: WorkItemConfiguration,
+): Promise<void> {
+  if (affectedTeamIds.length === 0) return
+  const affectedTeamIdSet = new Set(affectedTeamIds)
+  const configurationOverrides = new Map<string, WorkItemConfiguration>()
+  for (const affectedTeamId of affectedTeamIds) {
+    configurationOverrides.set(affectedTeamId, configuration)
+  }
+  let versions: RequestFormVersion[]
+  try {
+    versions = await workItemDependencies.requestIntake.listCurrentPublishedFormVersions(
+      directoryId,
+    )
+  } catch (error) {
+    const reason = error instanceof Error
+      ? error.message
+      : 'published Request Forms could not be inspected'
+    const unavailable = (
+      error instanceof RequestIntakeError ||
+      error instanceof ProjectDataError ||
+      error instanceof WorkspaceAccessError ||
+      error instanceof WorkItemConfigurationError
+    ) && error.status >= 500
+    throw new WorkItemConfigurationError(
+      unavailable ? 503 : 409,
+      unavailable
+        ? 'WorkItemConfigurationDependencyUnavailable'
+        : 'WorkItemConfigurationInUse',
+      `Published Request Form configuration could not be inspected: ${reason}`,
+    )
+  }
+  for (const version of versions) {
+    const targets = [
+      version.snapshot.routing.defaultTarget,
+      ...version.snapshot.routing.rules.map((rule) => rule.target),
+    ]
+    if (!targets.some((target) => affectedTeamIdSet.has(target.teamId))) continue
+    try {
+      await validateRequestFormRoutingReferences(
+        directoryId,
+        version.snapshot,
+        configurationOverrides,
+        affectedTeamIdSet,
+      )
+    } catch (error) {
+      const reason = error instanceof Error
+        ? error.message
+        : 'published routing references are invalid'
+      const unavailable = (
+        error instanceof RequestIntakeError ||
+        error instanceof ProjectDataError ||
+        error instanceof WorkspaceAccessError ||
+        error instanceof WorkItemConfigurationError
+      ) && error.status >= 500
+      throw new WorkItemConfigurationError(
+        unavailable ? 503 : 409,
+        unavailable
+          ? 'WorkItemConfigurationDependencyUnavailable'
+          : 'WorkItemConfigurationInUse',
+        `Published Request Form "${version.formId}" version ${version.version} is incompatible with this configuration: ${reason}`,
+      )
     }
   }
 }

@@ -43,6 +43,7 @@ import type {
   RequestSubmission,
   RequestSubmissionActionInput,
   TriageEntry,
+  WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
   REQUEST_FORM_SCHEMA_VERSION,
@@ -87,6 +88,9 @@ function createRequestIntakeClient(
 ): RequestIntakeClient {
   return {
     listForms: createUnexpectedRequestIntakeCall('listForms'),
+    listCurrentPublishedFormVersions: createUnexpectedRequestIntakeCall(
+      'listCurrentPublishedFormVersions',
+    ),
     getForm: createUnexpectedRequestIntakeCall('getForm'),
     createForm: createUnexpectedRequestIntakeCall('createForm'),
     updateForm: createUnexpectedRequestIntakeCall('updateForm'),
@@ -564,6 +568,125 @@ test('rejects a Request Form mapping that is unavailable to a routed Work Item T
     message: 'Custom field "summary" is not active for Team "core-team".',
   })
   expect(publishCalls).toBe(0)
+})
+
+test('rejects archiving a Work Item Type referenced by a published Request Form', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: [{ ...typedWorkItemType, status: 'archived' }],
+  }
+  const publishedVersion: RequestSubmission['formSnapshot'] = {
+    schemaVersion: REQUEST_FORM_SCHEMA_VERSION,
+    formId: 'form-1',
+    version: 1,
+    snapshot: {
+      ...draft,
+      routing: {
+        ...draft.routing,
+        defaultTarget: {
+          ...draft.routing.defaultTarget,
+          workItemTypeId: 'incident',
+        },
+      },
+    },
+    createdBy: 'admin@example.com',
+    createdAt: '2026-07-16T00:30:00.000Z',
+  }
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return [publishedVersion]
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('returns dependency unavailable when published Request Forms cannot be inspected', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        throw new RequestIntakeError(
+          503,
+          'RequestRoutingUnavailable',
+          'Request Intake storage is unavailable.',
+        )
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, nextConfiguration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration: nextConfiguration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationDependencyUnavailable',
+  })
+  expect(saveCompleted).toBe(false)
 })
 
 test('commits a Request conversion pointer in the same transaction as its canonical Work Item', async () => {

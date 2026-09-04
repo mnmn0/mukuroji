@@ -99,7 +99,9 @@ export function CreateTaskPanel({
   const [title, setTitle] = useState('')
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
-  const hasCreatableWorkItemType = creatableWorkItemTypes.length > 0
+  const hasLoadedWorkItemConfiguration = configuration !== undefined
+  const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration &&
+    creatableWorkItemTypes.length > 0
   const contextualWorkItemTypeId = context?.workItemTypeId && creatableWorkItemTypes.some((type) =>
     type.id === context.workItemTypeId,
   )
@@ -159,6 +161,7 @@ export function CreateTaskPanel({
         id="create-task-form"
         onSubmit={(event) => {
           event.preventDefault()
+          if (!hasLoadedWorkItemConfiguration || !hasCreatableWorkItemType) return
 
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()

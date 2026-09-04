@@ -5,6 +5,7 @@ import type { AiAssistanceController } from '../src/features/ai-assistance/mutat
 import { aiTriageGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import { requestSubmissionFixture } from '../src/requests/fixtures'
 import { normalizeRequestSubmission } from '../src/requests/model/requestForm'
+import { resolveRequestConversionWorkItemTypeId } from '../src/requests/model/requestConversion'
 import { RequestQueue } from '../src/requests/ui/RequestQueue'
 import {
   canAdoptRequestTriageDraft,
@@ -82,6 +83,17 @@ describe('RequestQueue', () => {
     )
 
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Convert to Work Item/u)
+  })
+
+  test('initializes conversion from the immutable routing Work Item Type', () => {
+    expect(resolveRequestConversionWorkItemTypeId(
+      [{ id: 'incident' }, { id: 'default' }],
+      'incident',
+    )).toBe('incident')
+    expect(resolveRequestConversionWorkItemTypeId(
+      [{ id: 'incident' }, { id: 'default' }],
+      'archived-type',
+    )).toBe('incident')
   })
 
   /** Uses the AI-adopted Team when resolving the conversion Work Item configuration. */

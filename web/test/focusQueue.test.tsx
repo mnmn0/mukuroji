@@ -220,6 +220,51 @@ describe('Focus queue', () => {
     expect(html.match(/aria-controls="focus-item-details-/gu)).toHaveLength(1)
   })
 
+  test('keeps non-contiguous Work Item Type runs in server-ranked order', () => {
+    const nowItems = getFocusQueueItems(focusQueueResponseFixture, 'now')
+    const firstItem = nowItems[0]
+    const secondItem = nowItems[1]
+    if (!firstItem || !secondItem) throw new Error('The Focus fixture requires two Now items.')
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => group.section === 'now'
+        ? {
+            ...group,
+            items: [
+              {
+                ...firstItem,
+                id: 'focus-type-a-1',
+                workItem: { ...firstItem.workItem, id: 'type-a-1', title: 'Type A first', workItemTypeId: 'type-a' },
+              },
+              {
+                ...secondItem,
+                id: 'focus-type-b',
+                workItem: { ...secondItem.workItem, id: 'type-b', title: 'Type B', workItemTypeId: 'type-b' },
+              },
+              {
+                ...firstItem,
+                id: 'focus-type-a-2',
+                workItem: { ...firstItem.workItem, id: 'type-a-2', title: 'Type A second', workItemTypeId: 'type-a' },
+              },
+            ],
+          }
+        : group),
+    }
+    const html = renderToStaticMarkup(
+      <FocusQueue
+        locale="en"
+        onOpenItem={() => undefined}
+        onSectionChange={() => undefined}
+        response={response}
+        section="now"
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html.indexOf('Type A first')).toBeLessThan(html.indexOf('Type B'))
+    expect(html.indexOf('Type B')).toBeLessThan(html.indexOf('Type A second'))
+  })
+
   test('keeps policy controls available when the selected section is empty', () => {
     const emptyNowResponse: FocusQueueResponse = {
       ...focusQueueResponseFixture,

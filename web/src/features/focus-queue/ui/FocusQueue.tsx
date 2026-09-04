@@ -387,7 +387,10 @@ export function FocusQueue({
         {!isLoading && !hasError && items.length > 0 ? (
           <ol className="divide-y divide-[var(--workbench-border)]" onKeyDown={handleQueueKeyDown}>
             {groups.map((group) => (
-              <li className="list-none" key={group.typeKey}>
+              <li
+                className="list-none"
+                key={`${group.typeKey}:${group.items[0]?.rank ?? 0}`}
+              >
                 <div className="flex items-center justify-between gap-3 bg-[var(--workbench-surface-muted)] px-4 py-2 text-xs font-bold uppercase tracking-[0.06em] text-[var(--workbench-muted)]">
                   <h3>{group.label}</h3>
                   <span className="tabular-nums">{group.items.length}</span>
@@ -507,17 +510,20 @@ function groupFocusItems(
   definitions: readonly FocusQueueWorkItemTypeOption[],
 ): FocusQueueTypeGroup[] {
   const labels = new Map(definitions.map((definition) => [definition.filterValue, definition.label]))
-  const groups = new Map<string, FocusQueueTypeGroupDraft>()
+  const groups: FocusQueueTypeGroupDraft[] = []
   items.forEach((item, index) => {
     const typeId = item.workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
     const typeKey = createSearchWorkItemTypeKey(item.workItem.teamId, typeId)
-    const group = groups.get(typeKey) ?? {
-      items: [],
-      label: labels.get(typeKey) ?? `${item.workItem.teamId} · ${typeId}`,
-      typeKey,
-    }
+    const previousGroup = groups.at(-1)
+    const group = previousGroup?.typeKey === typeKey
+      ? previousGroup
+      : {
+          items: [],
+          label: labels.get(typeKey) ?? `${item.workItem.teamId} · ${typeId}`,
+          typeKey,
+        }
     group.items.push({ item, rank: index + 1 })
-    groups.set(typeKey, group)
+    if (group !== previousGroup) groups.push(group)
   })
   let position = 0
   return [...groups.values()].map((group) => ({

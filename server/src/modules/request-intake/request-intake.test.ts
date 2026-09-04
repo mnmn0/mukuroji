@@ -959,6 +959,9 @@ test('lists only form root rows after publishing an immutable version', async ()
   const client = createClient(createDocumentClient((command) => {
     const key = command.input.Key as { recordKey?: string } | undefined
     if (key?.recordKey === 'FORM_ROOT#form-1') return { Item: root }
+    if (key?.recordKey?.startsWith('FORM_VERSION#') && versionRow) {
+      return { Item: versionRow }
+    }
     const transaction = command.input.TransactItems as Array<{
       Put?: { Item?: Record<string, unknown> }
     }> | undefined
@@ -995,6 +998,14 @@ test('lists only form root rows after publishing an immutable version', async ()
     status: 'published',
     currentPublishedVersion: 1,
   })
+  await expect(client.listCurrentPublishedFormVersions('workspace-1')).resolves.toEqual([{
+    schemaVersion: 1,
+    formId: 'form-1',
+    version: 1,
+    snapshot: draft,
+    createdBy: 'admin@example.com',
+    createdAt: now.toISOString(),
+  }])
 })
 
 test('rejects invalid form status and masks non-conditional store failures', async () => {

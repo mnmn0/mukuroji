@@ -365,6 +365,34 @@ describe('task-view surface adapters', () => {
     expect(next.layout.mode).toBe('board')
   })
 
+  test('round-trips type-qualified Team workflow status filters', () => {
+    const definition = {
+      ...createProjectDefinition(),
+      surface: 'team',
+      scope: { kind: 'team', teamId: 'core-team' },
+      filters: {
+        workflowStatuses: [{
+          teamId: 'core-team',
+          workItemTypeId: 'bug',
+          statusId: 'active',
+        }],
+      },
+    } satisfies TaskViewDefinition
+    const state = taskViewDefinitionToTeamState(definition)
+
+    expect(state.statusFilter).toBe('core-team\u0000bug\u0000active')
+    const next = teamStateToTaskViewDefinition(definition, {
+      ...state,
+      statusFilter: 'core-team\u0000bug\u0000review',
+    })
+
+    expect(next.filters.workflowStatuses).toEqual([{
+      teamId: 'core-team',
+      workItemTypeId: 'bug',
+      statusId: 'review',
+    }])
+  })
+
   test('preserves secondary Team filters and omits cleared represented filters', () => {
     const projectDefinition = createProjectDefinition()
     const definition = {

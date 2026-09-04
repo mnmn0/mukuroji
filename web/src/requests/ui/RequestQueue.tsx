@@ -26,7 +26,10 @@ import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
   type RequestSubmissionModel,
 } from '../model/requestForm'
-import { createMappedConversionCustomFieldValues } from '../model/requestConversion'
+import {
+  createMappedConversionCustomFieldValues,
+  resolveRequestConversionWorkItemTypeId,
+} from '../model/requestConversion'
 import { resolveRequestLocalizedText } from '../model/requestFormLogic'
 import {
   canAdoptRequestTriageDraft,
@@ -338,9 +341,21 @@ function RequestSubmissionDetail({
   )
   const hasLoadedWorkItemConfiguration = effectiveWorkItemConfiguration !== undefined
   const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration && workItemTypes.length > 0
-  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
-    () => workItemTypes[0]?.id ?? 'default',
+  const preferredWorkItemTypeId = resolveRequestConversionWorkItemTypeId(
+    workItemTypes,
+    effectiveRouting.workItemTypeId,
   )
+  const typeSelectionResetKey = [
+    submission?.id ?? '',
+    effectiveRouting.teamId ?? '',
+    effectiveRouting.workItemTypeId ?? '',
+  ].join('\u0000')
+  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
+    () => preferredWorkItemTypeId,
+  )
+  useEffect(() => {
+    setSelectedWorkItemTypeId(preferredWorkItemTypeId)
+  }, [preferredWorkItemTypeId, typeSelectionResetKey])
   const effectiveWorkItemTypeId = workItemTypes.some((type) => type.id === selectedWorkItemTypeId)
     ? selectedWorkItemTypeId
     : workItemTypes[0]?.id ?? 'default'

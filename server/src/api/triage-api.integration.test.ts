@@ -184,6 +184,7 @@ function createRequestIntakeClient(
   }
   return {
     listForms: unsupported,
+    listCurrentPublishedFormVersions: unsupported,
     getForm: unsupported,
     createForm: unsupported,
     updateForm: unsupported,
