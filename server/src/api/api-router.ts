@@ -13,6 +13,7 @@ import {
   ENTERPRISE_PERMISSION_IDS,
   createSearchWorkItemTypeKey,
   createDefaultUnscheduledWorkItemSchedule,
+  DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
   readSearchWorkItemTypeKey,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
@@ -97,6 +98,8 @@ import {
   type PlanningWorkItemSummary,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessPreferences,
+  type PublicCustomFieldDefinition,
+  type PublicWorkItemTypeCatalog,
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
   type ImportJob,
@@ -23675,7 +23678,10 @@ async function validateRequestFormRoutingReferences(
       .find((field) => field.id === formFieldId)
     for (const target of targets) {
       const configuration = configurations.get(target.teamId)!
-      const customField = configuration.customFields.find((definition) => definition.id === customFieldId)
+      const customField = getWorkItemTypeCustomFieldDefinitions(
+        configuration,
+        target.workItemTypeId,
+      ).find((definition) => definition.id === customFieldId)
       if (!customField) {
         throw new RequestIntakeError(
           400,
@@ -41150,6 +41156,101 @@ async function createCanonicalPublicWorkItem(
 }
 
 /**
+ * Redacts one custom field definition for the public Work Item creation schema.
+ *
+ * @param definition - Validated field definition from the effective Team configuration.
+ * @param typeRequired - Whether the selected Work Item Type requires this field.
+ * @param accessibleProjectIds - Project IDs visible to the caller, or undefined for unrestricted access.
+ * @returns A public definition, or undefined when its Project scope is not visible.
+ */
+function createPublicCustomFieldDefinition(
+  definition: CustomFieldDefinition,
+  typeRequired: boolean,
+  accessibleProjectIds: ReadonlySet<string> | undefined,
+): PublicCustomFieldDefinition | undefined {
+  const configuredProjectIds = definition.projectIds
+  const visibleProjectIds = configuredProjectIds && configuredProjectIds.length > 0 && accessibleProjectIds
+    ? configuredProjectIds.filter((projectId) => accessibleProjectIds.has(projectId))
+    : configuredProjectIds
+  if (
+    configuredProjectIds &&
+    configuredProjectIds.length > 0 &&
+    accessibleProjectIds &&
+    visibleProjectIds?.length === 0
+  ) {
+    return undefined
+  }
+
+  return {
+    id: definition.id,
+    name: definition.name,
+    type: definition.type,
+    sortOrder: definition.sortOrder,
+    required: definition.required || typeRequired,
+    ...(definition.defaultValue === undefined ? {} : { defaultValue: definition.defaultValue }),
+    ...(definition.options === undefined ? {} : { options: definition.options }),
+    ...(definition.validation === undefined ? {} : { validation: definition.validation }),
+    ...(visibleProjectIds === undefined ? {} : { projectIds: visibleProjectIds }),
+    ...(definition.currencyCode === undefined ? {} : { currencyCode: definition.currencyCode }),
+    ...(definition.durationUnit === undefined ? {} : { durationUnit: definition.durationUnit }),
+  }
+}
+
+/**
+ * Builds the authorized, creation-oriented Work Item Type catalog for one Team.
+ *
+ * @param teamId - Team whose configuration was resolved.
+ * @param resolvedConfiguration - Effective Team or inherited Work Item configuration.
+ * @param accessibleProjectIds - Project IDs visible to the requesting principal, or undefined for unrestricted access.
+ * @returns Active Work Item Types with their workflow statuses and public field definitions.
+ */
+function createPublicWorkItemTypeCatalog(
+  teamId: string,
+  resolvedConfiguration: ResolvedWorkItemConfiguration,
+  accessibleProjectIds: ReadonlySet<string> | undefined,
+): PublicWorkItemTypeCatalog {
+  const configuration = resolvedConfiguration.configuration
+  const types = [...(configuration.workItemTypes ?? [])]
+  if (!types.some((type) => type.id === DEFAULT_WORK_ITEM_TYPE_ID)) {
+    types.push(DEFAULT_WORK_ITEM_TYPE)
+  }
+
+  return {
+    teamId,
+    configurationRevision: configuration.revision,
+    workItemTypes: types
+      .filter((type) => type.status === 'active')
+      .sort((first, second) => first.sortOrder - second.sortOrder || first.name.localeCompare(second.name))
+      .map((type) => {
+        const workflow = resolveWorkItemTypeWorkflow(configuration, type.id)
+        const typeRequiredFieldIds = new Set(type.requiredCustomFieldIds)
+        const customFields = getWorkItemTypeCustomFieldDefinitions(configuration, type.id)
+          .flatMap((definition) => {
+            const publicDefinition = createPublicCustomFieldDefinition(
+              definition,
+              typeRequiredFieldIds.has(definition.id),
+              accessibleProjectIds,
+            )
+            return publicDefinition ? [publicDefinition] : []
+          })
+        return {
+          id: type.id,
+          name: type.name,
+          ...(type.description === undefined ? {} : { description: type.description }),
+          defaultWorkflowId: workflow.id,
+          workflow: {
+            id: workflow.id,
+            name: workflow.name,
+            initialStatusId: workflow.initialStatusId,
+            statuses: workflow.statuses,
+          },
+          customFields,
+        }
+      }),
+  }
+}
+
+/**
  * Adapts request-bound canonical Work Item operations and authorization to the Public API port.
  *
  * @returns A Public API Work Item service backed by canonical application operations.
@@ -41224,6 +41325,31 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         workItemId,
         'viewer',
       )).detail.issue)
+    },
+
+    async listWorkItemTypes(credential, teamId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const permission = await requireTeamPermission(principal, teamId, 'viewer')
+      const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        teamId,
+      )
+      const accessibleProjectIds = principal.isSystemAdmin
+        ? undefined
+        : new Set(
+            (permission.projectAccesses ?? [])
+              .filter((access) => projectAccessAllows(access, 'viewer'))
+              .map((access) => access.projectId),
+          )
+      return createPublicWorkItemTypeCatalog(
+        teamId,
+        resolvedConfiguration,
+        accessibleProjectIds,
+      )
     },
 
     /**

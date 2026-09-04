@@ -531,6 +531,102 @@ const components = {
         formulaExpression: { type: 'string' },
       },
     },
+    PublicCustomFieldDefinition: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id', 'name', 'type', 'sortOrder', 'required'],
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        type: {
+          type: 'string',
+          enum: [
+            'text',
+            'number',
+            'boolean',
+            'date',
+            'select',
+            'multi-select',
+            'person',
+            'currency',
+            'duration',
+            'formula',
+          ],
+        },
+        sortOrder: { type: 'integer', minimum: 0 },
+        required: { type: 'boolean' },
+        defaultValue: {
+          oneOf: [
+            { type: 'string' },
+            { type: 'number' },
+            { type: 'boolean' },
+            { type: 'array', items: { type: 'string' } },
+          ],
+        },
+        options: { type: 'array', items: schemaRef('CustomFieldOption') },
+        validation: schemaRef('CustomFieldValidation'),
+        projectIds: { type: 'array', items: { type: 'string' } },
+        currencyCode: { type: 'string' },
+        durationUnit: { type: 'string', enum: ['minutes', 'hours', 'days'] },
+      },
+    },
+    PublicWorkItemWorkflowStatus: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id', 'name', 'category', 'sortOrder'],
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        category: {
+          type: 'string',
+          enum: ['backlog', 'unstarted', 'started', 'completed', 'canceled'],
+        },
+        sortOrder: { type: 'integer', minimum: 0 },
+        color: { type: 'string' },
+      },
+    },
+    PublicWorkItemTypeSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id', 'name', 'defaultWorkflowId', 'workflow', 'customFields'],
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        description: { type: 'string' },
+        defaultWorkflowId: { type: 'string' },
+        workflow: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['id', 'name', 'initialStatusId', 'statuses'],
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            initialStatusId: { type: 'string' },
+            statuses: {
+              type: 'array',
+              items: schemaRef('PublicWorkItemWorkflowStatus'),
+            },
+          },
+        },
+        customFields: {
+          type: 'array',
+          items: schemaRef('PublicCustomFieldDefinition'),
+        },
+      },
+    },
+    PublicWorkItemTypeCatalog: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['teamId', 'configurationRevision', 'workItemTypes'],
+      properties: {
+        teamId: { type: 'string' },
+        configurationRevision: { type: 'integer', minimum: 0 },
+        workItemTypes: {
+          type: 'array',
+          items: schemaRef('PublicWorkItemTypeSchema'),
+        },
+      },
+    },
     CreatePublicWorkItemRequest: {
       type: 'object',
       additionalProperties: false,
@@ -1313,6 +1409,26 @@ const paths = {
       requestBody: jsonRequestBody('CreatePublicWorkItemRequest'),
       responses: {
         '201': jsonResponse('Work Item を作成しました。', schemaRef('WorkItem'), true),
+        ...problemResponses,
+      },
+    },
+  },
+  '/api/v1/work-item-types': {
+    get: {
+      operationId: 'listPublicWorkItemTypes',
+      tags: ['Work Items'],
+      summary: 'Work Item 作成用の active Type schema を取得する',
+      description: '指定 Team で利用できる active Work Item Type、workflow status、custom field definition/options を返します。',
+      security: publicApiSecurity('work-items:read'),
+      parameters: [{
+        name: 'teamId',
+        in: 'query',
+        required: true,
+        schema: { type: 'string' },
+        description: 'schema を取得する Team ID です。',
+      }],
+      responses: {
+        '200': jsonResponse('Work Item Type 作成 schema です。', schemaRef('PublicWorkItemTypeCatalog')),
         ...problemResponses,
       },
     },

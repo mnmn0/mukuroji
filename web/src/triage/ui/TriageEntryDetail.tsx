@@ -923,7 +923,8 @@ export function TriageEntryDetail({
                           definitions={acceptCustomFieldDefinitions}
                           disabled={actionIsPending}
                           errors={acceptFieldErrors}
-                          key={`${entry.revision}:${selectedWorkItemType?.id ?? 'default'}:${projectId}:${JSON.stringify(initialAcceptCustomFieldValues)}`}
+                          // Keep uncontrolled shared fields mounted while Project-scoped applicability changes.
+                          key={`${entry.revision}:${selectedWorkItemType?.id ?? 'default'}:${JSON.stringify(initialAcceptCustomFieldValues)}`}
                           locale={locale}
                           personOptions={workItemPersonOptions}
                           projectId={projectId || undefined}

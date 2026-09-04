@@ -1038,18 +1038,14 @@ test('audits Work Item Type policy changes even when policy counts stay the same
             field: 'workItemTypes',
             before: expect.arrayContaining([
               expect.objectContaining({
-                allowedChildTypeIds: ['default'],
-                customFieldIds: ['summary'],
-                detailSections: ['overview'],
-                requiredCustomFieldIds: ['summary'],
+                id: 'incident',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
               }),
             ]),
             after: expect.arrayContaining([
               expect.objectContaining({
-                allowedChildTypeIds: ['incident'],
-                customFieldIds: ['severity'],
-                detailSections: ['description'],
-                requiredCustomFieldIds: ['severity'],
+                id: 'incident',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
               }),
             ]),
           }),

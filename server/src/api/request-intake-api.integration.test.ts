@@ -485,6 +485,87 @@ test('delegates Request Form publish revision checks to the Request Intake clien
   expect(publishCalls).toBe(1)
 })
 
+test('rejects a Request Form mapping that is unavailable to a routed Work Item Type', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'summary',
+    name: 'Summary',
+    type: 'text',
+    sortOrder: 0,
+    required: false,
+  }]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'incident',
+    name: 'Incident',
+    defaultWorkflowId: configuration.workflow.id,
+    customFieldIds: [],
+    requiredCustomFieldIds: [],
+    allowedChildTypeIds: ['incident'],
+  }]
+  const typedDraft: RequestFormDraft = {
+    ...draft,
+    definition: {
+      ...draft.definition,
+      sections: draft.definition.sections.map((section, index) => index === 0
+        ? {
+            ...section,
+            fields: [...section.fields, {
+              id: 'summary-answer',
+              type: 'short-text',
+              label: { ja: 'Summary' },
+            }],
+          }
+        : section),
+    },
+    routing: {
+      ...draft.routing,
+      defaultTarget: {
+        ...draft.routing.defaultTarget,
+        workItemTypeId: 'incident',
+      },
+      mapping: {
+        ...draft.routing.mapping,
+        customFieldMappings: { 'summary-answer': 'summary' },
+      },
+    },
+  }
+  let publishCalls = 0
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async getForm() {
+        return { ...requestForm, draft: typedDraft }
+      },
+      async publishForm() {
+        publishCalls += 1
+        return requestForm
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/request-forms/form-1/publish', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    code: 'InvalidRequestRouting',
+    message: 'Custom field "summary" is not active for Team "core-team".',
+  })
+  expect(publishCalls).toBe(0)
+})
+
 test('commits a Request conversion pointer in the same transaction as its canonical Work Item', async () => {
   let transactionItems: Array<Record<string, unknown>> = []
   const documentClient = {

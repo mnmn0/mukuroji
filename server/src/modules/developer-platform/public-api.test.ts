@@ -8,6 +8,7 @@ import {
   type CustomFieldDefinition,
   type DueDateWorkItemSchedule,
   type ImportJob,
+  type PublicWorkItemTypeCatalog,
   type WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import {
@@ -123,6 +124,13 @@ function createDefaultWorkItemService(
     },
     async get() {
       return workItem
+    },
+    async listWorkItemTypes(_credential, teamId) {
+      return {
+        teamId,
+        configurationRevision: 1,
+        workItemTypes: [],
+      }
     },
     async previewTypeChange() {
       return {
@@ -385,6 +393,56 @@ describe('public API router', () => {
     })
   })
 
+  test('exposes the authorized Work Item Type creation schema', async () => {
+    let requestedTeamId: string | undefined
+    const catalog = {
+      teamId: 'team-1',
+      configurationRevision: 7,
+      workItemTypes: [{
+        id: 'incident',
+        name: 'Incident',
+        defaultWorkflowId: 'incident-workflow',
+        workflow: {
+          id: 'incident-workflow',
+          name: 'Incident workflow',
+          initialStatusId: 'incident-open',
+          statuses: [{
+            id: 'incident-open',
+            name: 'Open',
+            category: 'unstarted',
+            sortOrder: 0,
+          }],
+        },
+        customFields: [{
+          id: 'severity',
+          name: 'Severity',
+          required: true,
+          sortOrder: 0,
+          type: 'select',
+          options: [{ id: 'high', name: 'High', sortOrder: 0 }],
+        }],
+      }],
+    } satisfies PublicWorkItemTypeCatalog
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async listWorkItemTypes(_credential, teamId) {
+          requestedTeamId = teamId
+          return catalog
+        },
+      }),
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+
+    const response = await router.request(
+      'http://localhost/v1/work-item-types?teamId=team-1',
+      { headers: { Authorization: `Bearer ${apiKey.secret}` } },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(catalog)
+    expect(requestedTeamId).toBe('team-1')
+  })
+
   test('exposes a public Work Item Type change preview', async () => {
     let received: {
       teamId: string
@@ -589,6 +647,11 @@ describe('public API router', () => {
     })
     expect(components.schemas.OAuthAppSummary.properties).not.toHaveProperty('redirectUris')
     expect(components.schemas.CreateOAuthAppInput.properties).not.toHaveProperty('redirectUris')
+    expect(paths['/api/v1/work-item-types']).toHaveProperty('get')
+    expect(
+      paths['/api/v1/work-item-types'].get.responses['200'].content['application/json'].schema,
+    ).toEqual({ $ref: '#/components/schemas/PublicWorkItemTypeCatalog' })
+    expect(components.schemas.PublicCustomFieldDefinition.properties).not.toHaveProperty('formulaExpression')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('post')
     expect(paths['/api/v1/work-items/{workItemId}/work-item-type-preview']).toHaveProperty('post')

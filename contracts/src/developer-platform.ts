@@ -4,6 +4,10 @@ import type {
   WorkItemPatch,
 } from './work-items'
 import type {
+  CustomFieldDefinition,
+  WorkflowDefinition,
+} from './work-item-configuration'
+import type {
   PreviewWorkItemTypeChangeInput,
 } from './work-item-types'
 
@@ -1341,6 +1345,40 @@ export type UpdatePublicWorkItemRequest = WorkItemPatch & {
 
 /** Public Work Item Type change preview endpoint の request body です。 */
 export type PreviewPublicWorkItemTypeChangeRequest = PreviewWorkItemTypeChangeInput
+
+/**
+ * Custom field definition returned by the Public API for Work Item creation.
+ *
+ * Formula implementation expressions are omitted; only the writable type and its
+ * validation/options are exposed.
+ */
+export type PublicCustomFieldDefinition = Omit<CustomFieldDefinition, 'formulaExpression'>
+
+/** Work Item Type schema returned by the Public API for creation. */
+export type PublicWorkItemTypeSchema = {
+  /** Stable identifier of a Work Item Type available for creation. */
+  id: string
+  /** Display name used by UI and API clients. */
+  name: string
+  /** Optional Work Item Type description. */
+  description?: string
+  /** Workflow identifier initially applied to a new Work Item. */
+  defaultWorkflowId: string
+  /** Active workflow applied to this Work Item Type. */
+  workflow: Pick<WorkflowDefinition, 'id' | 'name' | 'initialStatusId' | 'statuses'>
+  /** Custom fields and validation/options accepted by this Work Item Type. */
+  customFields: PublicCustomFieldDefinition[]
+}
+
+/** Public API response containing the current creation schema for one Team. */
+export type PublicWorkItemTypeCatalog = {
+  /** Team for which the schema was resolved. */
+  teamId: string
+  /** Effective Work Item configuration revision used to resolve the schema. */
+  configurationRevision: number
+  /** Active Work Item Types available for creation. */
+  workItemTypes: PublicWorkItemTypeSchema[]
+}
 
 /**
  * Public Work Item delete endpoint の request body です。

@@ -23,6 +23,7 @@ import {
   type ImportDryRunReport,
   type ImportJob,
   type ImportSource,
+  type PublicWorkItemTypeCatalog,
   type PreviewPublicWorkItemTypeChangeRequest,
   type ResolveWorkItemSyncConflictInput,
   type UpdatePublicWorkItemRequest,
@@ -129,6 +130,11 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
+  /** Returns active Work Item Types and creation field schemas after current RBAC checks. */
+  listWorkItemTypes(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+  ): Promise<PublicWorkItemTypeCatalog>
   /**
    * Calculates the impact of a Work Item Type change after current authorization and revision checks.
    *
@@ -565,6 +571,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       (continuation, limit) =>
         dependencies.workItems.list(credential, filters, continuation, limit),
       (item) => item.updatedAt,
+    ))
+  })
+
+  router.get('/v1/work-item-types', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.listWorkItemTypes(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
     ))
   })
 
