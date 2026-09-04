@@ -214,6 +214,7 @@ function createWorkItemAutomationTemplate(
     version: 1,
     revision: 1,
     payload: {
+      assigneeUserId: 'demo@example.com',
       schedule: createDefaultUnscheduledWorkItemSchedule(),
       title: 'Incident from Automation',
       teamId: 'core-team',
@@ -1150,6 +1151,65 @@ test('validates the complete merged Work Item payload of enabled Automation crea
   expect(await response.json()).toMatchObject({
     code: 'WorkItemConfigurationInUse',
     message: expect.stringContaining('Recurring Work'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('rejects enabled Automation creates assigned to an inactive Workspace member', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    inactiveWorkspaceMemberKeys: ['former@example.com'],
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const template = createWorkItemAutomationTemplate('template-inactive-assignee', 'default')
+  template.payload = {
+    ...template.payload,
+    assigneeUserId: 'former@example.com',
+  }
+  const recurring = createRecurringWorkUsageFixture(template.id)
+  const automation = createAutomationConfigurationUsageDependencies([recurring], [template])
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, nextConfiguration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration: nextConfiguration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Only active non-guest Workspace members can be assigned.'),
   })
   expect(saveCompleted).toBe(false)
 })

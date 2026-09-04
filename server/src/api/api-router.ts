@@ -40382,7 +40382,7 @@ async function validateAutomationWorkItemConfigurationUsage(
         `Automation target Team "${targetTeamId}" is unavailable.`,
       )
     }
-    await prepareConfiguredCreateWorkItem(
+    const configuredBody = await prepareConfiguredCreateWorkItem(
       directoryId,
       targetTeamId,
       normalizeTeamIssueInput(
@@ -40390,6 +40390,10 @@ async function validateAutomationWorkItemConfigurationUsage(
         team,
       ),
       { configuration },
+    )
+    await requireActiveWorkspaceAssignee(
+      directoryId,
+      readTeamIssueAssigneeUserId(configuredBody),
     )
   }
 
