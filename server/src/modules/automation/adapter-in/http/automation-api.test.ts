@@ -2656,6 +2656,9 @@ test('applies a Workflow template atomically while preserving custom fields and 
   let completionCount = 0
   setTestAppDependencies({
     ruleTemplates: createAutomationRuleTemplatePort({
+      async listRules() {
+        return []
+      },
       async reserveTemplateApplication() {
         return structuredClone(application)
       },

@@ -1658,6 +1658,25 @@ export function createTestAppDependencies(): AppDependencies {
       return Reflect.get(target, property, receiver)
     },
   })
+  const automation: AutomationDependencies = {
+    ...production.automation,
+    ruleTemplates: new Proxy(production.automation.ruleTemplates, {
+      get(target, property, receiver) {
+        if (property === 'listRules') {
+          return async () => []
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+    recurringSchedules: new Proxy(production.automation.recurringSchedules, {
+      get(target, property, receiver) {
+        if (property === 'listRecurringWorks') {
+          return async () => []
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+  }
   const timeTrackingService = new TimeTrackingService(new InMemoryTimeTrackingRepository())
   return {
     ...production,
@@ -1675,6 +1694,7 @@ export function createTestAppDependencies(): AppDependencies {
       analytics: new InMemoryAnalyticsRepository(),
       requestIntake,
     },
+    automation,
     timeTracking: { timeTrackingService },
     capacityPlanning: {
       capacityPlanningService: new CapacityPlanningService(

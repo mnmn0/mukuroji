@@ -28,6 +28,8 @@ import {
   type AnalyticsSnapshotListResponse,
   type AnalyticsSnapshotRecord,
   type AcceptCreateTriageAction,
+  type AutomationRule,
+  type AutomationTemplate,
   type CreateManualTriageEntryInput,
   type CreateAnalyticsReportInput,
   type AutomationAction,
@@ -69,6 +71,7 @@ import {
   type RequestFormRoutingTarget,
   type RequestSubmission,
   type RequestSubmissionActionInput,
+  type RecurringWork,
   type TriageBulkActionInput,
   type TriageBulkActionResult,
   type TriageConfiguration,
@@ -39995,6 +39998,182 @@ async function validateWorkItemConfigurationUsage(
     directoryId,
     affectedTeamIds,
     configuration,
+  )
+  await validateAutomationWorkItemConfigurationUsage(
+    directoryId,
+    affectedTeamIds,
+    configuration,
+  )
+}
+
+/** A validated Work Item Automation template used by configuration usage checks. */
+type WorkItemAutomationTemplate = Extract<AutomationTemplate, { kind: 'work-item' }>
+
+/**
+ * Validates enabled Automation definitions that can create Work Items for an affected Team.
+ *
+ * @param directoryId - Workspace whose configuration is being saved.
+ * @param affectedTeamIds - Teams that will use the candidate configuration after the save.
+ * @param configuration - Candidate configuration to test against Automation references.
+ * @returns A promise that resolves after all enabled create references remain usable.
+ */
+async function validateAutomationWorkItemConfigurationUsage(
+  directoryId: string,
+  affectedTeamIds: readonly string[],
+  configuration: WorkItemConfiguration,
+): Promise<void> {
+  if (affectedTeamIds.length === 0) return
+  const affectedTeamIdSet = new Set(affectedTeamIds)
+  let recurringWorks: RecurringWork[]
+  let rules: AutomationRule[]
+  try {
+    [recurringWorks, rules] = await Promise.all([
+      automationDependencies.recurringSchedules.listRecurringWorks(directoryId),
+      automationDependencies.ruleTemplates.listRules(directoryId),
+    ])
+  } catch (error) {
+    throw createAutomationConfigurationUsageError(
+      'Automation definitions could not be inspected',
+      error,
+    )
+  }
+
+  const templateCache = new Map<string, Promise<WorkItemAutomationTemplate>>()
+  /**
+   * Loads and validates one immutable Work Item template version.
+   *
+   * @param templateId - Template identifier to load.
+   * @param templateVersion - Immutable version pinned by the Automation definition.
+   * @returns A promise for the enabled Work Item template.
+   */
+  const readWorkItemTemplate = (
+    templateId: string,
+    templateVersion: number | undefined,
+  ): Promise<WorkItemAutomationTemplate> => {
+    const cacheKey = `${templateId}\u0000${String(templateVersion)}`
+    const cached = templateCache.get(cacheKey)
+    if (cached) return cached
+    const pending = (async () => {
+      if (templateVersion === undefined || !Number.isSafeInteger(templateVersion)) {
+        throw new AutomationError(
+          'unavailable',
+          'AutomationTemplateUnavailable',
+          `Pinned Work Item template "${templateId}" is unavailable.`,
+          true,
+        )
+      }
+      const template = await automationDependencies.ruleTemplates.getTemplateVersion(
+        directoryId,
+        templateId,
+        templateVersion,
+      )
+      if (!template || !template.enabled || template.kind !== 'work-item') {
+        throw new AutomationError(
+          'conflict',
+          'AutomationTemplateUnavailable',
+          `Pinned Work Item template "${templateId}" is unavailable.`,
+        )
+      }
+      return template
+    })()
+    templateCache.set(cacheKey, pending)
+    return pending
+  }
+
+  /**
+   * Validates one Automation Work Item target against the candidate configuration.
+   *
+   * @param targetTeamId - Team that will own the generated Work Item.
+   * @param workItemTypeId - Optional Work Item Type selected by the Automation payload.
+   * @param workflowStatusId - Optional workflow status selected by the Automation payload.
+   */
+  const validateReference = (
+    targetTeamId: string,
+    workItemTypeId: string | undefined,
+    workflowStatusId: unknown,
+  ) => {
+    if (!affectedTeamIdSet.has(targetTeamId)) return
+    const workItemType = resolveWorkItemType(configuration, workItemTypeId)
+    resolveWorkflowStatus(configuration, workflowStatusId, workItemType.id)
+  }
+
+  for (const recurring of recurringWorks) {
+    if (!recurring.enabled || !affectedTeamIdSet.has(recurring.teamId)) continue
+    try {
+      const template = await readWorkItemTemplate(
+        recurring.templateId,
+        recurring.templateVersion,
+      )
+      validateReference(
+        recurring.teamId,
+        readAutomationText(template.payload.workItemTypeId),
+        template.payload.workflowStatusId,
+      )
+    } catch (error) {
+      throw createAutomationConfigurationUsageError(
+        `Enabled Recurring Work "${recurring.id}"`,
+        error,
+      )
+    }
+  }
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue
+    for (const [actionIndex, action] of rule.actions.entries()) {
+      if (action.type !== 'create') continue
+      try {
+        const template = action.templateId === undefined
+          ? undefined
+          : await readWorkItemTemplate(action.templateId, action.templateVersion)
+        const values = {
+          ...template?.payload,
+          ...action.values,
+        }
+        const targetTeamId = readAutomationText(values.teamId)
+        const targetTeamIds = targetTeamId === undefined
+          ? affectedTeamIds
+          : [targetTeamId]
+        for (const candidateTeamId of targetTeamIds) {
+          validateReference(
+            candidateTeamId,
+            readAutomationText(values.workItemTypeId),
+            values.workflowStatusId,
+          )
+        }
+      } catch (error) {
+        throw createAutomationConfigurationUsageError(
+          `Enabled Automation Rule "${rule.id}" create action ${actionIndex}`,
+          error,
+        )
+      }
+    }
+  }
+}
+
+/**
+ * Converts an Automation usage failure into the Work Item configuration error contract.
+ *
+ * @param reference - Human-readable Automation definition reference.
+ * @param error - Failure raised while reading or validating the reference.
+ * @returns A stable Work Item configuration usage error.
+ */
+function createAutomationConfigurationUsageError(
+  reference: string,
+  error: unknown,
+): WorkItemConfigurationError {
+  const reason = error instanceof AutomationError || error instanceof WorkItemConfigurationError
+    ? error.message
+    : 'Automation references could not be inspected'
+  const status = error instanceof AutomationError || error instanceof WorkItemConfigurationError
+    ? error.status
+    : 503
+  const unavailable = status >= 500
+  return new WorkItemConfigurationError(
+    unavailable ? 503 : 409,
+    unavailable
+      ? 'WorkItemConfigurationDependencyUnavailable'
+      : 'WorkItemConfigurationInUse',
+    `${reference} is incompatible with this configuration: ${reason}.`,
   )
 }
 
