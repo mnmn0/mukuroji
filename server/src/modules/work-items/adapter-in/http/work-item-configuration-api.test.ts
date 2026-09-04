@@ -777,6 +777,48 @@ test('reports pending approval completion conflicts in a Work Item Type preview'
   })
 })
 
+test('redacts pending approval storage failures from Work Item Type changes', async () => {
+  configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'bug',
+    name: 'Bug',
+    defaultWorkflowId: configuration.workflow.id,
+    sortOrder: 10,
+  }]
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listPendingWorkItemApprovalCompletionTransitions() {
+        throw new Error('DynamoDB secret table details')
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      workItemTypeId: 'bug',
+      expectedRevision: 1,
+    }),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemConfigurationDependencyUnavailable',
+    message: 'Pending Work Item approval transitions could not be inspected.',
+  })
+})
+
 test('validates parent relation type restrictions from the child source perspective', async () => {
   configureFakeProjectClients(true)
   const configuration = createTestWorkItemConfiguration('team', 'core-team')
