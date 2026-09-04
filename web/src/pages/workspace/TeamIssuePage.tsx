@@ -35,6 +35,7 @@ import {
   useState,
   useId,
   type CSSProperties,
+  type ChangeEvent,
   type DragEvent,
   type ReactNode,
 } from 'react'
@@ -4237,6 +4238,27 @@ function IssueDetailContent({
       })
     }
   }
+
+  /** Handles a Work Item Type selection from the Team Issue editor. */
+  const handleWorkItemTypeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextWorkItemTypeId = event.target.value
+    setSelectedWorkItemType({
+      revision: issue.revision,
+      value: nextWorkItemTypeId,
+    })
+    setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+    if (nextWorkItemTypeId === currentWorkItemTypeId) {
+      typeChangeRequestSequenceRef.current += 1
+      setTypeChangeState({
+        acknowledgedLostCustomFieldIds: [],
+        identity: typeChangePreviewIdentity,
+        isPreviewing: false,
+        targetWorkItemTypeId: nextWorkItemTypeId,
+      })
+      return
+    }
+    void requestWorkItemTypePreview(nextWorkItemTypeId)
+  }
   const editorFormId = useId()
   const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
 
@@ -4346,25 +4368,7 @@ function IssueDetailContent({
           disabled={isIssueReadOnly || isAiSummaryOperationPending || activeTypeChangeState.isPreviewing}
           form={editorFormId}
           name="workItemTypeId"
-          onChange={(event) => {
-            const nextWorkItemTypeId = event.target.value
-            setSelectedWorkItemType({
-              revision: issue.revision,
-              value: nextWorkItemTypeId,
-            })
-            setFieldErrors((current) => ({ ...current, typeChange: undefined }))
-            if (nextWorkItemTypeId === currentWorkItemTypeId) {
-              typeChangeRequestSequenceRef.current += 1
-              setTypeChangeState({
-                acknowledgedLostCustomFieldIds: [],
-                identity: typeChangePreviewIdentity,
-                isPreviewing: false,
-                targetWorkItemTypeId: nextWorkItemTypeId,
-              })
-              return
-            }
-            void requestWorkItemTypePreview(nextWorkItemTypeId)
-          }}
+          onChange={handleWorkItemTypeChange}
           value={selectedWorkItemTypeId}
         >
           {workItemTypes

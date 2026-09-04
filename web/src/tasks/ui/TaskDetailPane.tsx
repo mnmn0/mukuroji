@@ -13,7 +13,7 @@ import type {
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
 import { DEFAULT_WORK_ITEM_TYPE, DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
-import { Fragment, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, useId, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
@@ -513,7 +513,6 @@ export function TaskDetailPane({
     shouldConfirmAiPlanningAdoption()
   // The renderer only constructs inert React elements; the supplied callbacks
   // are invoked later by user events inside the feature-owned assistants.
-  // eslint-disable-next-line react-hooks/refs
   const aiAssistanceSlots = renderAiAssistance?.({
     accessToken,
     aiAssistanceEnabled,
@@ -610,6 +609,27 @@ export function TaskDetailPane({
         targetWorkItemTypeId,
       })
     }
+  }
+
+  /** Handles a Work Item Type selection from the detail editor. */
+  const handleWorkItemTypeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextWorkItemTypeId = event.target.value
+    setSelectedWorkItemType({
+      identity: workItemTypeSelectionIdentity,
+      value: nextWorkItemTypeId,
+    })
+    setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+    if (nextWorkItemTypeId === currentWorkItemTypeId) {
+      typeChangeRequestSequenceRef.current += 1
+      setTypeChangeState({
+        acknowledgedLostCustomFieldIds: [],
+        identity: typeChangePreviewIdentity,
+        isPreviewing: false,
+        targetWorkItemTypeId: nextWorkItemTypeId,
+      })
+      return
+    }
+    void requestWorkItemTypePreview(nextWorkItemTypeId)
   }
 
   /** Persists one Work Item update while exposing its pending state to AI review controls. */
@@ -775,25 +795,7 @@ export function TaskDetailPane({
           disabled={isReadOnly || isWorkItemMutationPending || activeTypeChangeState.isPreviewing}
           form={editorFormId}
           name="workItemTypeId"
-          onChange={(event) => {
-            const nextWorkItemTypeId = event.target.value
-            setSelectedWorkItemType({
-              identity: workItemTypeSelectionIdentity,
-              value: nextWorkItemTypeId,
-            })
-            setFieldErrors((current) => ({ ...current, typeChange: undefined }))
-            if (nextWorkItemTypeId === currentWorkItemTypeId) {
-              typeChangeRequestSequenceRef.current += 1
-              setTypeChangeState({
-                acknowledgedLostCustomFieldIds: [],
-                identity: typeChangePreviewIdentity,
-                isPreviewing: false,
-                targetWorkItemTypeId: nextWorkItemTypeId,
-              })
-              return
-            }
-            void requestWorkItemTypePreview(nextWorkItemTypeId)
-          }}
+          onChange={handleWorkItemTypeChange}
           value={selectedWorkItemTypeId}
         >
           {workItemTypes
