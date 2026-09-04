@@ -279,6 +279,10 @@ test('reports empty required values in a Work Item Type change preview', () => {
     'incident',
   )).toMatchObject({
     missingRequiredCustomFieldIds: ['labels', 'summary'],
+    missingRequiredCustomFieldDefinitions: [
+      expect.objectContaining({ id: 'labels', required: true, type: 'multi-select' }),
+      expect.objectContaining({ id: 'summary', required: true, type: 'text' }),
+    ],
     requiresResolution: true,
   })
 })

@@ -728,7 +728,7 @@ export function TaskDetailPane({
 
     setFieldErrors({})
     const customFieldValues = createVisibleCustomFieldValuePatch(
-      hasCustomFieldSection,
+      hasCustomFields,
       customFieldEditorDefinitions,
       issue?.customFieldValues ?? task.customFieldValues,
       parsedCustomFields.values,
@@ -1005,7 +1005,7 @@ export function TaskDetailPane({
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue?.customFieldValues ?? task.customFieldValues}
-                key={`${editorIdentity}:${selectedWorkItemTypeId}:${selectedProjectId}`}
+                key={`${editorIdentity}:${selectedWorkItemTypeId}`}
               />
             </div>
           </fieldset>
@@ -1372,7 +1372,7 @@ export function TaskDetailPane({
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue?.customFieldValues ?? task.customFieldValues}
-                key={`${editorIdentity}:${selectedWorkItemTypeId}:${selectedProjectId}:required`}
+                key={`${editorIdentity}:${selectedWorkItemTypeId}:required`}
               />
             </div>
           </fieldset>

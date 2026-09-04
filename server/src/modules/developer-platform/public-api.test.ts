@@ -5,6 +5,7 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type ApiScope,
   type CanonicalWorkItem,
+  type CustomFieldDefinition,
   type DueDateWorkItemSchedule,
   type ImportJob,
   type WorkItemSyncConflict,
@@ -132,6 +133,7 @@ function createDefaultWorkItemService(
         lostCustomFieldIds: [],
         targetInitialWorkflowStatusId: 'todo',
         missingRequiredCustomFieldIds: [],
+        missingRequiredCustomFieldDefinitions: [],
         requiresResolution: false,
       }
     },
@@ -398,6 +400,13 @@ describe('public API router', () => {
       invalidWorkflowStatusId: 'todo',
       targetInitialWorkflowStatusId: 'incident-open',
       missingRequiredCustomFieldIds: ['severity'],
+      missingRequiredCustomFieldDefinitions: [{
+        id: 'severity',
+        name: 'Severity',
+        required: true,
+        sortOrder: 0,
+        type: 'text',
+      } satisfies CustomFieldDefinition],
       requiresResolution: true,
     }
     const { platform, router } = createTestRouter({

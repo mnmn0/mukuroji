@@ -203,6 +203,39 @@ describe('Team Issue task-view presentation', () => {
     expect(html).toContain('data-testid="team-issue-detail-pane"')
   })
 
+  test('renders Team detail fields in the configured Work Item Type order', () => {
+    const issue = teamIssueFixtures[0]
+    if (!issue) throw new Error('Expected one Team Issue fixture.')
+    const configuration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+        detailSections: ['workflow', 'description', 'overview'],
+      }],
+    } satisfies WorkItemConfiguration
+    const html = renderToStaticMarkup(
+      <TeamIssueScreen
+        issues={[issue]}
+        locale="ja"
+        onSelectIssue={() => undefined}
+        onUpdateIssue={async () => undefined}
+        resolvedConfiguration={{ configuration }}
+        selectedIssueId={issue.id}
+        teamId="core-team"
+        teams={projectDirectoryFixtures}
+        userInitial="J"
+      />,
+    )
+
+    const workflowIndex = html.indexOf('name="workflowStatusId"')
+    const descriptionIndex = html.indexOf('name="description"')
+    const titleIndex = html.indexOf('name="title"')
+    expect(workflowIndex).toBeGreaterThanOrEqual(0)
+    expect(descriptionIndex).toBeGreaterThan(workflowIndex)
+    expect(titleIndex).toBeGreaterThan(descriptionIndex)
+  })
+
   test('keeps Team create destinations inside server-authorized Project scopes', () => {
     const team = projectDirectoryFixtures.find((candidate) => candidate.id === 'core-team')
     const writableProject = team?.projects.find((project) => project.id === 'refero')

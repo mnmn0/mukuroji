@@ -123,6 +123,23 @@ describe('Work Item display helpers', () => {
     )).toEqual({ risk: null })
   })
 
+  test('includes values from the fallback required-field editor', () => {
+    const definitions = [{
+      id: 'risk',
+      name: 'Risk',
+      required: true,
+      sortOrder: 0,
+      type: 'text' as const,
+    }]
+
+    expect(createVisibleCustomFieldValuePatch(
+      true,
+      definitions,
+      {},
+      { risk: 'high' },
+    )).toEqual({ risk: 'high' })
+  })
+
   test('uses the active locale when relation graph detail is not loaded', () => {
     const translate = (key: MessageKey) =>
       key === 'workItems.relations.graphNotLoaded' ? '関係を再読み込みしてください。' : key

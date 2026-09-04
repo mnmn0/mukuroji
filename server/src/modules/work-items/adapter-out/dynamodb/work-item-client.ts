@@ -64,7 +64,9 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemTypeKey,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -3058,8 +3060,7 @@ export class DynamoDbTeamIssuesClient {
       const pageItems = (response.Items ?? [])
         .map(toTeamIssueItem)
         .filter((item) => options.includeArchived || item.archivedAt === undefined)
-        .filter((item) => !options.workItemTypeId ||
-          (item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === options.workItemTypeId)
+        .filter((item) => matchesWorkItemTypeFilter(item, options.workItemTypeId))
       items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
@@ -3102,8 +3103,7 @@ export class DynamoDbTeamIssuesClient {
       const pageItems = (response.Items ?? [])
         .map(toTeamIssueItem)
         .filter((item) => options.includeArchived || item.archivedAt === undefined)
-        .filter((item) => !options.workItemTypeId ||
-          (item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === options.workItemTypeId)
+        .filter((item) => matchesWorkItemTypeFilter(item, options.workItemTypeId))
       items.push(...(remaining === undefined ? pageItems : pageItems.slice(0, remaining)))
       if (limit !== undefined && items.length >= limit) {
         break
@@ -3597,6 +3597,19 @@ export class DynamoDbTeamIssuesClient {
       this.bootstrapLocalTables,
     )
   }
+}
+
+/** Matches a Work Item against either a Team-local or Team-qualified type filter. */
+function matchesWorkItemTypeFilter(
+  item: TeamIssueItem,
+  filter: string | undefined,
+): boolean {
+  if (!filter) return true
+  const workItemTypeId = item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+  const qualifiedFilter = readSearchWorkItemTypeKey(filter)
+  return qualifiedFilter
+    ? createSearchWorkItemTypeKey(item.teamId, workItemTypeId) === filter
+    : workItemTypeId === filter
 }
 
 function isDefined<T>(value: T | undefined): value is T {

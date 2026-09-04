@@ -654,6 +654,10 @@ export function previewWorkItemTypeChange(
       isMissingCustomFieldValue(currentCustomFieldValues[fieldId]),
     )
     .sort()
+  const missingRequiredCustomFieldDefinitions = missingRequiredCustomFieldIds.flatMap((fieldId) => {
+    const definition = targetDefinitions.find((candidate) => candidate.id === fieldId)
+    return definition ? [{ ...definition, required: true }] : []
+  })
 
   return {
     expectedRevision,
@@ -664,6 +668,7 @@ export function previewWorkItemTypeChange(
     ...(targetStatus ? {} : { invalidWorkflowStatusId: currentWorkflowStatusId }),
     targetInitialWorkflowStatusId: targetWorkflow.initialStatusId,
     missingRequiredCustomFieldIds,
+    missingRequiredCustomFieldDefinitions,
     requiresResolution: lostCustomFieldIds.length > 0 ||
       targetStatus === undefined ||
       missingRequiredCustomFieldIds.length > 0,

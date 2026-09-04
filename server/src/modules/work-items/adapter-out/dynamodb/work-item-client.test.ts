@@ -27,6 +27,7 @@ import {
 } from 'bun:test'
 import {
   WORK_ITEM_SCHEMA_VERSION,
+  createSearchWorkItemTypeKey,
   type DueDateWorkItemSchedule,
   type TriageEntry,
 } from '@mukuroji/contracts'
@@ -1201,6 +1202,64 @@ test('DynamoDB Team and project Work Item clients read every page without a defa
   expect(projectResponse.issues).toHaveLength(2)
   expect(sentInputs).toHaveLength(4)
   expect(sentInputs.every((input) => !('Limit' in input))).toBe(true)
+})
+
+test('DynamoDB Project Work Item type filters remain qualified by Team', async () => {
+  const baseWorkItem = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'user#demo@example.com',
+    directoryProjectId: 'user#demo@example.com#project#refero',
+    assignedProjectId: 'refero',
+    sortOrder: 10,
+    title: 'Work Item',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    workItemTypeId: 'bug',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send() {
+      return {
+        Items: [
+          {
+            ...baseWorkItem,
+            directoryTeamId: 'user#demo@example.com#team#team-a',
+            issueId: 'team-a-bug',
+            teamId: 'team-a',
+          },
+          {
+            ...baseWorkItem,
+            directoryTeamId: 'user#demo@example.com#team#team-b',
+            issueId: 'team-b-bug',
+            teamId: 'team-b',
+          },
+        ],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.getProjectIssues('user#demo@example.com', 'refero', {
+    workItemTypeId: createSearchWorkItemTypeKey('team-a', 'bug'),
+  })
+
+  expect(response.issues.map((issue) => issue.id)).toEqual(['team-a-bug'])
 })
 
 test('DynamoDB Work Item list limits count visible rows instead of archived rows', async () => {

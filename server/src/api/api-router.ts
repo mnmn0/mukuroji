@@ -11713,7 +11713,7 @@ routeApp.get('/api/projects/:projectId/issues', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     await requireProjectPermission(principal, projectId, 'viewer')
     const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
-    const workItemTypeId = readOptionalWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
+    const workItemTypeId = readOptionalProjectWorkItemTypeIdQuery(c.req.query('workItemTypeId'))
 
     const response = await hydrateProjectIssuesResponse(
       await readProjectIssues(principal.directoryId, projectId, includeArchived, workItemTypeId),
@@ -29085,6 +29085,24 @@ function readOptionalWorkItemTypeIdQuery(value: string | undefined): string | un
     )
   }
   return value.trim()
+}
+
+/** Reads the Team-qualified Work Item Type filter accepted by Project aggregates. */
+function readOptionalProjectWorkItemTypeIdQuery(value: string | undefined): string | undefined {
+  if (value === undefined || value.trim() === '') return undefined
+  const normalized = value.trim()
+  const keyParts = readSearchWorkItemTypeKey(normalized)
+  if (
+    !keyParts ||
+    !/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(keyParts.workItemTypeId)
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidWorkItemQuery',
+      'Project workItemTypeId must be a Team-qualified Work Item Type key.',
+    )
+  }
+  return normalized
 }
 
 /** Reads the required stable Work Item Type identifier from a type-change preview request. */

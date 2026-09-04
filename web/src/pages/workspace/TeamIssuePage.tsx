@@ -21,16 +21,19 @@ import type {
 } from '@mukuroji/contracts'
 import {
   createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
 } from '@mukuroji/contracts'
 import {
   Fragment,
+  type FormEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  useId,
   type CSSProperties,
   type DragEvent,
   type ReactNode,
@@ -4152,17 +4155,17 @@ function IssueDetailContent({
     configuration,
     selectedWorkItemTypeId,
   )
-  const visibleDetailSections = selectedWorkItemTypeDefinition
-    ? new Set(selectedWorkItemTypeDefinition.detailSections)
-    : undefined
-  /** Returns whether a configured detail-pane section should be rendered. */
-  const isDetailSectionVisible = (section: WorkItemDetailSectionId) =>
-    visibleDetailSections === undefined || section === 'overview' || visibleDetailSections.has(section)
+  const detailSectionOrder = selectedWorkItemTypeDefinition?.detailSections ??
+    DEFAULT_WORK_ITEM_TYPE.detailSections
+  const hasOverviewSection = detailSectionOrder.includes('overview')
+  const hasDescriptionSection = detailSectionOrder.includes('description')
+  const hasCustomFieldSection = detailSectionOrder.includes('custom-fields')
+  const hasWorkflowSection = detailSectionOrder.includes('workflow')
   const selectedTypeCustomFieldDefinitions = resolveWorkItemTypeFormFields(
     configuration,
     selectedWorkItemTypeId,
   )
-  const customFieldEditorDefinitions = isDetailSectionVisible('custom-fields')
+  const customFieldEditorDefinitions = hasCustomFieldSection
     ? selectedTypeCustomFieldDefinitions
     : selectedTypeCustomFieldDefinitions.filter((definition) => definition.required)
   const selectedTypeWorkflow = resolveWorkItemTypeWorkflow(
@@ -4176,7 +4179,8 @@ function IssueDetailContent({
     ? currentWorkflowStatusId
     : selectedTypeWorkflow?.initialStatusId ?? workflowStatuses[0]?.id ?? currentWorkflowStatusId
   const typeChangePreview = activeTypeChangeState.preview
-  const isWorkItemTypeChangeRequested = selectedWorkItemTypeId !== currentWorkItemTypeId
+  const isWorkItemTypeChangeRequested = hasOverviewSection &&
+    selectedWorkItemTypeId !== currentWorkItemTypeId
   const typeChangeLostFields = typeChangePreview?.lostCustomFieldIds.map((fieldId) =>
     configuration?.customFields.find((definition) => definition.id === fieldId) ?? {
       id: fieldId,
@@ -4234,6 +4238,477 @@ function IssueDetailContent({
       })
     }
   }
+  const editorFormId = useId()
+  const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
+
+  /** Submits the visible Team Issue controls through the external editor form. */
+  const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (!onUpdateIssue || isAiSummaryOperationPending) {
+      return
+    }
+
+    if (isWorkItemTypeChangeRequested && !typeChangePreview) {
+      if (!activeTypeChangeState.isPreviewing) {
+        void requestWorkItemTypePreview(selectedWorkItemTypeId)
+      }
+      return
+    }
+
+    const formData = new FormData(event.currentTarget)
+    const assignedProjectId = hasOverviewSection
+      ? String(formData.get('assignedProjectId') ?? '').trim()
+      : selectedProjectId
+    const selectedAssigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
+    const formWorkflowStatusId = String(
+      formData.get('workflowStatusId') ?? currentWorkflowStatusId,
+    ).trim()
+    const workflowStatusId = isWorkItemTypeChangeRequested && typeChangePreview?.invalidWorkflowStatusId
+      ? String(
+          formData.get('typeChangeWorkflowStatusId') ?? selectedTypeWorkflowStatusId,
+        ).trim()
+      : formWorkflowStatusId
+    const parsedCustomFields = configuration
+      ? parseCustomFieldFormData(formData, customFieldEditorDefinitions, {
+          projectId: assignedProjectId || undefined,
+        })
+      : { errors: [], values: {} }
+
+    if (parsedCustomFields.errors.length > 0) {
+      setFieldErrors(createCustomFieldErrorMessages(
+        parsedCustomFields.errors,
+        customFieldEditorDefinitions,
+        locale,
+      ))
+      return
+    }
+
+    if (isWorkItemTypeChangeRequested && typeChangePreview) {
+      const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
+      const missingAcknowledgements = typeChangePreview.lostCustomFieldIds.filter((fieldId) =>
+        !acknowledgedIds.has(fieldId),
+      )
+      if (missingAcknowledgements.length > 0) {
+        setFieldErrors({
+          typeChange: t('tasks.detail.typeChange.acknowledge'),
+        })
+        return
+      }
+    }
+
+    setFieldErrors({})
+    const customFieldValues = createVisibleCustomFieldValuePatch(
+      hasCustomFields,
+      customFieldEditorDefinitions,
+      issue.customFieldValues,
+      parsedCustomFields.values,
+      assignedProjectId || undefined,
+    )
+    const nextIssueInput: UpdateTeamIssueInput = {
+      ...(hasOverviewSection
+        ? {
+            assignedProjectId: assignedProjectId || null,
+            priority: resolveIssuePriority(formData.get('priority')),
+            title: String(formData.get('title') ?? '').trim(),
+          }
+        : {}),
+      ...(hasWorkflowSection ? { workflowStatusId } : {}),
+      ...(hasDescriptionSection
+        ? { description: String(formData.get('description') ?? '').trim() }
+        : {}),
+      ...(customFieldValues === undefined ? {} : { customFieldValues }),
+    }
+
+    if (isWorkItemTypeChangeRequested && typeChangePreview) {
+      nextIssueInput.workItemTypeId = selectedWorkItemTypeId
+      nextIssueInput.typeChangeResolution = {
+        discardCustomFieldIds: [...activeTypeChangeState.acknowledgedLostCustomFieldIds].sort(),
+        ...(typeChangePreview.invalidWorkflowStatusId === undefined
+          ? {}
+          : { workflowStatusId }),
+      }
+    }
+
+    if (hasOverviewSection && assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
+      nextIssueInput.assigneeUserId = selectedAssigneeUserId
+    }
+
+    void onUpdateIssue(issue.id, nextIssueInput).catch(() => undefined)
+  }
+
+  /**
+   * Renders one configured Team Issue detail section in its persisted order.
+   *
+   * @param section - Detail section identifier selected by the Work Item Type.
+   * @returns The section markup, or null when the section has no visible content.
+   */
+  const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
+    switch (section) {
+      case 'overview':
+        return (
+          <fieldset
+            className="contents"
+            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+          >
+            <section className="grid min-w-0 gap-3" data-testid="team-issue-detail-overview">
+              {configuration ? (
+                <section className="workbench-panel-muted grid min-w-0 gap-3 p-3" data-testid="team-issue-detail-work-item-type">
+                  <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                    {t('tasks.create.workItemType')}
+                    <select
+                      className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                      disabled={activeTypeChangeState.isPreviewing}
+                      form={editorFormId}
+                      name="workItemTypeId"
+                      onChange={(event) => {
+                        const nextWorkItemTypeId = event.target.value
+                        setSelectedWorkItemType({
+                          revision: issue.revision,
+                          value: nextWorkItemTypeId,
+                        })
+                        setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+                        if (nextWorkItemTypeId === currentWorkItemTypeId) {
+                          typeChangeRequestSequenceRef.current += 1
+                          setTypeChangeState({
+                            acknowledgedLostCustomFieldIds: [],
+                            identity: typeChangePreviewIdentity,
+                            isPreviewing: false,
+                            targetWorkItemTypeId: nextWorkItemTypeId,
+                          })
+                          return
+                        }
+                        void requestWorkItemTypePreview(nextWorkItemTypeId)
+                      }}
+                      value={selectedWorkItemTypeId}
+                    >
+                      {workItemTypes
+                        .filter((type) => type.status === 'active' || type.id === currentWorkItemTypeId)
+                        .map((type) => (
+                          <option key={type.id} value={type.id}>
+                            {type.name}{type.status === 'archived' ? ' (' + t('tasks.create.archived') + ')' : ''}
+                          </option>
+                        ))}
+                    </select>
+                    {selectedWorkItemTypeDefinition?.description ? (
+                      <span className="text-xs font-medium text-[var(--workbench-muted)]">
+                        {selectedWorkItemTypeDefinition.description}
+                      </span>
+                    ) : null}
+                  </label>
+                  {isWorkItemTypeChangeRequested ? (
+                    <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="team-issue-detail-work-item-type-preview">
+                      <p className="font-semibold text-[var(--workbench-text)]">
+                        {t('tasks.detail.typeChange.title')}
+                      </p>
+                      {activeTypeChangeState.isPreviewing ? (
+                        <p className="text-[var(--workbench-muted)]">{t('tasks.detail.typeChange.previewing')}</p>
+                      ) : typeChangePreview ? (
+                        <>
+                          <p className="text-[var(--workbench-muted)]">
+                            {t('tasks.detail.typeChange.preview')}
+                          </p>
+                          {typeChangeLostFields.length > 0 ? (
+                            <div className="grid gap-2">
+                              <p className="font-semibold text-[var(--workbench-text)]">
+                                {t('tasks.detail.typeChange.lostFields')}
+                              </p>
+                              {typeChangeLostFields.map((field) => {
+                                const checked = activeTypeChangeState.acknowledgedLostCustomFieldIds.includes(field.id)
+                                return (
+                                  <label className="flex items-start gap-2 font-medium text-[var(--workbench-muted)]" key={field.id}>
+                                    <input
+                                      checked={checked}
+                                      className="mt-0.5"
+                                      form={editorFormId}
+                                      onChange={(event) => {
+                                        const nextIds = event.target.checked
+                                          ? [...activeTypeChangeState.acknowledgedLostCustomFieldIds, field.id]
+                                          : activeTypeChangeState.acknowledgedLostCustomFieldIds.filter((id) => id !== field.id)
+                                        setTypeChangeState((current) => ({
+                                          ...current,
+                                          acknowledgedLostCustomFieldIds: [...new Set(nextIds)].sort(),
+                                        }))
+                                        setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+                                      }}
+                                      type="checkbox"
+                                    />
+                                    <span>{field.name}</span>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          ) : null}
+                          {typeChangePreview.invalidWorkflowStatusId ? (
+                            <label className="grid gap-1.5 font-semibold text-[var(--workbench-text)]">
+                              {t('tasks.detail.typeChange.invalidStatus')}
+                              <select
+                                className="workbench-input h-9 px-3"
+                                form={editorFormId}
+                                name="typeChangeWorkflowStatusId"
+                                onChange={(event) => setTypeChangeState((current) => ({
+                                  ...current,
+                                  replacementWorkflowStatusId: event.target.value,
+                                }))}
+                                value={selectedTypeWorkflowStatusId}
+                              >
+                                {resolveCreateWorkflowStatuses(
+                                  configuration,
+                                  selectedWorkItemTypeId,
+                                ).map((status) => (
+                                  <option key={status.id} value={status.id}>{status.name}</option>
+                                ))}
+                              </select>
+                            </label>
+                          ) : null}
+                          {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
+                            <p className="text-amber-700">
+                              {t('tasks.detail.typeChange.missingRequired')}
+                            </p>
+                          ) : null}
+                        </>
+                      ) : activeTypeChangeState.errorMessage ? (
+                        <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
+                      ) : null}
+                      {fieldErrors.typeChange ? (
+                        <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+              <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('issues.column.title')}
+                <input
+                  className="workbench-input w-full min-w-0 px-3 py-2 text-lg font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                  defaultValue={resolveIssueTitle(issue, t)}
+                  form={editorFormId}
+                  key={editorIdentity + ':title'}
+                  name="title"
+                  required
+                />
+              </label>
+              <div className="workbench-panel-muted grid grid-cols-1 gap-3 p-3">
+                <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('issues.create.project')}
+                  <select
+                    className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                    form={editorFormId}
+                    name="assignedProjectId"
+                    onChange={(event) => setSelectedProject({
+                      revision: issue.revision,
+                      value: event.target.value,
+                    })}
+                    value={selectedProjectId}
+                  >
+                    {canAssignUnassigned ? (
+                      <option value="">{t('issues.project.unassigned')}</option>
+                    ) : null}
+                    {projects.map((project) => (
+                      <option key={project.id} value={project.id}>{project.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('issues.create.assignee')}
+                  <select
+                    className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                    defaultValue={issue.assigneeUserId}
+                    form={editorFormId}
+                    key={editorIdentity + ':assignee'}
+                    name="assigneeUserId"
+                  >
+                    {!hasSelectedAssigneeOption ? (
+                      <option value={issue.assigneeUserId}>{resolveWorkItemAssignee(issue)}</option>
+                    ) : null}
+                    {assigneeOptions.map((member) => (
+                      <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('tasks.column.priority')}
+                  <select
+                    className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                    defaultValue={issue.priority}
+                    form={editorFormId}
+                    key={editorIdentity + ':priority'}
+                    name="priority"
+                  >
+                    {issuePriorities.map((priority) => (
+                      <option key={priority} value={priority}>{t(`tasks.priority.${priority}`)}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            </section>
+          </fieldset>
+        )
+      case 'description':
+        return (
+          <fieldset
+            className="contents"
+            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+          >
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('issues.create.description')}
+              <textarea
+                className="workbench-input min-h-28 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                defaultValue={issue.description}
+                form={editorFormId}
+                key={editorIdentity + ':description'}
+                name="description"
+              />
+            </label>
+          </fieldset>
+        )
+      case 'custom-fields':
+        return hasCustomFields ? (
+          <fieldset
+            className="contents"
+            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+          >
+            <div className="workbench-panel-muted p-4">
+              <WorkItemFieldsEditor
+                definitions={customFieldEditorDefinitions}
+                errors={fieldErrors}
+                formId={editorFormId}
+                locale={locale}
+                personOptions={personOptions}
+                projectId={selectedProjectId || undefined}
+                values={issue.customFieldValues}
+                key={editorIdentity + ':' + selectedWorkItemTypeId}
+              />
+            </div>
+          </fieldset>
+        ) : null
+      case 'workflow':
+        return (
+          <fieldset
+            className="contents"
+            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+          >
+            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('tasks.column.status')}
+              <select
+                className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
+                form={editorFormId}
+                key={editorIdentity + ':workflow:' + selectedWorkItemTypeId}
+                name="workflowStatusId"
+              >
+                {workflowStatuses.map((status) => (
+                  <option key={status.id} value={status.id}>{status.name}</option>
+                ))}
+              </select>
+            </label>
+          </fieldset>
+        )
+      case 'schedule':
+        return (
+          <div className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+            <span>{t('tasks.schedule.title')}</span>
+            <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
+              {describeTeamIssueSchedule(issue.schedule, t)}
+            </output>
+          </div>
+        )
+      case 'relations':
+        return (
+          <>
+            {planningSnapshot ? (
+              <div className="border-t border-[var(--workbench-border)] bg-white px-6 py-6">
+                <WorkItemDependencyPanel
+                  canManageEndpoint={canManageDependencyEndpoint}
+                  currentEndpoint={{ teamId: issue.teamId, workItemId: issue.id }}
+                  onCreate={isAiSummaryOperationPending ? undefined : onCreateScheduleDependency}
+                  onDelete={isAiSummaryOperationPending ? undefined : onDeleteScheduleDependency}
+                  onUpdate={isAiSummaryOperationPending ? undefined : onUpdateScheduleDependency}
+                  snapshot={planningSnapshot}
+                  t={t}
+                />
+              </div>
+            ) : null}
+            <div className="border-t border-[var(--workbench-border)] px-6 py-6">
+              <WorkItemRelationsEditor
+                candidates={relationCandidates.map((candidate) => ({
+                  id: candidate.id,
+                  title: resolveIssueTitle(candidate, t),
+                }))}
+                currentWorkItemId={issue.id}
+                isLoading={isRelationsLoading}
+                locale={locale}
+                onAddRelation={onAddRelation && !isAiSummaryOperationPending
+                  ? (input) => onAddRelation(issue.id, input)
+                  : undefined}
+                onDeleteRelation={onDeleteRelation && !isAiSummaryOperationPending
+                  ? (relation) => onDeleteRelation(issue.id, relation)
+                  : undefined}
+                readOnly={isAiSummaryOperationPending || (!onAddRelation && !onDeleteRelation)}
+                relations={relations}
+              />
+            </div>
+          </>
+        )
+      case 'files':
+        return (
+          <>
+            {artifacts ? (
+              <IssueArtifactsPanel
+                completionTransitions={workflowStatuses.filter(
+                  (status) => status.id !== currentWorkflowStatusId,
+                )}
+                controller={artifacts}
+                currentMemberKey={currentWorkspaceMemberKey}
+                locale={locale}
+                members={workspaceMembers}
+              />
+            ) : null}
+            {externalLinksAccessToken ? (
+              <WorkItemExternalLinksPanelContainer
+                accessToken={externalLinksAccessToken}
+                canManage={canManageExternalLinks && !isAiSummaryOperationPending}
+                locale={locale}
+                teamId={issue.teamId}
+                workItemId={issue.id}
+              />
+            ) : null}
+            <RelatedDocuments
+              accessToken={accessToken}
+              onPromoteToContext={documentContextPromotion.onPromoteToContext}
+              t={t}
+              targetId={'team/' + issue.teamId + '/issue/' + issue.id}
+              targetKind="work-item"
+            />
+          </>
+        )
+      case 'activity':
+        return collaboration ? (
+          <IssueCollaborationPanel
+            aiAssistance={collaborationAiAssistance}
+            route={collaborationRoute}
+            artifacts={artifacts}
+            contextDraft={documentContextPromotion.documentContextDraft}
+            key={issue.teamId + ':' + issue.id}
+            controller={collaboration}
+            currentMemberKey={currentWorkspaceMemberKey}
+            focusedCommentId={focusedCommentId}
+            focusedRootCommentId={focusedRootCommentId}
+            locale={locale}
+            members={workspaceMembers}
+            onAiSummaryOperationPendingChange={(pending) => {
+              onAiSummaryOperationPendingChange?.(
+                createTaskViewItemKey(issue.teamId, issue.id),
+                pending,
+              )
+            }}
+            onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
+          />
+        ) : null
+      default:
+        return null
+    }
+  }
 
   return (
     <aside
@@ -4241,97 +4716,12 @@ function IssueDetailContent({
       data-testid="team-issue-detail-pane"
     >
       <form
-        className="grid min-w-0 gap-4 px-6 py-7"
-        key={`${issue.id}:${issue.revision}`}
-        onSubmit={(event) => {
-          event.preventDefault()
-
-          if (!onUpdateIssue || isAiSummaryOperationPending) {
-            return
-          }
-
-          if (isWorkItemTypeChangeRequested && !typeChangePreview) {
-            if (!activeTypeChangeState.isPreviewing) {
-              void requestWorkItemTypePreview(selectedWorkItemTypeId)
-            }
-            return
-          }
-
-          const formData = new FormData(event.currentTarget)
-          const assignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
-          const selectedAssigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
-          const formWorkflowStatusId = String(
-            formData.get('workflowStatusId') ?? currentWorkflowStatusId,
-          ).trim()
-          const workflowStatusId = isWorkItemTypeChangeRequested && typeChangePreview?.invalidWorkflowStatusId
-            ? String(
-                formData.get('typeChangeWorkflowStatusId') ?? selectedTypeWorkflowStatusId,
-              ).trim()
-            : formWorkflowStatusId
-          const parsedCustomFields = configuration
-            ? parseCustomFieldFormData(formData, customFieldEditorDefinitions, {
-                projectId: assignedProjectId || undefined,
-              })
-            : { errors: [], values: {} }
-
-          if (parsedCustomFields.errors.length > 0) {
-            setFieldErrors(createCustomFieldErrorMessages(
-              parsedCustomFields.errors,
-              customFieldEditorDefinitions,
-              locale,
-            ))
-            return
-          }
-
-          if (isWorkItemTypeChangeRequested && typeChangePreview) {
-            const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
-            const missingAcknowledgements = typeChangePreview.lostCustomFieldIds.filter((fieldId) =>
-              !acknowledgedIds.has(fieldId),
-            )
-            if (missingAcknowledgements.length > 0) {
-              setFieldErrors({
-                typeChange: t('tasks.detail.typeChange.acknowledge'),
-              })
-              return
-            }
-          }
-
-          setFieldErrors({})
-          const customFieldValues = createVisibleCustomFieldValuePatch(
-            isDetailSectionVisible('custom-fields'),
-            customFieldEditorDefinitions,
-            issue.customFieldValues,
-            parsedCustomFields.values,
-            assignedProjectId || undefined,
-          )
-          const nextIssueInput: UpdateTeamIssueInput = {
-            assignedProjectId: assignedProjectId || null,
-            priority: resolveIssuePriority(formData.get('priority')),
-            title: String(formData.get('title') ?? '').trim(),
-            workflowStatusId,
-            ...(isDetailSectionVisible('description')
-              ? { description: String(formData.get('description') ?? '').trim() }
-              : {}),
-            ...(customFieldValues === undefined ? {} : { customFieldValues }),
-          }
-
-          if (isWorkItemTypeChangeRequested && typeChangePreview) {
-            nextIssueInput.workItemTypeId = selectedWorkItemTypeId
-            nextIssueInput.typeChangeResolution = {
-              discardCustomFieldIds: [...activeTypeChangeState.acknowledgedLostCustomFieldIds].sort(),
-              ...(typeChangePreview.invalidWorkflowStatusId === undefined
-                ? {}
-                : { workflowStatusId }),
-            }
-          }
-
-          if (assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
-            nextIssueInput.assigneeUserId = selectedAssigneeUserId
-          }
-
-          void onUpdateIssue?.(issue.id, nextIssueInput).catch(() => undefined)
-        }}
-      >
+        aria-hidden="true"
+        className="hidden"
+        id={editorFormId}
+        onSubmit={submitEditorForm}
+      />
+      <div className="grid min-w-0 gap-4 px-6 py-7">
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="workbench-eyebrow">{t('tasks.detail.title')}</p>
@@ -4341,217 +4731,20 @@ function IssueDetailContent({
           </div>
           <IssuePriorityBadge priority={issue.priority} t={t} />
         </div>
-        <fieldset className="contents" disabled={isIssueReadOnly || isAiSummaryOperationPending}>
-          {configuration ? (
-            <section className="workbench-panel-muted grid min-w-0 gap-3 p-3" data-testid="team-issue-detail-work-item-type">
-              <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-                {t('tasks.create.workItemType')}
-                <select
-                  className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                  disabled={activeTypeChangeState.isPreviewing}
-                  name="workItemTypeId"
-                  onChange={(event) => {
-                    const nextWorkItemTypeId = event.target.value
-                    setSelectedWorkItemType({
-                      revision: issue.revision,
-                      value: nextWorkItemTypeId,
-                    })
-                    setFieldErrors((current) => ({ ...current, typeChange: undefined }))
-                    if (nextWorkItemTypeId === currentWorkItemTypeId) {
-                      typeChangeRequestSequenceRef.current += 1
-                      setTypeChangeState({
-                        acknowledgedLostCustomFieldIds: [],
-                        identity: typeChangePreviewIdentity,
-                        isPreviewing: false,
-                        targetWorkItemTypeId: nextWorkItemTypeId,
-                      })
-                      return
-                    }
-                    void requestWorkItemTypePreview(nextWorkItemTypeId)
-                  }}
-                  value={selectedWorkItemTypeId}
-                >
-                  {workItemTypes
-                    .filter((type) => type.status === 'active' || type.id === currentWorkItemTypeId)
-                    .map((type) => (
-                      <option key={type.id} value={type.id}>
-                        {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
-                      </option>
-                    ))}
-                </select>
-                {selectedWorkItemTypeDefinition?.description ? (
-                  <span className="text-xs font-medium text-[var(--workbench-muted)]">
-                    {selectedWorkItemTypeDefinition.description}
-                  </span>
-                ) : null}
-              </label>
-              {isWorkItemTypeChangeRequested ? (
-                <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="team-issue-detail-work-item-type-preview">
-                  <p className="font-semibold text-[var(--workbench-text)]">
-                    {t('tasks.detail.typeChange.title')}
-                  </p>
-                  {activeTypeChangeState.isPreviewing ? (
-                    <p className="text-[var(--workbench-muted)]">{t('tasks.detail.typeChange.previewing')}</p>
-                  ) : typeChangePreview ? (
-                    <>
-                      <p className="text-[var(--workbench-muted)]">
-                        {t('tasks.detail.typeChange.preview')}
-                      </p>
-                      {typeChangeLostFields.length > 0 ? (
-                        <div className="grid gap-2">
-                          <p className="font-semibold text-[var(--workbench-text)]">
-                            {t('tasks.detail.typeChange.lostFields')}
-                          </p>
-                          {typeChangeLostFields.map((field) => {
-                            const checked = activeTypeChangeState.acknowledgedLostCustomFieldIds.includes(field.id)
-                            return (
-                              <label className="flex items-start gap-2 font-medium text-[var(--workbench-muted)]" key={field.id}>
-                                <input
-                                  checked={checked}
-                                  className="mt-0.5"
-                                  onChange={(event) => {
-                                    const nextIds = event.target.checked
-                                      ? [...activeTypeChangeState.acknowledgedLostCustomFieldIds, field.id]
-                                      : activeTypeChangeState.acknowledgedLostCustomFieldIds.filter((id) => id !== field.id)
-                                    setTypeChangeState((current) => ({
-                                      ...current,
-                                      acknowledgedLostCustomFieldIds: [...new Set(nextIds)].sort(),
-                                    }))
-                                    setFieldErrors((current) => ({ ...current, typeChange: undefined }))
-                                  }}
-                                  type="checkbox"
-                                />
-                                <span>{field.name}</span>
-                              </label>
-                            )
-                          })}
-                        </div>
-                      ) : null}
-                      {typeChangePreview.invalidWorkflowStatusId ? (
-                        <label className="grid gap-1.5 font-semibold text-[var(--workbench-text)]">
-                          {t('tasks.detail.typeChange.invalidStatus')}
-                          <select
-                            className="workbench-input h-9 px-3"
-                            name="typeChangeWorkflowStatusId"
-                            onChange={(event) => setTypeChangeState((current) => ({
-                              ...current,
-                              replacementWorkflowStatusId: event.target.value,
-                            }))}
-                            value={selectedTypeWorkflowStatusId}
-                          >
-                            {resolveCreateWorkflowStatuses(
-                              configuration,
-                              selectedWorkItemTypeId,
-                            ).map((status) => (
-                              <option key={status.id} value={status.id}>{status.name}</option>
-                            ))}
-                          </select>
-                        </label>
-                      ) : null}
-                      {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
-                        <p className="text-amber-700">
-                          {t('tasks.detail.typeChange.missingRequired')}
-                        </p>
-                      ) : null}
-                    </>
-                  ) : activeTypeChangeState.errorMessage ? (
-                    <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
-                  ) : null}
-                  {fieldErrors.typeChange ? (
-                    <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
-                  ) : null}
-                </div>
-              ) : null}
-            </section>
-          ) : null}
-          <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-            {t('issues.column.title')}
-            <input className="workbench-input w-full min-w-0 px-3 py-2 text-lg font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
-          </label>
-          {isDetailSectionVisible('description') ? (
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('issues.create.description')}
-              <textarea className="workbench-input min-h-28 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.description} name="description" />
-            </label>
-          ) : null}
-          <div className="workbench-panel-muted grid grid-cols-1 gap-3 p-3">
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('issues.create.project')}
-              <select
-                className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                name="assignedProjectId"
-                onChange={(event) => setSelectedProject({
-                  revision: issue.revision,
-                  value: event.target.value,
-                })}
-                value={selectedProjectId}
-              >
-                {canAssignUnassigned ? (
-                  <option value="">{t('issues.project.unassigned')}</option>
-                ) : null}
-                {projects.map((project) => (
-                  <option key={project.id} value={project.id}>{project.name}</option>
-                ))}
-              </select>
-            </label>
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('issues.create.assignee')}
-              <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.assigneeUserId} name="assigneeUserId">
-                {!hasSelectedAssigneeOption ? (
-                  <option value={issue.assigneeUserId}>{resolveWorkItemAssignee(issue)}</option>
-                ) : null}
-                {assigneeOptions.map((member) => (
-                  <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
-                ))}
-              </select>
-            </label>
-            {isDetailSectionVisible('workflow') ? (
-              <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-                {t('tasks.column.status')}
-                <select
-                  className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                  defaultValue={isWorkItemTypeChangeRequested ? selectedTypeWorkflowStatusId : currentWorkflowStatusId}
-                  key={`${issue.revision}:${selectedWorkItemTypeId}`}
-                  name="workflowStatusId"
-                >
-                  {workflowStatuses.map((status) => (
-                    <option key={status.id} value={status.id}>{status.name}</option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.column.priority')}
-              <select className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.priority} name="priority">
-                {issuePriorities.map((priority) => (
-                  <option key={priority} value={priority}>{t(`tasks.priority.${priority}`)}</option>
-                ))}
-              </select>
-            </label>
-            {isDetailSectionVisible('schedule') ? (
-              <div className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-                <span>{t('tasks.schedule.title')}</span>
-                <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
-                  {describeTeamIssueSchedule(issue.schedule, t)}
-                </output>
-              </div>
-            ) : null}
-          </div>
-          {hasCustomFields ? (
-            <div className="workbench-panel-muted p-4">
-              <WorkItemFieldsEditor
-                definitions={customFieldEditorDefinitions}
-                errors={fieldErrors}
-                locale={locale}
-                personOptions={personOptions}
-                projectId={selectedProjectId || undefined}
-                values={issue.customFieldValues}
-                key={`${issue.revision}:${selectedWorkItemTypeId}:${selectedProjectId}`}
-              />
-            </div>
-          ) : null}
-        </fieldset>
-        <button className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300" disabled={isIssueReadOnly || isAiSummaryOperationPending} type="submit">
+        <div className="grid min-w-0 gap-4">
+          {detailSectionOrder.map((section) => (
+            <Fragment key={section}>{renderDetailSection(section)}</Fragment>
+          ))}
+          {!hasCustomFieldSection && hasCustomFields
+            ? <Fragment>{renderDetailSection('custom-fields')}</Fragment>
+            : null}
+        </div>
+        <button
+          className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
+          disabled={isIssueReadOnly || isAiSummaryOperationPending}
+          form={editorFormId}
+          type="submit"
+        >
           {t('issues.detail.save')}
         </button>
         {isIssueReadOnly ? (
@@ -4560,92 +4753,7 @@ function IssueDetailContent({
           </p>
         ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
-      </form>
-      {isDetailSectionVisible('relations') && planningSnapshot ? (
-        <div className="border-t border-[var(--workbench-border)] bg-white px-6 py-6">
-          <WorkItemDependencyPanel
-            canManageEndpoint={canManageDependencyEndpoint}
-            currentEndpoint={{ teamId: issue.teamId, workItemId: issue.id }}
-            onCreate={isAiSummaryOperationPending ? undefined : onCreateScheduleDependency}
-            onDelete={isAiSummaryOperationPending ? undefined : onDeleteScheduleDependency}
-            onUpdate={isAiSummaryOperationPending ? undefined : onUpdateScheduleDependency}
-            snapshot={planningSnapshot}
-            t={t}
-          />
-        </div>
-      ) : null}
-      {isDetailSectionVisible('files') && artifacts ? (
-        <IssueArtifactsPanel
-          completionTransitions={workflowStatuses.filter(
-            (status) => status.id !== currentWorkflowStatusId,
-          )}
-          controller={artifacts}
-          currentMemberKey={currentWorkspaceMemberKey}
-          locale={locale}
-          members={workspaceMembers}
-        />
-      ) : null}
-      {isDetailSectionVisible('files') && externalLinksAccessToken ? (
-        <WorkItemExternalLinksPanelContainer
-          accessToken={externalLinksAccessToken}
-          canManage={canManageExternalLinks && !isAiSummaryOperationPending}
-          locale={locale}
-          teamId={issue.teamId}
-          workItemId={issue.id}
-        />
-      ) : null}
-      {isDetailSectionVisible('relations') ? (
-        <div className="border-t border-[var(--workbench-border)] px-6 py-6">
-          <WorkItemRelationsEditor
-            candidates={relationCandidates.map((candidate) => ({
-              id: candidate.id,
-              title: resolveIssueTitle(candidate, t),
-            }))}
-            currentWorkItemId={issue.id}
-            isLoading={isRelationsLoading}
-            locale={locale}
-            onAddRelation={onAddRelation && !isAiSummaryOperationPending
-              ? (input) => onAddRelation(issue.id, input)
-              : undefined}
-            onDeleteRelation={onDeleteRelation && !isAiSummaryOperationPending
-              ? (relation) => onDeleteRelation(issue.id, relation)
-              : undefined}
-            readOnly={isAiSummaryOperationPending || (!onAddRelation && !onDeleteRelation)}
-            relations={relations}
-          />
-        </div>
-      ) : null}
-      {isDetailSectionVisible('files') ? (
-        <RelatedDocuments
-          accessToken={accessToken}
-          onPromoteToContext={documentContextPromotion.onPromoteToContext}
-          t={t}
-          targetId={`team/${issue.teamId}/issue/${issue.id}`}
-          targetKind="work-item"
-        />
-      ) : null}
-      {isDetailSectionVisible('activity') && collaboration ? (
-        <IssueCollaborationPanel
-          aiAssistance={collaborationAiAssistance}
-          route={collaborationRoute}
-          artifacts={artifacts}
-          contextDraft={documentContextPromotion.documentContextDraft}
-          key={`${issue.teamId}:${issue.id}`}
-          controller={collaboration}
-          currentMemberKey={currentWorkspaceMemberKey}
-          focusedCommentId={focusedCommentId}
-          focusedRootCommentId={focusedRootCommentId}
-          locale={locale}
-          members={workspaceMembers}
-          onAiSummaryOperationPendingChange={(pending) => {
-            onAiSummaryOperationPendingChange?.(
-              createTaskViewItemKey(issue.teamId, issue.id),
-              pending,
-            )
-          }}
-          onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
-        />
-      ) : null}
+      </div>
     </aside>
   )
 }

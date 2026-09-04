@@ -78,6 +78,32 @@ describe('Work Item editors', () => {
     expect(normalized.workItemTypes?.[0]?.requiredCustomFieldIds).toEqual(['risk'])
   })
 
+  test('normalizes Work Item Types in their existing administration order', () => {
+    const configuration = createConfiguration([])
+    const normalized = normalizeWorkItemConfigurationForSave({
+      ...configuration,
+      workItemTypes: [
+        {
+          ...DEFAULT_WORK_ITEM_TYPE,
+          id: 'incident',
+          name: 'Incident',
+          sortOrder: 20,
+        },
+        {
+          ...DEFAULT_WORK_ITEM_TYPE,
+          id: 'request',
+          name: 'Request',
+          sortOrder: 10,
+        },
+      ],
+    })
+
+    expect(normalized.workItemTypes?.map(({ id, sortOrder }) => ({ id, sortOrder }))).toEqual([
+      { id: 'request', sortOrder: 0 },
+      { id: 'incident', sortOrder: 1 },
+    ])
+  })
+
   test('keeps globally required fields required in every type checklist', () => {
     const configuration = createConfiguration([{
       ...createCustomFieldDefinition('global-required', 'Global required', 0),

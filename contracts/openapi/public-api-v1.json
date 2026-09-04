@@ -963,6 +963,142 @@
         ],
         "type": "object"
       },
+      "CustomFieldDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "currencyCode": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "durationUnit": {
+            "enum": [
+              "minutes",
+              "hours",
+              "days"
+            ],
+            "type": "string"
+          },
+          "formulaExpression": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldOption"
+            },
+            "type": "array"
+          },
+          "projectIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "enum": [
+              "text",
+              "number",
+              "boolean",
+              "date",
+              "select",
+              "multi-select",
+              "person",
+              "currency",
+              "duration",
+              "formula"
+            ],
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/CustomFieldValidation"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "sortOrder",
+          "required"
+        ],
+        "type": "object"
+      },
+      "CustomFieldOption": {
+        "additionalProperties": false,
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "sortOrder"
+        ],
+        "type": "object"
+      },
+      "CustomFieldValidation": {
+        "additionalProperties": false,
+        "properties": {
+          "max": {
+            "type": "number"
+          },
+          "maxLength": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min": {
+            "type": "number"
+          },
+          "minLength": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "DeletePublicWorkItemRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2328,6 +2464,12 @@
             },
             "type": "array"
           },
+          "missingRequiredCustomFieldDefinitions": {
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldDefinition"
+            },
+            "type": "array"
+          },
           "missingRequiredCustomFieldIds": {
             "items": {
               "type": "string"
@@ -2352,6 +2494,7 @@
           "lostCustomFieldIds",
           "targetInitialWorkflowStatusId",
           "missingRequiredCustomFieldIds",
+          "missingRequiredCustomFieldDefinitions",
           "requiresResolution"
         ],
         "type": "object"

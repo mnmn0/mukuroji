@@ -610,7 +610,7 @@ export function createCustomFieldValuePatch(
 /**
  * Creates a detail-form custom-field patch only when the field section was rendered.
  *
- * @param isVisible - Whether the current Work Item Type exposes custom fields in the detail form.
+ * @param isVisible - Whether the detail form renders a custom-field editor.
  * @param definitions - Custom field definitions applicable to the selected type.
  * @param existingValues - Values already stored on the Work Item.
  * @param parsedValues - Values parsed from rendered form controls.

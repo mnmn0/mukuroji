@@ -107,7 +107,11 @@ export function normalizeWorkItemConfigurationForSave(
       })),
       sortOrder: index,
     })),
-    workItemTypes: configuration.workItemTypes?.map((type, index) => {
+    workItemTypes: configuration.workItemTypes && [...configuration.workItemTypes]
+      .sort((first, second) =>
+        first.sortOrder - second.sortOrder || first.name.localeCompare(second.name),
+      )
+      .map((type, index) => {
       const customFieldIds = [...new Set(type.customFieldIds)]
         .filter((fieldId) => availableCustomFieldIds.has(fieldId))
       return {
@@ -122,6 +126,6 @@ export function normalizeWorkItemConfigurationForSave(
         allowedChildTypeIds: [...new Set(type.allowedChildTypeIds)],
         sortOrder: index,
       }
-    }),
+      }),
   }
 }
