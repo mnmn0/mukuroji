@@ -234,6 +234,30 @@ describe('Team Issue task-view presentation', () => {
     expect(workflowIndex).toBeGreaterThanOrEqual(0)
     expect(descriptionIndex).toBeGreaterThan(workflowIndex)
     expect(titleIndex).toBeGreaterThan(descriptionIndex)
+
+    const overviewlessConfiguration = {
+      ...configuration,
+      workItemTypes: [{
+        ...configuration.workItemTypes[0]!,
+        detailSections: ['workflow', 'description'],
+      }],
+    } satisfies WorkItemConfiguration
+    const overviewlessHtml = renderToStaticMarkup(
+      <TeamIssueScreen
+        issues={[issue]}
+        locale="ja"
+        onSelectIssue={() => undefined}
+        onUpdateIssue={async () => undefined}
+        resolvedConfiguration={{ configuration: overviewlessConfiguration }}
+        selectedIssueId={issue.id}
+        teamId="core-team"
+        teams={projectDirectoryFixtures}
+        userInitial="J"
+      />,
+    )
+
+    expect(overviewlessHtml).toContain('data-testid="team-issue-detail-work-item-type"')
+    expect(overviewlessHtml).toContain('name="workItemTypeId"')
   })
 
   test('keeps Team create destinations inside server-authorized Project scopes', () => {

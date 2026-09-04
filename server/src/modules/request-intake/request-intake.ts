@@ -703,6 +703,7 @@ export function createRequestWorkItemInput(
     ...submission.routingTarget,
     ...removeUndefined(overrides.target ?? {}),
   })
+  const workItemTypeId = overrides.workItemTypeId || target.workItemTypeId
   const title = overrides.title?.trim() || answerToText(
     submission.answers[submission.workItemMapping.titleFieldId],
   ).trim()
@@ -734,7 +735,7 @@ export function createRequestWorkItemInput(
     input: {
       title: title.slice(0, 500),
       ...(description ? { description } : {}),
-      ...(overrides.workItemTypeId ? { workItemTypeId: overrides.workItemTypeId } : {}),
+      ...(workItemTypeId ? { workItemTypeId } : {}),
       ...(target.projectId ? { assignedProjectId: target.projectId } : {}),
       assigneeUserId: target.assigneeUserId,
       ...(target.workflowStatusId ? { workflowStatusId: target.workflowStatusId } : {}),
@@ -851,6 +852,9 @@ function validateRoutingTarget(value: unknown): RequestFormRoutingTarget {
   const dueDateOffsetDays = requireInteger(record.dueDateOffsetDays, 'Due date offset', 0, 3650)
   return {
     teamId: requireIdentifier(record.teamId, 'Routing Team ID'),
+    ...(record.workItemTypeId === undefined
+      ? {}
+      : { workItemTypeId: requireIdentifier(record.workItemTypeId, 'Routing Work Item Type ID') }),
     ...(record.projectId === undefined ? {} : { projectId: requireIdentifier(record.projectId, 'Routing Project ID') }),
     ...(record.workflowStatusId === undefined
       ? {}

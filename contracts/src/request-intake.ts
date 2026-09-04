@@ -193,6 +193,8 @@ export type RequestFormDefinition = {
 export type RequestFormRoutingTarget = {
   /** Work Item を所有する Team ID です。 */
   teamId: string
+  /** Work Item の作成に利用する Work Item Type ID です。省略時は built-in type です。 */
+  workItemTypeId?: string
   /** Work Item の遂行先 Project ID です。 */
   projectId?: string
   /** Team workflow 内の status ID です。 */

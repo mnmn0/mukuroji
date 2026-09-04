@@ -23755,7 +23755,9 @@ async function validateRequestRoutingTarget(
   }
   await requireActiveWorkspaceAssignee(workspaceId, target.assigneeUserId)
   const resolved = await workItemDependencies.workItemConfigurations.getTeamConfiguration(workspaceId, target.teamId)
-  resolveWorkflowStatus(resolved.configuration, target.workflowStatusId, workflowTypeId)
+  const workItemTypeId = workflowTypeId ?? target.workItemTypeId
+  resolveWorkItemType(resolved.configuration, workItemTypeId)
+  resolveWorkflowStatus(resolved.configuration, target.workflowStatusId, workItemTypeId)
   return resolved.configuration
 }
 

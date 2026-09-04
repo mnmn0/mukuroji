@@ -954,8 +954,19 @@ test('audits Work Item Type policy changes even when policy counts stay the same
   const previousType = previousConfiguration.workItemTypes?.[0]
   if (!previousType) throw new Error('Expected an initial Work Item Type.')
   const nextConfiguration = createConfiguration({
-    customFields: previousConfiguration.customFields,
+    customFields: previousConfiguration.customFields.map((customField) => customField.id === 'summary'
+      ? {
+          ...customField,
+          validation: { minLength: 2 },
+        }
+      : customField),
     revision: previousConfiguration.revision,
+    workflow: {
+      ...previousConfiguration.workflow,
+      statuses: previousConfiguration.workflow.statuses.map((status, index) => index === 0
+        ? { ...status, name: 'Updated initial status' }
+        : status),
+    },
     workItemTypes: [{
       ...previousType,
       customFieldIds: ['severity'],
@@ -1039,6 +1050,36 @@ test('audits Work Item Type policy changes even when policy counts stay the same
                 customFieldIds: ['severity'],
                 detailSections: ['description'],
                 requiredCustomFieldIds: ['severity'],
+              }),
+            ]),
+          }),
+          expect.objectContaining({
+            field: 'workflowPolicies',
+            before: expect.arrayContaining([
+              expect.objectContaining({
+                id: DEFAULT_WORK_ITEM_CONFIGURATION.workflow.id,
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+            after: expect.arrayContaining([
+              expect.objectContaining({
+                id: DEFAULT_WORK_ITEM_CONFIGURATION.workflow.id,
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+          }),
+          expect.objectContaining({
+            field: 'customFieldPolicies',
+            before: expect.arrayContaining([
+              expect.objectContaining({
+                id: 'summary',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+            after: expect.arrayContaining([
+              expect.objectContaining({
+                id: 'summary',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
               }),
             ]),
           }),

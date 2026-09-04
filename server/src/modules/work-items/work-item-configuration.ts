@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -1789,9 +1790,21 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),
+    workflowPolicies: getWorkItemConfigurationWorkflows(configuration)
+      .map((workflow) => ({
+        id: workflow.id,
+        policyHash: createWorkItemConfigurationPolicyHash(workflow),
+      }))
+      .sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0),
     customFieldIds: configuration.customFields
       .map((field) => field.id)
       .sort(),
+    customFieldPolicies: configuration.customFields
+      .map((field) => ({
+        id: field.id,
+        policyHash: createWorkItemConfigurationPolicyHash(field),
+      }))
+      .sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0),
     workItemTypes: (configuration.workItemTypes ?? [])
       .map((type) => ({
         id: type.id,
@@ -1807,6 +1820,26 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
       }))
       .sort((first, second) => first.id.localeCompare(second.id)),
   }
+}
+
+/** Creates a stable SHA-256 fingerprint for a mutable configuration policy. */
+function createWorkItemConfigurationPolicyHash(value: unknown): string {
+  return `sha256:${createHash('sha256').update(stableSerializeConfigurationValue(value)).digest('hex')}`
+}
+
+/** Serializes configuration values with sorted object keys for deterministic hashing. */
+function stableSerializeConfigurationValue(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'undefined'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerializeConfigurationValue(entry)).join(',')}]`
+  }
+  return `{${Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([first], [second]) => first < second ? -1 : first > second ? 1 : 0)
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableSerializeConfigurationValue(entry)}`)
+    .join(',')}}`
 }
 
 function createConfigurationGuards(

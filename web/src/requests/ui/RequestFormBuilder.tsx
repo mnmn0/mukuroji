@@ -2,9 +2,11 @@ import type {
   RequestFormAccessMode,
   RequestLocale,
   RequestLocalizedText,
+  WorkItemConfiguration,
   WorkflowStatusDefinition,
   WorkItemPriority,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
@@ -25,6 +27,10 @@ import type {
   RequestConditionOperator,
   RequestVisibilityCondition,
 } from '../model/requestFormLogic'
+import {
+  resolveWorkItemTypeWorkflow,
+  resolveWorkItemTypes,
+} from '../../work-items/model/workItemDisplay'
 
 /**
  * RequestFormBuilder の入力です。
@@ -46,6 +52,8 @@ export type RequestFormBuilderProps = {
    * 選択 Team で利用できる workflow status 一覧です。
    */
   workflowStatuses?: WorkflowStatusDefinition[]
+  /** Work Item configurations indexed by Team ID for type-specific routing workflows. */
+  workItemConfigurationsByTeam?: Readonly<Record<string, WorkItemConfiguration>>
   /**
    * Draft 保存中かどうかです。
    */
@@ -125,6 +133,7 @@ export function RequestFormBuilder({
   onSave,
   teams,
   workflowStatuses = [],
+  workItemConfigurationsByTeam,
 }: RequestFormBuilderProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [editingLocale, setEditingLocale] = useState<RequestLocale>(model.defaultLocale)
@@ -132,6 +141,13 @@ export function RequestFormBuilder({
   const mutationPending = isSaving || isPublishing
   const editingDisabled = !canEdit || mutationPending
   const activeTeam = teams.find((team) => team.id === model.routing.teamId)
+  const defaultWorkItemConfiguration = workItemConfigurationsByTeam?.[model.routing.teamId]
+  const defaultWorkItemTypes = resolveWorkItemTypes(defaultWorkItemConfiguration)
+  const defaultWorkflowStatuses = resolveRoutingWorkflowStatuses(
+    model.routing,
+    defaultWorkItemConfiguration,
+    workflowStatuses,
+  )
   const allFields = model.sections.flatMap((section) => section.fields)
   const publicPath = model.linkToken
     ? `/request/${encodeURIComponent(model.linkToken)}`
@@ -610,6 +626,7 @@ export function RequestFormBuilder({
               ...model.routing,
               projectId: '',
               teamId: event.target.value,
+              workItemTypeId: DEFAULT_WORK_ITEM_TYPE_ID,
               workflowStatusId: '',
             } })}
           >
@@ -629,6 +646,25 @@ export function RequestFormBuilder({
             ))}
           </select>
         </BuilderLabel>
+        <BuilderLabel label={t('requests.builder.workItemType')}>
+          <select
+            className="workbench-input min-h-10 px-3"
+            value={model.routing.workItemTypeId}
+            onChange={(event) => update({ routing: {
+              ...model.routing,
+              workItemTypeId: event.target.value,
+              workflowStatusId: '',
+            } })}
+          >
+            {defaultWorkItemTypes
+              .filter((type) => type.status === 'active' || type.id === model.routing.workItemTypeId)
+              .map((type) => (
+                <option key={type.id} value={type.id}>
+                  {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
+                </option>
+              ))}
+          </select>
+        </BuilderLabel>
         <BuilderLabel label={t('requests.builder.workflow')}>
           <select
             className="workbench-input min-h-10 px-3"
@@ -636,7 +672,7 @@ export function RequestFormBuilder({
             onChange={(event) => update({ routing: { ...model.routing, workflowStatusId: event.target.value } })}
           >
             <option value="">—</option>
-            {workflowStatuses.map((status) => (
+            {defaultWorkflowStatuses.map((status) => (
               <option key={status.id} value={status.id}>{status.name}</option>
             ))}
           </select>
@@ -712,6 +748,7 @@ export function RequestFormBuilder({
         t={t}
         teamLocked={model.scope.type === 'team'}
         teams={teams}
+        workItemConfigurationsByTeam={workItemConfigurationsByTeam}
         onChange={(rules) => update({ routing: { ...model.routing, rules } })}
       />
 
@@ -747,6 +784,7 @@ function RoutingRulesEditor({
   t,
   teamLocked,
   teams,
+  workItemConfigurationsByTeam,
 }: {
   defaultTarget: RequestRoutingTargetDraft
   disabled: boolean
@@ -757,6 +795,7 @@ function RoutingRulesEditor({
   t: ReturnType<typeof createTranslator>
   teamLocked: boolean
   teams: ProjectDirectoryTeam[]
+  workItemConfigurationsByTeam?: Readonly<Record<string, WorkItemConfiguration>>
 }) {
   const addRule = () => {
     const firstField = fields[0]
@@ -825,6 +864,7 @@ function RoutingRulesEditor({
             t={t}
             teamLocked={teamLocked}
             teams={teams}
+            workItemConfiguration={workItemConfigurationsByTeam?.[rule.target.teamId]}
             onChange={(target) => onChange(rules.map((candidate) => candidate.id === rule.id ? { ...candidate, target } : candidate))}
           />
         </article>
@@ -839,21 +879,44 @@ function RoutingTargetEditor({
   t,
   teamLocked,
   teams,
+  workItemConfiguration,
 }: {
   onChange: (target: RequestRoutingTargetDraft) => void
   target: RequestRoutingTargetDraft
   t: ReturnType<typeof createTranslator>
   teamLocked: boolean
   teams: ProjectDirectoryTeam[]
+  workItemConfiguration?: WorkItemConfiguration
 }) {
   const team = teams.find((candidate) => candidate.id === target.teamId)
+  const workItemTypes = resolveWorkItemTypes(workItemConfiguration)
+  const workflowStatuses = resolveRoutingWorkflowStatuses(target, workItemConfiguration)
 
   return (
     <div className="grid grid-cols-3 gap-3 max-[900px]:grid-cols-2 max-[620px]:grid-cols-1">
       <BuilderLabel label={t('requests.builder.team')}>
-        <select className="workbench-input min-h-10 px-3" data-testid="request-routing-rule-team" disabled={teamLocked} required value={target.teamId} onChange={(event) => onChange({ ...target, projectId: '', teamId: event.target.value, workflowStatusId: '' })}>
+        <select className="workbench-input min-h-10 px-3" data-testid="request-routing-rule-team" disabled={teamLocked} required value={target.teamId} onChange={(event) => onChange({ ...target, projectId: '', teamId: event.target.value, workItemTypeId: DEFAULT_WORK_ITEM_TYPE_ID, workflowStatusId: '' })}>
           <option value="">—</option>
           {teams.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+        </select>
+      </BuilderLabel>
+      <BuilderLabel label={t('requests.builder.workItemType')}>
+        <select
+          className="workbench-input min-h-10 px-3"
+          value={target.workItemTypeId}
+          onChange={(event) => onChange({
+            ...target,
+            workItemTypeId: event.target.value,
+            workflowStatusId: '',
+          })}
+        >
+          {workItemTypes
+            .filter((type) => type.status === 'active' || type.id === target.workItemTypeId)
+            .map((type) => (
+              <option key={type.id} value={type.id}>
+                {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
+              </option>
+            ))}
         </select>
       </BuilderLabel>
       <BuilderLabel label={t('requests.builder.project')}>
@@ -862,8 +925,15 @@ function RoutingTargetEditor({
           {team?.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
         </select>
       </BuilderLabel>
-      <BuilderLabel label={t('requests.builder.workflowId')}>
-        <input className="workbench-input min-h-10 px-3" value={target.workflowStatusId} onChange={(event) => onChange({ ...target, workflowStatusId: event.target.value })} />
+      <BuilderLabel label={t('requests.builder.workflow')}>
+        {workflowStatuses.length > 0 ? (
+          <select className="workbench-input min-h-10 px-3" value={target.workflowStatusId} onChange={(event) => onChange({ ...target, workflowStatusId: event.target.value })}>
+            <option value="">—</option>
+            {workflowStatuses.map((status) => <option key={status.id} value={status.id}>{status.name}</option>)}
+          </select>
+        ) : (
+          <input className="workbench-input min-h-10 px-3" value={target.workflowStatusId} onChange={(event) => onChange({ ...target, workflowStatusId: event.target.value })} />
+        )}
       </BuilderLabel>
       <BuilderLabel label={t('requests.builder.assignee')}>
         <input className="workbench-input min-h-10 px-3" required value={target.assigneeUserId} onChange={(event) => onChange({ ...target, assigneeUserId: event.target.value })} />
@@ -1474,8 +1544,18 @@ function copyRoutingTarget(target: RequestRoutingTargetDraft): RequestRoutingTar
     priority: target.priority,
     projectId: target.projectId,
     teamId: target.teamId,
+    workItemTypeId: target.workItemTypeId,
     workflowStatusId: target.workflowStatusId,
   }
+}
+
+/** Resolves the workflow status options for one Request routing target. */
+function resolveRoutingWorkflowStatuses(
+  target: Pick<RequestRoutingTargetDraft, 'workItemTypeId'>,
+  configuration: WorkItemConfiguration | undefined,
+  fallback: readonly WorkflowStatusDefinition[] = [],
+): readonly WorkflowStatusDefinition[] {
+  return resolveWorkItemTypeWorkflow(configuration, target.workItemTypeId)?.statuses ?? fallback
 }
 
 function moveItem<T>(items: T[], index: number, direction: -1 | 1) {

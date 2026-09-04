@@ -925,7 +925,8 @@ describe('independent task views', () => {
     expect(orderedHtml.indexOf('スケジュール種別')).toBeLessThan(orderedHtml.indexOf('data-testid="task-detail-overview"'))
     expect(orderedHtml.indexOf('data-testid="task-detail-overview"')).toBeLessThan(orderedHtml.indexOf('>説明<textarea'))
     expect(overviewlessHtml).not.toContain('data-testid="task-detail-overview"')
-    expect(overviewlessHtml).not.toContain('data-testid="task-detail-work-item-type"')
+    expect(overviewlessHtml).toContain('data-testid="task-detail-work-item-type"')
+    expect(overviewlessHtml).toContain('name="workItemTypeId"')
   })
 
   test('limits inline custom fields to the selected Work Item Type', () => {

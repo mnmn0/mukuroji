@@ -445,8 +445,7 @@ export function TaskDetailPane({
     ? currentWorkflowStatusId
     : selectedTypeWorkflow?.initialStatusId ?? workflowStatuses[0]?.id ?? currentWorkflowStatusId
   const typeChangePreview = activeTypeChangeState.preview
-  const isWorkItemTypeChangeRequested = hasOverviewSection &&
-    selectedWorkItemTypeId !== currentWorkItemTypeId
+  const isWorkItemTypeChangeRequested = selectedWorkItemTypeId !== currentWorkItemTypeId
   const typeChangeFieldDefinitions = resolvedConfiguration?.customFields ?? []
   const typeChangeLostFields = typeChangePreview?.lostCustomFieldIds.map((fieldId) =>
     typeChangeFieldDefinitions.find((definition) => definition.id === fieldId) ?? {
@@ -766,12 +765,136 @@ export function TaskDetailPane({
     void submitIssueUpdate(nextIssueInput)
   }
 
-  /**
-   * Renders one configured Work Item detail section in its persisted order.
-   *
-   * @param section - Detail section identifier selected by the Work Item Type.
-   * @returns The section markup, or null when the section has no visible content.
-   */
+  /** Renders the Work Item Type selector and any pending type-change resolution UI. */
+  const renderWorkItemTypeControl = (): ReactNode => resolvedConfiguration ? (
+    <section className="workbench-panel-muted grid min-w-0 gap-3 p-3" data-testid="task-detail-work-item-type">
+      <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+        {t('tasks.create.workItemType')}
+        <select
+          className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+          disabled={isReadOnly || isWorkItemMutationPending || activeTypeChangeState.isPreviewing}
+          form={editorFormId}
+          name="workItemTypeId"
+          onChange={(event) => {
+            const nextWorkItemTypeId = event.target.value
+            setSelectedWorkItemType({
+              identity: workItemTypeSelectionIdentity,
+              value: nextWorkItemTypeId,
+            })
+            setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+            if (nextWorkItemTypeId === currentWorkItemTypeId) {
+              typeChangeRequestSequenceRef.current += 1
+              setTypeChangeState({
+                acknowledgedLostCustomFieldIds: [],
+                identity: typeChangePreviewIdentity,
+                isPreviewing: false,
+                targetWorkItemTypeId: nextWorkItemTypeId,
+              })
+              return
+            }
+            void requestWorkItemTypePreview(nextWorkItemTypeId)
+          }}
+          value={selectedWorkItemTypeId}
+        >
+          {workItemTypes
+            .filter((type) => type.status === 'active' || type.id === currentWorkItemTypeId)
+            .map((type) => (
+              <option key={type.id} value={type.id}>
+                {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
+              </option>
+            ))}
+        </select>
+        {selectedWorkItemTypeDefinition?.description ? (
+          <span className="text-xs font-medium text-[var(--workbench-muted)]">
+            {selectedWorkItemTypeDefinition.description}
+          </span>
+        ) : null}
+      </label>
+      {isWorkItemTypeChangeRequested ? (
+        <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="task-detail-work-item-type-preview">
+          <p className="font-semibold text-[var(--workbench-text)]">
+            {t('tasks.detail.typeChange.title')}
+          </p>
+          {activeTypeChangeState.isPreviewing ? (
+            <p className="text-[var(--workbench-muted)]">{t('tasks.detail.typeChange.previewing')}</p>
+          ) : typeChangePreview ? (
+            <>
+              <p className="text-[var(--workbench-muted)]">
+                {t('tasks.detail.typeChange.preview')}
+              </p>
+              {typeChangeLostFields.length > 0 ? (
+                <div className="grid gap-2">
+                  <p className="font-semibold text-[var(--workbench-text)]">
+                    {t('tasks.detail.typeChange.lostFields')}
+                  </p>
+                  {typeChangeLostFields.map((field) => {
+                    const checked = activeTypeChangeState.acknowledgedLostCustomFieldIds.includes(field.id)
+                    return (
+                      <label className="flex items-start gap-2 font-medium text-[var(--workbench-muted)]" key={field.id}>
+                        <input
+                          checked={checked}
+                          className="mt-0.5"
+                          disabled={isReadOnly || isWorkItemMutationPending}
+                          form={editorFormId}
+                          onChange={(event) => {
+                            const nextIds = event.target.checked
+                              ? [...activeTypeChangeState.acknowledgedLostCustomFieldIds, field.id]
+                              : activeTypeChangeState.acknowledgedLostCustomFieldIds.filter((id) => id !== field.id)
+                            setTypeChangeState((current) => ({
+                              ...current,
+                              acknowledgedLostCustomFieldIds: [...new Set(nextIds)].sort(),
+                            }))
+                            setFieldErrors((current) => ({ ...current, typeChange: undefined }))
+                          }}
+                          type="checkbox"
+                        />
+                        <span>{field.name}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+              ) : null}
+              {typeChangePreview.invalidWorkflowStatusId ? (
+                <label className="grid gap-1.5 font-semibold text-[var(--workbench-text)]">
+                  {t('tasks.detail.typeChange.invalidStatus')}
+                  <select
+                    className="workbench-input h-9 px-3"
+                    disabled={isReadOnly || isWorkItemMutationPending}
+                    form={editorFormId}
+                    name="typeChangeWorkflowStatusId"
+                    onChange={(event) => setTypeChangeState((current) => ({
+                      ...current,
+                      replacementWorkflowStatusId: event.target.value,
+                    }))}
+                    value={selectedTypeWorkflowStatusId}
+                  >
+                    {resolveCreateWorkflowStatuses(
+                      resolvedConfiguration,
+                      selectedWorkItemTypeId,
+                    ).map((status) => (
+                      <option key={status.id} value={status.id}>{status.name}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
+                <p className="text-amber-700">
+                  {t('tasks.detail.typeChange.missingRequired')}
+                </p>
+              ) : null}
+            </>
+          ) : activeTypeChangeState.errorMessage ? (
+            <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
+          ) : null}
+          {fieldErrors.typeChange ? (
+            <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  ) : null
+
+  /** Renders one configured Work Item detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
     switch (section) {
       case 'overview':
@@ -781,131 +904,7 @@ export function TaskDetailPane({
             disabled={isReadOnly || isWorkItemMutationPending}
           >
             <section className="grid min-w-0 gap-3" data-testid="task-detail-overview">
-              {resolvedConfiguration ? (
-                <section className="workbench-panel-muted grid min-w-0 gap-3 p-3" data-testid="task-detail-work-item-type">
-                  <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-                    {t('tasks.create.workItemType')}
-                    <select
-                      className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                      disabled={activeTypeChangeState.isPreviewing}
-                      form={editorFormId}
-                      name="workItemTypeId"
-                      onChange={(event) => {
-                        const nextWorkItemTypeId = event.target.value
-                        setSelectedWorkItemType({
-                          identity: workItemTypeSelectionIdentity,
-                          value: nextWorkItemTypeId,
-                        })
-                        setFieldErrors((current) => ({ ...current, typeChange: undefined }))
-                        if (nextWorkItemTypeId === currentWorkItemTypeId) {
-                          typeChangeRequestSequenceRef.current += 1
-                          setTypeChangeState({
-                            acknowledgedLostCustomFieldIds: [],
-                            identity: typeChangePreviewIdentity,
-                            isPreviewing: false,
-                            targetWorkItemTypeId: nextWorkItemTypeId,
-                          })
-                          return
-                        }
-                        void requestWorkItemTypePreview(nextWorkItemTypeId)
-                      }}
-                      value={selectedWorkItemTypeId}
-                    >
-                      {workItemTypes
-                        .filter((type) => type.status === 'active' || type.id === currentWorkItemTypeId)
-                        .map((type) => (
-                          <option key={type.id} value={type.id}>
-                            {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
-                          </option>
-                        ))}
-                    </select>
-                    {selectedWorkItemTypeDefinition?.description ? (
-                      <span className="text-xs font-medium text-[var(--workbench-muted)]">
-                        {selectedWorkItemTypeDefinition.description}
-                      </span>
-                    ) : null}
-                  </label>
-                  {isWorkItemTypeChangeRequested ? (
-                    <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="task-detail-work-item-type-preview">
-                      <p className="font-semibold text-[var(--workbench-text)]">
-                        {t('tasks.detail.typeChange.title')}
-                      </p>
-                      {activeTypeChangeState.isPreviewing ? (
-                        <p className="text-[var(--workbench-muted)]">{t('tasks.detail.typeChange.previewing')}</p>
-                      ) : typeChangePreview ? (
-                        <>
-                          <p className="text-[var(--workbench-muted)]">
-                            {t('tasks.detail.typeChange.preview')}
-                          </p>
-                          {typeChangeLostFields.length > 0 ? (
-                            <div className="grid gap-2">
-                              <p className="font-semibold text-[var(--workbench-text)]">
-                                {t('tasks.detail.typeChange.lostFields')}
-                              </p>
-                              {typeChangeLostFields.map((field) => {
-                                const checked = activeTypeChangeState.acknowledgedLostCustomFieldIds.includes(field.id)
-                                return (
-                                  <label className="flex items-start gap-2 font-medium text-[var(--workbench-muted)]" key={field.id}>
-                                    <input
-                                      checked={checked}
-                                      className="mt-0.5"
-                                      form={editorFormId}
-                                      onChange={(event) => {
-                                        const nextIds = event.target.checked
-                                          ? [...activeTypeChangeState.acknowledgedLostCustomFieldIds, field.id]
-                                          : activeTypeChangeState.acknowledgedLostCustomFieldIds.filter((id) => id !== field.id)
-                                        setTypeChangeState((current) => ({
-                                          ...current,
-                                          acknowledgedLostCustomFieldIds: [...new Set(nextIds)].sort(),
-                                        }))
-                                        setFieldErrors((current) => ({ ...current, typeChange: undefined }))
-                                      }}
-                                      type="checkbox"
-                                    />
-                                    <span>{field.name}</span>
-                                  </label>
-                                )
-                              })}
-                            </div>
-                          ) : null}
-                          {typeChangePreview.invalidWorkflowStatusId ? (
-                            <label className="grid gap-1.5 font-semibold text-[var(--workbench-text)]">
-                              {t('tasks.detail.typeChange.invalidStatus')}
-                              <select
-                                className="workbench-input h-9 px-3"
-                                form={editorFormId}
-                                name="typeChangeWorkflowStatusId"
-                                onChange={(event) => setTypeChangeState((current) => ({
-                                  ...current,
-                                  replacementWorkflowStatusId: event.target.value,
-                                }))}
-                                value={selectedTypeWorkflowStatusId}
-                              >
-                                {resolveCreateWorkflowStatuses(
-                                  resolvedConfiguration,
-                                  selectedWorkItemTypeId,
-                                ).map((status) => (
-                                  <option key={status.id} value={status.id}>{status.name}</option>
-                                ))}
-                              </select>
-                            </label>
-                          ) : null}
-                          {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
-                            <p className="text-amber-700">
-                              {t('tasks.detail.typeChange.missingRequired')}
-                            </p>
-                          ) : null}
-                        </>
-                      ) : activeTypeChangeState.errorMessage ? (
-                        <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
-                      ) : null}
-                      {fieldErrors.typeChange ? (
-                        <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </section>
-              ) : null}
+              {renderWorkItemTypeControl()}
               <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
                 {t('issues.column.title')}
                 <input
@@ -1355,6 +1354,7 @@ export function TaskDetailPane({
           </div>
         </div>
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
+        {!hasOverviewSection ? renderWorkItemTypeControl() : null}
         {detailSectionOrder.map((section) => (
           <Fragment key={section}>{renderDetailSection(section)}</Fragment>
         ))}

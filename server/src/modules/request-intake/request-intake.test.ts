@@ -816,6 +816,17 @@ test('uses the first matching routing rule and maps a submission into a canonica
     },
   })
 
+  const typeSelected = createRequestWorkItemInput(
+    createStoredSubmission({
+      routingTarget: {
+        ...routing.rules[0]!.target,
+        workItemTypeId: 'incident',
+      },
+    }) as RequestSubmission,
+    { action: 'convert', expectedRevision: 1 },
+  )
+  expect(typeSelected.input.workItemTypeId).toBe('incident')
+
   const overridden = createRequestWorkItemInput(
     createStoredSubmission() as RequestSubmission,
     {

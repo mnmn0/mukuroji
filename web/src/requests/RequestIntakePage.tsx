@@ -31,7 +31,6 @@ import {
 } from '../shared/routing/paths'
 import {
   useTeamWorkItemConfigurations,
-  useWorkItemConfiguration,
 } from '../work-items/queries/useWorkItemConfigurations'
 import {
   applyRequestSubmissionAction,
@@ -456,16 +455,26 @@ function RequestFormEditorContainer({
   const [errorMessage, setErrorMessage] = useState<string>()
   const canEdit = initialForm?.capabilities.canEdit ?? true
   const canPublish = initialForm?.capabilities.canPublish ?? false
-  const { data: resolvedConfiguration, error: configurationError } = useWorkItemConfiguration(
-    accessToken,
+  const routingTeamIds = useMemo(() => Array.from(new Set([
     model.routing.teamId,
+    ...model.routing.rules.map((rule) => rule.target.teamId),
+  ].filter(Boolean))), [model.routing.rules, model.routing.teamId])
+  const { data: workItemConfigurationsResult } = useTeamWorkItemConfigurations(
+    accessToken,
+    'request-form-editor',
+    routingTeamIds,
+    routingTeamIds.length > 0,
   )
+  const workItemConfigurationsByTeam = useMemo(() => Object.fromEntries(
+    Object.entries(workItemConfigurationsResult?.configurationsByTeam ?? {})
+      .map(([teamId, resolved]) => [teamId, resolved.configuration]),
+  ), [workItemConfigurationsResult?.configurationsByTeam])
 
   useEffect(() => {
-    if (configurationError) {
-      onAuthenticatedApiError(configurationError)
+    for (const error of workItemConfigurationsResult?.errors ?? []) {
+      onAuthenticatedApiError(error)
     }
-  }, [configurationError, onAuthenticatedApiError])
+  }, [onAuthenticatedApiError, workItemConfigurationsResult?.errors])
 
   const save = async () => {
     setIsSaving(true)
@@ -556,7 +565,7 @@ function RequestFormEditorContainer({
       locale={locale}
       model={model}
       teams={teams}
-      workflowStatuses={resolvedConfiguration?.configuration.workflow.statuses}
+      workItemConfigurationsByTeam={workItemConfigurationsByTeam}
       onChange={setModel}
       onPublish={publish}
       onSave={save}
