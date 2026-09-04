@@ -20,6 +20,8 @@ export type WorkItemTypeChangePreview = {
   missingRequiredCustomFieldIds: string[]
   /** Definitions needed to collect the currently missing required target fields. */
   missingRequiredCustomFieldDefinitions: CustomFieldDefinition[]
+  /** Whether a pending approval completion transition conflicts with the previewed target status. */
+  approvalCompletionTransitionConflict: boolean
   /** Whether an explicit resolution is required before mutation. */
   requiresResolution: boolean
 }

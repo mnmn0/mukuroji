@@ -32,6 +32,16 @@ function createInboundWebhookDocumentProbe() {
   ) => {
     if (!conditionExpression) return true
     const existing = readExisting(tableName, key)
+    if (conditionExpression.includes('attribute_not_exists(scopeKey) OR')) {
+      if (!existing) return true
+      const entryTypeField = expressionAttributeNames['#entryType'] ?? 'entryType'
+      const schemaVersionField = expressionAttributeNames['#schemaVersion'] ?? 'schemaVersion'
+      const revisionField = expressionAttributeNames['#revision'] ?? 'revision'
+      return existing[entryTypeField] === expressionAttributeValues[':entryType'] &&
+        existing[schemaVersionField] === expressionAttributeValues[':schemaVersion'] &&
+        typeof existing[revisionField] === 'number' &&
+        existing[revisionField] >= Number(expressionAttributeValues[':one'])
+    }
     if (conditionExpression.includes('attribute_not_exists')) return existing === undefined
     if (!existing) return false
 
@@ -134,6 +144,17 @@ function createInboundWebhookDocumentProbe() {
             const updated = structuredClone(existing ?? key)
             const names = update.ExpressionAttributeNames as Record<string, string>
             const values = update.ExpressionAttributeValues as Record<string, unknown>
+            if (String(update.UpdateExpression).includes('if_not_exists')) {
+              const entryTypeField = names['#entryType'] ?? 'entryType'
+              const revisionField = names['#revision'] ?? 'revision'
+              const schemaVersionField = names['#schemaVersion'] ?? 'schemaVersion'
+              updated[entryTypeField] = values[':entryType']
+              updated[schemaVersionField] = values[':schemaVersion']
+              updated[revisionField] =
+                (typeof existing?.[revisionField] === 'number'
+                  ? existing[revisionField]
+                  : Number(values[':zero'])) + Number(values[':one'])
+            }
             for (const match of String(update.UpdateExpression)
               .matchAll(/(#[A-Za-z0-9_]+)\s*=\s*(:[A-Za-z0-9_]+)/g)) {
               updated[names[match[1]!] ?? match[1]!.slice(1)] = values[match[2]!]

@@ -689,6 +689,7 @@ export function previewWorkItemTypeChange(
     targetInitialWorkflowStatusId: targetWorkflow.initialStatusId,
     missingRequiredCustomFieldIds,
     missingRequiredCustomFieldDefinitions,
+    approvalCompletionTransitionConflict: false,
     requiresResolution: lostCustomFieldIds.length > 0 ||
       targetStatus === undefined ||
       missingRequiredCustomFieldIds.length > 0,

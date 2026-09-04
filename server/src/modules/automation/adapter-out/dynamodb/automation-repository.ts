@@ -152,6 +152,9 @@ export const AUTOMATION_INBOUND_WEBHOOK_DELIVERY_RETENTION_SECONDS = 400 * 86_40
 type DynamoDbAutomationTransactionItem =
   NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
+/** Sort key for the Workspace-wide Automation definition revision sentinel. */
+const AUTOMATION_DEFINITION_REVISION_RECORD_KEY = 'AUTOMATION_DEFINITION_REVISION'
+
 /** DynamoDB single-table adapter implementing the focused Automation ports. */
 export class DynamoDbAutomationRepository implements AutomationRepository<
   DynamoDbAutomationTransactionItem,
@@ -177,6 +180,73 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     this.documentClient = documentClient
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTable = bootstrapLocalTable
+  }
+
+  /**
+   * Reads the monotonic revision for all mutable Automation definitions in a Workspace.
+   *
+   * @param workspaceId - Workspace whose Automation definitions are fenced.
+   * @returns Current definition revision, or zero before the sentinel is created.
+   */
+  async getAutomationDefinitionRevision(workspaceId: string): Promise<number> {
+    await this.ensureTable()
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        scopeKey: automationScopeKey(workspaceId),
+        recordKey: AUTOMATION_DEFINITION_REVISION_RECORD_KEY,
+      },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return 0
+    return readAutomationDefinitionRevision(response.Item)
+  }
+
+  /**
+   * Creates a commit-time condition check for the Automation definition revision.
+   *
+   * @param workspaceId - Workspace whose Automation definitions are fenced.
+   * @param expectedRevision - Revision observed before configuration validation.
+   * @returns Condition mutation for a cross-table completion transaction.
+   */
+  createAutomationDefinitionRevisionConditionCheck(
+    workspaceId: string,
+    expectedRevision: number,
+  ): DynamoDbAutomationTransactionItem {
+    const revision = requireInteger(
+      expectedRevision,
+      'Automation definition revision',
+      0,
+      Number.MAX_SAFE_INTEGER,
+    )
+    const conditionCheck = revision === 0
+      ? {
+          ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+        }
+      : {
+          ConditionExpression:
+            '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
+          ExpressionAttributeNames: {
+            '#entryType': 'entryType',
+            '#revision': 'revision',
+            '#schemaVersion': 'schemaVersion',
+          },
+          ExpressionAttributeValues: {
+            ':entryType': 'automation-definition-revision',
+            ':revision': revision,
+            ':schemaVersion': AUTOMATION_SCHEMA_VERSION,
+          },
+        }
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: {
+          scopeKey: automationScopeKey(workspaceId),
+          recordKey: AUTOMATION_DEFINITION_REVISION_RECORD_KEY,
+        },
+        ...conditionCheck,
+      },
+    }
   }
 
   /** Workspace の current rules を返します。 */
@@ -2744,6 +2814,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               },
             }]
           : []),
+        createAutomationDefinitionRevisionUpdate(this.tableName, scopeKey),
         ...additionalTransactItems,
       ],
     }))
@@ -2780,6 +2851,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
             },
           },
+          createAutomationDefinitionRevisionUpdate(this.tableName, scopeKey),
           ...additionalTransactItems,
         ],
       }))
@@ -2800,21 +2872,32 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   ) {
     await this.ensureTable()
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          scopeKey: automationScopeKey(workspaceId),
-          recordKey,
-          entryType,
-          ...value,
-          ...extra,
-        },
-        ConditionExpression: '#revision = :expectedRevision',
-        ExpressionAttributeNames: { '#revision': 'revision' },
-        ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+      const scopeKey = automationScopeKey(workspaceId)
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                scopeKey,
+                recordKey,
+                entryType,
+                ...value,
+                ...extra,
+              },
+              ConditionExpression: '#revision = :expectedRevision',
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+            },
+          },
+          createAutomationDefinitionRevisionUpdate(this.tableName, scopeKey),
+        ],
       }))
     } catch (error) {
-      if (isNamedError(error, 'ConditionalCheckFailedException')) throw revisionConflict()
+      if (
+        isNamedError(error, 'ConditionalCheckFailedException') ||
+        isNamedError(error, 'TransactionCanceledException')
+      ) throw revisionConflict()
       throw persistenceError(error)
     }
   }
@@ -2823,15 +2906,26 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   private async deleteCurrent(workspaceId: string, recordKey: string, expectedRevision: number) {
     await this.ensureTable()
     try {
-      await this.documentClient.send(new DeleteCommand({
-        TableName: this.tableName,
-        Key: { scopeKey: automationScopeKey(workspaceId), recordKey },
-        ConditionExpression: '#revision = :expectedRevision',
-        ExpressionAttributeNames: { '#revision': 'revision' },
-        ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+      const scopeKey = automationScopeKey(workspaceId)
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: { scopeKey, recordKey },
+              ConditionExpression: '#revision = :expectedRevision',
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+            },
+          },
+          createAutomationDefinitionRevisionUpdate(this.tableName, scopeKey),
+        ],
       }))
     } catch (error) {
-      if (isNamedError(error, 'ConditionalCheckFailedException')) throw revisionConflict()
+      if (
+        isNamedError(error, 'ConditionalCheckFailedException') ||
+        isNamedError(error, 'TransactionCanceledException')
+      ) throw revisionConflict()
       throw persistenceError(error)
     }
   }
@@ -2932,6 +3026,45 @@ function createBulkOperationStorageItem(operation: BulkOperation) {
 
 function automationScopeKey(workspaceId: string) {
   return `${encodeKey(requireText(workspaceId, 'Workspace ID'))}#automation`
+}
+
+/**
+ * Builds the atomic Automation definition revision increment.
+ *
+ * @param tableName - Automation table that stores the sentinel.
+ * @param scopeKey - Encoded Workspace Automation partition key.
+ * @returns Atomic sentinel update transaction item.
+ */
+function createAutomationDefinitionRevisionUpdate(
+  tableName: string,
+  scopeKey: string,
+): DynamoDbAutomationTransactionItem {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: {
+        scopeKey,
+        recordKey: AUTOMATION_DEFINITION_REVISION_RECORD_KEY,
+      },
+      UpdateExpression:
+        'SET #entryType = :entryType, #schemaVersion = :schemaVersion, ' +
+        '#revision = if_not_exists(#revision, :zero) + :one',
+      ConditionExpression:
+        'attribute_not_exists(scopeKey) OR (' +
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision >= :one)',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#revision': 'revision',
+        '#schemaVersion': 'schemaVersion',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'automation-definition-revision',
+        ':one': 1,
+        ':schemaVersion': AUTOMATION_SCHEMA_VERSION,
+        ':zero': 0,
+      },
+    },
+  }
 }
 
 function executionScopeKey(workspaceId: string, executionId: string) {
@@ -3274,6 +3407,26 @@ function stripStorage<T>(item: Record<string, unknown>) {
     ...value
   } = item
   return value as T
+}
+
+/**
+ * Validates and reads a stored Automation definition revision sentinel.
+ *
+ * @param item - Stored sentinel candidate.
+ * @returns Validated monotonic revision.
+ * @throws AutomationError when the sentinel shape is invalid.
+ */
+function readAutomationDefinitionRevision(item: Record<string, unknown>): number {
+  if (
+    item.entryType !== 'automation-definition-revision' ||
+    item.schemaVersion !== AUTOMATION_SCHEMA_VERSION ||
+    typeof item.revision !== 'number' ||
+    !Number.isSafeInteger(item.revision) ||
+    item.revision < 1
+  ) {
+    throw storedInvalid('Automation definition revision')
+  }
+  return item.revision
 }
 
 function readRecurringWork(item: Record<string, unknown>) {

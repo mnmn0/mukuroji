@@ -12,6 +12,24 @@ import type {
 
 /** Persistence capability required by Rule and Template use cases. */
 export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
+  /**
+   * Reads the monotonic revision for all mutable Automation definitions in a Workspace.
+   *
+   * @param workspaceId - Workspace whose Automation definitions are fenced.
+   * @returns Current definition revision, or zero before the sentinel is created.
+   */
+  getAutomationDefinitionRevision(workspaceId: string): Promise<number>
+  /**
+   * Creates a commit-time condition check for the Automation definition revision.
+   *
+   * @param workspaceId - Workspace whose Automation definitions are fenced.
+   * @param expectedRevision - Revision observed before configuration validation.
+   * @returns Adapter-owned condition mutation for the completion transaction.
+   */
+  createAutomationDefinitionRevisionConditionCheck(
+    workspaceId: string,
+    expectedRevision: number,
+  ): TCompletionMutation
   /** Lists current rules in a Workspace. */
   listRules(workspaceId: string): Promise<AutomationRule[]>
   /** Reads a current rule. */

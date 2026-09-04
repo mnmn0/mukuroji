@@ -328,6 +328,7 @@ export function isWorkItemTypeChangePreview(
     isStringArray(value.missingRequiredCustomFieldIds) &&
     Array.isArray(value.missingRequiredCustomFieldDefinitions) &&
     value.missingRequiredCustomFieldDefinitions.every(isCustomFieldDefinition) &&
+    typeof value.approvalCompletionTransitionConflict === 'boolean' &&
     typeof value.requiresResolution === 'boolean'
 }
 

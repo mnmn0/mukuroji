@@ -142,6 +142,7 @@ function createDefaultWorkItemService(
         targetInitialWorkflowStatusId: 'todo',
         missingRequiredCustomFieldIds: [],
         missingRequiredCustomFieldDefinitions: [],
+        approvalCompletionTransitionConflict: false,
         requiresResolution: false,
       }
     },
@@ -467,6 +468,7 @@ describe('public API router', () => {
       targetInitialWorkflowStatusId: 'incident-open',
       missingRequiredCustomFieldIds: ['severity'],
       missingRequiredCustomFieldDefinitions: [previewDefinition],
+      approvalCompletionTransitionConflict: false,
       requiresResolution: true,
     }
     const publicPreview = {

@@ -30,6 +30,7 @@ import {
   type AcceptCreateTriageAction,
   type AutomationRule,
   type AutomationTemplate,
+  type AutomationExecution,
   type CreateManualTriageEntryInput,
   type CreateAnalyticsReportInput,
   type AutomationAction,
@@ -358,6 +359,7 @@ import {
   type FileProofingScope,
   type FileApprovalCompletionTransition,
   type FileApprovalCompletionTransitionResolver,
+  type PendingWorkItemApprovalCompletionTransition,
   type ListReviewerApprovalsOptions,
   type ReviewerApprovalPage,
 } from '../modules/files/file-proofing'
@@ -9625,7 +9627,21 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/work-item-type-preview', async
       proposedAssignedProjectId ?? undefined,
       expectedRevision,
     )
-    return c.json(preview)
+    const approvalCompletionTransitionConflict = await hasWorkItemApprovalCompletionTransitionConflict(
+      principal.directoryId,
+      teamId,
+      issueId,
+      preview.targetWorkItemTypeId,
+      preview.invalidWorkflowStatusId === undefined
+        ? preview.currentWorkflowStatusId
+        : preview.targetInitialWorkflowStatusId,
+      resolvedConfiguration.configuration,
+    )
+    return c.json({
+      ...preview,
+      approvalCompletionTransitionConflict,
+      requiresResolution: preview.requiresResolution || approvalCompletionTransitionConflict,
+    })
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
@@ -14335,18 +14351,10 @@ async function executeAutomationWorkItemCreate(
   if (!teamId) {
     throw new AutomationError('invalid-input', 'AutomationTargetMissing', 'Create action requires a Team ID.')
   }
-  const body: CreateTeamIssueRequestBody = {
-    assignedProjectId: values.assignedProjectId,
-    assigneeUserId: values.assigneeUserId,
-    customFieldValues: values.customFieldValues,
-    description: values.description,
-    idempotencyResourceId: `${context.execution.id}_create_${context.actionIndex}`,
-    priority: values.priority,
-    schedule: values.schedule,
-    title: values.title,
-    workItemTypeId: readAutomationText(values.workItemTypeId),
-    workflowStatusId: values.workflowStatusId,
-  }
+  const body = createAutomationWorkItemCreateBody(
+    values,
+    `${context.execution.id}_create_${context.actionIndex}`,
+  )
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
     teamId,
@@ -14381,6 +14389,31 @@ async function executeAutomationWorkItemCreate(
     [],
     dependencies,
   )
+}
+
+/**
+ * Builds the create-boundary body from merged Automation values.
+ *
+ * @param values - Template and action values to project into the create body.
+ * @param idempotencyResourceId - Optional server-owned idempotency resource ID.
+ * @returns Create-boundary body containing only supported Work Item fields.
+ */
+function createAutomationWorkItemCreateBody(
+  values: Readonly<Record<string, AutomationValue>>,
+  idempotencyResourceId?: string,
+): CreateTeamIssueRequestBody {
+  return {
+    ...(idempotencyResourceId === undefined ? {} : { idempotencyResourceId }),
+    assignedProjectId: values.assignedProjectId,
+    assigneeUserId: values.assigneeUserId,
+    customFieldValues: values.customFieldValues,
+    description: values.description,
+    priority: values.priority,
+    schedule: values.schedule,
+    title: values.title,
+    workItemTypeId: readAutomationText(values.workItemTypeId),
+    workflowStatusId: values.workflowStatusId,
+  }
 }
 
 /**
@@ -14760,6 +14793,18 @@ function readAutomationMetadataText(event: AutomationEvent, key: string) {
 
 function readAutomationText(value: AutomationValue | undefined) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/**
+ * Reads a positive safe integer from Automation event metadata.
+ *
+ * @param value - Metadata value to validate.
+ * @returns Positive safe integer, or undefined for an invalid value.
+ */
+function readAutomationPositiveInteger(value: AutomationValue | undefined): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+    ? value
+    : undefined
 }
 
 function isAutomationPatchApplied(
@@ -39769,6 +39814,16 @@ async function prepareConfiguredUpdateWorkItem(
         options.relationDependencies,
       )
     : []
+  const approvalTransitionConditionChecks = typeChanged
+    ? await createWorkItemApprovalTypeChangeConfigurationTransactionItems(
+        directoryId,
+        teamId,
+        current.id,
+        targetWorkItemType.id,
+        nextWorkflowStatus.workflowStatusId,
+        resolved.configuration,
+      )
+    : []
   return {
     ...inputWithoutTypeChangeResolution,
     workItemTypeId: targetWorkItemType.id,
@@ -39781,8 +39836,157 @@ async function prepareConfiguredUpdateWorkItem(
       directoryId,
       teamId,
       resolved,
-    ).concat(relationTransactionItems),
+    ).concat(relationTransactionItems, approvalTransitionConditionChecks),
   }
+}
+
+/**
+ * Reads pending Work Item approval transitions needed by a type-change check.
+ *
+ * @param directoryId - Workspace whose Work Item is being changed.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item whose approvals are inspected.
+ * @returns Pending approval transitions and their commit-time row fences.
+ * @throws WorkItemConfigurationError when approval storage cannot be inspected.
+ */
+async function readPendingWorkItemApprovalCompletionTransitions(
+  directoryId: string,
+  teamId: string,
+  issueId: string,
+): Promise<PendingWorkItemApprovalCompletionTransition[]> {
+  try {
+    return await workItemDependencies.fileProofing.listPendingWorkItemApprovalCompletionTransitions({
+      workspaceId: directoryId,
+      teamId,
+      kind: 'work-item',
+      issueId,
+    })
+  } catch (error) {
+    const reason = error instanceof Error
+      ? error.message
+      : 'pending Work Item approvals could not be inspected'
+    throw new WorkItemConfigurationError(
+      503,
+      'WorkItemConfigurationDependencyUnavailable',
+      `Pending Work Item approval transitions could not be inspected: ${reason}`,
+    )
+  }
+}
+
+/**
+ * Validates one pending approval transition against the post-change Work Item state.
+ *
+ * @param configuration - Candidate Work Item configuration.
+ * @param reference - Pending approval transition read from durable storage.
+ * @param targetWorkItemTypeId - Work Item Type after the change.
+ * @param targetWorkflowStatusId - Workflow status after the change.
+ * @returns Nothing when the completion transition remains usable.
+ * @throws WorkItemConfigurationError when the transition is no longer allowed.
+ */
+function assertWorkItemApprovalCompletionTransitionCompatible(
+  configuration: WorkItemConfiguration,
+  reference: PendingWorkItemApprovalCompletionTransition,
+  targetWorkItemTypeId: string,
+  targetWorkflowStatusId: string,
+): void {
+  const completionStatus = resolveWorkflowStatus(
+    configuration,
+    reference.completionTransition,
+    targetWorkItemTypeId,
+  )
+  assertWorkflowTransitionAllowed(
+    configuration,
+    targetWorkflowStatusId,
+    completionStatus.workflowStatusId,
+    targetWorkItemTypeId,
+  )
+}
+
+/**
+ * Validates pending approval transitions and returns their commit-time row fences.
+ *
+ * @param directoryId - Workspace whose Work Item is being changed.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item whose approvals are inspected.
+ * @param targetWorkItemTypeId - Work Item Type after the change.
+ * @param targetWorkflowStatusId - Workflow status after the change.
+ * @param configuration - Candidate Work Item configuration.
+ * @returns Approval row condition checks for the Work Item transaction.
+ * @throws WorkItemConfigurationError when a pending approval would be broken.
+ */
+async function createWorkItemApprovalTypeChangeConfigurationTransactionItems(
+  directoryId: string,
+  teamId: string,
+  issueId: string,
+  targetWorkItemTypeId: string,
+  targetWorkflowStatusId: string,
+  configuration: WorkItemConfiguration,
+): Promise<WorkItemConfigurationTransactionItems> {
+  const references = await readPendingWorkItemApprovalCompletionTransitions(
+    directoryId,
+    teamId,
+    issueId,
+  )
+  for (const reference of references) {
+    try {
+      assertWorkItemApprovalCompletionTransitionCompatible(
+        configuration,
+        reference,
+        targetWorkItemTypeId,
+        targetWorkflowStatusId,
+      )
+    } catch (error) {
+      if (error instanceof WorkItemConfigurationError) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemApprovalCompletionTransitionConflict',
+          `Pending approval "${reference.approvalId}" cannot complete after this Work Item Type change.`,
+        )
+      }
+      throw error
+    }
+  }
+  return references.map((reference) => reference.conditionCheck)
+}
+
+/**
+ * Checks whether a previewed type/status pair would break a pending approval transition.
+ *
+ * @param directoryId - Workspace whose Work Item is being previewed.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item whose approvals are inspected.
+ * @param targetWorkItemTypeId - Previewed Work Item Type.
+ * @param targetWorkflowStatusId - Previewed workflow status.
+ * @param configuration - Current Work Item configuration.
+ * @returns Whether any pending approval cannot complete after the preview.
+ */
+async function hasWorkItemApprovalCompletionTransitionConflict(
+  directoryId: string,
+  teamId: string,
+  issueId: string,
+  targetWorkItemTypeId: string,
+  targetWorkflowStatusId: string,
+  configuration: WorkItemConfiguration,
+): Promise<boolean> {
+  const references = await readPendingWorkItemApprovalCompletionTransitions(
+    directoryId,
+    teamId,
+    issueId,
+  )
+  return references.some((reference) => {
+    try {
+      assertWorkItemApprovalCompletionTransitionCompatible(
+        configuration,
+        reference,
+        targetWorkItemTypeId,
+        targetWorkflowStatusId,
+      )
+      return false
+    } catch (error) {
+      if (error instanceof WorkItemConfigurationError) return true
+      throw error
+    }
+  })
 }
 
 /** Reads a Work Item's parent/child relations and fences their graph revision during a type change. */
@@ -39927,7 +40131,7 @@ async function validateWorkItemConfigurationUsage(
   directoryId: string,
   configuration: WorkItemConfiguration,
   teamId?: string,
-): Promise<void> {
+): Promise<WorkItemConfigurationTransactionItems> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(directoryId, 'ja')
   const targetTeamIds = teamId
     ? [teamId]
@@ -39999,10 +40203,11 @@ async function validateWorkItemConfigurationUsage(
     affectedTeamIds,
     configuration,
   )
-  await validateAutomationWorkItemConfigurationUsage(
+  return await validateAutomationWorkItemConfigurationUsage(
     directoryId,
     affectedTeamIds,
     configuration,
+    directory,
   )
 }
 
@@ -40010,20 +40215,89 @@ async function validateWorkItemConfigurationUsage(
 type WorkItemAutomationTemplate = Extract<AutomationTemplate, { kind: 'work-item' }>
 
 /**
+ * Lists pending, running, retryable failed, and dead-letter Automation executions with cursor-loop protection.
+ *
+ * @param workspaceId - Workspace whose executions are inspected.
+ * @returns All execution snapshots that may resume pinned Automation work.
+ */
+async function listNonTerminalAutomationExecutions(
+  workspaceId: string,
+): Promise<AutomationExecution[]> {
+  const statuses: readonly AutomationExecution['status'][] = [
+    'pending',
+    'running',
+    'failed',
+    'dead-letter',
+  ]
+  const executionsById = new Map<string, AutomationExecution>()
+  await Promise.all(statuses.map(async (status) => {
+    let cursor: string | undefined
+    const seenCursors = new Set<string>()
+    do {
+      const page = await automationDependencies.executions.listExecutions({
+        workspaceId,
+        status,
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      })
+      for (const execution of page.executions) {
+        if (execution.status !== status) continue
+        if (execution.workspaceId !== workspaceId) {
+          throw new AutomationError(
+            'unavailable',
+            'AutomationExecutionScopeInvalid',
+            'Automation execution scope metadata is inconsistent.',
+            true,
+          )
+        }
+        if (execution.status === 'failed' && !execution.retryable) continue
+        executionsById.set(execution.id, execution)
+      }
+      cursor = page.nextCursor
+      if (cursor !== undefined) {
+        if (seenCursors.has(cursor)) {
+          throw new AutomationError(
+            'unavailable',
+            'AutomationPaginationCursorLoop',
+            'Automation execution pagination cursor did not advance.',
+            true,
+          )
+        }
+        seenCursors.add(cursor)
+      }
+    } while (cursor !== undefined)
+  }))
+  return [...executionsById.values()]
+}
+
+/**
  * Validates enabled Automation definitions that can create Work Items for an affected Team.
  *
  * @param directoryId - Workspace whose configuration is being saved.
  * @param affectedTeamIds - Teams that will use the candidate configuration after the save.
  * @param configuration - Candidate configuration to test against Automation references.
- * @returns A promise that resolves after all enabled create references remain usable.
+ * @param directory - Consistent Team and Project directory snapshot used by create validation.
+ * @returns Commit-time Automation definition revision fences after all references remain usable.
  */
 async function validateAutomationWorkItemConfigurationUsage(
   directoryId: string,
   affectedTeamIds: readonly string[],
   configuration: WorkItemConfiguration,
-): Promise<void> {
-  if (affectedTeamIds.length === 0) return
+  directory: ProjectDirectoryResponse,
+): Promise<WorkItemConfigurationTransactionItems> {
+  if (affectedTeamIds.length === 0) return []
   const affectedTeamIdSet = new Set(affectedTeamIds)
+  let automationDefinitionRevision: number
+  try {
+    automationDefinitionRevision = await automationDependencies.ruleTemplates.getAutomationDefinitionRevision(
+      directoryId,
+    )
+  } catch (error) {
+    throw createAutomationConfigurationUsageError(
+      'Automation definition concurrency state could not be inspected',
+      error,
+    )
+  }
   let recurringWorks: RecurringWork[]
   let rules: AutomationRule[]
   try {
@@ -40034,6 +40308,16 @@ async function validateAutomationWorkItemConfigurationUsage(
   } catch (error) {
     throw createAutomationConfigurationUsageError(
       'Automation definitions could not be inspected',
+      error,
+    )
+  }
+
+  let executions: AutomationExecution[]
+  try {
+    executions = await listNonTerminalAutomationExecutions(directoryId)
+  } catch (error) {
+    throw createAutomationConfigurationUsageError(
+      'Automation executions could not be inspected',
       error,
     )
   }
@@ -40081,20 +40365,64 @@ async function validateAutomationWorkItemConfigurationUsage(
   }
 
   /**
-   * Validates one Automation Work Item target against the candidate configuration.
+   * Validates the complete merged create payload against one candidate Team configuration.
    *
    * @param targetTeamId - Team that will own the generated Work Item.
-   * @param workItemTypeId - Optional Work Item Type selected by the Automation payload.
-   * @param workflowStatusId - Optional workflow status selected by the Automation payload.
+   * @param values - Merged template and action values for the generated Work Item.
+   * @returns A promise that resolves after the create payload is accepted.
    */
-  const validateReference = (
+  const validateCreatePayload = async (
     targetTeamId: string,
-    workItemTypeId: string | undefined,
-    workflowStatusId: unknown,
+    values: Readonly<Record<string, AutomationValue>>,
   ) => {
     if (!affectedTeamIdSet.has(targetTeamId)) return
-    const workItemType = resolveWorkItemType(configuration, workItemTypeId)
-    resolveWorkflowStatus(configuration, workflowStatusId, workItemType.id)
+    const team = directory.teams.find((candidate) => candidate.id === targetTeamId)
+    if (!team) {
+      throw new WorkItemConfigurationError(
+        409,
+        'AutomationTeamUnavailable',
+        `Automation target Team "${targetTeamId}" is unavailable.`,
+      )
+    }
+    await prepareConfiguredCreateWorkItem(
+      directoryId,
+      targetTeamId,
+      normalizeTeamIssueInput(
+        createAutomationWorkItemCreateBody(values),
+        team,
+      ),
+      { configuration },
+    )
+  }
+
+  /**
+   * Validates every Work Item create action in one immutable rule version.
+   *
+   * @param rule - Immutable Automation rule version to inspect.
+   * @param fallbackTeamId - Event-derived target Team for actions without a Team value.
+   * @returns A promise that resolves after all create actions are accepted.
+   */
+  const validateRuleCreateActions = async (
+    rule: AutomationRule,
+    fallbackTeamId?: string,
+  ) => {
+    for (const action of rule.actions) {
+      if (action.type !== 'create') continue
+      const template = action.templateId === undefined
+        ? undefined
+        : await readWorkItemTemplate(action.templateId, action.templateVersion)
+      const values: Record<string, AutomationValue> = {
+        ...template?.payload,
+        ...action.values,
+      }
+      const targetTeamId = readAutomationText(values.teamId) ?? fallbackTeamId
+      const targetTeamIds = targetTeamId === undefined
+        ? affectedTeamIds
+        : [targetTeamId]
+      for (const candidateTeamId of targetTeamIds) {
+        await validateCreatePayload(candidateTeamId, values)
+      }
+    }
   }
 
   for (const recurring of recurringWorks) {
@@ -40104,11 +40432,10 @@ async function validateAutomationWorkItemConfigurationUsage(
         recurring.templateId,
         recurring.templateVersion,
       )
-      validateReference(
-        recurring.teamId,
-        readAutomationText(template.payload.workItemTypeId),
-        template.payload.workflowStatusId,
-      )
+      await validateCreatePayload(recurring.teamId, {
+        ...template.payload,
+        teamId: recurring.teamId,
+      })
     } catch (error) {
       throw createAutomationConfigurationUsageError(
         `Enabled Recurring Work "${recurring.id}"`,
@@ -40119,35 +40446,85 @@ async function validateAutomationWorkItemConfigurationUsage(
 
   for (const rule of rules) {
     if (!rule.enabled) continue
-    for (const [actionIndex, action] of rule.actions.entries()) {
-      if (action.type !== 'create') continue
-      try {
-        const template = action.templateId === undefined
-          ? undefined
-          : await readWorkItemTemplate(action.templateId, action.templateVersion)
-        const values = {
-          ...template?.payload,
-          ...action.values,
-        }
-        const targetTeamId = readAutomationText(values.teamId)
-        const targetTeamIds = targetTeamId === undefined
-          ? affectedTeamIds
-          : [targetTeamId]
-        for (const candidateTeamId of targetTeamIds) {
-          validateReference(
-            candidateTeamId,
-            readAutomationText(values.workItemTypeId),
-            values.workflowStatusId,
-          )
-        }
-      } catch (error) {
-        throw createAutomationConfigurationUsageError(
-          `Enabled Automation Rule "${rule.id}" create action ${actionIndex}`,
-          error,
-        )
-      }
+    try {
+      await validateRuleCreateActions(rule)
+    } catch (error) {
+      throw createAutomationConfigurationUsageError(
+        `Enabled Automation Rule "${rule.id}" create actions`,
+        error,
+      )
     }
   }
+
+  for (const execution of executions) {
+    try {
+      const event = await automationDependencies.executions.getExecutionEvent(
+        directoryId,
+        execution.id,
+      )
+      if (!event || event.workspaceId !== directoryId || event.eventId !== execution.triggerEventId) {
+        throw new AutomationError(
+          'unavailable',
+          'AutomationTriggerEventUnavailable',
+          `Automation execution "${execution.id}" trigger event is unavailable.`,
+          true,
+        )
+      }
+      if (execution.ruleId.startsWith('recurring:')) {
+        const recurringWorkId = execution.ruleId.slice('recurring:'.length)
+        const recurringWorkIdFromEvent = readAutomationMetadataText(event, 'recurringWorkId')
+        const targetTeamId = readAutomationMetadataText(event, 'teamId')
+        const templateId = readAutomationMetadataText(event, 'templateId')
+        const templateVersion = readAutomationPositiveInteger(event.metadata?.templateVersion)
+        if (
+          !recurringWorkId ||
+          recurringWorkIdFromEvent !== recurringWorkId ||
+          !targetTeamId ||
+          !templateId ||
+          templateVersion === undefined
+        ) {
+          throw new AutomationError(
+            'unavailable',
+            'RecurringExecutionInvalid',
+            `Automation execution "${execution.id}" recurring reference is invalid.`,
+          )
+        }
+        const template = await readWorkItemTemplate(templateId, templateVersion)
+        await validateCreatePayload(targetTeamId, {
+          ...template.payload,
+          teamId: targetTeamId,
+        })
+      } else {
+        const rule = await automationDependencies.ruleTemplates.getRuleVersion(
+          directoryId,
+          execution.ruleId,
+          execution.ruleVersion,
+        )
+        if (!rule) {
+          throw new AutomationError(
+            'unavailable',
+            'AutomationRuleVersionUnavailable',
+            `Automation execution "${execution.id}" rule version is unavailable.`,
+            true,
+          )
+        }
+        await validateRuleCreateActions(
+          rule,
+          readAutomationMetadataText(event, 'teamId'),
+        )
+      }
+    } catch (error) {
+      throw createAutomationConfigurationUsageError(
+        `Automation execution "${execution.id}"`,
+        error,
+      )
+    }
+  }
+
+  return [automationDependencies.ruleTemplates.createAutomationDefinitionRevisionConditionCheck(
+    directoryId,
+    automationDefinitionRevision,
+  )]
 }
 
 /**
@@ -40161,10 +40538,14 @@ function createAutomationConfigurationUsageError(
   reference: string,
   error: unknown,
 ): WorkItemConfigurationError {
-  const reason = error instanceof AutomationError || error instanceof WorkItemConfigurationError
+  const isKnownError = error instanceof AutomationError ||
+    error instanceof ProjectDataError ||
+    error instanceof WorkspaceAccessError ||
+    error instanceof WorkItemConfigurationError
+  const reason = isKnownError
     ? error.message
     : 'Automation references could not be inspected'
-  const status = error instanceof AutomationError || error instanceof WorkItemConfigurationError
+  const status = isKnownError
     ? error.status
     : 503
   const unavailable = status >= 500
@@ -41798,6 +42179,16 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         proposedAssignedProjectId ?? undefined,
         input.expectedRevision,
       )
+      const approvalCompletionTransitionConflict = await hasWorkItemApprovalCompletionTransitionConflict(
+        principal.directoryId,
+        teamId,
+        workItemId,
+        preview.targetWorkItemTypeId,
+        preview.invalidWorkflowStatusId === undefined
+          ? preview.currentWorkflowStatusId
+          : preview.targetInitialWorkflowStatusId,
+        resolvedConfiguration.configuration,
+      )
       const accessibleProjectIds = principal.isSystemAdmin
         ? undefined
         : new Set(
@@ -41805,7 +42196,11 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
               .filter((access) => projectAccessAllows(access, 'viewer'))
               .map((access) => access.projectId),
           )
-      return projectPublicWorkItemTypeChangePreview(preview, accessibleProjectIds)
+      return projectPublicWorkItemTypeChangePreview({
+        ...preview,
+        approvalCompletionTransitionConflict,
+        requiresResolution: preview.requiresResolution || approvalCompletionTransitionConflict,
+      }, accessibleProjectIds)
     },
 
     async authorizeCreate(credential, input) {

@@ -37,6 +37,7 @@ export {
   type FileUploadSession,
   type FileVersionAccess,
   type ListReviewerApprovalsOptions,
+  type PendingWorkItemApprovalCompletionTransition,
   type PresignedPutUpload,
   type ReviewerApprovalPage,
   type VerifiedFileObject,

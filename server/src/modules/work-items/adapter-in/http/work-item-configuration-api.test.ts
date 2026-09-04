@@ -5,6 +5,7 @@ const {
   app,
   configureFakeProjectClients,
   createFakeWorkItemConfigurationClient,
+  createFileProofingStub,
   createTeamIssuesFake,
   createTestWorkItemConfiguration,
   getTestAppDependencies,
@@ -168,7 +169,7 @@ test('keeps Workspace configuration validation transaction items bounded across 
   })
 
   expect(response.status).toBe(200)
-  expect(usageConditionChecks).toBeUndefined()
+  expect(usageConditionChecks).toHaveLength(1)
 })
 
 test('reads and saves Team Work Item configuration for a Team manager', async () => {
@@ -640,6 +641,140 @@ test('rejects a disallowed status transition when changing type within one workf
     message: 'Transition from "in-progress" to "done" is not allowed.',
   })
   expect(calls.issueUpdates).toEqual([])
+})
+
+test('rejects a Work Item Type change that breaks a pending approval completion transition', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const targetWorkflow = {
+    ...configuration.workflow,
+    id: 'bug-workflow',
+    name: 'Bug workflow',
+    transitions: configuration.workflow.transitions.filter((transition) =>
+      !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+    ),
+  }
+  configuration.workflows = [targetWorkflow]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'bug',
+    name: 'Bug',
+    defaultWorkflowId: targetWorkflow.id,
+    sortOrder: 10,
+  }]
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listPendingWorkItemApprovalCompletionTransitions() {
+        return [{
+          approvalId: 'approval-1',
+          revision: 1,
+          completionTransition: 'done',
+          conditionCheck: {
+            ConditionCheck: {
+              TableName: 'FileProofingTable',
+              Key: {
+                recordKey: 'APPROVAL#approval-1',
+                scopeKey: 'user%23demo%40example.com%23team%23core-team',
+              },
+              ConditionExpression: 'attribute_exists(scopeKey)',
+            },
+          },
+        }]
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      workItemTypeId: 'bug',
+      expectedRevision: 1,
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemApprovalCompletionTransitionConflict',
+    message: 'Pending approval "approval-1" cannot complete after this Work Item Type change.',
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('reports pending approval completion conflicts in a Work Item Type preview', async () => {
+  configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const targetWorkflow = {
+    ...configuration.workflow,
+    id: 'bug-workflow',
+    name: 'Bug workflow',
+    transitions: configuration.workflow.transitions.filter((transition) =>
+      !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+    ),
+  }
+  configuration.workflows = [targetWorkflow]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'bug',
+    name: 'Bug',
+    defaultWorkflowId: targetWorkflow.id,
+    sortOrder: 10,
+  }]
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listPendingWorkItemApprovalCompletionTransitions() {
+        return [{
+          approvalId: 'approval-1',
+          revision: 1,
+          completionTransition: 'done',
+          conditionCheck: {
+            ConditionCheck: {
+              TableName: 'FileProofingTable',
+              Key: {
+                recordKey: 'APPROVAL#approval-1',
+                scopeKey: 'user%23demo%40example.com%23team%23core-team',
+              },
+              ConditionExpression: 'attribute_exists(scopeKey)',
+            },
+          },
+        }]
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/work-item-type-preview',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedRevision: 1,
+        targetWorkItemTypeId: 'bug',
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    approvalCompletionTransitionConflict: true,
+    requiresResolution: true,
+  })
 })
 
 test('validates parent relation type restrictions from the child source perspective', async () => {

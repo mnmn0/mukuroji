@@ -1834,6 +1834,9 @@
       "PublicWorkItemTypeChangePreview": {
         "additionalProperties": false,
         "properties": {
+          "approvalCompletionTransitionConflict": {
+            "type": "boolean"
+          },
           "currentWorkItemTypeId": {
             "type": "string"
           },
@@ -1884,6 +1887,7 @@
           "targetInitialWorkflowStatusId",
           "missingRequiredCustomFieldIds",
           "missingRequiredCustomFieldDefinitions",
+          "approvalCompletionTransitionConflict",
           "requiresResolution"
         ],
         "type": "object"

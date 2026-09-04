@@ -2346,14 +2346,22 @@ test('advances recurring operational state with a revision guard and due index u
     nextRunAt: '2026-07-17T00:00:00.000Z',
   })
   expect(commands.at(-1)?.input).toMatchObject({
-    ConditionExpression: '#revision = :expectedRevision',
-    ExpressionAttributeValues: { ':expectedRevision': 7 },
-    Item: {
-      entryType: 'recurring',
-      nextRunAtRecordKey: '2026-07-17T00:00:00.000Z#recurring-1',
-      revision: 8,
-      version: 4,
-    },
+    TransactItems: [
+      { Put: {
+        ConditionExpression: '#revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': 7 },
+        Item: {
+          entryType: 'recurring',
+          nextRunAtRecordKey: '2026-07-17T00:00:00.000Z#recurring-1',
+          revision: 8,
+          version: 4,
+        },
+      } },
+      { Update: { Key: {
+        recordKey: 'AUTOMATION_DEFINITION_REVISION',
+        scopeKey: 'workspace-1#automation',
+      } } },
+    ],
   })
 })
 
@@ -2391,6 +2399,10 @@ test('indexes enabled schedule-trigger rules and advances their operational slot
         scheduleShard: expect.stringMatching(/^schedule-\d{2}$/),
       } } },
       { Put: { Item: { entryType: 'rule-version' } } },
+      { Update: { Key: {
+        recordKey: 'AUTOMATION_DEFINITION_REVISION',
+        scopeKey: 'workspace-1#automation',
+      } } },
     ],
   })
 
@@ -2425,11 +2437,19 @@ test('indexes enabled schedule-trigger rules and advances their operational slot
     nextRunAt,
   })
   expect(completionCommands.at(-1)?.input).toMatchObject({
-    ConditionExpression: '#revision = :expectedRevision',
-    Item: {
-      entryType: 'rule',
-      nextRunAtRecordKey: `${nextRunAt}#${created.id}`,
-    },
+    TransactItems: [
+      { Put: {
+        ConditionExpression: '#revision = :expectedRevision',
+        Item: {
+          entryType: 'rule',
+          nextRunAtRecordKey: `${nextRunAt}#${created.id}`,
+        },
+      } },
+      { Update: { Key: {
+        recordKey: 'AUTOMATION_DEFINITION_REVISION',
+        scopeKey: 'workspace-1#automation',
+      } } },
+    ],
   })
 })
 

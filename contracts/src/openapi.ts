@@ -697,6 +697,7 @@ const components = {
         'targetInitialWorkflowStatusId',
         'missingRequiredCustomFieldIds',
         'missingRequiredCustomFieldDefinitions',
+        'approvalCompletionTransitionConflict',
         'requiresResolution',
       ],
       properties: {
@@ -712,6 +713,7 @@ const components = {
           type: 'array',
           items: schemaRef('PublicCustomFieldDefinition'),
         },
+        approvalCompletionTransitionConflict: { type: 'boolean' },
         requiresResolution: { type: 'boolean' },
       },
     },

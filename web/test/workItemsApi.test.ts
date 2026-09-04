@@ -93,6 +93,7 @@ describe('canonical Work Item API', () => {
       lostCustomFieldIds: [],
       missingRequiredCustomFieldDefinitions: [definition],
       missingRequiredCustomFieldIds: [definition.id],
+      approvalCompletionTransitionConflict: false,
       requiresResolution: true,
       targetInitialWorkflowStatusId: 'backlog',
       targetWorkItemTypeId: 'incident',

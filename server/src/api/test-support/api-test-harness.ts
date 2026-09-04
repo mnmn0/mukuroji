@@ -552,6 +552,9 @@ function createFileProofingStub(
     deleteFile: unsupported,
     createApproval: unsupported,
     createWorkItemApproval: unsupported,
+    async listPendingWorkItemApprovalCompletionTransitions() {
+      return []
+    },
     decideApproval: unsupported,
     cancelApproval: unsupported,
     async getApprovalSummary() {

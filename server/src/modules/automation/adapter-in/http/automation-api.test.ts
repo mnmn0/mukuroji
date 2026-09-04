@@ -219,6 +219,21 @@ function createAutomationRuleTemplatePort(
   overrides: Partial<TestAutomationRuleTemplatePort>,
 ): TestAutomationRuleTemplatePort {
   return {
+    async getAutomationDefinitionRevision() {
+      return 0
+    },
+    createAutomationDefinitionRevisionConditionCheck(workspaceId) {
+      return {
+        ConditionCheck: {
+          TableName: 'AutomationTable',
+          Key: {
+            recordKey: 'AUTOMATION_DEFINITION_REVISION',
+            scopeKey: `${workspaceId}#automation`,
+          },
+          ConditionExpression: 'attribute_not_exists(scopeKey)',
+        },
+      }
+    },
     async listRules() {
       return unexpectedAutomationPortCall()
     },

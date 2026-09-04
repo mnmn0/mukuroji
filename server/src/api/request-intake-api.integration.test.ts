@@ -30,6 +30,7 @@ import {
 import {
   createTriageCapabilities,
 } from '../modules/triage'
+import type { AutomationEvent } from '../modules/automation'
 import { redactExpiredTriageEntry } from '../modules/triage/domain/triage-entry'
 import type { CreateTeamIssueRequestBody } from '../modules/work-items'
 import type {
@@ -40,6 +41,7 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import type {
+  AutomationExecution,
   AutomationRule,
   AutomationTemplate,
   PublicRequestForm,
@@ -134,8 +136,23 @@ function createAutomationConfigurationUsageDependencies(
   recurringWorks: readonly RecurringWork[],
   templates: readonly AutomationTemplate[],
   rules: readonly AutomationRule[] = [],
+  options: {
+    /** Immutable rule versions retained by non-terminal execution fixtures. */
+    pinnedRules?: readonly AutomationRule[]
+    /** Non-terminal executions and their durable trigger events. */
+    executions?: readonly {
+      execution: AutomationExecution
+      event: AutomationEvent
+    }[]
+    /** Automation definition revision returned for the configuration fence. */
+    automationDefinitionRevision?: number
+  } = {},
 ) {
   const production = createProductionAutomationDependencies()
+  const pinnedRules = options.pinnedRules ?? []
+  const executionEvents = new Map(
+    (options.executions ?? []).map(({ execution, event }) => [execution.id, event]),
+  )
   const ruleTemplates = new Proxy(production.ruleTemplates, {
     get(target, property, receiver) {
       if (property === 'listRules') {
@@ -144,6 +161,13 @@ function createAutomationConfigurationUsageDependencies(
       if (property === 'getTemplateVersion') {
         return async (_workspaceId: string, templateId: string, version: number) =>
           templates.find((template) => template.id === templateId && template.version === version)
+      }
+      if (property === 'getRuleVersion') {
+        return async (_workspaceId: string, ruleId: string, version: number) =>
+          pinnedRules.find((rule) => rule.id === ruleId && rule.version === version)
+      }
+      if (property === 'getAutomationDefinitionRevision') {
+        return async () => options.automationDefinitionRevision ?? 0
       }
       return Reflect.get(target, property, receiver)
     },
@@ -156,7 +180,22 @@ function createAutomationConfigurationUsageDependencies(
       return Reflect.get(target, property, receiver)
     },
   })
-  return { recurringSchedules, ruleTemplates }
+  const executions = new Proxy(production.executions, {
+    get(target, property, receiver) {
+      if (property === 'listExecutions') {
+        return async (query: { status?: AutomationExecution['status'] }) => ({
+          executions: (options.executions ?? [])
+            .map(({ execution }) => execution)
+            .filter((execution) => query.status === undefined || execution.status === query.status),
+        })
+      }
+      if (property === 'getExecutionEvent') {
+        return async (_workspaceId: string, executionId: string) => executionEvents.get(executionId)
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  return { executions, recurringSchedules, ruleTemplates }
 }
 
 /** Creates a valid Work Item Automation template fixture for configuration usage tests. */
@@ -1036,6 +1075,231 @@ test('rejects deleting a Work Item Type referenced by an enabled Automation Rule
     message: expect.stringContaining('Automation Rule'),
   })
   expect(saveCompleted).toBe(false)
+})
+
+test('validates the complete merged Work Item payload of enabled Automation create actions', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const customField = {
+    id: 'severity',
+    name: 'Severity',
+    type: 'text' as const,
+    sortOrder: 0,
+    required: false,
+    projectIds: ['refero'],
+  }
+  currentConfiguration.customFields = [customField]
+  currentConfiguration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'incident',
+    name: 'Incident',
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    customFieldIds: [customField.id],
+    sortOrder: 10,
+  }]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    customFields: [{ ...customField, required: true }],
+  }
+  const template = createWorkItemAutomationTemplate('template-required-field', 'incident')
+  template.payload = {
+    ...template.payload,
+    assignedProjectId: 'refero',
+  }
+  const recurring = createRecurringWorkUsageFixture(template.id)
+  const automation = createAutomationConfigurationUsageDependencies([recurring], [template])
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Recurring Work'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('protects a Work Item Type referenced only by a retryable pinned Automation execution', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: currentConfiguration.workItemTypes?.filter((type) => type.id !== 'incident'),
+  }
+  const template = createWorkItemAutomationTemplate('template-pinned-execution', 'incident')
+  const rule = createAutomationRuleUsageFixture(template.id)
+  const execution: AutomationExecution = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'execution-pinned-incident',
+    workspaceId: 'user#demo@example.com',
+    ruleId: rule.id,
+    ruleVersion: rule.version,
+    triggerEventId: 'event-pinned-incident',
+    status: 'failed',
+    attempts: 1,
+    actions: [],
+    startedAt: '2026-07-16T00:00:00.000Z',
+    retryable: true,
+  }
+  const event: AutomationEvent = {
+    eventId: execution.triggerEventId,
+    eventType: 'work-item.updated',
+    workspaceId: execution.workspaceId,
+    occurredAt: execution.startedAt,
+    changes: [],
+    metadata: { teamId: 'core-team' },
+  }
+  const automation = createAutomationConfigurationUsageDependencies([], [template], [], {
+    pinnedRules: [rule],
+    executions: [{ execution, event }],
+  })
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    executions: automation.executions,
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Automation execution'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('adds an Automation definition revision fence to Work Item configuration saves', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const automation = createAutomationConfigurationUsageDependencies([], [], [], {
+    automationDefinitionRevision: 7,
+  })
+  let usageConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> | undefined
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, nextConfiguration, compatibilityCheck) {
+        const checks = await compatibilityCheck()
+        if (checks !== undefined) usageConditionChecks = checks
+        return { configuration: nextConfiguration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(200)
+  expect(usageConditionChecks).toHaveLength(1)
+  expect(usageConditionChecks?.[0]).toMatchObject({
+    ConditionCheck: {
+      Key: {
+        recordKey: 'AUTOMATION_DEFINITION_REVISION',
+        scopeKey: 'user%23demo%40example.com#automation',
+      },
+      ExpressionAttributeValues: {
+        ':revision': 7,
+      },
+    },
+  })
 })
 
 test('returns dependency unavailable when published Request Forms cannot be inspected', async () => {

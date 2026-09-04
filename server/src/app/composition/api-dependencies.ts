@@ -1665,6 +1665,9 @@ export function createTestAppDependencies(): AppDependencies {
         if (property === 'listRules') {
           return async () => []
         }
+        if (property === 'getAutomationDefinitionRevision') {
+          return async () => 0
+        }
         return Reflect.get(target, property, receiver)
       },
     }),
@@ -1672,6 +1675,14 @@ export function createTestAppDependencies(): AppDependencies {
       get(target, property, receiver) {
         if (property === 'listRecurringWorks') {
           return async () => []
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+    executions: new Proxy(production.automation.executions, {
+      get(target, property, receiver) {
+        if (property === 'listExecutions') {
+          return async () => ({ executions: [] })
         }
         return Reflect.get(target, property, receiver)
       },

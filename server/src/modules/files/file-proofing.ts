@@ -292,6 +292,18 @@ export type FileApprovalCompletionTransition = {
   configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
+/** Pending Work Item approval transition reference used by type-change fences. */
+export type PendingWorkItemApprovalCompletionTransition = {
+  /** Approval identifier. */
+  approvalId: string
+  /** Approval revision read with the saved transition. */
+  revision: number
+  /** Workflow status identifier saved for completion. */
+  completionTransition: string
+  /** Condition check that keeps the approval row unchanged through the type change. */
+  conditionCheck: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
 /** 保存済み遷移先を現在の workflow configuration に対して解決します。 */
 export type FileApprovalCompletionTransitionResolver = (
   /** Approval request に保存された workflow status ID です。 */
@@ -648,6 +660,15 @@ export interface FileProofingClient {
     input: CreateWorkItemApprovalInput,
     auditContext?: MutationAuditContext,
   ): Promise<ApprovalRequest>
+  /**
+   * Reads pending Work Item approvals that carry a completion transition.
+   *
+   * @param scope - Work Item scope whose approval rows are checked.
+   * @returns Pending transitions and commit-time approval row conditions.
+   */
+  listPendingWorkItemApprovalCompletionTransitions(
+    scope: FileProofingScope,
+  ): Promise<PendingWorkItemApprovalCompletionTransition[]>
   /** Reviewer decision を revision 条件付きで保存します。 */
   decideApproval(
     scope: FileProofingScope,
@@ -1667,6 +1688,69 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     }
 
     return toApprovalRequest(item, actor)
+  }
+
+  /**
+   * Reads pending Work Item approval transitions and fences their approval rows.
+   *
+   * @param scope - Work Item scope whose approval rows are checked.
+   * @returns Pending transitions and commit-time approval row conditions.
+   */
+  async listPendingWorkItemApprovalCompletionTransitions(
+    scope: FileProofingScope,
+  ): Promise<PendingWorkItemApprovalCompletionTransition[]> {
+    requireWorkItemScope(scope)
+    await this.ensureReady()
+    const scopeKey = createFileProofingScopeKey(scope)
+    const items = await this.queryScope(scopeKey, 'APPROVAL#')
+    const references: PendingWorkItemApprovalCompletionTransition[] = []
+    for (const item of items) {
+      if (!isStoredApprovalItem(item) || item.status !== 'pending' || item.subjectType !== 'work-item') {
+        continue
+      }
+      if (item.workspaceId !== scope.workspaceId || item.teamId !== scope.teamId || item.issueId !== scope.issueId) {
+        throw new FileProofingError(
+          503,
+          'InvalidApprovalState',
+          'Stored Work Item approval scope metadata is inconsistent.',
+        )
+      }
+      if (item.completionTransition === undefined) continue
+      let completionTransition: string
+      let approvalRecordKey: string
+      try {
+        completionTransition = normalizeWorkflowStatusId(item.completionTransition)
+        if (!Number.isSafeInteger(item.revision) || item.revision <= 0) {
+          throw new Error('Approval revision is invalid.')
+        }
+        approvalRecordKey = createApprovalRecordKey(item.id)
+      } catch (error) {
+        throw new FileProofingError(
+          503,
+          'InvalidApprovalState',
+          'Stored Work Item approval completion transition is invalid.',
+          { cause: error },
+        )
+      }
+      if (item.recordKey !== approvalRecordKey) {
+        throw new FileProofingError(
+          503,
+          'InvalidApprovalState',
+          'Stored Work Item approval record key is inconsistent.',
+        )
+      }
+      references.push({
+        approvalId: item.id,
+        revision: item.revision,
+        completionTransition,
+        conditionCheck: createPendingApprovalCompletionTransitionConditionCheck(
+          this.tableName,
+          item,
+          completionTransition,
+        ),
+      })
+    }
+    return references
   }
 
   /** Reviewer decision を revision 条件付きで保存します。 */
@@ -3310,6 +3394,53 @@ function createApprovalSummaryTouch(
         ':entryType': 'approval-summary',
         ':one': 1,
         ':updatedAt': updatedAt,
+      },
+    },
+  }
+}
+
+/**
+ * Builds the approval-row condition used while changing a Work Item Type.
+ *
+ * @param tableName - File Proofing table that stores the approval row.
+ * @param item - Approval row read during type-change validation.
+ * @param completionTransition - Normalized completion status identifier.
+ * @returns A condition check that fences the observed approval row.
+ */
+function createPendingApprovalCompletionTransitionConditionCheck(
+  tableName: string,
+  item: StoredApprovalItem,
+  completionTransition: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        scopeKey: item.scopeKey,
+        recordKey: item.recordKey,
+      },
+      ConditionExpression: [
+        'attribute_exists(scopeKey)',
+        'attribute_exists(recordKey)',
+        '#entryType = :entryType',
+        '#subjectType = :subjectType',
+        '#status = :status',
+        '#revision = :revision',
+        '#completionTransition = :completionTransition',
+      ].join(' AND '),
+      ExpressionAttributeNames: {
+        '#completionTransition': 'completionTransition',
+        '#entryType': 'entryType',
+        '#revision': 'revision',
+        '#status': 'status',
+        '#subjectType': 'subjectType',
+      },
+      ExpressionAttributeValues: {
+        ':completionTransition': completionTransition,
+        ':entryType': 'approval',
+        ':revision': item.revision,
+        ':status': 'pending',
+        ':subjectType': 'work-item',
       },
     },
   }
