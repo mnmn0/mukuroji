@@ -942,6 +942,7 @@ export function TaskDetailPane({
                     className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                     defaultValue={assigneeUserId}
                     form={editorFormId}
+                    key={`assignee:${editorIdentity}`}
                     name="assigneeUserId"
                   >
                     {!hasSelectedAssigneeOption && assigneeUserId ? (
@@ -1062,6 +1063,7 @@ export function TaskDetailPane({
                 <DetailScheduleDateInput
                   defaultValue={resolveTaskScheduleEndDate(schedule) ?? ''}
                   formId={scheduleFormId}
+                  key={`schedule-due-date:${editorIdentity}`}
                   label={t('tasks.schedule.dueDate')}
                   name="scheduleDueDate"
                 />
@@ -1071,12 +1073,14 @@ export function TaskDetailPane({
                   <DetailScheduleDateInput
                     defaultValue={resolveTaskScheduleStartDate(schedule) ?? ''}
                     formId={scheduleFormId}
+                    key={`schedule-start-date:${editorIdentity}`}
                     label={t('tasks.schedule.startDate')}
                     name="scheduleStartDate"
                   />
                   <DetailScheduleDateInput
                     defaultValue={resolveTaskScheduleEndDate(schedule) ?? ''}
                     formId={scheduleFormId}
+                    key={`schedule-end-date:${editorIdentity}`}
                     label={t('tasks.schedule.endDate')}
                     name="scheduleEndDate"
                   />
@@ -1086,6 +1090,7 @@ export function TaskDetailPane({
                 <DetailScheduleDateInput
                   defaultValue={resolveTaskScheduleStartDate(schedule) ?? ''}
                   formId={scheduleFormId}
+                  key={`schedule-milestone-date:${editorIdentity}`}
                   label={t('tasks.schedule.milestoneDate')}
                   name="scheduleMilestoneDate"
                 />
