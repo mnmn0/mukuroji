@@ -44,6 +44,7 @@ export {
  * currency precision validation used by schedule and cost fields.
  */
 export {
+  MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES,
   WorkItemConfigurationError,
   assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,
@@ -63,6 +64,7 @@ export {
   resolveWorkItemTypeWorkflow,
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
+  validateWorkItemConfigurationItemSize,
   validateWorkflowDefinition,
   type MutateWorkItemRelationInput,
   type NormalizeCustomFieldValuesOptions,

@@ -685,7 +685,7 @@ const components = {
         assignedProjectId: { type: ['string', 'null'] },
       },
     },
-    WorkItemTypeChangePreview: {
+    PublicWorkItemTypeChangePreview: {
       type: 'object',
       additionalProperties: false,
       required: [
@@ -710,7 +710,7 @@ const components = {
         missingRequiredCustomFieldIds: { type: 'array', items: { type: 'string' } },
         missingRequiredCustomFieldDefinitions: {
           type: 'array',
-          items: schemaRef('CustomFieldDefinition'),
+          items: schemaRef('PublicCustomFieldDefinition'),
         },
         requiresResolution: { type: 'boolean' },
       },
@@ -1512,7 +1512,7 @@ const paths = {
       ],
       requestBody: jsonRequestBody('PreviewPublicWorkItemTypeChangeRequest'),
       responses: {
-        '200': jsonResponse('Work Item Type 変更の影響です。', schemaRef('WorkItemTypeChangePreview')),
+        '200': jsonResponse('Work Item Type 変更の影響です。', schemaRef('PublicWorkItemTypeChangePreview')),
         ...notFoundResponse,
         ...problemResponses,
       },

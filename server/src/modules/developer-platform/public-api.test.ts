@@ -449,6 +449,14 @@ describe('public API router', () => {
       workItemId: string
       input: Record<string, unknown>
     } | undefined
+    const previewDefinition = {
+      id: 'severity',
+      name: 'Severity',
+      required: true,
+      sortOrder: 0,
+      type: 'formula',
+      formulaExpression: '{amount} * 2',
+    } satisfies CustomFieldDefinition
     const preview = {
       expectedRevision: 4,
       currentWorkItemTypeId: 'default',
@@ -458,14 +466,18 @@ describe('public API router', () => {
       invalidWorkflowStatusId: 'todo',
       targetInitialWorkflowStatusId: 'incident-open',
       missingRequiredCustomFieldIds: ['severity'],
+      missingRequiredCustomFieldDefinitions: [previewDefinition],
+      requiresResolution: true,
+    }
+    const publicPreview = {
+      ...preview,
       missingRequiredCustomFieldDefinitions: [{
         id: 'severity',
         name: 'Severity',
         required: true,
         sortOrder: 0,
-        type: 'text',
-      } satisfies CustomFieldDefinition],
-      requiresResolution: true,
+        type: 'formula',
+      }],
     }
     const { platform, router } = createTestRouter({
       workItems: createDefaultWorkItemService({
@@ -494,7 +506,7 @@ describe('public API router', () => {
     )
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual(preview)
+    expect(await response.json()).toEqual(publicPreview)
     expect(received).toEqual({
       teamId: 'team-1',
       workItemId: 'work-item-1',
@@ -655,6 +667,15 @@ describe('public API router', () => {
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('post')
     expect(paths['/api/v1/work-items/{workItemId}/work-item-type-preview']).toHaveProperty('post')
+    expect(
+      paths['/api/v1/work-items/{workItemId}/work-item-type-preview'].post.responses['200'].content[
+        'application/json'
+      ].schema,
+    ).toEqual({ $ref: '#/components/schemas/PublicWorkItemTypeChangePreview' })
+    expect(
+      components.schemas.PublicWorkItemTypeChangePreview.properties
+        .missingRequiredCustomFieldDefinitions.items,
+    ).toEqual({ $ref: '#/components/schemas/PublicCustomFieldDefinition' })
     expect(
       paths['/api/v1/work-items/{workItemId}/work-item-type-preview'].post.requestBody.content[
         'application/json'

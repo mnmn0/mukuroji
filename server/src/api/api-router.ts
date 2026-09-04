@@ -98,7 +98,6 @@ import {
   type PlanningWorkItemSummary,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessPreferences,
-  type PublicCustomFieldDefinition,
   type PublicWorkItemTypeCatalog,
   type ResolvedWorkItemConfiguration,
   type ImportDryRunReport,
@@ -525,6 +524,10 @@ import {
   validateWorkItemConfiguration,
   type WorkItemConfigurationTransactionItems,
 } from '../modules/work-items/work-item-configuration'
+import {
+  createPublicCustomFieldDefinition,
+  projectPublicWorkItemTypeChangePreview,
+} from '../modules/developer-platform/public-work-item-type-projection'
 import { createWorkItemConfigurationScopeKey } from '../modules/work-items'
 import {
   createWorkItemConfigurationRouter,
@@ -41156,47 +41159,6 @@ async function createCanonicalPublicWorkItem(
 }
 
 /**
- * Redacts one custom field definition for the public Work Item creation schema.
- *
- * @param definition - Validated field definition from the effective Team configuration.
- * @param typeRequired - Whether the selected Work Item Type requires this field.
- * @param accessibleProjectIds - Project IDs visible to the caller, or undefined for unrestricted access.
- * @returns A public definition, or undefined when its Project scope is not visible.
- */
-function createPublicCustomFieldDefinition(
-  definition: CustomFieldDefinition,
-  typeRequired: boolean,
-  accessibleProjectIds: ReadonlySet<string> | undefined,
-): PublicCustomFieldDefinition | undefined {
-  const configuredProjectIds = definition.projectIds
-  const visibleProjectIds = configuredProjectIds && configuredProjectIds.length > 0 && accessibleProjectIds
-    ? configuredProjectIds.filter((projectId) => accessibleProjectIds.has(projectId))
-    : configuredProjectIds
-  if (
-    configuredProjectIds &&
-    configuredProjectIds.length > 0 &&
-    accessibleProjectIds &&
-    visibleProjectIds?.length === 0
-  ) {
-    return undefined
-  }
-
-  return {
-    id: definition.id,
-    name: definition.name,
-    type: definition.type,
-    sortOrder: definition.sortOrder,
-    required: definition.required || typeRequired,
-    ...(definition.defaultValue === undefined ? {} : { defaultValue: definition.defaultValue }),
-    ...(definition.options === undefined ? {} : { options: definition.options }),
-    ...(definition.validation === undefined ? {} : { validation: definition.validation }),
-    ...(visibleProjectIds === undefined ? {} : { projectIds: visibleProjectIds }),
-    ...(definition.currencyCode === undefined ? {} : { currencyCode: definition.currencyCode }),
-    ...(definition.durationUnit === undefined ? {} : { durationUnit: definition.durationUnit }),
-  }
-}
-
-/**
  * Builds the authorized, creation-oriented Work Item Type catalog for one Team.
  *
  * @param teamId - Team whose configuration was resolved.
@@ -41403,7 +41365,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal.directoryId,
         teamId,
       )
-      return previewWorkItemTypeChange(
+      const preview = previewWorkItemTypeChange(
         resolvedConfiguration.configuration,
         detail.issue.workItemTypeId,
         detail.issue.workflowStatusId,
@@ -41412,6 +41374,14 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         proposedAssignedProjectId ?? undefined,
         input.expectedRevision,
       )
+      const accessibleProjectIds = principal.isSystemAdmin
+        ? undefined
+        : new Set(
+            (permission.projectAccesses ?? [])
+              .filter((access) => projectAccessAllows(access, 'viewer'))
+              .map((access) => access.projectId),
+          )
+      return projectPublicWorkItemTypeChangePreview(preview, accessibleProjectIds)
     },
 
     async authorizeCreate(credential, input) {

@@ -1831,6 +1831,63 @@
         ],
         "type": "object"
       },
+      "PublicWorkItemTypeChangePreview": {
+        "additionalProperties": false,
+        "properties": {
+          "currentWorkItemTypeId": {
+            "type": "string"
+          },
+          "currentWorkflowStatusId": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "invalidWorkflowStatusId": {
+            "type": "string"
+          },
+          "lostCustomFieldIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "missingRequiredCustomFieldDefinitions": {
+            "items": {
+              "$ref": "#/components/schemas/PublicCustomFieldDefinition"
+            },
+            "type": "array"
+          },
+          "missingRequiredCustomFieldIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "requiresResolution": {
+            "type": "boolean"
+          },
+          "targetInitialWorkflowStatusId": {
+            "type": "string"
+          },
+          "targetWorkItemTypeId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "currentWorkItemTypeId",
+          "currentWorkflowStatusId",
+          "targetWorkItemTypeId",
+          "lostCustomFieldIds",
+          "targetInitialWorkflowStatusId",
+          "missingRequiredCustomFieldIds",
+          "missingRequiredCustomFieldDefinitions",
+          "requiresResolution"
+        ],
+        "type": "object"
+      },
       "PublicWorkItemTypeSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2642,63 +2699,6 @@
           "field",
           "localValue",
           "externalValue"
-        ],
-        "type": "object"
-      },
-      "WorkItemTypeChangePreview": {
-        "additionalProperties": false,
-        "properties": {
-          "currentWorkItemTypeId": {
-            "type": "string"
-          },
-          "currentWorkflowStatusId": {
-            "type": "string"
-          },
-          "expectedRevision": {
-            "minimum": 1,
-            "type": "integer"
-          },
-          "invalidWorkflowStatusId": {
-            "type": "string"
-          },
-          "lostCustomFieldIds": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "missingRequiredCustomFieldDefinitions": {
-            "items": {
-              "$ref": "#/components/schemas/CustomFieldDefinition"
-            },
-            "type": "array"
-          },
-          "missingRequiredCustomFieldIds": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "requiresResolution": {
-            "type": "boolean"
-          },
-          "targetInitialWorkflowStatusId": {
-            "type": "string"
-          },
-          "targetWorkItemTypeId": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "expectedRevision",
-          "currentWorkItemTypeId",
-          "currentWorkflowStatusId",
-          "targetWorkItemTypeId",
-          "lostCustomFieldIds",
-          "targetInitialWorkflowStatusId",
-          "missingRequiredCustomFieldIds",
-          "missingRequiredCustomFieldDefinitions",
-          "requiresResolution"
         ],
         "type": "object"
       }
@@ -7633,7 +7633,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/WorkItemTypeChangePreview"
+                  "$ref": "#/components/schemas/PublicWorkItemTypeChangePreview"
                 }
               }
             },

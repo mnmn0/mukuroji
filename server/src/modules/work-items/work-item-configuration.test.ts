@@ -8,6 +8,7 @@ import {
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   DynamoDbWorkItemConfigurationClient,
+  MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES,
   WorkItemConfigurationError,
   assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,
@@ -868,6 +869,53 @@ test('saves configuration with revision CAS and returns the incremented revision
       completion,
     ],
   })
+})
+
+test('rejects an oversized configuration before acquiring the write lock', async () => {
+  const sent: string[] = []
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      sent.push(command.constructor.name)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+  const customFields = Array.from({ length: 20 }, (_, fieldIndex) => field(
+    `large-field-${fieldIndex}`,
+    'select',
+    {
+      options: Array.from({ length: 100 }, (_, optionIndex) => ({
+        id: `option-${optionIndex}`,
+        name: 'x'.repeat(160),
+        sortOrder: optionIndex,
+      })),
+    },
+  ))
+  const configuration = createConfiguration({ customFields })
+  const item = {
+    ...configuration,
+    scopeKey: 'workspace-1#work-item-configuration',
+    recordKey: 'CONFIG',
+    revision: configuration.revision + 1,
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  expect(Buffer.byteLength(JSON.stringify(item), 'utf8'))
+    .toBeGreaterThan(MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES)
+  await expect(client.saveWorkspaceConfiguration(
+    'workspace-1',
+    configuration,
+    async () => undefined,
+  )).rejects.toMatchObject({
+    code: 'WorkItemConfigurationItemTooLarge',
+    status: 413,
+  })
+  expect(sent).toEqual([])
 })
 
 test('writes a configuration audit event in the same transaction as the revision update', async () => {

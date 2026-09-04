@@ -24,6 +24,7 @@ import {
   type ImportJob,
   type ImportSource,
   type PublicWorkItemTypeCatalog,
+  type PublicWorkItemTypeChangePreview,
   type PreviewPublicWorkItemTypeChangeRequest,
   type ResolveWorkItemSyncConflictInput,
   type UpdatePublicWorkItemRequest,
@@ -32,7 +33,6 @@ import {
   type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleWeekday,
   type WorkItemSyncConflict,
-  type WorkItemTypeChangePreview,
   type WorkItemTypeChangeResolution,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
@@ -52,6 +52,7 @@ import type {
 } from './application/ports'
 import { DeveloperPlatformError } from './errors'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
+import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
 export const PUBLIC_API_RATE_LIMIT = 120
@@ -149,7 +150,7 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
     input: PreviewPublicWorkItemTypeChangeRequest,
-  ): Promise<WorkItemTypeChangePreview>
+  ): Promise<PublicWorkItemTypeChangePreview>
   /** Work Item 作成 receipt の replay 前に current create RBAC を再評価します。 */
   authorizeCreate(
     credential: AuthenticatedDeveloperCredential,
@@ -596,12 +597,13 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const body = readPreviewPublicWorkItemTypeChangeRequest(await readJson(c))
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
-    return c.json(await dependencies.workItems.previewTypeChange(
+    const preview = await dependencies.workItems.previewTypeChange(
       credential,
       teamId,
       workItemId,
       body,
-    ))
+    )
+    return c.json(projectPublicWorkItemTypeChangePreview(preview, undefined))
   })
 
   router.post('/v1/work-items', async (c) => {

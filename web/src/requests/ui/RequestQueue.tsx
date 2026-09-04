@@ -743,7 +743,7 @@ function RequestSubmissionDetail({
                     <WorkItemFieldsEditor
                       definitions={conversionFieldDefinitions}
                       errors={conversionFieldErrors}
-                      key={`${submission.id}:${effectiveRouting.teamId ?? ''}:${effectiveWorkItemTypeId}:${conversionProjectId ?? ''}:${effectiveWorkItemConfiguration.scopeId}:${effectiveWorkItemConfiguration.revision}`}
+                      key={`${submission.id}:${effectiveRouting.teamId ?? ''}:${effectiveWorkItemTypeId}:${effectiveWorkItemConfiguration.scopeId}:${effectiveWorkItemConfiguration.revision}`}
                       locale={locale}
                       values={conversionCustomFieldValues}
                       projectId={conversionProjectId}

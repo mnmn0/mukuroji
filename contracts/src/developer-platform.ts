@@ -10,6 +10,9 @@ import type {
 import type {
   PreviewWorkItemTypeChangeInput,
 } from './work-item-types'
+import type {
+  WorkItemTypeChangePreview,
+} from './work-item-type-changes'
 
 /**
  * Public API client に付与できる最小権限 scope です。
@@ -1353,6 +1356,15 @@ export type PreviewPublicWorkItemTypeChangeRequest = PreviewWorkItemTypeChangeIn
  * validation/options are exposed.
  */
 export type PublicCustomFieldDefinition = Omit<CustomFieldDefinition, 'formulaExpression'>
+
+/** Work Item Type change preview returned by the Public API. */
+export type PublicWorkItemTypeChangePreview = Omit<
+  WorkItemTypeChangePreview,
+  'missingRequiredCustomFieldDefinitions'
+> & {
+  /** Required field definitions with formula implementation expressions removed. */
+  missingRequiredCustomFieldDefinitions: PublicCustomFieldDefinition[]
+}
 
 /** Work Item Type schema returned by the Public API for creation. */
 export type PublicWorkItemTypeSchema = {

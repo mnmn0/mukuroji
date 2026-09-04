@@ -60,6 +60,8 @@ const RELATION_RECORD_PREFIX = 'REL#'
 const RELATION_SCAN_LIMIT = 2_000
 const WORK_ITEM_RELATION_ID_LIMIT = 100
 const DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
+/** Maximum UTF-8 JSON size allowed for a persisted Work Item configuration item. */
+export const MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES = 350 * 1_024
 const MAX_CUSTOM_FIELD_TEXT_LENGTH = 10_000
 const MAX_FORMULA_EXPRESSION_LENGTH = 1_024
 const CONFIGURATION_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
@@ -462,6 +464,23 @@ export function validateWorkItemConfiguration(
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
+  }
+}
+
+/**
+ * Rejects a configuration item that could exceed DynamoDB's 400 KB item limit.
+ *
+ * @param item - Configuration item about to be persisted.
+ * @throws WorkItemConfigurationError when the serialized item is too large.
+ */
+export function validateWorkItemConfigurationItemSize(item: unknown): void {
+  const serialized = JSON.stringify(item)
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES) {
+    throw new WorkItemConfigurationError(
+      413,
+      'WorkItemConfigurationItemTooLarge',
+      'Work Item configuration cannot fit safely within the DynamoDB 400 KB item limit.',
+    )
   }
 }
 
@@ -1282,7 +1301,6 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       )
     }
     const scopeKey = createWorkItemConfigurationScopeKey(workspaceId, scopeType, scopeId)
-    const lock = await this.acquireConfigurationWriteLock(scopeKey)
     const nextRevision = validated.revision + 1
     const item = {
       ...validated,
@@ -1291,6 +1309,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       revision: nextRevision,
       updatedAt: new Date().toISOString(),
     }
+    validateWorkItemConfigurationItemSize(item)
+    const lock = await this.acquireConfigurationWriteLock(scopeKey)
     const releaseLock = async () => {
       try {
         await this.releaseConfigurationWriteLock(scopeKey, lock.token)
