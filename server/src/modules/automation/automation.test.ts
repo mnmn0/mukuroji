@@ -1256,6 +1256,48 @@ describe('automation execution safety', () => {
     expect(commands[1]?.input).toMatchObject({ ExclusiveStartKey: lastEvaluatedKey })
   })
 
+  test('uses a strongly consistent base-table scan for complete execution inspections', async () => {
+    const commands: Array<{ input: Record<string, unknown> }> = []
+    const documentClient = {
+      async send(command: { input: Record<string, unknown> }) {
+        commands.push(command)
+        return { Items: [] }
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+
+    await client.listExecutions({
+      workspaceId: 'workspace-1',
+      status: 'pending',
+      ruleId: 'rule-1',
+      consistentRead: true,
+      limit: 25,
+    })
+
+    expect(commands[0]?.input).toMatchObject({
+      ConsistentRead: true,
+      KeyConditionExpression: '#scopeKey = :scopeKey AND begins_with(#recordKey, :executionPrefix)',
+      FilterExpression: '#entryType = :entryType AND #status = :status AND #ruleId = :ruleId',
+      ExpressionAttributeNames: {
+        '#scopeKey': 'scopeKey',
+        '#recordKey': 'recordKey',
+        '#entryType': 'entryType',
+        '#status': 'status',
+        '#ruleId': 'ruleId',
+      },
+      ExpressionAttributeValues: {
+        ':scopeKey': 'workspace-1#automation',
+        ':executionPrefix': 'EXECUTION#',
+        ':entryType': 'execution',
+        ':status': 'pending',
+        ':ruleId': 'rule-1',
+      },
+      Limit: 25,
+      ScanIndexForward: false,
+    })
+    expect(commands[0]?.input).not.toHaveProperty('IndexName')
+  })
+
   test('fills status-filtered execution pages across DynamoDB evaluated pages', async () => {
     const commands: Array<{ input: Record<string, unknown> }> = []
     const firstCursor = {

@@ -2137,12 +2137,26 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     await this.ensureTable()
     const limit = normalizeLimit(query.limit ?? 50)
     const readBudget = query.status === undefined ? limit : limit * 5
-    const indexQuery: {
-      IndexName: string
+    const executionQuery: {
+      IndexName?: string
       KeyConditionExpression: string
       ExpressionAttributeNames: Record<string, string>
       ExpressionAttributeValues: Record<string, string>
-    } = query.ruleId
+      ConsistentRead?: boolean
+    } = query.consistentRead
+      ? {
+          KeyConditionExpression: '#scopeKey = :scopeKey AND begins_with(#recordKey, :executionPrefix)',
+          ExpressionAttributeNames: {
+            '#scopeKey': 'scopeKey',
+            '#recordKey': 'recordKey',
+          },
+          ExpressionAttributeValues: {
+            ':scopeKey': automationScopeKey(query.workspaceId),
+            ':executionPrefix': 'EXECUTION#',
+          },
+          ConsistentRead: true,
+        }
+      : query.ruleId
       ? {
           IndexName: 'RuleExecutionIndex',
           KeyConditionExpression: '#ruleExecutionKey = :ruleExecutionKey',
@@ -2162,23 +2176,36 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     const executions: AutomationExecution[] = []
     let evaluated = 0
     let exclusiveStartKey = query.cursor ? decodeCursor(query.cursor) : undefined
+    const filterExpression = query.consistentRead
+      ? [
+          '#entryType = :entryType',
+          ...(query.status !== undefined ? ['#status = :status'] : []),
+          ...(query.ruleId ? ['#ruleId = :ruleId'] : []),
+        ].join(' AND ')
+      : query.status !== undefined
+        ? '#status = :status'
+        : undefined
+    const expressionAttributeNames = {
+      ...executionQuery.ExpressionAttributeNames,
+      ...(query.consistentRead ? { '#entryType': 'entryType' } : {}),
+      ...(query.status !== undefined ? { '#status': 'status' } : {}),
+      ...(query.ruleId && query.consistentRead ? { '#ruleId': 'ruleId' } : {}),
+    }
+    const expressionAttributeValues = {
+      ...executionQuery.ExpressionAttributeValues,
+      ...(query.consistentRead ? { ':entryType': 'execution' } : {}),
+      ...(query.status !== undefined ? { ':status': query.status } : {}),
+      ...(query.ruleId && query.consistentRead ? { ':ruleId': query.ruleId } : {}),
+    }
     do {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
-        ...indexQuery,
-        ...(query.status !== undefined
-          ? {
-              FilterExpression: '#status = :status',
-              ExpressionAttributeNames: {
-                ...indexQuery.ExpressionAttributeNames,
-                '#status': 'status',
-              },
-              ExpressionAttributeValues: {
-                ...indexQuery.ExpressionAttributeValues,
-                ':status': query.status,
-              },
-            }
-          : {}),
+        ...(executionQuery.IndexName ? { IndexName: executionQuery.IndexName } : {}),
+        KeyConditionExpression: executionQuery.KeyConditionExpression,
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: expressionAttributeValues,
+        ...(executionQuery.ConsistentRead ? { ConsistentRead: true } : {}),
+        ...(filterExpression ? { FilterExpression: filterExpression } : {}),
         Limit: Math.min(limit - executions.length, readBudget - evaluated),
         ScanIndexForward: false,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),

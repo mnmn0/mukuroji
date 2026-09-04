@@ -40234,6 +40234,7 @@ async function listNonTerminalAutomationExecutions(
       const page = await automationDependencies.executions.listExecutions({
         workspaceId,
         status,
+        consistentRead: true,
         limit: 100,
         ...(cursor === undefined ? {} : { cursor }),
       })
