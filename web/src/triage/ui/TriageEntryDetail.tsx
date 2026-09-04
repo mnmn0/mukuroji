@@ -37,6 +37,7 @@ import {
   parseCustomFieldFormData,
 } from '../../work-items/model/customFields'
 import {
+  createCustomFieldValuePatch,
   createCustomFieldErrorMessages,
   resolveWorkItemTypes,
   resolveWorkItemTypeDefinition,
@@ -382,7 +383,7 @@ export function TriageEntryDetail({
     if (!actionMode || !onAction || actionIsPending || isActionMutationPendingRef.current) return
     if (actionMode === 'accept' && acceptMode === 'create' && !canCreateWorkItemFromTriage) return
     const formData = new FormData(event.currentTarget)
-    let customFieldValues: Record<string, CustomFieldValue> | undefined
+    let customFieldValues: Record<string, CustomFieldValue | null> | undefined
     if (
       actionMode === 'accept' &&
       acceptMode === 'create' &&
@@ -392,7 +393,6 @@ export function TriageEntryDetail({
         formData,
         acceptCustomFieldDefinitions,
         {
-          applyDefaults: true,
           projectId: readFormValue(formData, 'projectId') || undefined,
         },
       )
@@ -406,7 +406,12 @@ export function TriageEntryDetail({
         return
       }
       setAcceptFieldErrors({})
-      customFieldValues = parsedCustomFields.values
+      customFieldValues = createCustomFieldValuePatch(
+        acceptCustomFieldDefinitions,
+        initialAcceptCustomFieldValues,
+        parsedCustomFields.values,
+        readFormValue(formData, 'projectId') || undefined,
+      )
     } else {
       setAcceptFieldErrors({})
     }
@@ -1100,7 +1105,7 @@ function createActionInput(
   actionMode: TriageActionMode,
   acceptMode: 'create' | 'link',
   formData: FormData,
-  customFieldValues?: Record<string, CustomFieldValue>,
+  customFieldValues?: Record<string, CustomFieldValue | null>,
 ): TriageActionInput | undefined {
   const expectedRevision = entry.revision
   if (actionMode === 'assign') {

@@ -9,6 +9,7 @@ import {
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import {
   createCustomFieldErrorMessages,
+  createCustomFieldValuePatch,
   createVisibleCustomFieldValuePatch,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
@@ -121,6 +122,22 @@ describe('Work Item display helpers', () => {
       existingValues,
       {},
     )).toEqual({ risk: null })
+  })
+
+  test('emits null when a mapped custom field is cleared before Triage acceptance', () => {
+    const definitions = [{
+      id: 'request-summary',
+      name: 'Request summary',
+      required: false,
+      sortOrder: 0,
+      type: 'text' as const,
+    }]
+
+    expect(createCustomFieldValuePatch(
+      definitions,
+      { 'request-summary': 'Mapped from the Request form' },
+      {},
+    )).toEqual({ 'request-summary': null })
   })
 
   test('includes values from the fallback required-field editor', () => {
