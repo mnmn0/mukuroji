@@ -39861,14 +39861,11 @@ async function readPendingWorkItemApprovalCompletionTransitions(
       kind: 'work-item',
       issueId,
     })
-  } catch (error) {
-    const reason = error instanceof Error
-      ? error.message
-      : 'pending Work Item approvals could not be inspected'
+  } catch {
     throw new WorkItemConfigurationError(
       503,
       'WorkItemConfigurationDependencyUnavailable',
-      `Pending Work Item approval transitions could not be inspected: ${reason}`,
+      'Pending Work Item approval transitions could not be inspected.',
     )
   }
 }
