@@ -4674,7 +4674,9 @@ test.describe('authenticated task page', () => {
     await issueSearchbox.clear()
     await expect(issueSearchbox).toHaveValue('')
     await expect(page.getByTestId('team-issues-count')).toContainText('4')
-    await page.getByRole('combobox', { name: 'Issue ステータス' }).selectOption('review')
+    await page.getByRole('combobox', { name: 'Issue ステータス' }).selectOption(
+      ['core-team', 'default', 'review'].join('\u0000'),
+    )
 
     await expect(page.getByTestId('issue-row-brand-guideline')).toBeVisible()
     await expect(page.getByTestId('issue-row-wireframe')).toBeHidden()

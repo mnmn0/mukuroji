@@ -349,13 +349,15 @@ function RequestSubmissionDetail({
     submission?.id ?? '',
     effectiveRouting.teamId ?? '',
     effectiveRouting.workItemTypeId ?? '',
+    preferredWorkItemTypeId,
   ].join('\u0000')
-  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
-    () => preferredWorkItemTypeId,
-  )
-  useEffect(() => {
-    setSelectedWorkItemTypeId(preferredWorkItemTypeId)
-  }, [preferredWorkItemTypeId, typeSelectionResetKey])
+  const [selectedWorkItemTypeSelection, setSelectedWorkItemTypeSelection] = useState(() => ({
+    resetKey: typeSelectionResetKey,
+    typeId: preferredWorkItemTypeId,
+  }))
+  const selectedWorkItemTypeId = selectedWorkItemTypeSelection.resetKey === typeSelectionResetKey
+    ? selectedWorkItemTypeSelection.typeId
+    : preferredWorkItemTypeId
   const effectiveWorkItemTypeId = workItemTypes.some((type) => type.id === selectedWorkItemTypeId)
     ? selectedWorkItemTypeId
     : workItemTypes[0]?.id ?? 'default'
@@ -722,7 +724,10 @@ function RequestSubmissionDetail({
                     name="workItemTypeId"
                     onChange={(event) => {
                       const nextTypeId = event.target.value
-                      setSelectedWorkItemTypeId(nextTypeId)
+                      setSelectedWorkItemTypeSelection({
+                        resetKey: typeSelectionResetKey,
+                        typeId: nextTypeId,
+                      })
                       setConversionFieldErrors({})
                     }}
                     value={effectiveWorkItemTypeId}
