@@ -98,4 +98,44 @@ describe('Triage bulk policy projection', () => {
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Decline<\/button>/)
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Clear selection<\/button>/)
   })
+
+  test('preserves activity order when Work Item Type runs are interleaved', () => {
+    const sourceEntry = triageEntryFixtures[2]
+    if (!sourceEntry?.canonicalWorkItem) throw new Error('Expected a canonical triage fixture.')
+    const createView = (id: string, workItemTypeId: string) => createTriageEntryView({
+      ...sourceEntry,
+      canonicalWorkItem: {
+        ...sourceEntry.canonicalWorkItem,
+        workItemId: id,
+        workItemTypeId,
+      },
+      id,
+    })
+    const html = renderToStaticMarkup(
+      <TriageQueue
+        allowedBulkActions={[]}
+        counts={{ breached: 0, pending: 0, unowned: 0 }}
+        entries={[
+          createView('triage-a', 'type-a'),
+          createView('triage-b', 'type-b'),
+          createView('triage-c', 'type-a'),
+        ]}
+        filters={{ owner: 'all' }}
+        locale="en"
+        onEntrySelectionChange={() => undefined}
+        onFiltersChange={() => undefined}
+        onSelectEntry={() => undefined}
+        onVisibleSelectionChange={() => undefined}
+        selectedEntryIds={[]}
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html.indexOf('data-testid="triage-entry-triage-a"')).toBeLessThan(
+      html.indexOf('data-testid="triage-entry-triage-b"'),
+    )
+    expect(html.indexOf('data-testid="triage-entry-triage-b"')).toBeLessThan(
+      html.indexOf('data-testid="triage-entry-triage-c"'),
+    )
+  })
 })

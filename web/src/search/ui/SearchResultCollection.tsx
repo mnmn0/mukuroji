@@ -1,6 +1,8 @@
 import {
+  createSearchWorkItemStatusKey,
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemStatusKey,
   readSearchWorkItemTypeKey,
   type SearchEntityType,
   type SearchViewLayout,
@@ -55,6 +57,12 @@ const contextKindLabelKeys: Record<string, MessageKey> = {
   context: 'collaboration.decisions.kind.context',
 }
 
+/** Formats a workflow status with optional Work Item identity context. */
+type SearchStatusFormatter = (
+  status: string,
+  result?: WorkspaceSearchResult,
+) => string
+
 /** Localizes a context-item kind while preserving unknown search subtitles. */
 function formatSearchSubtitle(
   result: WorkspaceSearchResult,
@@ -82,7 +90,8 @@ export function SearchResultCollection({
   workItemTypeLabels = {},
 }: SearchResultCollectionProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const formatStatus = (status: string) => formatSearchStatus(status, statusLabels, t)
+  const formatStatus: SearchStatusFormatter = (status, result) =>
+    formatSearchStatus(status, statusLabels, t, result)
   const formatWorkItemType = (result: WorkspaceSearchResult) =>
     formatSearchWorkItemType(result, workItemTypeLabels)
   const formatWorkItemTypeId = (typeId: string) =>
@@ -126,7 +135,7 @@ function SearchTable({
   results,
   t,
 }: {
-  formatStatus: (status: string) => string
+  formatStatus: SearchStatusFormatter
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -208,7 +217,7 @@ function SearchBoard({
   results,
   t,
 }: {
-  formatStatus: (status: string) => string
+  formatStatus: SearchStatusFormatter
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemTypeId: (typeId: string) => string
@@ -269,7 +278,7 @@ function SearchCalendar({
   results,
   t,
 }: {
-  formatStatus: (status: string) => string
+  formatStatus: SearchStatusFormatter
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -318,7 +327,7 @@ function SearchTimeline({
   results,
   t,
 }: {
-  formatStatus: (status: string) => string
+  formatStatus: SearchStatusFormatter
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -364,7 +373,7 @@ function SearchTimeline({
                   <span className="workbench-badge-primary">{formatWorkItemType(result)}</span>
                 ) : null}
                 <span className="workbench-badge">
-                  {result.status ? formatStatus(result.status) : t(entityLabelKeys[result.entityType])}
+                  {result.status ? formatStatus(result.status, result) : t(entityLabelKeys[result.entityType])}
                 </span>
               </span>
             </button>
@@ -393,7 +402,7 @@ function SearchResultCard({
   t,
 }: {
   compact?: boolean
-  formatStatus: (status: string) => string
+  formatStatus: SearchStatusFormatter
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -426,7 +435,7 @@ function SearchResultCard({
       {formatWorkItemType(result) || result.status || result.dueDate ? (
         <span className="mt-3 flex flex-wrap gap-2">
           {formatWorkItemType(result) ? <span className="workbench-badge-primary">{formatWorkItemType(result)}</span> : null}
-          {result.status ? <span className="workbench-badge">{formatStatus(result.status)}</span> : null}
+          {result.status ? <span className="workbench-badge">{formatStatus(result.status, result)}</span> : null}
           {result.dueDate ? (
             <span className="text-xs font-semibold text-[var(--workbench-muted)]">
               {formatSearchDate(result.dueDate, locale)}
@@ -465,8 +474,10 @@ function groupResults(results: WorkspaceSearchResult[], field: string) {
 
   for (const result of results) {
     const value = formatResultFieldValue(
-      field === 'workItemType' && result.entityType === 'work-item'
-        ? resolveSearchWorkItemTypeKey(result)
+      field === 'status' && result.status
+        ? resolveSearchStatusKey(result)
+        : field === 'workItemType' && result.entityType === 'work-item'
+          ? resolveSearchWorkItemTypeKey(result)
         : resolveWorkspaceSearchResultFieldValue(result, field),
     ) ?? '—'
     groups.set(value, [...(groups.get(value) ?? []), result])
@@ -507,7 +518,7 @@ function renderColumnValue(
   result: WorkspaceSearchResult,
   column: string,
   locale: Locale,
-  formatStatus: (status: string) => string,
+  formatStatus: SearchStatusFormatter,
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined,
   t: (key: MessageKey) => string,
 ) {
@@ -517,7 +528,7 @@ function renderColumnValue(
 
   if (column === 'status') {
     return result.status
-      ? <span className="workbench-badge">{formatStatus(result.status)}</span>
+      ? <span className="workbench-badge">{formatStatus(result.status, result)}</span>
       : '—'
   }
 
@@ -587,15 +598,34 @@ function resolveSearchWorkItemTypeKey(result: WorkspaceSearchResult): string {
     : typeId
 }
 
+/** Resolves a Work Item result to its collision-safe Team-qualified status key. */
+function resolveSearchStatusKey(result: WorkspaceSearchResult): string {
+  if (result.entityType !== 'work-item' || !result.teamId || !result.status) {
+    return result.status ?? ''
+  }
+  return createSearchWorkItemStatusKey(
+    result.teamId,
+    result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+    result.status,
+  )
+}
+
+/** Formats a status using the result's qualified identity before legacy fallbacks. */
 function formatSearchStatus(
   status: string,
   statusLabels: Readonly<Record<string, string>>,
   t: (key: MessageKey) => string,
+  result?: WorkspaceSearchResult,
 ) {
-  const configuredLabel = statusLabels[status]
+  const configuredLabel = result
+    ? statusLabels[resolveSearchStatusKey(result)]
+    : undefined
   if (configuredLabel) {
     return configuredLabel
   }
-  const key = statusLabelKeys[status]
-  return key ? t(key) : status
+  const legacyLabel = statusLabels[status]
+  if (legacyLabel) return legacyLabel
+  const statusId = readSearchWorkItemStatusKey(status)?.statusId ?? status
+  const key = statusLabelKeys[statusId]
+  return key ? t(key) : statusId
 }

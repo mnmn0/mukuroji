@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import type { SearchViewLayout, WorkspaceSearchResult } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemStatusKey,
+  type SearchViewLayout,
+  type WorkspaceSearchResult,
+} from '@mukuroji/contracts'
 import { sortWorkspaceSearchResults } from '../src/search/model/sortResults'
 import {
   deduplicateSearchMigrationWarnings,
@@ -72,9 +76,11 @@ describe('Workspace search URL state', () => {
   test('canonical dynamic workflow status IDs round-trip without a fixed allowlist', () => {
     const source = new URLSearchParams()
     const maximumLengthStatusId = `a${'b'.repeat(127)}`
+    const qualifiedStatus = createSearchWorkItemStatusKey('core-team', 'bug', 'ready-for-qa')
     source.append('status', 'ready-for-qa')
     source.append('status', 'blocked.external_vendor')
     source.append('status', maximumLengthStatusId)
+    source.append('status', qualifiedStatus)
     source.append('status', 'ready-for-qa')
     source.append('status', '   ')
     source.append('status', 'ready for QA')
@@ -88,6 +94,7 @@ describe('Workspace search URL state', () => {
       'ready-for-qa',
       'blocked.external_vendor',
       maximumLengthStatusId,
+      qualifiedStatus,
     ])
 
     const canonical = serializeSearchRouteState(parsed)
@@ -95,11 +102,13 @@ describe('Workspace search URL state', () => {
     expect(canonical.getAll('status')).toEqual([
       maximumLengthStatusId,
       'blocked.external_vendor',
+      qualifiedStatus,
       'ready-for-qa',
     ])
     expect(getSearchStatuses(parseSearchRouteState(canonical).filters)).toEqual([
       maximumLengthStatusId,
       'blocked.external_vendor',
+      qualifiedStatus,
       'ready-for-qa',
     ])
   })

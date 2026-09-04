@@ -331,7 +331,7 @@ export function TriageQueue({
       ) : (
         <ul className="divide-y divide-[var(--workbench-border)]" data-testid="triage-entry-list">
           {groupedEntries.map((group) => (
-            <li className="list-none" key={group.typeId}>
+            <li className="list-none" key={group.groupKey}>
               <div className="flex items-center justify-between gap-3 bg-[var(--workbench-surface-muted)] px-3 py-2 text-xs font-bold uppercase tracking-[0.06em] text-[var(--workbench-muted)]">
                 <h3>{group.label}</h3>
                 <span className="tabular-nums">{group.entries.length}</span>
@@ -551,32 +551,39 @@ function hasActiveFilters(filters: TriageQueueFilters) {
   )
 }
 
-/** Groups triage entries by canonical Work Item Type while preserving queue order in each group. */
+/** Groups triage entries into contiguous Work Item Type runs without changing queue order. */
 function groupTriageEntries(
   entries: readonly TriageEntryView[],
   labels: ReadonlyMap<string, string>,
 ): Array<{
+  groupKey: string
   typeId: string
   label: string
   entries: Array<{ view: TriageEntryView; index: number }>
 }> {
-  const groups = new Map<string, {
+  const groups: Array<{
+    groupKey: string
     typeId: string
     label: string
     entries: Array<{ view: TriageEntryView; index: number }>
-  }>()
+  }> = []
   entries.forEach((view, index) => {
     const typeId = view.entry.canonicalWorkItem?.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
-    const group = groups.get(typeId) ?? {
-      entries: [],
-      label: labels.get(typeId) ?? typeId,
-      typeId,
+    const previousGroup = groups[groups.length - 1]
+    if (!previousGroup || previousGroup.typeId !== typeId) {
+      groups.push({
+        entries: [],
+        groupKey: `${typeId}:${index}`,
+        label: labels.get(typeId) ?? typeId,
+        typeId,
+      })
     }
+    const group = groups[groups.length - 1]
+    if (!group) return
     group.entries.push({ index, view })
-    groups.set(typeId, group)
   })
   let navigationIndex = 0
-  return [...groups.values()].map((group) => ({
+  return groups.map((group) => ({
     ...group,
     entries: group.entries.map(({ view }) => ({
       index: navigationIndex++,

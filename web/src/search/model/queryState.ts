@@ -1,4 +1,5 @@
 import {
+  readSearchWorkItemStatusKey,
   SEARCH_SCHEMA_VERSION,
   type SearchCustomFieldFilter,
   type SearchCustomFieldOperator,
@@ -444,7 +445,7 @@ function readStringArray(value: unknown) {
 function readWorkflowStatusIds(value: unknown) {
   return [...new Set(readStringArray(value)
     .map((item) => item.trim())
-    .filter((item) => workflowStatusIdPattern.test(item)))]
+    .filter((item) => workflowStatusIdPattern.test(item) || readSearchWorkItemStatusKey(item) !== undefined))]
 }
 
 function readUnknownArray(value: unknown) {

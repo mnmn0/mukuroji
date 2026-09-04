@@ -1,4 +1,7 @@
-import { readSearchWorkItemTypeKey } from '@mukuroji/contracts'
+import {
+  readSearchWorkItemStatusKey,
+  readSearchWorkItemTypeKey,
+} from '@mukuroji/contracts'
 import type {
   AiAssistanceCitation,
   AiAssistanceDraft,
@@ -580,10 +583,10 @@ function isOptionalSearchStatusIdArray(value: unknown): boolean {
 /** Rejects status identifiers that Search URL serialization would silently drop. */
 function isSearchStatusId(value: unknown): value is string {
   return typeof value === 'string' &&
-    value.length <= 128 &&
+    value.length <= 512 &&
     value.length > 0 &&
     value === value.trim() &&
-    workflowStatusIdPattern.test(value)
+    (workflowStatusIdPattern.test(value) || readSearchWorkItemStatusKey(value) !== undefined)
 }
 
 /** Validates a fixed-width Gregorian calendar date without timezone coercion. */

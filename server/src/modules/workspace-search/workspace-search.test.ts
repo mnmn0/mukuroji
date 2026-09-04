@@ -9,6 +9,7 @@ import {
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  createSearchWorkItemStatusKey,
   createSearchWorkItemTypeKey,
 } from '@mukuroji/contracts'
 import type { TaskViewDefinition } from '@mukuroji/contracts'
@@ -113,6 +114,56 @@ test('requires Team-qualified Work Item Type filters for Workspace Search', asyn
   })).rejects.toMatchObject({
     code: 'InvalidSearchFilters',
     status: 400,
+  })
+})
+
+test('matches qualified Search status filters to the Team and Work Item Type', async () => {
+  const documents = [
+    createWorkItemWorkspaceSearchDocument({
+      issueId: 'bug-1',
+      status: 'ready',
+      teamId: 'team-a',
+      title: 'Team A bug',
+      workItemTypeId: 'bug',
+      workspaceId: 'workspace-1',
+    }),
+    createWorkItemWorkspaceSearchDocument({
+      issueId: 'feature-1',
+      status: 'ready',
+      teamId: 'team-a',
+      title: 'Team A feature',
+      workItemTypeId: 'feature',
+      workspaceId: 'workspace-1',
+    }),
+    createWorkItemWorkspaceSearchDocument({
+      issueId: 'bug-2',
+      status: 'ready',
+      teamId: 'team-b',
+      title: 'Team B bug',
+      workItemTypeId: 'bug',
+      workspaceId: 'workspace-1',
+    }),
+  ]
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(documents),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.search({
+    access: {
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['team-a', 'team-b']),
+      viewerUserId: 'viewer@example.com',
+    },
+    filters: {
+      statuses: [createSearchWorkItemStatusKey('team-a', 'bug', 'ready')],
+    },
+    workspaceId: 'workspace-1',
+  })).resolves.toMatchObject({
+    results: [expect.objectContaining({ id: 'team/team-a/issue/bug-1' })],
   })
 })
 

@@ -1,4 +1,8 @@
-import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemStatusKey,
+  readSearchWorkItemStatusKey,
+  type ResolvedWorkItemConfiguration,
+} from '@mukuroji/contracts'
 import {
   resolveWorkItemTypeWorkflow,
   resolveWorkItemTypes,
@@ -15,53 +19,55 @@ export type SearchStatusOption = {
 }
 
 /**
- * Team ごとの configuration と現在表示中の status ID から検索用選択肢を作ります。
+ * Creates collision-safe Search status options from Team configurations and visible filter values.
  *
- * @param configurationsByTeam - Team ID ごとの解決済み configuration です。
- * @param visibleStatusIds - URL filter または検索結果に含まれる status ID です。
- * @returns Status ID で重複排除した検索用選択肢です。
+ * @param configurationsByTeam - Resolved Work Item configuration by Team ID.
+ * @param visibleStatusIds - Qualified or legacy status values from the URL and loaded results.
+ * @param teamNamesById - Optional human-readable Team names used in option labels.
+ * @returns Search options keyed by Team, Work Item Type, and status identity.
  */
 export function createSearchStatusOptions(
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   visibleStatusIds: readonly string[],
+  teamNamesById: Readonly<Record<string, string>> = {},
 ): SearchStatusOption[] {
-  const labelsByStatusId = new Map<string, Set<string>>()
+  const optionsByStatusKey = new Map<string, SearchStatusOption>()
 
-  for (const [, resolvedConfiguration] of Object.entries(configurationsByTeam)
+  for (const [teamId, resolvedConfiguration] of Object.entries(configurationsByTeam)
     .sort(([firstTeamId], [secondTeamId]) => firstTeamId.localeCompare(secondTeamId))) {
-    const workflows = new Map(
-      [
-        resolvedConfiguration.configuration.workflow,
-        ...(resolvedConfiguration.configuration.workflows ?? []),
-        ...resolveWorkItemTypes(resolvedConfiguration).flatMap((type) => {
-          const workflow = resolveWorkItemTypeWorkflow(resolvedConfiguration, type.id)
-          return workflow ? [workflow] : []
-        }),
-      ].map((workflow) => [workflow.id, workflow]),
-    )
-    const statuses = [...workflows.values()]
-      .flatMap((workflow) => workflow.statuses)
-      .sort((first, second) =>
+    const teamLabel = teamNamesById[teamId] ?? teamId
+    for (const type of resolveWorkItemTypes(resolvedConfiguration)) {
+      const workflow = resolveWorkItemTypeWorkflow(resolvedConfiguration, type.id)
+      if (!workflow) continue
+      const statuses = [...workflow.statuses].sort((first, second) =>
         first.sortOrder - second.sortOrder || first.name.localeCompare(second.name)
       )
 
-    for (const status of statuses) {
-      const labels = labelsByStatusId.get(status.id) ?? new Set<string>()
-      labels.add(status.name)
-      labelsByStatusId.set(status.id, labels)
+      for (const status of statuses) {
+        const id = createSearchWorkItemStatusKey(teamId, type.id, status.id)
+        optionsByStatusKey.set(id, {
+          id,
+          label: `${teamLabel} · ${type.name} · ${status.name}`,
+        })
+      }
     }
   }
 
   for (const statusId of visibleStatusIds) {
-    if (statusId && !labelsByStatusId.has(statusId)) {
-      labelsByStatusId.set(statusId, new Set())
+    if (!statusId) continue
+    const qualifiedStatus = readSearchWorkItemStatusKey(statusId)
+    if (qualifiedStatus) {
+      if (!optionsByStatusKey.has(statusId)) {
+        const teamLabel = teamNamesById[qualifiedStatus.teamId] ?? qualifiedStatus.teamId
+        optionsByStatusKey.set(statusId, {
+          id: statusId,
+          label: `${teamLabel} · ${qualifiedStatus.workItemTypeId} · ${qualifiedStatus.statusId}`,
+        })
+      }
+    } else if (!optionsByStatusKey.has(statusId)) {
+      optionsByStatusKey.set(statusId, { id: statusId, label: statusId })
     }
   }
 
-  return Array.from(labelsByStatusId, ([id, labels]) => ({
-    id,
-    label: labels.size > 0
-      ? Array.from(labels).sort((first, second) => first.localeCompare(second)).join(' / ')
-      : id,
-  }))
+  return [...optionsByStatusKey.values()]
 }

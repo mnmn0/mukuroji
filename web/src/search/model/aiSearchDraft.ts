@@ -6,7 +6,10 @@ import type {
   WorkspaceSearchDateField,
   WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
-import { readSearchWorkItemTypeKey } from '@mukuroji/contracts'
+import {
+  readSearchWorkItemStatusKey,
+  readSearchWorkItemTypeKey,
+} from '@mukuroji/contracts'
 import { isSearchFilterTransportWithinGetBudget } from './searchFilterTransportBudget'
 
 /** Search entity types that can be edited in an AI filter draft. */
@@ -35,7 +38,7 @@ export const aiSearchCustomFieldOperators: readonly SearchCustomFieldOperator[] 
 
 const AI_SEARCH_MAX_LIST_ITEMS = 100
 const AI_SEARCH_MAX_IDENTIFIER_LENGTH = 512
-const AI_SEARCH_MAX_STATUS_ID_LENGTH = 128
+const AI_SEARCH_MAX_STATUS_FILTER_LENGTH = 512
 const AI_SEARCH_MAX_KEYWORD_LENGTH = 256
 const AI_SEARCH_MAX_CUSTOM_FIELDS = 50
 const AI_SEARCH_MAX_CUSTOM_FIELD_ID_LENGTH = 256
@@ -314,9 +317,12 @@ function hasBoundedStatusIdList(values: readonly string[] | undefined): boolean 
     values.every((value) => (
       typeof value === 'string' &&
       value.length > 0 &&
-      value.length <= AI_SEARCH_MAX_STATUS_ID_LENGTH &&
+      value.length <= AI_SEARCH_MAX_STATUS_FILTER_LENGTH &&
       value === value.trim() &&
-      /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i.test(value)
+      (
+        /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i.test(value) ||
+        readSearchWorkItemStatusKey(value) !== undefined
+      )
     ))
   )
 }

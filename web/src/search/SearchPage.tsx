@@ -1,6 +1,8 @@
 import {
+  createSearchWorkItemStatusKey,
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_TYPE_ID,
   readSearchWorkItemTypeKey,
   SAVED_VIEW_SCHEMA_VERSION,
   type CreateSavedWorkspaceViewInput,
@@ -228,9 +230,18 @@ export function SearchPage() {
     workItemConfigurationsByTeam,
     [
       ...getSearchStatuses(routeState.filters),
-      ...results.flatMap((result) => result.status ? [result.status] : []),
+      ...results.flatMap((result) => result.status
+        ? [result.entityType === 'work-item' && result.teamId
+          ? createSearchWorkItemStatusKey(
+              result.teamId,
+              result.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+              result.status,
+            )
+          : result.status]
+        : []),
     ],
-  ), [results, routeState.filters, workItemConfigurationsByTeam])
+    Object.fromEntries(teams.map((team) => [team.id, team.name])),
+  ), [results, routeState.filters, teams, workItemConfigurationsByTeam])
   const statusLabels = useMemo(
     () => Object.fromEntries(statusOptions.map((status) => [status.id, status.label])),
     [statusOptions],

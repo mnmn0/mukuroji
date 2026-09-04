@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   AutomationRuleEditor,
   AutomationTemplateEditor,
+  createAutomationTrigger,
 } from '../src/automation/ui/AutomationEditors'
 import {
   createDefaultAutomationWorkflowTemplatePayload,
@@ -10,6 +11,44 @@ import {
 } from '../src/automation/model/editorValidation'
 
 describe('Automation editors', () => {
+  test('serializes source-only and bidirectional Work Item Type triggers', () => {
+    expect(createAutomationTrigger(
+      'work-item-type',
+      '',
+      'team-1',
+      { direction: 'from', fromConfiguration: 'bug' },
+    )).toEqual({
+      fromWorkItemTypeId: 'bug',
+      teamId: 'team-1',
+      type: 'work-item-type',
+    })
+    expect(createAutomationTrigger(
+      'work-item-type',
+      'feature',
+      'team-1',
+      { direction: 'both', fromConfiguration: 'bug' },
+    )).toEqual({
+      fromWorkItemTypeId: 'bug',
+      teamId: 'team-1',
+      toWorkItemTypeId: 'feature',
+      type: 'work-item-type',
+    })
+  })
+
+  test('renders Work Item Type trigger direction controls', () => {
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor
+        initialTriggerType="work-item-type"
+        locale="en"
+        onCreate={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('data-testid="automation-rule-trigger-type-direction"')
+    expect(html).toContain('value="from"')
+    expect(html).toContain('value="both"')
+  })
+
   test('keeps valid schedule time fields valid when only the cadence is invalid', () => {
     const html = renderToStaticMarkup(
       <AutomationRuleEditor

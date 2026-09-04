@@ -17,6 +17,7 @@ import {
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemStatusKey,
   readSearchWorkItemTypeKey,
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
@@ -4226,7 +4227,7 @@ function matchesWorkspaceSearchFilters(
   if (filters.entityTypes?.length && !filters.entityTypes.includes(document.entityType)) return false
   if (filters.assigneeUserIds?.length && (!document.assigneeUserId || !filters.assigneeUserIds.includes(document.assigneeUserId))) return false
   if (filters.creatorUserIds?.length && (!document.creatorUserId || !filters.creatorUserIds.includes(document.creatorUserId))) return false
-  if (filters.statuses?.length && (!document.status || !filters.statuses.includes(document.status))) return false
+  if (filters.statuses?.length && !matchesWorkspaceSearchStatusFilter(document, filters.statuses)) return false
   if (filters.projectIds?.length && (!document.projectId || !filters.projectIds.includes(document.projectId))) return false
   if (filters.teamIds?.length && (!document.teamId || !filters.teamIds.includes(document.teamId))) return false
   if (
@@ -4256,6 +4257,23 @@ function matchesWorkspaceSearchFilters(
     if (!splitKeyword(filters.keyword).every((term) => haystack.includes(term))) return false
   }
   return true
+}
+
+/** Matches a Search status filter against a legacy bare status or a qualified Work Item status key. */
+function matchesWorkspaceSearchStatusFilter(
+  document: WorkspaceSearchDocument,
+  statusFilters: readonly string[],
+): boolean {
+  if (!document.status) return false
+
+  return statusFilters.some((statusFilter) => {
+    const qualifiedStatus = readSearchWorkItemStatusKey(statusFilter)
+    if (!qualifiedStatus) return document.status === statusFilter
+    return document.entityType === 'work-item' &&
+      document.teamId === qualifiedStatus.teamId &&
+      (document.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === qualifiedStatus.workItemTypeId &&
+      document.status === qualifiedStatus.statusId
+  })
 }
 
 function matchesImmutableWorkspaceSearchFilters(

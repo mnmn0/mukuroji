@@ -126,6 +126,52 @@ export function readSearchWorkItemTypeKey(
   }
 }
 
+/** Parts of a collision-safe Team and Work Item Type-qualified workflow status key. */
+export type SearchWorkItemStatusKeyParts = {
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Stable Work Item Type identifier within the Team. */
+  workItemTypeId: string
+  /** Stable workflow status identifier within the Work Item Type workflow. */
+  statusId: string
+}
+
+/**
+ * Creates the canonical Team and Work Item Type-qualified workflow status key used by Workspace Search.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemTypeId - Stable Work Item Type identifier within the Team.
+ * @param statusId - Stable workflow status identifier within the Work Item Type workflow.
+ * @returns Collision-safe filter key containing all three identities.
+ */
+export function createSearchWorkItemStatusKey(
+  teamId: string,
+  workItemTypeId: string,
+  statusId: string,
+): string {
+  return `${teamId}\0${workItemTypeId}\0${statusId}`
+}
+
+/**
+ * Reads a Team and Work Item Type-qualified workflow status key without accepting malformed values.
+ *
+ * @param value - Candidate Search filter key.
+ * @returns Parsed Team, Work Item Type, and status identities, or undefined for an invalid key.
+ */
+export function readSearchWorkItemStatusKey(
+  value: string,
+): SearchWorkItemStatusKeyParts | undefined {
+  const parts = value.split('\0')
+  if (parts.length !== 3 || parts.some((part) => part.length === 0)) {
+    return undefined
+  }
+
+  const [teamId, workItemTypeId, statusId] = parts
+  if (!teamId || !workItemTypeId || !statusId) return undefined
+
+  return { statusId, teamId, workItemTypeId }
+}
+
 /**
  * Workspace 横断検索で組み合わせられる filter set です。
  */
@@ -147,7 +193,7 @@ export type WorkspaceSearchFilters = {
    */
   creatorUserIds?: string[]
   /**
-   * Workflow status code 候補です。
+   * Workflow status ID または Team/Work Item Type-qualified status key (`teamId\0workItemTypeId\0statusId`) の候補です。
    */
   statuses?: string[]
   /**

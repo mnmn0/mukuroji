@@ -89,6 +89,15 @@ const recurringWeekdays = [0, 1, 2, 3, 4, 5, 6] as const
 type AutomationTriggerType = (typeof automationTriggerTypes)[number]
 /** Schedule 以外の Automation trigger type です。 */
 type NonScheduleAutomationTriggerType = Exclude<AutomationTriggerType, 'schedule'>
+/** Work Item Type change direction accepted by the Automation rule editor. */
+export type AutomationWorkItemTypeTriggerDirection = 'from' | 'to' | 'both'
+/** Optional source-side values used when creating an Automation trigger. */
+export type AutomationTriggerOptions = {
+  /** Work Item Type change direction for a Work Item Type trigger. */
+  direction?: AutomationWorkItemTypeTriggerDirection
+  /** Source Work Item Type ID for a Work Item Type trigger. */
+  fromConfiguration?: string
+}
 /** Automation rule editor で選択できる action type です。 */
 type AutomationActionType = (typeof automationActionTypes)[number]
 /** Automation condition editor で選択できる operator です。 */
@@ -221,6 +230,8 @@ export function AutomationRuleEditor({
       ? activeWebhookEndpoints[0]?.id ?? ''
       : '',
   )
+  const [triggerFromConfiguration, setTriggerFromConfiguration] = useState('')
+  const [workItemTypeTriggerDirection, setWorkItemTypeTriggerDirection] = useState<AutomationWorkItemTypeTriggerDirection>('to')
   const [triggerTeamId, setTriggerTeamId] = useState(
     !initialSchedule && initialTriggerType === 'work-item-type'
       ? teams[0]?.id ?? ''
@@ -266,10 +277,16 @@ export function AutomationRuleEditor({
     isAutomationConditionField(trimmedConditionField) &&
     (isExistenceCondition || Boolean(trimmedConditionValue))
   )
+  const isWorkItemTypeTriggerValid = workItemTypeTriggerDirection === 'from'
+    ? Boolean(triggerFromConfiguration.trim())
+    : workItemTypeTriggerDirection === 'to'
+      ? Boolean(triggerConfiguration.trim())
+      : Boolean(triggerFromConfiguration.trim() && triggerConfiguration.trim())
   const isTriggerValid = triggerType === 'webhook'
     ? activeWebhookEndpoints.some((endpoint) => endpoint.id === resolvedTriggerConfiguration)
-    : isAutomationTriggerConfigurationValid(triggerType, resolvedTriggerConfiguration) &&
-      (triggerType !== 'work-item-type' || Boolean(resolvedTriggerTeamId.trim()))
+    : triggerType === 'work-item-type'
+      ? Boolean(resolvedTriggerTeamId.trim()) && isWorkItemTypeTriggerValid
+      : isAutomationTriggerConfigurationValid(triggerType, resolvedTriggerConfiguration)
   const isActionValid = isAutomationActionConfigurationValid(actionType, actionConfiguration)
   const isScheduleTimeValid = isAutomationScheduleConfigurationValid(
     scheduleTimeZone,
@@ -325,6 +342,10 @@ export function AutomationRuleEditor({
               triggerType,
               resolvedTriggerConfiguration,
               resolvedTriggerTeamId,
+              {
+                direction: workItemTypeTriggerDirection,
+                fromConfiguration: triggerFromConfiguration,
+              },
             ),
       })
     } catch {
@@ -365,6 +386,8 @@ export function AutomationRuleEditor({
             setTriggerConfiguration(
               nextType === 'webhook' ? activeWebhookEndpoints[0]?.id ?? '' : '',
             )
+            setTriggerFromConfiguration('')
+            setWorkItemTypeTriggerDirection('to')
             setTriggerTeamId(nextType === 'work-item-type' ? teams[0]?.id ?? '' : '')
           }}
         />
@@ -381,43 +404,74 @@ export function AutomationRuleEditor({
       </div>
       <div className={`grid gap-3 max-[760px]:grid-cols-1 ${triggerType === 'schedule' ? 'grid-cols-1' : 'grid-cols-2'}`}>
         {triggerType === 'work-item-type' ? (
-          <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
-            <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
-              {t('automation.rule.triggerTeam')}
-              {teams.length > 0 ? (
+          <div className="grid gap-3">
+            <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
+              <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('automation.rule.triggerTeam')}
+                {teams.length > 0 ? (
+                  <select
+                    className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                    data-testid="automation-rule-trigger-team"
+                    required
+                    value={resolvedTriggerTeamId}
+                    onChange={(event) => setTriggerTeamId(event.target.value)}
+                  >
+                    {teams.map((team) => (
+                      <option key={team.id} value={team.id}>
+                        {team.name} · {team.id}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                    data-testid="automation-rule-trigger-team"
+                    required
+                    value={resolvedTriggerTeamId}
+                    onChange={(event) => setTriggerTeamId(event.target.value)}
+                  />
+                )}
+              </label>
+              <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('automation.rule.triggerWorkItemTypeDirection')}
                 <select
                   className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
-                  data-testid="automation-rule-trigger-team"
-                  required
-                  value={resolvedTriggerTeamId}
-                  onChange={(event) => setTriggerTeamId(event.target.value)}
+                  data-testid="automation-rule-trigger-type-direction"
+                  value={workItemTypeTriggerDirection}
+                  onChange={(event) => setWorkItemTypeTriggerDirection(readWorkItemTypeTriggerDirection(event.target.value))}
                 >
-                  {teams.map((team) => (
-                    <option key={team.id} value={team.id}>
-                      {team.name} · {team.id}
-                    </option>
-                  ))}
+                  <option value="from">{t('automation.rule.triggerWorkItemTypeDirection.from')}</option>
+                  <option value="to">{t('automation.rule.triggerWorkItemTypeDirection.to')}</option>
+                  <option value="both">{t('automation.rule.triggerWorkItemTypeDirection.both')}</option>
                 </select>
-              ) : (
-                <input
-                  className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
-                  data-testid="automation-rule-trigger-team"
-                  required
-                  value={resolvedTriggerTeamId}
-                  onChange={(event) => setTriggerTeamId(event.target.value)}
-                />
-              )}
-            </label>
-            <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
-              {t('automation.rule.triggerWorkItemType')}
-              <input
-                className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
-                data-testid="automation-rule-trigger-configuration"
-                required
-                value={triggerConfiguration}
-                onChange={(event) => setTriggerConfiguration(event.target.value)}
-              />
-            </label>
+              </label>
+            </div>
+            <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
+              {workItemTypeTriggerDirection !== 'to' ? (
+                <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                  {t('automation.rule.triggerWorkItemTypeFrom')}
+                  <input
+                    className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                    data-testid="automation-rule-trigger-from-work-item-type"
+                    required
+                    value={triggerFromConfiguration}
+                    onChange={(event) => setTriggerFromConfiguration(event.target.value)}
+                  />
+                </label>
+              ) : null}
+              {workItemTypeTriggerDirection !== 'from' ? (
+                <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                  {t('automation.rule.triggerWorkItemType')}
+                  <input
+                    className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                    data-testid="automation-rule-trigger-configuration"
+                    required
+                    value={triggerConfiguration}
+                    onChange={(event) => setTriggerConfiguration(event.target.value)}
+                  />
+                </label>
+              ) : null}
+            </div>
           </div>
         ) : triggerType === 'webhook' ? (
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
@@ -1336,6 +1390,11 @@ function readTriggerType(value: string): AutomationTriggerType {
   return automationTriggerTypes.find((candidate) => candidate === value) ?? 'status'
 }
 
+/** Narrows an editor value to a supported Work Item Type trigger direction. */
+function readWorkItemTypeTriggerDirection(value: string): AutomationWorkItemTypeTriggerDirection {
+  return value === 'from' || value === 'both' ? value : 'to'
+}
+
 function readActionType(value: string): AutomationActionType {
   return automationActionTypes.find((candidate) => candidate === value) ?? 'move'
 }
@@ -1389,14 +1448,17 @@ function toRecord(value: unknown): Record<string, unknown> {
  * @param type - Trigger discriminator selected in the editor.
  * @param configuration - Primary trigger identifier or value.
  * @param teamId - Team identity required by Work Item Type triggers.
+ * @param options - Optional source-side Work Item Type trigger values.
  * @returns A normalized Automation trigger.
  */
-function createAutomationTrigger(
+export function createAutomationTrigger(
   type: NonScheduleAutomationTriggerType,
   configuration: string,
   teamId?: string,
+  options: AutomationTriggerOptions = {},
 ): AutomationTrigger {
   const value = configuration.trim()
+  const fromValue = options.fromConfiguration?.trim()
 
   switch (type) {
     case 'assignee':
@@ -1409,7 +1471,8 @@ function createAutomationTrigger(
       return {
         type,
         teamId: teamId?.trim() ?? '',
-        ...(value ? { toWorkItemTypeId: value } : {}),
+        ...(options.direction !== 'to' && fromValue ? { fromWorkItemTypeId: fromValue } : {}),
+        ...(options.direction !== 'from' && value ? { toWorkItemTypeId: value } : {}),
       }
     case 'due':
       return { type, reason: value === 'changed' || value === 'overdue' ? value : 'due' }
