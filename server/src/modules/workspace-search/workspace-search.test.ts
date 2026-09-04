@@ -1442,10 +1442,11 @@ test('removes deleted custom field references with stable migration warnings', (
       mode: 'table',
       sort: [
         { field: 'relevance', direction: 'desc' },
+        { field: 'workItemType', direction: 'asc' },
         { field: 'custom:deleted', direction: 'asc' },
       ],
       groupBy: 'custom:deleted',
-      columns: ['title', 'custom:kept', 'custom:deleted'],
+      columns: ['title', 'workItemType', 'custom:kept', 'custom:deleted'],
     },
     revision: 1,
     canEdit: true,
@@ -1458,8 +1459,11 @@ test('removes deleted custom field references with stable migration warnings', (
 
   expect(migrated.filters.customFields?.map((filter) => filter.fieldId)).toEqual(['kept'])
   expect(migrated.layout).toMatchObject({
-    columns: ['title', 'custom:kept'],
-    sort: [{ field: 'relevance', direction: 'desc' }],
+    columns: ['title', 'workItemType', 'custom:kept'],
+    sort: [
+      { field: 'relevance', direction: 'desc' },
+      { field: 'workItemType', direction: 'asc' },
+    ],
   })
   expect(migrated.layout.groupBy).toBeUndefined()
   expect(migrated.migrationWarnings).toHaveLength(4)
@@ -2537,7 +2541,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
     readableCustomFieldIds: new Set(['kept']),
     activeStatusIds: new Set(['core\0todo']),
     activeWorkflowStatusIds: new Set(['core\0bug\0todo']),
-    readableColumnIds: new Set(['title', 'customFields']),
+    readableColumnIds: new Set(['title', 'customFields', 'workItemType']),
     readableActorIds: new Set(['owner@example.com']),
     readableRelationIds: new Set(['visible-relation']),
   }
@@ -2576,15 +2580,17 @@ test('sanitizes deleted and permission-restricted task view references with stab
         },
         layout: {
           mode: 'table',
-          group: { field: 'custom:deleted', direction: 'asc' },
+          group: { field: 'workItemType', direction: 'asc' },
           subgroup: { field: 'custom:private', direction: 'asc' },
           sort: [
             { field: 'custom:kept', direction: 'asc' },
+            { field: 'workItemType', direction: 'asc' },
             { field: 'customFields', direction: 'asc' },
             { field: 'unknown-built-in', direction: 'desc' },
           ],
           columns: [
             { field: 'title' },
+            { field: 'workItemType' },
             { field: 'customFields' },
             { field: 'status' },
             { field: 'custom:kept' },
@@ -2613,14 +2619,18 @@ test('sanitizes deleted and permission-restricted task view references with stab
     customFields: [{ fieldId: 'kept', operator: 'equals', value: 'yes' }],
   })
   expect(created.definition.layout).toMatchObject({
-    sort: [{ field: 'custom:kept', direction: 'asc' }],
+    sort: [
+      { field: 'custom:kept', direction: 'asc' },
+      { field: 'workItemType', direction: 'asc' },
+    ],
     columns: [
       { field: 'title' },
+      { field: 'workItemType' },
       { field: 'customFields' },
       { field: 'custom:kept' },
     ],
   })
-  expect(created.definition.layout.group).toBeUndefined()
+  expect(created.definition.layout.group).toEqual({ field: 'workItemType', direction: 'asc' })
   expect(created.definition.layout.subgroup).toBeUndefined()
   expect(new Set(created.migrationWarnings?.map((warning) => warning.code))).toEqual(new Set([
     'deleted-custom-field',

@@ -12,10 +12,13 @@ import {
   createVisibleCustomFieldValuePatch,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
+  resolveAvailableWorkItemTypeSortOrder,
   resolveCreatableWorkItemTypeId,
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypes,
 } from '../src/work-items/model/workItemDisplay'
+import { workspaceWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 describe('Work Item display helpers', () => {
   test('uses the canonical literal title', () => {
@@ -54,6 +57,24 @@ describe('Work Item display helpers', () => {
     ]
     expect(resolveCreatableWorkItemTypeId(workItemTypes, 'default')).toBe('incident')
     expect(resolveCreatableWorkItemTypeId(workItemTypes, 'missing')).toBe('incident')
+  })
+
+  test('keeps synthesized and newly added Work Item Type sort orders unique', () => {
+    const types = resolveWorkItemTypes({
+      ...workspaceWorkItemConfigurationFixture,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        id: 'incident',
+        name: 'Incident',
+        sortOrder: 10,
+      }],
+    })
+
+    expect(types.map((type) => ({ id: type.id, sortOrder: type.sortOrder }))).toEqual([
+      { id: 'default', sortOrder: 0 },
+      { id: 'incident', sortOrder: 10 },
+    ])
+    expect(resolveAvailableWorkItemTypeSortOrder(types)).toBe(1)
   })
 
   test('translates and combines custom field validation messages', () => {

@@ -24,6 +24,7 @@ import {
   sortCustomFieldDefinitions,
 } from '../model/customFields'
 import {
+  resolveAvailableWorkItemTypeSortOrder,
   resolveWorkflowCategoryToneClassName,
   sortWorkflowStatuses,
 } from '../model/workItemDisplay'
@@ -727,7 +728,7 @@ export function WorkItemTypesConfigurationSection({
           ...configuredTypes,
           {
             ...defaultType,
-            sortOrder: configuredTypes.length * 10,
+            sortOrder: resolveAvailableWorkItemTypeSortOrder(configuredTypes),
           },
         ]
   const workflows = [
@@ -757,7 +758,7 @@ export function WorkItemTypesConfigurationSection({
         requiredCustomFieldIds: [],
         detailSections: ['overview', 'description', 'workflow', 'activity'],
         allowedChildTypeIds: [DEFAULT_WORK_ITEM_TYPE.id],
-        sortOrder: types.length * 10,
+        sortOrder: resolveAvailableWorkItemTypeSortOrder(types),
       },
     ])
   }

@@ -902,6 +902,7 @@ const builtInLayoutFields = new Set([
   'updatedAt',
   'priority',
   'relevance',
+  'workItemType',
 ])
 
 const taskViewBuiltInLayoutFields = new Set([

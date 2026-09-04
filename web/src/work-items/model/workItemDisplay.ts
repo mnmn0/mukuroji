@@ -94,7 +94,27 @@ export function resolveWorkflowStatusDefinition(
   )
 }
 
-/** Returns configured Work Item Types, including the built-in fallback. */
+/**
+ * Returns the first non-negative sort order that is not used by the supplied Work Item Types.
+ *
+ * @param workItemTypes - Work Item Types whose sort orders must remain unique.
+ * @returns The smallest unused non-negative sort order.
+ */
+export function resolveAvailableWorkItemTypeSortOrder(
+  workItemTypes: readonly Pick<WorkItemTypeDefinition, 'sortOrder'>[],
+): number {
+  const usedSortOrders = new Set(workItemTypes.map((type) => type.sortOrder))
+  let sortOrder = 0
+  while (usedSortOrders.has(sortOrder)) sortOrder += 1
+  return sortOrder
+}
+
+/**
+ * Returns configured Work Item Types, including the built-in fallback.
+ *
+ * @param configuration - Configuration whose Work Item Types should be resolved.
+ * @returns Configured Work Item Types with a collision-safe built-in fallback.
+ */
 export function resolveWorkItemTypes(
   configuration: WorkItemConfigurationLike,
 ): WorkItemTypeDefinition[] {
@@ -104,7 +124,10 @@ export function resolveWorkItemTypes(
   }
   const configuredTypes = [...resolvedConfiguration.workItemTypes]
   if (!configuredTypes.some((type) => type.id === DEFAULT_WORK_ITEM_TYPE_ID)) {
-    configuredTypes.push(DEFAULT_WORK_ITEM_TYPE)
+    configuredTypes.push({
+      ...DEFAULT_WORK_ITEM_TYPE,
+      sortOrder: resolveAvailableWorkItemTypeSortOrder(configuredTypes),
+    })
   }
   return configuredTypes.sort(
     (first, second) => first.sortOrder - second.sortOrder || first.name.localeCompare(second.name),
