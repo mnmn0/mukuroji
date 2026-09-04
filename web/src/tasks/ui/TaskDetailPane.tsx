@@ -1221,7 +1221,6 @@ export function TaskDetailPane({
       />
       <div
         className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
-        key={`${task.teamId}:${task.id}:${issue?.revision ?? 'loading'}`}
         onChange={() => {
           const nextDirtyState = { dirty: true, identity: editorIdentity }
           editorDirtyStateRef.current = nextDirtyState
