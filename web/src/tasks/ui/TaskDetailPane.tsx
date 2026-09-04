@@ -513,6 +513,7 @@ export function TaskDetailPane({
     shouldConfirmAiPlanningAdoption()
   // The renderer only constructs inert React elements; the supplied callbacks
   // are invoked later by user events inside the feature-owned assistants.
+  // eslint-disable-next-line react-hooks/refs -- the renderer returns inert elements and invokes callbacks only from later user events.
   const aiAssistanceSlots = renderAiAssistance?.({
     accessToken,
     aiAssistanceEnabled,
