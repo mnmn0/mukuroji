@@ -1,5 +1,6 @@
 import { Hono, type Context } from 'hono'
 import type { WorkItemConfiguration } from '@mukuroji/contracts'
+import type { MutationAuditContext } from '../../../audit'
 import type {
   WorkItemConfigurationClient,
   WorkItemConfigurationTransactionItems,
@@ -31,6 +32,12 @@ export type WorkItemConfigurationRouterDependencies<
   authenticate(accessToken: string, context: Context): Promise<TPrincipal>
   /** Requires permission to change the Workspace configuration. */
   requireWorkspaceAdministration(principal: TPrincipal): void
+  /** Creates the request-scoped audit context for a configuration mutation. */
+  createAuditContext(
+    context: Context,
+    principal: TPrincipal,
+    body: unknown,
+  ): MutationAuditContext
   /** Requires Workspace business-write permission for a Team configuration change. */
   requireWorkspaceBusinessWrite(principal: TPrincipal): void
   /** Requires read or write permission for a Team scope. */
@@ -105,6 +112,7 @@ export function createWorkItemConfigurationRouter<
         withConfigurationScope(body, expectedScope),
         expectedScope,
       )
+      const auditContext = dependencies.createAuditContext(context, principal, configuration)
       return context.json(await dependencies.getWorkItemConfigurations().saveWorkspaceConfiguration(
         principal.directoryId,
         configuration,
@@ -112,6 +120,8 @@ export function createWorkItemConfigurationRouter<
           await dependencies.validateReferences(principal.directoryId, configuration)
           return dependencies.validateUsage(principal.directoryId, configuration)
         },
+        [],
+        auditContext,
       ))
     } catch (error) {
       return dependencies.mapError(context, error)
@@ -163,6 +173,7 @@ export function createWorkItemConfigurationRouter<
         withConfigurationScope(body, expectedScope),
         expectedScope,
       )
+      const auditContext = dependencies.createAuditContext(context, principal, configuration)
       return context.json(await dependencies.getWorkItemConfigurations().saveTeamConfiguration(
         principal.directoryId,
         teamId,
@@ -171,6 +182,8 @@ export function createWorkItemConfigurationRouter<
           await dependencies.validateReferences(principal.directoryId, configuration, teamId)
           return dependencies.validateUsage(principal.directoryId, configuration, teamId)
         },
+        [],
+        auditContext,
       ))
     } catch (error) {
       return dependencies.mapError(context, error)

@@ -12,6 +12,7 @@ import {
   createWorkItemConfigurationRouter,
   type WorkItemConfigurationRouterDependencies,
 } from './work-item-configuration-router'
+import { createMutationAuditContext } from '../../../audit'
 
 const principal = { directoryId: 'workspace-1' }
 
@@ -86,6 +87,15 @@ function createDependencies(
     async authenticate(accessToken, context) {
       calls.push({ operation: 'authenticate', value: { accessToken, context } })
       return principal
+    },
+    createAuditContext(context, value, body) {
+      return createMutationAuditContext({
+        workspaceId: value.directoryId,
+        actor: { id: 'router-test-actor', kind: 'user' },
+        idempotencyKey: 'router-test-idempotency',
+        request: { method: context.req.method, path: context.req.path, body },
+        source: { kind: 'api', method: context.req.method, route: context.req.path },
+      })
     },
     requireWorkspaceAdministration(value) {
       calls.push({ operation: 'requireWorkspaceAdministration', value })

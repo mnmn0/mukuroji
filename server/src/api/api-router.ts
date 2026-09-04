@@ -6542,6 +6542,8 @@ routeApp.route('/', createWorkItemConfigurationRouter<WorkspacePrincipal>({
   authenticate: async (accessToken, context) =>
     await authenticateWorkspacePrincipal(accessToken, undefined, context),
   requireWorkspaceAdministration,
+  createAuditContext: (context, principal, body) =>
+    createWorkspaceMutationContext(context, principal, body),
   requireWorkspaceBusinessWrite,
   requireTeamPermission: async (principal, teamId, minimum) => {
     await requireTeamPermission(principal, teamId, minimum)
@@ -13166,6 +13168,17 @@ async function executeAutomationTemplateApplication(
     const completionTransactItems = [
       automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, result),
     ]
+    const configurationAuditContext = createWorkspaceMutationContext(
+      c,
+      principal,
+      {
+        applicationId: application.id,
+        target,
+        templateId: application.templateId,
+        templateVersion: application.templateVersion,
+      },
+      application.id,
+    )
     if (target.scopeType === 'workspace') {
       await workItemDependencies.workItemConfigurations.saveWorkspaceConfiguration(
         application.workspaceId,
@@ -13175,6 +13188,7 @@ async function executeAutomationTemplateApplication(
           return validateWorkItemConfigurationUsage(application.workspaceId, configuration)
         },
         completionTransactItems,
+        configurationAuditContext,
       )
     } else {
       await workItemDependencies.workItemConfigurations.saveTeamConfiguration(
@@ -13194,6 +13208,7 @@ async function executeAutomationTemplateApplication(
           )
         },
         completionTransactItems,
+        configurationAuditContext,
       )
     }
     return await requireCompletedTemplateApplication(application)
@@ -40883,7 +40898,7 @@ function projectPublicWorkItem(workItem: CanonicalWorkItem): CanonicalWorkItem {
     priority: workItem.priority,
     creatorMemberKey: workItem.creatorMemberKey,
     workflowStatusId: workItem.workflowStatusId,
-    workItemTypeId: workItem.workItemTypeId,
+    workItemTypeId: workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     statusCategory: workItem.statusCategory,
     workflowSchemaVersion: workItem.workflowSchemaVersion,
     customFieldValues: structuredClone(workItem.customFieldValues),

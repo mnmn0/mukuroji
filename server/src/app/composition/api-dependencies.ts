@@ -226,6 +226,7 @@ export function createWorkItemConfigurationClient(): WorkItemConfigurationClient
     createDynamoDbDocumentClient(dynamoDbClient),
     dynamoDbClient,
     shouldBootstrapLocalDynamoDb(),
+    getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
   )
 }
 

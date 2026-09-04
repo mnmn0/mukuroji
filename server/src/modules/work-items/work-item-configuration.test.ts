@@ -21,6 +21,7 @@ import {
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
 } from './work-item-configuration'
+import { createMutationAuditContext } from '../audit'
 
 test('validates the built-in workflow and resolves configured statuses', () => {
   const configuration = validateWorkItemConfiguration(DEFAULT_WORK_ITEM_CONFIGURATION)
@@ -859,6 +860,72 @@ test('saves configuration with revision CAS and returns the incremented revision
       usageConditionCheck,
       completion,
     ],
+  })
+})
+
+test('writes a configuration audit event in the same transaction as the revision update', async () => {
+  const sent: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sent.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'audit-table',
+  )
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'configuration-audit-1',
+    request: {
+      method: 'PUT',
+      path: '/api/work-item-configuration',
+      body: { revision: 0 },
+    },
+    source: {
+      kind: 'api',
+      method: 'PUT',
+      route: '/api/work-item-configuration',
+    },
+    occurredAt: '2026-07-16T00:00:00.000Z',
+  })
+
+  const response = await client.saveWorkspaceConfiguration(
+    'workspace-1',
+    createConfiguration({ scopeId: 'workspace-1' }),
+    async () => undefined,
+    [],
+    auditContext,
+  )
+
+  expect(response.configuration.revision).toBe(1)
+  const transaction = sent[2]
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Expected a configuration transaction.')
+  }
+  const auditItem = transaction.TransactItems.find((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null || !('Put' in candidate)) {
+      return false
+    }
+    const put = candidate.Put
+    return typeof put === 'object' && put !== null &&
+      'TableName' in put && put.TableName === 'audit-table'
+  })
+  expect(auditItem).toMatchObject({
+    Put: {
+      Item: expect.objectContaining({
+        eventType: 'work-item-configuration.created',
+        entityType: 'work-item-configuration',
+        entityId: 'workspace:workspace-1',
+        action: 'created',
+      }),
+    },
   })
 })
 

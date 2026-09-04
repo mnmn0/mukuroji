@@ -37,6 +37,13 @@ import {
   createDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
 import {
+  createAuditFieldChanges,
+  createMutationAuditEventPut,
+  ensureLocalAuditEventsTable,
+  getConfiguredAuditTableName,
+  type MutationAuditContext,
+} from '../audit'
+import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
 } from '../work-item-workflow'
@@ -253,20 +260,41 @@ export type WorkItemConfigurationClient = {
   getWorkspaceConfiguration(workspaceId: string): Promise<ResolvedWorkItemConfiguration>
   /** Team override、Workspace default、built-in default の順で解決します。 */
   getTeamConfiguration(workspaceId: string, teamId: string): Promise<ResolvedWorkItemConfiguration>
-  /** Workspace default を optimistic revision 付きで保存します。 */
+  /**
+   * Workspace default を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   saveWorkspaceConfiguration(
     workspaceId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    auditContext?: MutationAuditContext,
   ): Promise<ResolvedWorkItemConfiguration>
-  /** Team override を optimistic revision 付きで保存します。 */
+  /**
+   * Team override を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param teamId - Team whose configuration is being saved.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   saveTeamConfiguration(
     workspaceId: string,
     teamId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    auditContext?: MutationAuditContext,
   ): Promise<ResolvedWorkItemConfiguration>
   /** Work Item から見た relation と graph revision を返します。 */
   listRelations(
@@ -932,6 +960,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   private readonly dynamoDbClient: DynamoDBClient
   /** Local table の自動作成を有効にするかどうかです。 */
   private readonly bootstrapLocalTable: boolean
+  /** Immutable audit event table 名です。 */
+  private readonly auditTableName?: string
 
   constructor(
     tableName =
@@ -943,6 +973,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createConfiguredDynamoDbClient(),
     bootstrapLocalTable = false,
+    auditTableName = documentClient === undefined
+      ? getConfiguredAuditTableName() ?? 'mukuroji-audit-events'
+      : undefined,
   ) {
     this.tableName = tableName
     this.workItemsTableName = workItemsTableName
@@ -950,6 +983,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       createDocumentClient(dynamoDbClient)
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTable = bootstrapLocalTable
+    this.auditTableName = auditTableName?.trim() || undefined
   }
 
   /** Workspace default または built-in default を返します。 */
@@ -985,12 +1019,22 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     } satisfies ResolvedWorkItemConfiguration
   }
 
-  /** Workspace default を optimistic revision 付きで保存します。 */
+  /**
+   * Workspace default を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   async saveWorkspaceConfiguration(
     workspaceId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    auditContext?: MutationAuditContext,
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
@@ -999,17 +1043,29 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       configuration,
       usageCheck,
       completionTransactItems,
+      auditContext,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
 
-  /** Team override を optimistic revision 付きで保存します。 */
+  /**
+   * Team override を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param teamId - Team whose configuration is being saved.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   async saveTeamConfiguration(
     workspaceId: string,
     teamId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    auditContext?: MutationAuditContext,
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
@@ -1018,6 +1074,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       configuration,
       usageCheck,
       completionTransactItems,
+      auditContext,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
@@ -1168,6 +1225,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   private async ensureTable() {
     if (this.bootstrapLocalTable) {
       await ensureLocalWorkItemConfigurationTable(this.tableName, this.dynamoDbClient)
+      if (this.auditTableName) {
+        await ensureLocalAuditEventsTable(this.auditTableName, this.dynamoDbClient)
+      }
     }
   }
 
@@ -1197,9 +1257,24 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    auditContext?: MutationAuditContext,
   ) {
     await this.ensureTable()
     const validated = validateWorkItemConfiguration(configuration, { scopeType, scopeId })
+    if (this.auditTableName && auditContext === undefined) {
+      throw new WorkItemConfigurationError(
+        500,
+        'WorkItemConfigurationAuditContextMissing',
+        'Work Item configuration mutation audit context is required.',
+      )
+    }
+    if (auditContext && auditContext.workspaceId !== workspaceId) {
+      throw new WorkItemConfigurationError(
+        500,
+        'WorkItemConfigurationAuditContextMismatch',
+        'Work Item configuration mutation audit context does not match the target Workspace.',
+      )
+    }
     const scopeKey = createWorkItemConfigurationScopeKey(workspaceId, scopeType, scopeId)
     const lock = await this.acquireConfigurationWriteLock(scopeKey)
     const nextRevision = validated.revision + 1
@@ -1217,15 +1292,53 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         console.error('Failed to release Work Item configuration write lock.', releaseError)
       }
     }
+    const auditEnabled = this.auditTableName !== undefined
+    let previousConfiguration: WorkItemConfiguration | undefined
     let usageConditionChecks: WorkItemConfigurationTransactionItems = []
     try {
+      if (auditEnabled) {
+        previousConfiguration = await this.getStoredConfiguration(workspaceId, scopeType, scopeId)
+      }
       usageConditionChecks = (await usageCheck()) ?? []
     } catch (error) {
       await releaseLock()
       throw error
     }
 
-    const transactionItemCount = 2 + usageConditionChecks.length + completionTransactItems.length
+    const auditPut = auditEnabled
+      ? createMutationAuditEventPut(this.auditTableName, auditContext, {
+          directoryId: workspaceId,
+          eventType: previousConfiguration
+            ? 'work-item-configuration.updated'
+            : 'work-item-configuration.created',
+          entityType: 'work-item-configuration',
+          entityId: `${scopeType}:${scopeId}`,
+          action: previousConfiguration ? 'updated' : 'created',
+          occurredAt: item.updatedAt,
+          changes: createAuditFieldChanges(
+            previousConfiguration
+              ? createWorkItemConfigurationAuditSnapshot(previousConfiguration)
+              : undefined,
+            createWorkItemConfigurationAuditSnapshot({
+              ...validated,
+              revision: nextRevision,
+            }),
+          ),
+          summary: previousConfiguration
+            ? 'Work Item configuration was updated.'
+            : 'Work Item configuration was created.',
+          metadata: {
+            adapter: 'work-item-configuration',
+            scopeType,
+            scopeId,
+            previousRevision: previousConfiguration?.revision ?? 0,
+            revision: nextRevision,
+          },
+        })
+      : undefined
+
+    const transactionItemCount = 2 + usageConditionChecks.length + completionTransactItems.length +
+      (auditPut === undefined ? 0 : 1)
     if (transactionItemCount > DYNAMODB_TRANSACTION_ITEM_LIMIT) {
       await releaseLock()
       throw new WorkItemConfigurationError(
@@ -1237,43 +1350,43 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
 
     const currentEpochSeconds = Math.floor(Date.now() / 1_000)
     try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: item,
-              ...(validated.revision === 0
-                ? {
-                    ConditionExpression:
-                      'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-                  }
-                : {
-                    ConditionExpression: '#revision = :expectedRevision',
-                    ExpressionAttributeNames: { '#revision': 'revision' },
-                    ExpressionAttributeValues: { ':expectedRevision': validated.revision },
-                  }),
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: item,
+            ...(validated.revision === 0
+              ? {
+                  ConditionExpression:
+                    'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+                }
+              : {
+                  ConditionExpression: '#revision = :expectedRevision',
+                  ExpressionAttributeNames: { '#revision': 'revision' },
+                  ExpressionAttributeValues: { ':expectedRevision': validated.revision },
+                }),
+          },
+        },
+        {
+          Delete: {
+            TableName: this.tableName,
+            Key: { scopeKey, recordKey: CONFIGURATION_WRITE_LOCK_RECORD_KEY },
+            ConditionExpression: '#token = :token AND #expiresAt >= :now',
+            ExpressionAttributeNames: {
+              '#expiresAt': 'expiresAtEpochSeconds',
+              '#token': 'token',
+            },
+            ExpressionAttributeValues: {
+              ':now': currentEpochSeconds,
+              ':token': lock.token,
             },
           },
-          {
-            Delete: {
-              TableName: this.tableName,
-              Key: { scopeKey, recordKey: CONFIGURATION_WRITE_LOCK_RECORD_KEY },
-              ConditionExpression: '#token = :token AND #expiresAt >= :now',
-              ExpressionAttributeNames: {
-                '#expiresAt': 'expiresAtEpochSeconds',
-                '#token': 'token',
-              },
-              ExpressionAttributeValues: {
-                ':now': currentEpochSeconds,
-                ':token': lock.token,
-              },
-            },
-          },
-          ...usageConditionChecks,
-          ...completionTransactItems,
-        ],
-      }))
+        },
+        ...usageConditionChecks,
+        ...completionTransactItems,
+        ...(auditPut === undefined ? [] : [auditPut]),
+      ]
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
       await releaseLock()
       if (
@@ -1652,6 +1765,38 @@ function createScopedDefaultConfiguration(
     ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
     scopeType,
     scopeId,
+  }
+}
+
+/**
+ * Creates a bounded configuration summary suitable for an immutable audit event.
+ *
+ * The full configuration can contain user-authored option lists and formulas. Audit events keep
+ * stable identifiers and structural counts instead of copying that unbounded payload into the
+ * audit table.
+ *
+ * @param configuration - Validated Work Item configuration to summarize.
+ * @returns A deterministic, bounded summary of the configuration structure.
+ */
+function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfiguration) {
+  return {
+    revision: configuration.revision,
+    workflowIds: getWorkItemConfigurationWorkflows(configuration)
+      .map((workflow) => workflow.id)
+      .sort(),
+    customFieldIds: configuration.customFields
+      .map((field) => field.id)
+      .sort(),
+    workItemTypes: (configuration.workItemTypes ?? [])
+      .map((type) => ({
+        id: type.id,
+        name: type.name,
+        status: type.status,
+        defaultWorkflowId: type.defaultWorkflowId,
+        customFieldCount: type.customFieldIds.length,
+        requiredCustomFieldCount: type.requiredCustomFieldIds.length,
+      }))
+      .sort((first, second) => first.id.localeCompare(second.id)),
   }
 }
 

@@ -49,6 +49,7 @@ afterEach(() => {
 function addInternalWorkItemFields(workItem: CanonicalWorkItem): CanonicalWorkItem {
   return {
     ...workItem,
+    workItemTypeId: undefined,
     priorityUpdatedAt: '2026-06-08T01:00:00.000Z',
     dueDateUpdatedAt: '2026-06-08T01:00:00.000Z',
     sourceRequestId: 'request-internal-1',
@@ -386,6 +387,7 @@ test('projects every Public Work Item service result onto the closed response sc
     expect(item).toBeDefined()
     expect(item).toMatchObject({
       dueDate: '2026-06-18',
+      workItemTypeId: 'default',
       schedule: {
         mode: 'due-date',
         dueDate: '2026-06-18',
