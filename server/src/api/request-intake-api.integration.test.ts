@@ -454,6 +454,7 @@ test('uses a forwarded request rate-limit source only for a configured trusted p
 test('delegates Request Form publish revision checks to the Request Intake client', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'owner' })
   let publishCalls = 0
+  let publishGuards: NonNullable<TransactWriteCommandInput['TransactItems']> | undefined
   const conflict = new RequestIntakeError(
     409,
     'RequestRevisionConflict',
@@ -463,8 +464,15 @@ test('delegates Request Form publish revision checks to the Request Intake clien
     async getForm() {
       return requestForm
     },
-    async publishForm() {
+    async publishForm(
+      _workspaceId,
+      _formId,
+      _actor,
+      _input,
+      additionalTransactionItems,
+    ) {
       publishCalls += 1
+      publishGuards = additionalTransactionItems
       throw conflict
     },
   } satisfies Pick<RequestIntakeClient, 'getForm' | 'publishForm'>
@@ -487,6 +495,9 @@ test('delegates Request Form publish revision checks to the Request Intake clien
     message: 'Request resource revision changed.',
   })
   expect(publishCalls).toBe(1)
+  expect(publishGuards).toHaveLength(4)
+  expect(publishGuards?.every((item) => item.ConditionCheck?.TableName === 'mukuroji-work-item-configuration-local'))
+    .toBe(true)
 })
 
 test('rejects a Request Form mapping that is unavailable to a routed Work Item Type', async () => {

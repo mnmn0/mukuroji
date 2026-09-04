@@ -217,6 +217,34 @@ describe('admin request intake router', () => {
     })
   })
 
+  test('forwards configuration guards returned by routing validation', async () => {
+    const guard = {
+      ConditionCheck: {
+        TableName: 'mukuroji-work-item-configuration-local',
+        Key: { scopeKey: 'workspace-1', recordKey: 'CONFIG' },
+        ConditionExpression: 'attribute_exists(scopeKey)',
+      },
+    }
+    let receivedGuards: unknown
+    const { router } = createDependencies({
+      validateFormRoutingReferences: async () => [guard],
+    }, {
+      publishForm: async (_workspaceId, _formId, _actor, _input, additionalTransactionItems) => {
+        receivedGuards = additionalTransactionItems
+        return form
+      },
+    })
+
+    const response = await router.request('/api/request-forms/form-1/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expectedRevision: 7 }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(receivedGuards).toEqual([guard])
+  })
+
   test('forwards queue filters, submission detail, and attachment access', async () => {
     const { calls, router } = createDependencies()
     const queueResponse = await router.request(

@@ -103,6 +103,8 @@ const REQUEST_PATTERN_FIXED_QUANTIFIER_LIMIT = 1_000
 const REQUEST_STORED_ITEM_BYTE_LIMIT = 360 * 1024
 const REQUEST_SUBMISSION_REPLAY_GRACE_MS = 15 * 60_000
 const REQUEST_SUBMISSION_REPLAY_LIMIT = 5
+const REQUEST_FORM_PUBLISH_BASE_TRANSACTION_ITEM_COUNT = 3
+const DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
 
 /** Request domain の安定した application error です。 */
 export class RequestIntakeError extends Error {
@@ -157,6 +159,11 @@ export type RequestSubmissionListOptions = {
   cursor?: string
 }
 
+/** Transaction items supplied by a caller that owns a cross-domain publish guard. */
+export type RequestIntakeTransactionItems = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>
+
 /** Work Item conversion の private projection input です。 */
 export type RequestConversionProjection = {
   /** 読み込み時点の submission revision です。 */
@@ -194,12 +201,16 @@ export interface RequestIntakeClient {
     actor: RequestIntakeActor,
     input: UpdateRequestFormInput,
   ): Promise<RequestForm>
-  /** Current draft を immutable version として公開します。 */
+  /** Current draft を immutable version として公開します。
+   *
+   * @param additionalTransactionItems - Additional atomic guards owned by the caller.
+   */
   publishForm(
     workspaceId: string,
     formId: string,
     actor: RequestIntakeActor,
     input: PublishRequestFormInput,
+    additionalTransactionItems?: RequestIntakeTransactionItems,
   ): Promise<RequestForm>
   /** Opaque link token を内部 form scope へ解決します。 */
   resolveLink(token: string): Promise<RequestLinkResolution>
@@ -1585,7 +1596,18 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     formId: string,
     actor: RequestIntakeActor,
     input: PublishRequestFormInput,
+    additionalTransactionItems: RequestIntakeTransactionItems = [],
   ) {
+    if (
+      REQUEST_FORM_PUBLISH_BASE_TRANSACTION_ITEM_COUNT + additionalTransactionItems.length >
+      DYNAMODB_TRANSACTION_ITEM_LIMIT
+    ) {
+      throw new RequestIntakeError(
+        413,
+        'RequestFormTransactionTooLarge',
+        'Request form publication exceeds the atomic transaction limit.',
+      )
+    }
     const current = await this.getStoredForm(workspaceId, formId)
     requireExpectedRevision(input.expectedRevision, current.revision)
     if (current.status === 'archived') {
@@ -1648,6 +1670,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
               Item: this.createLinkLookup(next),
             },
           },
+          ...additionalTransactionItems,
         ],
       }))
       return this.toFormView(next)

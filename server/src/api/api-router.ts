@@ -23672,7 +23672,7 @@ function readRequestSubmissionStatus(value: string | undefined) {
  * @param draft - Draft or immutable published snapshot being checked.
  * @param configurationOverrides - Candidate configurations keyed by affected Team.
  * @param targetTeamIds - Optional Team allowlist for partial configuration validation.
- * @returns A promise that resolves after every selected routing reference is valid.
+ * @returns Configuration revision guards for the validated live configurations.
  */
 async function validateRequestFormRoutingReferences(
   workspaceId: string,
@@ -23682,16 +23682,24 @@ async function validateRequestFormRoutingReferences(
 ) {
   const targets = [draft.routing.defaultTarget, ...draft.routing.rules.map((rule) => rule.target)]
     .filter((target) => targetTeamIds?.has(target.teamId) ?? true)
-  if (targets.length === 0) return
+  if (targets.length === 0) return []
   const configurations = new Map<string, WorkItemConfiguration>()
+  const resolvedConfigurations = new Map<string, ResolvedWorkItemConfiguration>()
   for (const target of targets) {
-    const configuration = configurations.get(target.teamId) ?? await validateRequestRoutingTarget(
-      workspaceId,
-      target,
-      undefined,
-      configurationOverrides.get(target.teamId),
-    )
-    configurations.set(target.teamId, configuration)
+    let configuration = configurations.get(target.teamId)
+    if (!configuration) {
+      const validated = await validateRequestRoutingTarget(
+        workspaceId,
+        target,
+        undefined,
+        configurationOverrides.get(target.teamId),
+      )
+      configuration = validated.configuration
+      configurations.set(target.teamId, configuration)
+      if (validated.resolvedConfiguration) {
+        resolvedConfigurations.set(target.teamId, validated.resolvedConfiguration)
+      }
+    }
   }
   for (const [formFieldId, customFieldId] of Object.entries(
     draft.routing.mapping.customFieldMappings ?? {},
@@ -23737,6 +23745,21 @@ async function validateRequestFormRoutingReferences(
       }
     }
   }
+
+  const guardsByKey = new Map<string, WorkItemConfigurationTransactionItems[number]>()
+  for (const [teamId, resolved] of resolvedConfigurations) {
+    for (const guard of createWorkItemConfigurationGuardConditionChecks(
+      getWorkItemConfigurationTableName(),
+      workspaceId,
+      teamId,
+      resolved,
+    )) {
+      if (!guard.ConditionCheck) continue
+      const key = JSON.stringify([guard.ConditionCheck.TableName, guard.ConditionCheck.Key])
+      if (!guardsByKey.has(key)) guardsByKey.set(key, guard)
+    }
+  }
+  return [...guardsByKey.values()]
 }
 
 function isCompatibleRequestCustomField(
@@ -23805,7 +23828,10 @@ async function validateRequestRoutingTarget(
   }
   resolveWorkItemType(configuration, workItemTypeId)
   resolveWorkflowStatus(configuration, target.workflowStatusId, workItemTypeId)
-  return configuration
+  return {
+    configuration,
+    ...(resolved ? { resolvedConfiguration: resolved } : {}),
+  }
 }
 
 function toRequestIntakeErrorResponse(

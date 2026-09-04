@@ -948,6 +948,59 @@ test('publishes an immutable version snapshot and protects the form revision wit
   )).rejects.toMatchObject({ code: 'RequestRevisionConflict', status: 409 })
 })
 
+test('includes caller-owned configuration guards in the publish transaction', async () => {
+  const current = createStoredForm({ status: 'draft', currentPublishedVersion: undefined, publishedVersions: [] })
+  const commands: FakeCommand[] = []
+  const client = createClient(createDocumentClient((command) => {
+    commands.push(command)
+    if (command.input.Key) return { Item: current }
+    return {}
+  }))
+  const guard = {
+    ConditionCheck: {
+      TableName: 'mukuroji-work-item-configuration-local',
+      Key: { scopeKey: 'workspace-1', recordKey: 'CONFIG' },
+      ConditionExpression: 'attribute_exists(scopeKey)',
+    },
+  }
+
+  await client.publishForm(
+    'workspace-1',
+    'form-1',
+    { id: 'admin@example.com' },
+    { expectedRevision: 1 },
+    [guard],
+  )
+
+  const transactionCommand = commands.find((command) => Array.isArray(command.input.TransactItems))
+  const transaction = transactionCommand?.input.TransactItems as Array<Record<string, unknown>>
+  expect(transaction.at(-1)).toEqual(guard)
+})
+
+test('rejects a publish transaction that cannot fit its configuration guards', async () => {
+  const commands: FakeCommand[] = []
+  const client = createClient(createDocumentClient((command) => {
+    commands.push(command)
+    return {}
+  }))
+  const guards = Array.from({ length: 98 }, (_, index) => ({
+    ConditionCheck: {
+      TableName: 'mukuroji-work-item-configuration-local',
+      Key: { scopeKey: `guard-${index}`, recordKey: 'CONFIG' },
+      ConditionExpression: 'attribute_exists(scopeKey)',
+    },
+  }))
+
+  await expect(client.publishForm(
+    'workspace-1',
+    'form-1',
+    { id: 'admin@example.com' },
+    { expectedRevision: 1 },
+    guards,
+  )).rejects.toMatchObject({ code: 'RequestFormTransactionTooLarge', status: 413 })
+  expect(commands).toHaveLength(0)
+})
+
 test('lists only form root rows after publishing an immutable version', async () => {
   let root = createStoredForm({
     status: 'draft',

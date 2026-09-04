@@ -15,6 +15,7 @@ export {
   type RequestExternalContext,
   type RequestIntakeActor,
   type RequestIntakeClient,
+  type RequestIntakeTransactionItems,
   type RequestLinkResolution,
   type RequestSubmissionListOptions,
 } from './request-intake'
