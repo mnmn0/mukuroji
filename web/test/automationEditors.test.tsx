@@ -3,10 +3,10 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   AutomationRuleEditor,
   AutomationTemplateEditor,
-  createAutomationTrigger,
 } from '../src/automation/ui/AutomationEditors'
 import {
   createDefaultAutomationWorkflowTemplatePayload,
+  createAutomationTrigger,
   parseAutomationTemplatePayload,
 } from '../src/automation/model/editorValidation'
 

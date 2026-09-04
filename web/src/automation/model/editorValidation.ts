@@ -322,6 +322,60 @@ export function createAutomationScheduleTrigger(
   }
 }
 
+/** Work Item Type change direction accepted by the Automation rule editor. */
+export type AutomationWorkItemTypeTriggerDirection = 'from' | 'to' | 'both'
+
+/** Optional source-side values used when creating an Automation trigger. */
+export type AutomationTriggerOptions = {
+  /** Work Item Type change direction for a Work Item Type trigger. */
+  direction?: AutomationWorkItemTypeTriggerDirection
+  /** Source Work Item Type ID for a Work Item Type trigger. */
+  fromConfiguration?: string
+}
+
+/**
+ * Builds a non-schedule trigger from the editor's compact configuration values.
+ *
+ * @param type - Trigger discriminator selected in the editor.
+ * @param configuration - Primary trigger identifier or value.
+ * @param teamId - Team identity required by Work Item Type triggers.
+ * @param options - Optional source-side Work Item Type trigger values.
+ * @returns A normalized Automation trigger.
+ */
+export function createAutomationTrigger(
+  type: Exclude<AutomationTrigger['type'], 'schedule'>,
+  configuration: string,
+  teamId?: string,
+  options: AutomationTriggerOptions = {},
+): AutomationTrigger {
+  const value = configuration.trim()
+  const fromValue = options.fromConfiguration?.trim()
+
+  switch (type) {
+    case 'assignee':
+      return { type, ...(value ? { assigneeMemberKey: value } : {}) }
+    case 'comment':
+      return { type, kind: 'any' }
+    case 'custom-field':
+      return { type, fieldId: value }
+    case 'work-item-type':
+      return {
+        type,
+        teamId: teamId?.trim() ?? '',
+        ...(options.direction !== 'to' && fromValue ? { fromWorkItemTypeId: fromValue } : {}),
+        ...(options.direction !== 'from' && value ? { toWorkItemTypeId: value } : {}),
+      }
+    case 'due':
+      return { type, reason: value === 'changed' || value === 'overdue' ? value : 'due' }
+    case 'form':
+      return { type, formId: value }
+    case 'status':
+      return { type, ...(value ? { toStatusId: value } : {}) }
+    case 'webhook':
+      return { type, webhookId: value }
+  }
+}
+
 function splitCommaSeparated(value: string) {
   return value.split(',').map((item) => item.trim()).filter(Boolean)
 }
