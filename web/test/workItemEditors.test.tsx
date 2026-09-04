@@ -7,6 +7,7 @@ import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   WorkItemConfigurationPanel,
+  WorkItemTypesConfigurationSection,
   WorkflowConfigurationSection,
 } from '../src/work-items/ui/WorkItemConfigurationPanel'
 import { WorkItemFieldsEditor } from '../src/work-items/ui/WorkItemFieldsEditor'
@@ -75,6 +76,30 @@ describe('Work Item editors', () => {
 
     expect(normalized.workItemTypes?.[0]?.customFieldIds).toEqual(['risk'])
     expect(normalized.workItemTypes?.[0]?.requiredCustomFieldIds).toEqual(['risk'])
+  })
+
+  test('keeps globally required fields required in every type checklist', () => {
+    const configuration = createConfiguration([{
+      ...createCustomFieldDefinition('global-required', 'Global required', 0),
+      required: true,
+    }])
+    const html = renderToStaticMarkup(
+      <WorkItemTypesConfigurationSection
+        configuration={{
+          ...configuration,
+          workItemTypes: [{
+            ...DEFAULT_WORK_ITEM_TYPE,
+            customFieldIds: ['global-required'],
+            defaultWorkflowId: configuration.workflow.id,
+            requiredCustomFieldIds: [],
+          }],
+        }}
+        locale="en"
+        onChange={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<input[^>]*disabled=""[^>]*type="checkbox"[^>]*checked=""/u)
   })
 
   test('allows decimal defaults for every numeric custom field type', () => {

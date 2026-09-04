@@ -1,4 +1,5 @@
 import {
+  createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -525,13 +526,24 @@ function resolveMyTaskGroupValue(
 ): TaskViewGroupValue {
   const configuration = configurationsByTeam[task.teamId]?.configuration
   let value: string
+  let key: string | undefined
   switch (field) {
     case 'title': value = task.title; break
     case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
-    case 'workItemType': value = resolveWorkItemTypeLabel(task, configuration); break
+    case 'workItemType': {
+      const typeLabel = resolveWorkItemTypeLabel(task, configuration)
+      const hasMultipleTeams = Object.keys(configurationsByTeam).length > 1 || teams.length > 1
+      const teamLabel = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId
+      value = hasMultipleTeams ? `${teamLabel} · ${typeLabel}` : typeLabel
+      key = createSearchWorkItemTypeKey(
+        task.teamId,
+        task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      )
+      break
+    }
     case 'project': value = resolveMyTaskProjectLabel(task, teams) ?? '—'; break
     case 'team': value = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId; break
     default: {
@@ -545,5 +557,5 @@ function resolveMyTaskGroupValue(
           : String(customValue)
     }
   }
-  return { key: value, label: value }
+  return { key: key ?? value, label: value }
 }

@@ -70,6 +70,20 @@ describe('RequestQueue', () => {
     expect(submission.formId).toBe(requestSubmissionFixture.formId)
   })
 
+  test('disables conversion until the target Team configuration is loaded', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const html = renderToStaticMarkup(
+      <RequestQueue
+        locale="en"
+        selectedSubmission={submission}
+        submissions={[submission]}
+        onSelectSubmission={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Convert to Work Item/u)
+  })
+
   /** Uses the AI-adopted Team when resolving the conversion Work Item configuration. */
   test('resolves the conversion configuration for the effective Team', () => {
     const submission = normalizeRequestSubmission(requestSubmissionFixture)

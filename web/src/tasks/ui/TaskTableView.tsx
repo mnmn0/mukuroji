@@ -14,7 +14,7 @@ import {
   type KeyboardEvent,
 } from 'react'
 import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
-import type { ProjectMember } from '../../projects/api'
+import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
@@ -95,6 +95,8 @@ export type TaskTableViewProps = {
   canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Team-scoped resolved configurations used by individual rows. */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /** Project directory used to label Team-qualified type groups. */
+  teams?: readonly ProjectDirectoryTeam[]
   /** Locale used to format custom-field values. */
   locale: Locale
   /** Dependency summaries keyed by canonical Team/Work Item identity. */
@@ -235,6 +237,7 @@ export function TaskTableView({
   selectedBulkItems,
   selectedDetailTaskKey,
   selectedTaskKeys,
+  teams = [],
   taskErrorMessage,
   tasks,
   t,
@@ -288,6 +291,7 @@ export function TaskTableView({
           configurationsByTeam,
           configuration,
           t,
+          teams,
         ),
         presentation.groupDirection,
       )
@@ -576,6 +580,7 @@ export function TaskTableView({
                           configurationsByTeam,
                           configuration,
                           t,
+                          teams,
                         ),
                         presentation.subgroupDirection,
                       )

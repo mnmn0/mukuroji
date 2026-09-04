@@ -942,7 +942,7 @@ function TypeFieldChecklist({
       <legend className="text-sm font-semibold text-[var(--workbench-text)]">{label}</legend>
       {configuration.customFields.map((field) => {
         const available = type.customFieldIds.includes(field.id)
-        const required = type.requiredCustomFieldIds.includes(field.id)
+        const required = field.required || type.requiredCustomFieldIds.includes(field.id)
         return (
           <div className="flex items-center justify-between gap-2 text-xs font-medium text-[var(--workbench-muted)]" key={field.id}>
             <label className="flex min-w-0 items-center gap-2">
@@ -967,8 +967,9 @@ function TypeFieldChecklist({
               <input
                 checked={required}
                 className="h-4 w-4 accent-[var(--workbench-primary)]"
-                disabled={!available || field.type === 'formula'}
+                disabled={!available || field.type === 'formula' || field.required}
                 onChange={(event) => {
+                  if (field.required) return
                   const nextIds = event.target.checked
                     ? [...type.requiredCustomFieldIds, field.id]
                     : type.requiredCustomFieldIds.filter((fieldId) => fieldId !== field.id)

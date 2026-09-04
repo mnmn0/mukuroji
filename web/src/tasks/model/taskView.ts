@@ -669,6 +669,7 @@ export function resolveProjectTaskConfiguration(
  * @param configurationsByTeam - Team-specific configurations for aggregate Project views.
  * @param fallbackConfiguration - Single-Team configuration used when no Team map is available.
  * @param t - Translator used for localized priority labels.
+ * @param teams - Optional Project directory used to make aggregate type labels readable.
  * @returns Stable grouping key and human-readable label.
  */
 export function resolveProjectTaskGroupValue(
@@ -677,6 +678,7 @@ export function resolveProjectTaskGroupValue(
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   fallbackConfiguration: WorkItemConfiguration | undefined,
   t: TaskTranslator,
+  teams: readonly ProjectDirectoryTeam[] = [],
 ): TaskViewGroupValue {
   const configuration = resolveProjectTaskConfiguration(
     task,
@@ -684,13 +686,22 @@ export function resolveProjectTaskGroupValue(
     fallbackConfiguration,
   )
   let value: string
+  let key: string | undefined
   switch (field) {
     case 'title': value = resolveWorkItemTitle(task); break
     case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
-    case 'workItemType': value = resolveWorkItemTypeLabel(task, configuration); break
+    case 'workItemType': {
+      const workItemTypeId = task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+      const typeLabel = resolveWorkItemTypeLabel(task, configuration)
+      const hasMultipleTeams = Object.keys(configurationsByTeam).length > 1 || teams.length > 1
+      const teamLabel = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId
+      value = hasMultipleTeams ? `${teamLabel} · ${typeLabel}` : typeLabel
+      key = createSearchWorkItemTypeKey(task.teamId, workItemTypeId)
+      break
+    }
     case 'project': value = task.assignedProjectId ?? '—'; break
     case 'team': value = task.teamId; break
     default: {
@@ -704,7 +715,7 @@ export function resolveProjectTaskGroupValue(
           : String(customValue)
     }
   }
-  return { key: value, label: value }
+  return { key: key ?? value, label: value }
 }
 
 /**

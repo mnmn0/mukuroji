@@ -859,6 +859,75 @@ describe('independent task views', () => {
     expect(emptyHtml).toContain(t('tasks.detail.empty'))
   })
 
+  test('renders configured detail sections in order and omits the overview section when removed', () => {
+    const orderedConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+        detailSections: ['schedule', 'overview', 'description'],
+      }],
+    }
+    const orderedDetail = {
+      ...taskViewStorySelectedIssueDetail,
+      resolvedConfiguration: {
+        ...taskViewStorySelectedIssueDetail.resolvedConfiguration,
+        configuration: orderedConfiguration,
+      },
+    }
+    const orderedHtml = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={orderedConfiguration}
+        detail={orderedDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        onUpdateIssue={async () => undefined}
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+    const overviewlessConfiguration = {
+      ...orderedConfiguration,
+      workItemTypes: [{
+        ...orderedConfiguration.workItemTypes[0]!,
+        detailSections: ['schedule', 'description'],
+      }],
+    }
+    const overviewlessDetail = {
+      ...orderedDetail,
+      resolvedConfiguration: {
+        ...orderedDetail.resolvedConfiguration,
+        configuration: overviewlessConfiguration,
+      },
+    }
+    const overviewlessHtml = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={overviewlessConfiguration}
+        detail={overviewlessDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        onUpdateIssue={async () => undefined}
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(orderedHtml.indexOf('スケジュール種別')).toBeLessThan(orderedHtml.indexOf('data-testid="task-detail-overview"'))
+    expect(orderedHtml.indexOf('data-testid="task-detail-overview"')).toBeLessThan(orderedHtml.indexOf('>説明<textarea'))
+    expect(overviewlessHtml).not.toContain('data-testid="task-detail-overview"')
+    expect(overviewlessHtml).not.toContain('data-testid="task-detail-work-item-type"')
+  })
+
   test('limits inline custom fields to the selected Work Item Type', () => {
     const incidentType = {
       ...DEFAULT_WORK_ITEM_TYPE,

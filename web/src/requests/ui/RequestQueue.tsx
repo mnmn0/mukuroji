@@ -336,7 +336,8 @@ function RequestSubmissionDetail({
     () => resolveWorkItemTypes(effectiveWorkItemConfiguration).filter((type) => type.status === 'active'),
     [effectiveWorkItemConfiguration],
   )
-  const hasCreatableWorkItemType = workItemTypes.length > 0
+  const hasLoadedWorkItemConfiguration = effectiveWorkItemConfiguration !== undefined
+  const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration && workItemTypes.length > 0
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
     () => workItemTypes[0]?.id ?? 'default',
   )
@@ -393,6 +394,7 @@ function RequestSubmissionDetail({
 
   /** Opens the conversion action while preserving any locally edited overrides. */
   const openConversionAction = () => {
+    if (!hasLoadedWorkItemConfiguration) return
     setActionError(false)
     setConversionFieldErrors({})
     setActionMode('convert')
@@ -401,7 +403,7 @@ function RequestSubmissionDetail({
 
   /** Copies proposed conversion fields while retaining fields omitted by the draft. */
   const applyTriageDraft = (draft: AiTriageDraft) => {
-    if (!submission || isSubmittingRef.current) return
+    if (!submission || isSubmittingRef.current || !hasLoadedWorkItemConfiguration) return
     openConversionAction()
     setTitleOverride((current) => draft.title?.value ?? current)
     setDescriptionOverride((current) => draft.description?.value ?? current)
@@ -445,6 +447,7 @@ function RequestSubmissionDetail({
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!actionMode || !onAction || actionIsPending || isSubmittingRef.current) return
+    if (actionMode === 'convert' && !hasLoadedWorkItemConfiguration) return
 
     const parsedConversionCustomFields = actionMode === 'convert' &&
       effectiveWorkItemConfiguration
@@ -653,7 +656,7 @@ function RequestSubmissionDetail({
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdoptDraft={adoptTriageDraft}
             onOperationPendingChange={onOperationPendingChange}
-            canAdoptDraft={(draft) => canAdoptRequestTriageDraft(
+            canAdoptDraft={(draft) => hasLoadedWorkItemConfiguration && canAdoptRequestTriageDraft(
               submission,
               draft,
               conversionTargetOverride,
@@ -677,7 +680,7 @@ function RequestSubmissionDetail({
           {submission.capabilities.canRequestMoreInfo ? <ActionButton disabled={actionIsPending} label={t('requests.action.moreInfo')} onClick={() => activateAction('request-more-info')} /> : null}
           {submission.capabilities.canReject ? <ActionButton disabled={actionIsPending} label={t('requests.action.reject')} onClick={() => activateAction('reject')} /> : null}
           {submission.capabilities.canMarkDuplicate ? <ActionButton disabled={actionIsPending} label={t('requests.action.duplicate')} onClick={() => activateAction('mark-duplicate')} /> : null}
-          {submission.capabilities.canConvert ? <ActionButton disabled={actionIsPending} label={t('requests.action.convert')} primary onClick={() => activateAction('convert')} /> : null}
+          {submission.capabilities.canConvert ? <ActionButton disabled={actionIsPending || !hasLoadedWorkItemConfiguration} label={t('requests.action.convert')} primary onClick={() => activateAction('convert')} /> : null}
         </div>
 
         {actionMode ? (
@@ -713,7 +716,11 @@ function RequestSubmissionDetail({
                       <option key={type.id} value={type.id}>{type.name}</option>
                     ))}
                   </select>
-                  {!hasCreatableWorkItemType ? (
+                  {!hasLoadedWorkItemConfiguration ? (
+                    <span className="text-xs font-semibold text-[var(--workbench-muted)]">
+                      {t('tasks.detail.loading')}
+                    </span>
+                  ) : !hasCreatableWorkItemType ? (
                     <span className="text-xs font-semibold text-amber-700">
                       {t('tasks.create.noActiveWorkItemTypes')}
                     </span>

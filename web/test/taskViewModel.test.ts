@@ -42,6 +42,7 @@ import {
   resolveLatestTaskSnapshot,
   resolveDueDateFilterLabelKey,
   resolveProjectTaskConfiguration,
+  resolveProjectTaskGroupValue,
   resolveTaskAssigneeFilterValue,
   resolveTaskCustomFieldEntries,
   resolveTaskCustomFieldSearchValues,
@@ -415,6 +416,52 @@ describe('Team-scoped task status columns and configuration', () => {
       configurationsByTeam,
       designConfiguration,
     )).toBeUndefined()
+  })
+
+  test('keeps equal Work Item Type names distinct by Team when grouping Project tasks', () => {
+    const coreType = {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: coreConfiguration.workflow.id,
+      id: 'shared-type',
+      name: 'Request',
+    }
+    const designType = {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: designConfiguration.workflow.id,
+      id: 'shared-type',
+      name: 'Request',
+    }
+    const groupedCoreTask = resolveProjectTaskGroupValue(
+      createTask({ teamId: 'core-team', workItemTypeId: coreType.id }),
+      'workItemType',
+      {
+        'core-team': { configuration: { ...coreConfiguration, workItemTypes: [coreType] } },
+        'design-team': { configuration: { ...designConfiguration, workItemTypes: [designType] } },
+      },
+      undefined,
+      translateTaskLabel,
+      teams,
+    )
+    const groupedDesignTask = resolveProjectTaskGroupValue(
+      createTask({ teamId: 'design-team', workItemTypeId: designType.id }),
+      'workItemType',
+      {
+        'core-team': { configuration: { ...coreConfiguration, workItemTypes: [coreType] } },
+        'design-team': { configuration: { ...designConfiguration, workItemTypes: [designType] } },
+      },
+      undefined,
+      translateTaskLabel,
+      teams,
+    )
+
+    expect(groupedCoreTask).toEqual({
+      key: createSearchWorkItemTypeKey('core-team', 'shared-type'),
+      label: 'Core · Request',
+    })
+    expect(groupedDesignTask).toEqual({
+      key: createSearchWorkItemTypeKey('design-team', 'shared-type'),
+      label: 'Design · Request',
+    })
   })
 
   test('includes configured Teams without tasks and distinguishes equal status IDs by Team', () => {

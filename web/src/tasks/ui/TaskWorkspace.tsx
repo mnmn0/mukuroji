@@ -400,6 +400,7 @@ export function TaskWorkspace({
           configurationsByTeam,
           configuration,
           t,
+          teams,
         ),
         taskViewPresentation.groupDirection,
       )
@@ -710,6 +711,7 @@ export function TaskWorkspace({
           selectedBulkItems={selectedBulkItems}
           selectedDetailTaskKey={selectedDetailTaskKey}
           selectedTaskKeys={selectedTaskKeys}
+          teams={teams}
           t={t}
           taskErrorMessage={taskErrorMessage}
           tasks={tasks}
