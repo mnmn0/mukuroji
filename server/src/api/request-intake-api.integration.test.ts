@@ -581,6 +581,65 @@ test('rejects a Request Form mapping that is unavailable to a routed Work Item T
   expect(publishCalls).toBe(0)
 })
 
+test('validates every Request Form routing target while reusing the Team configuration', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  let configurationReads = 0
+  let publishCalls = 0
+  const routedDraft: RequestFormDraft = {
+    ...draft,
+    routing: {
+      ...draft.routing,
+      rules: [{
+        id: 'invalid-project-route',
+        name: 'Invalid project route',
+        when: {
+          mode: 'all',
+          conditions: [{ fieldId: 'title', operator: 'equals', value: 'route' }],
+        },
+        target: {
+          ...draft.routing.defaultTarget,
+          projectId: 'missing-project',
+        },
+      }],
+    },
+  }
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async getForm() {
+        return { ...requestForm, draft: routedDraft }
+      },
+      async publishForm() {
+        publishCalls += 1
+        return requestForm
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        configurationReads += 1
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/request-forms/form-1/publish', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    code: 'InvalidRequestRouting',
+    message: 'Request routing Project is inactive.',
+  })
+  expect(configurationReads).toBe(1)
+  expect(publishCalls).toBe(0)
+})
+
 test('rejects archiving a Work Item Type referenced by a published Request Form', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'owner' })
   const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')

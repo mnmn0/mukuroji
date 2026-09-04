@@ -526,7 +526,7 @@ export function resolveWorkItemType(
   requestedTypeId?: unknown,
   options: { allowArchived?: boolean } = {},
 ): WorkItemTypeDefinition {
-  const typeId = requestedTypeId === undefined || requestedTypeId === null || requestedTypeId === ''
+  const typeId = requestedTypeId === undefined
     ? DEFAULT_WORK_ITEM_TYPE_ID
     : readConfigurationId(requestedTypeId, 'Work Item Type ID')
   const configuredType = configuration.workItemTypes?.find((candidate) => candidate.id === typeId)

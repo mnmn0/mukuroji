@@ -4618,7 +4618,7 @@ function IssueDetailContent({
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue.customFieldValues}
-                key={editorIdentity + ':' + selectedWorkItemTypeId}
+                key={editorIdentity}
               />
             </div>
           </fieldset>

@@ -478,7 +478,7 @@ export function CreateTaskPanel({
           </fieldset>
         ) : null}
         {effectiveMode === 'detailed' && hasCustomFields ? (
-          <div className="workbench-panel-muted p-4" key={effectiveWorkItemTypeId}>
+          <div className="workbench-panel-muted p-4">
             <WorkItemFieldsEditor
               definitions={customFieldDefinitions}
               errors={fieldErrors}

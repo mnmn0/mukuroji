@@ -1007,7 +1007,7 @@ export function TaskDetailPane({
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue?.customFieldValues ?? task.customFieldValues}
-                key={`${editorIdentity}:${selectedWorkItemTypeId}`}
+                key={editorIdentity}
               />
             </div>
           </fieldset>
@@ -1375,7 +1375,7 @@ export function TaskDetailPane({
                 personOptions={personOptions}
                 projectId={selectedProjectId || undefined}
                 values={issue?.customFieldValues ?? task.customFieldValues}
-                key={`${editorIdentity}:${selectedWorkItemTypeId}:required`}
+                key={`${editorIdentity}:required`}
               />
             </div>
           </fieldset>

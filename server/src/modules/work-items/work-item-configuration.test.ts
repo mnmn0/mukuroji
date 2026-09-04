@@ -62,6 +62,19 @@ test('resolves the implicit default type to a legacy configuration workflow', ()
   expect(resolveWorkflowStatus(configuration).workflowStatusId).toBe('backlog')
 })
 
+test('rejects explicitly empty Work Item Type IDs', () => {
+  const configuration = createConfiguration()
+
+  for (const requestedTypeId of [null, '']) {
+    expectConfigurationError(
+      () => resolveWorkItemType(configuration, requestedTypeId),
+      'InvalidWorkItemConfiguration',
+      'Work Item Type ID is invalid.',
+    )
+  }
+  expect(resolveWorkItemType(configuration, undefined)).toEqual(DEFAULT_WORK_ITEM_TYPE)
+})
+
 test('encodes configuration scope key components before adding delimiters', () => {
   expect(createWorkItemConfigurationScopeKey(
     'workspace#owner@example.com',

@@ -23699,6 +23699,13 @@ async function validateRequestFormRoutingReferences(
       if (validated.resolvedConfiguration) {
         resolvedConfigurations.set(target.teamId, validated.resolvedConfiguration)
       }
+    } else {
+      await validateRequestRoutingTarget(
+        workspaceId,
+        target,
+        undefined,
+        configuration,
+      )
     }
   }
   for (const [formFieldId, customFieldId] of Object.entries(
