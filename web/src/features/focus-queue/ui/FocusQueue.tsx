@@ -485,10 +485,7 @@ function resolveFocusWorkItemTypes(
 ): FocusQueueWorkItemTypeOption[] {
   const options = new Map<string, FocusQueueWorkItemTypeOption>()
   for (const [teamId, configuration] of Object.entries(configurationsByTeam)) {
-    for (const definition of [
-      DEFAULT_WORK_ITEM_TYPE,
-      ...resolveWorkItemTypes(configuration.configuration),
-    ]) {
+    for (const definition of resolveWorkItemTypes(configuration.configuration)) {
       const filterValue = createSearchWorkItemTypeKey(teamId, definition.id)
       if (!options.has(filterValue)) {
         options.set(filterValue, {

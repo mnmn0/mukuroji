@@ -619,6 +619,9 @@ test('rejects archiving a Work Item Type referenced by a published Request Form'
       async listCurrentPublishedFormVersions() {
         return [publishedVersion]
       },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
     }),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       async getTeamConfiguration() {
@@ -650,6 +653,75 @@ test('rejects archiving a Work Item Type referenced by a published Request Form'
   expect(await response.json()).toMatchObject({
     code: 'WorkItemConfigurationInUse',
   })
+  expect(saveCompleted).toBe(false)
+})
+
+test('rejects deleting a Work Item Type referenced by a queued Request submission', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: currentConfiguration.workItemTypes?.filter((type) => type.id !== 'incident'),
+  }
+  const submission = createLegacySubmission({
+    routingTarget: {
+      ...createLegacySubmission().routingTarget,
+      workItemTypeId: 'incident',
+    },
+  })
+  const requestedStatuses: string[] = []
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions(_workspaceId, options) {
+        requestedStatuses.push(options?.status ?? '')
+        return options?.status === 'received'
+          ? { submissions: [submission] }
+          : { submissions: [] }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+  })
+  expect(requestedStatuses).toEqual(['received', 'triaging', 'needs-more-info'])
   expect(saveCompleted).toBe(false)
 })
 

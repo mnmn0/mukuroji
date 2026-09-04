@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import { createSearchWorkItemTypeKey, type FocusQueueResponse } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE,
+  type FocusQueueResponse,
+} from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   focusConfigurationFixture,
@@ -73,6 +77,33 @@ describe('Focus queue', () => {
       'now',
       createSearchWorkItemTypeKey('design-team', 'default'),
     ).map((item) => item.workItem.teamId)).toEqual(['design-team'])
+  })
+
+  test('uses configured metadata for the built-in Work Item Type', () => {
+    const configuration = {
+      ...focusConfigurationFixture,
+      configuration: {
+        ...focusConfigurationFixture.configuration,
+        workItemTypes: [{
+          ...DEFAULT_WORK_ITEM_TYPE,
+          defaultWorkflowId: focusConfigurationFixture.configuration.workflow.id,
+          name: 'Configured Work',
+        }],
+      },
+    }
+    const html = renderToStaticMarkup(
+      <FocusQueue
+        configurationsByTeam={{ 'core-team': configuration }}
+        locale="en"
+        onSectionChange={() => undefined}
+        response={focusQueueResponseFixture}
+        section="now"
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toContain('core-team · Configured Work')
+    expect(html).not.toContain('core-team · Work Item')
   })
 
   test('clamps roving keyboard navigation without wrapping server order', () => {

@@ -39984,7 +39984,7 @@ async function validateWorkItemConfigurationUsage(
       }
     }
   }
-  await validatePublishedRequestFormConfigurationUsage(
+  await validateRequestFormConfigurationUsage(
     directoryId,
     affectedTeamIds,
     configuration,
@@ -39992,14 +39992,14 @@ async function validateWorkItemConfigurationUsage(
 }
 
 /**
- * Validates immutable routing snapshots still referenced by published Request Forms.
+ * Validates immutable Request routing snapshots still required by published Forms or queued submissions.
  *
  * @param directoryId - Workspace whose configuration is being saved.
  * @param affectedTeamIds - Teams that will use the candidate configuration after the save.
  * @param configuration - Candidate configuration to test against those Teams.
- * @returns A promise that resolves after all affected published snapshots remain usable.
+ * @returns A promise that resolves after all affected Request routing references remain usable.
  */
-async function validatePublishedRequestFormConfigurationUsage(
+async function validateRequestFormConfigurationUsage(
   directoryId: string,
   affectedTeamIds: readonly string[],
   configuration: WorkItemConfiguration,
@@ -40065,6 +40065,97 @@ async function validatePublishedRequestFormConfigurationUsage(
       )
     }
   }
+
+  let submissions: RequestSubmission[]
+  try {
+    submissions = await listNonTerminalRequestSubmissions(directoryId)
+  } catch (error) {
+    const reason = error instanceof Error
+      ? error.message
+      : 'queued Request submissions could not be inspected'
+    const unavailable = (
+      error instanceof RequestIntakeError ||
+      error instanceof ProjectDataError ||
+      error instanceof WorkspaceAccessError ||
+      error instanceof WorkItemConfigurationError
+    ) && error.status >= 500
+    throw new WorkItemConfigurationError(
+      unavailable ? 503 : 409,
+      unavailable
+        ? 'WorkItemConfigurationDependencyUnavailable'
+        : 'WorkItemConfigurationInUse',
+      `Queued Request submissions could not be inspected: ${reason}`,
+    )
+  }
+  for (const submission of submissions) {
+    if (!affectedTeamIdSet.has(submission.routingTarget.teamId)) continue
+    try {
+      await validateRequestRoutingTarget(
+        directoryId,
+        submission.routingTarget,
+        undefined,
+        configurationOverrides.get(submission.routingTarget.teamId),
+      )
+    } catch (error) {
+      const reason = error instanceof Error
+        ? error.message
+        : 'queued routing references are invalid'
+      const unavailable = (
+        error instanceof RequestIntakeError ||
+        error instanceof ProjectDataError ||
+        error instanceof WorkspaceAccessError ||
+        error instanceof WorkItemConfigurationError
+      ) && error.status >= 500
+      throw new WorkItemConfigurationError(
+        unavailable ? 503 : 409,
+        unavailable
+          ? 'WorkItemConfigurationDependencyUnavailable'
+          : 'WorkItemConfigurationInUse',
+        `Queued Request submission "${submission.id}" is incompatible with this configuration: ${reason}`,
+      )
+    }
+  }
+}
+
+const nonTerminalRequestSubmissionStatuses = [
+  'received',
+  'triaging',
+  'needs-more-info',
+] as const
+
+/**
+ * Lists every non-terminal Request submission using the bounded queue pagination contract.
+ *
+ * @param directoryId - Workspace whose queued submissions are inspected.
+ * @returns Non-terminal submissions retained by the Request Intake queue.
+ */
+async function listNonTerminalRequestSubmissions(
+  directoryId: string,
+): Promise<RequestSubmission[]> {
+  const submissions: RequestSubmission[] = []
+  for (const status of nonTerminalRequestSubmissionStatuses) {
+    let cursor: string | undefined
+    const evaluatedCursors = new Set<string>()
+    do {
+      const page = await workItemDependencies.requestIntake.listSubmissions(directoryId, {
+        status,
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      })
+      submissions.push(...page.submissions)
+      if (page.nextCursor === undefined) break
+      if (evaluatedCursors.has(page.nextCursor)) {
+        throw new RequestIntakeError(
+          503,
+          'RequestRoutingUnavailable',
+          'Request submission pagination did not advance.',
+        )
+      }
+      evaluatedCursors.add(page.nextCursor)
+      cursor = page.nextCursor
+    } while (cursor !== undefined)
+  }
+  return submissions
 }
 
 function assertWorkItemConfigurationUsage(

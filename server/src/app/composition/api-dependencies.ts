@@ -1652,6 +1652,9 @@ export function createTestAppDependencies(): AppDependencies {
       if (property === 'listCurrentPublishedFormVersions') {
         return async () => []
       }
+      if (property === 'listSubmissions') {
+        return async () => ({ submissions: [] })
+      }
       return Reflect.get(target, property, receiver)
     },
   })
