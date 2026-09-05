@@ -389,13 +389,23 @@ export function TaskDetailPane({
     : resolvedSchedule?.mode ?? 'unscheduled'
 
   if (!task) {
+    const statusMessage = isLoading
+      ? t('tasks.detail.loading')
+      : errorMessage ?? t('tasks.detail.empty')
     return (
       <aside
         className="workbench-detail-pane min-h-0 min-w-0 px-5 py-6 max-[1180px]:border-l-0 max-[1180px]:border-t"
         data-testid="task-detail-pane"
       >
-        <p className="rounded-md border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
-          {t('tasks.detail.empty')}
+        <p
+          className={`rounded-md border border-dashed px-4 py-8 text-center text-sm font-medium ${
+            errorMessage && !isLoading
+              ? 'border-red-200 bg-red-50 text-red-700'
+              : 'border-[var(--workbench-border-strong)] bg-white text-[var(--workbench-muted)]'
+          }`}
+          role={errorMessage && !isLoading ? 'alert' : 'status'}
+        >
+          {statusMessage}
         </p>
       </aside>
     )
@@ -1393,7 +1403,9 @@ export function TaskDetailPane({
             {t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
           </p>
         ) : null}
-        {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
+        {errorMessage ? (
+          <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage}</p>
+        ) : null}
       </div>
       <form
         aria-label={t('tasks.schedule.title')}

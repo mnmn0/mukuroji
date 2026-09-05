@@ -307,6 +307,8 @@ export type TaskScreenProps = {
   isProjectQuickAccessSaving?: boolean
   /** Initial displayed in the current-user avatar. */
   userInitial: string
+  /** Normalized Project identity for the authenticated viewer, when available. */
+  currentUserProjectKey?: string
   /** Team and Project hierarchy shown by the sidebar. */
   teams: ProjectDirectoryTeam[]
   /** Display name of the current Project. */
@@ -349,6 +351,8 @@ export type TaskScreenProps = {
   projectMembersErrorMessage?: string
   /** Error shown when Project tasks could not be loaded. */
   taskErrorMessage?: string
+  /** Retries the Project task list after a non-session refresh failure. */
+  onRetryTasks?: () => void
   /** Authoritative canonical Work Item dependency graph shared by all task views. */
   planningSnapshot?: PlanningSnapshot
   /** Whether canonical Planning dependency data or its permission projection is loading. */
@@ -365,8 +369,14 @@ export type TaskScreenProps = {
   defaultCreateTaskOpen?: boolean
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
+  /** Work Item ID explicitly selected by the current route, including unresolved selections. */
+  selectedIssueId?: string
+  /** Prevents opening a fallback task after an ambiguous route was normalized. */
+  suppressIssueFallback?: boolean
   /** Detail, relations, and activity for the selected Work Item. */
   selectedIssueDetail?: TeamIssueDetail
+  /** Prevents stale list data from opening when the detail response is outside the Project scope. */
+  selectedIssueDetailUnavailable?: boolean
   /** Customer Request impact aggregated across the current Project. */
   projectCustomerImpact?: CustomerImpactSignal
   /** Single-Team Work Item configuration used by list and create controls. */
@@ -493,6 +503,7 @@ export function TaskScreen({
   isProjectQuickAccess = false,
   isProjectQuickAccessSaving = false,
   userInitial,
+  currentUserProjectKey,
   teams,
   projectName,
   teamName,
@@ -534,9 +545,13 @@ export function TaskScreen({
   resolvedConfigurationsByTeam = emptyResolvedWorkItemConfigurations,
   configurationFailedTeamIds = emptyConfigurationTeamIds,
   selectedIssueDetail,
+  selectedIssueDetailUnavailable = false,
+  selectedIssueId,
+  suppressIssueFallback = false,
   projectCustomerImpact,
   tasks = [],
   taskErrorMessage,
+  onRetryTasks,
   taskViewToolbar,
   taskViewDefinition,
   taskViewPresentation,
@@ -631,6 +646,9 @@ export function TaskScreen({
   const isAiOperationPendingRef = useRef(false)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
+  const [createTaskEditorGeneration, setCreateTaskEditorGeneration] = useState(0)
+  const createTaskEditorGenerationRef = useRef(0)
+  const createTaskSubmissionInFlightRef = useRef(false)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
   const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
   const onPreviewScheduleChangeRef = useRef(onPreviewScheduleChange)
@@ -921,13 +939,25 @@ export function TaskScreen({
     })
   }, [selectedBulkTaskViewKeys, visibleTaskViewKeys])
 
-  const selectedDetailTask =
-    (localSelectedDetailTaskKey
-      ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
-      : undefined) ??
-    findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
-    visibleTasks[0] ??
-    tasks[0]
+  const selectedDetailTask = selectedIssueDetailUnavailable
+    ? undefined
+    : selectedIssueId
+      ? (() => {
+          const selectedTasks = tasks.filter((task) =>
+            task.id === selectedIssueId && (!activeProjectTeamId || task.teamId === activeProjectTeamId)
+          )
+          return selectedTasks.length === 1 ? selectedTasks[0] : undefined
+        })()
+      : suppressIssueFallback
+        ? undefined
+        : (
+            (localSelectedDetailTaskKey
+              ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
+              : undefined) ??
+            findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
+            visibleTasks[0] ??
+            tasks[0]
+          )
   const detailTask = isDetailOpen
     ? resolveLatestTaskSnapshot(selectedDetailTask, selectedIssueDetail?.issue)
     : undefined
@@ -962,7 +992,16 @@ export function TaskScreen({
   const createConfiguration = createTaskContext?.teamId
     ? resolvedConfigurationsByTeam[createTaskContext.teamId]?.configuration ?? configuration
     : configuration
-
+  const createDestinationProjectId = createTaskContext?.projectId ?? projectId
+  const createDestinationTeam = createTaskContext?.teamId
+    ? teams.find((team) => team.id === createTaskContext.teamId && team.projects.some((project) =>
+        project.id === createDestinationProjectId,
+      ))
+    : resolvedActiveTeam
+  const createDestinationProjectName = createDestinationTeam?.projects.find((project) =>
+    project.id === createDestinationProjectId,
+  )?.name ?? (createDestinationProjectId === projectId ? resolvedProjectName : createDestinationProjectId)
+  const createDestinationTeamName = createDestinationTeam?.name ?? createTaskContext?.teamId ?? resolvedTeamName
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
     const task = tasks.find((candidate) => createTaskKey(candidate) === taskKey)
@@ -1076,6 +1115,8 @@ export function TaskScreen({
 
   /** Opens the shared create panel without cancelling its newly accepted invocation. */
   const showCreateTaskEditor = useCallback((context?: TaskCreateContext) => {
+    setCreateTaskEditorGeneration((generation) => generation + 1)
+    createTaskEditorGenerationRef.current += 1
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
     )?.id
@@ -2111,6 +2152,14 @@ export function TaskScreen({
 
   /** Projects normalized action failures into the existing reversible-action feedback surface. */
   const handleProjectTaskActionExecution = useCallback((result: TaskActionExecutionResult) => {
+    if (
+      result.status === 'executed' &&
+      result.actionId === 'create' &&
+      result.result.status === 'failed' &&
+      result.result.failure?.code === 'ProjectTaskCreateFailed'
+    ) {
+      return
+    }
     const errorMessage = resolveTaskActionExecutionFailureMessage(
       result,
       t('taskViews.action.failed'),
@@ -2477,6 +2526,9 @@ export function TaskScreen({
     visibleTaskViewKeys,
   ])
 
+  const showClosedCreateTaskError = Boolean(createTaskError) &&
+    (!isCreateTaskOpen || !onCreateTask)
+
   return (
     <section aria-busy={isLoading || isAiOperationPending} className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <TaskHeader
@@ -2536,6 +2588,20 @@ export function TaskScreen({
                 ) : null}
               </div>
             ) : null}
+            {(taskErrorMessage || detailErrorMessage) && onRetryTasks ? (
+              <div
+                className="mx-[clamp(20px,3vw,34px)] mt-2 flex justify-end"
+                data-testid="project-task-error"
+              >
+                <button
+                  className="min-h-11 px-2 text-sm font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+                  onClick={onRetryTasks}
+                  type="button"
+                >
+                  {t('collaboration.retry')}
+                </button>
+              </div>
+            ) : null}
             {projectCustomerImpact && projectCustomerImpact.requestCount > 0 ? (
               <CustomerImpactPanel signal={projectCustomerImpact} t={t} />
             ) : null}
@@ -2565,7 +2631,14 @@ export function TaskScreen({
                 {t('planning.loading')}
               </p>
             ) : null}
-            {taskAction ? (
+            {showClosedCreateTaskError ? (
+              <TaskActionFeedback
+                dismissLabel={t('tasks.action.dismiss')}
+                kind="error"
+                message={createTaskError ?? t('tasks.create.error')}
+                onDismiss={() => setCreateTaskError(undefined)}
+              />
+            ) : taskAction ? (
               <TaskActionFeedback
                 dismissLabel={t('tasks.action.dismiss')}
                 kind={taskAction.kind}
@@ -2587,11 +2660,12 @@ export function TaskScreen({
             ) : null}
             {isCreateTaskOpen && onCreateTask ? (
               <CreateTaskPanel
-                key={createTaskContextKey(createTaskContext)}
+                key={createTaskContextKey(createTaskContext, createTaskEditorGeneration)}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
                 configuration={createConfiguration}
                 context={createTaskContext}
+                currentUserProjectKey={currentUserProjectKey}
                 errorMessage={createTaskError}
                 isAssigneeOptionsLoading={isAssigneeOptionsLoading}
                 isSubmitting={isCreatingTask}
@@ -2603,6 +2677,9 @@ export function TaskScreen({
                   setIsCreateTaskOpen(false)
                 }}
                 onSubmit={async (input) => {
+                  if (createTaskSubmissionInFlightRef.current) return
+                  createTaskSubmissionInFlightRef.current = true
+                  const submittedEditorGeneration = createTaskEditorGeneration
                   const pendingContext = resolvePendingTaskActionContext(
                     taskActionCompletion,
                     ['create'],
@@ -2616,9 +2693,10 @@ export function TaskScreen({
 
                   try {
                     const createdMutation = await onCreateTask(input, createTaskContext)
-                    const canDismissOwner = claimedContext
-                      ? canDismissCompletedTaskActionOwner(taskActionCompletion, claimedContext)
-                      : true
+                    const canUpdateCreateEditor = createTaskEditorGenerationRef.current ===
+                      submittedEditorGeneration && (claimedContext
+                        ? canDismissCompletedTaskActionOwner(taskActionCompletion, claimedContext)
+                        : true)
                     if (claimedContext) {
                       const createdTarget = createdMutation
                         ? {
@@ -2632,22 +2710,17 @@ export function TaskScreen({
                         createdMutation?.navigationPath,
                       ))
                     }
+                    if (!canUpdateCreateEditor) return
                     setTaskUndo(undefined)
                     setTaskRedo(undefined)
                     setTaskAction({
                       kind: 'success',
                       message: t('tasks.action.saved'),
                     })
-                    if (canDismissOwner) {
-                      setCreateTaskContext(undefined)
-                      setIsCreateTaskOpen(false)
-                    }
+                    setCreateTaskContext(undefined)
+                    setIsCreateTaskOpen(false)
                   } catch (error) {
                     if (claimedContext) {
-                      const canDismissOwner = canDismissCompletedTaskActionOwner(
-                        taskActionCompletion,
-                        claimedContext,
-                      )
                       taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
                         claimedContext.actionId,
                         undefined,
@@ -2655,18 +2728,24 @@ export function TaskScreen({
                         'unknown',
                         t('tasks.create.error'),
                       ))
-                      if (canDismissOwner) dismissCreateTaskEditor()
                     }
-                    if (!claimedContext) {
+                    if (createTaskEditorGenerationRef.current === submittedEditorGeneration &&
+                      (!claimedContext || canDismissCompletedTaskActionOwner(
+                        taskActionCompletion,
+                        claimedContext,
+                      ))) {
                       setCreateTaskError(
                         error instanceof Error ? error.message : t('tasks.create.error'),
                       )
                     }
                   } finally {
+                    createTaskSubmissionInFlightRef.current = false
                     setIsCreatingTask(false)
                   }
                 }}
-                projectId={projectId}
+                projectId={createDestinationProjectId}
+                projectName={createDestinationProjectName}
+                teamName={createDestinationTeamName}
                 t={t}
                 workspaceMembers={workspaceMembers}
               />
@@ -3168,11 +3247,15 @@ function resolveTaskScheduleWarning(
 }
 
 /**
- * Serializes the complete create context so uncontrolled schedule inputs remount on any change.
+ * Serializes the create context and editor generation so replacement editors remount reliably.
  *
  * @param context - View-derived create context or the default header context.
- * @returns A stable React key that includes every schedule field.
+ * @param generation - Monotonic generation for same-context editor replacements.
+ * @returns A React key that includes the context and editor identity.
  */
-function createTaskContextKey(context: TaskCreateContext | undefined): string {
-  return JSON.stringify(context ?? { source: 'header' })
+function createTaskContextKey(
+  context: TaskCreateContext | undefined,
+  generation: number,
+): string {
+  return `${generation}:${JSON.stringify(context ?? { source: 'header' })}`
 }

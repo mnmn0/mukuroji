@@ -13,7 +13,7 @@ import {
   useSyncExternalStore,
   type ComponentProps,
 } from 'react'
-import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
+import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
 import { TaskScreen } from './TaskScreen'
 import {
   createWorkspaceCommandMenuWorkItemActionRegistry,
@@ -40,6 +40,17 @@ const projectFilesControllerFixture = {
   approvals: [],
   scope: { kind: 'project', projectId: 'refero', teamId: 'core-team' },
 } satisfies FileArtifactsController
+
+/** Long destination labels used by the create-panel responsive story. */
+const createOpenTeams = projectDirectoryFixtures.map((team) => team.id === 'core-team'
+  ? {
+      ...team,
+      name: 'コアチーム・プロダクトオペレーション',
+      projects: team.projects.map((project) => project.id === 'refero'
+        ? { ...project, name: 'Refero Strategic Delivery Workspace' }
+        : project),
+    }
+  : team)
 
 const assigneeOptions: ProjectMember[] = [
   {
@@ -121,6 +132,14 @@ const storyTasks = referoTaskFixtures.map((task, index) => {
   }
 })
 
+const ambiguousSelectionTasks = [
+  ...storyTasks,
+  {
+    ...storyTasks[0],
+    teamId: 'design-team',
+  },
+]
+
 const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
   const baseTask = storyTasks[index % storyTasks.length]
 
@@ -165,6 +184,7 @@ const selectedIssueDetail: TeamIssueDetail = {
 
 const onProjectQuickAccessToggle = fn()
 const onRetryPlanning = fn()
+const onRetryTasks = fn()
 const onContextMenuSelectedIssueChange = fn()
 const onReadOnlySelectedIssueChange = fn()
 const onDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
@@ -299,6 +319,98 @@ function LateTimelinePreviewHarness({ remountOnTabSwitch }: LateTimelinePreviewH
 type CommandProviderTaskScreenProps = {
   /** TaskScreen props rendered directly beneath the observable command provider. */
   taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Props for the stale create rejection harness. */
+type StaleCreateRejectionHarnessProps = {
+  /** TaskScreen inputs used by the replacement-editor regression. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/**
+ * Holds a create request until the story explicitly rejects it after a replacement editor opens.
+ *
+ * @param props - TaskScreen inputs for the stale invocation scenario.
+ * @returns A deterministic rejection control and the nested TaskScreen.
+ */
+function StaleCreateRejectionHarness({ taskScreenProps }: StaleCreateRejectionHarnessProps) {
+  const rejectCreateRef = useRef<(() => void) | undefined>(undefined)
+  /** Holds the story create request until the regression control rejects it. */
+  const onCreateTask = useCallback(async () => new Promise<void>((_resolve, reject) => {
+    rejectCreateRef.current = () => reject(new Error('先行する登録に失敗しました。'))
+  }), [])
+
+  return (
+    <>
+      <button
+        data-testid="reject-stale-create"
+        onClick={() => rejectCreateRef.current?.()}
+        type="button"
+      >
+        先行登録を失敗させる
+      </button>
+      <TaskScreen {...taskScreenProps} onCreateTask={onCreateTask} />
+    </>
+  )
+}
+
+/** Props for the canonical create failure and retry harness. */
+type CreateFailureRetryHarnessProps = {
+  /** TaskScreen inputs used by the create failure and retry scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Fails the first create request and lets the next request complete successfully. */
+function CreateFailureRetryHarness({ taskScreenProps }: CreateFailureRetryHarnessProps) {
+  const createAttemptRef = useRef(0)
+  const [createAttemptCount, setCreateAttemptCount] = useState(0)
+  const onCreateTask = useCallback(async () => {
+    createAttemptRef.current += 1
+    setCreateAttemptCount(createAttemptRef.current)
+    if (createAttemptRef.current === 1) {
+      throw new Error('作成 API が一時的に失敗しました。')
+    }
+  }, [])
+
+  return (
+    <>
+      <output data-testid="create-failure-attempt-count">{createAttemptCount}</output>
+      <TaskScreen {...taskScreenProps} onCreateTask={onCreateTask} />
+    </>
+  )
+}
+
+/** Props for a harness that settles an older create request successfully. */
+type StaleCreateSuccessHarnessProps = {
+  /** TaskScreen inputs used by the replacement-editor success scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Holds a create request until the story resolves it after a replacement editor opens. */
+function StaleCreateSuccessHarness({ taskScreenProps }: StaleCreateSuccessHarnessProps) {
+  const resolveCreateRef = useRef<(() => void) | undefined>(undefined)
+  const [createCallCount, setCreateCallCount] = useState(0)
+  /** Holds the story create request until the regression control resolves it. */
+  const onCreateTask = useCallback(async () => {
+    setCreateCallCount((count) => count + 1)
+    await new Promise<void>((resolve) => {
+      resolveCreateRef.current = resolve
+    })
+  }, [])
+
+  return (
+    <>
+      <button
+        data-testid="resolve-stale-create"
+        onClick={() => resolveCreateRef.current?.()}
+        type="button"
+      >
+        先行登録を完了させる
+      </button>
+      <output data-testid="stale-create-call-count">{createCallCount}</output>
+      <TaskScreen {...taskScreenProps} onCreateTask={onCreateTask} />
+    </>
+  )
 }
 
 /**
@@ -560,6 +672,43 @@ export const Loading: Story = {
   },
 }
 
+/** An explicit ambiguous route selection stays unresolved instead of opening another task. */
+export const ExplicitAmbiguousSelection: Story = {
+  args: {
+    activeProjectTeamId: undefined,
+    detailErrorMessage: 'タスク詳細を取得できませんでした',
+    selectedIssueId: 'wireframe',
+    tasks: ambiguousSelectionTasks,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const detailPaneElement = canvas.getByTestId('task-detail-pane')
+    const detailPane = within(detailPaneElement)
+
+    await expect(detailPaneElement).toHaveTextContent('タスク詳細を取得できませんでした')
+    await expect(detailPane.queryByRole('heading', {
+      name: 'ワイヤーフレームを確認する',
+    })).not.toBeInTheDocument()
+  },
+}
+
+/** Keeps a stale Project-list row closed when its detail response belongs elsewhere. */
+export const DetailScopeUnavailable: Story = {
+  args: {
+    detailErrorMessage: 'タスク詳細を取得できませんでした',
+    selectedIssueDetailUnavailable: true,
+    selectedIssueId: 'wireframe',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const detailPane = canvas.getByTestId('task-detail-pane')
+
+    await expect(detailPane).toHaveTextContent('タスク詳細を取得できませんでした')
+    await expect(detailPane).not.toHaveTextContent('ワイヤーフレームを確認する')
+    await expect(canvas.queryByTestId('project-task-error')).toBeNull()
+  },
+}
+
 /** Planning dependency failure that leaves the primary task table usable and retryable. */
 export const PlanningUnavailable: Story = {
   args: {
@@ -714,6 +863,153 @@ export const Permissions: Story = {
 export const CreateOpen: Story = {
   args: {
     defaultCreateTaskOpen: true,
+    currentUserProjectKey: 'sato@example.com',
+    projectName: 'Refero Strategic Delivery Workspace',
+    teamName: 'コアチーム・プロダクトオペレーション',
+    teams: createOpenTeams,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByTestId('create-task-destination')).toHaveTextContent(
+      'コアチーム・プロダクトオペレーション / Refero Strategic Delivery Workspace',
+    )
+    await expect(canvas.getByRole('combobox', { name: '担当者' })).toHaveValue(
+      'sato@example.com',
+    )
+  },
+}
+
+/** Keeps a replacement create editor intact when an older invocation rejects. */
+export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <StaleCreateRejectionHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const firstFormElement = canvas.getByTestId('create-task-form')
+    const firstForm = within(firstFormElement)
+    await userEvent.type(firstForm.getByRole('textbox', { name: 'タスク名' }), '先行登録')
+    await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
+    await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    await expect(canvas.queryByTestId('create-task-form')).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const replacementForm = canvas.getByTestId('create-task-form')
+    await expect(within(replacementForm).getByRole('button', { name: '登録中' })).toBeDisabled()
+    await expect(within(replacementForm).getByRole('textbox', { name: 'タスク名' })).toBeDisabled()
+    fireEvent.submit(replacementForm)
+    await userEvent.click(canvas.getByTestId('reject-stale-create'))
+
+    const replacementFormQueries = within(replacementForm)
+    await expect(replacementFormQueries.queryByRole('alert')).toBeNull()
+    await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
+    await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toBeEnabled()
+    await expect(replacementFormQueries.getByRole('button', { name: '登録' })).toBeEnabled()
+  },
+}
+
+/** Surfaces a rejected create after its editor was explicitly closed. */
+export const ClosedCreateFailureUsesGlobalAlert: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <StaleCreateRejectionHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const form = within(createTaskForm)
+    await userEvent.type(form.getByRole('textbox', { name: 'タスク名' }), 'closed failure')
+    await userEvent.click(form.getByRole('button', { name: '登録' }))
+    await expect(form.getByRole('button', { name: '登録中' })).toBeDisabled()
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    await expect(canvas.queryByTestId('create-task-form')).toBeNull()
+    await userEvent.click(canvas.getByTestId('reject-stale-create'))
+
+    const globalFailure = await canvas.findByTestId('task-action-feedback')
+    await expect(globalFailure).toHaveTextContent('先行する登録に失敗しました。')
+    await expect(canvas.getAllByRole('alert')).toHaveLength(1)
+    await userEvent.click(within(globalFailure).getByRole('button', { name: '通知を閉じる' }))
+    await expect(canvas.queryByTestId('task-action-feedback')).toBeNull()
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const reopenedForm = canvas.getByTestId('create-task-form')
+    await expect(within(reopenedForm).queryByRole('alert')).toBeNull()
+  },
+}
+
+/** Shows a rejected create in its form and clears the error after a successful retry. */
+export const CreateFailureUsesFormAlertOnly: Story = {
+  args: {
+    initialTab: 'board',
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <CreateFailureRetryHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const boardCreateButton = canvasElement.querySelector<HTMLElement>(
+      '[data-testid^="project-task-add-"]',
+    )
+    if (!boardCreateButton) throw new Error('Expected a Board column create button.')
+
+    await userEvent.click(boardCreateButton)
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const form = within(createTaskForm)
+    await userEvent.type(form.getByRole('textbox', { name: 'タスク名' }), 'story retry')
+
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(form.getByRole('alert')).toHaveTextContent(
+      '作成 API が一時的に失敗しました。',
+    )
+    await expect(canvas.queryByTestId('task-action-feedback')).not.toBeInTheDocument()
+    await expect(canvas.getAllByRole('alert')).toHaveLength(1)
+    await expect(form.getByRole('button', { name: /^登録$/u })).toBeEnabled()
+    await expect(form.getByRole('textbox', { name: 'タスク名' })).toHaveValue('story retry')
+
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(canvas.queryByTestId('create-task-form')).not.toBeInTheDocument()
+    await expect(canvas.queryByRole('alert')).not.toBeInTheDocument()
+    await expect(canvas.getByTestId('create-failure-attempt-count')).toHaveTextContent('2')
+  },
+}
+
+/** Resets a same-context replacement editor after an older create succeeds. */
+export const StaleCreateSuccessResetsReplacement: Story = {
+  args: {
+    initialTab: 'board',
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <StaleCreateSuccessHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const boardCreateButton = canvasElement.querySelector<HTMLElement>(
+      '[data-testid^="project-task-add-"]',
+    )
+    if (!boardCreateButton) throw new Error('Expected a Board column create button.')
+
+    await userEvent.click(boardCreateButton)
+    const firstForm = within(canvas.getByTestId('create-task-form'))
+    await userEvent.type(firstForm.getByRole('textbox', { name: 'タスク名' }), '先行登録')
+    await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
+    await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
+
+    await userEvent.click(boardCreateButton)
+    const replacementForm = within(canvas.getByTestId('create-task-form'))
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toBeDisabled()
+
+    await userEvent.click(canvas.getByTestId('resolve-stale-create'))
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toBeEnabled()
+    await expect(replacementForm.getByRole('button', { name: '登録' })).toBeEnabled()
+    await expect(canvas.getByTestId('stale-create-call-count')).toHaveTextContent('1')
   },
 }
 
@@ -819,8 +1115,19 @@ export const DenseRows: Story = {
  */
 export const LoadingError: Story = {
   args: {
+    onRetryTasks,
     taskErrorMessage: 'Lambda returned 500.',
     tasks: [],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onRetryTasks.mockClear()
+
+    await expect(canvas.getByTestId('tasks-error')).toHaveTextContent('Lambda returned 500.')
+    expect(canvas.getAllByRole('alert')).toHaveLength(1)
+    const taskRetry = canvas.getByTestId('project-task-error')
+    await userEvent.click(within(taskRetry).getByRole('button', { name: '再読み込み' }))
+    await expect(onRetryTasks).toHaveBeenCalledTimes(1)
   },
 }
 

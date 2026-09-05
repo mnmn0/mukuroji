@@ -435,7 +435,7 @@ export const Error: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
 
-    await expect(canvas.getByText('Issue 詳細を保存できませんでした。')).toBeVisible()
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Issue 詳細を保存できませんでした。')
     await expect(canvas.getByRole('button', { name: '変更を保存' })).toBeEnabled()
   },
 }
@@ -485,5 +485,36 @@ export const Empty: Story = {
       canvas.getByText('タスクを選択すると詳細を確認できます。'),
     ).toBeVisible()
     await expect(canvas.queryByRole('button', { name: '変更を保存' })).not.toBeInTheDocument()
+  },
+}
+
+/** Detail pane loading state while an explicitly routed Work Item is unresolved. */
+export const MissingSelectionLoading: Story = {
+  args: {
+    detail: undefined,
+    isLoading: true,
+    task: undefined,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByRole('status')).toHaveTextContent('詳細を確認しています。')
+    await expect(canvas.queryByText('タスクを選択すると詳細を確認できます。')).not.toBeInTheDocument()
+  },
+}
+
+/** Detail pane error state while an explicitly routed Work Item cannot be loaded. */
+export const MissingSelectionError: Story = {
+  args: {
+    detail: undefined,
+    errorMessage: 'タスク詳細を取得できませんでした',
+    isLoading: false,
+    task: undefined,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByRole('alert')).toHaveTextContent('タスク詳細を取得できませんでした')
+    await expect(canvas.queryByText('タスクを選択すると詳細を確認できます。')).not.toBeInTheDocument()
   },
 }

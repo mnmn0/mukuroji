@@ -47,7 +47,6 @@ import {
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
 import {
-  createTeamIssue,
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
@@ -89,6 +88,7 @@ import {
   resolveProjectTaskRouteContext,
 } from '../../tasks/model/taskRoute'
 import { createTaskScheduleMutationController } from '../../tasks/mutations/createTaskScheduleMutationController'
+import { createTaskMutationController } from '../../tasks/mutations/createTaskMutationController'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import {
@@ -259,6 +259,8 @@ export function TaskPage() {
     projectId,
     Boolean(user && !currentUserError),
     true,
+    selectedTeamId,
+    selectedIssueId,
   )
   const {
     data: projectCustomerImpact,
@@ -362,6 +364,7 @@ export function TaskPage() {
   const projectUsersErrorMessage = projectUsersError
     ? t('workspace.permissions.usersError')
     : undefined
+  const suppressIssueFallback = location.state === ambiguousIssueSelectionLocationState
   const {
     activeProject,
     activeTeam,
@@ -380,16 +383,15 @@ export function TaskPage() {
       projectIssues,
       selectedIssueId,
       selectedTeamId,
-      suppressIssueFallback:
-        location.state === ambiguousIssueSelectionLocationState,
+      suppressIssueFallback,
       teams,
     }),
     [
-      location.state,
       projectId,
       projectIssues,
       selectedIssueId,
       selectedTeamId,
+      suppressIssueFallback,
       teams,
     ],
   )
@@ -540,6 +542,12 @@ export function TaskPage() {
     'project-relation-candidates',
   )
   const resolvedSelectedIssueTeamId = selectedWorkItemTeamId
+  const selectedIssueDetailTeamId = selectedTeamId && selectedIssueId
+    ? selectedTeamId
+    : resolvedSelectedIssueTeamId
+  const selectedIssueDetailId = selectedTeamId && selectedIssueId
+    ? selectedIssueId
+    : resolvedSelectedIssue?.id
   const collaboration = useIssueCollaboration({
     accessToken,
     issueId: resolvedSelectedIssue?.id,
@@ -556,17 +564,29 @@ export function TaskPage() {
   })
   const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
   const {
-    data: selectedIssueDetail,
+    data: rawSelectedIssueDetail,
     error: detailError,
     isLoading: isSelectedIssueDetailLoading,
     mutate: mutateSelectedIssueDetail,
     key: issueDetailKey,
   } = useTeamIssueDetail(
     accessToken,
-    resolvedSelectedIssueTeamId,
-    resolvedSelectedIssue?.id,
-    true,
+    selectedIssueDetailTeamId,
+    selectedIssueDetailId,
+    Boolean(user && !currentUserError),
     'project-issue-detail',
+  )
+  const selectedIssueDetailIsInScope = Boolean(
+    rawSelectedIssueDetail &&
+    rawSelectedIssueDetail.issue.assignedProjectId === projectId &&
+    (!selectedIssueDetailTeamId || rawSelectedIssueDetail.issue.teamId === selectedIssueDetailTeamId) &&
+    (!selectedIssueDetailId || rawSelectedIssueDetail.issue.id === selectedIssueDetailId),
+  )
+  const selectedIssueDetail = selectedIssueDetailIsInScope
+    ? rawSelectedIssueDetail
+    : undefined
+  const selectedIssueDetailScopeMismatch = Boolean(
+    rawSelectedIssueDetail && !selectedIssueDetailIsInScope,
   )
   const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
   const [scheduleRefreshError, setScheduleRefreshError] = useState<unknown>()
@@ -629,11 +649,12 @@ export function TaskPage() {
     ],
     currentPath,
   )
-  const redirectEnterpriseSessionError = (error: unknown) => {
+  /** Redirects an authenticated API failure while preserving the intended return path. */
+  const redirectEnterpriseSessionError = (error: unknown, returnPath = currentPath) => {
     const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
       undefined,
       [error],
-      currentPath,
+      returnPath,
     )
 
     if (!sessionErrorAction?.redirectTo) {
@@ -671,6 +692,14 @@ export function TaskPage() {
     t,
     user,
   })
+  const taskCreateMutation = createTaskMutationController({
+    accessToken,
+    createErrorMessage: t('issues.error.create'),
+    guardEnterpriseSession,
+    mutateProjectTasks,
+    mutationRequestRunner,
+    projectId,
+  })
   const taskErrorMessage = useMemo(() => {
     if (currentUserErrorAction?.kind === 'stay') {
       return t('tasks.error.loading')
@@ -697,9 +726,22 @@ export function TaskPage() {
   const isPlanningDependencyLoading = Boolean(planningKey && isPlanningLoading) ||
     Boolean(planningProjectRolesKey && isPlanningProjectRolesLoading) ||
     Boolean(projectDirectoryKey && isProjectDirectoryLoading)
-  const detailErrorMessage = issueUpdateErrorMessage ?? (
-    detailError ? t('tasks.detail.error') : undefined
+  const detailFetchError = Boolean(
+    detailError ||
+    selectedIssueDetailScopeMismatch ||
+    (
+      Boolean(selectedIssueId) &&
+      !taskError &&
+      !isProjectTasksLoading &&
+      !isSelectedIssueDetailLoading &&
+      !resolvedSelectedIssue
+    ),
   )
+  const detailFetchErrorMessage = detailFetchError
+    ? t('tasks.detail.error')
+    : undefined
+  const detailErrorMessage = issueUpdateErrorMessage ?? detailFetchErrorMessage
+  const canRetryTaskQueries = Boolean(taskError || detailFetchError)
   const configurationErrorMessage = failedConfigurationTeamIds.length > 0
     ? t('workItems.configuration.loadError')
     : undefined
@@ -883,25 +925,20 @@ export function TaskPage() {
       teamId: targetTeamId,
     })
 
-    const issue = await guardEnterpriseSession(mutationRequestRunner.run(
-      `issue:create:${targetTeamId}:${targetProjectId}`,
-      JSON.stringify([targetTeamId, targetProjectId, input]),
-      (context) => createTeamIssue(
-        targetTeamId,
-        accessToken,
-        {
-          ...input,
-          assignedProjectId: targetProjectId,
-        },
-        context,
-      ),
-    ))
-    await mutateProjectTasks()
+    const createdMutation = await taskCreateMutation.createTask(input, {
+      projectId: targetProjectId,
+      teamId: targetTeamId,
+    })
+    const issue = createdMutation.task
     const navigationPath = preserveTaskViewUrlState(
       createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
       searchParams,
     )
-    navigate(navigationPath)
+    let shouldNavigate = true
+    if (createdMutation.refreshError !== undefined) {
+      shouldNavigate = !redirectEnterpriseSessionError(createdMutation.refreshError, navigationPath)
+    }
+    if (shouldNavigate) navigate(navigationPath)
     return { navigationPath, task: issue }
   }
 
@@ -1117,7 +1154,7 @@ export function TaskPage() {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.conflict')])
         await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
       } else {
-        setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.error')])
+        setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.action.updateError')])
       }
 
       throw error
@@ -1448,6 +1485,14 @@ export function TaskPage() {
       locale={locale}
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
+      onRetryTasks={canRetryTaskQueries
+        ? () => {
+            void Promise.all([
+              mutateProjectTasks(),
+              mutateSelectedIssueDetail(),
+            ]).catch(() => undefined)
+          }
+        : undefined}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
@@ -1467,6 +1512,7 @@ export function TaskPage() {
           onCollaborationSourceChange: handleCollaborationSourceChange,
         } satisfies IssueCollaborationRoute
       }
+      currentUserProjectKey={currentUserProjectKey}
       artifacts={issueArtifacts}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
@@ -1474,6 +1520,7 @@ export function TaskPage() {
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
+      selectedIssueId={selectedIssueId}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
       isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}
       isSelectedIssueDetailLoading={Boolean(issueDetailKey && isSelectedIssueDetailLoading)}
@@ -1530,6 +1577,8 @@ export function TaskPage() {
       relationCandidates={relationCandidates}
       relationCandidatesErrorMessage={relationCandidatesErrorMessage}
       selectedIssueDetail={selectedIssueDetail}
+      selectedIssueDetailUnavailable={selectedIssueDetailScopeMismatch}
+      suppressIssueFallback={suppressIssueFallback}
       projectCustomerImpact={projectCustomerImpactKey ? projectCustomerImpact : undefined}
       resolvedConfiguration={listConfigurationTeamId ? resolvedConfiguration : undefined}
       resolvedConfigurationsByTeam={workItemConfigurationLoadResult.configurationsByTeam}
