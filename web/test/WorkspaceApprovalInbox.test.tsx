@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type FocusActionabilityReason,
   type PlanningUpdateTargetSummary,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -84,14 +85,16 @@ describe('Workspace approval Inbox', () => {
     }
     const t = createTranslator('en')
     const views = [
-      <HomeWorkspaceView
-        focusQueue={focusQueueResponseFixture}
-        summary={summary}
-        t={t}
-        teams={projectDirectoryFixtures}
-        workItemConfigurationsByTeam={workItemConfigurationsByTeam}
-        onOpenTask={() => undefined}
-      />,
+      <MemoryRouter>
+        <HomeWorkspaceView
+          focusQueue={focusQueueResponseFixture}
+          summary={summary}
+          t={t}
+          teams={projectDirectoryFixtures}
+          workItemConfigurationsByTeam={workItemConfigurationsByTeam}
+          onOpenTask={() => undefined}
+        />
+      </MemoryRouter>,
       <DashboardWorkspaceView
         focusQueue={focusQueueResponseFixture}
         summary={summary}
@@ -171,13 +174,15 @@ describe('Workspace approval Inbox', () => {
       const summary = { blocked: 0, projects: 1, tasks: 0 }
       const view = viewName === 'Home'
         ? (
-            <HomeWorkspaceView
-              isFocusUnavailable
-              summary={summary}
-              t={t}
-              teams={projectDirectoryFixtures}
-              workItemConfigurationsByTeam={{}}
-            />
+            <MemoryRouter>
+              <HomeWorkspaceView
+                isFocusUnavailable
+                summary={summary}
+                t={t}
+                teams={projectDirectoryFixtures}
+                workItemConfigurationsByTeam={{}}
+              />
+            </MemoryRouter>
           )
         : (
             <DashboardWorkspaceView
@@ -195,6 +200,10 @@ describe('Workspace approval Inbox', () => {
       expect(html).toContain('<span class="sr-only">Focus data is unavailable.</span>')
       expect(html).toContain('data-testid="workspace-focus-preview-unavailable"')
       expect(html).toContain('Focus data is unavailable.')
+      if (viewName === 'Home') {
+        expect(html).not.toContain('Nothing needs action now or next.')
+        expect(html).not.toContain('No tasks have been registered yet.')
+      }
     })
   }
 
@@ -244,8 +253,62 @@ describe('Workspace approval Inbox', () => {
     expect(html).toContain('data-testid="notification-load-more"')
   })
 
-  test('renders an explicit empty state when the available Home Focus preview has no items', () => {
+  test('renders an explicit empty state when Home has no Now or Next preview', () => {
     const emptyFocusQueue = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => ({
+        ...group,
+        items: group.section === 'now' || group.section === 'next' ? [] : group.items,
+      })),
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <HomeWorkspaceView
+          focusQueue={emptyFocusQueue}
+          summary={{ blocked: 0, projects: 1, tasks: 2 }}
+          t={createTranslator('en')}
+          teams={projectDirectoryFixtures}
+          workItemConfigurationsByTeam={{}}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('Nothing needs action now or next.')
+    expect(html).toContain('data-testid="workspace-home-my-tasks"')
+    expect(html).toContain('href="/my-tasks"')
+    expect(html).toContain('href="/focus?section=now"')
+    expect(html).toContain('href="/focus?section=waiting"')
+    expect(html).toContain('Waiting for another member')
+    expect(html).not.toContain('data-testid="workspace-focus-preview-unavailable"')
+  })
+
+  test('opens the Next Focus section when only Next work is available', () => {
+    const nextOnlyFocusQueue = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => ({
+        ...group,
+        items: group.section === 'now' ? [] : group.items,
+      })),
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <HomeWorkspaceView
+          focusQueue={nextOnlyFocusQueue}
+          summary={{ blocked: 0, projects: 1, tasks: 2 }}
+          t={createTranslator('en')}
+          teams={projectDirectoryFixtures}
+          workItemConfigurationsByTeam={{}}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('data-testid="workspace-home-focus-now"')
+    expect(html).toContain('href="/focus?section=next"')
+    expect(html).toContain('>Open Focus</a>')
+  })
+
+  test('keeps complete Home Focus emptiness distinct from unavailable data', () => {
+    const completeEmptyFocusQueue = {
       ...focusQueueResponseFixture,
       sections: focusQueueResponseFixture.sections.map((group) => ({
         ...group,
@@ -253,17 +316,60 @@ describe('Workspace approval Inbox', () => {
       })),
     }
     const html = renderToStaticMarkup(
-      <HomeWorkspaceView
-        focusQueue={emptyFocusQueue}
-        summary={{ blocked: 0, projects: 1, tasks: 0 }}
-        t={createTranslator('en')}
-        teams={projectDirectoryFixtures}
-        workItemConfigurationsByTeam={{}}
-      />,
+      <MemoryRouter>
+        <HomeWorkspaceView
+          focusQueue={completeEmptyFocusQueue}
+          summary={{ blocked: 0, projects: 1, tasks: 0 }}
+          t={createTranslator('en')}
+          teams={projectDirectoryFixtures}
+          workItemConfigurationsByTeam={{}}
+        />
+      </MemoryRouter>,
     )
 
-    expect(html).toContain('No tasks have been registered yet.')
-    expect(html).not.toContain('data-testid="workspace-focus-preview-unavailable"')
+    expect(html).toContain('Nothing needs action now or next.')
+    expect(html).toContain('Nothing is waiting.')
+    expect(html).not.toContain('No tasks have been registered yet.')
+    expect(html).not.toContain('Focus data is unavailable.')
+  })
+
+  test('shows each waiting actionability reason with its existing localized label', () => {
+    const waitingItem = focusQueueResponseFixture.sections
+      .find((group) => group.section === 'waiting')?.items[0]
+    if (!waitingItem) throw new Error('The Focus fixture requires a waiting item.')
+    const waitingReasons = [
+      'blocked',
+      'awaiting-external-action',
+      'no-permitted-primary-action',
+    ] satisfies readonly FocusActionabilityReason[]
+    const waitingReasonFocusQueue = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => group.section === 'waiting'
+        ? {
+            ...group,
+            items: waitingReasons.map((reason, index) => ({
+              ...waitingItem,
+              id: `${waitingItem.id}-${index}`,
+              actionability: { actionable: false, reasons: [reason] },
+            })),
+          }
+        : group),
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <HomeWorkspaceView
+          focusQueue={waitingReasonFocusQueue}
+          summary={{ blocked: 0, projects: 1, tasks: 0 }}
+          t={createTranslator('en')}
+          teams={projectDirectoryFixtures}
+          workItemConfigurationsByTeam={{}}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('Blocked by predecessor work')
+    expect(html).toContain('Waiting for another member')
+    expect(html).toContain('No permitted primary action')
   })
 
   test('keeps canonical My Tasks visible when its Team configuration is unavailable', () => {
