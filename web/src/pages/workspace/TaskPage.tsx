@@ -47,7 +47,6 @@ import {
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
 import {
-  createTeamIssue,
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
@@ -89,6 +88,7 @@ import {
   resolveProjectTaskRouteContext,
 } from '../../tasks/model/taskRoute'
 import { createTaskScheduleMutationController } from '../../tasks/mutations/createTaskScheduleMutationController'
+import { createTaskMutationController } from '../../tasks/mutations/createTaskMutationController'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import {
@@ -672,6 +672,14 @@ export function TaskPage() {
     t,
     user,
   })
+  const taskCreateMutation = createTaskMutationController({
+    accessToken,
+    createErrorMessage: t('issues.error.create'),
+    guardEnterpriseSession,
+    mutateProjectTasks,
+    mutationRequestRunner,
+    projectId,
+  })
   const taskErrorMessage = useMemo(() => {
     if (currentUserErrorAction?.kind === 'stay') {
       return t('tasks.error.loading')
@@ -884,41 +892,18 @@ export function TaskPage() {
       teamId: targetTeamId,
     })
 
-    const issue = await guardEnterpriseSession(mutationRequestRunner.run(
-      `issue:create:${targetTeamId}:${targetProjectId}`,
-      JSON.stringify([targetTeamId, targetProjectId, input]),
-      (context) => createTeamIssue(
-        targetTeamId,
-        accessToken,
-        {
-          ...input,
-          assignedProjectId: targetProjectId,
-        },
-        context,
-      ),
-    ))
+    const createdMutation = await taskCreateMutation.createTask(input, {
+      projectId: targetProjectId,
+      teamId: targetTeamId,
+    })
+    const issue = createdMutation.task
     const navigationPath = preserveTaskViewUrlState(
       createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
       searchParams,
     )
-    if (projectId === targetProjectId && issue.assignedProjectId === targetProjectId &&
-      issue.teamId === targetTeamId) {
-      await mutateProjectTasks(
-        (currentTasks = []) => {
-          const existingIndex = currentTasks.findIndex((candidate) =>
-            candidate.id === issue.id && candidate.teamId === issue.teamId,
-          )
-          if (existingIndex < 0) return [issue, ...currentTasks]
-          return currentTasks.map((candidate, index) => index === existingIndex ? issue : candidate)
-        },
-        { revalidate: false },
-      )
-    }
     let shouldNavigate = true
-    try {
-      await mutateProjectTasks()
-    } catch (error) {
-      shouldNavigate = !redirectEnterpriseSessionError(error, navigationPath)
+    if (createdMutation.refreshError !== undefined) {
+      shouldNavigate = !redirectEnterpriseSessionError(createdMutation.refreshError, navigationPath)
     }
     if (shouldNavigate) navigate(navigationPath)
     return { navigationPath, task: issue }

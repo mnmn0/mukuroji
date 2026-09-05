@@ -2558,13 +2558,11 @@ export function TaskScreen({
             ) : null}
             {taskErrorMessage && onRetryTasks ? (
               <div
-                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
+                className="mx-[clamp(20px,3vw,34px)] mt-2 flex justify-end"
                 data-testid="project-task-error"
-                role="alert"
               >
-                <span>{taskErrorMessage}</span>
                 <button
-                  className="underline underline-offset-2"
+                  className="min-h-11 px-2 text-sm font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
                   onClick={onRetryTasks}
                   type="button"
                 >

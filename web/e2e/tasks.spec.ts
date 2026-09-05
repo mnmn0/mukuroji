@@ -7861,9 +7861,10 @@ test.describe('authenticated task page', () => {
     await expect(taskDetailPane.getByRole('textbox', { name: 'Issue' })).toHaveValue(
       'refresh-failure-single-create',
     )
-    const taskRefreshError = page.getByTestId('project-task-error')
+    const taskRefreshError = page.getByTestId('tasks-error')
     await expect(taskRefreshError).toContainText('タスク一覧を取得できませんでした')
-    await taskRefreshError.getByRole('button', { name: '再読み込み', exact: true }).click()
+    await expect(taskRefreshError.getByRole('alert')).toHaveCount(1)
+    await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
     await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(3)
     await expect(taskRefreshError).toHaveCount(0)
     await expect(page.getByTestId('task-row-refresh-failure-single-create')).toContainText(

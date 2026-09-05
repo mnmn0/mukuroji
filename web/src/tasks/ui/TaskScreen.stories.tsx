@@ -919,9 +919,10 @@ export const LoadingError: Story = {
     const canvas = within(canvasElement)
     onRetryTasks.mockClear()
 
-    const taskError = canvas.getByTestId('project-task-error')
-    await expect(taskError).toHaveTextContent('Lambda returned 500.')
-    await userEvent.click(within(taskError).getByRole('button', { name: '再読み込み' }))
+    await expect(canvas.getByTestId('tasks-error')).toHaveTextContent('Lambda returned 500.')
+    expect(canvas.getAllByRole('alert')).toHaveLength(1)
+    const taskRetry = canvas.getByTestId('project-task-error')
+    await userEvent.click(within(taskRetry).getByRole('button', { name: '再読み込み' }))
     await expect(onRetryTasks).toHaveBeenCalledTimes(1)
   },
 }
