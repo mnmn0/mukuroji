@@ -1,3 +1,4 @@
+import { DEFAULT_WORK_ITEM_TYPE, type WorkItemConfiguration } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
@@ -60,6 +61,37 @@ const detailedOnlyConfiguration = {
     ),
   },
 } satisfies typeof teamWorkItemConfigurationFixture
+
+const boardTypeChangeConfiguration = {
+  ...teamWorkItemConfigurationFixture,
+  workflows: [
+    teamWorkItemConfigurationFixture.workflow,
+    {
+      id: 'board-special-workflow',
+      initialStatusId: 'backlog',
+      name: 'Board special workflow',
+      statuses: [teamWorkItemConfigurationFixture.workflow.statuses[0]!],
+      transitions: [],
+    },
+  ],
+  workItemTypes: [
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: 'board-special-workflow',
+      id: 'board-special',
+      name: 'Board special',
+      sortOrder: 1,
+    },
+  ],
+} satisfies WorkItemConfiguration
+
+const boardTypeChangeSubmit = fn(async (input: CreateWorkItemInput) => {
+  void input
+})
 
 let rejectThenRetryAttempts = 0
 
@@ -238,6 +270,55 @@ export const QuickCapture: Story = {
       workItemTypeId: 'default',
       workflowStatusId: 'backlog',
     })
+  },
+}
+
+/** Keeps a non-backlog Board create detailed when its type falls back to Backlog. */
+export const BoardContextTypeChangeKeepsDetailedMode: Story = {
+  args: {
+    assigneeOptions,
+    configuration: boardTypeChangeConfiguration,
+    context: {
+      projectId: 'refero',
+      source: 'board',
+      teamId: 'core-team',
+      workItemTypeId: 'default',
+      workflowStatusId: 'active',
+    },
+    currentUserProjectKey: 'sato@example.com',
+    onSubmit: boardTypeChangeSubmit,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const typeSelect = canvas.getByTestId('create-task-work-item-type')
+    boardTypeChangeSubmit.mockClear()
+
+    await expect(canvas.getByRole('button', { name: '詳細登録' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await userEvent.type(canvas.getByRole('textbox', { name: 'タスク名' }), 'Board type change')
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '担当者' }), 'sato@example.com')
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '優先度' }), 'high')
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'スケジュール種別' }), 'date-range')
+    fireEvent.change(canvas.getByLabelText('開始日'), { target: { value: '2026-07-01' } })
+    fireEvent.change(canvas.getByLabelText('終了日'), { target: { value: '2026-07-03' } })
+    await userEvent.selectOptions(typeSelect, 'board-special')
+    await expect(canvas.getByRole('button', { name: '詳細登録' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    await userEvent.click(canvas.getByRole('button', { name: '登録' }))
+
+    await expect(boardTypeChangeSubmit).toHaveBeenCalledWith(expect.objectContaining({
+      priority: 'high',
+      schedule: expect.objectContaining({ mode: 'date-range' }),
+      title: 'Board type change',
+      workflowStatusId: 'backlog',
+    }))
+    const submittedInput = boardTypeChangeSubmit.mock.calls[0]?.[0]
+    expect(submittedInput).toBeDefined()
+    expect(submittedInput).not.toHaveProperty('quickCapture')
   },
 }
 

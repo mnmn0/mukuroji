@@ -354,6 +354,39 @@ function StaleCreateRejectionHarness({ taskScreenProps }: StaleCreateRejectionHa
   )
 }
 
+/** Props for a harness that settles an older create request successfully. */
+type StaleCreateSuccessHarnessProps = {
+  /** TaskScreen inputs used by the replacement-editor success scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Holds a create request until the story resolves it after a replacement editor opens. */
+function StaleCreateSuccessHarness({ taskScreenProps }: StaleCreateSuccessHarnessProps) {
+  const resolveCreateRef = useRef<(() => void) | undefined>(undefined)
+  const [createCallCount, setCreateCallCount] = useState(0)
+  /** Holds the story create request until the regression control resolves it. */
+  const onCreateTask = useCallback(async () => {
+    setCreateCallCount((count) => count + 1)
+    await new Promise<void>((resolve) => {
+      resolveCreateRef.current = resolve
+    })
+  }, [])
+
+  return (
+    <>
+      <button
+        data-testid="resolve-stale-create"
+        onClick={() => resolveCreateRef.current?.()}
+        type="button"
+      >
+        先行登録を完了させる
+      </button>
+      <output data-testid="stale-create-call-count">{createCallCount}</output>
+      <TaskScreen {...taskScreenProps} onCreateTask={onCreateTask} />
+    </>
+  )
+}
+
 /**
  * Renders TaskScreen beneath the same observable registry shape used by the authenticated layout.
  *
@@ -851,6 +884,39 @@ export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
     await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
     await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toBeEnabled()
     await expect(replacementFormQueries.getByRole('button', { name: '登録' })).toBeEnabled()
+  },
+}
+
+/** Resets a same-context replacement editor after an older create succeeds. */
+export const StaleCreateSuccessResetsReplacement: Story = {
+  args: {
+    initialTab: 'board',
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <StaleCreateSuccessHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const boardCreateButton = canvasElement.querySelector<HTMLElement>(
+      '[data-testid^="project-task-add-"]',
+    )
+    if (!boardCreateButton) throw new Error('Expected a Board column create button.')
+
+    await userEvent.click(boardCreateButton)
+    const firstForm = within(canvas.getByTestId('create-task-form'))
+    await userEvent.type(firstForm.getByRole('textbox', { name: 'タスク名' }), '先行登録')
+    await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
+    await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
+
+    await userEvent.click(boardCreateButton)
+    const replacementForm = within(canvas.getByTestId('create-task-form'))
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toBeDisabled()
+
+    await userEvent.click(canvas.getByTestId('resolve-stale-create'))
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
+    await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toBeEnabled()
+    await expect(replacementForm.getByRole('button', { name: '登録' })).toBeEnabled()
+    await expect(canvas.getByTestId('stale-create-call-count')).toHaveTextContent('1')
   },
 }
 

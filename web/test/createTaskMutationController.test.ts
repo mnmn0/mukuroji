@@ -38,6 +38,7 @@ function createControllerHarness(
   createdTask: CanonicalWorkItem,
   initialTasks: CanonicalWorkItem[],
   refreshedTasks: CanonicalWorkItem[],
+  refreshCacheTasks: CanonicalWorkItem[] = refreshedTasks,
 ) {
   let currentTasks = initialTasks
   let firstUpdaterResult: CanonicalWorkItem[] | undefined
@@ -57,8 +58,8 @@ function createControllerHarness(
       return currentTasks
     }
     if (data === undefined) {
-      currentTasks = refreshedTasks
-      return currentTasks
+      currentTasks = refreshCacheTasks
+      return refreshedTasks
     }
     const nextTasks = await data
     if (nextTasks !== undefined) currentTasks = nextTasks
@@ -110,7 +111,12 @@ describe('create Task mutation controller', () => {
       revision: 7,
       title: '先に取得した最新行',
     })
-    const harness = createControllerHarness(createdTask, [cachedTask], [cachedTask])
+    const staleGetTask = createFixtureTask({
+      id: createdTask.id,
+      revision: 3,
+      title: '古い一覧応答',
+    })
+    const harness = createControllerHarness(createdTask, [cachedTask], [staleGetTask])
 
     await harness.controller.createTask(createInput, {
       projectId: 'refero',
@@ -119,6 +125,85 @@ describe('create Task mutation controller', () => {
 
     expect(harness.firstUpdaterResult).toEqual([cachedTask])
     expect(harness.currentTasks).toEqual([cachedTask])
+    expect(harness.postCount).toBe(1)
+  })
+
+  test('preserves a newer cached revision when a stale GET omits the row', async () => {
+    const createdTask = createFixtureTask({
+      id: 'retry-missing',
+      revision: 1,
+      title: '古い POST 結果',
+    })
+    const cachedTask = createFixtureTask({
+      id: createdTask.id,
+      revision: 7,
+      title: '先に取得した最新行',
+    })
+    const otherTask = createFixtureTask({ id: 'other-task', revision: 4 })
+    const harness = createControllerHarness(createdTask, [cachedTask, otherTask], [otherTask])
+
+    await harness.controller.createTask(createInput, {
+      projectId: 'refero',
+      teamId: 'core-team',
+    })
+
+    expect(harness.currentTasks).toEqual([cachedTask, otherTask])
+    expect(harness.postCount).toBe(1)
+  })
+
+  test('allows a newer GET revision to replace the retained snapshot', async () => {
+    const createdTask = createFixtureTask({ id: 'retry-get-newer', revision: 1 })
+    const cachedTask = createFixtureTask({
+      id: createdTask.id,
+      revision: 7,
+      title: '先に取得した行',
+    })
+    const newerGetTask = createFixtureTask({
+      id: createdTask.id,
+      revision: 9,
+      title: 'GETで取得した最新行',
+    })
+    const harness = createControllerHarness(createdTask, [cachedTask], [newerGetTask])
+
+    await harness.controller.createTask(createInput, {
+      projectId: 'refero',
+      teamId: 'core-team',
+    })
+
+    expect(harness.currentTasks).toEqual([newerGetTask])
+    expect(harness.postCount).toBe(1)
+  })
+
+  test('preserves a newer concurrent cache row beyond the retained snapshot', async () => {
+    const createdTask = createFixtureTask({ id: 'retry-concurrent', revision: 1 })
+    const cachedTask = createFixtureTask({
+      id: createdTask.id,
+      revision: 7,
+      title: '保持したスナップショット',
+    })
+    const returnedGetTask = createFixtureTask({
+      id: createdTask.id,
+      revision: 9,
+      title: '再取得で確認した行',
+    })
+    const concurrentTask = createFixtureTask({
+      id: createdTask.id,
+      revision: 10,
+      title: '並行更新で取得した最新行',
+    })
+    const harness = createControllerHarness(
+      createdTask,
+      [cachedTask],
+      [returnedGetTask],
+      [concurrentTask],
+    )
+
+    await harness.controller.createTask(createInput, {
+      projectId: 'refero',
+      teamId: 'core-team',
+    })
+
+    expect(harness.currentTasks).toEqual([concurrentTask])
     expect(harness.postCount).toBe(1)
   })
 

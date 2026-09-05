@@ -646,6 +646,7 @@ export function TaskScreen({
   const isAiOperationPendingRef = useRef(false)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
+  const [createTaskEditorGeneration, setCreateTaskEditorGeneration] = useState(0)
   const createTaskEditorGenerationRef = useRef(0)
   const createTaskSubmissionInFlightRef = useRef(false)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
@@ -1001,8 +1002,6 @@ export function TaskScreen({
     project.id === createDestinationProjectId,
   )?.name ?? (createDestinationProjectId === projectId ? resolvedProjectName : createDestinationProjectId)
   const createDestinationTeamName = createDestinationTeam?.name ?? createTaskContext?.teamId ?? resolvedTeamName
-  const createTaskEditorGeneration = createTaskEditorGenerationRef.current
-
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
     const task = tasks.find((candidate) => createTaskKey(candidate) === taskKey)
@@ -1116,6 +1115,7 @@ export function TaskScreen({
 
   /** Opens the shared create panel without cancelling its newly accepted invocation. */
   const showCreateTaskEditor = useCallback((context?: TaskCreateContext) => {
+    setCreateTaskEditorGeneration((generation) => generation + 1)
     createTaskEditorGenerationRef.current += 1
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
@@ -2642,7 +2642,7 @@ export function TaskScreen({
             ) : null}
             {isCreateTaskOpen && onCreateTask ? (
               <CreateTaskPanel
-                key={createTaskContextKey(createTaskContext)}
+                key={createTaskContextKey(createTaskContext, createTaskEditorGeneration)}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
                 configuration={createConfiguration}
@@ -3229,11 +3229,15 @@ function resolveTaskScheduleWarning(
 }
 
 /**
- * Serializes the complete create context so uncontrolled schedule inputs remount on any change.
+ * Serializes the create context and editor generation so replacement editors remount reliably.
  *
  * @param context - View-derived create context or the default header context.
- * @returns A stable React key that includes every schedule field.
+ * @param generation - Monotonic generation for same-context editor replacements.
+ * @returns A React key that includes the context and editor identity.
  */
-function createTaskContextKey(context: TaskCreateContext | undefined): string {
-  return JSON.stringify(context ?? { source: 'header' })
+function createTaskContextKey(
+  context: TaskCreateContext | undefined,
+  generation: number,
+): string {
+  return `${generation}:${JSON.stringify(context ?? { source: 'header' })}`
 }

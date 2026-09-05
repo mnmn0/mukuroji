@@ -317,7 +317,10 @@ export function CreateTaskPanel({
               data-testid="create-task-work-item-type"
               disabled={isSubmitPending || !hasCreatableWorkItemType}
               name="workItemTypeId"
-              onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
+              onChange={(event) => {
+                if (effectiveMode === 'detailed') setMode('detailed')
+                setSelectedWorkItemTypeId(event.target.value)
+              }}
               value={effectiveWorkItemTypeId}
             >
               {workItemTypes.map((type) => (

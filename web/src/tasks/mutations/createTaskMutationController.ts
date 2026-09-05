@@ -2,6 +2,7 @@ import type { KeyedMutator } from 'swr'
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { createTeamIssue } from '../../issues/api/workItems'
 import type { CreateWorkItemInput, CanonicalWorkItem } from '../api/tasks'
+import { resolveLatestTaskSnapshot } from '../model/taskView'
 
 /** Dependencies used by the Project task create mutation controller. */
 export type TaskCreateMutationControllerOptions = {
@@ -72,6 +73,7 @@ export function createTaskMutationController({
 
     let hasRefreshError = false
     let refreshError: unknown
+    let highestObservedTask = task
     try {
       if (
         projectId === target.projectId &&
@@ -83,6 +85,10 @@ export function createTaskMutationController({
             const existingIndex = currentTasks.findIndex((candidate) =>
               candidate.id === task.id && candidate.teamId === task.teamId,
             )
+            const existingTask = existingIndex >= 0 ? currentTasks[existingIndex] : undefined
+            highestObservedTask = existingTask
+              ? resolveLatestTaskSnapshot(task, existingTask) ?? task
+              : task
             if (existingIndex < 0) return [task, ...currentTasks]
             return currentTasks.map((candidate, index) => {
               if (index !== existingIndex) return candidate
@@ -97,17 +103,32 @@ export function createTaskMutationController({
         projectId === target.projectId &&
         task.assignedProjectId === target.projectId &&
         task.teamId === target.teamId &&
-        Array.isArray(refreshedTasks) &&
-        !refreshedTasks.some((candidate) =>
+        Array.isArray(refreshedTasks)
+      ) {
+        const refreshedTask = refreshedTasks.find((candidate) =>
           candidate.id === task.id && candidate.teamId === task.teamId,
         )
-      ) {
-        await mutateProjectTasks(
-          (currentTasks = []) => currentTasks.some((candidate) =>
-            candidate.id === task.id && candidate.teamId === task.teamId,
-          ) ? currentTasks : [task, ...currentTasks],
-          { revalidate: false },
-        )
+        highestObservedTask = refreshedTask
+          ? resolveLatestTaskSnapshot(highestObservedTask, refreshedTask) ?? highestObservedTask
+          : highestObservedTask
+        if (!refreshedTask || refreshedTask.revision < highestObservedTask.revision) {
+          await mutateProjectTasks(
+            (currentTasks = []) => {
+              const existingIndex = currentTasks.findIndex((candidate) =>
+                candidate.id === task.id && candidate.teamId === task.teamId,
+              )
+              const existingTask = existingIndex >= 0 ? currentTasks[existingIndex] : undefined
+              const latestTask = existingTask
+                ? resolveLatestTaskSnapshot(existingTask, highestObservedTask) ?? existingTask
+                : highestObservedTask
+              if (existingIndex < 0) return [latestTask, ...currentTasks]
+              return currentTasks.map((candidate, index) =>
+                index === existingIndex ? latestTask : candidate,
+              )
+            },
+            { revalidate: false },
+          )
+        }
       }
     } catch (error: unknown) {
       hasRefreshError = true
