@@ -276,7 +276,7 @@ export function TaskBoardView({
 
         return (
           <div
-            className={`workbench-panel min-h-[420px] transition ${
+            className={`workbench-panel min-w-0 min-h-[420px] transition ${
               dropTargetColumnKey === column.key
                 ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40'
                 : ''
@@ -399,7 +399,7 @@ export function TaskBoardView({
                     ) : null}
                     <article
                       aria-grabbed={draggedTaskKey === taskKey || undefined}
-                      className={`rounded-md border ${cardPadding} text-left transition ${
+                      className={`min-w-0 rounded-md border ${cardPadding} text-left transition ${
                         selectedDetailTaskKey === taskKey
                           ? 'border-[#99d7cf] bg-[#e5f7f4] shadow-[inset_3px_0_0_var(--workbench-primary)]'
                           : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
@@ -424,14 +424,16 @@ export function TaskBoardView({
                     >
                       <div className="flex items-start gap-2">
                         {canEditTask(task) ? (
-                          <TaskInlineField
-                            ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.name')}`}
-                            displayValue={resolveWorkItemTitle(task)}
-                            testId={`task-inline-title-${task.id}`}
-                            value={resolveWorkItemTitle(task)}
-                            wrapText={wrapText}
-                            onCommit={(value) => updateTask(task, { title: value }).then(() => undefined)}
-                          />
+                          <div className="min-w-0 flex-1 [&>button]:w-full">
+                            <TaskInlineField
+                              ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.name')}`}
+                              displayValue={resolveWorkItemTitle(task)}
+                              testId={`task-inline-title-${task.id}`}
+                              value={resolveWorkItemTitle(task)}
+                              wrapText={wrapText}
+                              onCommit={(value) => updateTask(task, { title: value }).then(() => undefined)}
+                            />
+                          </div>
                         ) : (
                           <button
                             className={`min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[#1c1d1f] hover:text-[var(--workbench-primary)] ${
@@ -463,6 +465,10 @@ export function TaskBoardView({
                           <button
                             aria-label={`${t('tasks.action.more')}: ${resolveWorkItemTitle(task)}`}
                             className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                            data-task-action="context-menu"
+                            data-task-open-variant="context-menu"
+                            data-task-team-id={task.teamId}
+                            data-task-work-item-id={task.id}
                             data-testid={`task-card-actions-${task.id}`}
                             onClick={(event) => {
                               event.stopPropagation()
@@ -621,7 +627,7 @@ export function TaskBoardView({
       ) : null}
       {unavailableTasks.length > 0 ? (
         <div
-          className="workbench-panel min-h-[420px] border-red-200"
+          className="workbench-panel min-w-0 min-h-[420px] border-red-200"
           data-testid="project-task-configuration-unavailable-column"
         >
           <div className="border-b border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-700">
@@ -658,6 +664,10 @@ export function TaskBoardView({
                     <button
                       aria-label={`${t('tasks.action.more')}: ${resolveWorkItemTitle(task)}`}
                       className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-red-50 hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                      data-task-action="context-menu"
+                      data-task-open-variant="context-menu"
+                      data-task-team-id={task.teamId}
+                      data-task-work-item-id={task.id}
                       data-testid={`task-card-actions-${task.id}`}
                       onClick={(event) => {
                         const returnFocusElement = event.currentTarget
