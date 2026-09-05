@@ -312,6 +312,38 @@ type CommandProviderTaskScreenProps = {
   taskScreenProps: ComponentProps<typeof TaskScreen>
 }
 
+/** Props for the stale create rejection harness. */
+type StaleCreateRejectionHarnessProps = {
+  /** TaskScreen inputs used by the replacement-editor regression. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/**
+ * Holds a create request until the story explicitly rejects it after a replacement editor opens.
+ *
+ * @param props - TaskScreen inputs for the stale invocation scenario.
+ * @returns A deterministic rejection control and the nested TaskScreen.
+ */
+function StaleCreateRejectionHarness({ taskScreenProps }: StaleCreateRejectionHarnessProps) {
+  const rejectCreateRef = useRef<(() => void) | undefined>(undefined)
+  const onCreateTask = useCallback(async () => new Promise<void>((_resolve, reject) => {
+    rejectCreateRef.current = () => reject(new Error('先行する登録に失敗しました。'))
+  }), [])
+
+  return (
+    <>
+      <button
+        data-testid="reject-stale-create"
+        onClick={() => rejectCreateRef.current?.()}
+        type="button"
+      >
+        先行登録を失敗させる
+      </button>
+      <TaskScreen {...taskScreenProps} onCreateTask={onCreateTask} />
+    </>
+  )
+}
+
 /**
  * Renders TaskScreen beneath the same observable registry shape used by the authenticated layout.
  *
@@ -739,6 +771,35 @@ export const CreateOpen: Story = {
     await expect(canvas.getByRole('combobox', { name: '担当者' })).toHaveValue(
       'sato@example.com',
     )
+  },
+}
+
+/** Keeps a replacement create editor intact when an older invocation rejects. */
+export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <StaleCreateRejectionHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const firstFormElement = canvas.getByTestId('create-task-form')
+    const firstForm = within(firstFormElement)
+    await userEvent.type(firstForm.getByRole('textbox', { name: 'タスク名' }), '先行登録')
+    await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
+    await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    await expect(canvas.queryByTestId('create-task-form')).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const replacementForm = canvas.getByTestId('create-task-form')
+    await userEvent.click(canvas.getByTestId('reject-stale-create'))
+
+    const replacementFormQueries = within(replacementForm)
+    await expect(replacementFormQueries.queryByRole('alert')).toBeNull()
+    await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
+    await expect(replacementFormQueries.getByRole('button', { name: '登録' })).toBeEnabled()
   },
 }
 

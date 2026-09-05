@@ -896,12 +896,17 @@ export function TaskPage() {
         context,
       ),
     ))
-    await mutateProjectTasks()
+    let shouldNavigate = true
+    try {
+      await mutateProjectTasks()
+    } catch (error) {
+      shouldNavigate = !redirectEnterpriseSessionError(error)
+    }
     const navigationPath = preserveTaskViewUrlState(
       createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
       searchParams,
     )
-    navigate(navigationPath)
+    if (shouldNavigate) navigate(navigationPath)
     return { navigationPath, task: issue }
   }
 

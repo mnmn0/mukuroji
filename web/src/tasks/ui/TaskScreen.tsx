@@ -634,6 +634,7 @@ export function TaskScreen({
   const isAiOperationPendingRef = useRef(false)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
+  const createTaskEditorGenerationRef = useRef(0)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
   const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
   const onPreviewScheduleChangeRef = useRef(onPreviewScheduleChange)
@@ -975,6 +976,7 @@ export function TaskScreen({
     project.id === createDestinationProjectId,
   )?.name ?? (createDestinationProjectId === projectId ? resolvedProjectName : createDestinationProjectId)
   const createDestinationTeamName = createDestinationTeam?.name ?? createTaskContext?.teamId ?? resolvedTeamName
+  const createTaskEditorGeneration = createTaskEditorGenerationRef.current
 
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
@@ -1089,6 +1091,8 @@ export function TaskScreen({
 
   /** Opens the shared create panel without cancelling its newly accepted invocation. */
   const showCreateTaskEditor = useCallback((context?: TaskCreateContext) => {
+    createTaskEditorGenerationRef.current += 1
+    setIsCreatingTask(false)
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
     )?.id
@@ -2617,6 +2621,7 @@ export function TaskScreen({
                   setIsCreateTaskOpen(false)
                 }}
                 onSubmit={async (input) => {
+                  const submittedEditorGeneration = createTaskEditorGeneration
                   const pendingContext = resolvePendingTaskActionContext(
                     taskActionCompletion,
                     ['create'],
@@ -2630,9 +2635,10 @@ export function TaskScreen({
 
                   try {
                     const createdMutation = await onCreateTask(input, createTaskContext)
-                    const canDismissOwner = claimedContext
-                      ? canDismissCompletedTaskActionOwner(taskActionCompletion, claimedContext)
-                      : true
+                    const canUpdateCreateEditor = createTaskEditorGenerationRef.current ===
+                      submittedEditorGeneration && (claimedContext
+                        ? canDismissCompletedTaskActionOwner(taskActionCompletion, claimedContext)
+                        : true)
                     if (claimedContext) {
                       const createdTarget = createdMutation
                         ? {
@@ -2646,22 +2652,17 @@ export function TaskScreen({
                         createdMutation?.navigationPath,
                       ))
                     }
+                    if (!canUpdateCreateEditor) return
                     setTaskUndo(undefined)
                     setTaskRedo(undefined)
                     setTaskAction({
                       kind: 'success',
                       message: t('tasks.action.saved'),
                     })
-                    if (canDismissOwner) {
-                      setCreateTaskContext(undefined)
-                      setIsCreateTaskOpen(false)
-                    }
+                    setCreateTaskContext(undefined)
+                    setIsCreateTaskOpen(false)
                   } catch (error) {
                     if (claimedContext) {
-                      const canDismissOwner = canDismissCompletedTaskActionOwner(
-                        taskActionCompletion,
-                        claimedContext,
-                      )
                       taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
                         claimedContext.actionId,
                         undefined,
@@ -2669,15 +2670,20 @@ export function TaskScreen({
                         'unknown',
                         t('tasks.create.error'),
                       ))
-                      if (canDismissOwner) dismissCreateTaskEditor()
                     }
-                    if (!claimedContext) {
+                    if (createTaskEditorGenerationRef.current === submittedEditorGeneration &&
+                      (!claimedContext || canDismissCompletedTaskActionOwner(
+                        taskActionCompletion,
+                        claimedContext,
+                      ))) {
                       setCreateTaskError(
                         error instanceof Error ? error.message : t('tasks.create.error'),
                       )
                     }
                   } finally {
-                    setIsCreatingTask(false)
+                    if (createTaskEditorGenerationRef.current === submittedEditorGeneration) {
+                      setIsCreatingTask(false)
+                    }
                   }
                 }}
                 projectId={createDestinationProjectId}

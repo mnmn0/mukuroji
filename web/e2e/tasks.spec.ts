@@ -189,6 +189,8 @@ type MockRequestCounts = {
    * チーム Issue 作成 API の request 数です。
    */
   issueCreates: number
+  /** Idempotency keys observed by the task create API stub. */
+  issueCreateIdempotencyKeys: string[]
   /**
    * チーム Issue 更新 API の request 数です。
    */
@@ -321,6 +323,14 @@ type MockAuthenticatedTaskPageOptions = {
   planningFailureCount?: number
   /** Number of Project Work Item GET requests to fail after schedule confirmation commits. */
   postConfirmProjectIssueFailureCount?: number
+  /** Number of Project Work Item GET requests to fail after a task create commits. */
+  postCreateProjectIssueFailureCount?: number
+  /** HTTP status returned by the post-create Project Work Item GET failure. */
+  postCreateProjectIssueFailureStatus?: number
+  /** Stable error code returned by the post-create Project Work Item GET failure. */
+  postCreateProjectIssueFailureCode?: string
+  /** Number of create requests that should fail before a retry succeeds. */
+  createIssueFailureCount?: number
   /**
    * Notification API が初期状態として返す recipient 通知です。
    */
@@ -386,6 +396,7 @@ async function mockAuthenticatedTaskPage(
     projectMemberRemoves: 0,
     issueReads: 0,
     issueCreates: 0,
+    issueCreateIdempotencyKeys: [],
     issueUpdates: 0,
     schedulePreviews: 0,
     scheduleConfirms: 0,
@@ -459,6 +470,12 @@ async function mockAuthenticatedTaskPage(
     0,
     options.postConfirmProjectIssueFailureCount ?? 0,
   )
+  let remainingCreateIssueFailures = Math.max(0, options.createIssueFailureCount ?? 0)
+  let remainingPostCreateProjectIssueFailures = Math.max(
+    0,
+    options.postCreateProjectIssueFailureCount ?? 0,
+  )
+  let committedIssueCreates = 0
   const failedWorkItemConfigurationTeamIds = new Set(
     options.failedWorkItemConfigurationTeamIds ?? [],
   )
@@ -945,6 +962,20 @@ async function mockAuthenticatedTaskPage(
       return
     }
 
+    if (committedIssueCreates > 0 && remainingPostCreateProjectIssueFailures > 0) {
+      remainingPostCreateProjectIssueFailures -= 1
+      await route.fulfill({
+        json: {
+          code: options.postCreateProjectIssueFailureCode ?? 'ProjectIssuesUnavailable',
+          message: options.postCreateProjectIssueFailureStatus === 401
+            ? 'Unauthorized'
+            : 'issues.error.loading',
+        },
+        status: options.postCreateProjectIssueFailureStatus ?? 503,
+      })
+      return
+    }
+
     const projectIssues = taskResponsesByProject[projectId] ?? []
     const assignedIssues = Object.values(teamIssuesByTeam)
       .flat()
@@ -1307,6 +1338,17 @@ async function mockAuthenticatedTaskPage(
 
     if (route.request().method() === 'POST') {
       requestCounts.issueCreates += 1
+      requestCounts.issueCreateIdempotencyKeys.push(
+        route.request().headers()['idempotency-key'] ?? '',
+      )
+      if (remainingCreateIssueFailures > 0) {
+        remainingCreateIssueFailures -= 1
+        await route.fulfill({
+          status: 500,
+          json: { message: 'タスク作成に失敗しました。' },
+        })
+        return
+      }
       const body = route.request().postDataJSON() as {
         assignedProjectId?: string
         assigneeUserId?: string
@@ -1357,6 +1399,7 @@ async function mockAuthenticatedTaskPage(
       } satisfies TeamIssue
 
       teamIssuesByTeam[teamId] = [...(teamIssuesByTeam[teamId] ?? []), issue]
+      committedIssueCreates += 1
 
       await route.fulfill({
         status: 201,
@@ -7678,6 +7721,149 @@ test.describe('authenticated task page', () => {
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
+    expect(requestCounts.issueCreates).toBe(1)
+  })
+
+  test('作成 API の失敗はフォームを保持し、同じ idempotency key で再試行できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      createIssueFailureCount: 1,
+    })
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('retryable-create')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(createTaskForm).toContainText('タスク作成に失敗しました。')
+    await expect(createTaskForm.locator('input[name="title"]')).toHaveValue('retryable-create')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(page.getByTestId('task-row-retryable-create')).toContainText('retryable-create')
+    expect(requestCounts.issueCreates).toBe(2)
+    expect(requestCounts.issueCreateIdempotencyKeys[0]).toBeTruthy()
+    expect(requestCounts.issueCreateIdempotencyKeys[0]).toBe(
+      requestCounts.issueCreateIdempotencyKeys[1],
+    )
+  })
+
+  test('進行中の古い作成失敗は再表示した作成パネルを変更しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    let resolveFirstCreateArrival: (() => void) | undefined
+    let resolveFirstCreateResponse: (() => void) | undefined
+    let resolveSecondCreateArrival: (() => void) | undefined
+    let resolveSecondCreateResponse: (() => void) | undefined
+    let createRequestNumber = 0
+    const firstCreateArrival = new Promise<void>((resolve) => {
+      resolveFirstCreateArrival = resolve
+    })
+    const firstCreateResponse = new Promise<void>((resolve) => {
+      resolveFirstCreateResponse = resolve
+    })
+    const secondCreateArrival = new Promise<void>((resolve) => {
+      resolveSecondCreateArrival = resolve
+    })
+    const secondCreateResponse = new Promise<void>((resolve) => {
+      resolveSecondCreateResponse = resolve
+    })
+    await page.route(/.*\/api\/teams\/core-team\/issues(?:\?.*)?$/, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+
+      const requestNumber = createRequestNumber + 1
+      createRequestNumber = requestNumber
+      if (requestNumber === 1) {
+        resolveFirstCreateArrival?.()
+        await firstCreateResponse
+      } else if (requestNumber === 2) {
+        resolveSecondCreateArrival?.()
+        await secondCreateResponse
+      } else {
+        await route.fallback()
+        return
+      }
+
+      await route.fulfill({
+        status: 500,
+        json: { message: '先行する登録に失敗しました。' },
+      })
+    })
+    await page.goto('/projects/refero/issues')
+    const firstResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues',
+    )
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('先行リクエスト')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+    await firstCreateArrival
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    const replacementForm = page.getByTestId('create-task-form')
+    await replacementForm.locator('input[name="title"]').fill('置き換えリクエスト')
+    await replacementForm.getByRole('button', { name: '登録', exact: true }).click()
+    await secondCreateArrival
+
+    resolveFirstCreateResponse?.()
+    const completedFirstResponse = await firstResponse
+    await completedFirstResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+
+    await expect(replacementForm.locator('input[name="title"]')).toHaveValue('置き換えリクエスト')
+    await expect(replacementForm.getByRole('button', { name: '登録中', exact: true })).toBeDisabled()
+
+    resolveSecondCreateResponse?.()
+    await expect(replacementForm.getByRole('alert')).toContainText('先行する登録に失敗しました。')
+  })
+
+  test('作成 POST 成功後の一覧再取得失敗でも作成を重複実行せず詳細へ遷移する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      postCreateProjectIssueFailureCount: 1,
+    })
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('refresh-failure-single-create')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(page).toHaveURL(/issueId=refresh-failure-single-create/)
+    expect(requestCounts.issueCreates).toBe(1)
+  })
+
+  test('作成後一覧取得の認証失効はログインへ遷移し、作成を重複実行しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      postCreateProjectIssueFailureCount: 1,
+      postCreateProjectIssueFailureStatus: 401,
+      postCreateProjectIssueFailureCode: 'EnterpriseSessionExpired',
+    })
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('refresh-auth-expired')
+    const refreshResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/projects/refero/issues' &&
+      response.status() === 401,
+    )
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await refreshResponse
+    await expect(page).toHaveURL(/\/login\?returnTo=/)
+    expect(new URL(page.url()).searchParams.get('returnTo')).toBe(
+      '/projects/refero/issues?issueId=refresh-auth-expired&teamId=core-team',
+    )
     expect(requestCounts.issueCreates).toBe(1)
   })
 
