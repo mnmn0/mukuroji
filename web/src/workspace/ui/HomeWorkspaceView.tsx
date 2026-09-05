@@ -2,14 +2,17 @@ import type {
   FocusQueueResponse,
   ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
-import type { MessageKey } from '../../shared/i18n/i18n'
-import {
-  MetricCard,
-  SectionHeader,
-} from '../../shared/ui/WorkbenchPrimitives'
+import { Link } from 'react-router'
 import type { ProjectDirectoryTeam } from '../../projects/api'
+import type { MessageKey } from '../../shared/i18n/i18n'
+import { workspaceNavPaths } from '../../shared/routing/paths'
+import { MetricCard } from '../../shared/ui/WorkbenchPrimitives'
 import type { CanonicalWorkItem } from '../../tasks/api'
-import { getFocusQueueItems } from '../../features/focus-queue/model/focusQueue'
+import {
+  getFocusActionabilityMessageKey,
+  getFocusQueueItems,
+  getFocusSignalMessageKey,
+} from '../../features/focus-queue/model/focusQueue'
 import {
   isOpenableWorkspaceTask,
   resolveWorkspaceTaskConfiguration,
@@ -61,26 +64,34 @@ export function HomeWorkspaceView({
     ...getFocusQueueItems(focusQueue, 'now'),
     ...getFocusQueueItems(focusQueue, 'next'),
   ].slice(0, 3)
+  const focusPreviewSection = getFocusQueueItems(focusQueue, 'now').length > 0
+    ? 'now'
+    : getFocusQueueItems(focusQueue, 'next').length > 0
+      ? 'next'
+      : 'now'
   const attentionTasks = getFocusQueueItems(focusQueue, 'waiting').slice(0, 3)
 
   return (
     <div className="grid gap-6">
-      <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
-        <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="teal" />
-        <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
-        <MetricCard
-          label={t('workspace.metric.blocked')}
-          srValue={isFocusUnavailable ? t('workspace.focus.previewUnavailable') : undefined}
-          testId="workspace-focus-blocked-metric"
-          value={isFocusUnavailable ? '—' : summary.blocked}
-          tone="red"
-        />
-        <MetricCard label={t('workspace.metric.teams')} value={teams.length} tone="amber" />
-      </div>
-
       <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(320px,0.8fr)] gap-6 max-[1080px]:grid-cols-1">
         <section className="workbench-panel">
-          <SectionHeader title={t('workspace.home.focusTitle')} meta={t('workspace.home.focusMeta')} />
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-[var(--workbench-text)]">
+                {t('workspace.home.focusTitle')}
+              </h2>
+              <p className="mt-1 text-sm font-medium text-[var(--workbench-muted)]">
+                {t('workspace.home.focusMeta')}
+              </p>
+            </div>
+            <Link
+              className="inline-flex min-h-11 items-center text-sm font-bold text-[var(--workbench-primary)] underline decoration-[#99d7cf] underline-offset-4 hover:decoration-[var(--workbench-primary)]"
+              data-testid="workspace-home-focus-now"
+              to={`${workspaceNavPaths.focus}?section=${focusPreviewSection}`}
+            >
+              {t('workspace.home.openFocus')}
+            </Link>
+          </div>
           <div className="divide-y divide-slate-100">
             {nextTasks.map((item) => (
               <TaskListRow
@@ -99,18 +110,38 @@ export function HomeWorkspaceView({
                 {t('workspace.focus.previewUnavailable')}
               </p>
             ) : nextTasks.length === 0 ? (
-              <p className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]">
-                {t('workspace.empty.tasks')}
-              </p>
+              <div className="grid gap-3 px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]">
+                <p>{t('workspace.home.emptyNext')}</p>
+                <Link
+                  className="inline-flex min-h-11 w-fit items-center rounded-lg border border-[var(--workbench-border)] bg-white px-3 font-bold text-[var(--workbench-primary)] no-underline hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]"
+                  data-testid="workspace-home-my-tasks"
+                  to={workspaceNavPaths['my-tasks']}
+                >
+                  {t('workspace.home.openMyTasks')}
+                </Link>
+              </div>
             ) : null}
           </div>
         </section>
 
         <section className="workbench-panel">
-          <SectionHeader
-            title={t('workspace.reports.attentionTitle')}
-            meta={t('workspace.reports.attentionMeta')}
-          />
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 px-5 py-4">
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-[var(--workbench-text)]">
+                {t('workspace.home.waitingTitle')}
+              </h2>
+              <p className="mt-1 text-sm font-medium text-[var(--workbench-muted)]">
+                {t('workspace.home.waitingMeta')}
+              </p>
+            </div>
+            <Link
+              className="inline-flex min-h-11 items-center text-sm font-bold text-[var(--workbench-primary)] underline decoration-[#99d7cf] underline-offset-4 hover:decoration-[var(--workbench-primary)]"
+              data-testid="workspace-home-focus-waiting"
+              to={`${workspaceNavPaths.focus}?section=waiting`}
+            >
+              {t('workspace.home.openFocusWaiting')}
+            </Link>
+          </div>
           <div className="grid gap-3 px-5 pb-5">
             {attentionTasks.map((item) => (
               <button
@@ -129,6 +160,19 @@ export function HomeWorkspaceView({
                     resolveWorkspaceTaskConfiguration(item.workItem, workItemConfigurationsByTeam),
                   )} / {item.workItem.dueDate}
                 </p>
+                <p className="mt-2 flex flex-wrap gap-1.5 text-xs font-bold text-[var(--workbench-warning)]">
+                  {(item.actionability.reasons.length > 0
+                    ? item.actionability.reasons.map((reason) => t(getFocusActionabilityMessageKey(reason)))
+                    : item.signals.map((signal) => t(getFocusSignalMessageKey(signal.type)))
+                  ).filter((reason, index, reasons) => reasons.indexOf(reason) === index).map((reason) => (
+                    <span
+                      className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1"
+                      key={reason}
+                    >
+                      {reason}
+                    </span>
+                  ))}
+                </p>
               </button>
             ))}
             {isFocusUnavailable ? (
@@ -140,11 +184,24 @@ export function HomeWorkspaceView({
               </p>
             ) : attentionTasks.length === 0 ? (
               <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm font-bold text-[#526381]">
-                {t('workspace.empty.tasks')}
+                {t('workspace.focus.empty.waiting')}
               </p>
             ) : null}
           </div>
         </section>
+      </div>
+
+      <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
+        <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="teal" />
+        <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
+        <MetricCard
+          label={t('workspace.metric.blocked')}
+          srValue={isFocusUnavailable ? t('workspace.focus.previewUnavailable') : undefined}
+          testId="workspace-focus-blocked-metric"
+          value={isFocusUnavailable ? '—' : summary.blocked}
+          tone="red"
+        />
+        <MetricCard label={t('workspace.metric.teams')} value={teams.length} tone="amber" />
       </div>
     </div>
   )

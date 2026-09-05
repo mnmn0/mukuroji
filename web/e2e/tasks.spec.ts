@@ -3500,6 +3500,31 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page)
   })
 
+  test('Home の Focus と My Tasks の導線はキュー区分を保持する', async ({ page }) => {
+    await page.goto('/home')
+
+    const focusNowLink = page.getByTestId('workspace-home-focus-now')
+    await expect(focusNowLink).toHaveAttribute('href', '/focus?section=now')
+    await focusNowLink.click()
+    await expect(page).toHaveURL('/focus?section=now')
+
+    await page.goBack()
+    await expect(page).toHaveURL('/home')
+    await page.getByTestId('workspace-home-focus-waiting').click()
+    await expect(page).toHaveURL('/focus?section=waiting')
+
+    const emptyFocusQueue = structuredClone(focusQueueResponseFixture)
+    for (const group of emptyFocusQueue.sections) {
+      if (group.section === 'now' || group.section === 'next') group.items = []
+    }
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      focusQueue: emptyFocusQueue,
+    })
+    await page.goto('/home')
+    await page.getByTestId('workspace-home-my-tasks').click()
+    await expect(page).toHaveURL('/my-tasks')
+  })
+
   test('Issue #194: Focus は server 順・理由・keyboard・snooze・Inbox 相関を一続きで扱う', async ({ page }) => {
     const focusQueue = structuredClone(focusQueueResponseFixture)
     const mentionSignal = focusQueue.sections
