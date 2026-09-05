@@ -325,6 +325,8 @@ type MockAuthenticatedTaskPageOptions = {
   postConfirmProjectIssueFailureCount?: number
   /** Number of Project Work Item GET requests to fail after a task create commits. */
   postCreateProjectIssueFailureCount?: number
+  /** Number of successful Project Work Item GET responses that omit newly created items. */
+  postCreateProjectIssueStaleResponseCount?: number
   /** HTTP status returned by the post-create Project Work Item GET failure. */
   postCreateProjectIssueFailureStatus?: number
   /** Stable error code returned by the post-create Project Work Item GET failure. */
@@ -475,7 +477,12 @@ async function mockAuthenticatedTaskPage(
     0,
     options.postCreateProjectIssueFailureCount ?? 0,
   )
+  let remainingPostCreateProjectIssueStaleResponses = Math.max(
+    0,
+    options.postCreateProjectIssueStaleResponseCount ?? 0,
+  )
   let committedIssueCreates = 0
+  const committedIssueIds = new Set<string>()
   const failedWorkItemConfigurationTeamIds = new Set(
     options.failedWorkItemConfigurationTeamIds ?? [],
   )
@@ -976,10 +983,16 @@ async function mockAuthenticatedTaskPage(
       return
     }
 
+    const omitCommittedCreates = committedIssueCreates > 0 &&
+      remainingPostCreateProjectIssueStaleResponses > 0
+    if (omitCommittedCreates) {
+      remainingPostCreateProjectIssueStaleResponses -= 1
+    }
     const projectIssues = taskResponsesByProject[projectId] ?? []
     const assignedIssues = Object.values(teamIssuesByTeam)
       .flat()
       .filter((issue) => issue.assignedProjectId === projectId)
+      .filter((issue) => !omitCommittedCreates || !committedIssueIds.has(issue.id))
 
     await route.fulfill({
       json: {
@@ -1400,6 +1413,7 @@ async function mockAuthenticatedTaskPage(
 
       teamIssuesByTeam[teamId] = [...(teamIssuesByTeam[teamId] ?? []), issue]
       committedIssueCreates += 1
+      committedIssueIds.add(issue.id)
 
       await route.fulfill({
         status: 201,
@@ -7869,6 +7883,27 @@ test.describe('authenticated task page', () => {
     await expect(taskRefreshError).toHaveCount(0)
     await expect(page.getByTestId('task-row-refresh-failure-single-create')).toContainText(
       'refresh-failure-single-create',
+    )
+    expect(requestCounts.issueCreates).toBe(1)
+  })
+
+  test('作成直後の古い一覧応答でも作成したタスクの詳細を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      postCreateProjectIssueStaleResponseCount: 1,
+    })
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('stale-list-create')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(page).toHaveURL(/issueId=stale-list-create/)
+    const taskDetailPane = page.getByTestId('task-detail-pane')
+    await expect(taskDetailPane.getByRole('heading', { name: 'stale-list-create' })).toBeVisible()
+    await expect(taskDetailPane.getByRole('textbox', { name: 'Issue' })).toHaveValue(
+      'stale-list-create',
     )
     expect(requestCounts.issueCreates).toBe(1)
   })

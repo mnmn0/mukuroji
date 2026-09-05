@@ -89,7 +89,23 @@ export function createTaskMutationController({
           { revalidate: false },
         )
       }
-      await mutateProjectTasks()
+      const refreshedTasks = await mutateProjectTasks()
+      if (
+        projectId === target.projectId &&
+        task.assignedProjectId === target.projectId &&
+        task.teamId === target.teamId &&
+        Array.isArray(refreshedTasks) &&
+        !refreshedTasks.some((candidate) =>
+          candidate.id === task.id && candidate.teamId === task.teamId,
+        )
+      ) {
+        await mutateProjectTasks(
+          (currentTasks = []) => currentTasks.some((candidate) =>
+            candidate.id === task.id && candidate.teamId === task.teamId,
+          ) ? currentTasks : [task, ...currentTasks],
+          { revalidate: false },
+        )
+      }
     } catch (error: unknown) {
       hasRefreshError = true
       refreshError = error
