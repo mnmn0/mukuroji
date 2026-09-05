@@ -901,6 +901,19 @@ export function TaskPage() {
       createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
       searchParams,
     )
+    if (projectId === targetProjectId && issue.assignedProjectId === targetProjectId &&
+      issue.teamId === targetTeamId) {
+      await mutateProjectTasks(
+        (currentTasks = []) => {
+          const existingIndex = currentTasks.findIndex((candidate) =>
+            candidate.id === issue.id && candidate.teamId === issue.teamId,
+          )
+          if (existingIndex < 0) return [issue, ...currentTasks]
+          return currentTasks.map((candidate, index) => index === existingIndex ? issue : candidate)
+        },
+        { revalidate: false },
+      )
+    }
     let shouldNavigate = true
     try {
       await mutateProjectTasks()
@@ -1454,6 +1467,9 @@ export function TaskPage() {
       locale={locale}
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
+      onRetryTasks={() => {
+        void mutateProjectTasks().catch(() => undefined)
+      }}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}

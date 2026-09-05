@@ -351,6 +351,8 @@ export type TaskScreenProps = {
   projectMembersErrorMessage?: string
   /** Error shown when Project tasks could not be loaded. */
   taskErrorMessage?: string
+  /** Retries the Project task list after a non-session refresh failure. */
+  onRetryTasks?: () => void
   /** Authoritative canonical Work Item dependency graph shared by all task views. */
   planningSnapshot?: PlanningSnapshot
   /** Whether canonical Planning dependency data or its permission projection is loading. */
@@ -540,6 +542,7 @@ export function TaskScreen({
   projectCustomerImpact,
   tasks = [],
   taskErrorMessage,
+  onRetryTasks,
   taskViewToolbar,
   taskViewDefinition,
   taskViewPresentation,
@@ -2551,6 +2554,22 @@ export function TaskScreen({
                     {t('collaboration.retry')}
                   </button>
                 ) : null}
+              </div>
+            ) : null}
+            {taskErrorMessage && onRetryTasks ? (
+              <div
+                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
+                data-testid="project-task-error"
+                role="alert"
+              >
+                <span>{taskErrorMessage}</span>
+                <button
+                  className="underline underline-offset-2"
+                  onClick={onRetryTasks}
+                  type="button"
+                >
+                  {t('collaboration.retry')}
+                </button>
               </div>
             ) : null}
             {projectCustomerImpact && projectCustomerImpact.requestCount > 0 ? (

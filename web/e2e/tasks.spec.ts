@@ -7854,6 +7854,21 @@ test.describe('authenticated task page', () => {
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page).toHaveURL(/issueId=refresh-failure-single-create/)
+    const taskDetailPane = page.getByTestId('task-detail-pane')
+    await expect(taskDetailPane.getByRole('heading', {
+      name: 'refresh-failure-single-create',
+    })).toBeVisible()
+    await expect(taskDetailPane.getByRole('textbox', { name: 'Issue' })).toHaveValue(
+      'refresh-failure-single-create',
+    )
+    const taskRefreshError = page.getByTestId('project-task-error')
+    await expect(taskRefreshError).toContainText('タスク一覧を取得できませんでした')
+    await taskRefreshError.getByRole('button', { name: '再読み込み', exact: true }).click()
+    await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(3)
+    await expect(taskRefreshError).toHaveCount(0)
+    await expect(page.getByTestId('task-row-refresh-failure-single-create')).toContainText(
+      'refresh-failure-single-create',
+    )
     expect(requestCounts.issueCreates).toBe(1)
   })
 

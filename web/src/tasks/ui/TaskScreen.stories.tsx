@@ -176,6 +176,7 @@ const selectedIssueDetail: TeamIssueDetail = {
 
 const onProjectQuickAccessToggle = fn()
 const onRetryPlanning = fn()
+const onRetryTasks = fn()
 const onContextMenuSelectedIssueChange = fn()
 const onReadOnlySelectedIssueChange = fn()
 const onDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
@@ -326,6 +327,7 @@ type StaleCreateRejectionHarnessProps = {
  */
 function StaleCreateRejectionHarness({ taskScreenProps }: StaleCreateRejectionHarnessProps) {
   const rejectCreateRef = useRef<(() => void) | undefined>(undefined)
+  /** Holds the story create request until the regression control rejects it. */
   const onCreateTask = useCallback(async () => new Promise<void>((_resolve, reject) => {
     rejectCreateRef.current = () => reject(new Error('先行する登録に失敗しました。'))
   }), [])
@@ -909,8 +911,18 @@ export const DenseRows: Story = {
  */
 export const LoadingError: Story = {
   args: {
+    onRetryTasks,
     taskErrorMessage: 'Lambda returned 500.',
     tasks: [],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onRetryTasks.mockClear()
+
+    const taskError = canvas.getByTestId('project-task-error')
+    await expect(taskError).toHaveTextContent('Lambda returned 500.')
+    await userEvent.click(within(taskError).getByRole('button', { name: '再読み込み' }))
+    await expect(onRetryTasks).toHaveBeenCalledTimes(1)
   },
 }
 
