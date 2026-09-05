@@ -371,8 +371,12 @@ export type TaskScreenProps = {
   initialSelectedTaskId?: string
   /** Work Item ID explicitly selected by the current route, including unresolved selections. */
   selectedIssueId?: string
+  /** Prevents opening a fallback task after an ambiguous route was normalized. */
+  suppressIssueFallback?: boolean
   /** Detail, relations, and activity for the selected Work Item. */
   selectedIssueDetail?: TeamIssueDetail
+  /** Prevents stale list data from opening when the detail response is outside the Project scope. */
+  selectedIssueDetailUnavailable?: boolean
   /** Customer Request impact aggregated across the current Project. */
   projectCustomerImpact?: CustomerImpactSignal
   /** Single-Team Work Item configuration used by list and create controls. */
@@ -541,7 +545,9 @@ export function TaskScreen({
   resolvedConfigurationsByTeam = emptyResolvedWorkItemConfigurations,
   configurationFailedTeamIds = emptyConfigurationTeamIds,
   selectedIssueDetail,
+  selectedIssueDetailUnavailable = false,
   selectedIssueId,
+  suppressIssueFallback = false,
   projectCustomerImpact,
   tasks = [],
   taskErrorMessage,
@@ -932,21 +938,25 @@ export function TaskScreen({
     })
   }, [selectedBulkTaskViewKeys, visibleTaskViewKeys])
 
-  const selectedDetailTask = selectedIssueId
-    ? (() => {
-      const selectedTasks = tasks.filter((task) =>
-        task.id === selectedIssueId && (!activeProjectTeamId || task.teamId === activeProjectTeamId)
-      )
-      return selectedTasks.length === 1 ? selectedTasks[0] : undefined
-    })()
-    : (
-      (localSelectedDetailTaskKey
-        ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
-        : undefined) ??
-      findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
-      visibleTasks[0] ??
-      tasks[0]
-    )
+  const selectedDetailTask = selectedIssueDetailUnavailable
+    ? undefined
+    : selectedIssueId
+      ? (() => {
+          const selectedTasks = tasks.filter((task) =>
+            task.id === selectedIssueId && (!activeProjectTeamId || task.teamId === activeProjectTeamId)
+          )
+          return selectedTasks.length === 1 ? selectedTasks[0] : undefined
+        })()
+      : suppressIssueFallback
+        ? undefined
+        : (
+            (localSelectedDetailTaskKey
+              ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
+              : undefined) ??
+            findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
+            visibleTasks[0] ??
+            tasks[0]
+          )
   const detailTask = isDetailOpen
     ? resolveLatestTaskSnapshot(selectedDetailTask, selectedIssueDetail?.issue)
     : undefined

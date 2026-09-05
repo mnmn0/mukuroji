@@ -134,7 +134,7 @@ describe('Project task route context', () => {
       teams: sharedProjectTeams,
     })
 
-    expect(suppressedContext.resolvedSelectedIssue).toBe(coreIssue)
+    expect(suppressedContext.resolvedSelectedIssue).toBeUndefined()
     expect(suppressedContext.selectedWorkItemTeamId).toBeUndefined()
 
     const selectedEmptyTeamContext = resolveProjectTaskRouteContext({

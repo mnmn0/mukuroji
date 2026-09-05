@@ -5049,6 +5049,29 @@ test.describe('authenticated task page', () => {
       '別のメンバーが更新した最新内容です。',
     )
     await expect(detailPane.getByText(workItemConflictMessage)).toBeVisible()
+    await expect(page.getByTestId('project-task-error')).toHaveCount(0)
+  })
+
+  test('保存 API の失敗は保存エラーを維持し、一覧再試行を表示しない', async ({ page }) => {
+    let updateAttempts = 0
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, async () => {
+      updateAttempts += 1
+      return updateAttempts === 1 ? 'fail' : undefined
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const requestCounts = getMockRequestCounts(page)
+
+    await detailPane.locator('select[name="workflowStatusId"]').selectOption('done')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect(detailPane).toContainText('変更を保存できませんでした。もう一度お試しください。')
+    await expect(page.getByTestId('project-task-error')).toHaveCount(0)
+    expect(requestCounts.issueUpdates).toBe(1)
+
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await expect(page.getByTestId('task-action-feedback')).toContainText('変更を保存しました。')
+    expect(requestCounts.issueUpdates).toBe(2)
   })
 
   test('Team Issue 詳細は競合後の revision 再取得後も競合メッセージを維持する', async ({ page }) => {
@@ -6363,6 +6386,10 @@ test.describe('authenticated task page', () => {
     await expect(
       page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }),
     ).toBeVisible()
+    const emptyDetailPane = page.getByTestId('task-detail-pane')
+    await expect(emptyDetailPane).toContainText('タスクを選択すると詳細を確認できます。')
+    await expect(emptyDetailPane).not.toContainText('Core ambiguous issue')
+    await expect(emptyDetailPane).not.toContainText('Design ambiguous issue')
     expect(teamScopedIssueRequestPaths).toEqual([])
 
     await page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }).click()
@@ -8200,6 +8227,30 @@ test.describe('authenticated task page', () => {
       expect(requestCounts.issueCreates).toBe(1)
     })
   }
+
+  test('一覧の同一 Team/ID 行より別 Project の detail を優先して表示しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      issueDetailOverrides: {
+        [createIssueCollaborationKey('core-team', 'wireframe')]: {
+          issuePatch: {
+            assignedProjectId: 'other-project',
+            description: '別 Project の本文です。',
+            title: '別 Project のタイトル',
+          },
+        },
+      },
+    })
+    await page.goto('/projects/refero/issues?issueId=wireframe&teamId=core-team')
+
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    const detailPane = page.getByTestId('task-detail-pane')
+    await expect(detailPane).toContainText('タスク詳細を取得できませんでした')
+    await expect(detailPane.getByRole('heading', {
+      name: '別 Project のタイトル',
+    })).toHaveCount(0)
+    await expect(detailPane.getByRole('textbox', { name: 'Issue' })).toHaveCount(0)
+    await expect(page.getByTestId('project-task-error')).toBeVisible()
+  })
 
   for (const detailStatus of [404, 503]) {
     test(`明示URLのdetail補完失敗でも一覧を表示し、再試行できる (${detailStatus})`, async ({ page }) => {

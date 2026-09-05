@@ -633,6 +633,23 @@ export const ExplicitAmbiguousSelection: Story = {
   },
 }
 
+/** Keeps a stale Project-list row closed when its detail response belongs elsewhere. */
+export const DetailScopeUnavailable: Story = {
+  args: {
+    detailErrorMessage: 'タスク詳細を取得できませんでした',
+    selectedIssueDetailUnavailable: true,
+    selectedIssueId: 'wireframe',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const detailPane = canvas.getByTestId('task-detail-pane')
+
+    await expect(detailPane).toHaveTextContent('タスク詳細を取得できませんでした')
+    await expect(detailPane).not.toHaveTextContent('ワイヤーフレームを確認する')
+    await expect(canvas.queryByTestId('project-task-error')).toBeNull()
+  },
+}
+
 /** Planning dependency failure that leaves the primary task table usable and retryable. */
 export const PlanningUnavailable: Story = {
   args: {

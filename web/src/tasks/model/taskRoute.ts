@@ -142,7 +142,7 @@ export function resolveProjectTaskRouteContext(
     ? undefined
     : requestedIssueCandidates[0]
   const resolvedSelectedIssue = requestedIssue ?? (
-    input.selectedIssueId ? undefined : tasks[0]
+    input.selectedIssueId || input.suppressIssueFallback ? undefined : tasks[0]
   )
   const requestedIssueTeamId = input.selectedIssueId && requestedIssue
     ? requestedIssue.teamId

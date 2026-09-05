@@ -364,6 +364,7 @@ export function TaskPage() {
   const projectUsersErrorMessage = projectUsersError
     ? t('workspace.permissions.usersError')
     : undefined
+  const suppressIssueFallback = location.state === ambiguousIssueSelectionLocationState
   const {
     activeProject,
     activeTeam,
@@ -382,16 +383,15 @@ export function TaskPage() {
       projectIssues,
       selectedIssueId,
       selectedTeamId,
-      suppressIssueFallback:
-        location.state === ambiguousIssueSelectionLocationState,
+      suppressIssueFallback,
       teams,
     }),
     [
-      location.state,
       projectId,
       projectIssues,
       selectedIssueId,
       selectedTeamId,
+      suppressIssueFallback,
       teams,
     ],
   )
@@ -564,7 +564,7 @@ export function TaskPage() {
   })
   const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
   const {
-    data: selectedIssueDetail,
+    data: rawSelectedIssueDetail,
     error: detailError,
     isLoading: isSelectedIssueDetailLoading,
     mutate: mutateSelectedIssueDetail,
@@ -575,6 +575,18 @@ export function TaskPage() {
     selectedIssueDetailId,
     Boolean(user && !currentUserError),
     'project-issue-detail',
+  )
+  const selectedIssueDetailIsInScope = Boolean(
+    rawSelectedIssueDetail &&
+    rawSelectedIssueDetail.issue.assignedProjectId === projectId &&
+    (!selectedIssueDetailTeamId || rawSelectedIssueDetail.issue.teamId === selectedIssueDetailTeamId) &&
+    (!selectedIssueDetailId || rawSelectedIssueDetail.issue.id === selectedIssueDetailId),
+  )
+  const selectedIssueDetail = selectedIssueDetailIsInScope
+    ? rawSelectedIssueDetail
+    : undefined
+  const selectedIssueDetailScopeMismatch = Boolean(
+    rawSelectedIssueDetail && !selectedIssueDetailIsInScope,
   )
   const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
   const [scheduleRefreshError, setScheduleRefreshError] = useState<unknown>()
@@ -714,17 +726,22 @@ export function TaskPage() {
   const isPlanningDependencyLoading = Boolean(planningKey && isPlanningLoading) ||
     Boolean(planningProjectRolesKey && isPlanningProjectRolesLoading) ||
     Boolean(projectDirectoryKey && isProjectDirectoryLoading)
-  const detailErrorMessage = issueUpdateErrorMessage ?? (
-    detailError || (
+  const detailFetchError = Boolean(
+    detailError ||
+    selectedIssueDetailScopeMismatch ||
+    (
       Boolean(selectedIssueId) &&
       !taskError &&
       !isProjectTasksLoading &&
       !isSelectedIssueDetailLoading &&
       !resolvedSelectedIssue
-    )
-      ? t('tasks.detail.error')
-      : undefined
+    ),
   )
+  const detailFetchErrorMessage = detailFetchError
+    ? t('tasks.detail.error')
+    : undefined
+  const detailErrorMessage = issueUpdateErrorMessage ?? detailFetchErrorMessage
+  const canRetryTaskQueries = Boolean(taskError || detailFetchError)
   const configurationErrorMessage = failedConfigurationTeamIds.length > 0
     ? t('workItems.configuration.loadError')
     : undefined
@@ -1137,7 +1154,7 @@ export function TaskPage() {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.conflict')])
         await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
       } else {
-        setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.error')])
+        setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.action.updateError')])
       }
 
       throw error
@@ -1468,12 +1485,14 @@ export function TaskPage() {
       locale={locale}
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
-      onRetryTasks={() => {
-        void Promise.all([
-          mutateProjectTasks(),
-          mutateSelectedIssueDetail(),
-        ]).catch(() => undefined)
-      }}
+      onRetryTasks={canRetryTaskQueries
+        ? () => {
+            void Promise.all([
+              mutateProjectTasks(),
+              mutateSelectedIssueDetail(),
+            ]).catch(() => undefined)
+          }
+        : undefined}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
@@ -1558,6 +1577,8 @@ export function TaskPage() {
       relationCandidates={relationCandidates}
       relationCandidatesErrorMessage={relationCandidatesErrorMessage}
       selectedIssueDetail={selectedIssueDetail}
+      selectedIssueDetailUnavailable={selectedIssueDetailScopeMismatch}
+      suppressIssueFallback={suppressIssueFallback}
       projectCustomerImpact={projectCustomerImpactKey ? projectCustomerImpact : undefined}
       resolvedConfiguration={listConfigurationTeamId ? resolvedConfiguration : undefined}
       resolvedConfigurationsByTeam={workItemConfigurationLoadResult.configurationsByTeam}
