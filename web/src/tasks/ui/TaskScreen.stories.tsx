@@ -992,6 +992,58 @@ export const CreateFailureUsesFormAlertOnly: Story = {
   },
 }
 
+/** Keeps detailed-only validation visible after a failed detailed create switches to quick mode. */
+export const DetailedFailureKeepsQuickValidation: Story = {
+  args: {
+    initialTab: 'board',
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <CreateFailureRetryHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const boardCreateButton = canvasElement.querySelector<HTMLElement>(
+      '[data-testid^="project-task-add-"]',
+    )
+    if (!boardCreateButton) throw new Error('Expected a Board column create button.')
+
+    await userEvent.click(boardCreateButton)
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const form = within(createTaskForm)
+    await userEvent.click(form.getByRole('button', { name: /^詳細登録$/u }))
+    await userEvent.type(form.getByRole('textbox', { name: 'タスク名' }), 'detailed failure')
+    const assignee = createTaskForm.querySelector<HTMLSelectElement>(
+      'select[name="assigneeUserId"]',
+    )
+    if (!assignee) throw new Error('Expected an assignee input.')
+    fireEvent.change(assignee, { target: { value: 'sato@example.com' } })
+    await userEvent.selectOptions(form.getByLabelText('スケジュール種別'), 'date-range')
+    fireEvent.change(form.getByLabelText('開始日'), { target: { value: '2026-07-01' } })
+    fireEvent.change(form.getByLabelText('終了日'), { target: { value: '2026-07-03' } })
+    const riskLevel = createTaskForm.querySelector<HTMLSelectElement>(
+      'select[name="custom-field:risk-level"]',
+    )
+    if (!riskLevel) throw new Error('Expected a risk level input.')
+    await userEvent.selectOptions(riskLevel, 'moderate')
+    const customerImpact = createTaskForm.querySelector<HTMLInputElement>(
+      'input[name="custom-field:customer-impact"]',
+    )
+    if (!customerImpact) throw new Error('Expected a Customer impact input.')
+    fireEvent.change(customerImpact, { target: { value: 'DetailedFailureContext' } })
+    await expect(assignee).toHaveValue('sato@example.com')
+    await expect(customerImpact).toHaveValue('DetailedFailureContext')
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(form.getByRole('alert')).toHaveTextContent(
+      '作成 API が一時的に失敗しました。',
+    )
+
+    await userEvent.click(form.getByRole('button', { name: /^クイック登録$/u }))
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(createTaskForm).toHaveTextContent('詳細登録に戻ってから登録してください。')
+    await expect(canvas.getByTestId('create-failure-attempt-count')).toHaveTextContent('1')
+    await expect(form.getByRole('textbox', { name: 'タスク名' })).toHaveValue('detailed failure')
+  },
+}
+
 /** Resets a same-context replacement editor after an older create succeeds. */
 export const StaleCreateSuccessResetsReplacement: Story = {
   args: {

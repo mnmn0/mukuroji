@@ -639,6 +639,9 @@ export function TaskGanttView({
                       {onSelectTask ? (
                         <button
                           className="block max-w-full truncate text-left text-sm font-semibold text-[#1c1d1f] hover:text-[var(--workbench-primary)]"
+                          data-task-action="open"
+                          data-task-team-id={row.task.teamId}
+                          data-task-work-item-id={row.task.id}
                           onClick={() => onSelectTask(row.task)}
                           type="button"
                         >
@@ -769,6 +772,9 @@ export function TaskGanttView({
                             )
                           : `${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}
                         className="flex h-full w-full items-center px-2 text-left focus:outline-none focus:ring-2 focus:ring-[var(--workbench-primary)]"
+                        data-task-action="open"
+                        data-task-team-id={row.task.teamId}
+                        data-task-work-item-id={row.task.id}
                         data-testid={`task-gantt-bar-${row.task.id}`}
                         draggable={canEditSchedule && !isBusy}
                         onClick={() => onSelectTask?.(row.task)}

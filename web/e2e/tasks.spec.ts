@@ -4783,6 +4783,21 @@ test.describe('authenticated task page', () => {
     await searchbox.fill('Synthetic task')
     const targetRow = page.getByTestId('task-row-synthetic-150')
     const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
+    let releaseSecondDetail: (() => void) | undefined
+    let secondDetailRequestStarted: (() => void) | undefined
+    const secondDetailRequestGate = new Promise<void>((resolve) => {
+      releaseSecondDetail = resolve
+    })
+    const secondDetailRequestSeen = new Promise<void>((resolve) => {
+      secondDetailRequestStarted = resolve
+    })
+    await page.route(/\/api\/teams\/core-team\/issues\/synthetic-170(?:\?.*)?$/u, async (route) => {
+      if (route.request().method() === 'GET') {
+        secondDetailRequestStarted?.()
+        await secondDetailRequestGate
+      }
+      await route.fallback()
+    })
     await openDetailButton.scrollIntoViewIfNeeded()
     await expect(openDetailButton).toBeVisible()
     const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
@@ -4811,6 +4826,49 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(/issueId=synthetic-150/)
     await expect(detailHeading).toBeInViewport()
     await expect(detailHeading).toBeFocused()
+
+    // Keep the list mounted while moving from A to B so the browser history
+    // remains list → A → B and the original list opener can be restored later.
+    const secondOpenDetailButton = page.getByTestId('task-open-detail-synthetic-170')
+    await expect(secondOpenDetailButton).toBeVisible()
+    const secondDetailResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/synthetic-170' &&
+      response.status() === 200,
+    )
+    await secondOpenDetailButton.focus()
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(/issueId=synthetic-170/u)
+    await secondDetailRequestSeen
+
+    await page.goBack()
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await expect(detailHeading).toBeFocused()
+    await searchbox.focus()
+    releaseSecondDetail?.()
+    const completedSecondDetailResponse = await secondDetailResponse
+    await completedSecondDetailResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await expect(detailHeading).toBeVisible()
+    await expect(searchbox).toBeFocused()
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'Synthetic task 170',
+    })).toHaveCount(0)
+
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
+    await expect(searchbox).toHaveValue('Synthetic task')
+    await expect(openDetailButton).toBeFocused()
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
+
+    await openDetailButton.focus()
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(/issueId=synthetic-150/)
+    await expect(detailHeading).toBeInViewport()
+    await expect(detailHeading).toBeFocused()
     await page.getByTestId('task-detail-close').click()
     await expect(openDetailButton).toBeFocused()
     await page.goBack()
@@ -4820,6 +4878,47 @@ test.describe('authenticated task page', () => {
     await expect(openDetailButton).toBeFocused()
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
   })
+
+  for (const viewport of [
+    { height: 900, label: '1440px', width: 1440 },
+    { height: 844, label: '390px', width: 390 },
+  ]) {
+    for (const taskView of [
+      { key: 'board', tabName: 'ボード', opener: 'board' },
+      { key: 'calendar', tabName: '期限カレンダー', opener: 'calendar' },
+      { key: 'gantt', tabName: '期限順', opener: 'gantt' },
+    ]) {
+      test(`${viewport.label} ${taskView.key} のキーボード詳細遷移は同じ開く操作へフォーカスを戻す`, async ({ page }) => {
+        await page.setViewportSize({ width: viewport.width, height: viewport.height })
+        await page.goto('/projects/refero/issues')
+        await page.getByRole('tab', { name: taskView.tabName, exact: true }).click()
+
+        const opener = taskView.opener === 'board'
+          ? page.getByTestId('project-task-card-wireframe').getByRole('button', {
+              name: /タスク詳細/u,
+            })
+          : taskView.opener === 'calendar'
+            ? page.getByTestId('task-calendar-item-wireframe')
+            : page.getByTestId('task-gantt-bar-wireframe')
+        await expect(opener).toBeVisible()
+        const listUrl = page.url()
+        await opener.focus()
+        await page.keyboard.press('Enter')
+
+        await expect(page).toHaveURL(/(?:[?&])issueId=wireframe/u)
+        const detailHeading = page.getByTestId('task-detail-pane').getByRole('heading', {
+          name: '新しいランディングページのワイヤーフレーム作成',
+        })
+        await expect(detailHeading).toBeFocused()
+        await expect(detailHeading).toBeInViewport()
+
+        await page.goBack()
+        await expect(page).toHaveURL(listUrl)
+        await expect(opener).toBeVisible()
+        await expect(opener).toBeFocused()
+      })
+    }
+  }
 
   test('行のコンテキスト編集は詳細のタイトル入力へフォーカスを移す', async ({ page }) => {
     let releaseTaskViewRequest: (() => void) | undefined
@@ -6536,6 +6635,118 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
   })
 
+  for (const returnBeforeDetailCompletes of [false, true]) {
+    test(`同じ issueId の Team 切り替え履歴は ${returnBeforeDetailCompletes ? '遅延中の戻るでも元の詳細と操作フォーカスを保つ' : 'Back/Forward で Team ごとの詳細フォーカスを戻す'}`, async ({ page }) => {
+      const coreIssue = createStoredTeamIssue({
+        assignedProjectId: 'shared-launch',
+        description: 'core team history detail',
+        id: 'duplicate-issue',
+        teamId: 'core-team',
+        title: 'Core shared duplicate',
+      })
+      const designIssue = createStoredTeamIssue({
+        assignedProjectId: 'shared-launch',
+        description: 'design team history detail',
+        id: 'duplicate-issue',
+        teamId: 'design-team',
+        title: 'Design shared duplicate',
+      })
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+        teamIssuesByTeam: {
+          'core-team': [coreIssue],
+          'design-team': [designIssue],
+        },
+      })
+
+      let releaseDesignDetail: (() => void) | undefined
+      let designDetailRequestStarted: (() => void) | undefined
+      const designDetailRequestGate = new Promise<void>((resolve) => {
+        releaseDesignDetail = resolve
+      })
+      const designDetailRequestSeen = new Promise<void>((resolve) => {
+        designDetailRequestStarted = resolve
+      })
+      await page.route(/\/api\/teams\/design-team\/issues\/duplicate-issue(?:\?.*)?$/u, async (route) => {
+        if (route.request().method() === 'GET') {
+          designDetailRequestStarted?.()
+          await designDetailRequestGate
+        }
+        await route.fallback()
+      })
+
+      await page.goto('/projects/shared-launch/issues')
+      const duplicateRows = page.getByTestId('task-row-duplicate-issue')
+      const coreRow = duplicateRows.filter({ hasText: coreIssue.title })
+      const coreOpener = coreRow.getByTestId('task-open-detail-duplicate-issue')
+
+      await coreOpener.focus()
+      await page.keyboard.press('Enter')
+      await expect(page).toHaveURL(/(?=.*teamId=core-team)(?=.*issueId=duplicate-issue)/u)
+      const coreHeading = page.getByTestId('task-detail-pane').getByRole('heading', {
+        name: coreIssue.title,
+      })
+      await expect(coreHeading).toBeFocused()
+
+      const designDetailResponse = page.waitForResponse((response) =>
+        response.request().method() === 'GET' &&
+        new URL(response.url()).pathname === '/api/teams/design-team/issues/duplicate-issue' &&
+        response.status() === 200,
+      )
+      // The Project view is scoped to the selected Team, so the Design row is
+      // intentionally removed after Core is selected. Seed the next browser
+      // entry with the same SPA history state instead of reloading or adding a
+      // test-only navigation hook; the real Core row opener built the first entry.
+      const currentHistoryState = await page.evaluate(() => window.history.state)
+      await page.evaluate(({ path, state }) => {
+        window.history.pushState({
+          ...state,
+          idx: (typeof state?.idx === 'number' ? state.idx : 0) + 1,
+          key: 'same-id-design-history',
+        }, '', path)
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }, {
+        path: '/projects/shared-launch/issues?issueId=duplicate-issue&teamId=design-team',
+        state: currentHistoryState,
+      })
+      await expect(page).toHaveURL(/(?=.*teamId=design-team)(?=.*issueId=duplicate-issue)/u)
+      await designDetailRequestSeen
+
+      if (returnBeforeDetailCompletes) {
+        await page.goBack()
+        await expect(page).toHaveURL(/(?=.*teamId=core-team)(?=.*issueId=duplicate-issue)/u)
+        await expect(coreHeading).toBeFocused()
+        const searchbox = page.getByRole('searchbox', { name: '検索...' })
+        await searchbox.focus()
+        releaseDesignDetail?.()
+        const completedDesignDetailResponse = await designDetailResponse
+        await completedDesignDetailResponse.finished()
+        await page.evaluate(() => new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        }))
+        await expect(page).toHaveURL(/(?=.*teamId=core-team)(?=.*issueId=duplicate-issue)/u)
+        await expect(coreHeading).toBeVisible()
+        await expect(searchbox).toBeFocused()
+        await expect(page.getByTestId('task-detail-pane')).toContainText(coreIssue.description)
+        return
+      }
+
+      releaseDesignDetail?.()
+      const completedDesignDetailResponse = await designDetailResponse
+      await completedDesignDetailResponse.finished()
+      const designHeading = page.getByTestId('task-detail-pane').getByRole('heading', {
+        name: designIssue.title,
+      })
+      await expect(designHeading).toBeFocused()
+
+      await page.goBack()
+      await expect(page).toHaveURL(/(?=.*teamId=core-team)(?=.*issueId=duplicate-issue)/u)
+      await expect(coreHeading).toBeFocused()
+      await page.goForward()
+      await expect(page).toHaveURL(/(?=.*teamId=design-team)(?=.*issueId=duplicate-issue)/u)
+      await expect(designHeading).toBeFocused()
+    })
+  }
+
   test('teamId のない曖昧な issueId deep-link は Team Issue 詳細 API を呼ばず aggregate URL へ戻す', async ({
     page,
   }) => {
@@ -8124,6 +8335,30 @@ test.describe('authenticated task page', () => {
     expect(dialogMessages).toHaveLength(1)
     await expect(titleInput).toHaveValue('keep-before-opening-task')
     await expect(page).not.toHaveURL(/(?:[?&])issueId=/u)
+
+    page.once('dialog', async (dialog) => {
+      await dialog.accept()
+    })
+    await page.getByTestId('task-row-wireframe').click()
+    await expect(page).toHaveURL(/(?:[?&])issueId=wireframe/u)
+    await expect(createTaskForm).toHaveCount(0)
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    const reopenedCreateTaskForm = page.getByTestId('create-task-form')
+    const reopenedTitleInput = reopenedCreateTaskForm.locator('input[name="title"]')
+    await expect(reopenedTitleInput).toHaveValue('')
+    await reopenedTitleInput.fill('replacement-draft-after-discard')
+    const currentWireframeUrl = page.url()
+
+    page.once('dialog', async (dialog) => {
+      dialogMessages.push(dialog.message())
+      await dialog.dismiss()
+    })
+    await page.getByTestId('task-row-brand-guideline').click()
+
+    expect(dialogMessages).toHaveLength(2)
+    await expect(reopenedTitleInput).toHaveValue('replacement-draft-after-discard')
+    await expect(page).toHaveURL(currentWireframeUrl)
   })
 
   test('入力済みの作成パネルはブラウザ戻るの破棄確認を待つ', async ({ page }) => {
