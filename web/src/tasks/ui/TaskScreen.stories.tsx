@@ -41,6 +41,17 @@ const projectFilesControllerFixture = {
   scope: { kind: 'project', projectId: 'refero', teamId: 'core-team' },
 } satisfies FileArtifactsController
 
+/** Long destination labels used by the create-panel responsive story. */
+const createOpenTeams = projectDirectoryFixtures.map((team) => team.id === 'core-team'
+  ? {
+      ...team,
+      name: 'コアチーム・プロダクトオペレーション',
+      projects: team.projects.map((project) => project.id === 'refero'
+        ? { ...project, name: 'Refero Strategic Delivery Workspace' }
+        : project),
+    }
+  : team)
+
 const assigneeOptions: ProjectMember[] = [
   {
     id: 'sato@example.com',
@@ -717,6 +728,7 @@ export const CreateOpen: Story = {
     currentUserProjectKey: 'sato@example.com',
     projectName: 'Refero Strategic Delivery Workspace',
     teamName: 'コアチーム・プロダクトオペレーション',
+    teams: createOpenTeams,
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
