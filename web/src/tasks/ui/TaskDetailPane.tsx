@@ -1249,7 +1249,12 @@ export function TaskDetailPane({
             <p className="workbench-eyebrow text-[var(--workbench-muted)]">
               {t('tasks.detail.title')}
             </p>
-            <h2 className="mt-1.5 text-lg font-semibold leading-6 text-[var(--workbench-text)]">{title}</h2>
+            <h2
+              className="mt-1.5 text-lg font-semibold leading-6 text-[var(--workbench-text)]"
+              tabIndex={-1}
+            >
+              {title}
+            </h2>
             {isLoading ? (
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
             ) : null}

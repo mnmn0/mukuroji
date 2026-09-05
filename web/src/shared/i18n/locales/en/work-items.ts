@@ -354,6 +354,8 @@ export const workItemsMessages = {
   'tasks.create.workItemType': 'Work Item Type',
   'tasks.create.archived': 'archived',
   'tasks.create.noActiveWorkItemTypes': 'All Work Item Types are archived. Unarchive a type before creating a new item.',
+  'tasks.create.quickDetailsRequireDetailed': 'Return to detailed create to review the entered schedule, workflow, priority, or custom fields before creating this task.',
+  'tasks.create.discardConfirm': 'Discard the entered task details?',
   'tasks.board.addInColumn': 'Add to this column',
   'tasks.board.dragHint': 'Move by dragging or choosing a status',
   'tasks.calendar.addOnDate': 'Add on this date',

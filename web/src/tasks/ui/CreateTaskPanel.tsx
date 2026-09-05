@@ -1,5 +1,6 @@
 import type { WorkItemConfiguration, WorkItemSchedule } from '@mukuroji/contracts'
 import { useRef, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -62,6 +63,8 @@ export type CreateTaskPanelProps = {
   locale: Locale
   /** Closes the creation panel without submitting. */
   onCancel: () => void
+  /** Reports whether user-entered values need an explicit discard decision. */
+  onDirtyChange?: (isDirty: boolean) => void
   /** Submits a validated project task creation request. */
   onSubmit: (input: CreateWorkItemInput) => Promise<void>
   /** Project used to resolve project-scoped custom fields. */
@@ -94,6 +97,7 @@ export function CreateTaskPanel({
   isSubmitting,
   locale,
   onCancel,
+  onDirtyChange,
   onSubmit,
   projectId,
   projectName,
@@ -105,6 +109,8 @@ export function CreateTaskPanel({
   const [title, setTitle] = useState('')
   const [isPanelSubmitting, setIsPanelSubmitting] = useState(false)
   const submissionInFlightRef = useRef(false)
+  const dirtyRef = useRef(false)
+  const detailedOnlyEditsRef = useRef(false)
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
   const hasLoadedWorkItemConfiguration = configuration !== undefined
@@ -176,6 +182,18 @@ export function CreateTaskPanel({
   const quickCaptureDueDate = resolveTaskScheduleEndDate(initialSchedule) ?? ''
   const initialStartDate = resolveTaskScheduleStartDate(initialSchedule) ?? ''
   const initialEndDate = resolveTaskScheduleEndDate(initialSchedule) ?? ''
+  const [quickDueDate, setQuickDueDate] = useState(quickCaptureDueDate)
+  const [scheduleDueDate, setScheduleDueDate] = useState(initialEndDate)
+  const [scheduleStartDate, setScheduleStartDate] = useState(initialStartDate)
+  const [scheduleEndDate, setScheduleEndDate] = useState(initialEndDate)
+  const [scheduleMilestoneDate, setScheduleMilestoneDate] = useState(initialStartDate || initialEndDate)
+  const [scheduleEffortMinutes, setScheduleEffortMinutes] = useState(
+    initialSchedule.plannedEffortMinutes === undefined
+      ? ''
+      : String(initialSchedule.plannedEffortMinutes),
+  )
+  const [selectedWorkflowStatusId, setSelectedWorkflowStatusId] = useState(initialWorkflowStatusId)
+  const [priority, setPriority] = useState<CreateWorkItemInput['priority']>('medium')
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
     ? createDefaultCustomFieldValues(customFieldDefinitions, projectId)
@@ -183,6 +201,47 @@ export function CreateTaskPanel({
   const hasCustomFields = customFieldDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, projectId),
   )
+  const effectiveWorkflowStatusId = workflowStatuses.some((status) =>
+    status.id === selectedWorkflowStatusId,
+  )
+    ? selectedWorkflowStatusId
+    : initialWorkflowStatusId
+
+  /** Marks the local form dirty after the user changes a value. */
+  const markDirty = () => {
+    if (dirtyRef.current) return
+    dirtyRef.current = true
+    onDirtyChange?.(true)
+  }
+
+  /** Marks edits to fields that cannot be represented safely by quick capture. */
+  const markDetailedOnlyEdit = () => {
+    markDirty()
+    detailedOnlyEditsRef.current = true
+  }
+
+  /** Records user edits without parsing uncontrolled custom-field text on every keystroke. */
+  const handleFormChange = (event: ChangeEvent<HTMLFormElement>) => {
+    const target = event.target
+    if (!(target instanceof HTMLInputElement ||
+      target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) {
+      return
+    }
+    const detailedOnlyField = target.name === 'scheduleMode' ||
+      target.name === 'scheduleDueDate' ||
+      target.name === 'scheduleStartDate' ||
+      target.name === 'scheduleEndDate' ||
+      target.name === 'scheduleMilestoneDate' ||
+      target.name === 'scheduleEffortMinutes' ||
+      target.name === 'workflowStatusId' ||
+      target.name === 'priority' ||
+      target.name.startsWith('custom-field:')
+    if (detailedOnlyField) {
+      markDetailedOnlyEdit()
+      return
+    }
+    markDirty()
+  }
 
   return (
     <section className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-[clamp(18px,2.5vw,30px)] py-3">
@@ -190,6 +249,7 @@ export function CreateTaskPanel({
         className="workbench-panel grid gap-3 p-4"
         data-testid="create-task-form"
         id="create-task-form"
+        onChange={handleFormChange}
         onSubmit={(event) => {
           event.preventDefault()
           if (submissionInFlightRef.current || isSubmitPending) return
@@ -198,12 +258,16 @@ export function CreateTaskPanel({
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()
           const assigneeUserId = String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
+          if (effectiveMode === 'quick' && detailedOnlyEditsRef.current) {
+            setFieldErrors({ mode: t('tasks.create.quickDetailsRequireDetailed') })
+            return
+          }
           const schedule = effectiveMode === 'quick'
             ? createQuickCaptureSchedule(formData, initialSchedule)
             : createDetailedSchedule(formData, initialSchedule)
           const workflowStatusId = effectiveMode === 'quick'
             ? quickCaptureStatusId ?? initialWorkflowStatusId
-            : String(formData.get('workflowStatusId') ?? initialWorkflowStatusId).trim()
+            : effectiveWorkflowStatusId
           const workflowStatus = workflowStatuses.find((status) => status.id === workflowStatusId)
           const priority = resolveTaskPriority(formData.get('priority'))
 
@@ -281,7 +345,9 @@ export function CreateTaskPanel({
                 <button
                   aria-pressed={effectiveMode === 'quick'}
                   className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
-                  onClick={() => setMode('quick')}
+                  onClick={() => {
+                    setMode('quick')
+                  }}
                   type="button"
                 >
                   {t('tasks.create.quick')}
@@ -290,7 +356,15 @@ export function CreateTaskPanel({
               <button
                 aria-pressed={effectiveMode === 'detailed'}
                 className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'detailed' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
-                onClick={() => setMode('detailed')}
+                onClick={() => {
+                  setMode('detailed')
+                  setFieldErrors((currentErrors) => {
+                    if (!currentErrors.mode) return currentErrors
+                    const nextErrors = { ...currentErrors }
+                    delete nextErrors.mode
+                    return nextErrors
+                  })
+                }}
                 type="button"
               >
                 {t('tasks.create.detailed')}
@@ -319,6 +393,7 @@ export function CreateTaskPanel({
               name="workItemTypeId"
               onChange={(event) => {
                 if (effectiveMode === 'detailed') setMode('detailed')
+                markDirty()
                 setSelectedWorkItemTypeId(event.target.value)
               }}
               value={effectiveWorkItemTypeId}
@@ -369,6 +444,7 @@ export function CreateTaskPanel({
                 disabled={isSubmitPending || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
                 name="assigneeUserId"
                 onChange={(event) => {
+                  markDirty()
                   setSelectedAssigneeUserId(event.target.value)
                 }}
                 required
@@ -398,9 +474,21 @@ export function CreateTaskPanel({
               {t('tasks.column.dueDate')}
               <input
                 className="workbench-input h-10 px-3"
-                defaultValue={quickCaptureDueDate}
+                onChange={(event) => {
+                  const nextDueDate = event.target.value
+                  setQuickDueDate(nextDueDate)
+                  if (scheduleMode === 'unscheduled' || scheduleMode === 'due-date') {
+                    setScheduleDueDate(nextDueDate)
+                  }
+                  if (nextDueDate && scheduleMode === 'unscheduled') {
+                    setScheduleMode('due-date')
+                  } else if (!nextDueDate && scheduleMode === 'due-date') {
+                    setScheduleMode('unscheduled')
+                  }
+                }}
                 name="dueDate"
                 type="date"
+                value={quickDueDate}
               />
             </label>
             <div className="flex items-center gap-2">
@@ -446,6 +534,7 @@ export function CreateTaskPanel({
                 disabled={isSubmitPending || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
                 name="assigneeUserId"
                 onChange={(event) => {
+                  markDirty()
                   setSelectedAssigneeUserId(event.target.value)
                 }}
                 required
@@ -471,8 +560,9 @@ export function CreateTaskPanel({
               <select
                 className="workbench-input h-10 px-3"
                 key={effectiveWorkItemTypeId}
-                defaultValue={initialWorkflowStatusId}
                 name="workflowStatusId"
+                onChange={(event) => setSelectedWorkflowStatusId(event.target.value)}
+                value={effectiveWorkflowStatusId}
               >
                 {workflowStatuses.map((status) => (
                   <option key={status.id} value={status.id}>
@@ -485,8 +575,9 @@ export function CreateTaskPanel({
               {t('tasks.column.priority')}
               <select
                 className="workbench-input h-10 px-3"
-                defaultValue="medium"
                 name="priority"
+                onChange={(event) => setPriority(resolveTaskPriority(event.target.value))}
+                value={priority}
               >
                 {taskPriorities.map((priority) => (
                   <option key={priority} value={priority}>
@@ -520,76 +611,83 @@ export function CreateTaskPanel({
             </div>
           </div>
         ) : null}
-        {effectiveMode === 'detailed' ? (
-          <fieldset className="workbench-panel-muted grid gap-3 p-4">
-            <legend className="px-1 text-sm font-semibold text-[#505967]">
-              {t('tasks.schedule.title')}
-            </legend>
-            <div className="grid grid-cols-[180px_repeat(3,minmax(150px,1fr))] gap-3 max-[900px]:grid-cols-2 max-[640px]:grid-cols-1">
-              <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
-                {t('tasks.schedule.mode')}
-                <select
-                  className="workbench-input h-10 px-3"
-                  name="scheduleMode"
-                  onChange={(event) => setScheduleMode(readScheduleMode(event.currentTarget.value))}
-                  value={scheduleMode}
-                >
-                  <option value="unscheduled">{t('tasks.schedule.unscheduled')}</option>
-                  <option value="due-date">{t('tasks.schedule.dueDate')}</option>
-                  <option value="date-range">{t('tasks.schedule.dateRange')}</option>
-                  <option value="milestone">{t('tasks.schedule.milestone')}</option>
-                </select>
-              </label>
-              {scheduleMode === 'due-date' ? (
-                <ScheduleDateInput
-                  defaultValue={initialEndDate}
-                  label={t('tasks.schedule.dueDate')}
-                  name="scheduleDueDate"
-                />
-              ) : null}
-              {scheduleMode === 'date-range' ? (
-                <>
-                  <ScheduleDateInput
-                    defaultValue={initialStartDate}
-                    label={t('tasks.schedule.startDate')}
-                    name="scheduleStartDate"
-                  />
-                  <ScheduleDateInput
-                    defaultValue={initialEndDate}
-                    label={t('tasks.schedule.endDate')}
-                    name="scheduleEndDate"
-                  />
-                </>
-              ) : null}
-              {scheduleMode === 'milestone' ? (
-                <ScheduleDateInput
-                  defaultValue={initialStartDate || initialEndDate}
-                  label={t('tasks.schedule.milestoneDate')}
-                  name="scheduleMilestoneDate"
-                />
-              ) : null}
-              <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
-                {t('tasks.schedule.effortMinutes')}
-                <input
-                  className="workbench-input h-10 px-3"
-                  defaultValue={initialSchedule.plannedEffortMinutes}
-                  min="0"
-                  name="scheduleEffortMinutes"
-                  type="number"
-                />
-              </label>
-            </div>
-            {fieldErrors.schedule ? (
-              <p className="text-sm font-semibold text-red-700" role="alert">
-                {fieldErrors.schedule}
-              </p>
-            ) : null}
-          </fieldset>
-        ) : null}
-        {effectiveMode === 'detailed' && hasCustomFields ? (
-          <div className="workbench-panel-muted p-4">
+        <fieldset
+          className={`workbench-panel-muted grid gap-3 p-4 ${effectiveMode === 'quick' ? 'hidden' : ''}`}
+          disabled={effectiveMode !== 'detailed'}
+        >
+          <legend className="px-1 text-sm font-semibold text-[#505967]">
+            {t('tasks.schedule.title')}
+          </legend>
+          <div className="grid grid-cols-[180px_repeat(3,minmax(150px,1fr))] gap-3 max-[900px]:grid-cols-2 max-[640px]:grid-cols-1">
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.schedule.mode')}
+              <select
+                className="workbench-input h-10 px-3"
+                name="scheduleMode"
+                onChange={(event) => setScheduleMode(readScheduleMode(event.currentTarget.value))}
+                value={scheduleMode}
+              >
+                <option value="unscheduled">{t('tasks.schedule.unscheduled')}</option>
+                <option value="due-date">{t('tasks.schedule.dueDate')}</option>
+                <option value="date-range">{t('tasks.schedule.dateRange')}</option>
+                <option value="milestone">{t('tasks.schedule.milestone')}</option>
+              </select>
+            </label>
+            <ScheduleDateInput
+              disabled={scheduleMode !== 'due-date'}
+              hidden={scheduleMode !== 'due-date'}
+              label={t('tasks.schedule.dueDate')}
+              name="scheduleDueDate"
+              onChange={(event) => setScheduleDueDate(event.target.value)}
+              value={scheduleDueDate}
+            />
+            <ScheduleDateInput
+              disabled={scheduleMode !== 'date-range'}
+              hidden={scheduleMode !== 'date-range'}
+              label={t('tasks.schedule.startDate')}
+              name="scheduleStartDate"
+              onChange={(event) => setScheduleStartDate(event.target.value)}
+              value={scheduleStartDate}
+            />
+            <ScheduleDateInput
+              disabled={scheduleMode !== 'date-range'}
+              hidden={scheduleMode !== 'date-range'}
+              label={t('tasks.schedule.endDate')}
+              name="scheduleEndDate"
+              onChange={(event) => setScheduleEndDate(event.target.value)}
+              value={scheduleEndDate}
+            />
+            <ScheduleDateInput
+              disabled={scheduleMode !== 'milestone'}
+              hidden={scheduleMode !== 'milestone'}
+              label={t('tasks.schedule.milestoneDate')}
+              name="scheduleMilestoneDate"
+              onChange={(event) => setScheduleMilestoneDate(event.target.value)}
+              value={scheduleMilestoneDate}
+            />
+            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.schedule.effortMinutes')}
+              <input
+                className="workbench-input h-10 px-3"
+                onChange={(event) => setScheduleEffortMinutes(event.target.value)}
+                min="0"
+                name="scheduleEffortMinutes"
+                type="number"
+                value={scheduleEffortMinutes}
+              />
+            </label>
+          </div>
+          {fieldErrors.schedule ? (
+            <p className="text-sm font-semibold text-red-700" role="alert">
+              {fieldErrors.schedule}
+            </p>
+          ) : null}
+        </fieldset>
+        {hasCustomFields ? (
+          <div className={`workbench-panel-muted p-4 ${effectiveMode === 'quick' ? 'hidden' : ''}`}>
             <WorkItemFieldsEditor
               definitions={customFieldDefinitions}
+              disabled={effectiveMode !== 'detailed'}
               errors={fieldErrors}
               locale={locale}
               personOptions={personOptions}
@@ -598,9 +696,9 @@ export function CreateTaskPanel({
             />
           </div>
         ) : null}
-        {errorMessage ?? fieldErrors.submit ? (
+        {errorMessage ?? fieldErrors.submit ?? fieldErrors.mode ? (
           <p className="text-sm font-semibold text-red-700" role="alert">
-            {errorMessage ?? fieldErrors.submit}
+            {errorMessage ?? fieldErrors.submit ?? fieldErrors.mode}
           </p>
         ) : null}
         {isAssigneeOptionsLoading ? (
@@ -620,12 +718,18 @@ export function CreateTaskPanel({
 
 /** Props for one schedule date field. */
 type ScheduleDateInputProps = {
-  /** Initial ISO date, if supplied by a contextual create action. */
-  defaultValue: string
+  /** Current ISO date retained by the owning create form. */
+  value: string
   /** Visible and accessible field label. */
   label: string
   /** Form field name read by schedule construction. */
   name: string
+  /** Whether this schedule variant is currently active. */
+  disabled?: boolean
+  /** Whether the inactive schedule variant remains visually hidden. */
+  hidden?: boolean
+  /** Updates the owning form's retained date. */
+  onChange: (event: ChangeEvent<HTMLInputElement>) => void
 }
 
 /**
@@ -634,16 +738,18 @@ type ScheduleDateInputProps = {
  * @param props - Date field label, name, and initial value.
  * @returns A labeled native calendar input.
  */
-function ScheduleDateInput({ defaultValue, label, name }: ScheduleDateInputProps) {
+function ScheduleDateInput({ disabled = false, hidden = false, label, name, onChange, value }: ScheduleDateInputProps) {
   return (
-    <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+    <label className={`grid gap-1.5 text-sm font-semibold text-[#505967] ${hidden ? 'hidden' : ''}`}>
       {label}
       <input
         className="workbench-input h-10 px-3"
-        defaultValue={defaultValue}
+        disabled={disabled}
         name={name}
-        required
+        onChange={onChange}
+        required={!disabled}
         type="date"
+        value={value}
       />
     </label>
   )

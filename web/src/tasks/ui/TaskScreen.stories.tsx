@@ -896,7 +896,13 @@ export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
     await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
     await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
 
-    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => true
+    try {
+      await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
     await expect(canvas.queryByTestId('create-task-form')).toBeNull()
     await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
     const replacementForm = canvas.getByTestId('create-task-form')
@@ -929,7 +935,13 @@ export const ClosedCreateFailureUsesGlobalAlert: Story = {
     await userEvent.click(form.getByRole('button', { name: '登録' }))
     await expect(form.getByRole('button', { name: '登録中' })).toBeDisabled()
 
-    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => true
+    try {
+      await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
     await expect(canvas.queryByTestId('create-task-form')).toBeNull()
     await userEvent.click(canvas.getByTestId('reject-stale-create'))
 
@@ -1000,7 +1012,13 @@ export const StaleCreateSuccessResetsReplacement: Story = {
     await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
     await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
 
-    await userEvent.click(boardCreateButton)
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => true
+    try {
+      await userEvent.click(boardCreateButton)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
     const replacementForm = within(canvas.getByTestId('create-task-form'))
     await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
     await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toBeDisabled()
