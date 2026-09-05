@@ -7781,6 +7781,8 @@ test.describe('authenticated task page', () => {
       } else if (requestNumber === 2) {
         resolveSecondCreateArrival?.()
         await secondCreateResponse
+        await route.fallback()
+        return
       } else {
         await route.fallback()
         return
@@ -7792,6 +7794,7 @@ test.describe('authenticated task page', () => {
       })
     })
     await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
     const firstResponse = page.waitForResponse((response) =>
       response.request().method() === 'POST' &&
       new URL(response.url()).pathname === '/api/teams/core-team/issues',
@@ -7805,10 +7808,17 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: '新規タスク' }).click()
     await expect(page.getByTestId('create-task-form')).toHaveCount(0)
     await page.getByRole('button', { name: '新規タスク' }).click()
-    const replacementForm = page.getByTestId('create-task-form')
-    await replacementForm.locator('input[name="title"]').fill('置き換えリクエスト')
-    await replacementForm.getByRole('button', { name: '登録', exact: true }).click()
-    await secondCreateArrival
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    const finalForm = page.getByTestId('create-task-form')
+    const finalTitle = finalForm.locator('input[name="title"]')
+    await expect(finalForm.getByRole('button', { name: '登録中', exact: true })).toBeDisabled()
+    await expect(finalTitle).toBeDisabled()
+    await finalForm.evaluate((form) => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    expect(createRequestNumber).toBe(1)
 
     resolveFirstCreateResponse?.()
     const completedFirstResponse = await firstResponse
@@ -7817,11 +7827,18 @@ test.describe('authenticated task page', () => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
     }))
 
-    await expect(replacementForm.locator('input[name="title"]')).toHaveValue('置き換えリクエスト')
-    await expect(replacementForm.getByRole('button', { name: '登録中', exact: true })).toBeDisabled()
+    await expect(finalTitle).toHaveValue('')
+    await expect(finalForm.getByRole('alert')).toHaveCount(0)
+    await expect(finalForm.getByRole('button', { name: '登録', exact: true })).toBeEnabled()
+    await expect(finalTitle).toBeEnabled()
 
+    await finalTitle.fill('replacement-create')
+    await finalForm.getByRole('button', { name: '登録', exact: true }).click()
+    await secondCreateArrival
     resolveSecondCreateResponse?.()
-    await expect(replacementForm.getByRole('alert')).toContainText('先行する登録に失敗しました。')
+    await expect(page).toHaveURL(/issueId=/)
+    expect(createRequestNumber).toBe(2)
+    expect(requestCounts.issueCreates).toBe(1)
   })
 
   test('作成 POST 成功後の一覧再取得失敗でも作成を重複実行せず詳細へ遷移する', async ({ page }) => {

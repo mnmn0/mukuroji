@@ -635,6 +635,7 @@ export function TaskScreen({
   const taskContentRef = useRef<HTMLDivElement>(null)
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
   const createTaskEditorGenerationRef = useRef(0)
+  const createTaskSubmissionInFlightRef = useRef(false)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
   const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
   const onPreviewScheduleChangeRef = useRef(onPreviewScheduleChange)
@@ -1092,7 +1093,6 @@ export function TaskScreen({
   /** Opens the shared create panel without cancelling its newly accepted invocation. */
   const showCreateTaskEditor = useCallback((context?: TaskCreateContext) => {
     createTaskEditorGenerationRef.current += 1
-    setIsCreatingTask(false)
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
     )?.id
@@ -2621,6 +2621,8 @@ export function TaskScreen({
                   setIsCreateTaskOpen(false)
                 }}
                 onSubmit={async (input) => {
+                  if (createTaskSubmissionInFlightRef.current) return
+                  createTaskSubmissionInFlightRef.current = true
                   const submittedEditorGeneration = createTaskEditorGeneration
                   const pendingContext = resolvePendingTaskActionContext(
                     taskActionCompletion,
@@ -2681,9 +2683,8 @@ export function TaskScreen({
                       )
                     }
                   } finally {
-                    if (createTaskEditorGenerationRef.current === submittedEditorGeneration) {
-                      setIsCreatingTask(false)
-                    }
+                    createTaskSubmissionInFlightRef.current = false
+                    setIsCreatingTask(false)
                   }
                 }}
                 projectId={createDestinationProjectId}

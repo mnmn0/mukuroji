@@ -629,11 +629,12 @@ export function TaskPage() {
     ],
     currentPath,
   )
-  const redirectEnterpriseSessionError = (error: unknown) => {
+  /** Redirects an authenticated API failure while preserving the intended return path. */
+  const redirectEnterpriseSessionError = (error: unknown, returnPath = currentPath) => {
     const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
       undefined,
       [error],
-      currentPath,
+      returnPath,
     )
 
     if (!sessionErrorAction?.redirectTo) {
@@ -896,16 +897,16 @@ export function TaskPage() {
         context,
       ),
     ))
-    let shouldNavigate = true
-    try {
-      await mutateProjectTasks()
-    } catch (error) {
-      shouldNavigate = !redirectEnterpriseSessionError(error)
-    }
     const navigationPath = preserveTaskViewUrlState(
       createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
       searchParams,
     )
+    let shouldNavigate = true
+    try {
+      await mutateProjectTasks()
+    } catch (error) {
+      shouldNavigate = !redirectEnterpriseSessionError(error, navigationPath)
+    }
     if (shouldNavigate) navigate(navigationPath)
     return { navigationPath, task: issue }
   }

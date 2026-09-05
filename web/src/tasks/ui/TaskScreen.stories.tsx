@@ -13,7 +13,7 @@ import {
   useSyncExternalStore,
   type ComponentProps,
 } from 'react'
-import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
+import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
 import { TaskScreen } from './TaskScreen'
 import {
   createWorkspaceCommandMenuWorkItemActionRegistry,
@@ -794,11 +794,15 @@ export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
     await expect(canvas.queryByTestId('create-task-form')).toBeNull()
     await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
     const replacementForm = canvas.getByTestId('create-task-form')
+    await expect(within(replacementForm).getByRole('button', { name: '登録中' })).toBeDisabled()
+    await expect(within(replacementForm).getByRole('textbox', { name: 'タスク名' })).toBeDisabled()
+    fireEvent.submit(replacementForm)
     await userEvent.click(canvas.getByTestId('reject-stale-create'))
 
     const replacementFormQueries = within(replacementForm)
     await expect(replacementFormQueries.queryByRole('alert')).toBeNull()
     await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
+    await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toBeEnabled()
     await expect(replacementFormQueries.getByRole('button', { name: '登録' })).toBeEnabled()
   },
 }
