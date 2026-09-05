@@ -8038,6 +8038,123 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.issueCreates).toBe(1)
   })
 
+  test('遅い一覧再検証でも選択中タスクの最新 detail revision を保持する', async ({ page }) => {
+    const canonicalIssue = createStoredTeamIssue({
+      id: 'late-list-revalidation',
+      description: 'canonical detail の最新本文です。',
+      revision: 8,
+      title: 'canonical detail の最新タイトル',
+    })
+    const olderListIssue = {
+      ...canonicalIssue,
+      revision: 7,
+      title: '一覧の古いタイトル',
+    }
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [canonicalIssue],
+      },
+      issueDetailOverrides: {
+        [createIssueCollaborationKey('core-team', olderListIssue.id)]: {
+          issuePatch: {
+            description: canonicalIssue.description,
+            revision: canonicalIssue.revision,
+            title: canonicalIssue.title,
+          },
+        },
+      },
+    })
+
+    await page.goto(`/projects/refero/issues?issueId=${olderListIssue.id}&teamId=core-team`)
+    const taskRow = page.getByTestId(`task-row-${olderListIssue.id}`)
+    const taskDetailPane = page.getByTestId('task-detail-pane')
+    await expect(taskRow).toContainText(canonicalIssue.title)
+    await expect(taskDetailPane.getByRole('heading', { name: canonicalIssue.title })).toBeVisible()
+    await expect(taskDetailPane.locator('textarea[name="description"]')).toHaveValue(
+      canonicalIssue.description,
+    )
+
+    let staleListReads = 0
+    await page.route(/.*\/api\/projects\/refero\/issues(?:\?.*)?$/, async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.fallback()
+        return
+      }
+      staleListReads += 1
+      await route.fulfill({
+        json: {
+          issues: [...referoTaskFixtures, olderListIssue],
+          projectId: 'refero',
+        },
+      })
+    })
+
+    await page.waitForTimeout(10_100)
+    const staleListResponse = page.waitForResponse((response) => {
+      const pathname = new URL(response.url()).pathname
+      return response.request().method() === 'GET' &&
+        pathname === '/api/projects/refero/issues' &&
+        response.status() === 200
+    })
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    const completedStaleListResponse = await staleListResponse
+    await completedStaleListResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    expect(staleListReads).toBeGreaterThan(0)
+    await expect(taskRow).toContainText(canonicalIssue.title)
+    await expect(taskRow).not.toContainText(olderListIssue.title)
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+
+    await page.getByRole('tab', { name: 'ボード', exact: true }).click()
+    await expect(page.getByTestId(`project-task-card-${olderListIssue.id}`)).toContainText(
+      canonicalIssue.title,
+    )
+  })
+
+  for (const detailRevision of [8, 9]) {
+    test(`${detailRevision} revision の detail は一覧行を上書きしない`, async ({ page }) => {
+      const listIssue = createStoredTeamIssue({
+        id: 'equal-list-revision',
+        title: '一覧の正本タイトル',
+        revision: 9,
+      })
+      const equalRevisionDetail = {
+        ...listIssue,
+        title: '同じ revision の古い detail',
+      }
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+        teamIssuesByTeam: {
+          'core-team': [listIssue],
+        },
+        issueDetailOverrides: {
+          [createIssueCollaborationKey('core-team', listIssue.id)]: {
+            issuePatch: {
+              revision: detailRevision,
+              title: equalRevisionDetail.title,
+            },
+          },
+        },
+      })
+
+      const detailResponse = page.waitForResponse((response) => {
+        const pathname = new URL(response.url()).pathname
+        return response.request().method() === 'GET' &&
+          pathname === `/api/teams/core-team/issues/${listIssue.id}` &&
+          response.status() === 200
+      })
+      await page.goto(`/projects/refero/issues?issueId=${listIssue.id}&teamId=core-team`)
+      const completedDetailResponse = await detailResponse
+      await completedDetailResponse.finished()
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      }))
+      await expect(page.getByTestId(`task-row-${listIssue.id}`)).toContainText(listIssue.title)
+      await expect(page.getByTestId(`task-row-${listIssue.id}`)).not.toContainText(equalRevisionDetail.title)
+    })
+  }
+
   test('一覧にない選択中タスクは最新の canonical detail で補完する', async ({ page }) => {
     const createdTitle = 'canonical-detail-latest'
     const detailOverride = {
@@ -8184,6 +8301,9 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => detailReads).toBeGreaterThan(initialDetailReads)
 
     await expect(taskDetailPane).toContainText('タスク詳細を取得できませんでした')
+    await expect(taskDetailPane.locator('[role="alert"]').filter({
+      hasText: 'タスク詳細を取得できませんでした',
+    })).toHaveCount(1)
     await expect(taskDetailPane.getByRole('heading', { name: detailOnlyIssue.title })).toBeVisible()
     await expect(issueInput).toHaveValue('未保存の Issue 入力')
     await expect(page).toHaveURL(

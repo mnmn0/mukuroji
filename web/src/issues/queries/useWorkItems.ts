@@ -121,10 +121,9 @@ export function useProjectIssues(
       return issues
     }
 
-    const hasSelectedIssue = issues.some((issue) =>
+    const selectedIssueIndex = issues.findIndex((issue) =>
       issue.teamId === selectedTeamId && issue.id === selectedIssueId,
     )
-    if (hasSelectedIssue) return issues
 
     if (
       selectedDetailIssue.teamId !== selectedTeamId ||
@@ -135,7 +134,18 @@ export function useProjectIssues(
       return issues
     }
 
-    return [...issues, selectedDetailIssue]
+    if (selectedIssueIndex < 0) {
+      return [...issues, selectedDetailIssue]
+    }
+
+    const existingIssue = issues[selectedIssueIndex]
+    if (!existingIssue || selectedDetailIssue.revision <= existingIssue.revision) {
+      return issues
+    }
+
+    const reconciled = [...issues]
+    reconciled[selectedIssueIndex] = selectedDetailIssue
+    return reconciled
   }, [
     includeArchived,
     projectId,

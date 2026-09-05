@@ -435,7 +435,7 @@ export const Error: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
 
-    await expect(canvas.getByText('Issue 詳細を保存できませんでした。')).toBeVisible()
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Issue 詳細を保存できませんでした。')
     await expect(canvas.getByRole('button', { name: '変更を保存' })).toBeEnabled()
   },
 }

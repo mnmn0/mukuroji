@@ -1403,7 +1403,9 @@ export function TaskDetailPane({
             {t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
           </p>
         ) : null}
-        {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
+        {errorMessage ? (
+          <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage}</p>
+        ) : null}
       </div>
       <form
         aria-label={t('tasks.schedule.title')}
