@@ -4,17 +4,20 @@ import type {
   CreateWorkItemInput,
   CustomerImpactSignal,
   PreviewWorkItemScheduleInput,
+  PreviewWorkItemTypeChangeInput,
   ResolvedWorkItemConfiguration,
   TeamIssueCommentResponseItem,
   UpdateWorkItemInput,
   WorkItemPatch,
   WorkItemRelation,
   WorkItemTriageContextSnapshot,
+  WorkItemTypeChangePreview,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import {
   isConfirmWorkItemScheduleChangeResponse,
   readWorkItemScheduleChangePreviewForEndpoint,
+  isWorkItemTypeChangePreview,
 } from '../../work-items/api/contractValidation'
 import type { TeamIssueActivity } from './activity'
 import { TeamIssuesApiError } from './errors'
@@ -338,6 +341,34 @@ export async function previewTeamIssueSchedule(
     )
   }
   return preview
+}
+
+/**
+ * Validates a proposed Work Item Type change without mutating the Work Item.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Team-local Work Item identifier.
+ * @param accessToken - Session bearer token.
+ * @param input - Revision and target type sent to the preview endpoint.
+ * @returns Server-authoritative field and workflow impacts.
+ */
+export async function previewTeamIssueWorkItemType(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  input: PreviewWorkItemTypeChangeInput,
+): Promise<WorkItemTypeChangePreview> {
+  return requestValidatedJson(
+    `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/work-item-type-preview`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    },
+    isWorkItemTypeChangePreview,
+    'InvalidWorkItemTypeChangePreview',
+  )
 }
 
 /**

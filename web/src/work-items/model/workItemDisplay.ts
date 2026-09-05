@@ -6,6 +6,11 @@ import type {
   WorkflowStatusCategory,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
+  WorkItemTypeDefinition,
+} from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_TYPE_ID,
 } from '@mukuroji/contracts'
 import {
   createTranslator,
@@ -20,6 +25,7 @@ import {
   formatCustomFieldValue,
   isCustomFieldApplicable,
   matchesCustomFieldFilter,
+  sortCustomFieldDefinitions,
   type FormatCustomFieldValueOptions,
 } from './customFields'
 
@@ -83,9 +89,183 @@ export function resolveWorkflowStatusDefinition(
   workItem: CanonicalWorkItem,
   configuration: WorkItemConfigurationLike,
 ) {
-  return getWorkItemConfiguration(configuration)?.workflow.statuses.find(
+  return resolveWorkItemTypeWorkflow(configuration, workItem.workItemTypeId)?.statuses.find(
     (status) => status.id === workItem.workflowStatusId,
   )
+}
+
+/**
+ * Returns the first non-negative sort order that is not used by the supplied Work Item Types.
+ *
+ * @param workItemTypes - Work Item Types whose sort orders must remain unique.
+ * @returns The smallest unused non-negative sort order.
+ */
+export function resolveAvailableWorkItemTypeSortOrder(
+  workItemTypes: readonly Pick<WorkItemTypeDefinition, 'sortOrder'>[],
+): number {
+  const usedSortOrders = new Set(workItemTypes.map((type) => type.sortOrder))
+  let sortOrder = 0
+  while (usedSortOrders.has(sortOrder)) sortOrder += 1
+  return sortOrder
+}
+
+/**
+ * Returns configured Work Item Types, including the built-in fallback.
+ *
+ * @param configuration - Configuration whose Work Item Types should be resolved.
+ * @returns Configured Work Item Types with a collision-safe built-in fallback.
+ */
+export function resolveWorkItemTypes(
+  configuration: WorkItemConfigurationLike,
+): WorkItemTypeDefinition[] {
+  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+  if (!resolvedConfiguration?.workItemTypes) {
+    return [DEFAULT_WORK_ITEM_TYPE]
+  }
+  const configuredTypes = [...resolvedConfiguration.workItemTypes]
+  if (!configuredTypes.some((type) => type.id === DEFAULT_WORK_ITEM_TYPE_ID)) {
+    configuredTypes.push({
+      ...DEFAULT_WORK_ITEM_TYPE,
+      sortOrder: resolveAvailableWorkItemTypeSortOrder(configuredTypes),
+    })
+  }
+  return configuredTypes.sort(
+    (first, second) => first.sortOrder - second.sortOrder || first.name.localeCompare(second.name),
+  )
+}
+
+/** Resolves one Work Item Type by stable identifier for client-side rendering. */
+export function resolveWorkItemTypeDefinition(
+  configuration: WorkItemConfigurationLike,
+  typeId?: string,
+): WorkItemTypeDefinition | undefined {
+  return resolveWorkItemTypes(configuration).find((type) =>
+    type.id === (typeId ?? DEFAULT_WORK_ITEM_TYPE_ID),
+  )
+}
+
+/**
+ * Resolves a requested Work Item Type to an active creation option.
+ *
+ * @param workItemTypes - Work Item Types visible to the creation form.
+ * @param requestedTypeId - Previously selected or contextual Work Item Type ID.
+ * @returns An active Work Item Type ID, or the built-in fallback when none is active.
+ */
+export function resolveCreatableWorkItemTypeId(
+  workItemTypes: readonly WorkItemTypeDefinition[],
+  requestedTypeId?: string,
+): string {
+  return workItemTypes.find((type) =>
+    type.status === 'active' && type.id === requestedTypeId,
+  )?.id ?? workItemTypes.find((type) => type.status === 'active')?.id ?? DEFAULT_WORK_ITEM_TYPE_ID
+}
+
+/** Resolves the workflow selected by a Work Item Type for client-side forms. */
+export function resolveWorkItemTypeWorkflow(
+  configuration: WorkItemConfigurationLike,
+  typeId?: string,
+) {
+  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+  const type = resolveWorkItemTypeDefinition(configuration, typeId)
+  if (!resolvedConfiguration || !type) return undefined
+  const workflows = resolvedConfiguration.workflows ?? [resolvedConfiguration.workflow]
+  const hasExplicitType = resolvedConfiguration.workItemTypes?.some((candidate) =>
+    candidate.id === type.id,
+  ) ?? false
+  const workflowId = type.id === DEFAULT_WORK_ITEM_TYPE_ID && !hasExplicitType
+    ? resolvedConfiguration.workflow.id
+    : type.defaultWorkflowId
+  return workflows.find((workflow) => workflow.id === workflowId) ??
+    (resolvedConfiguration.workflow.id === workflowId
+      ? resolvedConfiguration.workflow
+      : undefined)
+}
+
+/** A workflow status paired with the Work Item Type that owns its workflow. */
+export type WorkItemTypeWorkflowStatus = {
+  /** Stable Work Item Type identifier owning the workflow status. */
+  workItemTypeId: string
+  /** Workflow status definition exposed by the Work Item Type. */
+  status: WorkflowStatusDefinition
+}
+
+/**
+ * Creates a collision-safe key for a Team, Work Item Type, and workflow status.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemTypeId - Work Item Type whose workflow owns the status.
+ * @param statusId - Stable workflow status identifier.
+ * @returns Stable key used by type-qualified status columns and filters.
+ */
+export function createWorkItemTypeWorkflowStatusKey(
+  teamId: string,
+  workItemTypeId: string,
+  statusId: string,
+): string {
+  return [teamId, workItemTypeId, statusId].join('\u0000')
+}
+
+/**
+ * Resolves every configured Work Item Type workflow status for board columns.
+ *
+ * @param configuration - Team or Workspace Work Item configuration.
+ * @returns Type-qualified workflow statuses in type and status display order.
+ */
+export function resolveWorkItemTypeWorkflowStatuses(
+  configuration: WorkItemConfigurationLike,
+): WorkItemTypeWorkflowStatus[] {
+  return resolveWorkItemTypes(configuration).flatMap((type) => {
+    const workflow = resolveWorkItemTypeWorkflow(configuration, type.id)
+    return workflow
+      ? sortWorkflowStatuses(workflow.statuses).map((status) => ({
+          status,
+          workItemTypeId: type.id,
+        }))
+      : []
+  })
+}
+
+/** Returns the custom fields available to a Work Item Type in display order. */
+export function resolveWorkItemTypeCustomFields(
+  configuration: WorkItemConfigurationLike,
+  typeId?: string,
+) {
+  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+  const type = resolveWorkItemTypeDefinition(configuration, typeId)
+  if (!resolvedConfiguration || !type) return []
+  const hasExplicitType = resolvedConfiguration.workItemTypes?.some((candidate) =>
+    candidate.id === type.id,
+  ) ?? false
+  if (type.id === DEFAULT_WORK_ITEM_TYPE_ID && !hasExplicitType) {
+    return sortCustomFieldDefinitions(resolvedConfiguration.customFields)
+  }
+  const fieldIds = new Set(type.customFieldIds)
+  return sortCustomFieldDefinitions(resolvedConfiguration.customFields)
+    .filter((field) => fieldIds.has(field.id))
+}
+
+/** Returns type-specific fields with type-level required flags applied for forms. */
+export function resolveWorkItemTypeFormFields(
+  configuration: WorkItemConfigurationLike,
+  typeId?: string,
+) {
+  const definitions = resolveWorkItemTypeCustomFields(configuration, typeId)
+  const type = resolveWorkItemTypeDefinition(configuration, typeId)
+  if (!type) return definitions
+  const requiredFieldIds = new Set(type.requiredCustomFieldIds)
+  return definitions.map((definition) => requiredFieldIds.has(definition.id)
+    ? { ...definition, required: true }
+    : definition)
+}
+
+/** Returns the localized-ready display label for a Work Item Type. */
+export function resolveWorkItemTypeLabel(
+  workItem: Pick<CanonicalWorkItem, 'workItemTypeId'>,
+  configuration: WorkItemConfigurationLike,
+) {
+  return resolveWorkItemTypeDefinition(configuration, workItem.workItemTypeId)?.name ??
+    workItem.workItemTypeId ??
+    DEFAULT_WORK_ITEM_TYPE.name
 }
 
 /**
@@ -144,8 +324,9 @@ export function resolveWorkflowCategoryToneClassName(category: WorkflowStatusCat
 export function resolveAllowedWorkflowStatuses(
   currentStatusId: string,
   configuration: WorkItemConfigurationLike,
+  workItemTypeId?: string,
 ) {
-  const workflow = getWorkItemConfiguration(configuration)?.workflow
+  const workflow = resolveWorkItemTypeWorkflow(configuration, workItemTypeId)
 
   if (!workflow) {
     return []
@@ -277,12 +458,36 @@ export function resolveWorkItemWorkflowStatusLabel(
  */
 export function resolveCreateWorkflowStatuses(
   configuration: WorkItemConfigurationLike,
+  workItemTypeId?: string,
 ) {
-  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+  const workflow = resolveWorkItemTypeWorkflow(configuration, workItemTypeId)
 
-  return resolvedConfiguration
-    ? sortWorkflowStatuses(resolvedConfiguration.workflow.statuses)
+  return workflow
+    ? sortWorkflowStatuses(workflow.statuses)
     : []
+}
+
+/** Returns every status reachable from the configured Work Item workflows. */
+export function resolveConfiguredWorkflowStatuses(
+  configuration: WorkItemConfigurationLike,
+): WorkflowStatusDefinition[] {
+  const resolvedConfiguration = getWorkItemConfiguration(configuration)
+  if (!resolvedConfiguration) return []
+
+  const workflows = [
+    resolvedConfiguration.workflow,
+    ...(resolvedConfiguration.workflows ?? []),
+    ...resolveWorkItemTypes(resolvedConfiguration).flatMap((type) => {
+      const workflow = resolveWorkItemTypeWorkflow(resolvedConfiguration, type.id)
+      return workflow ? [workflow] : []
+    }),
+  ]
+  const statusesById = new Map<string, WorkflowStatusDefinition>()
+  for (const status of workflows.flatMap((workflow) => workflow.statuses)) {
+    if (!statusesById.has(status.id)) statusesById.set(status.id, status)
+  }
+
+  return sortWorkflowStatuses([...statusesById.values()])
 }
 
 /**
@@ -302,7 +507,11 @@ export function resolveEditableWorkflowStatuses(
     return []
   }
 
-  return resolveAllowedWorkflowStatuses(workItem.workflowStatusId, resolvedConfiguration)
+  return resolveAllowedWorkflowStatuses(
+    workItem.workflowStatusId,
+    resolvedConfiguration,
+    workItem.workItemTypeId,
+  )
 }
 
 /**
@@ -396,6 +605,28 @@ export function createCustomFieldValuePatch(
   }
 
   return patch
+}
+
+/**
+ * Creates a detail-form custom-field patch only when the field section was rendered.
+ *
+ * @param isVisible - Whether the detail form renders a custom-field editor.
+ * @param definitions - Custom field definitions applicable to the selected type.
+ * @param existingValues - Values already stored on the Work Item.
+ * @param parsedValues - Values parsed from rendered form controls.
+ * @param projectId - Project used to resolve project-scoped field applicability.
+ * @returns A patch for rendered fields, or undefined when the section was hidden.
+ */
+export function createVisibleCustomFieldValuePatch(
+  isVisible: boolean,
+  definitions: readonly CustomFieldDefinition[],
+  existingValues: Readonly<Record<string, CustomFieldValue>> | undefined,
+  parsedValues: Readonly<Record<string, CustomFieldValue>>,
+  projectId?: string,
+): Record<string, CustomFieldValue | null> | undefined {
+  return isVisible
+    ? createCustomFieldValuePatch(definitions, existingValues, parsedValues, projectId)
+    : undefined
 }
 
 /**

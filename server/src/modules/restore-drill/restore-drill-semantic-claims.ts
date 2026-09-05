@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto'
+import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import type {
   CrossDomainIntegrityFailureCode,
   CrossDomainIntegrityItem,
@@ -272,7 +273,7 @@ function resourceClaims(
   ]
 }
 
-/** Creates configuration scope/status claims. */
+/** Creates configuration scope, Work Item Type, and type-specific status claims. */
 function configurationClaims(
   item: Extract<CrossDomainIntegrityItem, { readonly kind: 'configuration' }>,
   digestKey: Uint8Array,
@@ -284,15 +285,34 @@ function configurationClaims(
     fact(scopeToken, originToken),
     unique(scopeToken, originToken, 'CONFIGURATION_DUPLICATE_SCOPE'),
   ]
-  for (const status of item.workflowStatuses) {
-    claims.push(
-      fact(token(digestKey, 'configuration-status', [...scope, status.statusId]), originToken),
-      fact(token(
+  for (const mapping of item.workItemTypeWorkflows) {
+    claims.push(fact(token(
+      digestKey,
+      'configuration-work-item-type',
+      [...scope, mapping.workItemTypeId],
+    ), originToken))
+    for (const childTypeId of mapping.allowedChildTypeIds) {
+      claims.push(fact(token(
         digestKey,
-        'configuration-status-category',
-        [...scope, status.statusId, status.category],
-      ), originToken),
-    )
+        'configuration-work-item-child-type',
+        [...scope, mapping.workItemTypeId, childTypeId],
+      ), originToken))
+    }
+    for (const status of item.workflowStatuses) {
+      if (status.workflowId !== mapping.workflowId) continue
+      claims.push(
+        fact(token(digestKey, 'configuration-work-item-type-status', [
+          ...scope,
+          mapping.workItemTypeId,
+          status.statusId,
+        ]), originToken),
+        fact(token(
+          digestKey,
+          'configuration-work-item-type-status-category',
+          [...scope, mapping.workItemTypeId, status.statusId, status.category],
+        ), originToken),
+      )
+    }
   }
   return claims
 }
@@ -416,36 +436,50 @@ function workItemStatusRequirement(
   originToken: string,
 ): RestoreDrillSemanticRequirement {
   const builtInCategory = builtInWorkflowStatusCategory(item.workflowStatusId)
+  const isBuiltInType = item.workItemTypeId === DEFAULT_WORK_ITEM_TYPE_ID
   const teamScope = [item.workspaceId, item.teamId]
   const workspaceScope = [item.workspaceId, '']
   const configuredBranch = (
     scope: readonly string[],
   ): RestoreDrillSemanticRequirementBranch => ({
-    defaultFailureCode: 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN',
-    fallbacks: [{
-      factToken: token(digestKey, 'configuration-status', [
-        ...scope,
-        item.workflowStatusId,
-      ]),
-      failureCode: 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
-    }],
+    defaultFailureCode: 'WORK_ITEM_TYPE_UNKNOWN',
+    fallbacks: [
+      {
+        factToken: token(digestKey, 'configuration-work-item-type-status', [
+          ...scope,
+          item.workItemTypeId,
+          item.workflowStatusId,
+        ]),
+        failureCode: 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
+      },
+      {
+        factToken: token(digestKey, 'configuration-work-item-type', [
+          ...scope,
+          item.workItemTypeId,
+        ]),
+        failureCode: 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN',
+      },
+    ],
     guardToken: token(digestKey, 'configuration-scope', scope),
     satisfied: false,
-    successTokens: [token(digestKey, 'configuration-status-category', [
+    successTokens: [token(digestKey, 'configuration-work-item-type-status-category', [
       ...scope,
+      item.workItemTypeId,
       item.workflowStatusId,
       item.statusCategory,
     ])],
   })
-  const builtInMatches = builtInCategory === item.statusCategory
+  const builtInMatches = isBuiltInType && builtInCategory === item.statusCategory
   return {
     branches: [
       configuredBranch(teamScope),
       configuredBranch(workspaceScope),
       {
-        defaultFailureCode: builtInCategory === undefined
-          ? 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN'
-          : 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
+        defaultFailureCode: !isBuiltInType
+          ? 'WORK_ITEM_TYPE_UNKNOWN'
+          : builtInCategory === undefined
+            ? 'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN'
+            : 'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
         fallbacks: [],
         satisfied: builtInMatches,
         successTokens: [],
@@ -572,7 +606,82 @@ function relationClaims(
       'RELATION_ENDPOINT_MISSING',
     ))
   }
+  const parentTypeId = item.relationType === 'parent'
+    ? item.targetWorkItemTypeId
+    : item.relationType === 'child'
+      ? item.sourceWorkItemTypeId
+      : undefined
+  const childTypeId = item.relationType === 'parent'
+    ? item.sourceWorkItemTypeId
+    : item.relationType === 'child'
+      ? item.targetWorkItemTypeId
+      : undefined
+  if (parentTypeId !== undefined && childTypeId !== undefined) {
+    claims.push(createWorkItemTypeRelationRequirement(
+      item,
+      parentTypeId,
+      childTypeId,
+      digestKey,
+      originToken,
+    ))
+  }
   return claims
+}
+
+/**
+ * Creates the effective-configuration requirement for one typed parent-child relation.
+ *
+ * @param item - Relation whose endpoint types were joined by the normalized reader.
+ * @param parentTypeId - Process-local parent Work Item Type identifier.
+ * @param childTypeId - Process-local child Work Item Type identifier.
+ * @param digestKey - Invocation-local restore-drill HMAC key.
+ * @param originToken - Opaque physical source-row identity.
+ * @returns An opaque deferred requirement for the effective configuration.
+ */
+function createWorkItemTypeRelationRequirement(
+  item: Extract<CrossDomainIntegrityItem, { readonly kind: 'relation' }>,
+  parentTypeId: string,
+  childTypeId: string,
+  digestKey: Uint8Array,
+  originToken: string,
+): RestoreDrillSemanticRequirement {
+  const configuredBranch = (
+    scope: readonly string[],
+  ): RestoreDrillSemanticRequirementBranch => ({
+    defaultFailureCode: 'WORK_ITEM_TYPE_UNKNOWN',
+    fallbacks: [{
+      factToken: token(digestKey, 'configuration-work-item-type', [
+        ...scope,
+        parentTypeId,
+      ]),
+      failureCode: 'RELATION_WORK_ITEM_TYPE_MISMATCH',
+    }],
+    guardToken: token(digestKey, 'configuration-scope', scope),
+    satisfied: false,
+    successTokens: [token(digestKey, 'configuration-work-item-child-type', [
+      ...scope,
+      parentTypeId,
+      childTypeId,
+    ])],
+  })
+  const builtInMatches = parentTypeId === DEFAULT_WORK_ITEM_TYPE_ID &&
+    childTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+  return {
+    branches: [
+      configuredBranch([item.workspaceId, item.teamId]),
+      configuredBranch([item.workspaceId, '']),
+      {
+        defaultFailureCode: parentTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+          ? 'RELATION_WORK_ITEM_TYPE_MISMATCH'
+          : 'WORK_ITEM_TYPE_UNKNOWN',
+        fallbacks: [],
+        satisfied: builtInMatches,
+        successTokens: [],
+      },
+    ],
+    kind: 'requirement',
+    requirementToken: token(digestKey, 'requirement', [originToken, 'relation-work-item-types']),
+  }
 }
 
 /** Creates lifecycle-aware audit resource requirements from normalized references. */

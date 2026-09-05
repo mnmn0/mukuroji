@@ -33,6 +33,25 @@ describe('Automation rule domain', () => {
       type: 'status',
       toStatusId: 'cancelled',
     }, event)).toBe(false)
+    expect(matchesAutomationTrigger({
+      type: 'work-item-type',
+      teamId: 'team-1',
+      fromWorkItemTypeId: 'default',
+      toWorkItemTypeId: 'incident',
+    }, {
+      ...event,
+      metadata: { teamId: 'team-1' },
+      changes: [{ field: 'workItemTypeId', before: 'default', after: 'incident' }],
+    })).toBe(true)
+    expect(matchesAutomationTrigger({
+      type: 'work-item-type',
+      teamId: 'team-1',
+      toWorkItemTypeId: 'incident',
+    }, {
+      ...event,
+      metadata: { teamId: 'team-2' },
+      changes: [{ field: 'workItemTypeId', before: 'default', after: 'incident' }],
+    })).toBe(false)
   })
 
   test('evaluates nested conditions against typed domain roots', () => {
@@ -73,5 +92,25 @@ describe('Automation rule domain', () => {
 
     expect(input.name).toBe('Complete review')
     expect(input.actions).toEqual([{ type: 'comment', body: 'Completed' }])
+    expect(validateCreateAutomationRuleInput({
+      name: 'Incident type change',
+      enabled: true,
+      trigger: {
+        type: 'work-item-type',
+        teamId: ' team-1 ',
+        toWorkItemTypeId: 'incident',
+      },
+      actions: [{ type: 'comment', body: 'Changed' }],
+    }).trigger).toEqual({
+      type: 'work-item-type',
+      teamId: 'team-1',
+      toWorkItemTypeId: 'incident',
+    })
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Unqualified type change',
+      enabled: true,
+      trigger: { type: 'work-item-type', toWorkItemTypeId: 'incident' },
+      actions: [{ type: 'comment', body: 'Changed' }],
+    })).toThrow('Work Item Type trigger Team ID is required.')
   })
 })

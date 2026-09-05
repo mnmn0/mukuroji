@@ -21,6 +21,18 @@ export function cloneWorkItemConfiguration(
       statuses: configuration.workflow.statuses.map((status) => ({ ...status })),
       transitions: configuration.workflow.transitions.map((transition) => ({ ...transition })),
     },
+    workflows: configuration.workflows?.map((workflow) => ({
+      ...workflow,
+      statuses: workflow.statuses.map((status) => ({ ...status })),
+      transitions: workflow.transitions.map((transition) => ({ ...transition })),
+    })),
+    workItemTypes: configuration.workItemTypes?.map((type) => ({
+      ...type,
+      customFieldIds: [...type.customFieldIds],
+      requiredCustomFieldIds: [...type.requiredCustomFieldIds],
+      detailSections: [...type.detailSections],
+      allowedChildTypeIds: [...type.allowedChildTypeIds],
+    })),
     customFields: configuration.customFields.map((field) => ({
       ...field,
       defaultValue: Array.isArray(field.defaultValue) ? [...field.defaultValue] : field.defaultValue,
@@ -55,6 +67,8 @@ export function sortCustomFieldOptions(
 export function normalizeWorkItemConfigurationForSave(
   configuration: WorkItemConfiguration,
 ): WorkItemConfiguration {
+  const availableCustomFieldIds = new Set(configuration.customFields.map((field) => field.id))
+
   return {
     ...cloneWorkItemConfiguration(configuration),
     workflow: {
@@ -70,6 +84,19 @@ export function normalizeWorkItemConfigurationForSave(
           first.toStatusId.localeCompare(second.toStatusId),
       ),
     },
+    workflows: configuration.workflows?.map((workflow) => ({
+      ...workflow,
+      statuses: sortWorkflowStatuses(workflow.statuses).map((status, index) => ({
+        ...status,
+        name: status.name.trim(),
+        sortOrder: index,
+      })),
+      transitions: [...workflow.transitions].sort(
+        (first, second) =>
+          first.fromStatusId.localeCompare(second.fromStatusId) ||
+          first.toStatusId.localeCompare(second.toStatusId),
+      ),
+    })),
     customFields: sortCustomFieldDefinitions(configuration.customFields).map((field, index) => ({
       ...field,
       name: field.name.trim(),
@@ -80,5 +107,25 @@ export function normalizeWorkItemConfigurationForSave(
       })),
       sortOrder: index,
     })),
+    workItemTypes: configuration.workItemTypes && [...configuration.workItemTypes]
+      .sort((first, second) =>
+        first.sortOrder - second.sortOrder || first.name.localeCompare(second.name),
+      )
+      .map((type, index) => {
+      const customFieldIds = [...new Set(type.customFieldIds)]
+        .filter((fieldId) => availableCustomFieldIds.has(fieldId))
+      return {
+        ...type,
+        name: type.name.trim(),
+        iconToken: type.iconToken.trim(),
+        description: type.description?.trim() || undefined,
+        customFieldIds,
+        requiredCustomFieldIds: [...new Set(type.requiredCustomFieldIds)]
+          .filter((fieldId) => customFieldIds.includes(fieldId)),
+        detailSections: [...new Set(type.detailSections)],
+        allowedChildTypeIds: [...new Set(type.allowedChildTypeIds)],
+        sortOrder: index,
+      }
+      }),
   }
 }

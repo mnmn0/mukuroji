@@ -201,7 +201,7 @@ export type AiSearchReportDraft = {
   /** Metric calculated from permission-filtered search results. */
   metric: 'count'
   /** Optional result field used to group the metric. */
-  groupBy?: 'entityType' | 'assignee' | 'creator' | 'status' | 'project' | 'team'
+  groupBy?: 'entityType' | 'assignee' | 'creator' | 'status' | 'project' | 'team' | 'workItemType'
 }
 
 /** Safe structured search interpretation produced without running the search. */

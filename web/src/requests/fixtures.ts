@@ -93,6 +93,7 @@ const requestFormDraft: RequestFormDraft = {
       priority: 'medium' as const,
       projectId: 'refero',
       teamId: 'core-team',
+      workItemTypeId: 'default',
       workflowStatusId: 'todo',
     },
     mapping: {
@@ -110,6 +111,7 @@ const requestFormDraft: RequestFormDraft = {
           priority: 'high',
           projectId: 'shared-launch',
           teamId: 'design-team',
+          workItemTypeId: 'default',
           workflowStatusId: 'triage',
         },
         when: {

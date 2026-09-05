@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import {
   TRIAGE_BULK_ACTION_LIMIT,
   type CreateManualTriageEntryInput,
+  type CustomFieldValue,
   type TriageActionInput,
   type TriageBulkActionInput,
   type TriageBulkActionResult,
@@ -756,6 +757,7 @@ function readListInput(context: Context): TriageEntryListInput {
   const query = context.req.query('query')?.trim()
   const state = context.req.query('state')
   const sourceKind = context.req.query('sourceKind')
+  const workItemTypeId = context.req.query('workItemTypeId')
   const sla = context.req.query('sla')
   const ownerUserId = context.req.query('ownerUserId')
   const ownerAlias = context.req.query('owner')
@@ -767,6 +769,7 @@ function readListInput(context: Context): TriageEntryListInput {
     ...(query ? { query: readQueueQuery(query) } : {}),
     ...(state ? { state: readState(state) } : {}),
     ...(sourceKind ? { sourceKind: readSourceKind(sourceKind) } : {}),
+    ...(workItemTypeId ? { workItemTypeId: readIdentifier(workItemTypeId, 'Work Item Type ID') } : {}),
     ...(sla ? { sla: readQueueSlaFilter(sla) } : {}),
     ...(owner
       ? { ownerUserId: readOwnerFilter(owner) }
@@ -812,7 +815,11 @@ function readAction(value: unknown): TriageActionInput {
     }
   }
   if (record.action === 'accept' && record.mode === 'create') {
-    requireOnlyKeys(record, ['action', 'mode', 'expectedRevision', 'projectId'], 'Accept-create action')
+    requireOnlyKeys(
+      record,
+      ['action', 'mode', 'expectedRevision', 'projectId', 'workItemTypeId', 'customFieldValues'],
+      'Accept-create action',
+    )
     return {
       action: 'accept',
       mode: 'create',
@@ -820,6 +827,12 @@ function readAction(value: unknown): TriageActionInput {
       ...(record.projectId === undefined
         ? {}
         : { projectId: readIdentifier(record.projectId, 'Project ID') }),
+      ...(record.workItemTypeId === undefined
+        ? {}
+        : { workItemTypeId: readIdentifier(record.workItemTypeId, 'Work Item Type ID') }),
+      ...(record.customFieldValues === undefined
+        ? {}
+        : { customFieldValues: readCustomFieldValues(record.customFieldValues) }),
     }
   }
   if (record.action === 'accept' && record.mode === 'link') {
@@ -1219,6 +1232,46 @@ function readText(
     throw invalidInput(`${label} is invalid.`)
   }
   return normalized
+}
+
+/** Reads the bounded typed custom-field override map accepted by Triage conversions. */
+function readCustomFieldValues(value: unknown): Record<string, CustomFieldValue | null> {
+  const record = readObject(value, 'Custom field values')
+  const entries = Object.entries(record)
+  if (entries.length > 100) throw invalidInput('Custom field values are limited to 100 entries.')
+
+  return Object.fromEntries(entries.map(([fieldId, fieldValue]) => {
+    const normalizedFieldId = readIdentifier(fieldId, 'Custom field ID')
+    return [
+      normalizedFieldId,
+      readCustomFieldValue(fieldValue, normalizedFieldId),
+    ]
+  }))
+}
+
+/** Reads one JSON-compatible custom-field value while preserving null clears. */
+function readCustomFieldValue(value: unknown, fieldId: string): CustomFieldValue | null {
+  if (value === null) return null
+  if (typeof value === 'string') {
+    if (value.length > 10_000) {
+      throw invalidInput(`Custom field "${fieldId}" exceeds the maximum value length.`)
+    }
+    return value
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'boolean') return value
+  if (Array.isArray(value) && value.length <= 100 && value.every(isStringValue)) {
+    if (value.some((entry) => entry.length > 10_000)) {
+      throw invalidInput(`Custom field "${fieldId}" exceeds the maximum value length.`)
+    }
+    return value
+  }
+  throw invalidInput(`Custom field "${fieldId}" has an invalid value.`)
+}
+
+/** Narrows one unknown array member to a string for custom-field parsing. */
+function isStringValue(value: unknown): value is string {
+  return typeof value === 'string'
 }
 
 /** Reads a parseable ISO 8601 instant. */

@@ -103,6 +103,8 @@ export type AnalyticsWorkbenchProps = {
    * Sidebar filter 候補に使う Team / Project directory です。
    */
   teams: ProjectDirectoryTeam[]
+  /** Team-qualified Work Item Type options available across the visible Teams. */
+  workItemTypes?: AnalyticsWorkItemTypeOption[]
   /**
    * Report 一覧または snapshot の初回読み込み中表示です。
    */
@@ -219,6 +221,14 @@ export type AnalyticsWorkbenchProps = {
   onRetry?: () => void
 }
 
+/** One Team-qualified Work Item Type option shown by Analytics filters. */
+export type AnalyticsWorkItemTypeOption = {
+  /** Canonical filter value containing the Team and Work Item Type IDs. */
+  filterValue: string
+  /** Human-readable Team and Work Item Type label. */
+  label: string
+}
+
 const metricKeys = [
   'throughput',
   'cycle-time',
@@ -304,6 +314,7 @@ export function AnalyticsWorkbench({
   evidence,
   evidenceMetric,
   teams,
+  workItemTypes = [],
   isLoading = false,
   isLoadingMoreSnapshots = false,
   isEvidenceLoading = false,
@@ -335,6 +346,10 @@ export function AnalyticsWorkbench({
   onRetry,
 }: AnalyticsWorkbenchProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const workItemTypeLabels = useMemo(
+    () => new Map(workItemTypes.map((type) => [type.filterValue, type.label])),
+    [workItemTypes],
+  )
   const selectedReport = reports.find((report) => report.id === selectedReportId)
   const [draftId] = useState(
     selectedReport?.id ?? createAnalyticsClientId('report'),
@@ -564,6 +579,7 @@ export function AnalyticsWorkbench({
         t={t}
         teams={teams}
         timeZone={timeZone}
+        workItemTypes={workItemTypes}
         onFilterChange={onFilterChange}
         onForecastBaselineChange={onForecastBaselineChange}
         onTimeZoneChange={onTimeZoneChange}
@@ -641,6 +657,7 @@ export function AnalyticsWorkbench({
                         snapshot={snapshot}
                         t={t}
                         widget={widgets.find((widget) => widget.id === result.widgetId)}
+                        workItemTypeLabels={workItemTypeLabels}
                         onOpenEvidence={onOpenEvidence}
                       />
                     ))}
@@ -795,6 +812,7 @@ function AnalyticsFilterToolbar({
   t,
   teams,
   timeZone,
+  workItemTypes,
 }: {
   filter: AnalyticsFilter
   forecastBaseline?: AnalyticsDateRange
@@ -804,6 +822,7 @@ function AnalyticsFilterToolbar({
   t: ReturnType<typeof createTranslator>
   teams: ProjectDirectoryTeam[]
   timeZone: string
+  workItemTypes: AnalyticsWorkItemTypeOption[]
 }) {
   const projects = uniqueProjects(teams)
   const teamOptions = includeSelectedFilterOptions(
@@ -820,6 +839,10 @@ function AnalyticsFilterToolbar({
       value: category,
     })),
     filter.statusCategories,
+  )
+  const workItemTypeOptions = includeSelectedFilterOptions(
+    workItemTypes.map((type) => ({ label: type.label, value: type.filterValue })),
+    filter.workItemTypeIds,
   )
   const assigneeDraft = useDebouncedDraft(
     filter.assigneeUserIds?.join(', ') ?? '',
@@ -926,6 +949,16 @@ function AnalyticsFilterToolbar({
           testId="analytics-status-filter"
           onChange={(statusCategories) =>
             onFilterChange?.({ ...filter, statusCategories })}
+        />
+        <AnalyticsMultiSelectFilter
+          allLabel={t('analytics.filter.allWorkItemTypes')}
+          label={t('analytics.filter.workItemType')}
+          noneLabel={t('analytics.filter.noWorkItemTypes')}
+          options={workItemTypeOptions}
+          selectedValues={filter.workItemTypeIds}
+          testId="analytics-work-item-type-filter"
+          onChange={(workItemTypeIds) =>
+            onFilterChange?.({ ...filter, workItemTypeIds })}
         />
       </div>
       <details className="mt-3">
@@ -1593,6 +1626,7 @@ function AnalyticsWidgetEditor({
               'project',
               'assignee',
               'status',
+              'work-item-type',
               'custom-field',
             ].map((dimension) => (
               <option key={dimension} value={dimension}>
@@ -1709,6 +1743,7 @@ function AnalyticsResultWidget({
   snapshot,
   t,
   widget,
+  workItemTypeLabels,
 }: {
   locale: Locale
   onOpenEvidence?: (input: AnalyticsEvidenceInput) => void
@@ -1716,6 +1751,7 @@ function AnalyticsResultWidget({
   snapshot: AnalyticsSnapshot
   t: ReturnType<typeof createTranslator>
   widget?: AnalyticsWidget
+  workItemTypeLabels: ReadonlyMap<string, string>
 }) {
   const widgetType = widget?.type ?? (result.rows.length > 0 ? 'table' : 'chart')
   const size = readWidgetSize(widget)
@@ -1724,7 +1760,11 @@ function AnalyticsResultWidget({
     : size === 'medium'
       ? 'col-span-6 max-[900px]:col-span-12'
       : 'col-span-8 max-[1100px]:col-span-12'
-  const points = normalizeWidgetPoints(result, snapshot.timeZone)
+  const points = normalizeWidgetPoints(
+    result,
+    snapshot.timeZone,
+    widget?.groupBy?.dimension === 'work-item-type' ? workItemTypeLabels : undefined,
+  )
 
   return (
     <section className={`workbench-panel min-w-0 overflow-hidden ${columnClassName}`} data-testid={`analytics-widget-${result.widgetId}`}>
@@ -1755,7 +1795,15 @@ function AnalyticsResultWidget({
           </p>
         ) : null}
         {widgetType === 'table' ? (
-          <AnalyticsTable result={result} t={t} />
+          <AnalyticsTable
+            result={result}
+            t={t}
+            workItemTypeLabels={
+              widget?.groupBy?.dimension === 'work-item-type'
+                ? workItemTypeLabels
+                : undefined
+            }
+          />
         ) : points.length > 0 ? (
           <AccessibleChart
             label={widget?.title ?? result.definition.label}
@@ -1955,9 +2003,11 @@ function isDrawableChartValue(value: number | null): value is number {
 function AnalyticsTable({
   result,
   t,
+  workItemTypeLabels,
 }: {
   result: AnalyticsWidgetResult
   t: ReturnType<typeof createTranslator>
+  workItemTypeLabels?: ReadonlyMap<string, string>
 }) {
   const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row.values)))].slice(0, 6)
 
@@ -1987,7 +2037,9 @@ function AnalyticsTable({
         <tbody>
           {result.rows.map((row) => (
             <tr className="border-b border-[var(--workbench-border)]" key={row.id}>
-              <th className="px-3 py-3 font-semibold" scope="row">{row.label}</th>
+              <th className="px-3 py-3 font-semibold" scope="row">
+                {workItemTypeLabels?.get(row.label) ?? row.label}
+              </th>
               {columns.map((column) => (
                 <td className="px-3 py-3 tabular-nums text-[var(--workbench-muted)]" key={column}>
                   {formatTableValue(row.values[column])}
@@ -2378,6 +2430,7 @@ function createEvidenceInput(
 function normalizeWidgetPoints(
   result: AnalyticsWidgetResult,
   timeZone: string,
+  workItemTypeLabels?: ReadonlyMap<string, string>,
 ) {
   if (result.series.length > 0) {
     return result.series.map((point, index) => ({
@@ -2390,7 +2443,7 @@ function normalizeWidgetPoints(
 
   return result.groups.map((group) => ({
     key: group.key,
-    label: group.label,
+    label: workItemTypeLabels?.get(group.key) ?? group.label,
     sampleSize: group.sampleSize,
     value: group.value,
   }))

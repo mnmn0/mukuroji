@@ -7,7 +7,11 @@ import {
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import { COLLABORATION_CONTEXT_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  createSearchWorkItemStatusKey,
+  createSearchWorkItemTypeKey,
+} from '@mukuroji/contracts'
 import type { TaskViewDefinition } from '@mukuroji/contracts'
 import {
   type CreateTaskViewRequest,
@@ -63,6 +67,104 @@ test('keeps the unprocessed DynamoDB page behind the opaque search cursor', asyn
     cursor: first.nextCursor,
     filters: { keyword: 'different query' },
   })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+})
+
+test('requires Team-qualified Work Item Type filters for Workspace Search', async () => {
+  const documents = [
+    createWorkItemWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      teamId: 'team-a',
+      issueId: 'issue-a',
+      title: 'Team A bug',
+      workItemTypeId: 'bug',
+    }),
+    createWorkItemWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      teamId: 'team-b',
+      issueId: 'issue-b',
+      title: 'Team B bug',
+      workItemTypeId: 'bug',
+    }),
+  ]
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(documents),
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['team-a', 'team-b']),
+    },
+  }
+
+  await expect(client.search({
+    ...input,
+    filters: { workItemTypeIds: [createSearchWorkItemTypeKey('team-a', 'bug')] },
+  })).resolves.toMatchObject({
+    results: [expect.objectContaining({ id: 'team/team-a/issue/issue-a' })],
+  })
+  await expect(client.search({
+    ...input,
+    filters: { workItemTypeIds: ['bug'] },
+  })).rejects.toMatchObject({
+    code: 'InvalidSearchFilters',
+    status: 400,
+  })
+})
+
+test('matches qualified Search status filters to the Team and Work Item Type', async () => {
+  const documents = [
+    createWorkItemWorkspaceSearchDocument({
+      issueId: 'bug-1',
+      status: 'ready',
+      teamId: 'team-a',
+      title: 'Team A bug',
+      workItemTypeId: 'bug',
+      workspaceId: 'workspace-1',
+    }),
+    createWorkItemWorkspaceSearchDocument({
+      issueId: 'feature-1',
+      status: 'ready',
+      teamId: 'team-a',
+      title: 'Team A feature',
+      workItemTypeId: 'feature',
+      workspaceId: 'workspace-1',
+    }),
+    createWorkItemWorkspaceSearchDocument({
+      issueId: 'bug-2',
+      status: 'ready',
+      teamId: 'team-b',
+      title: 'Team B bug',
+      workItemTypeId: 'bug',
+      workspaceId: 'workspace-1',
+    }),
+  ]
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(documents),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.search({
+    access: {
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['team-a', 'team-b']),
+      viewerUserId: 'viewer@example.com',
+    },
+    filters: {
+      statuses: [createSearchWorkItemStatusKey('team-a', 'bug', 'ready')],
+    },
+    workspaceId: 'workspace-1',
+  })).resolves.toMatchObject({
+    results: [expect.objectContaining({ id: 'team/team-a/issue/bug-1' })],
+  })
 })
 
 test('skips an invalid index row without failing or skipping the remaining page', async () => {
@@ -1391,10 +1493,11 @@ test('removes deleted custom field references with stable migration warnings', (
       mode: 'table',
       sort: [
         { field: 'relevance', direction: 'desc' },
+        { field: 'workItemType', direction: 'asc' },
         { field: 'custom:deleted', direction: 'asc' },
       ],
       groupBy: 'custom:deleted',
-      columns: ['title', 'custom:kept', 'custom:deleted'],
+      columns: ['title', 'workItemType', 'custom:kept', 'custom:deleted'],
     },
     revision: 1,
     canEdit: true,
@@ -1407,8 +1510,11 @@ test('removes deleted custom field references with stable migration warnings', (
 
   expect(migrated.filters.customFields?.map((filter) => filter.fieldId)).toEqual(['kept'])
   expect(migrated.layout).toMatchObject({
-    columns: ['title', 'custom:kept'],
-    sort: [{ field: 'relevance', direction: 'desc' }],
+    columns: ['title', 'workItemType', 'custom:kept'],
+    sort: [
+      { field: 'relevance', direction: 'desc' },
+      { field: 'workItemType', direction: 'asc' },
+    ],
   })
   expect(migrated.layout.groupBy).toBeUndefined()
   expect(migrated.migrationWarnings).toHaveLength(4)
@@ -2482,9 +2588,11 @@ test('sanitizes deleted and permission-restricted task view references with stab
     projectScopeKeys: new Set(['core\0project-1']),
     writableProjectScopeKeys: new Set(['core\0project-1']),
     activeCustomFieldIds: new Set(['kept', 'private']),
+    activeWorkItemTypeIds: new Set([createSearchWorkItemTypeKey('core', 'bug')]),
     readableCustomFieldIds: new Set(['kept']),
     activeStatusIds: new Set(['core\0todo']),
-    readableColumnIds: new Set(['title', 'customFields']),
+    activeWorkflowStatusIds: new Set(['core\0bug\0todo']),
+    readableColumnIds: new Set(['title', 'customFields', 'workItemType']),
     readableActorIds: new Set(['owner@example.com']),
     readableRelationIds: new Set(['visible-relation']),
   }
@@ -2501,12 +2609,18 @@ test('sanitizes deleted and permission-restricted task view references with stab
           assigneeUserIds: ['owner@example.com', 'hidden@example.com'],
           creatorUserIds: ['hidden@example.com'],
           relationIds: ['visible-relation', 'hidden-relation'],
+          workItemTypeIds: [
+            createSearchWorkItemTypeKey('core', 'bug'),
+            createSearchWorkItemTypeKey('core', 'deleted-type'),
+          ],
           teamIds: ['core', 'secret'],
           projectIds: ['project-1', 'project-2'],
           statuses: ['todo', 'gone'],
           workflowStatuses: [
             { teamId: 'core', statusId: 'todo' },
             { teamId: 'core', statusId: 'gone' },
+            { teamId: 'core', workItemTypeId: 'bug', statusId: 'todo' },
+            { teamId: 'core', workItemTypeId: 'bug', statusId: 'gone' },
             { teamId: 'secret', statusId: 'hidden' },
           ],
           customFields: [
@@ -2517,15 +2631,17 @@ test('sanitizes deleted and permission-restricted task view references with stab
         },
         layout: {
           mode: 'table',
-          group: { field: 'custom:deleted', direction: 'asc' },
+          group: { field: 'workItemType', direction: 'asc' },
           subgroup: { field: 'custom:private', direction: 'asc' },
           sort: [
             { field: 'custom:kept', direction: 'asc' },
+            { field: 'workItemType', direction: 'asc' },
             { field: 'customFields', direction: 'asc' },
             { field: 'unknown-built-in', direction: 'desc' },
           ],
           columns: [
             { field: 'title' },
+            { field: 'workItemType' },
             { field: 'customFields' },
             { field: 'status' },
             { field: 'custom:kept' },
@@ -2543,24 +2659,33 @@ test('sanitizes deleted and permission-restricted task view references with stab
     assigneeUserIds: ['owner@example.com'],
     creatorUserIds: [],
     relationIds: ['visible-relation'],
+    workItemTypeIds: [createSearchWorkItemTypeKey('core', 'bug')],
     teamIds: ['core'],
     projectIds: ['project-1'],
     statuses: ['todo'],
-    workflowStatuses: [{ teamId: 'core', statusId: 'todo' }],
+    workflowStatuses: [
+      { teamId: 'core', statusId: 'todo' },
+      { teamId: 'core', workItemTypeId: 'bug', statusId: 'todo' },
+    ],
     customFields: [{ fieldId: 'kept', operator: 'equals', value: 'yes' }],
   })
   expect(created.definition.layout).toMatchObject({
-    sort: [{ field: 'custom:kept', direction: 'asc' }],
+    sort: [
+      { field: 'custom:kept', direction: 'asc' },
+      { field: 'workItemType', direction: 'asc' },
+    ],
     columns: [
       { field: 'title' },
+      { field: 'workItemType' },
       { field: 'customFields' },
       { field: 'custom:kept' },
     ],
   })
-  expect(created.definition.layout.group).toBeUndefined()
+  expect(created.definition.layout.group).toEqual({ field: 'workItemType', direction: 'asc' })
   expect(created.definition.layout.subgroup).toBeUndefined()
   expect(new Set(created.migrationWarnings?.map((warning) => warning.code))).toEqual(new Set([
     'deleted-custom-field',
+    'deleted-work-item-type',
     'deleted-workflow-status',
     'permission-redacted',
     'invalid-layout',

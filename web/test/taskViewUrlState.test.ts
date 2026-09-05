@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  createSearchWorkItemTypeKey,
   TASK_VIEW_URL_STATE_SCHEMA_VERSION,
   type TaskViewUrlState,
 } from '@mukuroji/contracts'
@@ -26,7 +27,15 @@ describe('task view URL state', () => {
     searchParams.set('view', ' saved-view-1 ')
     searchParams.set('view.v', String(TASK_VIEW_URL_STATE_SCHEMA_VERSION))
     searchParams.set('view.override', JSON.stringify({
-      filters: { keyword: 'urgent', statuses: ['todo'] },
+      filters: {
+        keyword: 'urgent',
+        statuses: ['todo'],
+        workflowStatuses: [{
+          teamId: 'team-1',
+          workItemTypeId: 'bug',
+          statusId: 'todo',
+        }],
+      },
       layout: {
         mode: 'board',
         group: { field: 'status', direction: 'asc' },
@@ -42,7 +51,15 @@ describe('task view URL state', () => {
       scope: { kind: 'team', teamId: 'team-1' },
       viewId: 'saved-view-1',
       override: {
-        filters: { keyword: 'urgent', statuses: ['todo'] },
+        filters: {
+          keyword: 'urgent',
+          statuses: ['todo'],
+          workflowStatuses: [{
+            teamId: 'team-1',
+            workItemTypeId: 'bug',
+            statusId: 'todo',
+          }],
+        },
         layout: {
           mode: 'board',
           group: { field: 'status', direction: 'asc' },
@@ -65,7 +82,11 @@ describe('task view URL state', () => {
       scope: { kind: 'team', teamId: 'team-1' },
       viewId: 'view-1',
       override: {
-        filters: { teamIds: ['team-1'], keyword: 'alpha' },
+        filters: {
+          teamIds: ['team-1'],
+          workItemTypeIds: [createSearchWorkItemTypeKey('team-1', 'bug')],
+          keyword: 'alpha',
+        },
         layout: {
           columns: [{ field: 'title', width: 240 }, { field: 'status' }],
           displayOptions: { wrapText: true, showCompleted: false },
@@ -84,7 +105,11 @@ describe('task view URL state', () => {
           displayOptions: { showCompleted: false, wrapText: true },
           columns: [{ width: 240, field: 'title' }, { field: 'status' }],
         },
-        filters: { keyword: 'alpha', teamIds: ['team-1'] },
+        filters: {
+          keyword: 'alpha',
+          teamIds: ['team-1'],
+          workItemTypeIds: [createSearchWorkItemTypeKey('team-1', 'bug')],
+        },
       },
     } satisfies TaskViewUrlState
     const unrelated = [

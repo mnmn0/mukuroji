@@ -1,3 +1,4 @@
+import { createSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import type {
   AnalyticsEvidenceInput,
   AnalyticsEvidenceResponse,
@@ -59,7 +60,10 @@ import {
   createDefaultAnalyticsWidgets,
   getDefaultAnalyticsTimeZone,
 } from '../../analytics/model/defaults'
-import { AnalyticsWorkbench } from '../../analytics/ui/AnalyticsWorkbench'
+import {
+  AnalyticsWorkbench,
+  type AnalyticsWorkItemTypeOption,
+} from '../../analytics/ui/AnalyticsWorkbench'
 import { createAnalyticsLiveQueryRunner } from '../../analytics/liveQuery'
 import {
   createAnalyticsQueryInput,
@@ -77,6 +81,8 @@ import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
+import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
+import { useTeamWorkItemConfigurations } from '../../work-items/queries/useWorkItemConfigurations'
 
 const emptyReports: AnalyticsReport[] = []
 const emptyTeams: ProjectDirectoryTeam[] = []
@@ -127,6 +133,28 @@ export function ReportsPage() {
     enabled: Boolean(user && !currentUserError),
     locale,
   })
+  const {
+    data: workItemConfigurationLoadResult,
+    error: workItemConfigurationsError,
+    isLoading: isWorkItemConfigurationsLoading,
+    key: workItemConfigurationsKey,
+    mutate: mutateWorkItemConfigurations,
+  } = useTeamWorkItemConfigurations(
+    accessToken,
+    'reports',
+    teams.map((team) => team.id).sort(),
+    Boolean(user && !currentUserError && !isProjectDirectoryLoading),
+  )
+  const workItemTypes = useMemo<AnalyticsWorkItemTypeOption[]>(() =>
+    teams
+      .flatMap((team) => resolveWorkItemTypes(
+        workItemConfigurationLoadResult?.configurationsByTeam[team.id],
+      ).map((type) => ({
+        filterValue: createSearchWorkItemTypeKey(team.id, type.id),
+        label: `${team.name} · ${type.name}`,
+      })))
+      .sort((left, right) => left.label.localeCompare(right.label)),
+  [teams, workItemConfigurationLoadResult?.configurationsByTeam])
   const {
     data: reportResponse,
     error: reportsError,
@@ -256,6 +284,8 @@ export function ReportsPage() {
   const loadError = currentUserError ??
     reportsError ??
     projectDirectoryError ??
+    workItemConfigurationsError ??
+    workItemConfigurationLoadResult?.errors[0] ??
     snapshotsError ??
     snapshotPaginationGuardError ??
     queryError
@@ -265,6 +295,7 @@ export function ReportsPage() {
   const isLoading = !session ||
     isCurrentUserLoading ||
     Boolean(projectDirectoryKey && isProjectDirectoryLoading) ||
+    Boolean(workItemConfigurationsKey && isWorkItemConfigurationsLoading) ||
     Boolean(reportsKey && isReportsLoading) ||
     Boolean(
       routeState.snapshotId &&
@@ -741,6 +772,7 @@ export function ReportsPage() {
           isLoadingMoreSnapshots={isLoadingMoreSnapshots}
           teams={teams}
           timeZone={displayedTimeZone}
+          workItemTypes={workItemTypes}
           widgets={displayedWidgets}
           onBuilderChange={(builder) => {
             if (selectedSnapshotRecord) {
@@ -786,6 +818,7 @@ export function ReportsPage() {
             void Promise.all([
               mutateCurrentUser(),
               mutateProjectDirectory(),
+              mutateWorkItemConfigurations(),
               mutateReports(),
               mutateSnapshots(),
               mutateQuery(),

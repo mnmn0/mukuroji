@@ -3,6 +3,8 @@ import type {
   CreateCustomerRequestFromTriageInput,
   Customer,
   CustomerRequest,
+  CustomFieldValue,
+  WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -22,6 +24,7 @@ import type { TriageRouteView } from '../model/queryState'
 import type { TriageEntryView } from '../model/triageView'
 import { TriageBulkToolbar } from './TriageBulkToolbar'
 import { TriageEntryDetail } from './TriageEntryDetail'
+import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import { TriageQueue } from './TriageQueue'
 import { TriageSettingsPanel } from './TriageSettingsPanel'
 
@@ -45,6 +48,10 @@ export type TriageWorkbenchProps = {
   readonly visibleProjectIds?: readonly string[]
   /** Active non-guest members keyed by their current Team-qualified Project. */
   readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
+  /** Active Project members available to person custom fields in the accept form. */
+  readonly workItemPersonOptions?: readonly WorkItemPersonOption[]
+  /** Mapped custom field values loaded from a form-backed Request submission. */
+  readonly initialAcceptCustomFieldValues?: Readonly<Record<string, CustomFieldValue>>
   /** Active queue or settings surface. */
   readonly routeView: TriageRouteView
   /** Visible permission-safe queue entries. */
@@ -81,6 +88,8 @@ export type TriageWorkbenchProps = {
   readonly bulkResults?: readonly TriageBulkItemResult[]
   /** Loaded Team triage configuration. */
   readonly configuration?: TriageConfiguration
+  /** Loaded Work Item configuration used by type-aware queue surfaces. */
+  readonly workItemConfiguration?: WorkItemConfiguration
   /** Whether Team configuration is loading. */
   readonly isConfigurationLoading?: boolean
   /** Safe configuration load or save error. */
@@ -214,6 +223,9 @@ export function TriageWorkbench({
   customerOptions,
   eligibleAssigneeIdsByProject,
   visibleProjectIds,
+  workItemConfiguration,
+  workItemPersonOptions,
+  initialAcceptCustomFieldValues,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
@@ -337,6 +349,7 @@ export function TriageWorkbench({
                   selectedEntryId={selectedEntry?.entry.id}
                   selectedEntryIds={selectedEntryIds}
                   t={t}
+                  workItemConfiguration={workItemConfiguration}
                 />
               </div>
               <div className={explicitEntryId ? '' : 'max-[860px]:hidden'}>
@@ -368,6 +381,9 @@ export function TriageWorkbench({
                   teamId={teamId}
                   eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
                   visibleProjectIds={visibleProjectIds}
+                  workItemConfiguration={workItemConfiguration}
+                  workItemPersonOptions={workItemPersonOptions}
+                  initialAcceptCustomFieldValues={initialAcceptCustomFieldValues}
                   view={selectedEntry}
                 />
               </div>

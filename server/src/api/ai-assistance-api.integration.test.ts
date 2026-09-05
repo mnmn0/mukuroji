@@ -206,6 +206,9 @@ function createUnreachableRequestIntakeClient(
 ): RequestIntakeClient {
   return {
     listForms: createUnexpectedAiRequestIntakeCall('listForms'),
+    listCurrentPublishedFormVersions: createUnexpectedAiRequestIntakeCall(
+      'listCurrentPublishedFormVersions',
+    ),
     getForm: createUnexpectedAiRequestIntakeCall('getForm'),
     createForm: createUnexpectedAiRequestIntakeCall('createForm'),
     updateForm: createUnexpectedAiRequestIntakeCall('updateForm'),

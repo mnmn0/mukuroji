@@ -35,6 +35,8 @@ export type AutomationExecutionQuery = {
   ruleId?: string
   /** Optional execution status filter. */
   status?: AutomationExecution['status']
+  /** Uses a strongly consistent base-table scan for safety-critical complete scans. */
+  consistentRead?: boolean
   /** Page size. */
   limit?: number
   /** Opaque cursor from the previous page. */

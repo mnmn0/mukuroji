@@ -54,10 +54,11 @@ export function useTriageQueue(
         filters.owner ?? 'all',
         currentUserKey ?? '',
         filters.sla ?? '',
+        filters.workItemTypeId ?? '',
         pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
       ] as const
     },
-    ([, token, currentTeamId, , state, source, owner, ownerKey, , cursor]) =>
+    ([, token, currentTeamId, , state, source, owner, ownerKey, , workItemTypeId, cursor]) =>
       getTriageEntries(currentTeamId, token, {
         cursor: cursor || undefined,
         limit: 50,
@@ -69,6 +70,7 @@ export function useTriageQueue(
         sourceKind: source === 'form' || source === 'chat' || source === 'email' || source === 'webhook' || source === 'manual-handoff'
           ? source
           : undefined,
+        workItemTypeId: workItemTypeId || undefined,
         state: state === 'pending' || state === 'accepted' || state === 'duplicate' || state === 'declined' || state === 'snoozed' || state === 'needs-information'
           ? state
           : undefined,

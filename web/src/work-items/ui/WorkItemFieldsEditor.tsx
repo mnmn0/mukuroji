@@ -64,6 +64,8 @@ export type WorkItemFieldsEditorProps = {
    * 全 control を無効化するかどうかです。
    */
   disabled?: boolean
+  /** Optional external form ID that owns the rendered controls. */
+  formId?: string
   /**
    * Formula 以外も参照専用表示にするかどうかです。
    */
@@ -83,6 +85,7 @@ export function WorkItemFieldsEditor({
   definitions,
   disabled = false,
   errors = {},
+  formId,
   locale,
   personOptions = [],
   projectId,
@@ -126,6 +129,7 @@ export function WorkItemFieldsEditor({
             <CustomFieldControl
               definition={definition}
               errorMessage={errors[definition.id]}
+              formId={formId}
               key={definition.id}
               locale={locale}
               personOptions={personOptions}
@@ -141,6 +145,7 @@ export function WorkItemFieldsEditor({
 function CustomFieldControl({
   definition,
   errorMessage,
+  formId,
   locale,
   personOptions,
   value,
@@ -149,6 +154,8 @@ function CustomFieldControl({
   definition: CustomFieldDefinition
   /** Field 下部へ表示する validation message です。 */
   errorMessage?: string
+  /** Optional external form ID that owns the field control. */
+  formId?: string
   /** 表示 locale です。 */
   locale: Locale
   /** Person field の選択候補です。 */
@@ -188,6 +195,7 @@ function CustomFieldControl({
       <CustomFieldInput
         describedBy={describedBy}
         definition={definition}
+        formId={formId}
         inputId={inputId}
         locale={locale}
         name={name}
@@ -217,6 +225,7 @@ function CustomFieldControl({
 function CustomFieldInput({
   describedBy,
   definition,
+  formId,
   inputId,
   locale,
   name,
@@ -227,6 +236,8 @@ function CustomFieldInput({
   describedBy?: string
   /** Field control の definition です。 */
   definition: CustomFieldDefinition
+  /** Optional external form ID that owns the input. */
+  formId?: string
   /** Label と input を結び付ける DOM ID です。 */
   inputId: string
   /** 表示 locale です。 */
@@ -244,6 +255,7 @@ function CustomFieldInput({
     className: 'workbench-input min-h-10 w-full min-w-0 px-3 disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]',
     id: inputId,
     name,
+    form: formId,
     required: definition.required,
   }
 
@@ -266,11 +278,12 @@ function CustomFieldInput({
   if (definition.type === 'boolean') {
     return (
       <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]" htmlFor={inputId}>
-        <input name={name} type="hidden" value="false" />
+        <input form={formId} name={name} type="hidden" value="false" />
         <input
           aria-describedby={describedBy}
           className="h-4 w-4 accent-[var(--workbench-primary)]"
           defaultChecked={value === true}
+          form={formId}
           id={inputId}
           name={name}
           type="checkbox"

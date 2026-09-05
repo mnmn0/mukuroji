@@ -219,6 +219,21 @@ function createAutomationRuleTemplatePort(
   overrides: Partial<TestAutomationRuleTemplatePort>,
 ): TestAutomationRuleTemplatePort {
   return {
+    async getAutomationDefinitionRevision() {
+      return 0
+    },
+    createAutomationDefinitionRevisionConditionCheck(workspaceId) {
+      return {
+        ConditionCheck: {
+          TableName: 'AutomationTable',
+          Key: {
+            recordKey: 'AUTOMATION_DEFINITION_REVISION',
+            scopeKey: `${workspaceId}#automation`,
+          },
+          ConditionExpression: 'attribute_not_exists(scopeKey)',
+        },
+      }
+    },
     async listRules() {
       return unexpectedAutomationPortCall()
     },
@@ -2610,6 +2625,7 @@ test('applies a Workflow template atomically while preserving custom fields and 
     revision: 1,
     payload: {
       ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION.workflow),
+      id: 'delivery-workflow',
       name: 'Delivery workflow',
     },
     createdAt: now,
@@ -2638,11 +2654,26 @@ test('applies a Workflow template atomically while preserving custom fields and 
       sortOrder: 10,
       required: false,
     }],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['customer'],
+      requiredCustomFieldIds: [],
+      detailSections: ['overview', 'custom-fields', 'activity'],
+      allowedChildTypeIds: ['default', 'incident'],
+      sortOrder: 10,
+    }],
   }
   let savedConfiguration: WorkItemConfiguration | undefined
   let completionCount = 0
   setTestAppDependencies({
     ruleTemplates: createAutomationRuleTemplatePort({
+      async listRules() {
+        return []
+      },
       async reserveTemplateApplication() {
         return structuredClone(application)
       },
@@ -2735,8 +2766,9 @@ test('applies a Workflow template atomically while preserving custom fields and 
   })
   expect(savedConfiguration).toMatchObject({
     revision: 2,
-    workflow: { name: 'Delivery workflow' },
+    workflow: { id: 'delivery-workflow', name: 'Delivery workflow' },
     customFields: existingConfiguration.customFields,
+    workItemTypes: [{ id: 'incident', defaultWorkflowId: 'delivery-workflow' }],
   })
   expect(completionCount).toBe(1)
 })

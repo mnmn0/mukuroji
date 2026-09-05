@@ -14,7 +14,7 @@ import {
   type KeyboardEvent,
 } from 'react'
 import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
-import type { ProjectMember } from '../../projects/api'
+import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
@@ -65,6 +65,7 @@ import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDi
 import {
   TaskCustomFieldSummary,
   TaskStatusBadge,
+  TaskWorkItemTypeBadge,
   TaskViewFlagIcon,
   TaskViewPlusIcon,
 } from './TaskViewPrimitives'
@@ -94,6 +95,8 @@ export type TaskTableViewProps = {
   canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Team-scoped resolved configurations used by individual rows. */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
+  /** Project directory used to label Team-qualified type groups. */
+  teams?: readonly ProjectDirectoryTeam[]
   /** Locale used to format custom-field values. */
   locale: Locale
   /** Dependency summaries keyed by canonical Team/Work Item identity. */
@@ -234,6 +237,7 @@ export function TaskTableView({
   selectedBulkItems,
   selectedDetailTaskKey,
   selectedTaskKeys,
+  teams = [],
   taskErrorMessage,
   tasks,
   t,
@@ -263,6 +267,7 @@ export function TaskTableView({
     { field: 'status' },
     { field: 'dueDate' },
     { field: 'priority' },
+    { field: 'workItemType' },
   ]).filter((column) => isSupportedProjectTaskColumn(column.field))
   const renderedColumns = visibleColumns.some((column) => column.field === 'title')
     ? visibleColumns
@@ -286,6 +291,7 @@ export function TaskTableView({
           configurationsByTeam,
           configuration,
           t,
+          teams,
         ),
         presentation.groupDirection,
       )
@@ -574,6 +580,7 @@ export function TaskTableView({
                           configurationsByTeam,
                           configuration,
                           t,
+                          teams,
                         ),
                         presentation.subgroupDirection,
                       )
@@ -888,6 +895,11 @@ function TaskTableRow({
               ) : <TaskStatusBadge configuration={configuration} task={task} />}
             </td>
           )
+          case 'workItemType': return (
+            <td {...columnCellProps} className={cellPadding} key={field}>
+              <TaskWorkItemTypeBadge configuration={configuration} task={task} />
+            </td>
+          )
           case 'dueDate': return (
             <td
               {...columnCellProps}
@@ -993,6 +1005,7 @@ function TaskTableRow({
               schedule,
               source: 'table',
               teamId: task.teamId,
+              workItemTypeId: task.workItemTypeId ?? 'default',
               workflowStatusId: task.workflowStatusId,
             })}
             type="button"
@@ -1041,6 +1054,7 @@ function isSupportedProjectTaskColumn(field: string): boolean {
     'status',
     'dueDate',
     'priority',
+    'workItemType',
     'project',
     'team',
     'customFields',
@@ -1060,6 +1074,7 @@ function resolveTaskTableColumnLabel(
     case 'status': return t('tasks.column.status')
     case 'dueDate': return t('tasks.column.dueDate')
     case 'priority': return t('tasks.column.priority')
+    case 'workItemType': return t('tasks.column.workItemType')
     case 'project': return t('workspace.column.project')
     case 'team': return t('workspace.column.team')
     case 'customFields': return t('workItems.fields.title')

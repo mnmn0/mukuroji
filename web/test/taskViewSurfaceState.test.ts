@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { TaskViewDefinition } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey, type TaskViewDefinition } from '@mukuroji/contracts'
 import {
   applyTaskViewDefinitionToTasks,
   canSetTeamTaskViewDefault,
@@ -40,6 +40,7 @@ describe('task-view surface adapters', () => {
           { field: 'assignee' },
           { field: 'dueDate' },
           { field: 'priority' },
+          { field: 'workItemType' },
         ],
         density: 'comfortable',
         displayOptions: {
@@ -68,6 +69,7 @@ describe('task-view surface adapters', () => {
       'assignee',
       'dueDate',
       'priority',
+      'workItemType',
       'customFields',
     ])
   })
@@ -111,6 +113,7 @@ describe('task-view surface adapters', () => {
       searchQuery: 'launch',
       sortOrder: 'due-date-desc',
       statusFilter: 'core:team:active',
+      workItemTypeFilter: 'all',
     })
 
     const next = projectStateToTaskViewDefinition(definition, {
@@ -132,6 +135,77 @@ describe('task-view surface adapters', () => {
       },
     })
     expect(next.layout.columns).toEqual(definition.layout.columns)
+  })
+
+  test('round-trips type-qualified Project status filters without mixing equal status IDs', () => {
+    const definition = {
+      ...createBuiltInTaskViewDefinition(
+        'project',
+        { kind: 'project', projectId: 'refero', teamId: 'core:team' },
+        'table',
+      ),
+      filters: {
+        workflowStatuses: [{
+          teamId: 'core:team',
+          workItemTypeId: 'bug',
+          statusId: 'active',
+        }],
+      },
+    } satisfies TaskViewDefinition
+    const state = taskViewDefinitionToProjectState(definition)
+
+    expect(state.statusFilter).toBe('core:team\u0000bug\u0000active')
+    const next = projectStateToTaskViewDefinition(definition, {
+      ...state,
+      statusFilter: 'core:team\u0000bug\u0000review',
+    })
+    expect(next.filters.workflowStatuses).toEqual([{
+      teamId: 'core:team',
+      workItemTypeId: 'bug',
+      statusId: 'review',
+    }])
+
+    const defaultTask = {
+      ...taskViewStoryTasks[0],
+      id: 'default-active',
+      teamId: 'core:team',
+      workItemTypeId: 'default',
+      workflowStatusId: 'active',
+    }
+    const bugTask = {
+      ...defaultTask,
+      id: 'bug-active',
+      workItemTypeId: 'bug',
+    }
+    expect(applyTaskViewDefinitionToTasks([defaultTask, bugTask], definition)
+      .map((task) => task.id)).toEqual(['bug-active'])
+    expect(applyTaskViewDefinitionToTasks([defaultTask, bugTask], {
+      ...definition,
+      filters: { workflowStatuses: [{ teamId: 'core:team', statusId: 'active' }] },
+    }).map((task) => task.id)).toEqual(['default-active', 'bug-active'])
+  })
+
+  test('matches Work Item Type filters by Team and type identity', () => {
+    const coreTask = {
+      ...taskViewStoryTasks[0],
+      id: 'core-bug',
+      teamId: 'core-team',
+      workItemTypeId: 'bug',
+    }
+    const designTask = {
+      ...coreTask,
+      id: 'design-bug',
+      teamId: 'design-team',
+    }
+    const definition = {
+      ...createBuiltInTaskViewDefinition('my-tasks', { kind: 'viewer' }, 'board'),
+      filters: {
+        workItemTypeIds: [createSearchWorkItemTypeKey('core-team', 'bug')],
+      },
+    } satisfies TaskViewDefinition
+
+    expect(applyTaskViewDefinitionToTasks([coreTask, designTask], definition)
+      .map((task) => task.id)).toEqual(['core-bug'])
   })
 
   test('retains an existing Project custom-field predicate when another control changes', () => {
@@ -277,6 +351,7 @@ describe('task-view surface adapters', () => {
       searchQuery: 'launch',
       statusFilter: 'active',
       viewMode: 'table',
+      workItemTypeFilter: 'all',
     })
     const next = teamStateToTaskViewDefinition(definition, {
       ...state,
@@ -288,6 +363,34 @@ describe('task-view surface adapters', () => {
     ])
     expect(next.filters.customFields).toEqual(definition.filters.customFields)
     expect(next.layout.mode).toBe('board')
+  })
+
+  test('round-trips type-qualified Team workflow status filters', () => {
+    const definition = {
+      ...createProjectDefinition(),
+      surface: 'team',
+      scope: { kind: 'team', teamId: 'core-team' },
+      filters: {
+        workflowStatuses: [{
+          teamId: 'core-team',
+          workItemTypeId: 'bug',
+          statusId: 'active',
+        }],
+      },
+    } satisfies TaskViewDefinition
+    const state = taskViewDefinitionToTeamState(definition)
+
+    expect(state.statusFilter).toBe('core-team\u0000bug\u0000active')
+    const next = teamStateToTaskViewDefinition(definition, {
+      ...state,
+      statusFilter: 'core-team\u0000bug\u0000review',
+    })
+
+    expect(next.filters.workflowStatuses).toEqual([{
+      teamId: 'core-team',
+      workItemTypeId: 'bug',
+      statusId: 'review',
+    }])
   })
 
   test('preserves secondary Team filters and omits cleared represented filters', () => {

@@ -816,25 +816,44 @@ test('uses the first matching routing rule and maps a submission into a canonica
     },
   })
 
+  const typeSelected = createRequestWorkItemInput(
+    createStoredSubmission({
+      routingTarget: {
+        ...routing.rules[0]!.target,
+        workItemTypeId: 'incident',
+      },
+    }) as RequestSubmission,
+    { action: 'convert', expectedRevision: 1 },
+  )
+  expect(typeSelected.input.workItemTypeId).toBe('incident')
+
   const overridden = createRequestWorkItemInput(
     createStoredSubmission() as RequestSubmission,
     {
       action: 'convert',
       expectedRevision: 1,
       title: 'Manual title',
+      workItemTypeId: 'incident',
       target: {
         projectId: 'project-manual',
         dueDateOffsetDays: 3,
         priority: 'low',
       },
+      customFieldValues: {
+        'request-channel': null,
+        estimate: 13,
+      },
     },
   )
   expect(overridden.input).toMatchObject({
     title: 'Manual title',
+    workItemTypeId: 'incident',
     assignedProjectId: 'project-manual',
+    workflowStatusId: 'triage',
     schedule: { dueDate: '2026-07-19', mode: 'due-date' },
     priority: 'low',
   })
+  expect(overridden.input.customFieldValues).toEqual({ estimate: 13 })
 })
 
 test('creates a form with a digest-keyed link lookup and CAS-protected form row', async () => {
@@ -929,6 +948,59 @@ test('publishes an immutable version snapshot and protects the form revision wit
   )).rejects.toMatchObject({ code: 'RequestRevisionConflict', status: 409 })
 })
 
+test('includes caller-owned configuration guards in the publish transaction', async () => {
+  const current = createStoredForm({ status: 'draft', currentPublishedVersion: undefined, publishedVersions: [] })
+  const commands: FakeCommand[] = []
+  const client = createClient(createDocumentClient((command) => {
+    commands.push(command)
+    if (command.input.Key) return { Item: current }
+    return {}
+  }))
+  const guard = {
+    ConditionCheck: {
+      TableName: 'mukuroji-work-item-configuration-local',
+      Key: { scopeKey: 'workspace-1', recordKey: 'CONFIG' },
+      ConditionExpression: 'attribute_exists(scopeKey)',
+    },
+  }
+
+  await client.publishForm(
+    'workspace-1',
+    'form-1',
+    { id: 'admin@example.com' },
+    { expectedRevision: 1 },
+    [guard],
+  )
+
+  const transactionCommand = commands.find((command) => Array.isArray(command.input.TransactItems))
+  const transaction = transactionCommand?.input.TransactItems as Array<Record<string, unknown>>
+  expect(transaction.at(-1)).toEqual(guard)
+})
+
+test('rejects a publish transaction that cannot fit its configuration guards', async () => {
+  const commands: FakeCommand[] = []
+  const client = createClient(createDocumentClient((command) => {
+    commands.push(command)
+    return {}
+  }))
+  const guards = Array.from({ length: 98 }, (_, index) => ({
+    ConditionCheck: {
+      TableName: 'mukuroji-work-item-configuration-local',
+      Key: { scopeKey: `guard-${index}`, recordKey: 'CONFIG' },
+      ConditionExpression: 'attribute_exists(scopeKey)',
+    },
+  }))
+
+  await expect(client.publishForm(
+    'workspace-1',
+    'form-1',
+    { id: 'admin@example.com' },
+    { expectedRevision: 1 },
+    guards,
+  )).rejects.toMatchObject({ code: 'RequestFormTransactionTooLarge', status: 413 })
+  expect(commands).toHaveLength(0)
+})
+
 test('lists only form root rows after publishing an immutable version', async () => {
   let root = createStoredForm({
     status: 'draft',
@@ -940,6 +1012,9 @@ test('lists only form root rows after publishing an immutable version', async ()
   const client = createClient(createDocumentClient((command) => {
     const key = command.input.Key as { recordKey?: string } | undefined
     if (key?.recordKey === 'FORM_ROOT#form-1') return { Item: root }
+    if (key?.recordKey?.startsWith('FORM_VERSION#') && versionRow) {
+      return { Item: versionRow }
+    }
     const transaction = command.input.TransactItems as Array<{
       Put?: { Item?: Record<string, unknown> }
     }> | undefined
@@ -976,6 +1051,14 @@ test('lists only form root rows after publishing an immutable version', async ()
     status: 'published',
     currentPublishedVersion: 1,
   })
+  await expect(client.listCurrentPublishedFormVersions('workspace-1')).resolves.toEqual([{
+    schemaVersion: 1,
+    formId: 'form-1',
+    version: 1,
+    snapshot: draft,
+    createdBy: 'admin@example.com',
+    createdAt: now.toISOString(),
+  }])
 })
 
 test('rejects invalid form status and masks non-conditional store failures', async () => {

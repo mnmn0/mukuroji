@@ -1,4 +1,5 @@
 import type { WorkItemPriority } from './work-items'
+import type { CustomFieldValue } from './work-item-configuration'
 
 /** 現在の Request Form schema version です。 */
 export const REQUEST_FORM_SCHEMA_VERSION = 1 as const
@@ -192,6 +193,8 @@ export type RequestFormDefinition = {
 export type RequestFormRoutingTarget = {
   /** Work Item を所有する Team ID です。 */
   teamId: string
+  /** Work Item の作成に利用する Work Item Type ID です。省略時は built-in type です。 */
+  workItemTypeId?: string
   /** Work Item の遂行先 Project ID です。 */
   projectId?: string
   /** Team workflow 内の status ID です。 */
@@ -655,12 +658,16 @@ export type ConvertRequestSubmissionAction = {
   action: 'convert'
   /** 読み込み時点の submission revision です。 */
   expectedRevision: number
+  /** Work Item creation に利用する active Work Item Type ID です。 */
+  workItemTypeId?: string
   /** 保存済み routing target を上書きする値です。 */
   target?: Partial<RequestFormRoutingTarget>
   /** Mapping から生成した title を上書きする値です。 */
   title?: string
   /** Mapping から生成した description を上書きする値です。 */
   description?: string
+  /** Selected Work Item Type の custom field values; null explicitly clears a mapped value. */
+  customFieldValues?: Record<string, CustomFieldValue | null>
 }
 
 /** Intake queue で許可する明示的な state transition input です。 */

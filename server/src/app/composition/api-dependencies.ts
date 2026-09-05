@@ -130,6 +130,7 @@ import {
 import {
   DynamoDbTeamIssuesClient,
   createWorkItemRevisionConditionCheck,
+  isTeamIssueNotFoundError,
   type TeamIssuesClient,
   type TriageDuplicateContextTransactionContribution,
   type WorkItemImportQueue,
@@ -225,6 +226,7 @@ export function createWorkItemConfigurationClient(): WorkItemConfigurationClient
     createDynamoDbDocumentClient(dynamoDbClient),
     dynamoDbClient,
     shouldBootstrapLocalDynamoDb(),
+    getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
   )
 }
 
@@ -429,6 +431,9 @@ export function createDefaultWorkItemConfigurationClient(): WorkItemConfiguratio
       }
     },
     async listRelations() {
+      return { relations: [], graphRevision: 0 }
+    },
+    async listRelationGraph() {
       return { relations: [], graphRevision: 0 }
     },
     async createRelation(_workspaceId, _teamId, input) {
@@ -975,6 +980,27 @@ function createTriageClient(
     validateAdmission,
     validateConfigurationReferences,
     validateActionReferences,
+    readCanonicalWorkItem: async (workspaceId, teamId, workItemId) => {
+      try {
+        const detail = await teamIssues.getTeamIssueDetail(
+          workspaceId,
+          teamId,
+          workItemId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        )
+        return {
+          ...(detail.issue.assignedProjectId === undefined
+            ? {}
+            : { projectId: detail.issue.assignedProjectId }),
+          ...(detail.issue.workItemTypeId === undefined
+            ? {}
+            : { workItemTypeId: detail.issue.workItemTypeId }),
+        }
+      } catch (error) {
+        if (isTeamIssueNotFoundError(error)) return undefined
+        throw error
+      }
+    },
     resolveWorkItemAction: async (workspaceId, entry, actor, action, now) => {
       if (action.action === 'accept' && action.mode === 'create') {
         throw new TriageError(
@@ -1018,6 +1044,9 @@ function createTriageClient(
         canonicalWorkItem: {
           teamId: detail.issue.teamId,
           workItemId: detail.issue.id,
+          ...(detail.issue.workItemTypeId
+            ? { workItemTypeId: detail.issue.workItemTypeId }
+            : {}),
           ...(detail.issue.assignedProjectId
             ? { projectId: detail.issue.assignedProjectId }
             : {}),
@@ -1618,6 +1647,47 @@ export function createProductionAppDependencies(): AppDependencies {
  */
 export function createTestAppDependencies(): AppDependencies {
   const production = createProductionAppDependencies()
+  const requestIntake = new Proxy(production.workItems.requestIntake, {
+    get(target, property, receiver) {
+      if (property === 'listCurrentPublishedFormVersions') {
+        return async () => []
+      }
+      if (property === 'listSubmissions') {
+        return async () => ({ submissions: [] })
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const automation: AutomationDependencies = {
+    ...production.automation,
+    ruleTemplates: new Proxy(production.automation.ruleTemplates, {
+      get(target, property, receiver) {
+        if (property === 'listRules') {
+          return async () => []
+        }
+        if (property === 'getAutomationDefinitionRevision') {
+          return async () => 0
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+    recurringSchedules: new Proxy(production.automation.recurringSchedules, {
+      get(target, property, receiver) {
+        if (property === 'listRecurringWorks') {
+          return async () => []
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+    executions: new Proxy(production.automation.executions, {
+      get(target, property, receiver) {
+        if (property === 'listExecutions') {
+          return async () => ({ executions: [] })
+        }
+        return Reflect.get(target, property, receiver)
+      },
+    }),
+  }
   const timeTrackingService = new TimeTrackingService(new InMemoryTimeTrackingRepository())
   return {
     ...production,
@@ -1633,7 +1703,9 @@ export function createTestAppDependencies(): AppDependencies {
       planning: new InMemoryPlanningClient(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
+      requestIntake,
     },
+    automation,
     timeTracking: { timeTrackingService },
     capacityPlanning: {
       capacityPlanningService: new CapacityPlanningService(

@@ -81,6 +81,11 @@ export function filterTriageEntryViews(
         (!entry.ownerUserId || !currentUserIds.has(entry.ownerUserId.toLocaleLowerCase()))
       ) return false
       if (filters.sla && view.slaState !== filters.sla) return false
+      if (
+        filters.workItemTypeId &&
+        (!entry.canonicalWorkItem ||
+          (entry.canonicalWorkItem.workItemTypeId ?? 'default') !== filters.workItemTypeId)
+      ) return false
       if (!normalizedQuery) return true
 
       return [

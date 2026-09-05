@@ -4,13 +4,18 @@ import {
 const {
   app,
   configureFakeProjectClients,
+  createFakeWorkItemConfigurationClient,
   createTeamIssuesFake,
+  createTestWorkItemConfiguration,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
 import {
   DynamoDbTeamIssuesClient,
 } from '../modules/work-items'
+import {
+  createProductionAutomationDependencies,
+} from '../app/composition/api-dependencies'
 import type { TriageCompositionClient } from '../app/composition/app-dependencies'
 import {
   resolveRequestClientKey,
@@ -25,6 +30,7 @@ import {
 import {
   createTriageCapabilities,
 } from '../modules/triage'
+import type { AutomationEvent } from '../modules/automation'
 import { redactExpiredTriageEntry } from '../modules/triage/domain/triage-entry'
 import type { CreateTeamIssueRequestBody } from '../modules/work-items'
 import type {
@@ -35,17 +41,24 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import type {
+  AutomationExecution,
+  AutomationRule,
+  AutomationTemplate,
   PublicRequestForm,
   RequestForm,
   RequestFormDraft,
   RequestSubmission,
   RequestSubmissionActionInput,
+  RecurringWork,
   TriageEntry,
+  WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
+  AUTOMATION_SCHEMA_VERSION,
   REQUEST_FORM_SCHEMA_VERSION,
   REQUEST_SUBMISSION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE,
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultUnscheduledWorkItemSchedule,
 } from '@mukuroji/contracts'
@@ -84,6 +97,9 @@ function createRequestIntakeClient(
 ): RequestIntakeClient {
   return {
     listForms: createUnexpectedRequestIntakeCall('listForms'),
+    listCurrentPublishedFormVersions: createUnexpectedRequestIntakeCall(
+      'listCurrentPublishedFormVersions',
+    ),
     getForm: createUnexpectedRequestIntakeCall('getForm'),
     createForm: createUnexpectedRequestIntakeCall('createForm'),
     updateForm: createUnexpectedRequestIntakeCall('updateForm'),
@@ -105,6 +121,163 @@ function createRequestIntakeClient(
       'createAttachmentAccess',
     ),
     ...overrides,
+  }
+}
+
+/**
+ * Creates Automation port proxies that expose only the references needed by configuration usage tests.
+ *
+ * @param recurringWorks - Recurring definitions returned to the API under test.
+ * @param templates - Immutable Work Item templates returned to the API under test.
+ * @param rules - Automation rules returned to the API under test.
+ * @returns Automation ports backed by the production method surface and test-owned reads.
+ */
+function createAutomationConfigurationUsageDependencies(
+  recurringWorks: readonly RecurringWork[],
+  templates: readonly AutomationTemplate[],
+  rules: readonly AutomationRule[] = [],
+  options: {
+    /** Immutable rule versions retained by non-terminal execution fixtures. */
+    pinnedRules?: readonly AutomationRule[]
+    /** Non-terminal executions and their durable trigger events. */
+    executions?: readonly {
+      execution: AutomationExecution
+      event: AutomationEvent
+    }[]
+    /** Automation definition revision returned for the configuration fence. */
+    automationDefinitionRevision?: number
+  } = {},
+) {
+  const production = createProductionAutomationDependencies()
+  const pinnedRules = options.pinnedRules ?? []
+  const executionEvents = new Map(
+    (options.executions ?? []).map(({ execution, event }) => [execution.id, event]),
+  )
+  const ruleTemplates = new Proxy(production.ruleTemplates, {
+    get(target, property, receiver) {
+      if (property === 'listRules') {
+        return async (_workspaceId: string) => [...rules]
+      }
+      if (property === 'getTemplateVersion') {
+        return async (_workspaceId: string, templateId: string, version: number) =>
+          templates.find((template) => template.id === templateId && template.version === version)
+      }
+      if (property === 'getRuleVersion') {
+        return async (_workspaceId: string, ruleId: string, version: number) =>
+          pinnedRules.find((rule) => rule.id === ruleId && rule.version === version)
+      }
+      if (property === 'getAutomationDefinitionRevision') {
+        return async () => options.automationDefinitionRevision ?? 0
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const recurringSchedules = new Proxy(production.recurringSchedules, {
+    get(target, property, receiver) {
+      if (property === 'listRecurringWorks') {
+        return async (_workspaceId: string) => [...recurringWorks]
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const executions = new Proxy(production.executions, {
+    get(target, property, receiver) {
+      if (property === 'listExecutions') {
+        return async (query: { status?: AutomationExecution['status'] }) => ({
+          executions: (options.executions ?? [])
+            .map(({ execution }) => execution)
+            .filter((execution) => query.status === undefined || execution.status === query.status),
+        })
+      }
+      if (property === 'getExecutionEvent') {
+        return async (_workspaceId: string, executionId: string) => executionEvents.get(executionId)
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  return { executions, recurringSchedules, ruleTemplates }
+}
+
+/** Creates a valid Work Item Automation template fixture for configuration usage tests. */
+function createWorkItemAutomationTemplate(
+  templateId: string,
+  workItemTypeId: string,
+): AutomationTemplate {
+  const timestamp = '2026-07-16T00:00:00.000Z'
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: templateId,
+    workspaceId: 'workspace-1',
+    kind: 'work-item',
+    name: 'Incident template',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: {
+      assigneeUserId: 'demo@example.com',
+      schedule: createDefaultUnscheduledWorkItemSchedule(),
+      title: 'Incident from Automation',
+      teamId: 'core-team',
+      workItemTypeId,
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }
+}
+
+/** Creates an enabled recurring Work fixture pinned to a Work Item template. */
+function createRecurringWorkUsageFixture(templateId: string): RecurringWork {
+  const timestamp = '2026-07-16T00:00:00.000Z'
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'recurring-incident',
+    workspaceId: 'workspace-1',
+    teamId: 'core-team',
+    name: 'Recurring incident',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    templateId,
+    templateVersion: 1,
+    schedule: {
+      frequency: 'daily',
+      interval: 1,
+      timeZone: 'UTC',
+      localTime: '09:00',
+      startDate: '2026-07-01',
+      catchUpPolicy: 'skip',
+    },
+    nextRunAt: '2026-07-17T09:00:00.000Z',
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  }
+}
+
+/** Creates an enabled Automation rule with a pinned Work Item create action. */
+function createAutomationRuleUsageFixture(templateId: string): AutomationRule {
+  const timestamp = '2026-07-16T00:00:00.000Z'
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'rule-incident',
+    workspaceId: 'workspace-1',
+    name: 'Create incident',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    trigger: { type: 'status' },
+    conditions: [],
+    actions: [{ type: 'create', templateId, templateVersion: 1 }],
+    retryPolicy: {
+      maxAttempts: 3,
+      initialDelayMs: 1_000,
+      backoffMultiplier: 2,
+      maxDelayMs: 60_000,
+    },
+    rateLimit: { maxExecutions: 10, windowSeconds: 60 },
+    allowReentry: false,
+    maxChainDepth: 8,
+    createdAt: timestamp,
+    updatedAt: timestamp,
   }
 }
 
@@ -447,6 +620,7 @@ test('uses a forwarded request rate-limit source only for a configured trusted p
 test('delegates Request Form publish revision checks to the Request Intake client', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'owner' })
   let publishCalls = 0
+  let publishGuards: NonNullable<TransactWriteCommandInput['TransactItems']> | undefined
   const conflict = new RequestIntakeError(
     409,
     'RequestRevisionConflict',
@@ -456,8 +630,15 @@ test('delegates Request Form publish revision checks to the Request Intake clien
     async getForm() {
       return requestForm
     },
-    async publishForm() {
+    async publishForm(
+      _workspaceId,
+      _formId,
+      _actor,
+      _input,
+      additionalTransactionItems,
+    ) {
       publishCalls += 1
+      publishGuards = additionalTransactionItems
       throw conflict
     },
   } satisfies Pick<RequestIntakeClient, 'getForm' | 'publishForm'>
@@ -480,6 +661,812 @@ test('delegates Request Form publish revision checks to the Request Intake clien
     message: 'Request resource revision changed.',
   })
   expect(publishCalls).toBe(1)
+  expect(publishGuards).toHaveLength(4)
+  expect(publishGuards?.every((item) => item.ConditionCheck?.TableName === 'mukuroji-work-item-configuration-local'))
+    .toBe(true)
+})
+
+test('rejects a Request Form mapping that is unavailable to a routed Work Item Type', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'summary',
+    name: 'Summary',
+    type: 'text',
+    sortOrder: 0,
+    required: false,
+  }]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'incident',
+    name: 'Incident',
+    defaultWorkflowId: configuration.workflow.id,
+    customFieldIds: [],
+    requiredCustomFieldIds: [],
+    allowedChildTypeIds: ['incident'],
+  }]
+  const typedDraft: RequestFormDraft = {
+    ...draft,
+    definition: {
+      ...draft.definition,
+      sections: draft.definition.sections.map((section, index) => index === 0
+        ? {
+            ...section,
+            fields: [...section.fields, {
+              id: 'summary-answer',
+              type: 'short-text',
+              label: { ja: 'Summary' },
+            }],
+          }
+        : section),
+    },
+    routing: {
+      ...draft.routing,
+      defaultTarget: {
+        ...draft.routing.defaultTarget,
+        workItemTypeId: 'incident',
+      },
+      mapping: {
+        ...draft.routing.mapping,
+        customFieldMappings: { 'summary-answer': 'summary' },
+      },
+    },
+  }
+  let publishCalls = 0
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async getForm() {
+        return { ...requestForm, draft: typedDraft }
+      },
+      async publishForm() {
+        publishCalls += 1
+        return requestForm
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/request-forms/form-1/publish', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    code: 'InvalidRequestRouting',
+    message: 'Custom field "summary" is not active for Team "core-team".',
+  })
+  expect(publishCalls).toBe(0)
+})
+
+test('validates every Request Form routing target while reusing the Team configuration', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  let configurationReads = 0
+  let publishCalls = 0
+  const routedDraft: RequestFormDraft = {
+    ...draft,
+    routing: {
+      ...draft.routing,
+      rules: [{
+        id: 'invalid-project-route',
+        name: 'Invalid project route',
+        when: {
+          mode: 'all',
+          conditions: [{ fieldId: 'title', operator: 'equals', value: 'route' }],
+        },
+        target: {
+          ...draft.routing.defaultTarget,
+          projectId: 'missing-project',
+        },
+      }],
+    },
+  }
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async getForm() {
+        return { ...requestForm, draft: routedDraft }
+      },
+      async publishForm() {
+        publishCalls += 1
+        return requestForm
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        configurationReads += 1
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/request-forms/form-1/publish', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ expectedRevision: 1 }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({
+    code: 'InvalidRequestRouting',
+    message: 'Request routing Project is inactive.',
+  })
+  expect(configurationReads).toBe(1)
+  expect(publishCalls).toBe(0)
+})
+
+test('rejects archiving a Work Item Type referenced by a published Request Form', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: [{ ...typedWorkItemType, status: 'archived' }],
+  }
+  const publishedVersion: RequestSubmission['formSnapshot'] = {
+    schemaVersion: REQUEST_FORM_SCHEMA_VERSION,
+    formId: 'form-1',
+    version: 1,
+    snapshot: {
+      ...draft,
+      routing: {
+        ...draft.routing,
+        defaultTarget: {
+          ...draft.routing.defaultTarget,
+          workItemTypeId: 'incident',
+        },
+      },
+    },
+    createdBy: 'admin@example.com',
+    createdAt: '2026-07-16T00:30:00.000Z',
+  }
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return [publishedVersion]
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('rejects deleting a Work Item Type referenced by a queued Request submission', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: currentConfiguration.workItemTypes?.filter((type) => type.id !== 'incident'),
+  }
+  const submission = createLegacySubmission({
+    routingTarget: {
+      ...createLegacySubmission().routingTarget,
+      workItemTypeId: 'incident',
+    },
+  })
+  const requestedStatuses: string[] = []
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions(_workspaceId, options) {
+        requestedStatuses.push(options?.status ?? '')
+        return options?.status === 'received'
+          ? { submissions: [submission] }
+          : { submissions: [] }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+  })
+  expect(requestedStatuses).toEqual(['received', 'triaging', 'needs-more-info'])
+  expect(saveCompleted).toBe(false)
+})
+
+test('rejects archiving a Work Item Type referenced by enabled Recurring Work', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: [{ ...typedWorkItemType, status: 'archived' }],
+  }
+  const template = createWorkItemAutomationTemplate('template-recurring-incident', 'incident')
+  const recurring = createRecurringWorkUsageFixture(template.id)
+  const automation = createAutomationConfigurationUsageDependencies([recurring], [template])
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Recurring Work'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('rejects deleting a Work Item Type referenced by an enabled Automation Rule', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: currentConfiguration.workItemTypes?.filter((type) => type.id !== 'incident'),
+  }
+  const template = createWorkItemAutomationTemplate('template-rule-incident', 'incident')
+  const rule = createAutomationRuleUsageFixture(template.id)
+  const automation = createAutomationConfigurationUsageDependencies([], [template], [rule])
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Automation Rule'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('validates the complete merged Work Item payload of enabled Automation create actions', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const customField = {
+    id: 'severity',
+    name: 'Severity',
+    type: 'text' as const,
+    sortOrder: 0,
+    required: false,
+    projectIds: ['refero'],
+  }
+  currentConfiguration.customFields = [customField]
+  currentConfiguration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'incident',
+    name: 'Incident',
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    customFieldIds: [customField.id],
+    sortOrder: 10,
+  }]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    customFields: [{ ...customField, required: true }],
+  }
+  const template = createWorkItemAutomationTemplate('template-required-field', 'incident')
+  template.payload = {
+    ...template.payload,
+    assignedProjectId: 'refero',
+  }
+  const recurring = createRecurringWorkUsageFixture(template.id)
+  const automation = createAutomationConfigurationUsageDependencies([recurring], [template])
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Recurring Work'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('rejects enabled Automation creates assigned to an inactive Workspace member', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    inactiveWorkspaceMemberKeys: ['former@example.com'],
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const template = createWorkItemAutomationTemplate('template-inactive-assignee', 'default')
+  template.payload = {
+    ...template.payload,
+    assigneeUserId: 'former@example.com',
+  }
+  const recurring = createRecurringWorkUsageFixture(template.id)
+  const automation = createAutomationConfigurationUsageDependencies([recurring], [template])
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, nextConfiguration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration: nextConfiguration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Only active non-guest Workspace members can be assigned.'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('protects a Work Item Type referenced only by a retryable pinned Automation execution', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const currentConfiguration: WorkItemConfiguration = createTestWorkItemConfiguration('team', 'core-team')
+  const typedWorkItemType = {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    defaultWorkflowId: currentConfiguration.workflow.id,
+    id: 'incident',
+    name: 'Incident',
+    sortOrder: 10,
+  } satisfies NonNullable<WorkItemConfiguration['workItemTypes']>[number]
+  currentConfiguration.workItemTypes = [typedWorkItemType]
+  const candidateConfiguration: WorkItemConfiguration = {
+    ...currentConfiguration,
+    workItemTypes: currentConfiguration.workItemTypes?.filter((type) => type.id !== 'incident'),
+  }
+  const template = createWorkItemAutomationTemplate('template-pinned-execution', 'incident')
+  const rule = createAutomationRuleUsageFixture(template.id)
+  const execution: AutomationExecution = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'execution-pinned-incident',
+    workspaceId: 'user#demo@example.com',
+    ruleId: rule.id,
+    ruleVersion: rule.version,
+    triggerEventId: 'event-pinned-incident',
+    status: 'failed',
+    attempts: 1,
+    actions: [],
+    startedAt: '2026-07-16T00:00:00.000Z',
+    retryable: true,
+  }
+  const event: AutomationEvent = {
+    eventId: execution.triggerEventId,
+    eventType: 'work-item.updated',
+    workspaceId: execution.workspaceId,
+    occurredAt: execution.startedAt,
+    changes: [],
+    metadata: { teamId: 'core-team' },
+  }
+  const automation = createAutomationConfigurationUsageDependencies([], [template], [], {
+    pinnedRules: [rule],
+    executions: [{ execution, event }],
+  })
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    executions: automation.executions,
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration: currentConfiguration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(candidateConfiguration),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationInUse',
+    message: expect.stringContaining('Automation execution'),
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('adds an Automation definition revision fence to Work Item configuration saves', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const automation = createAutomationConfigurationUsageDependencies([], [], [], {
+    automationDefinitionRevision: 7,
+  })
+  let usageConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> | undefined
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: automation.recurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, nextConfiguration, compatibilityCheck) {
+        const checks = await compatibilityCheck()
+        if (checks !== undefined) usageConditionChecks = checks
+        return { configuration: nextConfiguration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(200)
+  expect(usageConditionChecks).toHaveLength(1)
+  expect(usageConditionChecks?.[0]).toMatchObject({
+    ConditionCheck: {
+      Key: {
+        recordKey: 'AUTOMATION_DEFINITION_REVISION',
+        scopeKey: 'user%23demo%40example.com#automation',
+      },
+      ExpressionAttributeValues: {
+        ':revision': 7,
+      },
+    },
+  })
+})
+
+test('returns dependency unavailable when published Request Forms cannot be inspected', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        throw new RequestIntakeError(
+          503,
+          'RequestRoutingUnavailable',
+          'Request Intake storage is unavailable.',
+        )
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, nextConfiguration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration: nextConfiguration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationDependencyUnavailable',
+  })
+  expect(saveCompleted).toBe(false)
+})
+
+test('returns dependency unavailable without exposing Automation storage errors', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const automation = createAutomationConfigurationUsageDependencies([], [])
+  const unavailableRecurringSchedules = new Proxy(automation.recurringSchedules, {
+    get(target, property, receiver) {
+      if (property === 'listRecurringWorks') {
+        return async () => {
+          throw new Error('raw automation storage failure')
+        }
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  let saveCompleted = false
+  setTestAppDependencies({
+    requestIntake: createRequestIntakeClient({
+      async listCurrentPublishedFormVersions() {
+        return []
+      },
+      async listSubmissions() {
+        return { submissions: [] }
+      },
+    }),
+    recurringSchedules: unavailableRecurringSchedules,
+    ruleTemplates: automation.ruleTemplates,
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, _teamId, nextConfiguration, compatibilityCheck) {
+        await compatibilityCheck()
+        saveCompleted = true
+        return { configuration: nextConfiguration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues() {
+        return { teamId: 'core-team', issues: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemConfigurationDependencyUnavailable',
+    message: 'Automation definitions could not be inspected is incompatible with this configuration: Automation references could not be inspected.',
+  })
+  expect(saveCompleted).toBe(false)
 })
 
 test('commits a Request conversion pointer in the same transaction as its canonical Work Item', async () => {
@@ -683,6 +1670,135 @@ test('does not copy expired Form answers during legacy conversion', async () => 
   })
   expect(createdInput?.description).toBeUndefined()
   expect(createdInput?.title).not.toBe('Expired source answer')
+})
+
+test('uses the selected Work Item Type initial status when routing status is not in its workflow', async () => {
+  const submission = createLegacySubmission()
+  const entry = createLegacyTriageEntry(submission)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflows = [{
+    id: 'incident-workflow',
+    name: 'Incident workflow',
+    initialStatusId: 'incident-open',
+    statuses: [{
+      id: 'incident-open',
+      name: 'Open',
+      category: 'unstarted',
+      sortOrder: 10,
+    }],
+    transitions: [],
+  }]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'incident',
+    name: 'Incident',
+    defaultWorkflowId: 'incident-workflow',
+    allowedChildTypeIds: ['incident'],
+    sortOrder: 10,
+  }]
+  let createdInput: CreateTeamIssueRequestBody | undefined
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+  })
+  setTestAppDependencies({
+    triage: createLegacyTriageClient(entry),
+    requestIntake: createRequestIntakeClient({
+      getSubmission: async () => submission,
+      completeConversion: async () => ({
+        ...submission,
+        status: 'converted',
+        revision: submission.revision + 1,
+        workItem: {
+          teamId: 'core-team',
+          workItemId: 'incident-work-item',
+          projectId: 'refero',
+        },
+      }),
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(
+        _directoryId,
+        teamId,
+        input,
+        actorUserId,
+      ) {
+        createdInput = input
+        return {
+          issue: {
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+            revision: 1,
+            id: 'incident-work-item',
+            teamId,
+            assignedProjectId: 'refero',
+            title: String(input.title),
+            assigneeUserId: String(input.assigneeUserId),
+            creatorMemberKey: actorUserId,
+            workflowSchemaVersion: 1,
+            workflowStatusId: String(input.workflowStatusId),
+            statusCategory: 'unstarted',
+            customFieldValues: {},
+            relationIds: [],
+            dueDate: '',
+            schedule: createDefaultUnscheduledWorkItemSchedule(),
+            priority: 'medium',
+            createdAt: TRIAGE_NOW,
+            updatedAt: TRIAGE_NOW,
+            source: 'dynamodb',
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    `/api/request-submissions/${submission.id}/actions`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'typed-workflow-conversion',
+      },
+      body: JSON.stringify({
+        action: 'convert',
+        expectedRevision: 1,
+        workItemTypeId: 'incident',
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(createdInput).toMatchObject({
+    workItemTypeId: 'incident',
+    workflowStatusId: 'incident-open',
+  })
+
+  const explicitStatusResponse = await app.request(
+    `/api/request-submissions/${submission.id}/actions`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'typed-workflow-explicit-status-conversion',
+      },
+      body: JSON.stringify({
+        action: 'convert',
+        expectedRevision: 1,
+        workItemTypeId: 'incident',
+        target: { workflowStatusId: 'incident-open' },
+      }),
+    },
+  )
+
+  expect(explicitStatusResponse.status).toBe(200)
+  expect(createdInput?.workflowStatusId).toBe('incident-open')
 })
 
 test.each([
@@ -1157,4 +2273,102 @@ test('returns the converted Request on a response-loss conversion retry without 
   })
   expect(triageReadCount).toBe(1)
   expect(triageWriteCount).toBe(0)
+})
+
+test('binds legacy Request conversion idempotency to custom field overrides', async () => {
+  const submission = createLegacySubmission()
+  const entry = createLegacyTriageEntry(submission)
+  let firstDigest: string | undefined
+  let createCount = 0
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+  })
+  setTestAppDependencies({
+    triage: createLegacyTriageClient(entry),
+    requestIntake: createRequestIntakeClient({
+      getSubmission: async () => submission,
+      completeConversion: async () => ({
+        ...submission,
+        status: 'converted',
+        revision: submission.revision + 1,
+        workItem: {
+          teamId: 'core-team',
+          workItemId: 'converted-work-item',
+          projectId: 'refero',
+        },
+      }),
+    }),
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(_directoryId, teamId, input, actorUserId) {
+        createCount += 1
+        const digest = input.idempotentRequestDigest
+        if (typeof digest !== 'string') {
+          throw new Error('Expected a deterministic conversion digest.')
+        }
+        if (firstDigest !== undefined && firstDigest !== digest) {
+          throw new RequestIntakeError(
+            409,
+            'RequestConversionIdempotencyConflict',
+            'The conversion idempotency key was reused with different custom fields.',
+          )
+        }
+        firstDigest = digest
+        return {
+          issue: {
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+            revision: 1,
+            id: input.idempotentIssueId ?? 'converted-work-item',
+            teamId,
+            assignedProjectId: 'refero',
+            title: String(input.title),
+            assigneeUserId: String(input.assigneeUserId),
+            creatorMemberKey: actorUserId,
+            workflowSchemaVersion: 1,
+            workflowStatusId: typeof input.workflowStatusId === 'string'
+              ? input.workflowStatusId
+              : 'todo',
+            statusCategory: 'unstarted',
+            customFieldValues: {},
+            relationIds: [],
+            dueDate: '',
+            schedule: createDefaultUnscheduledWorkItemSchedule(),
+            priority: 'medium',
+            createdAt: TRIAGE_NOW,
+            updatedAt: TRIAGE_NOW,
+            source: 'dynamodb',
+          },
+        }
+      },
+    }),
+  })
+
+  /** Sends one conversion request with the supplied custom-field overrides. */
+  const request = (customFieldValues: Record<string, string>) => app.request(
+    `/api/request-submissions/${submission.id}/actions`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'legacy-conversion-custom-fields',
+      },
+      body: JSON.stringify({
+        action: 'convert',
+        expectedRevision: 1,
+        customFieldValues,
+      }),
+    },
+  )
+
+  const firstResponse = await request({ priority: 'high' })
+  const conflictingResponse = await request({ priority: 'low' })
+
+  expect(firstResponse.status).toBe(200)
+  expect(conflictingResponse.status).toBe(409)
+  expect(await conflictingResponse.json()).toEqual({
+    code: 'RequestConversionIdempotencyConflict',
+    message: 'The conversion idempotency key was reused with different custom fields.',
+  })
+  expect(createCount).toBe(2)
 })

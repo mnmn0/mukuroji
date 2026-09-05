@@ -12,6 +12,7 @@ import {
   isCustomFieldApplicable,
   sortCustomFieldDefinitions,
 } from '../../work-items/model/customFields'
+import { resolveWorkItemTypeCustomFields } from '../../work-items/model/workItemDisplay'
 import { TaskInlineField } from './TaskInlineField'
 
 /** Props accepted by the compact inline custom-field editor. */
@@ -49,9 +50,11 @@ export function TaskInlineCustomFields({
   t,
   task,
 }: TaskInlineCustomFieldsProps) {
-  const definitions = configuration?.customFields.filter((definition) =>
-    isCustomFieldApplicable(definition, task.assignedProjectId),
-  ) ?? []
+  const definitions = configuration
+    ? resolveWorkItemTypeCustomFields(configuration, task.workItemTypeId).filter((definition) =>
+        isCustomFieldApplicable(definition, task.assignedProjectId),
+      )
+    : []
 
   if (definitions.length === 0) {
     return null

@@ -1,4 +1,4 @@
-import type { WorkspaceSearchResult } from '@mukuroji/contracts'
+import { readSearchWorkItemTypeKey, type WorkspaceSearchResult } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createLoadedSearchCountReport } from '../model/searchCountReport'
 
@@ -8,6 +8,8 @@ export type SearchCountReportProps = {
   results: readonly WorkspaceSearchResult[]
   /** Existing Search layout field used for an optional count breakdown. */
   groupBy?: string
+  /** Configuration-derived Work Item Type labels for the optional breakdown. */
+  workItemTypeLabels?: Readonly<Record<string, string>>
   /** Whether the Search response exposes another permission-filtered page. */
   hasMore: boolean
   /** Localized message resolver. */
@@ -20,7 +22,13 @@ export type SearchCountReportProps = {
  * @param props - Loaded results, cursor completeness, existing grouping, and translations.
  * @returns A visibly bounded count review placed beside the normal Search results.
  */
-export function SearchCountReport({ groupBy, hasMore, results, t }: SearchCountReportProps) {
+export function SearchCountReport({
+  groupBy,
+  hasMore,
+  results,
+  t,
+  workItemTypeLabels = {},
+}: SearchCountReportProps) {
   const report = createLoadedSearchCountReport(results, groupBy, hasMore)
   const countMessage = report.isComplete
     ? t('ai.search.report.completeCount')
@@ -57,7 +65,10 @@ export function SearchCountReport({ groupBy, hasMore, results, t }: SearchCountR
           {report.groups.map((group) => (
             <div className="rounded-lg bg-[var(--workbench-surface-muted)] px-3 py-2" key={group.value ?? '__not-set__'}>
               <dt className="break-words text-app-caption font-semibold leading-5 text-[var(--workbench-muted)]">
-                {group.value ?? t('ai.search.report.notSet')}
+                {groupBy === 'workItemType' && group.value
+                  ? workItemTypeLabels[group.value] ??
+                    readSearchWorkItemTypeKey(group.value)?.workItemTypeId ?? group.value
+                  : group.value ?? t('ai.search.report.notSet')}
               </dt>
               <dd className="mt-1 text-lg font-semibold text-[var(--workbench-text)]">{group.count}</dd>
             </div>
@@ -80,6 +91,7 @@ function formatSearchReportGroupBy(
     case 'status': return t('search.filters.status')
     case 'project': return t('search.filters.project')
     case 'team': return t('search.filters.team')
+    case 'workItemType': return t('search.filters.workItemType')
     default: return groupBy
   }
 }

@@ -84,6 +84,15 @@ export function matchesAutomationTrigger(
         change.field === `customFieldValues.${trigger.fieldId}` ||
         change.field === `customFields.${trigger.fieldId}`
       )
+    case 'work-item-type': {
+      const change = findChange(event, 'workItemTypeId')
+      return Boolean(
+        change &&
+        metadata.teamId === trigger.teamId &&
+        (trigger.fromWorkItemTypeId === undefined || change.before === trigger.fromWorkItemTypeId) &&
+        (trigger.toWorkItemTypeId === undefined || change.after === trigger.toWorkItemTypeId),
+      )
+    }
     case 'comment': {
       const commentKind = event.eventType === 'comment.created'
         ? 'comment'

@@ -1,3 +1,5 @@
+import type { CustomFieldValue } from './work-item-configuration'
+
 /** Current persisted and public schema version for triage entries. */
 export const TRIAGE_ENTRY_SCHEMA_VERSION = 1
 
@@ -155,6 +157,8 @@ export type TriageWorkItemReference = {
   workItemId: string
   /** The currently assigned Project identifier when one exists. */
   projectId?: string
+  /** The canonical Work Item Type identifier, with the built-in fallback for legacy rows. */
+  workItemTypeId?: string
 }
 
 /** Counts proving which permission-safe source metadata was attached to a canonical Work Item. */
@@ -318,6 +322,8 @@ export type TriageEntryListInput = {
   state?: TriageEntryState
   /** A single source kind to include. */
   sourceKind?: TriageSourceKind
+  /** A single canonical Work Item Type to include for accepted or duplicate entries. */
+  workItemTypeId?: string
   /** The derived SLA condition to include. */
   sla?: TriageQueueSlaFilter
   /** A specific owner, or the literal `unowned`. */
@@ -350,6 +356,10 @@ export type AcceptCreateTriageAction = {
   expectedRevision: number
   /** The Project to assign to the new Work Item. */
   projectId?: string
+  /** The active Work Item Type to use for the new Work Item. */
+  workItemTypeId?: string
+  /** Explicit custom field values supplied when the entry is converted into a Work Item. */
+  customFieldValues?: Record<string, CustomFieldValue | null>
 }
 
 /** Accepts an entry by linking it to an existing canonical Work Item. */

@@ -311,9 +311,15 @@ function normalizeTaskViewFilters(
     } : {}),
     ...(filters.projectIds ? { projectIds: [...filters.projectIds] } : {}),
     ...(filters.teamIds ? { teamIds: [...filters.teamIds] } : {}),
+    ...(filters.workItemTypeIds
+      ? { workItemTypeIds: [...filters.workItemTypeIds] }
+      : {}),
     ...(filters.workflowStatuses ? {
       workflowStatuses: filters.workflowStatuses.map((status) => ({
         teamId: status.teamId,
+        ...(status.workItemTypeId !== undefined
+          ? { workItemTypeId: status.workItemTypeId }
+          : {}),
         statusId: status.statusId,
       })),
     } : {}),

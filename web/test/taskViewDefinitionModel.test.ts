@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import type { TaskViewDefinition } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey, type TaskViewDefinition } from '@mukuroji/contracts'
 import {
   applyTaskViewUrlOverride,
   resolveTaskViewDefinition,
@@ -181,6 +181,45 @@ describe('task view definition migration and sanitization', () => {
       ]),
     )
     expect(result.warnings.every((warning) => warning.referenceId === undefined)).toBe(true)
+  })
+
+  test('keeps legacy status filters broad while checking type-qualified filters exactly', () => {
+    const result = sanitizeTaskViewDefinition({
+      ...builtInDefinition,
+      filters: {
+        workflowStatuses: [
+          { teamId: 'team-1', statusId: 'todo' },
+          { teamId: 'team-1', workItemTypeId: 'bug', statusId: 'todo' },
+          { teamId: 'team-1', workItemTypeId: 'feature', statusId: 'todo' },
+        ],
+      },
+    }, {
+      ...options,
+      workflowStatuses: [
+        { teamId: 'team-1', workItemTypeId: 'bug', statusId: 'todo' },
+      ],
+    })
+
+    expect(result.definition.filters.workflowStatuses).toEqual([
+      { teamId: 'team-1', statusId: 'todo' },
+      { teamId: 'team-1', workItemTypeId: 'bug', statusId: 'todo' },
+    ])
+    expect(result.warnings).toEqual([
+      expect.objectContaining({ code: 'deleted-workflow-status', section: 'filter' }),
+    ])
+  })
+
+  test('preserves Work Item Type filters while sanitizing saved definitions', () => {
+    const result = sanitizeTaskViewDefinition({
+      ...builtInDefinition,
+      filters: {
+        workItemTypeIds: [createSearchWorkItemTypeKey('team-1', 'incident')],
+      },
+    }, options)
+
+    expect(result.definition.filters.workItemTypeIds).toEqual([
+      createSearchWorkItemTypeKey('team-1', 'incident'),
+    ])
   })
 
   test('keeps custom filters while removing raw custom layout fields from a URL override', () => {

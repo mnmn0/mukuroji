@@ -51,7 +51,7 @@ describe('evaluateAiAssistanceOffline', () => {
     expect(report.caseCount).toBe(4)
     expect(report.passedCaseCount).toBe(4)
     expect(report.provenance).toEqual({
-      datasetRevision: 'sanitized-model-inputs-2026-08-25.v1',
+      datasetRevision: 'sanitized-model-inputs-2026-08-25.v2',
       provider: 'bedrock-runtime',
       modelId: 'jp.anthropic.claude-sonnet-4-6',
       inferenceProfileId: 'jp.anthropic.claude-sonnet-4-6',
@@ -69,19 +69,19 @@ describe('evaluateAiAssistanceOffline', () => {
       cases: [
         {
           id: 'triage-grounded-routing-v2',
-          promptSha256: '5b25bda8cd3ca0cfde828858346a79096669633db658732f6abceca09ba13f06',
+          promptSha256: 'bf9ffde41d9a1255c0a41ca2898c77793531472862b92c6fcd8551c2fd9b8761',
         },
         {
           id: 'summary-grounded-actions-v2',
-          promptSha256: 'f4976f16ac7cc36873024b4fe344d4ccfa6762b57ceb049165d28b378837c8d4',
+          promptSha256: 'a440562589352b2eaf3cbc7ce0d3d09aad0cd643e033a9ea836767ac22edfbea',
         },
         {
           id: 'search-safe-filter-translation-v2',
-          promptSha256: 'f65eb203359f3055518846a40ba3d991477b2f6cee5f9663b0ec551770320917',
+          promptSha256: 'ccc651833871042b2666778b9564d217568edc2fa012cc5c6b191a9245bddabb',
         },
         {
           id: 'planning-review-only-draft-v2',
-          promptSha256: 'c0817c229f2cfd3c78960f34c85bfad841a7594ea0086704ecf341d2bb56e7be',
+          promptSha256: 'a8585c258c0a42bf8f5419453b20f46794338a2f24c2afe05aa2126cf7ad5719',
         },
       ],
     })

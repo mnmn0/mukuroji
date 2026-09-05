@@ -3,15 +3,23 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
+  DEFAULT_WORK_ITEM_TYPE,
+  type WorkItemTypeDefinition,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import {
   createCustomFieldErrorMessages,
+  createCustomFieldValuePatch,
+  createVisibleCustomFieldValuePatch,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
+  resolveAvailableWorkItemTypeSortOrder,
+  resolveCreatableWorkItemTypeId,
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypes,
 } from '../src/work-items/model/workItemDisplay'
+import { workspaceWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 describe('Work Item display helpers', () => {
   test('uses the canonical literal title', () => {
@@ -43,6 +51,33 @@ describe('Work Item display helpers', () => {
     ], 'team-b')).toEqual([{ id: 'issue-b', teamId: 'team-b' }])
   })
 
+  test('falls back to an active Work Item Type for creation', () => {
+    const workItemTypes = [
+      { ...DEFAULT_WORK_ITEM_TYPE, status: 'archived' } satisfies WorkItemTypeDefinition,
+      { ...DEFAULT_WORK_ITEM_TYPE, id: 'incident', name: 'Incident', sortOrder: 1 } satisfies WorkItemTypeDefinition,
+    ]
+    expect(resolveCreatableWorkItemTypeId(workItemTypes, 'default')).toBe('incident')
+    expect(resolveCreatableWorkItemTypeId(workItemTypes, 'missing')).toBe('incident')
+  })
+
+  test('keeps synthesized and newly added Work Item Type sort orders unique', () => {
+    const types = resolveWorkItemTypes({
+      ...workspaceWorkItemConfigurationFixture,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        id: 'incident',
+        name: 'Incident',
+        sortOrder: 10,
+      }],
+    })
+
+    expect(types.map((type) => ({ id: type.id, sortOrder: type.sortOrder }))).toEqual([
+      { id: 'default', sortOrder: 0 },
+      { id: 'incident', sortOrder: 10 },
+    ])
+    expect(resolveAvailableWorkItemTypeSortOrder(types)).toBe(1)
+  })
+
   test('translates and combines custom field validation messages', () => {
     const definitions = [{
       id: 'estimate',
@@ -63,6 +98,63 @@ describe('Work Item display helpers', () => {
     expect(createCustomFieldErrorMessages(errors, definitions, 'en')).toEqual({
       estimate: 'A value is required. Enter a value at or above the minimum.',
     })
+  })
+
+  test('does not synthesize deletions for hidden detail custom fields', () => {
+    const definitions = [{
+      id: 'risk',
+      name: 'Risk',
+      required: false,
+      sortOrder: 0,
+      type: 'text' as const,
+    }]
+    const existingValues = { risk: 'high' }
+
+    expect(createVisibleCustomFieldValuePatch(
+      false,
+      definitions,
+      existingValues,
+      {},
+    )).toBeUndefined()
+    expect(createVisibleCustomFieldValuePatch(
+      true,
+      definitions,
+      existingValues,
+      {},
+    )).toEqual({ risk: null })
+  })
+
+  test('emits null when a mapped custom field is cleared before Triage acceptance', () => {
+    const definitions = [{
+      id: 'request-summary',
+      name: 'Request summary',
+      required: false,
+      sortOrder: 0,
+      type: 'text' as const,
+    }]
+
+    expect(createCustomFieldValuePatch(
+      definitions,
+      { 'request-summary': 'Mapped from the Request form' },
+      {},
+    )).toEqual({ 'request-summary': null })
+  })
+
+  test('includes values from the fallback required-field editor', () => {
+    const definitions = [{
+      id: 'risk',
+      name: 'Risk',
+      required: true,
+      sortOrder: 0,
+      type: 'text' as const,
+    }]
+
+    expect(createVisibleCustomFieldValuePatch(
+      true,
+      definitions,
+      {},
+      { risk: 'high' },
+    )).toEqual({ risk: 'high' })
   })
 
   test('uses the active locale when relation graph detail is not loaded', () => {

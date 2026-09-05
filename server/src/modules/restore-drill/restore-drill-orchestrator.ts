@@ -6124,6 +6124,7 @@ export class AwsRestoreDrillVerifier implements RestoreDrillVerifier {
         remainingItemCapacity,
         signal: pageSignal,
         target: toCrossDomainTableTarget(target),
+        includeRelationEndpointTypes: true,
       })
       const claims: RestoreDrillSemanticClaim[] = []
       for (const entry of normalized.items) {
@@ -11447,6 +11448,7 @@ const CROSS_DOMAIN_FAILURE_CODES = new Set<string>([
   'RELATION_RECIPROCAL_MISSING',
   'RELATION_TEAM_MISSING',
   'RELATION_TENANT_MISMATCH',
+  'RELATION_WORK_ITEM_TYPE_MISMATCH',
   'RESTORE_AUDIT_DIFFERENCE',
   'RESTORE_CHECK_FAILED',
   'RESTORE_CONFIGURATION_DIFFERENCE',
@@ -11471,6 +11473,7 @@ const CROSS_DOMAIN_FAILURE_CODES = new Set<string>([
   'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
   'WORK_ITEM_TEAM_MISSING',
   'WORK_ITEM_TENANT_MISMATCH',
+  'WORK_ITEM_TYPE_UNKNOWN',
   'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN',
 ])
 

@@ -3476,7 +3476,7 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL('/focus')
 
     const queuePanel = page.getByRole('tabpanel', { name: /いま/ })
-    const orderedRows = queuePanel.locator('ol').first().locator(':scope > li')
+    const orderedRows = queuePanel.locator('[data-testid^="focus-item-"]')
     const blockedItem = page.getByTestId('focus-item-core-team-WI-194')
     const mentionItem = page.getByTestId('focus-item-core-team-WI-202')
 
@@ -4674,7 +4674,9 @@ test.describe('authenticated task page', () => {
     await issueSearchbox.clear()
     await expect(issueSearchbox).toHaveValue('')
     await expect(page.getByTestId('team-issues-count')).toContainText('4')
-    await page.getByRole('combobox', { name: 'Issue ステータス' }).selectOption('review')
+    await page.getByRole('combobox', { name: 'Issue ステータス' }).selectOption(
+      ['core-team', 'default', 'review'].join('\u0000'),
+    )
 
     await expect(page.getByTestId('issue-row-brand-guideline')).toBeVisible()
     await expect(page.getByTestId('issue-row-wireframe')).toBeHidden()
@@ -5844,12 +5846,12 @@ test.describe('authenticated task page', () => {
 
     await expect(page).toHaveURL('/my-tasks')
     await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
-    await expect(page.getByTestId('my-tasks-column-core-team-todo')).toContainText('未着手')
-    await expect(page.getByTestId('my-tasks-column-core-team-in-progress')).toContainText('進行中')
-    await expect(page.getByTestId('my-tasks-column-core-team-review')).toContainText('レビュー')
-    await expect(page.getByTestId('my-tasks-column-core-team-done')).toContainText('完了')
+    await expect(page.getByTestId('my-tasks-column-core-team-default-todo')).toContainText('未着手')
+    await expect(page.getByTestId('my-tasks-column-core-team-default-in-progress')).toContainText('進行中')
+    await expect(page.getByTestId('my-tasks-column-core-team-default-review')).toContainText('レビュー')
+    await expect(page.getByTestId('my-tasks-column-core-team-default-done')).toContainText('完了')
     await expect(
-      page.getByTestId('my-tasks-column-core-team-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+      page.getByTestId('my-tasks-column-core-team-default-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toBeVisible()
     await expect(
       page.getByTestId('my-tasks-card-refero-seo-research'),
@@ -5867,7 +5869,7 @@ test.describe('authenticated task page', () => {
     ).toBeVisible()
     await expect(wireframeCard).toHaveAttribute('draggable', 'true')
     await expect(
-      page.getByTestId('my-tasks-column-core-team-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
+      page.getByTestId('my-tasks-column-core-team-default-in-progress').getByTestId('my-tasks-card-refero-wireframe'),
     ).toBeVisible()
     const boardGeometry = await page.getByTestId('my-tasks-kanban').evaluate((element) => {
       const columnRects = Array.from(element.children).map((column) => column.getBoundingClientRect())
@@ -5985,8 +5987,8 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/my-tasks')
 
-    const coreColumn = page.getByTestId('my-tasks-column-core-team-todo')
-    const designColumn = page.getByTestId('my-tasks-column-design-team-todo')
+    const coreColumn = page.getByTestId('my-tasks-column-core-team-default-todo')
+    const designColumn = page.getByTestId('my-tasks-column-design-team-default-todo')
 
     await expect(coreColumn).toContainText('コアチーム · 未着手')
     await expect(designColumn).toContainText('デザインチーム · 未着手')
@@ -6377,7 +6379,7 @@ test.describe('authenticated task page', () => {
     const unavailableColumn = page.getByTestId('project-task-configuration-unavailable-column')
 
     await expect(unavailableColumn).toContainText('Core configuration unavailable')
-    await expect(page.getByTestId('project-task-column-design-team-todo')).toContainText(
+    await expect(page.getByTestId('project-task-column-design-team-default-todo')).toContainText(
       'Design configuration available',
     )
   })
@@ -6476,10 +6478,10 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/shared-launch/issues')
     await page.getByRole('tab', { name: 'ボード', exact: true }).click()
 
-    await expect(page.getByTestId('project-task-column-core-team-todo')).toContainText(
+    await expect(page.getByTestId('project-task-column-core-team-default-todo')).toContainText(
       'コアチーム · 未着手',
     )
-    const emptyDesignColumn = page.getByTestId('project-task-column-design-team-todo')
+    const emptyDesignColumn = page.getByTestId('project-task-column-design-team-default-todo')
 
     await expect(emptyDesignColumn).toContainText('デザインチーム · 未着手')
     await expect(emptyDesignColumn).toContainText('この状態のタスクはありません。')
@@ -6655,10 +6657,10 @@ test.describe('authenticated task page', () => {
     })).toBeVisible()
     await statusFilterButton.click()
     await page.getByRole('tab', { name: 'ボード', exact: true }).click()
-    await expect(page.getByTestId('project-task-column-core-team-core-active')).toContainText(
+    await expect(page.getByTestId('project-task-column-core-team-default-core-active')).toContainText(
       'Core configured',
     )
-    await expect(page.getByTestId('project-task-column-design-team-design-active')).toContainText(
+    await expect(page.getByTestId('project-task-column-design-team-default-design-active')).toContainText(
       'Design configured',
     )
   })
@@ -7826,20 +7828,20 @@ test('マイタスクの片方の移動が失敗しても別 Issue の成功済�
     .getByTestId('my-tasks-card-refero-billing-copy-status-select')
     .selectOption('done')
   await expect(
-    page.getByTestId('my-tasks-column-core-team-done').getByTestId('my-tasks-card-refero-billing-copy'),
+    page.getByTestId('my-tasks-column-core-team-default-done').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toBeVisible()
 
   releaseOnboardingFailure()
 
   await expect(page.getByTestId('my-tasks-move-error')).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-core-team-in-progress').getByTestId('my-tasks-card-refero-onboarding-friction'),
+    page.getByTestId('my-tasks-column-core-team-default-in-progress').getByTestId('my-tasks-card-refero-onboarding-friction'),
   ).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-core-team-done').getByTestId('my-tasks-card-refero-billing-copy'),
+    page.getByTestId('my-tasks-column-core-team-default-done').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toBeVisible()
   await expect(
-    page.getByTestId('my-tasks-column-core-team-todo').getByTestId('my-tasks-card-refero-billing-copy'),
+    page.getByTestId('my-tasks-column-core-team-default-todo').getByTestId('my-tasks-card-refero-billing-copy'),
   ).toHaveCount(0)
   expect(getMockRequestCounts(page).issueUpdates).toBe(2)
   expect(getMockRequestCounts(page).taskStatusUpdates).toBe(0)
@@ -7885,7 +7887,7 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
     .selectOption('done')
   await onboardingDoneUpdateStarted
   await expect(
-    page.getByTestId('my-tasks-column-core-team-done').getByTestId('my-tasks-card-refero-onboarding-friction'),
+    page.getByTestId('my-tasks-column-core-team-default-done').getByTestId('my-tasks-card-refero-onboarding-friction'),
   ).toBeVisible()
   await expect(
     page.getByTestId('my-tasks-card-refero-onboarding-friction-status-select'),

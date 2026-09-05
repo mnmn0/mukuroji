@@ -6,6 +6,10 @@ import type {
   WorkspaceSearchDateField,
   WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
+import {
+  readSearchWorkItemStatusKey,
+  readSearchWorkItemTypeKey,
+} from '@mukuroji/contracts'
 import { isSearchFilterTransportWithinGetBudget } from './searchFilterTransportBudget'
 
 /** Search entity types that can be edited in an AI filter draft. */
@@ -34,7 +38,7 @@ export const aiSearchCustomFieldOperators: readonly SearchCustomFieldOperator[] 
 
 const AI_SEARCH_MAX_LIST_ITEMS = 100
 const AI_SEARCH_MAX_IDENTIFIER_LENGTH = 512
-const AI_SEARCH_MAX_STATUS_ID_LENGTH = 128
+const AI_SEARCH_MAX_STATUS_FILTER_LENGTH = 512
 const AI_SEARCH_MAX_KEYWORD_LENGTH = 256
 const AI_SEARCH_MAX_CUSTOM_FIELDS = 50
 const AI_SEARCH_MAX_CUSTOM_FIELD_ID_LENGTH = 256
@@ -65,6 +69,7 @@ export function createEditableAiSearchFilters(
     date: filters.date ? { ...filters.date } : undefined,
     projectIds: filters.projectIds ? [...filters.projectIds] : undefined,
     teamIds: filters.teamIds ? [...filters.teamIds] : undefined,
+    workItemTypeIds: filters.workItemTypeIds ? [...filters.workItemTypeIds] : undefined,
   }
 }
 
@@ -97,6 +102,7 @@ export function normalizeAiSearchFilters(
     date,
     projectIds: cleanStringArray(filters.projectIds),
     teamIds: cleanStringArray(filters.teamIds),
+    workItemTypeIds: cleanStringArray(filters.workItemTypeIds),
   }
 }
 
@@ -143,6 +149,7 @@ export function hasReviewableAiSearchFilterBounds(
   if (!hasBoundedStringList(filters.relationIds)) return false
   if (!hasBoundedStringList(filters.projectIds)) return false
   if (!hasBoundedStringList(filters.teamIds)) return false
+  if (!hasBoundedSearchWorkItemTypeKeyList(filters.workItemTypeIds)) return false
   if (filters.entityTypes !== undefined && (
     !Array.isArray(filters.entityTypes) ||
     filters.entityTypes.length > aiSearchEntityTypes.length ||
@@ -154,6 +161,16 @@ export function hasReviewableAiSearchFilterBounds(
     !filters.customFields.every(isBoundedCustomFieldFilter)
   )) return false
   return true
+}
+
+/** Validates locally edited Work Item Type filters as Team-qualified Search keys. */
+function hasBoundedSearchWorkItemTypeKeyList(
+  values: readonly string[] | undefined,
+): boolean {
+  return values === undefined || (
+    hasBoundedStringList(values) &&
+    values.every((value) => readSearchWorkItemTypeKey(value) !== undefined)
+  )
 }
 
 /**
@@ -300,9 +317,12 @@ function hasBoundedStatusIdList(values: readonly string[] | undefined): boolean 
     values.every((value) => (
       typeof value === 'string' &&
       value.length > 0 &&
-      value.length <= AI_SEARCH_MAX_STATUS_ID_LENGTH &&
+      value.length <= AI_SEARCH_MAX_STATUS_FILTER_LENGTH &&
       value === value.trim() &&
-      /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i.test(value)
+      (
+        /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i.test(value) ||
+        readSearchWorkItemStatusKey(value) !== undefined
+      )
     ))
   )
 }

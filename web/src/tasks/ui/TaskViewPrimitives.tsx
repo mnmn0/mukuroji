@@ -1,11 +1,18 @@
-import type { WorkItemConfiguration, WorkflowStatusDefinition } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  type WorkItemConfiguration,
+  type WorkflowStatusDefinition,
+} from '@mukuroji/contracts'
 import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
   resolveWorkItemWorkflowStatusLabel,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeLabel,
   resolveWorkflowCategoryToneClassName,
   resolveWorkflowStatusCategory,
   resolveWorkflowStatusDefinition,
 } from '../../work-items/model/workItemDisplay'
+import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
   type Locale,
   type MessageKey,
@@ -124,6 +131,34 @@ export function TaskPriorityBadge({
   return (
     <span className={priorityClasses[priority]}>
       {t(`tasks.priority.${priority}`)}
+    </span>
+  )
+}
+
+/** Props for a Work Item Type badge in task collections. */
+export type TaskWorkItemTypeBadgeProps = {
+  /** Configuration used to resolve the type name. */
+  configuration?: WorkItemConfiguration
+  /** Work Item whose type should be displayed. */
+  task: Pick<CanonicalWorkItem, 'workItemTypeId'>
+}
+
+/** Renders the stable Work Item Type name used by task collection surfaces. */
+export function TaskWorkItemTypeBadge({
+  configuration,
+  task,
+}: TaskWorkItemTypeBadgeProps) {
+  const definition = resolveWorkItemTypeDefinition(configuration, task.workItemTypeId)
+  return (
+    <span
+      className="workbench-badge inline-flex items-center gap-1.5"
+      data-work-item-type-id={task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE.id}
+    >
+      <WorkItemTypeIcon
+        className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
+        iconToken={definition?.iconToken ?? DEFAULT_WORK_ITEM_TYPE.iconToken}
+      />
+      <span>{resolveWorkItemTypeLabel(task, configuration)}</span>
     </span>
   )
 }

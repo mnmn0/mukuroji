@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import type { FocusQueueResponse } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE,
+  type FocusQueueResponse,
+} from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   focusConfigurationFixture,
@@ -42,6 +46,64 @@ describe('Focus queue', () => {
       teamId: 'core-team',
       workItemId: 'WI-202',
     })).toBeUndefined()
+  })
+
+  test('qualifies Focus Work Item Type filters by owning Team', () => {
+    const coreItem = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
+    if (!coreItem) throw new Error('The Focus fixture requires one Now item.')
+    const designItem = {
+      ...coreItem,
+      id: 'focus-design-WI-194',
+      workItem: {
+        ...coreItem.workItem,
+        id: 'design-WI-194',
+        teamId: 'design-team',
+      },
+    }
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => group.section === 'now'
+        ? { ...group, items: [coreItem, designItem] }
+        : group),
+    }
+
+    expect(getFocusQueueItems(
+      response,
+      'now',
+      createSearchWorkItemTypeKey('core-team', 'default'),
+    ).map((item) => item.workItem.teamId)).toEqual(['core-team'])
+    expect(getFocusQueueItems(
+      response,
+      'now',
+      createSearchWorkItemTypeKey('design-team', 'default'),
+    ).map((item) => item.workItem.teamId)).toEqual(['design-team'])
+  })
+
+  test('uses configured metadata for the built-in Work Item Type', () => {
+    const configuration = {
+      ...focusConfigurationFixture,
+      configuration: {
+        ...focusConfigurationFixture.configuration,
+        workItemTypes: [{
+          ...DEFAULT_WORK_ITEM_TYPE,
+          defaultWorkflowId: focusConfigurationFixture.configuration.workflow.id,
+          name: 'Configured Work',
+        }],
+      },
+    }
+    const html = renderToStaticMarkup(
+      <FocusQueue
+        configurationsByTeam={{ 'core-team': configuration }}
+        locale="en"
+        onSectionChange={() => undefined}
+        response={focusQueueResponseFixture}
+        section="now"
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toContain('core-team · Configured Work')
+    expect(html).not.toContain('core-team · Work Item')
   })
 
   test('clamps roving keyboard navigation without wrapping server order', () => {
@@ -187,6 +249,51 @@ describe('Focus queue', () => {
     expect(html).toMatch(/<input(?=[^>]*name="weight-blocker")(?=[^>]*placeholder="10")[^>]*>/u)
     expect(html).toMatch(/<input(?=[^>]*name="weight-urgent")(?=[^>]*value="8")[^>]*>/u)
     expect(html.match(/aria-controls="focus-item-details-/gu)).toHaveLength(1)
+  })
+
+  test('keeps non-contiguous Work Item Type runs in server-ranked order', () => {
+    const nowItems = getFocusQueueItems(focusQueueResponseFixture, 'now')
+    const firstItem = nowItems[0]
+    const secondItem = nowItems[1]
+    if (!firstItem || !secondItem) throw new Error('The Focus fixture requires two Now items.')
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => group.section === 'now'
+        ? {
+            ...group,
+            items: [
+              {
+                ...firstItem,
+                id: 'focus-type-a-1',
+                workItem: { ...firstItem.workItem, id: 'type-a-1', title: 'Type A first', workItemTypeId: 'type-a' },
+              },
+              {
+                ...secondItem,
+                id: 'focus-type-b',
+                workItem: { ...secondItem.workItem, id: 'type-b', title: 'Type B', workItemTypeId: 'type-b' },
+              },
+              {
+                ...firstItem,
+                id: 'focus-type-a-2',
+                workItem: { ...firstItem.workItem, id: 'type-a-2', title: 'Type A second', workItemTypeId: 'type-a' },
+              },
+            ],
+          }
+        : group),
+    }
+    const html = renderToStaticMarkup(
+      <FocusQueue
+        locale="en"
+        onOpenItem={() => undefined}
+        onSectionChange={() => undefined}
+        response={response}
+        section="now"
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html.indexOf('Type A first')).toBeLessThan(html.indexOf('Type B'))
+    expect(html.indexOf('Type B')).toBeLessThan(html.indexOf('Type A second'))
   })
 
   test('keeps policy controls available when the selected section is empty', () => {

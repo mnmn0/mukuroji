@@ -16,6 +16,7 @@ import {
   TRIAGE_BULK_ACTION_LIMIT,
   TRIAGE_CONFIGURATION_SCHEMA_VERSION,
   TRIAGE_ENTRY_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE_ID,
   type CreateManualTriageEntryInput,
   type TriageActionInput,
   type TriageBulkActionInput,
@@ -35,6 +36,7 @@ import {
   type TriageRoutingRule,
   type TriageSlaPolicy,
   type TriageSourceKind,
+  type TriageWorkItemReference,
   type TriageWorkItemSourcePage,
   type UpdateTriageCustomerAssociationInput,
   type UpdateTriageConfigurationInput,
@@ -100,6 +102,13 @@ const TRIAGE_QUEUE_QUERY_PAGE_LIMIT = 20
 /** Maximum number of canonical queue rows read concurrently per GSI page. */
 const TRIAGE_CANONICAL_READ_CONCURRENCY = 16
 
+/** Reads the current canonical fields used by Triage queue projections. */
+export type TriageCanonicalWorkItemReader = (
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+) => Promise<Pick<TriageWorkItemReference, 'projectId' | 'workItemTypeId'> | undefined>
+
 /** DynamoDB adapter construction options. */
 export type DynamoDbTriageClientOptions = {
   /** Request Intake table name. */
@@ -124,6 +133,8 @@ export type DynamoDbTriageClientOptions = {
   cursorSecret?: string
   /** Work Item orchestration callback for accept and duplicate actions. */
   resolveWorkItemAction?: ResolveTriageWorkItemAction
+  /** Canonical Work Item reader used to refresh accepted and duplicate projections. */
+  readCanonicalWorkItem?: TriageCanonicalWorkItemReader
   /** Live Project/member validation applied to every admission evaluation attempt. */
   validateAdmission?: TriageAdmissionValidator
   /** Commit-time guards for every persisted Team configuration reference. */
@@ -276,6 +287,9 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Optional Work Item action resolver supplied by composition. */
   private readonly resolveWorkItemAction?: ResolveTriageWorkItemAction
 
+  /** Optional canonical Work Item reader used to refresh Triage projections. */
+  private readonly readCanonicalWorkItem?: TriageCanonicalWorkItemReader
+
   /** Optional live reference validator invoked for every admission attempt. */
   private readonly validateAdmission?: TriageAdmissionValidator
 
@@ -362,6 +376,7 @@ export class DynamoDbTriageClient implements TriageClient {
     )
     this.cursorKey = createHash('sha256').update(cursorSecret).digest()
     this.resolveWorkItemAction = options.resolveWorkItemAction
+    this.readCanonicalWorkItem = options.readCanonicalWorkItem
     this.validateAdmission = options.validateAdmission
     this.validateConfigurationReferences = options.validateConfigurationReferences
     this.validateActionReferences = options.validateActionReferences
@@ -470,11 +485,28 @@ export class DynamoDbTriageClient implements TriageClient {
     teamId: string,
     entryId: string,
   ): Promise<TriageEntry> {
-    const entry = await this.readStoredEntry(workspaceId, entryId)
-    if (entry.teamId !== teamId) {
+    const storedEntry = await this.readStoredEntry(workspaceId, entryId)
+    if (storedEntry.teamId !== teamId) {
       throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
     }
+    const entry = await this.refreshCanonicalWorkItem(storedEntry)
     return redactExpiredTriageEntry(entry, this.now().toISOString())
+  }
+
+  /** Refreshes the canonical Work Item fields copied into an accepted Triage entry. */
+  private async refreshCanonicalWorkItem(entry: TriageEntry): Promise<TriageEntry> {
+    if (!entry.canonicalWorkItem || !this.readCanonicalWorkItem) return entry
+    const current = await this.readCanonicalWorkItem(
+      entry.workspaceId,
+      entry.canonicalWorkItem.teamId,
+      entry.canonicalWorkItem.workItemId,
+    )
+    if (!current) {
+      const withoutCanonicalWorkItem = { ...entry }
+      delete withoutCanonicalWorkItem.canonicalWorkItem
+      return withoutCanonicalWorkItem
+    }
+    return mergeCanonicalWorkItemProjection(entry, current)
   }
 
   /** Looks up an existing fingerprint-bound action receipt.
@@ -1806,6 +1838,7 @@ export class DynamoDbTriageClient implements TriageClient {
         input,
         ownerUserId,
         now,
+        this.readCanonicalWorkItem,
       ))
     } while (
       entries.length < limit &&
@@ -1844,8 +1877,9 @@ export class DynamoDbTriageClient implements TriageClient {
     if (stored.workspaceId !== workspaceId || stored.entryId !== entryId) {
       throw new TriageError(500, 'InvalidTriageReceipt', 'The triage receipt scope is invalid.')
     }
-    const entry = await this.readStoredEntry(workspaceId, stored.entryId)
-    if (expectedTeamId !== undefined && entry.teamId !== expectedTeamId) return undefined
+    const storedEntry = await this.readStoredEntry(workspaceId, stored.entryId)
+    if (expectedTeamId !== undefined && storedEntry.teamId !== expectedTeamId) return undefined
+    const entry = await this.refreshCanonicalWorkItem(storedEntry)
     if (entry.revision < stored.resultRevision) {
       throw new TriageError(
         500,
@@ -1998,6 +2032,45 @@ function isAmbiguousTriageMutationError(error: unknown): boolean {
   return !(error instanceof TriageError)
 }
 
+/** Resolves current canonical fields before a stored Triage projection is filtered or returned. */
+async function refreshCanonicalWorkItemProjection(
+  entry: TriageEntry,
+  readCanonicalWorkItem: TriageCanonicalWorkItemReader,
+): Promise<TriageEntry> {
+  if (!entry.canonicalWorkItem) return entry
+  const current = await readCanonicalWorkItem(
+    entry.workspaceId,
+    entry.canonicalWorkItem.teamId,
+    entry.canonicalWorkItem.workItemId,
+  )
+  if (!current) {
+    const withoutCanonicalWorkItem = { ...entry }
+    delete withoutCanonicalWorkItem.canonicalWorkItem
+    return withoutCanonicalWorkItem
+  }
+  return mergeCanonicalWorkItemProjection(entry, current)
+}
+
+/** Replaces optional canonical fields without retaining stale projection values. */
+function mergeCanonicalWorkItemProjection(
+  entry: TriageEntry,
+  current: Pick<TriageWorkItemReference, 'projectId' | 'workItemTypeId'>,
+): TriageEntry {
+  if (!entry.canonicalWorkItem) return entry
+  const canonicalWorkItem = { ...entry.canonicalWorkItem }
+  if (current.projectId === undefined) {
+    delete canonicalWorkItem.projectId
+  } else {
+    canonicalWorkItem.projectId = current.projectId
+  }
+  if (current.workItemTypeId === undefined) {
+    delete canonicalWorkItem.workItemTypeId
+  } else {
+    canonicalWorkItem.workItemTypeId = current.workItemTypeId
+  }
+  return { ...entry, canonicalWorkItem }
+}
+
 /** Reads one queue page's canonical rows with bounded strong-read concurrency.
  *
  * @param documentClient Request Intake DocumentClient.
@@ -2008,6 +2081,7 @@ function isAmbiguousTriageMutationError(error: unknown): boolean {
  * @param input Queue filters applied only after the canonical read.
  * @param ownerUserId Effective owner filter selected by the query strategy.
  * @param now Shared queue evaluation instant.
+ * @param readCanonicalWorkItem Optional reader for current canonical Work Item projections.
  * @returns Canonical entries that survive permission-safe projection and filters, in index order.
  */
 async function readCanonicalQueueEntries(
@@ -2019,6 +2093,7 @@ async function readCanonicalQueueEntries(
   input: TriageEntryListInput,
   ownerUserId: string | undefined,
   now: Date,
+  readCanonicalWorkItem?: TriageCanonicalWorkItemReader,
 ): Promise<TriageEntry[]> {
   const results: Array<TriageEntry | undefined> = Array.from({ length: keys.length })
   let nextIndex = 0
@@ -2052,7 +2127,10 @@ async function readCanonicalQueueEntries(
           'The stored triage entry is outside the requested queue scope.',
         )
       }
-      const boundaryEntry = redactExpiredTriageEntry(entry, now.toISOString())
+      const refreshedEntry = readCanonicalWorkItem
+        ? await refreshCanonicalWorkItemProjection(entry, readCanonicalWorkItem)
+        : entry
+      const boundaryEntry = redactExpiredTriageEntry(refreshedEntry, now.toISOString())
       if (!matchesQueueFilter(boundaryEntry, workspaceId, teamId, input, ownerUserId, now)) continue
       results[index] = projectTriageEntryForResponse(boundaryEntry, now.toISOString())
     }
@@ -2183,6 +2261,11 @@ function matchesQueueFilter(
   ) return false
   if (input.state && entry.state !== input.state) return false
   if (input.sourceKind && entry.source.kind !== input.sourceKind) return false
+  if (
+    input.workItemTypeId &&
+    (!entry.canonicalWorkItem ||
+      (entry.canonicalWorkItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) !== input.workItemTypeId)
+  ) return false
   const normalizedEntryOwner = entry.ownerUserId?.trim().toLowerCase()
   if (ownerUserId === 'UNOWNED' && normalizedEntryOwner !== undefined) return false
   if (ownerUserId && ownerUserId !== 'UNOWNED' && normalizedEntryOwner !== ownerUserId) return false
@@ -2278,6 +2361,7 @@ function createQueueCursorScope(
       : [...input.visibleProjectIds].sort(),
     query: input.query,
     sla: input.sla,
+    workItemTypeId: input.workItemTypeId,
   })
 }
 

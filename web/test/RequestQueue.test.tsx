@@ -5,15 +5,18 @@ import type { AiAssistanceController } from '../src/features/ai-assistance/mutat
 import { aiTriageGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import { requestSubmissionFixture } from '../src/requests/fixtures'
 import { normalizeRequestSubmission } from '../src/requests/model/requestForm'
+import { resolveRequestConversionWorkItemTypeId } from '../src/requests/model/requestConversion'
 import { RequestQueue } from '../src/requests/ui/RequestQueue'
 import {
   canAdoptRequestTriageDraft,
   createSafeTriageRoutingOverride,
+  resolveRequestWorkItemConfiguration,
 } from '../src/requests/model/requestTriageRouting'
 import {
   isRequestAiOperationPendingForSubmission,
   updateRequestAiOperationFence,
 } from '../src/requests/model/requestAiOperationFence'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 const aiController: AiAssistanceController = {
   cancelGeneration: () => undefined,
@@ -66,6 +69,55 @@ describe('RequestQueue', () => {
     expect(html).toContain('aria-current="true"')
     expect(html).toContain('aria-label="Open request details: プロダクトサポート依頼 v1"')
     expect(submission.formId).toBe(requestSubmissionFixture.formId)
+  })
+
+  test('disables conversion until the target Team configuration is loaded', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const html = renderToStaticMarkup(
+      <RequestQueue
+        locale="en"
+        selectedSubmission={submission}
+        submissions={[submission]}
+        onSelectSubmission={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Convert to Work Item/u)
+  })
+
+  test('initializes conversion from the immutable routing Work Item Type', () => {
+    expect(resolveRequestConversionWorkItemTypeId(
+      [{ id: 'incident' }, { id: 'default' }],
+      'incident',
+    )).toBe('incident')
+    expect(resolveRequestConversionWorkItemTypeId(
+      [{ id: 'incident' }, { id: 'default' }],
+      'archived-type',
+    )).toBe('incident')
+  })
+
+  /** Uses the AI-adopted Team when resolving the conversion Work Item configuration. */
+  test('resolves the conversion configuration for the effective Team', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const sourceConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: submission.routing.teamId,
+    }
+    const targetConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      scopeId: 'new-team',
+    }
+    const configurations = {
+      [submission.routing.teamId]: sourceConfiguration,
+      'new-team': targetConfiguration,
+    }
+
+    expect(resolveRequestWorkItemConfiguration(configurations, submission)).toBe(sourceConfiguration)
+    expect(resolveRequestWorkItemConfiguration(
+      configurations,
+      submission,
+      { teamId: 'new-team' },
+    )).toBe(targetConfiguration)
   })
 
   test('renders every known multi-select option label and preserves unknown legacy values', () => {

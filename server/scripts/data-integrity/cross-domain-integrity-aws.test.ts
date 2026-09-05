@@ -498,6 +498,7 @@ function createWorkItemRow(): object {
     teamId: TEAM_ID,
     assignedProjectId: PROJECT_ID,
     issueId: WORK_ITEM_ID,
+    workItemTypeId: 'default',
     sortOrder: 10,
     title: 'Bridge fixture',
     description: 'Strict canonical row',
@@ -1093,6 +1094,95 @@ describe('cross-domain integrity AWS composition bridge', () => {
     ]) {
       expect(evidence).not.toContain(privateValue)
     }
+  })
+
+  test('joins Work Item statuses from additional configured Workflows', async () => {
+    const rows = createHealthyNativeRows()
+    rows['work-items'] = [{
+      ...createWorkItemRow(),
+      workItemTypeId: 'type-a',
+      statusCategory: 'started',
+      workflowStatusId: 'secondary-status',
+    }]
+    rows['work-item-configuration'] = [{
+      ...createConfigurationRow(),
+      workflows: [{
+        id: 'secondary-workflow',
+        name: 'Secondary workflow',
+        initialStatusId: 'secondary-status',
+        statuses: [{
+          id: 'secondary-status',
+          name: 'In progress',
+          category: 'started',
+          sortOrder: 10,
+          color: 'blue',
+        }],
+        transitions: [],
+      }],
+      workItemTypes: [{
+        id: 'type-a',
+        name: 'Type A',
+        iconToken: 'type-a',
+        status: 'active',
+        defaultWorkflowId: 'secondary-workflow',
+        customFieldIds: [],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['type-a'],
+        sortOrder: 10,
+      }],
+    }]
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('pass')
+    expect(result.failureCodes).not.toContain('WORK_ITEM_WORKFLOW_STATUS_UNKNOWN')
+  })
+
+  test('checks a Work Item status against its Work Item Type workflow', async () => {
+    const rows = createHealthyNativeRows()
+    rows['work-items'] = [{
+      ...createWorkItemRow(),
+      workItemTypeId: 'type-a',
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+    }]
+    rows['work-item-configuration'] = [{
+      ...createConfigurationRow(),
+      workflows: [{
+        id: 'secondary-workflow',
+        name: 'Secondary workflow',
+        initialStatusId: 'secondary-status',
+        statuses: [{
+          id: 'secondary-status',
+          name: 'In progress',
+          category: 'started',
+          sortOrder: 10,
+          color: 'blue',
+        }],
+        transitions: [],
+      }],
+      workItemTypes: [{
+        id: 'type-a',
+        name: 'Type A',
+        iconToken: 'type-a',
+        status: 'active',
+        defaultWorkflowId: 'secondary-workflow',
+        customFieldIds: [],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['type-a'],
+        sortOrder: 10,
+      }],
+    }]
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('fail')
+    expect(result.failureCodes).toContain('WORK_ITEM_WORKFLOW_STATUS_UNKNOWN')
+    expect(result.failureCodes).not.toContain('WORK_ITEM_STATUS_CATEGORY_MISMATCH')
   })
 
   test('recognizes current Project Directory Webhook rows as auxiliary', async () => {

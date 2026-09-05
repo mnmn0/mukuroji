@@ -902,6 +902,9 @@
             "minLength": 1,
             "type": "string"
           },
+          "workItemTypeId": {
+            "type": "string"
+          },
           "workflowStatusId": {
             "type": "string"
           }
@@ -958,6 +961,142 @@
           "teamIds",
           "eventTypes"
         ],
+        "type": "object"
+      },
+      "CustomFieldDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "currencyCode": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "durationUnit": {
+            "enum": [
+              "minutes",
+              "hours",
+              "days"
+            ],
+            "type": "string"
+          },
+          "formulaExpression": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldOption"
+            },
+            "type": "array"
+          },
+          "projectIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "enum": [
+              "text",
+              "number",
+              "boolean",
+              "date",
+              "select",
+              "multi-select",
+              "person",
+              "currency",
+              "duration",
+              "formula"
+            ],
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/CustomFieldValidation"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "sortOrder",
+          "required"
+        ],
+        "type": "object"
+      },
+      "CustomFieldOption": {
+        "additionalProperties": false,
+        "properties": {
+          "color": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "sortOrder"
+        ],
+        "type": "object"
+      },
+      "CustomFieldValidation": {
+        "additionalProperties": false,
+        "properties": {
+          "max": {
+            "type": "number"
+          },
+          "maxLength": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min": {
+            "type": "number"
+          },
+          "minLength": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "DeletePublicWorkItemRequest": {
@@ -1536,6 +1675,116 @@
         ],
         "type": "object"
       },
+      "PreviewPublicWorkItemTypeChangeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "assignedProjectId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expectedRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "targetWorkItemTypeId": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "targetWorkItemTypeId"
+        ],
+        "type": "object"
+      },
+      "PublicCustomFieldDefinition": {
+        "additionalProperties": false,
+        "properties": {
+          "currencyCode": {
+            "type": "string"
+          },
+          "defaultValue": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "durationUnit": {
+            "enum": [
+              "minutes",
+              "hours",
+              "days"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldOption"
+            },
+            "type": "array"
+          },
+          "projectIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "enum": [
+              "text",
+              "number",
+              "boolean",
+              "date",
+              "select",
+              "multi-select",
+              "person",
+              "currency",
+              "duration",
+              "formula"
+            ],
+            "type": "string"
+          },
+          "validation": {
+            "$ref": "#/components/schemas/CustomFieldValidation"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "sortOrder",
+          "required"
+        ],
+        "type": "object"
+      },
       "PublicWorkItemPage": {
         "additionalProperties": false,
         "properties": {
@@ -1555,6 +1804,184 @@
         "required": [
           "items",
           "hasMore"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTypeCatalog": {
+        "additionalProperties": false,
+        "properties": {
+          "configurationRevision": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemTypes": {
+            "items": {
+              "$ref": "#/components/schemas/PublicWorkItemTypeSchema"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "teamId",
+          "configurationRevision",
+          "workItemTypes"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTypeChangePreview": {
+        "additionalProperties": false,
+        "properties": {
+          "approvalCompletionTransitionConflict": {
+            "type": "boolean"
+          },
+          "currentWorkItemTypeId": {
+            "type": "string"
+          },
+          "currentWorkflowStatusId": {
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "invalidWorkflowStatusId": {
+            "type": "string"
+          },
+          "lostCustomFieldIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "missingRequiredCustomFieldDefinitions": {
+            "items": {
+              "$ref": "#/components/schemas/PublicCustomFieldDefinition"
+            },
+            "type": "array"
+          },
+          "missingRequiredCustomFieldIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "requiresResolution": {
+            "type": "boolean"
+          },
+          "targetInitialWorkflowStatusId": {
+            "type": "string"
+          },
+          "targetWorkItemTypeId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "currentWorkItemTypeId",
+          "currentWorkflowStatusId",
+          "targetWorkItemTypeId",
+          "lostCustomFieldIds",
+          "targetInitialWorkflowStatusId",
+          "missingRequiredCustomFieldIds",
+          "missingRequiredCustomFieldDefinitions",
+          "approvalCompletionTransitionConflict",
+          "requiresResolution"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemTypeSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "customFields": {
+            "items": {
+              "$ref": "#/components/schemas/PublicCustomFieldDefinition"
+            },
+            "type": "array"
+          },
+          "defaultWorkflowId": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "workflow": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "initialStatusId": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "statuses": {
+                "items": {
+                  "$ref": "#/components/schemas/PublicWorkItemWorkflowStatus"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "initialStatusId",
+              "statuses"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "defaultWorkflowId",
+          "workflow",
+          "customFields"
+        ],
+        "type": "object"
+      },
+      "PublicWorkItemWorkflowStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "enum": [
+              "backlog",
+              "unstarted",
+              "started",
+              "completed",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "category",
+          "sortOrder"
         ],
         "type": "object"
       },
@@ -1664,6 +2091,27 @@
           },
           "title": {
             "minLength": 1,
+            "type": "string"
+          },
+          "typeChangeResolution": {
+            "additionalProperties": false,
+            "properties": {
+              "discardCustomFieldIds": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "workflowStatusId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "discardCustomFieldIds"
+            ],
+            "type": "object"
+          },
+          "workItemTypeId": {
             "type": "string"
           },
           "workflowStatusId": {
@@ -1984,6 +2432,9 @@
             "format": "date-time",
             "type": "string"
           },
+          "workItemTypeId": {
+            "type": "string"
+          },
           "workflowSchemaVersion": {
             "const": 1,
             "type": "integer"
@@ -2004,6 +2455,7 @@
           "priority",
           "creatorMemberKey",
           "workflowStatusId",
+          "workItemTypeId",
           "statusCategory",
           "workflowSchemaVersion",
           "customFieldValues",
@@ -6182,6 +6634,87 @@
         ]
       }
     },
+    "/api/v1/work-item-types": {
+      "get": {
+        "description": "指定 Team で利用できる active Work Item Type、workflow status、custom field definition/options を返します。",
+        "operationId": "listPublicWorkItemTypes",
+        "parameters": [
+          {
+            "description": "schema を取得する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemTypeCatalog"
+                }
+              }
+            },
+            "description": "Work Item Type 作成 schema です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Work Item 作成用の active Type schema を取得する",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
     "/api/v1/work-items": {
       "get": {
         "operationId": "listPublicWorkItems",
@@ -6215,6 +6748,14 @@
             "description": "Workflow status ID filter です。",
             "in": "query",
             "name": "workflowStatusId",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable Work Item Type ID filter です。",
+            "in": "query",
+            "name": "workItemTypeId",
             "schema": {
               "type": "string"
             }
@@ -7054,6 +7595,109 @@
         "summary": "Work Item の外部 resource link を削除する",
         "tags": [
           "External Links"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/work-item-type-preview": {
+      "post": {
+        "operationId": "previewPublicWorkItemTypeChange",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewPublicWorkItemTypeChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkItemTypeChangePreview"
+                }
+              }
+            },
+            "description": "Work Item Type 変更の影響です。",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Work Item Type 変更の影響を確認する",
+        "tags": [
+          "Work Items"
         ]
       }
     }

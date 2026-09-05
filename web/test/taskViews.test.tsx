@@ -4,6 +4,7 @@ import type {
   WorkItemScheduleChangePreview,
   WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
@@ -23,6 +24,7 @@ import { TaskCalendarView } from '../src/tasks/ui/TaskCalendarView'
 import { TaskDetailPane } from '../src/tasks/ui/TaskDetailPane'
 import { TaskFileView } from '../src/tasks/ui/TaskFileView'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
+import { TaskInlineCustomFields } from '../src/tasks/ui/TaskInlineCustomFields'
 import { TaskPermissionsView } from '../src/tasks/ui/TaskPermissionsView'
 import { TaskSchedulePreviewMetadata } from '../src/tasks/ui/TaskSchedulePreviewMetadata'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
@@ -196,7 +198,7 @@ describe('independent task views', () => {
     )
 
     expect(html).toContain('aria-label="ボードビュー"')
-    expect(html).toContain('data-testid="project-task-column-core-team-active"')
+    expect(html).toContain('data-testid="project-task-column-core-team-default-active"')
     expect(html).toContain('ワイヤーフレームを確認する')
     expect(html).toContain('data-testid="task-card-actions-wireframe"')
     expect(unavailableHtml).toContain(
@@ -281,8 +283,8 @@ describe('independent task views', () => {
     expect(boardHtml).toContain('p-4')
     expect(boardHtml).toContain('高 (1)')
     expect(boardHtml).toContain('data-testid="work-item-assignee-avatar"')
-    expect(boardHtml).not.toContain('project-task-column-core-team-ready')
-    expect(boardHtml).not.toContain('project-task-column-core-team-done')
+    expect(boardHtml).not.toContain('project-task-column-core-team-default-ready')
+    expect(boardHtml).not.toContain('project-task-column-core-team-default-done')
     expect(boardHtml).not.toContain('2026-06-03')
   })
 
@@ -346,6 +348,7 @@ describe('independent task views', () => {
           columns: [
             { field: 'title' },
             { field: 'assignee' },
+            { field: 'workItemType' },
             { field: 'project' },
             { field: 'team' },
           ],
@@ -378,6 +381,8 @@ describe('independent task views', () => {
     expect(html).toContain('data-testid="work-item-assignee-avatar"')
     expect(html).toContain('data-task-view-focused="true"')
     expect(html).toContain('data-task-view-selected="true"')
+    expect(html).toContain('data-work-item-type-id="default"')
+    expect(html).toContain('>Work Item</span>')
     expect(html).toContain(t('tasks.row.selected'))
     expect(html).toContain('Refero')
     expect(html).toContain('コアチーム')
@@ -696,6 +701,35 @@ describe('independent task views', () => {
     expect(html).not.toContain('name="scheduleDueDate"')
   })
 
+  test('disables task creation when every Work Item Type is archived', () => {
+    const archivedConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+        status: 'archived',
+      }],
+    }
+    const html = renderToStaticMarkup(
+      <CreateTaskPanel
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={archivedConfiguration}
+        isAssigneeOptionsLoading={false}
+        isSubmitting={false}
+        locale="ja"
+        projectId="refero"
+        t={t}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+        onCancel={() => undefined}
+        onSubmit={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('すべての Work Item Type がアーカイブ済みです')
+    expect(html).toContain('data-testid="create-task-work-item-type" disabled=""')
+    expect(html).toContain('disabled="" type="submit"')
+  })
+
   test('carries view context into quick capture and exposes shared inline editors', () => {
     const quickHtml = renderToStaticMarkup(
       <CreateTaskPanel
@@ -823,6 +857,112 @@ describe('independent task views', () => {
     expect(errorHtml).toContain('Lambda returned 500.')
     expect(errorHtml).toContain('disabled="" type="submit"')
     expect(emptyHtml).toContain(t('tasks.detail.empty'))
+  })
+
+  test('renders configured detail sections in order and omits the overview section when removed', () => {
+    const orderedConfiguration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [{
+        ...DEFAULT_WORK_ITEM_TYPE,
+        defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+        detailSections: ['schedule', 'overview', 'description'],
+      }],
+    }
+    const orderedDetail = {
+      ...taskViewStorySelectedIssueDetail,
+      resolvedConfiguration: {
+        ...taskViewStorySelectedIssueDetail.resolvedConfiguration,
+        configuration: orderedConfiguration,
+      },
+    }
+    const orderedHtml = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={orderedConfiguration}
+        detail={orderedDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        onUpdateIssue={async () => undefined}
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+    const overviewlessConfiguration = {
+      ...orderedConfiguration,
+      workItemTypes: [{
+        ...orderedConfiguration.workItemTypes[0]!,
+        detailSections: ['schedule', 'description'],
+      }],
+    }
+    const overviewlessDetail = {
+      ...orderedDetail,
+      resolvedConfiguration: {
+        ...orderedDetail.resolvedConfiguration,
+        configuration: overviewlessConfiguration,
+      },
+    }
+    const overviewlessHtml = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={overviewlessConfiguration}
+        detail={overviewlessDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        onUpdateIssue={async () => undefined}
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(orderedHtml.indexOf('スケジュール種別')).toBeLessThan(orderedHtml.indexOf('data-testid="task-detail-overview"'))
+    expect(orderedHtml.indexOf('data-testid="task-detail-overview"')).toBeLessThan(orderedHtml.indexOf('>説明<textarea'))
+    expect(overviewlessHtml).not.toContain('data-testid="task-detail-overview"')
+    expect(overviewlessHtml).toContain('data-testid="task-detail-work-item-type"')
+    expect(overviewlessHtml).toContain('name="workItemTypeId"')
+  })
+
+  test('limits inline custom fields to the selected Work Item Type', () => {
+    const incidentType = {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'incident',
+      name: 'Incident',
+      customFieldIds: ['risk-level'],
+      allowedChildTypeIds: ['incident'],
+      defaultWorkflowId: teamWorkItemConfigurationFixture.workflow.id,
+      sortOrder: 10,
+    }
+    const configuration = {
+      ...teamWorkItemConfigurationFixture,
+      workItemTypes: [incidentType],
+    }
+    const task = {
+      ...taskViewStoryTasks[0]!,
+      customFieldValues: workItemCustomFieldValueFixture,
+      workItemTypeId: incidentType.id,
+    }
+    const html = renderToStaticMarkup(
+      <TaskInlineCustomFields
+        configuration={configuration}
+        locale="ja"
+        personLabels={personLabels}
+        personOptions={[]}
+        t={t}
+        task={task}
+        onUpdateTask={async (candidate) => candidate}
+      />,
+    )
+
+    expect(html).toContain('Risk level')
+    expect(html).not.toContain('Customer impact')
+    expect(html).not.toContain('Story points')
   })
 
   test('mounts the complete Work Item planning review in the editable detail form', () => {

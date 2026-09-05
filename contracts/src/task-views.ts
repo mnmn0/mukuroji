@@ -71,6 +71,8 @@ export type TaskViewScope =
 export type TaskViewWorkflowStatusFilter = {
   /** Team that owns the workflow status definition. */
   teamId: string
+  /** Stable Work Item Type identifier whose workflow owns the status; omitted for legacy unqualified filters. */
+  workItemTypeId?: string
   /** Stable workflow status identifier within the Team configuration. */
   statusId: string
 }
@@ -94,6 +96,8 @@ export type TaskViewFilters = WorkspaceSearchFilters & {
   dueDatePreset?: TaskViewDueDatePreset
   /** Whether archived Work Items may be included after permission filtering. */
   includeArchived?: boolean
+  /** Team-qualified Work Item Type keys (`teamId\0workItemTypeId`) retained by the view. */
+  workItemTypeIds?: string[]
 }
 
 /** Layout modes supported by Search and task-oriented product surfaces. */
@@ -222,6 +226,7 @@ export type TaskViewDefaultSelection = {
 /** Stable reason that a persisted or URL-provided task view required migration. */
 export type TaskViewMigrationWarningCode =
   | 'deleted-custom-field'
+  | 'deleted-work-item-type'
   | 'deleted-workflow-status'
   | 'permission-redacted'
   | 'inaccessible-scope'

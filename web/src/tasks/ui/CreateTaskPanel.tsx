@@ -11,7 +11,12 @@ import {
 import {
   createCustomFieldErrorMessages,
   resolveCreateWorkflowStatuses,
+  resolveCreatableWorkItemTypeId,
   resolveWorkItemPersonOptions,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeFormFields,
+  resolveWorkItemTypes,
+  resolveWorkItemTypeWorkflow,
 } from '../../work-items/model/workItemDisplay'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
 import type { CreateWorkItemInput } from '../api/tasks'
@@ -91,8 +96,37 @@ export function CreateTaskPanel({
   workspaceMembers,
 }: CreateTaskPanelProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
-  const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
-  const initialWorkflowStatusId = context?.workflowStatusId ?? configuration?.workflow.initialStatusId ?? ''
+  const [title, setTitle] = useState('')
+  const workItemTypes = resolveWorkItemTypes(configuration)
+  const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
+  const hasLoadedWorkItemConfiguration = configuration !== undefined
+  const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration &&
+    creatableWorkItemTypes.length > 0
+  const contextualWorkItemTypeId = context?.workItemTypeId && creatableWorkItemTypes.some((type) =>
+    type.id === context.workItemTypeId,
+  )
+    ? context.workItemTypeId
+    : undefined
+  const initialWorkItemTypeId = contextualWorkItemTypeId ??
+    creatableWorkItemTypes[0]?.id ??
+    'default'
+  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(initialWorkItemTypeId)
+  const effectiveWorkItemTypeId = resolveCreatableWorkItemTypeId(
+    workItemTypes,
+    selectedWorkItemTypeId,
+  )
+  const selectedWorkItemType = resolveWorkItemTypeDefinition(configuration, effectiveWorkItemTypeId) ??
+    creatableWorkItemTypes[0]
+  const customFieldDefinitions = resolveWorkItemTypeFormFields(configuration, effectiveWorkItemTypeId)
+  const workflowStatuses = resolveCreateWorkflowStatuses(configuration, effectiveWorkItemTypeId)
+  const selectedWorkflow = resolveWorkItemTypeWorkflow(configuration, effectiveWorkItemTypeId)
+  const configuredInitialWorkflowStatusId = context?.workflowStatusId ??
+    selectedWorkflow?.initialStatusId ?? ''
+  const initialWorkflowStatusId = workflowStatuses.some((status) =>
+    status.id === configuredInitialWorkflowStatusId,
+  )
+    ? configuredInitialWorkflowStatusId
+    : workflowStatuses[0]?.id ?? ''
   const requestedWorkflowStatus = workflowStatuses.find((status) => status.id === initialWorkflowStatusId)
   const quickCaptureStatusId = requestedWorkflowStatus?.category === 'backlog'
     ? requestedWorkflowStatus.id
@@ -113,11 +147,11 @@ export function CreateTaskPanel({
   const initialEndDate = resolveTaskScheduleEndDate(initialSchedule) ?? ''
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
-    ? createDefaultCustomFieldValues(configuration.customFields, projectId)
+    ? createDefaultCustomFieldValues(customFieldDefinitions, projectId)
     : {}
-  const hasCustomFields = configuration?.customFields.some((definition) =>
+  const hasCustomFields = customFieldDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, projectId),
-  ) ?? false
+  )
 
   return (
     <section className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-[clamp(18px,2.5vw,30px)] py-3">
@@ -127,6 +161,7 @@ export function CreateTaskPanel({
         id="create-task-form"
         onSubmit={(event) => {
           event.preventDefault()
+          if (!hasLoadedWorkItemConfiguration || !hasCreatableWorkItemType) return
 
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()
@@ -156,7 +191,7 @@ export function CreateTaskPanel({
           }
 
           const parsedCustomFields = effectiveMode === 'detailed' && configuration
-            ? parseCustomFieldFormData(formData, configuration.customFields, {
+            ? parseCustomFieldFormData(formData, customFieldDefinitions, {
                 applyDefaults: true,
                 projectId,
               })
@@ -170,7 +205,7 @@ export function CreateTaskPanel({
           if (effectiveMode === 'detailed' && parsedCustomFields.errors.length > 0) {
             setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
-              configuration?.customFields ?? [],
+              customFieldDefinitions,
               locale,
             ))
             return
@@ -181,6 +216,7 @@ export function CreateTaskPanel({
             title,
             assigneeUserId,
             schedule,
+            workItemTypeId: effectiveWorkItemTypeId,
             ...(workflowStatusId ? { workflowStatusId } : {}),
             customFieldValues: effectiveMode === 'detailed' ? parsedCustomFields.values : {},
             priority,
@@ -215,6 +251,35 @@ export function CreateTaskPanel({
             </p>
           ) : null}
         </div>
+        {configuration ? (
+          <label className="grid max-w-[360px] gap-1.5 text-sm font-semibold text-[#505967]">
+            {t('tasks.create.workItemType')}
+            <select
+              className="workbench-input h-10 px-3"
+              data-testid="create-task-work-item-type"
+              disabled={isSubmitting || !hasCreatableWorkItemType}
+              name="workItemTypeId"
+              onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
+              value={effectiveWorkItemTypeId}
+            >
+              {workItemTypes.map((type) => (
+                <option disabled={type.status === 'archived'} key={type.id} value={type.id}>
+                  {type.name}{type.status === 'archived' ? ` (${t('tasks.create.archived')})` : ''}
+                </option>
+              ))}
+            </select>
+            {selectedWorkItemType?.description ? (
+              <span className="text-xs font-medium text-[var(--workbench-muted)]">
+                {selectedWorkItemType.description}
+              </span>
+            ) : null}
+            {!hasCreatableWorkItemType ? (
+              <span className="text-xs font-semibold text-amber-700">
+                {t('tasks.create.noActiveWorkItemTypes')}
+              </span>
+            ) : null}
+          </label>
+        ) : null}
         {effectiveMode === 'quick' ? (
           <div className="grid gap-3">
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
@@ -225,6 +290,8 @@ export function CreateTaskPanel({
                 name="title"
                 placeholder={t('tasks.create.titlePlaceholder')}
                 required
+                onChange={(event) => setTitle(event.target.value)}
+                value={title}
               />
             </label>
             <p className="text-sm font-medium text-[var(--workbench-muted)]">
@@ -242,7 +309,7 @@ export function CreateTaskPanel({
             <div className="flex items-center gap-2">
               <button
                 className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
-                disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || !quickCaptureAssigneeUserId}
+                disabled={isSubmitting || !hasCreatableWorkItemType || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || !quickCaptureAssigneeUserId}
                 type="submit"
               >
                 {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
@@ -267,6 +334,8 @@ export function CreateTaskPanel({
                 name="title"
                 placeholder={t('tasks.create.titlePlaceholder')}
                 required
+                onChange={(event) => setTitle(event.target.value)}
+                value={title}
               />
             </label>
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
@@ -292,6 +361,7 @@ export function CreateTaskPanel({
               {t('tasks.column.status')}
               <select
                 className="workbench-input h-10 px-3"
+                key={effectiveWorkItemTypeId}
                 defaultValue={initialWorkflowStatusId}
                 name="workflowStatusId"
               >
@@ -321,6 +391,7 @@ export function CreateTaskPanel({
                 className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
                 disabled={
                   isSubmitting ||
+                  !hasCreatableWorkItemType ||
                   isAssigneeOptionsLoading ||
                   Boolean(assigneeErrorMessage) ||
                   assigneeOptions.length === 0
@@ -409,7 +480,7 @@ export function CreateTaskPanel({
         {effectiveMode === 'detailed' && hasCustomFields ? (
           <div className="workbench-panel-muted p-4">
             <WorkItemFieldsEditor
-              definitions={configuration?.customFields ?? []}
+              definitions={customFieldDefinitions}
               errors={fieldErrors}
               locale={locale}
               personOptions={personOptions}

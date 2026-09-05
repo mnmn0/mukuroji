@@ -76,7 +76,11 @@ import {
   isOpenableWorkspaceTask,
   isWorkspaceTaskAssignedToUser,
 } from '../../work-items/model/workspaceWorkItems'
-import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
+import {
+  resolveConfiguredWorkflowStatuses,
+  resolveEditableWorkflowStatuses,
+  resolveWorkItemTypeWorkflowStatuses,
+} from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
@@ -93,6 +97,7 @@ const taskViewBuiltInFields = [
   'assignee',
   'dueDate',
   'priority',
+  'workItemType',
   'project',
   'team',
 ]
@@ -183,10 +188,18 @@ export function MyTasksPage() {
   ]
   const taskViewWorkflowStatuses = taskViewConfigurations.flatMap(
     ([teamId, resolvedConfiguration]) =>
-      resolvedConfiguration.configuration.workflow.statuses.map((status) => ({
+      resolveWorkItemTypeWorkflowStatuses(resolvedConfiguration.configuration).map(({
+        status,
+        workItemTypeId,
+      }) => ({
         statusId: status.id,
         teamId,
+        workItemTypeId,
       })),
+  )
+  const taskViewLegacyStatusIds = taskViewConfigurations.flatMap(
+    ([, resolvedConfiguration]) =>
+      resolveConfiguredWorkflowStatuses(resolvedConfiguration.configuration).map((status) => status.id),
   )
   const taskViewController = useTaskViewController({
     accessToken: workspace.accessToken,
@@ -195,7 +208,7 @@ export function MyTasksPage() {
       columns: taskViewColumns,
       fields: taskViewFields,
       layoutModes: ['board'],
-      legacyStatusIds: taskViewWorkflowStatuses.map((status) => status.statusId),
+      legacyStatusIds: taskViewLegacyStatusIds,
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -708,6 +721,7 @@ export function MyTasksPage() {
     { id: 'assignee', label: t('tasks.column.assignee') },
     { id: 'dueDate', label: t('tasks.column.dueDate') },
     { id: 'priority', label: t('tasks.column.priority') },
+    { id: 'workItemType', label: t('tasks.column.workItemType') },
     { id: 'project', label: t('workspace.column.project') },
     { id: 'team', label: t('workspace.column.team') },
     ...(taskViewCustomFields.length > 0

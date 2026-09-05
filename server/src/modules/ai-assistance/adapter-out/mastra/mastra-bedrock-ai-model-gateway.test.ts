@@ -23,6 +23,7 @@ function createInput(): AiModelGenerationInput {
       creatorUserIds: ['C1'],
       teamIds: ['team-1'],
       projectIds: ['project-1'],
+      workItemTypeIds: ['default'],
       customFieldIds: [],
       relationIds: [],
       statuses: ['todo'],

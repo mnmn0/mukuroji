@@ -3,10 +3,13 @@ import type {
   CustomFieldType,
   CustomFieldValidation,
   CustomFieldValue,
+  WorkItemDetailSectionId,
+  WorkItemTypeDefinition,
   WorkflowStatusCategory,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import {
   useMemo,
   useState,
@@ -15,11 +18,13 @@ import {
 import {
   createTranslator,
   type Locale,
+  type MessageKey,
 } from '../../shared/i18n/i18n'
 import {
   sortCustomFieldDefinitions,
 } from '../model/customFields'
 import {
+  resolveAvailableWorkItemTypeSortOrder,
   resolveWorkflowCategoryToneClassName,
   sortWorkflowStatuses,
 } from '../model/workItemDisplay'
@@ -28,6 +33,7 @@ import {
   normalizeWorkItemConfigurationForSave,
   sortCustomFieldOptions,
 } from '../model/workItemConfigurationEditor'
+import { WorkItemTypeIcon } from './WorkItemTypeIcon'
 
 /**
  * Configuration panel の scope selector に表示する選択肢です。
@@ -245,6 +251,11 @@ function WorkItemConfigurationPanelContent({
               locale={locale}
               onChange={setDraft}
             />
+            <WorkItemTypesConfigurationSection
+              configuration={draft}
+              locale={locale}
+              onChange={setDraft}
+            />
           </fieldset>
 
           <div className="workbench-toolbar sticky bottom-3 z-10 flex flex-wrap items-center justify-between gap-3 px-4 py-3 shadow-[0_12px_30px_rgba(23,32,29,0.12)]">
@@ -279,10 +290,13 @@ function WorkItemConfigurationPanelContent({
 
 /** Workflow definition を status rail と transition matrix で編集します。 */
 export function WorkflowConfigurationSection({
+  allowMultipleWorkflows = true,
   configuration,
   locale,
   onChange,
 }: {
+  /** Whether the editor should expose additional reusable workflows. */
+  allowMultipleWorkflows?: boolean
   /** 編集中 configuration です。 */
   configuration: WorkItemConfiguration
   /** 表示 locale です。 */
@@ -291,13 +305,33 @@ export function WorkflowConfigurationSection({
   onChange: (configuration: WorkItemConfiguration) => void
 }) {
   const t = createTranslator(locale)
-  const statuses = sortWorkflowStatuses(configuration.workflow.statuses)
+  const workflows = [
+    configuration.workflow,
+    ...(configuration.workflows ?? []).filter((workflow) => workflow.id !== configuration.workflow.id),
+  ]
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState(configuration.workflow.id)
+  const selectedWorkflow = workflows.find((workflow) => workflow.id === selectedWorkflowId) ??
+    configuration.workflow
+  const statuses = sortWorkflowStatuses(selectedWorkflow.statuses)
+  const workflowStatusIds = workflows.flatMap((workflow) =>
+    workflow.statuses.map((status) => status.id),
+  )
+  const isPrimaryWorkflow = selectedWorkflow.id === configuration.workflow.id
   const updateWorkflow = (workflow: WorkItemConfiguration['workflow']) => {
-    onChange({ ...configuration, workflow })
+    if (workflow.id === configuration.workflow.id) {
+      onChange({ ...configuration, workflow })
+      return
+    }
+    onChange({
+      ...configuration,
+      workflows: (configuration.workflows ?? []).map((candidate) =>
+        candidate.id === workflow.id ? workflow : candidate,
+      ),
+    })
   }
   const updateStatus = (statusId: string, patch: Partial<WorkflowStatusDefinition>) => {
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       statuses: statuses.map((status) => status.id === statusId ? { ...status, ...patch } : status),
     })
   }
@@ -318,12 +352,12 @@ export function WorkflowConfigurationSection({
 
     nextStatuses.splice(targetIndex, 0, status)
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       statuses: nextStatuses.map((candidate, index) => ({ ...candidate, sortOrder: index })),
     })
   }
   const addStatus = () => {
-    const id = createUniqueDefinitionId('status', statuses.map((status) => status.id))
+    const id = createUniqueDefinitionId('status', workflowStatusIds)
     const nextStatus: WorkflowStatusDefinition = {
       category: 'started',
       id,
@@ -332,8 +366,8 @@ export function WorkflowConfigurationSection({
     }
 
     updateWorkflow({
-      ...configuration.workflow,
-      initialStatusId: configuration.workflow.initialStatusId || id,
+      ...selectedWorkflow,
+      initialStatusId: selectedWorkflow.initialStatusId || id,
       statuses: [...statuses, nextStatus],
     })
   }
@@ -345,32 +379,69 @@ export function WorkflowConfigurationSection({
     const nextStatuses = statuses
       .filter((status) => status.id !== statusId)
       .map((status, index) => ({ ...status, sortOrder: index }))
-    const initialStatusId = configuration.workflow.initialStatusId === statusId
-      ? nextStatuses[0]?.id ?? configuration.workflow.initialStatusId
-      : configuration.workflow.initialStatusId
+    const initialStatusId = selectedWorkflow.initialStatusId === statusId
+      ? nextStatuses[0]?.id ?? selectedWorkflow.initialStatusId
+      : selectedWorkflow.initialStatusId
 
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       initialStatusId,
       statuses: nextStatuses,
-      transitions: configuration.workflow.transitions.filter(
+      transitions: selectedWorkflow.transitions.filter(
         (transition) =>
           transition.fromStatusId !== statusId && transition.toStatusId !== statusId,
       ),
     })
   }
   const toggleTransition = (fromStatusId: string, toStatusId: string, enabled: boolean) => {
-    const withoutTransition = configuration.workflow.transitions.filter(
+    const withoutTransition = selectedWorkflow.transitions.filter(
       (transition) =>
         transition.fromStatusId !== fromStatusId || transition.toStatusId !== toStatusId,
     )
 
     updateWorkflow({
-      ...configuration.workflow,
+      ...selectedWorkflow,
       transitions: enabled
         ? [...withoutTransition, { fromStatusId, toStatusId }]
         : withoutTransition,
     })
+  }
+  /** Adds a reusable workflow to the configuration draft. */
+  const addWorkflow = () => {
+    if (!allowMultipleWorkflows) return
+    const id = createUniqueDefinitionId('workflow', workflows.map((workflow) => workflow.id))
+    const initialStatusId = createUniqueDefinitionId('status', workflowStatusIds)
+    const workflow: WorkItemConfiguration['workflow'] = {
+      id,
+      name: t('workItems.configuration.newWorkflow'),
+      initialStatusId,
+      statuses: [{
+        category: 'backlog',
+        id: initialStatusId,
+        name: t('workItems.configuration.newStatus'),
+        sortOrder: 0,
+      }],
+      transitions: [],
+    }
+    onChange({
+      ...configuration,
+      workflows: [...(configuration.workflows ?? []), workflow],
+    })
+    setSelectedWorkflowId(id)
+  }
+  const workflowIsUsedByType = configuration.workItemTypes?.some((type) =>
+    type.defaultWorkflowId === selectedWorkflow.id,
+  ) ?? false
+  /** Removes the selected reusable workflow when no Work Item Type references it. */
+  const removeWorkflow = () => {
+    if (!allowMultipleWorkflows || isPrimaryWorkflow || workflowIsUsedByType) return
+    onChange({
+      ...configuration,
+      workflows: (configuration.workflows ?? []).filter((workflow) =>
+        workflow.id !== selectedWorkflow.id,
+      ),
+    })
+    setSelectedWorkflowId(configuration.workflow.id)
   }
 
   return (
@@ -385,18 +456,55 @@ export function WorkflowConfigurationSection({
             {t('workItems.configuration.workflowDescription')}
           </p>
         </div>
-        <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-          {t('workItems.configuration.workflowName')}
-          <input
-            className="workbench-input min-h-10 px-3"
-            required
-            value={configuration.workflow.name}
-            onChange={(event) => updateWorkflow({
-              ...configuration.workflow,
-              name: event.target.value,
-            })}
-          />
-        </label>
+        <div className="grid gap-3">
+          {allowMultipleWorkflows ? (
+            <div className="flex items-end gap-2">
+              <label className="grid min-w-0 flex-1 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workItems.configuration.workflowSelect')}
+                <select
+                  aria-label={t('workItems.configuration.workflowSelect')}
+                  className="workbench-input min-h-10 min-w-0 px-3"
+                  value={selectedWorkflow.id}
+                  onChange={(event) => setSelectedWorkflowId(event.target.value)}
+                >
+                  {workflows.map((workflow) => (
+                    <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className="workbench-button-secondary min-h-10 px-3"
+                onClick={addWorkflow}
+                type="button"
+              >
+                + {t('workItems.configuration.addWorkflow')}
+              </button>
+              <button
+                className="workbench-button-secondary min-h-10 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                disabled={isPrimaryWorkflow || workflowIsUsedByType}
+                onClick={removeWorkflow}
+                title={workflowIsUsedByType
+                  ? t('workItems.configuration.workflowInUse')
+                  : t('workItems.configuration.removeWorkflow')}
+                type="button"
+              >
+                {t('workItems.configuration.removeWorkflow')}
+              </button>
+            </div>
+          ) : null}
+          <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+            {t('workItems.configuration.workflowName')}
+            <input
+              className="workbench-input min-h-10 px-3"
+              required
+              value={selectedWorkflow.name}
+              onChange={(event) => updateWorkflow({
+                ...selectedWorkflow,
+                name: event.target.value,
+              })}
+            />
+          </label>
+        </div>
       </div>
 
       <div className="grid grid-cols-[minmax(0,0.92fr)_minmax(520px,1.08fr)] gap-0 max-[1320px]:grid-cols-1">
@@ -490,11 +598,11 @@ export function WorkflowConfigurationSection({
                 </div>
                 <label className="col-start-2 col-end-4 flex min-h-8 cursor-pointer items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)] max-[680px]:col-end-3">
                   <input
-                    checked={configuration.workflow.initialStatusId === status.id}
+                    checked={selectedWorkflow.initialStatusId === status.id}
                     className="h-4 w-4 accent-[var(--workbench-primary)]"
                     name="workflow-initial-status"
                     onChange={() => updateWorkflow({
-                      ...configuration.workflow,
+                      ...selectedWorkflow,
                       initialStatusId: status.id,
                     })}
                     type="radio"
@@ -535,7 +643,7 @@ export function WorkflowConfigurationSection({
                     </th>
                     {statuses.map((toStatus) => {
                       const isSelf = fromStatus.id === toStatus.id
-                      const isAllowed = configuration.workflow.transitions.some(
+                      const isAllowed = selectedWorkflow.transitions.some(
                         (transition) =>
                           transition.fromStatusId === fromStatus.id &&
                           transition.toStatusId === toStatus.id,
@@ -574,6 +682,399 @@ export function WorkflowConfigurationSection({
   )
 }
 
+const workItemDetailSectionIds = [
+  'overview',
+  'description',
+  'custom-fields',
+  'workflow',
+  'schedule',
+  'relations',
+  'files',
+  'activity',
+] as const satisfies readonly WorkItemDetailSectionId[]
+
+const workItemDetailSectionLabelKeys: Record<WorkItemDetailSectionId, MessageKey> = {
+  overview: 'workItems.configuration.section.overview',
+  description: 'workItems.configuration.section.description',
+  'custom-fields': 'workItems.configuration.section.custom-fields',
+  workflow: 'workItems.configuration.section.workflow',
+  schedule: 'workItems.configuration.section.schedule',
+  relations: 'workItems.configuration.section.relations',
+  files: 'workItems.configuration.section.files',
+  activity: 'workItems.configuration.section.activity',
+}
+
+/** Edits Work Item Type definitions together with their workflow and field scope. */
+export function WorkItemTypesConfigurationSection({
+  configuration,
+  locale,
+  onChange,
+}: {
+  /** Configuration draft being edited. */
+  configuration: WorkItemConfiguration
+  /** Locale used for labels. */
+  locale: Locale
+  /** Updates the configuration draft. */
+  onChange: (configuration: WorkItemConfiguration) => void
+}) {
+  const t = createTranslator(locale)
+  const defaultType = createEditableDefaultWorkItemType(configuration)
+  const configuredTypes = configuration.workItemTypes ?? []
+  const types = configuredTypes.length === 0
+    ? [defaultType]
+    : configuredTypes.some((type) => type.id === DEFAULT_WORK_ITEM_TYPE.id)
+      ? configuredTypes
+      : [
+          ...configuredTypes,
+          {
+            ...defaultType,
+            sortOrder: resolveAvailableWorkItemTypeSortOrder(configuredTypes),
+          },
+        ]
+  const workflows = [
+    configuration.workflow,
+    ...(configuration.workflows ?? []).filter((workflow) => workflow.id !== configuration.workflow.id),
+  ]
+  const updateTypes = (nextTypes: WorkItemTypeDefinition[]) => {
+    onChange({ ...configuration, workItemTypes: nextTypes })
+  }
+  const updateType = (
+    typeId: string,
+    update: (type: WorkItemTypeDefinition) => WorkItemTypeDefinition,
+  ) => {
+    updateTypes(types.map((type) => type.id === typeId ? update(type) : type))
+  }
+  const addType = () => {
+    const id = createUniqueDefinitionId('type', types.map((type) => type.id))
+    updateTypes([
+      ...types,
+      {
+        id,
+        name: t('workItems.configuration.newType'),
+        iconToken: 'work-item',
+        status: 'active',
+        defaultWorkflowId: configuration.workflow.id,
+        customFieldIds: [],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview', 'description', 'workflow', 'activity'],
+        allowedChildTypeIds: [DEFAULT_WORK_ITEM_TYPE.id],
+        sortOrder: resolveAvailableWorkItemTypeSortOrder(types),
+      },
+    ])
+  }
+  const removeType = (typeId: string) => {
+    if (typeId === DEFAULT_WORK_ITEM_TYPE.id) return
+    const remainingTypeIds = new Set(types.filter((type) => type.id !== typeId).map((type) => type.id))
+    updateTypes(
+      types
+        .filter((type) => type.id !== typeId)
+        .map((type, index) => ({
+          ...type,
+          allowedChildTypeIds: type.allowedChildTypeIds.filter((childId) => remainingTypeIds.has(childId)),
+          sortOrder: index * 10,
+        })),
+    )
+  }
+
+  return (
+    <section className="workbench-panel overflow-hidden">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
+        <div>
+          <p className="workbench-eyebrow">{t('workItems.configuration.typesEyebrow')}</p>
+          <h3 className="mt-2 text-lg font-semibold text-[var(--workbench-text)]">
+            {t('workItems.configuration.typesTitle')}
+          </h3>
+          <p className="mt-1 max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+            {t('workItems.configuration.typesDescription')}
+          </p>
+        </div>
+        <button className="workbench-button-secondary min-h-10 px-4" onClick={addType} type="button">
+          + {t('workItems.configuration.addType')}
+        </button>
+      </div>
+      <div className="grid gap-4 p-5">
+        {types.map((type) => (
+          <article
+            className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-white p-4"
+            data-testid={`work-item-type-definition-${type.id}`}
+            key={type.id}
+          >
+            <div className="grid grid-cols-[minmax(180px,1fr)_minmax(140px,0.7fr)_minmax(140px,0.7fr)_auto] gap-3 max-[900px]:grid-cols-2 max-[600px]:grid-cols-1">
+              <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workItems.configuration.typeName')}
+                <input
+                  className="workbench-input min-h-10 px-3"
+                  required
+                  value={type.name}
+                  onChange={(event) => updateType(type.id, (current) => ({ ...current, name: event.target.value }))}
+                />
+                <code className="truncate text-[11px] text-[var(--workbench-muted)]">{type.id}</code>
+              </label>
+              <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workItems.configuration.typeIcon')}
+                <span className="flex items-center gap-2">
+                  <span className="grid h-10 w-10 flex-none place-items-center rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] text-[var(--workbench-primary)]">
+                    <WorkItemTypeIcon
+                      className="h-5 w-5 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]"
+                      iconToken={type.iconToken}
+                    />
+                  </span>
+                  <input
+                    className="workbench-input min-h-10 min-w-0 flex-1 px-3"
+                    required
+                    value={type.iconToken}
+                    onChange={(event) => updateType(type.id, (current) => ({ ...current, iconToken: event.target.value }))}
+                  />
+                </span>
+              </label>
+              <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workItems.configuration.typeStatus')}
+                <select
+                  className="workbench-input min-h-10 px-3"
+                  value={type.status}
+                  onChange={(event) => updateType(type.id, (current) => ({
+                    ...current,
+                    status: event.target.value === 'archived' ? 'archived' : 'active',
+                  }))}
+                >
+                  <option value="active">{t('workItems.configuration.typeActive')}</option>
+                  <option value="archived">{t('workItems.configuration.typeArchived')}</option>
+                </select>
+              </label>
+              <div className="flex items-end justify-end">
+                <button
+                  aria-label={t('workItems.configuration.removeType').replace('{type}', type.name)}
+                  className="workbench-button-secondary min-h-10 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={type.id === DEFAULT_WORK_ITEM_TYPE.id}
+                  onClick={() => removeType(type.id)}
+                  type="button"
+                >
+                  {t('workItems.configuration.remove')}
+                </button>
+              </div>
+            </div>
+            <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workItems.configuration.typeDescription')}
+              <textarea
+                className="workbench-input min-h-20 px-3 py-2"
+                value={type.description ?? ''}
+                onChange={(event) => updateType(type.id, (current) => ({
+                  ...current,
+                  description: event.target.value || undefined,
+                }))}
+              />
+            </label>
+            <label className="grid max-w-[420px] gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workItems.configuration.typeWorkflow')}
+              <select
+                className="workbench-input min-h-10 px-3"
+                value={type.defaultWorkflowId}
+                onChange={(event) => updateType(type.id, (current) => ({
+                  ...current,
+                  defaultWorkflowId: event.target.value,
+                }))}
+              >
+                {workflows.map((workflow) => (
+                  <option key={workflow.id} value={workflow.id}>{workflow.name}</option>
+                ))}
+              </select>
+            </label>
+            <div className="grid grid-cols-3 gap-4 max-[900px]:grid-cols-1">
+              <TypeFieldChecklist
+                configuration={configuration}
+                label={t('workItems.configuration.typeFields')}
+                type={type}
+                onChange={(customFieldIds, requiredCustomFieldIds) => updateType(type.id, (current) => ({
+                  ...current,
+                  customFieldIds,
+                  requiredCustomFieldIds,
+                }))}
+                requiredLabel={t('workItems.configuration.typeRequired')}
+              />
+              <TypeSectionChecklist
+                label={t('workItems.configuration.typeSections')}
+                sections={type.detailSections}
+                t={t}
+                onChange={(detailSections) => updateType(type.id, (current) => ({ ...current, detailSections }))}
+              />
+              <TypeChildChecklist
+                label={t('workItems.configuration.typeChildren')}
+                type={type}
+                types={types}
+                onChange={(allowedChildTypeIds) => updateType(type.id, (current) => ({ ...current, allowedChildTypeIds }))}
+              />
+            </div>
+          </article>
+        ))}
+        {types.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+            {t('workItems.configuration.noTypes')}
+          </p>
+        ) : null}
+        <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+          {t('workItems.configuration.archiveHint')}
+        </p>
+      </div>
+    </section>
+  )
+}
+
+function TypeFieldChecklist({
+  configuration,
+  label,
+  onChange,
+  requiredLabel,
+  type,
+}: {
+  /** Current configuration whose fields are selectable. */
+  configuration: WorkItemConfiguration
+  /** Checklist heading. */
+  label: string
+  /** Called with the next available field IDs. */
+  onChange: (fieldIds: string[], requiredFieldIds: string[]) => void
+  /** Label for each required toggle. */
+  requiredLabel: string
+  /** Type whose field scope is edited. */
+  type: WorkItemTypeDefinition
+}) {
+  return (
+    <fieldset className="grid content-start gap-2">
+      <legend className="text-sm font-semibold text-[var(--workbench-text)]">{label}</legend>
+      {configuration.customFields.map((field) => {
+        const available = type.customFieldIds.includes(field.id)
+        const required = field.required || type.requiredCustomFieldIds.includes(field.id)
+        return (
+          <div className="flex items-center justify-between gap-2 text-xs font-medium text-[var(--workbench-muted)]" key={field.id}>
+            <label className="flex min-w-0 items-center gap-2">
+              <input
+                checked={available}
+                className="h-4 w-4 accent-[var(--workbench-primary)]"
+                onChange={(event) => {
+                  const nextIds = event.target.checked
+                    ? [...type.customFieldIds, field.id]
+                    : type.customFieldIds.filter((fieldId) => fieldId !== field.id)
+                  const nextFieldIds = [...new Set(nextIds)]
+                  onChange(
+                    nextFieldIds,
+                    type.requiredCustomFieldIds.filter((fieldId) => nextFieldIds.includes(fieldId)),
+                  )
+                }}
+                type="checkbox"
+              />
+              <span className="truncate">{field.name}</span>
+            </label>
+            <label className="flex flex-none items-center gap-1">
+              <input
+                checked={required}
+                className="h-4 w-4 accent-[var(--workbench-primary)]"
+                disabled={!available || field.type === 'formula' || field.required}
+                onChange={(event) => {
+                  if (field.required) return
+                  const nextIds = event.target.checked
+                    ? [...type.requiredCustomFieldIds, field.id]
+                    : type.requiredCustomFieldIds.filter((fieldId) => fieldId !== field.id)
+                  onChange(type.customFieldIds, [...new Set(nextIds)])
+                }}
+                type="checkbox"
+              />
+              {requiredLabel}
+            </label>
+          </div>
+        )
+      })}
+    </fieldset>
+  )
+}
+
+function TypeSectionChecklist({
+  label,
+  onChange,
+  sections,
+  t,
+}: {
+  /** Checklist heading. */
+  label: string
+  /** Called with the next ordered section IDs. */
+  onChange: (sections: WorkItemDetailSectionId[]) => void
+  /** Currently visible section IDs. */
+  sections: WorkItemDetailSectionId[]
+  /** Translator for section names. */
+  t: (key: MessageKey) => string
+}) {
+  return (
+    <fieldset className="grid content-start gap-2">
+      <legend className="text-sm font-semibold text-[var(--workbench-text)]">{label}</legend>
+      {workItemDetailSectionIds.map((section) => (
+        <label className="flex items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]" key={section}>
+          <input
+            checked={sections.includes(section)}
+            className="h-4 w-4 accent-[var(--workbench-primary)]"
+            onChange={(event) => onChange(event.target.checked
+              ? [...sections, section]
+              : sections.filter((candidate) => candidate !== section))}
+            type="checkbox"
+          />
+          {t(workItemDetailSectionLabelKeys[section])}
+        </label>
+      ))}
+    </fieldset>
+  )
+}
+
+function TypeChildChecklist({
+  label,
+  onChange,
+  type,
+  types,
+}: {
+  /** Checklist heading. */
+  label: string
+  /** Called with the next child type IDs. */
+  onChange: (typeIds: string[]) => void
+  /** Type whose child scope is edited. */
+  type: WorkItemTypeDefinition
+  /** All type definitions available in this scope. */
+  types: readonly WorkItemTypeDefinition[]
+}) {
+  return (
+    <fieldset className="grid content-start gap-2">
+      <legend className="text-sm font-semibold text-[var(--workbench-text)]">{label}</legend>
+      {types.map((childType) => (
+        <label className="flex items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]" key={childType.id}>
+          <input
+            checked={type.allowedChildTypeIds.includes(childType.id)}
+            className="h-4 w-4 accent-[var(--workbench-primary)]"
+            onChange={(event) => onChange(event.target.checked
+              ? [...type.allowedChildTypeIds, childType.id]
+              : type.allowedChildTypeIds.filter((typeId) => typeId !== childType.id))}
+            type="checkbox"
+          />
+          {childType.name}
+        </label>
+      ))}
+    </fieldset>
+  )
+}
+
+/**
+ * Creates an editable built-in type projection for a legacy configuration.
+ *
+ * @param configuration - Configuration whose workflow and fields should be exposed.
+ * @returns The built-in Work Item Type populated from the configuration.
+ */
+function createEditableDefaultWorkItemType(
+  configuration: WorkItemConfiguration,
+): WorkItemTypeDefinition {
+  return {
+    ...DEFAULT_WORK_ITEM_TYPE,
+    customFieldIds: configuration.customFields.map((field) => field.id),
+    requiredCustomFieldIds: configuration.customFields
+      .filter((field) => field.required && field.type !== 'formula')
+      .map((field) => field.id),
+    defaultWorkflowId: configuration.workflow.id,
+  }
+}
+
 function CustomFieldsConfigurationSection({
   configuration,
   locale,
@@ -588,8 +1089,18 @@ function CustomFieldsConfigurationSection({
 }) {
   const t = createTranslator(locale)
   const fields = sortCustomFieldDefinitions(configuration.customFields)
+  /** Updates custom fields while removing type references to fields no longer available. */
   const updateFields = (customFields: CustomFieldDefinition[]) => {
-    onChange({ ...configuration, customFields })
+    const availableFieldIds = new Set(customFields.map((field) => field.id))
+    onChange({
+      ...configuration,
+      customFields,
+      workItemTypes: configuration.workItemTypes?.map((type) => ({
+        ...type,
+        customFieldIds: type.customFieldIds.filter((fieldId) => availableFieldIds.has(fieldId)),
+        requiredCustomFieldIds: type.requiredCustomFieldIds.filter((fieldId) => availableFieldIds.has(fieldId)),
+      })),
+    })
   }
   const updateField = (
     fieldId: string,

@@ -159,8 +159,12 @@ export type WorkItemConfiguration = {
   revision: number
   /** Scope で利用する workflow です。 */
   workflow: WorkflowDefinition
+  /** Scope で利用する追加 workflow 一覧です。省略時は `workflow` のみを利用します。 */
+  workflows?: WorkflowDefinition[]
   /** Scope で利用する custom field 一覧です。 */
   customFields: CustomFieldDefinition[]
+  /** Scope で利用する Work Item Type 一覧です。省略時は built-in type を利用します。 */
+  workItemTypes?: import('./work-item-types').WorkItemTypeDefinition[]
   /** 最終更新日時の ISO 8601 timestamp です。 */
   updatedAt?: string
 }

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -15,8 +16,14 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_TYPE_ID,
   type CustomFieldDefinition,
   type CustomFieldValue,
+  type WorkItemDetailSectionId,
+  type WorkItemTypeChangePreview,
+  type WorkItemTypeChangeResolution,
+  type WorkItemTypeDefinition,
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
@@ -30,6 +37,13 @@ import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
   createDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
+import {
+  createAuditFieldChanges,
+  createMutationAuditEventPut,
+  ensureLocalAuditEventsTable,
+  getConfiguredAuditTableName,
+  type MutationAuditContext,
+} from '../audit'
 import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
@@ -45,6 +59,9 @@ const RELATION_GRAPH_RECORD_KEY = 'RELATION_GRAPH'
 const RELATION_RECORD_PREFIX = 'REL#'
 const RELATION_SCAN_LIMIT = 2_000
 const WORK_ITEM_RELATION_ID_LIMIT = 100
+const DYNAMODB_TRANSACTION_ITEM_LIMIT = 100
+/** Maximum UTF-8 JSON size allowed for a persisted Work Item configuration item. */
+export const MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES = 350 * 1_024
 const MAX_CUSTOM_FIELD_TEXT_LENGTH = 10_000
 const MAX_FORMULA_EXPRESSION_LENGTH = 1_024
 const CONFIGURATION_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
@@ -133,8 +150,70 @@ export function createWorkItemRelationGraphRevisionConditionCheck(
   }
 }
 
-/** Configuration lock 取得後に実行する既存 Work Item の参照整合性検査です。 */
-export type WorkItemConfigurationUsageCheck = () => Promise<void>
+/**
+ * Creates an atomic relation graph revision increment for a Work Item Type change.
+ *
+ * The relation graph revision covers endpoint Work Item Types as well as relation edges,
+ * so configuration validation and concurrent endpoint type changes can share one fence.
+ *
+ * @param tableName - Work Item configuration table containing relation metadata.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team whose relation graph is being changed.
+ * @param expectedRevision - Positive graph revision observed by the caller's strong read.
+ * @returns One DynamoDB Update ready for a Work Item mutation transaction.
+ */
+export function createWorkItemRelationGraphRevisionIncrementTransactionItem(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  expectedRevision: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (
+    !Number.isSafeInteger(expectedRevision) ||
+    expectedRevision < 1 ||
+    expectedRevision >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemRelationGraphRevision',
+      'Work Item relation graph revision must be a positive safe integer below the maximum.',
+    )
+  }
+  return {
+    Update: {
+      TableName: tableName,
+      Key: {
+        scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+        recordKey: RELATION_GRAPH_RECORD_KEY,
+      },
+      UpdateExpression: 'SET #revision = :nextRevision',
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        '#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'relation-graph',
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedRevision': expectedRevision,
+        ':nextRevision': expectedRevision + 1,
+      },
+    },
+  }
+}
+
+/** DynamoDB transaction items contributed by a configuration validation boundary. */
+export type WorkItemConfigurationTransactionItems = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>
+
+/** Runs existing Work Item validation and contributes commit-time condition checks. */
+export type WorkItemConfigurationUsageCheck = () => Promise<
+  WorkItemConfigurationTransactionItems | void
+>
 
 /** Custom field value の正規化条件です。 */
 export type NormalizeCustomFieldValuesOptions = {
@@ -146,6 +225,8 @@ export type NormalizeCustomFieldValuesOptions = {
   projectId?: string
   /** Backlog/Triage の quick capture では required value の欠落を許可します。 */
   allowRequiredMissing?: boolean
+  /** Values are validated against this Work Item Type definition. */
+  workItemTypeId?: string
 }
 
 /** Workflow status の解決結果です。 */
@@ -182,20 +263,41 @@ export type WorkItemConfigurationClient = {
   getWorkspaceConfiguration(workspaceId: string): Promise<ResolvedWorkItemConfiguration>
   /** Team override、Workspace default、built-in default の順で解決します。 */
   getTeamConfiguration(workspaceId: string, teamId: string): Promise<ResolvedWorkItemConfiguration>
-  /** Workspace default を optimistic revision 付きで保存します。 */
+  /**
+   * Workspace default を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   saveWorkspaceConfiguration(
     workspaceId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    auditContext?: MutationAuditContext,
   ): Promise<ResolvedWorkItemConfiguration>
-  /** Team override を optimistic revision 付きで保存します。 */
+  /**
+   * Team override を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param teamId - Team whose configuration is being saved.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   saveTeamConfiguration(
     workspaceId: string,
     teamId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    auditContext?: MutationAuditContext,
   ): Promise<ResolvedWorkItemConfiguration>
   /** Work Item から見た relation と graph revision を返します。 */
   listRelations(
@@ -210,7 +312,7 @@ export type WorkItemConfigurationClient = {
    * @param teamId - Team whose complete relation graph is read.
    * @returns All directed relations and their stable graph revision.
    */
-  listRelationGraph?(workspaceId: string, teamId: string): Promise<WorkItemRelationsResponse>
+  listRelationGraph(workspaceId: string, teamId: string): Promise<WorkItemRelationsResponse>
   /**
    * Reads the current canonical relation graph revision for recurrence-sensitive projections.
    *
@@ -224,6 +326,7 @@ export type WorkItemConfigurationClient = {
     workspaceId: string,
     teamId: string,
     input: MutateWorkItemRelationInput,
+    configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<WorkItemRelationMutationResponse>
   /** Reciprocal relation を単一 transaction で削除します。 */
   deleteRelation(
@@ -328,8 +431,26 @@ export function validateWorkItemConfiguration(
   }
   const revision = readNonNegativeInteger(value.revision, 'Configuration revision')
   const workflow = validateWorkflowDefinition(value.workflow)
+  const workflows = value.workflows === undefined
+    ? undefined
+    : readWorkflowDefinitions(value.workflows)
+  if (workflows !== undefined) {
+    assertUnique([workflow.id, ...workflows.map((candidate) => candidate.id)], 'Workflow ID')
+  }
+  assertUnique(
+    [workflow, ...(workflows ?? [])].flatMap((candidate) =>
+      candidate.statuses.map((status) => status.id),
+    ),
+    'Workflow status ID',
+  )
   const customFields = readCustomFieldDefinitions(value.customFields)
   validateFormulaDefinitions(customFields)
+  const workItemTypes = value.workItemTypes === undefined
+    ? undefined
+    : readWorkItemTypeDefinitions(value.workItemTypes, customFields, [
+        workflow,
+        ...(workflows ?? []),
+      ])
 
   return {
     scopeType,
@@ -337,10 +458,29 @@ export function validateWorkItemConfiguration(
     schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     revision,
     workflow,
+    ...(workflows === undefined ? {} : { workflows }),
     customFields,
+    ...(workItemTypes === undefined ? {} : { workItemTypes }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
+  }
+}
+
+/**
+ * Rejects a configuration item that could exceed DynamoDB's 400 KB item limit.
+ *
+ * @param item - Configuration item about to be persisted.
+ * @throws WorkItemConfigurationError when the serialized item is too large.
+ */
+export function validateWorkItemConfigurationItemSize(item: unknown): void {
+  const serialized = JSON.stringify(item)
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES) {
+    throw new WorkItemConfigurationError(
+      413,
+      'WorkItemConfigurationItemTooLarge',
+      'Work Item configuration cannot fit safely within the DynamoDB 400 KB item limit.',
+    )
   }
 }
 
@@ -356,14 +496,275 @@ export function validateWorkflowDefinition(value: unknown): WorkItemConfiguratio
   }
 }
 
-/** Work Item custom field値へdefault/patchを適用し、全definitionに対して検証します。 */
+/**
+ * Resolves every workflow available to a Work Item Type.
+ *
+ * @param configuration - Work Item configuration whose workflows are resolved.
+ * @returns The primary workflow followed by every distinct additional workflow.
+ */
+export function getWorkItemConfigurationWorkflows(
+  configuration: WorkItemConfiguration,
+): readonly WorkItemConfiguration['workflow'][] {
+  return configuration.workflows === undefined
+    ? [configuration.workflow]
+    : [configuration.workflow, ...configuration.workflows.filter((workflow) =>
+        workflow.id !== configuration.workflow.id,
+      )]
+}
+
+/**
+ * Resolves the active or archived Work Item Type for a configuration.
+ *
+ * @param configuration - Work Item configuration that owns the type definition.
+ * @param requestedTypeId - Untrusted requested type identifier; omitted values use the built-in type.
+ * @param options - Whether an archived type may be returned.
+ * @returns The validated Work Item Type definition.
+ * @throws WorkItemConfigurationError when the type is unknown or archived without permission.
+ */
+export function resolveWorkItemType(
+  configuration: WorkItemConfiguration,
+  requestedTypeId?: unknown,
+  options: { allowArchived?: boolean } = {},
+): WorkItemTypeDefinition {
+  const typeId = requestedTypeId === undefined
+    ? DEFAULT_WORK_ITEM_TYPE_ID
+    : readConfigurationId(requestedTypeId, 'Work Item Type ID')
+  const configuredType = configuration.workItemTypes?.find((candidate) => candidate.id === typeId)
+  const type = configuredType ?? (
+    typeId === DEFAULT_WORK_ITEM_TYPE_ID && configuredType === undefined
+      ? DEFAULT_WORK_ITEM_TYPE
+      : undefined
+  )
+  if (!type) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemType',
+      `Work Item Type "${typeId}" is not defined.`,
+    )
+  }
+  if (!options.allowArchived && type.status === 'archived') {
+    throw new WorkItemConfigurationError(
+      400,
+      'ArchivedWorkItemType',
+      `Work Item Type "${typeId}" is archived and cannot be used for new Work Items.`,
+    )
+  }
+  return type
+}
+
+/**
+ * Checks whether a child Work Item Type is permitted by its parent's definition.
+ *
+ * @param configuration - Resolved Work Item configuration for the Team.
+ * @param parentTypeId - Stored type identifier of the parent Work Item.
+ * @param childTypeId - Stored type identifier of the child Work Item.
+ * @returns Nothing when the parent-child type relation is allowed.
+ * @throws WorkItemConfigurationError when either type is invalid or the relation is denied.
+ */
+export function assertWorkItemChildTypeAllowed(
+  configuration: WorkItemConfiguration,
+  parentTypeId: unknown,
+  childTypeId: unknown,
+): void {
+  const parentType = resolveWorkItemType(configuration, parentTypeId, { allowArchived: true })
+  const childType = resolveWorkItemType(configuration, childTypeId, { allowArchived: true })
+  if (parentType.allowedChildTypeIds.includes(childType.id)) return
+
+  throw new WorkItemConfigurationError(
+    409,
+    'WorkItemChildTypeDenied',
+    `Work Item Type "${childType.id}" cannot be created as a child of "${parentType.id}".`,
+  )
+}
+
+/**
+ * Resolves the workflow selected by a Work Item Type.
+ *
+ * @param configuration - Work Item configuration that owns the workflow definitions.
+ * @param typeId - Untrusted Work Item Type identifier.
+ * @param options - Whether an archived type may be used for resolution.
+ * @returns The validated workflow selected by the type.
+ * @throws WorkItemConfigurationError when the type or selected workflow is invalid.
+ */
+export function resolveWorkItemTypeWorkflow(
+  configuration: WorkItemConfiguration,
+  typeId?: unknown,
+  options: { allowArchived?: boolean } = {},
+): WorkItemConfiguration['workflow'] {
+  const type = resolveWorkItemType(configuration, typeId, options)
+  const hasExplicitType = configuration.workItemTypes?.some((candidate) => candidate.id === type.id) ?? false
+  const workflowId = type.id === DEFAULT_WORK_ITEM_TYPE_ID && !hasExplicitType
+    ? configuration.workflow.id
+    : type.defaultWorkflowId
+  const workflow = getWorkItemConfigurationWorkflows(configuration).find((candidate) =>
+    candidate.id === workflowId,
+  )
+  if (!workflow) {
+    throw invalidConfiguration(
+      `Work Item Type "${type.id}" references unavailable workflow "${workflowId}".`,
+    )
+  }
+  return workflow
+}
+
+/**
+ * Returns the custom fields visible to a Work Item Type in definition order.
+ *
+ * @param configuration - Work Item configuration containing field definitions.
+ * @param typeId - Untrusted Work Item Type identifier.
+ * @param options - Whether an archived type may be used for resolution.
+ * @returns Applicable custom field definitions in configuration order.
+ * @throws WorkItemConfigurationError when the type is unknown or archived without permission.
+ */
+export function getWorkItemTypeCustomFieldDefinitions(
+  configuration: WorkItemConfiguration,
+  typeId?: unknown,
+  options: { allowArchived?: boolean } = {},
+): readonly CustomFieldDefinition[] {
+  const type = resolveWorkItemType(configuration, typeId, options)
+  const hasExplicitType = configuration.workItemTypes?.some((candidate) => candidate.id === type.id) ?? false
+  if (type.id === DEFAULT_WORK_ITEM_TYPE_ID && !hasExplicitType) {
+    return configuration.customFields
+  }
+  const fieldIds = new Set(type.customFieldIds)
+  return configuration.customFields.filter((definition) => fieldIds.has(definition.id))
+}
+
+/**
+ * Calculates the data and workflow impact of a Work Item Type change.
+ *
+ * @param configuration - Work Item configuration used to resolve both types.
+ * @param currentTypeId - Current stored Work Item Type identifier.
+ * @param currentWorkflowStatusId - Current stored workflow status identifier.
+ * @param currentCustomFieldValues - Current stored custom field values.
+ * @param targetTypeId - Requested replacement Work Item Type identifier.
+ * @param projectId - Optional Project used for field applicability.
+ * @param expectedRevision - Revision that must still hold when applying the change.
+ * @returns Server-calculated type-change impact and resolution requirements.
+ * @throws WorkItemConfigurationError when either type cannot be resolved.
+ */
+export function previewWorkItemTypeChange(
+  configuration: WorkItemConfiguration,
+  currentTypeId: unknown,
+  currentWorkflowStatusId: string,
+  currentCustomFieldValues: Readonly<Record<string, CustomFieldValue>>,
+  targetTypeId: unknown,
+  projectId?: string,
+  expectedRevision = 0,
+): WorkItemTypeChangePreview {
+  const currentType = resolveWorkItemType(configuration, currentTypeId, { allowArchived: true })
+  const targetType = resolveWorkItemType(configuration, targetTypeId)
+  const targetWorkflow = resolveWorkItemTypeWorkflow(configuration, targetType.id)
+  const targetDefinitions = getWorkItemTypeCustomFieldDefinitions(configuration, targetType.id)
+    .filter((definition) => isFieldApplicable(definition, projectId))
+  const targetDefinitionIds = new Set(targetDefinitions.map((definition) => definition.id))
+  const lostCustomFieldIds = Object.keys(currentCustomFieldValues)
+    .filter((fieldId) => !targetDefinitionIds.has(fieldId))
+    .sort()
+  const targetStatus = targetWorkflow.statuses.find((status) => status.id === currentWorkflowStatusId)
+  const requiredCustomFieldIds = new Set([
+    ...targetDefinitions
+      .filter((definition) => definition.required)
+      .map((definition) => definition.id),
+    ...targetType.requiredCustomFieldIds,
+  ])
+  const missingRequiredCustomFieldIds = [...requiredCustomFieldIds]
+    .filter((fieldId) =>
+      targetDefinitionIds.has(fieldId) &&
+      isMissingCustomFieldValue(currentCustomFieldValues[fieldId]),
+    )
+    .sort()
+  const missingRequiredCustomFieldDefinitions = missingRequiredCustomFieldIds.flatMap((fieldId) => {
+    const definition = targetDefinitions.find((candidate) => candidate.id === fieldId)
+    return definition ? [{ ...definition, required: true }] : []
+  })
+
+  return {
+    expectedRevision,
+    currentWorkItemTypeId: currentType.id,
+    currentWorkflowStatusId,
+    targetWorkItemTypeId: targetType.id,
+    lostCustomFieldIds,
+    ...(targetStatus ? {} : { invalidWorkflowStatusId: currentWorkflowStatusId }),
+    targetInitialWorkflowStatusId: targetWorkflow.initialStatusId,
+    missingRequiredCustomFieldIds,
+    missingRequiredCustomFieldDefinitions,
+    approvalCompletionTransitionConflict: false,
+    requiresResolution: lostCustomFieldIds.length > 0 ||
+      targetStatus === undefined ||
+      missingRequiredCustomFieldIds.length > 0,
+  }
+}
+
+/** Determines whether a stored custom field value is absent for required-field preview purposes. */
+function isMissingCustomFieldValue(value: CustomFieldValue | undefined): boolean {
+  return value === undefined ||
+    typeof value === 'string' && value.length === 0 ||
+    Array.isArray(value) && value.length === 0
+}
+
+/** Validates the explicit acknowledgements required before a type change is persisted. */
+export function assertWorkItemTypeChangeResolution(
+  preview: WorkItemTypeChangePreview,
+  resolution: WorkItemTypeChangeResolution | undefined,
+  requestedWorkflowStatusId?: unknown,
+): string {
+  const discarded = [...new Set(resolution?.discardCustomFieldIds ?? [])].sort()
+  const expectedDiscarded = [...preview.lostCustomFieldIds].sort()
+  if (discarded.join('\u0000') !== expectedDiscarded.join('\u0000')) {
+    throw new WorkItemConfigurationError(
+      409,
+      'WorkItemTypeChangeResolutionRequired',
+      'Changing the Work Item Type requires an explicit resolution for every lost custom field.',
+    )
+  }
+  const requestedStatus = requestedWorkflowStatusId ?? resolution?.workflowStatusId
+  if (preview.invalidWorkflowStatusId !== undefined && requestedStatus === undefined) {
+    throw new WorkItemConfigurationError(
+      409,
+      'WorkItemTypeChangeResolutionRequired',
+      'Changing the Work Item Type requires a replacement workflow status.',
+    )
+  }
+  if (requestedStatus !== undefined && typeof requestedStatus !== 'string') {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkflowStatus',
+      'Replacement workflow status must be a string.',
+    )
+  }
+  return requestedStatus ?? (
+    preview.invalidWorkflowStatusId === undefined
+      ? preview.currentWorkflowStatusId
+      : preview.targetInitialWorkflowStatusId
+  )
+}
+
+/**
+ * Applies defaults or patches to Work Item custom field values and validates every definition.
+ *
+ * @param configuration - Work Item configuration that owns the definitions.
+ * @param input - Untrusted create values or update patch values.
+ * @param options - Operation mode and Work Item Type scope used for validation.
+ * @returns Canonical custom field values suitable for persistence.
+ * @throws WorkItemConfigurationError when a value is malformed or violates its definition.
+ */
 export function normalizeCustomFieldValues(
   configuration: WorkItemConfiguration,
   input: unknown,
   options: NormalizeCustomFieldValuesOptions,
 ) {
-  const definitions = configuration.customFields
+  const workItemType = resolveWorkItemType(configuration, options.workItemTypeId, {
+    allowArchived: true,
+  })
+  const definitions = getWorkItemTypeCustomFieldDefinitions(configuration, workItemType.id, {
+    allowArchived: true,
+  })
   const definitionsById = new Map(definitions.map((definition) => [definition.id, definition]))
+  const requiredFieldIds = new Set([
+    ...definitions.filter((definition) => definition.required).map((definition) => definition.id),
+    ...workItemType.requiredCustomFieldIds,
+  ])
   const values: Record<string, CustomFieldValue> = {}
 
   if (options.mode === 'update') {
@@ -427,12 +828,12 @@ export function normalizeCustomFieldValues(
     }
     const value = values[definition.id]
     if (value === undefined) {
-      if (definition.required && !options.allowRequiredMissing) {
+      if (requiredFieldIds.has(definition.id) && !options.allowRequiredMissing) {
         throw invalidFieldValue(`Custom field "${definition.id}" is required.`)
       }
       continue
     }
-    validateCustomFieldValue(definition, value)
+    validateCustomFieldValue(definition, value, requiredFieldIds.has(definition.id))
   }
 
   const applicableFormulaDefinitions = new Map(
@@ -462,10 +863,9 @@ export function normalizeCustomFieldValues(
         return false
       }
 
-      const referenceDefinition = definitionsById.get(reference)
       if (
         options.allowRequiredMissing &&
-        referenceDefinition?.required &&
+        requiredFieldIds.has(reference) &&
         values[reference] === undefined
       ) {
         delete values[fieldId]
@@ -484,17 +884,29 @@ export function normalizeCustomFieldValues(
   return values
 }
 
-/** Requested status、未指定時は initial status を解決します。 */
+/**
+ * Resolves a requested workflow status, or the workflow's initial status when omitted.
+ *
+ * @param configuration - Work Item configuration that owns the workflow.
+ * @param requestedStatusId - Optional untrusted requested status identifier.
+ * @param workItemTypeId - Optional Work Item Type selecting the workflow.
+ * @returns The canonical status identifier and its category.
+ * @throws WorkItemConfigurationError when the status or workflow is invalid.
+ */
 export function resolveWorkflowStatus(
   configuration: WorkItemConfiguration,
   requestedStatusId?: unknown,
+  workItemTypeId?: unknown,
 ): ResolvedWorkflowStatus {
-  const statuses = configuration.workflow.statuses
+  const workflow = workItemTypeId === undefined
+    ? configuration.workflow
+    : resolveWorkItemTypeWorkflow(configuration, workItemTypeId, { allowArchived: true })
+  const statuses = workflow.statuses
   const requested = typeof requestedStatusId === 'string'
     ? statuses.find((status) => status.id === requestedStatusId.trim())
     : undefined
   const status = requested ?? statuses.find(
-    (candidate) => candidate.id === configuration.workflow.initialStatusId,
+    (candidate) => candidate.id === workflow.initialStatusId,
   )
   if (!status) {
     throw invalidConfiguration('Workflow initial status is unavailable.')
@@ -512,27 +924,48 @@ export function resolveWorkflowStatus(
   }
 }
 
-/** Workflow transition が許可されているか判定します。 */
+/**
+ * Determines whether a workflow transition is allowed for a Work Item Type.
+ *
+ * @param configuration - Work Item configuration that owns the workflow.
+ * @param fromStatusId - Current workflow status identifier.
+ * @param toStatusId - Requested workflow status identifier.
+ * @param workItemTypeId - Optional Work Item Type selecting the workflow.
+ * @returns Whether the transition is allowed.
+ */
 export function isWorkflowTransitionAllowed(
   configuration: WorkItemConfiguration,
   fromStatusId: string,
   toStatusId: string,
+  workItemTypeId?: unknown,
 ) {
   if (fromStatusId === toStatusId) {
     return true
   }
-  return configuration.workflow.transitions.some((transition) =>
+  const workflow = workItemTypeId === undefined
+    ? configuration.workflow
+    : resolveWorkItemTypeWorkflow(configuration, workItemTypeId, { allowArchived: true })
+  return workflow.transitions.some((transition) =>
     transition.fromStatusId === fromStatusId && transition.toStatusId === toStatusId,
   )
 }
 
-/** 許可されていない workflow transition を安定した409で拒否します。 */
+/**
+ * Rejects a workflow transition that is not allowed for a Work Item Type.
+ *
+ * @param configuration - Work Item configuration that owns the workflow.
+ * @param fromStatusId - Current workflow status identifier.
+ * @param toStatusId - Requested workflow status identifier.
+ * @param workItemTypeId - Optional Work Item Type selecting the workflow.
+ * @throws WorkItemConfigurationError when the transition is not allowed.
+ */
 export function assertWorkflowTransitionAllowed(
   configuration: WorkItemConfiguration,
   fromStatusId: string,
   toStatusId: string,
+  workItemTypeId?: unknown,
 ) {
-  if (!isWorkflowTransitionAllowed(configuration, fromStatusId, toStatusId)) {
+  if (!isWorkflowTransitionAllowed(configuration, fromStatusId, toStatusId, workItemTypeId)) {
     throw new WorkItemConfigurationError(
       409,
       'WorkflowTransitionDenied',
@@ -553,6 +986,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   private readonly dynamoDbClient: DynamoDBClient
   /** Local table の自動作成を有効にするかどうかです。 */
   private readonly bootstrapLocalTable: boolean
+  /** Immutable audit event table 名です。 */
+  private readonly auditTableName?: string
 
   constructor(
     tableName =
@@ -564,6 +999,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createConfiguredDynamoDbClient(),
     bootstrapLocalTable = false,
+    auditTableName = documentClient === undefined
+      ? getConfiguredAuditTableName() ?? 'mukuroji-audit-events'
+      : undefined,
   ) {
     this.tableName = tableName
     this.workItemsTableName = workItemsTableName
@@ -571,6 +1009,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       createDocumentClient(dynamoDbClient)
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTable = bootstrapLocalTable
+    this.auditTableName = auditTableName?.trim() || undefined
   }
 
   /** Workspace default または built-in default を返します。 */
@@ -606,12 +1045,22 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     } satisfies ResolvedWorkItemConfiguration
   }
 
-  /** Workspace default を optimistic revision 付きで保存します。 */
+  /**
+   * Workspace default を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   async saveWorkspaceConfiguration(
     workspaceId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    auditContext?: MutationAuditContext,
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
@@ -620,17 +1069,29 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       configuration,
       usageCheck,
       completionTransactItems,
+      auditContext,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
 
-  /** Team override を optimistic revision 付きで保存します。 */
+  /**
+   * Team override を optimistic revision 付きで保存します。
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param teamId - Team whose configuration is being saved.
+   * @param configuration - Validated configuration carrying the expected revision.
+   * @param usageCheck - Commit-time compatibility checks and condition contributors.
+   * @param completionTransactItems - Additional transaction items to commit atomically.
+   * @param auditContext - Request audit context for the immutable configuration event.
+   * @returns The saved configuration with its incremented revision.
+   */
   async saveTeamConfiguration(
     workspaceId: string,
     teamId: string,
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    auditContext?: MutationAuditContext,
   ) {
     const saved = await this.saveConfiguration(
       workspaceId,
@@ -639,6 +1100,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       configuration,
       usageCheck,
       completionTransactItems,
+      auditContext,
     )
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
@@ -672,7 +1134,12 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   }
 
   /** Reciprocal relation を単一 transaction で作成します。 */
-  async createRelation(workspaceId: string, teamId: string, input: MutateWorkItemRelationInput) {
+  async createRelation(
+    workspaceId: string,
+    teamId: string,
+    input: MutateWorkItemRelationInput,
+    configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+  ) {
     await this.ensureTable()
     const normalized = normalizeRelationInput(input)
     const snapshot = await this.readStableRelationGraph(workspaceId, teamId)
@@ -727,6 +1194,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       createWorkItemRelationIds(nextRelations, normalized.sourceWorkItemId),
       createWorkItemRelationIds(nextRelations, normalized.targetWorkItemId),
       'create',
+      configurationConditionChecks,
     )
     return { relation, reciprocalRelation, graphRevision: nextRevision }
   }
@@ -783,6 +1251,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   private async ensureTable() {
     if (this.bootstrapLocalTable) {
       await ensureLocalWorkItemConfigurationTable(this.tableName, this.dynamoDbClient)
+      if (this.auditTableName) {
+        await ensureLocalAuditEventsTable(this.auditTableName, this.dynamoDbClient)
+      }
     }
   }
 
@@ -812,11 +1283,25 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     configuration: WorkItemConfiguration,
     usageCheck: WorkItemConfigurationUsageCheck,
     completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    auditContext?: MutationAuditContext,
   ) {
     await this.ensureTable()
     const validated = validateWorkItemConfiguration(configuration, { scopeType, scopeId })
+    if (this.auditTableName && auditContext === undefined) {
+      throw new WorkItemConfigurationError(
+        500,
+        'WorkItemConfigurationAuditContextMissing',
+        'Work Item configuration mutation audit context is required.',
+      )
+    }
+    if (auditContext && auditContext.workspaceId !== workspaceId) {
+      throw new WorkItemConfigurationError(
+        500,
+        'WorkItemConfigurationAuditContextMismatch',
+        'Work Item configuration mutation audit context does not match the target Workspace.',
+      )
+    }
     const scopeKey = createWorkItemConfigurationScopeKey(workspaceId, scopeType, scopeId)
-    const lock = await this.acquireConfigurationWriteLock(scopeKey)
     const nextRevision = validated.revision + 1
     const item = {
       ...validated,
@@ -825,6 +1310,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       revision: nextRevision,
       updatedAt: new Date().toISOString(),
     }
+    validateWorkItemConfigurationItemSize(item)
+    const lock = await this.acquireConfigurationWriteLock(scopeKey)
     const releaseLock = async () => {
       try {
         await this.releaseConfigurationWriteLock(scopeKey, lock.token)
@@ -832,56 +1319,109 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         console.error('Failed to release Work Item configuration write lock.', releaseError)
       }
     }
+    const auditEnabled = this.auditTableName !== undefined
+    let previousConfiguration: WorkItemConfiguration | undefined
+    let usageConditionChecks: WorkItemConfigurationTransactionItems = []
     try {
-      await usageCheck()
+      if (auditEnabled) {
+        previousConfiguration = await this.getStoredConfiguration(workspaceId, scopeType, scopeId)
+      }
+      usageConditionChecks = (await usageCheck()) ?? []
     } catch (error) {
       await releaseLock()
       throw error
     }
 
+    const auditPut = auditEnabled
+      ? createMutationAuditEventPut(this.auditTableName, auditContext, {
+          directoryId: workspaceId,
+          eventType: previousConfiguration
+            ? 'work-item-configuration.updated'
+            : 'work-item-configuration.created',
+          entityType: 'work-item-configuration',
+          entityId: `${scopeType}:${scopeId}`,
+          action: previousConfiguration ? 'updated' : 'created',
+          occurredAt: item.updatedAt,
+          changes: createAuditFieldChanges(
+            previousConfiguration
+              ? createWorkItemConfigurationAuditSnapshot(previousConfiguration)
+              : undefined,
+            createWorkItemConfigurationAuditSnapshot({
+              ...validated,
+              revision: nextRevision,
+            }),
+          ),
+          summary: previousConfiguration
+            ? 'Work Item configuration was updated.'
+            : 'Work Item configuration was created.',
+          metadata: {
+            adapter: 'work-item-configuration',
+            scopeType,
+            scopeId,
+            previousRevision: previousConfiguration?.revision ?? 0,
+            revision: nextRevision,
+          },
+        })
+      : undefined
+
+    const transactionItemCount = 2 + usageConditionChecks.length + completionTransactItems.length +
+      (auditPut === undefined ? 0 : 1)
+    if (transactionItemCount > DYNAMODB_TRANSACTION_ITEM_LIMIT) {
+      await releaseLock()
+      throw new WorkItemConfigurationError(
+        413,
+        'WorkItemConfigurationTransactionTooLarge',
+        'Work Item configuration changes exceed the transaction limit.',
+      )
+    }
+
     const currentEpochSeconds = Math.floor(Date.now() / 1_000)
     try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: item,
-              ...(validated.revision === 0
-                ? {
-                    ConditionExpression:
-                      'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-                  }
-                : {
-                    ConditionExpression: '#revision = :expectedRevision',
-                    ExpressionAttributeNames: { '#revision': 'revision' },
-                    ExpressionAttributeValues: { ':expectedRevision': validated.revision },
-                  }),
+      const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        {
+          Put: {
+            TableName: this.tableName,
+            Item: item,
+            ...(validated.revision === 0
+              ? {
+                  ConditionExpression:
+                    'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+                }
+              : {
+                  ConditionExpression: '#revision = :expectedRevision',
+                  ExpressionAttributeNames: { '#revision': 'revision' },
+                  ExpressionAttributeValues: { ':expectedRevision': validated.revision },
+                }),
+          },
+        },
+        {
+          Delete: {
+            TableName: this.tableName,
+            Key: { scopeKey, recordKey: CONFIGURATION_WRITE_LOCK_RECORD_KEY },
+            ConditionExpression: '#token = :token AND #expiresAt >= :now',
+            ExpressionAttributeNames: {
+              '#expiresAt': 'expiresAtEpochSeconds',
+              '#token': 'token',
+            },
+            ExpressionAttributeValues: {
+              ':now': currentEpochSeconds,
+              ':token': lock.token,
             },
           },
-          {
-            Delete: {
-              TableName: this.tableName,
-              Key: { scopeKey, recordKey: CONFIGURATION_WRITE_LOCK_RECORD_KEY },
-              ConditionExpression: '#token = :token AND #expiresAt >= :now',
-              ExpressionAttributeNames: {
-                '#expiresAt': 'expiresAtEpochSeconds',
-                '#token': 'token',
-              },
-              ExpressionAttributeValues: {
-                ':now': currentEpochSeconds,
-                ':token': lock.token,
-              },
-            },
-          },
-          ...completionTransactItems,
-        ],
-      }))
+        },
+        ...usageConditionChecks,
+        ...completionTransactItems,
+        ...(auditPut === undefined ? [] : [auditPut]),
+      ]
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
       await releaseLock()
       if (
         isNamedError(error, 'ConditionalCheckFailedException') ||
-        isConfigurationConditionalTransactionCancellation(error)
+        isConfigurationConditionalTransactionCancellation(error) ||
+        usageConditionChecks.some((_, index) =>
+          isTransactionConditionalFailureAt(error, 2 + index),
+        )
       ) {
         throw new WorkItemConfigurationError(
           409,
@@ -1023,9 +1563,11 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     sourceRelationIds: readonly string[],
     targetRelationIds: readonly string[],
     operation: 'create' | 'delete',
+    configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const scopeKey = createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId)
     const workItemPartitionKey = `${workspaceId}#team#${teamId}`
+    const configurationConditionStartIndex = 2 + 1 + edgeMutations.length
     const graphMutation = expectedRevision === 0
       ? {
           Put: {
@@ -1082,9 +1624,19 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           },
           graphMutation,
           ...edgeMutations,
+          ...configurationConditionChecks,
         ],
       }))
     } catch (error) {
+      if (configurationConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
+      )) {
+        throw new WorkItemConfigurationError(
+          409,
+          'WorkItemConfigurationRevisionConflict',
+          'Work Item configuration changed during the relation mutation.',
+        )
+      }
       if (isNamedError(error, 'TransactionCanceledException')) {
         throw await this.classifyRelationTransactionCancellation(
           workspaceId,
@@ -1243,6 +1795,67 @@ function createScopedDefaultConfiguration(
   }
 }
 
+/**
+ * Creates a bounded configuration summary suitable for an immutable audit event.
+ *
+ * The full configuration can contain user-authored option lists and formulas. Audit events keep
+ * stable identifiers and per-resource policy hashes instead of copying that unbounded payload
+ * into the audit table. Each Work Item Type is kept as its own fixed-size policy record so a
+ * single type edit cannot turn the whole type collection into one oversized audit value.
+ *
+ * @param configuration - Validated Work Item configuration to summarize.
+ * @returns A deterministic, bounded summary of the configuration structure.
+ */
+function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfiguration) {
+  return {
+    revision: configuration.revision,
+    workflowIds: getWorkItemConfigurationWorkflows(configuration)
+      .map((workflow) => workflow.id)
+      .sort(),
+    workflowPolicies: getWorkItemConfigurationWorkflows(configuration)
+      .map((workflow) => ({
+        id: workflow.id,
+        policyHash: createWorkItemConfigurationPolicyHash(workflow),
+      }))
+      .sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0),
+    customFieldIds: configuration.customFields
+      .map((field) => field.id)
+      .sort(),
+    customFieldPolicies: configuration.customFields
+      .map((field) => ({
+        id: field.id,
+        policyHash: createWorkItemConfigurationPolicyHash(field),
+      }))
+      .sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0),
+    workItemTypes: (configuration.workItemTypes ?? [])
+      .map((type) => ({
+        id: type.id,
+        policyHash: createWorkItemConfigurationPolicyHash(type),
+      }))
+      .sort((first, second) => first.id < second.id ? -1 : first.id > second.id ? 1 : 0),
+  }
+}
+
+/** Creates a stable SHA-256 fingerprint for a mutable configuration policy. */
+function createWorkItemConfigurationPolicyHash(value: unknown): string {
+  return `sha256:${createHash('sha256').update(stableSerializeConfigurationValue(value)).digest('hex')}`
+}
+
+/** Serializes configuration values with sorted object keys for deterministic hashing. */
+function stableSerializeConfigurationValue(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'undefined'
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => stableSerializeConfigurationValue(entry)).join(',')}]`
+  }
+  return `{${Object.entries(value)
+    .filter(([, entry]) => entry !== undefined)
+    .sort(([first], [second]) => first < second ? -1 : first > second ? 1 : 0)
+    .map(([key, entry]) => `${JSON.stringify(key)}:${stableSerializeConfigurationValue(entry)}`)
+    .join(',')}}`
+}
+
 function createConfigurationGuards(
   workspaceId: string,
   teamId: string,
@@ -1260,6 +1873,136 @@ function createConfigurationGuards(
       revision: resolved.inheritedFrom === 'workspace' ? resolved.configuration.revision : 0,
     },
   ]
+}
+
+function readWorkflowDefinitions(value: unknown): WorkItemConfiguration['workflow'][] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw invalidConfiguration('Workflows must be an array with at most 100 entries.')
+  }
+  const workflows = value.map((workflow) => validateWorkflowDefinition(workflow))
+  assertUnique(workflows.map((workflow) => workflow.id), 'Workflow ID')
+  return workflows
+}
+
+function readWorkItemTypeDefinitions(
+  value: unknown,
+  customFields: readonly CustomFieldDefinition[],
+  workflows: readonly WorkItemConfiguration['workflow'][],
+): WorkItemTypeDefinition[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw invalidConfiguration('Work Item Types must be an array with at most 100 entries.')
+  }
+  const types = value.map((candidate) => readWorkItemTypeDefinition(candidate))
+  assertUnique(types.map((type) => type.id), 'Work Item Type ID')
+  assertUnique(types.map((type) => type.sortOrder), 'Work Item Type sortOrder')
+  const customFieldIds = new Set(customFields.map((definition) => definition.id))
+  const customFieldsById = new Map(customFields.map((definition) => [definition.id, definition]))
+  const workflowIds = new Set(workflows.map((workflow) => workflow.id))
+  const typeIds = new Set([...types.map((type) => type.id), DEFAULT_WORK_ITEM_TYPE_ID])
+  for (const type of types) {
+    if (!workflowIds.has(type.defaultWorkflowId)) {
+      throw invalidConfiguration(
+        `Work Item Type "${type.id}" references unknown workflow "${type.defaultWorkflowId}".`,
+      )
+    }
+    if (type.customFieldIds.some((fieldId) => !customFieldIds.has(fieldId))) {
+      throw invalidConfiguration(`Work Item Type "${type.id}" references an unknown custom field.`)
+    }
+    if (type.requiredCustomFieldIds.some((fieldId) => !type.customFieldIds.includes(fieldId))) {
+      throw invalidConfiguration(
+        `Work Item Type "${type.id}" has a required custom field that is not available.`,
+      )
+    }
+    if (type.requiredCustomFieldIds.some((fieldId) => customFieldsById.get(fieldId)?.type === 'formula')) {
+      throw invalidConfiguration(`Work Item Type "${type.id}" cannot require a formula field.`)
+    }
+    const typeFieldIds = new Set(type.customFieldIds)
+    for (const fieldId of type.customFieldIds) {
+      const definition = customFieldsById.get(fieldId)
+      if (definition?.type !== 'formula') continue
+      const missingReference = readFormulaReferences(definition.formulaExpression ?? '')
+        .find((reference) => !typeFieldIds.has(reference))
+      if (missingReference) {
+        throw invalidConfiguration(
+          `Work Item Type "${type.id}" formula field "${fieldId}" references an unavailable field "${missingReference}".`,
+        )
+      }
+    }
+    if (type.allowedChildTypeIds.some((childTypeId) => !typeIds.has(childTypeId))) {
+      throw invalidConfiguration(`Work Item Type "${type.id}" references an unknown child type.`)
+    }
+  }
+  return types
+}
+
+function readWorkItemTypeDefinition(value: unknown): WorkItemTypeDefinition {
+  if (!isRecord(value)) {
+    throw invalidConfiguration('Work Item Type definition must be an object.')
+  }
+  const customFieldIds = readConfigurationIdList(value.customFieldIds, 'Work Item Type custom field IDs')
+  const requiredCustomFieldIds = readConfigurationIdList(
+    value.requiredCustomFieldIds,
+    'Work Item Type required custom field IDs',
+  )
+  const detailSections = readDetailSections(value.detailSections)
+  const allowedChildTypeIds = readConfigurationIdList(
+    value.allowedChildTypeIds,
+    'Work Item Type child type IDs',
+  )
+  if (value.status !== 'active' && value.status !== 'archived') {
+    throw invalidConfiguration('Work Item Type status is invalid.')
+  }
+  return {
+    id: readConfigurationId(value.id, 'Work Item Type ID'),
+    name: readDisplayName(value.name, 'Work Item Type name'),
+    iconToken: readConfigurationId(value.iconToken, 'Work Item Type icon token'),
+    ...(value.description === undefined
+      ? {}
+      : { description: readBoundedText(value.description, 'Work Item Type description', 2_000) }),
+    status: value.status,
+    defaultWorkflowId: readConfigurationId(value.defaultWorkflowId, 'Work Item Type workflow ID'),
+    customFieldIds,
+    requiredCustomFieldIds,
+    detailSections,
+    allowedChildTypeIds,
+    sortOrder: readNonNegativeInteger(value.sortOrder, 'Work Item Type sortOrder'),
+  }
+}
+
+function readConfigurationIdList(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length > 100) {
+    throw invalidConfiguration(`${label} must be an array with at most 100 entries.`)
+  }
+  const values = value.map((candidate) => readConfigurationId(candidate, label))
+  assertUnique(values, label)
+  return values
+}
+
+function readDetailSections(value: unknown): WorkItemDetailSectionId[] {
+  if (!Array.isArray(value) || value.length > 20) {
+    throw invalidConfiguration('Work Item Type detail sections must be an array with at most 20 entries.')
+  }
+  const sections = value.map((candidate) => {
+    if (!isWorkItemDetailSectionId(candidate)) {
+      throw invalidConfiguration('Work Item Type detail section is invalid.')
+    }
+    return candidate
+  })
+  assertUnique(sections, 'Work Item Type detail section')
+  return sections
+}
+
+function readBoundedText(value: unknown, label: string, maxLength: number): string {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    throw invalidConfiguration(`${label} is invalid.`)
+  }
+  return value.trim()
+}
+
+function isWorkItemDetailSectionId(value: unknown): value is WorkItemDetailSectionId {
+  return value === 'overview' || value === 'description' || value === 'custom-fields' ||
+    value === 'workflow' || value === 'schedule' || value === 'relations' ||
+    value === 'files' || value === 'activity'
 }
 
 function readCustomFieldDefinitions(value: unknown) {
@@ -1514,9 +2257,20 @@ function readCustomFieldValue(
   return value.trim()
 }
 
-function validateCustomFieldValue(definition: CustomFieldDefinition, value: CustomFieldValue) {
+/**
+ * Validates a normalized custom field value against its definition and Work Item Type scope.
+ *
+ * @param definition - Custom field definition that owns the value.
+ * @param value - Normalized custom field value to validate.
+ * @param required - Whether the value is required for the current Work Item Type.
+ */
+function validateCustomFieldValue(
+  definition: CustomFieldDefinition,
+  value: CustomFieldValue,
+  required = definition.required,
+) {
   if (
-    definition.required &&
+    required &&
     ((typeof value === 'string' && value.length === 0) ||
       (Array.isArray(value) && value.length === 0))
   ) {
@@ -2199,12 +2953,23 @@ function isConfigurationConditionalTransactionCancellation(error: unknown) {
     return false
   }
   const reasons = error.CancellationReasons
-  if (!Array.isArray(reasons) || reasons.length !== 2) {
+  if (!Array.isArray(reasons) || reasons.length < 2) {
     return false
   }
-  const reasonCodes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
+  const reasonCodes = reasons.slice(0, 2).map((reason) => isRecord(reason) ? reason.Code : undefined)
   return reasonCodes.includes('ConditionalCheckFailed') &&
     reasonCodes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')
+}
+
+/** Returns whether a DynamoDB transaction cancellation identifies a conditional failure at an index. */
+function isTransactionConditionalFailureAt(error: unknown, index: number) {
+  if (!isNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  return Array.isArray(reasons) &&
+    isRecord(reasons[index]) &&
+    reasons[index].Code === 'ConditionalCheckFailed'
 }
 
 function invalidConfiguration(message: string) {

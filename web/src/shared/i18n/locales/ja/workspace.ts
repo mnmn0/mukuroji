@@ -29,6 +29,8 @@ export const workspaceMessages = {
   'workspace.focus.section.snoozed': 'スヌーズ中',
   'workspace.focus.section.done': '完了',
   'workspace.focus.generatedAt': '{time} 時点',
+  'workspace.focus.filter.workItemType': 'Work Item Type',
+  'workspace.focus.filter.allTypes': 'すべてのタイプ',
   'workspace.focus.loading': 'フォーカスキューを読み込んでいます',
   'workspace.focus.loadError': 'フォーカスキューを読み込めませんでした。',
   'workspace.focus.overviewStale':

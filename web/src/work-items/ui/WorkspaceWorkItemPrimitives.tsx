@@ -1,8 +1,9 @@
 /* eslint-disable react-refresh/only-export-components -- Work Item test ID helpers share this component module. */
-import type {
-  WorkflowStatusDefinition,
-  WorkItemConfiguration,
-  TaskViewDensity,
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  type TaskViewDensity,
+  type WorkflowStatusDefinition,
+  type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { useRef, type DragEvent } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -17,6 +18,8 @@ import {
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeLabel,
   resolveWorkItemWorkflowStatusId,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowCategoryToneClassName,
@@ -24,6 +27,7 @@ import {
 } from '../model/workItemDisplay'
 import { isOpenableWorkspaceTask } from '../model/workspaceWorkItems'
 import { WorkItemAssigneeAvatar } from './WorkItemAssigneeAvatar'
+import { WorkItemTypeIcon } from './WorkItemTypeIcon'
 
 /**
  * Props for a Work Item row in a Workspace action list.
@@ -281,6 +285,21 @@ export function CompactTaskCard({
           </button>
         ) : null}
       </div>
+      {visibleFields.includes('workItemType') ? (
+        <span
+          className="mt-2 inline-flex max-w-full items-center gap-1.5 workbench-badge"
+          data-work-item-type-id={task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE.id}
+        >
+          <WorkItemTypeIcon
+            className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
+            iconToken={resolveWorkItemTypeDefinition(
+              configuration,
+              task.workItemTypeId,
+            )?.iconToken ?? DEFAULT_WORK_ITEM_TYPE.iconToken}
+          />
+          <span className="truncate">{resolveWorkItemTypeLabel(task, configuration)}</span>
+        </span>
+      ) : null}
       {visibleFields.includes('assignee') ? (
         <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">
           {showAssigneeAvatar ? (

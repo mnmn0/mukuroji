@@ -31,6 +31,7 @@ export function readTriageRouteState(searchParams: URLSearchParams): TriageRoute
   const source = readSourceKind(searchParams.get('source'))
   const owner = readOwnerFilter(searchParams.get('owner'))
   const sla = readSlaFilter(searchParams.get('sla'))
+  const workItemTypeId = readTrimmed(searchParams.get('workItemTypeId'))
 
   return {
     filters: {
@@ -39,6 +40,7 @@ export function readTriageRouteState(searchParams: URLSearchParams): TriageRoute
       ...(sla ? { sla } : {}),
       ...(source ? { source } : {}),
       ...(state ? { state } : {}),
+      ...(workItemTypeId ? { workItemTypeId } : {}),
     },
     view: searchParams.get('view') === 'settings' ? 'settings' : 'queue',
     ...(entryId ? { entryId } : {}),
@@ -62,6 +64,7 @@ export function createTriageSearchParams(state: TriageRouteState) {
     searchParams.set('owner', state.filters.owner)
   }
   if (state.filters.sla) searchParams.set('sla', state.filters.sla)
+  if (state.filters.workItemTypeId) searchParams.set('workItemTypeId', state.filters.workItemTypeId)
   return searchParams
 }
 

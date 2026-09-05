@@ -18,6 +18,7 @@ import type {
   UpdateRequestFormInput,
   WorkItemPriority,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import type {
   RequestAnswerValue,
   RequestFieldValidation,
@@ -121,6 +122,8 @@ export type RequestAttachmentPolicyDraft = {
 export type RequestRoutingDraft = {
   /** Work Item を所有する Team ID です。 */
   teamId: string
+  /** Work Item の作成に利用する Work Item Type ID です。 */
+  workItemTypeId: string
   /** Work Item を割り当てる任意 Project ID です。 */
   projectId: string
   /** Work Item 作成時に適用する workflow status ID です。 */
@@ -161,6 +164,8 @@ export type RequestRoutingRuleDraft = {
 export type RequestRoutingTargetDraft = {
   /** Work Item を所有する Team ID です。 */
   teamId: string
+  /** Work Item の作成に利用する Work Item Type ID です。 */
+  workItemTypeId: string
   /** Work Item の任意 Project ID です。 */
   projectId: string
   /** Work Item の任意 workflow status ID です。 */
@@ -291,6 +296,8 @@ export type RequestSubmissionModel = {
   capabilities: RequestSubmission['capabilities']
   /** Submit 時点で固定した routing target です。 */
   routing: RequestSubmission['routingTarget']
+  /** Submit 時点で固定した Work Item field mapping です。 */
+  workItemMapping: RequestSubmission['workItemMapping']
 }
 
 /**
@@ -360,6 +367,7 @@ export function createEmptyRequestFormDraft(): RequestFormDraftModel {
       priority: 'medium',
       projectId: '',
       teamId: '',
+      workItemTypeId: DEFAULT_WORK_ITEM_TYPE_ID,
       titleFieldId: '',
       workflowStatusId: '',
       rules: [],
@@ -393,6 +401,7 @@ export function synchronizeRequestRoutingTeam(
         ...target,
         projectId: '',
         teamId,
+        workItemTypeId: DEFAULT_WORK_ITEM_TYPE_ID,
         workflowStatusId: '',
       }
   const defaultTarget = synchronizeTarget(routing)
@@ -401,6 +410,7 @@ export function synchronizeRequestRoutingTeam(
     ...routing,
     projectId: defaultTarget.projectId,
     teamId: defaultTarget.teamId,
+    workItemTypeId: defaultTarget.workItemTypeId,
     workflowStatusId: defaultTarget.workflowStatusId,
     rules: routing.rules.map((rule) => ({
       ...rule,
@@ -430,6 +440,7 @@ export function isRequestFormDraftModelValid(model: RequestFormDraftModel) {
     !hasLocalizedText(text) || hasDefaultText(text)
   const targetIsValid = (target: RequestRoutingTargetDraft) =>
     Boolean(target.teamId.trim()) &&
+    Boolean(target.workItemTypeId.trim()) &&
     Boolean(target.assigneeUserId.trim()) &&
     Number.isInteger(target.dueDateOffsetDays) &&
     target.dueDateOffsetDays >= 0 &&
@@ -683,6 +694,15 @@ export function normalizeRequestSubmission(submission: RequestSubmission): Reque
     source: submission.source,
     status: submission.status,
     summary: typeof summary === 'string' ? summary : submission.receiptId,
+    workItemMapping: {
+      ...submission.workItemMapping,
+      ...(submission.workItemMapping.descriptionFieldIds === undefined
+        ? {}
+        : { descriptionFieldIds: [...submission.workItemMapping.descriptionFieldIds] }),
+      ...(submission.workItemMapping.customFieldMappings === undefined
+        ? {}
+        : { customFieldMappings: { ...submission.workItemMapping.customFieldMappings } }),
+    },
     workItem: submission.workItem
       ? {
           id: submission.workItem.workItemId,
@@ -975,6 +995,7 @@ function normalizeRoutingTarget(target: RequestFormRoutingTarget): RequestRoutin
     priority: target.priority,
     projectId: target.projectId ?? '',
     teamId: target.teamId,
+    workItemTypeId: target.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     workflowStatusId: target.workflowStatusId ?? '',
   }
 }
@@ -986,6 +1007,7 @@ function serializeRoutingTarget(target: RequestRoutingTargetDraft): RequestFormR
     priority: target.priority,
     projectId: target.projectId || undefined,
     teamId: target.teamId,
+    workItemTypeId: target.workItemTypeId || DEFAULT_WORK_ITEM_TYPE_ID,
     workflowStatusId: target.workflowStatusId || undefined,
   }
 }

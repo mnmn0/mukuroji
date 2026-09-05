@@ -72,6 +72,8 @@ export type AiAssistanceAllowedValues = {
   teamIds: readonly string[]
   /** Project identifiers visible to the current operator. */
   projectIds: readonly string[]
+  /** Work Item Type identifiers visible to the current operator. */
+  workItemTypeIds: readonly string[]
   /** Custom field identifiers visible to the current operator. */
   customFieldIds: readonly string[]
   /** Team-scoped writable custom-field definitions used for model-output validation. */

@@ -5,7 +5,10 @@ const {
   app,
   configureFakeProjectClients,
   createFakeWorkItemConfigurationClient,
+  createFileProofingStub,
+  createTeamIssuesFake,
   createTestWorkItemConfiguration,
+  getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
@@ -19,6 +22,7 @@ import {
   WorkItemConfigurationError,
 } from '../../work-item-configuration'
 import {
+  DEFAULT_WORK_ITEM_TYPE,
   createDefaultDueDateWorkItemSchedule,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -130,6 +134,44 @@ test('reads and saves Workspace Work Item configuration through the authenticate
   }])
 })
 
+test('keeps Workspace configuration validation transaction items bounded across many Teams', async () => {
+  configureFakeProjectClients(true, {
+    additionalTeams: Array.from({ length: 100 }, (_, index) => ({
+      id: `team-${index + 1}`,
+      name: `Team ${index + 1}`,
+      projects: [{ id: `project-${index + 1}`, name: `Project ${index + 1}`, tone: 'blue' as const }],
+    })),
+  })
+  let usageConditionChecks: unknown
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveWorkspaceConfiguration(workspaceId, configuration, compatibilityCheck) {
+        usageConditionChecks = await compatibilityCheck()
+        return {
+          configuration: {
+            ...configuration,
+            scopeType: 'workspace',
+            scopeId: workspaceId,
+            revision: configuration.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(createTestWorkItemConfiguration('workspace', 'user#demo@example.com')),
+  })
+
+  expect(response.status).toBe(200)
+  expect(usageConditionChecks).toHaveLength(1)
+})
+
 test('reads and saves Team Work Item configuration for a Team manager', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   const stored = createTestWorkItemConfiguration('team', 'core-team', 2)
@@ -225,7 +267,15 @@ test('denies Work Item configuration writes outside the required administration 
 test('rejects a configuration change that conflicts with an existing Work Item', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   let writes = 0
+  let usageReadOptions: { consistentRead?: boolean; includeArchived?: boolean } | undefined
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
   setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues(directoryId, teamId, options) {
+        usageReadOptions = options
+        return existingTeamIssues.getTeamIssues(directoryId, teamId, options)
+      },
+    }),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
         await compatibilityCheck()
@@ -256,7 +306,73 @@ test('rejects a configuration change that conflicts with an existing Work Item',
   expect(await response.json()).toMatchObject({
     code: 'WorkItemConfigurationInUse',
   })
+  expect(usageReadOptions).toMatchObject({
+    consistentRead: true,
+    includeArchived: true,
+  })
   expect(writes).toBe(0)
+})
+
+test('allows existing incomplete backlog Work Items during configuration validation', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'effort',
+    name: 'Effort',
+    type: 'number',
+    sortOrder: 10,
+    required: true,
+  }]
+  configuration.workflow.statuses.unshift({
+    id: 'triage',
+    name: 'Triage',
+    category: 'backlog',
+    sortOrder: 5,
+  })
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
+  let writes = 0
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssues(directoryId, teamId, options) {
+        const response = await existingTeamIssues.getTeamIssues(directoryId, teamId, options)
+        return {
+          ...response,
+          issues: response.issues.map((issue, index) => index === 0
+            ? { ...issue, statusCategory: 'backlog', workflowStatusId: 'triage' }
+            : issue),
+        }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async saveTeamConfiguration(_workspaceId, teamId, value, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return {
+          configuration: {
+            ...value,
+            scopeType: 'team',
+            scopeId: teamId,
+            revision: value.revision + 1,
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(configuration),
+  })
+
+  expect(response.status).toBe(200)
+  expect(writes).toBe(1)
 })
 
 test('rejects missing required custom fields before creating a Work Item', async () => {
@@ -475,6 +591,321 @@ test('rejects a disallowed configured workflow transition before updating a Work
     message: 'Transition from "in-progress" to "done" is not allowed.',
   })
   expect(calls.issueUpdates).toEqual([])
+})
+
+test('rejects a disallowed status transition when changing type within one workflow', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workflow.transitions = configuration.workflow.transitions.filter((transition) =>
+    !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+  )
+  configuration.workItemTypes = [
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: configuration.workflow.id,
+      sortOrder: 0,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'bug',
+      name: 'Bug',
+      defaultWorkflowId: configuration.workflow.id,
+      sortOrder: 10,
+    },
+  ]
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      workItemTypeId: 'bug',
+      workflowStatusId: 'done',
+      typeChangeResolution: { discardCustomFieldIds: [] },
+      expectedRevision: 1,
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkflowTransitionDenied',
+    message: 'Transition from "in-progress" to "done" is not allowed.',
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('rejects a Work Item Type change that breaks a pending approval completion transition', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const targetWorkflow = {
+    ...configuration.workflow,
+    id: 'bug-workflow',
+    name: 'Bug workflow',
+    transitions: configuration.workflow.transitions.filter((transition) =>
+      !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+    ),
+  }
+  configuration.workflows = [targetWorkflow]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'bug',
+    name: 'Bug',
+    defaultWorkflowId: targetWorkflow.id,
+    sortOrder: 10,
+  }]
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listPendingWorkItemApprovalCompletionTransitions() {
+        return [{
+          approvalId: 'approval-1',
+          revision: 1,
+          completionTransition: 'done',
+          conditionCheck: {
+            ConditionCheck: {
+              TableName: 'FileProofingTable',
+              Key: {
+                recordKey: 'APPROVAL#approval-1',
+                scopeKey: 'user%23demo%40example.com%23team%23core-team',
+              },
+              ConditionExpression: 'attribute_exists(scopeKey)',
+            },
+          },
+        }]
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      workItemTypeId: 'bug',
+      expectedRevision: 1,
+    }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemApprovalCompletionTransitionConflict',
+    message: 'Pending approval "approval-1" cannot complete after this Work Item Type change.',
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('reports pending approval completion conflicts in a Work Item Type preview', async () => {
+  configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  const targetWorkflow = {
+    ...configuration.workflow,
+    id: 'bug-workflow',
+    name: 'Bug workflow',
+    transitions: configuration.workflow.transitions.filter((transition) =>
+      !(transition.fromStatusId === 'in-progress' && transition.toStatusId === 'done')
+    ),
+  }
+  configuration.workflows = [targetWorkflow]
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'bug',
+    name: 'Bug',
+    defaultWorkflowId: targetWorkflow.id,
+    sortOrder: 10,
+  }]
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listPendingWorkItemApprovalCompletionTransitions() {
+        return [{
+          approvalId: 'approval-1',
+          revision: 1,
+          completionTransition: 'done',
+          conditionCheck: {
+            ConditionCheck: {
+              TableName: 'FileProofingTable',
+              Key: {
+                recordKey: 'APPROVAL#approval-1',
+                scopeKey: 'user%23demo%40example.com%23team%23core-team',
+              },
+              ConditionExpression: 'attribute_exists(scopeKey)',
+            },
+          },
+        }]
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/work-item-type-preview',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedRevision: 1,
+        targetWorkItemTypeId: 'bug',
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    approvalCompletionTransitionConflict: true,
+    requiresResolution: true,
+  })
+})
+
+test('redacts pending approval storage failures from Work Item Type changes', async () => {
+  configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workItemTypes = [{
+    ...DEFAULT_WORK_ITEM_TYPE,
+    id: 'bug',
+    name: 'Bug',
+    defaultWorkflowId: configuration.workflow.id,
+    sortOrder: 10,
+  }]
+  setTestAppDependencies({
+    fileProofing: createFileProofingStub({
+      async listPendingWorkItemApprovalCompletionTransitions() {
+        throw new Error('DynamoDB secret table details')
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      workItemTypeId: 'bug',
+      expectedRevision: 1,
+    }),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'WorkItemConfigurationDependencyUnavailable',
+    message: 'Pending Work Item approval transitions could not be inspected.',
+  })
+})
+
+test('validates parent relation type restrictions from the child source perspective', async () => {
+  configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.workItemTypes = [
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      defaultWorkflowId: configuration.workflow.id,
+      sortOrder: 0,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'parent',
+      name: 'Parent',
+      iconToken: 'folder',
+      allowedChildTypeIds: ['child'],
+      sortOrder: 10,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'child',
+      name: 'Child',
+      iconToken: 'check',
+      allowedChildTypeIds: [],
+      sortOrder: 20,
+    },
+  ]
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
+  const creates: unknown[] = []
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssueDetail(directoryId, teamId, issueId, readOptions) {
+        const detail = await existingTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          readOptions,
+        )
+        return {
+          ...detail,
+          issue: {
+            ...detail.issue,
+            workItemTypeId: issueId === 'onboarding-friction' ? 'child' : 'parent',
+          },
+        }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+      async createRelation(_workspaceId, _teamId, input) {
+        creates.push(input)
+        return {
+          relation: {
+            sourceWorkItemId: input.sourceWorkItemId,
+            targetWorkItemId: input.targetWorkItemId,
+            type: input.type,
+          },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'child',
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/relations',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        type: 'parent',
+        targetWorkItemId: 'parent-issue',
+        expectedGraphRevision: 0,
+      }),
+    },
+  )
+
+  expect(response.status).toBe(201)
+  expect(creates).toHaveLength(1)
 })
 
 test('calls reciprocal relation mutations and preserves their stable conflict response', async () => {

@@ -80,6 +80,98 @@ export type WorkspaceSearchDateFilter = {
   to?: string
 }
 
+/** Parts of a collision-safe Team-qualified Work Item Type filter key. */
+export type SearchWorkItemTypeKeyParts = {
+  /** Team that owns the Work Item Type. */
+  teamId: string
+  /** Stable Work Item Type identifier within the Team. */
+  workItemTypeId: string
+}
+
+/**
+ * Creates the canonical Team-qualified Work Item Type key used by Workspace Search.
+ *
+ * @param teamId - Team that owns the Work Item Type.
+ * @param workItemTypeId - Stable Work Item Type identifier within the Team.
+ * @returns Collision-safe filter key containing both identities.
+ */
+export function createSearchWorkItemTypeKey(
+  teamId: string,
+  workItemTypeId: string,
+): string {
+  return `${teamId}\0${workItemTypeId}`
+}
+
+/**
+ * Reads a Team-qualified Work Item Type key without accepting malformed values.
+ *
+ * @param value - Candidate Search filter key.
+ * @returns Parsed Team and Work Item Type identities, or undefined for an invalid key.
+ */
+export function readSearchWorkItemTypeKey(
+  value: string,
+): SearchWorkItemTypeKeyParts | undefined {
+  const separatorIndex = value.indexOf('\0')
+  if (
+    separatorIndex <= 0 ||
+    separatorIndex === value.length - 1 ||
+    value.indexOf('\0', separatorIndex + 1) !== -1
+  ) {
+    return undefined
+  }
+
+  return {
+    teamId: value.slice(0, separatorIndex),
+    workItemTypeId: value.slice(separatorIndex + 1),
+  }
+}
+
+/** Parts of a collision-safe Team and Work Item Type-qualified workflow status key. */
+export type SearchWorkItemStatusKeyParts = {
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Stable Work Item Type identifier within the Team. */
+  workItemTypeId: string
+  /** Stable workflow status identifier within the Work Item Type workflow. */
+  statusId: string
+}
+
+/**
+ * Creates the canonical Team and Work Item Type-qualified workflow status key used by Workspace Search.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemTypeId - Stable Work Item Type identifier within the Team.
+ * @param statusId - Stable workflow status identifier within the Work Item Type workflow.
+ * @returns Collision-safe filter key containing all three identities.
+ */
+export function createSearchWorkItemStatusKey(
+  teamId: string,
+  workItemTypeId: string,
+  statusId: string,
+): string {
+  return `${teamId}\0${workItemTypeId}\0${statusId}`
+}
+
+/**
+ * Reads a Team and Work Item Type-qualified workflow status key without accepting malformed values.
+ *
+ * @param value - Candidate Search filter key.
+ * @returns Parsed Team, Work Item Type, and status identities, or undefined for an invalid key.
+ */
+export function readSearchWorkItemStatusKey(
+  value: string,
+): SearchWorkItemStatusKeyParts | undefined {
+  const parts = value.split('\0')
+  if (parts.length !== 3 || parts.some((part) => part.length === 0)) {
+    return undefined
+  }
+
+  const [teamId, workItemTypeId, statusId] = parts
+  if (!teamId || !workItemTypeId || !statusId) return undefined
+
+  return { statusId, teamId, workItemTypeId }
+}
+
 /**
  * Workspace 横断検索で組み合わせられる filter set です。
  */
@@ -101,7 +193,7 @@ export type WorkspaceSearchFilters = {
    */
   creatorUserIds?: string[]
   /**
-   * Workflow status code 候補です。
+   * Workflow status ID または Team/Work Item Type-qualified status key (`teamId\0workItemTypeId\0statusId`) の候補です。
    */
   statuses?: string[]
   /**
@@ -124,6 +216,11 @@ export type WorkspaceSearchFilters = {
    * Team scope の候補です。
    */
   teamIds?: string[]
+  /**
+   * Team-qualified Work Item Type keys (`teamId\0workItemTypeId`) の候補です。
+   * Work Item 以外の entity には一致しません。
+   */
+  workItemTypeIds?: string[]
 }
 
 /**
@@ -206,6 +303,10 @@ export type WorkspaceSearchResult = {
    * Entity の workflow status code です。
    */
   status?: string
+  /**
+   * Work Item に適用された stable Work Item Type ID です。
+   */
+  workItemTypeId?: string
   /**
    * Entity の custom field value map です。
    */

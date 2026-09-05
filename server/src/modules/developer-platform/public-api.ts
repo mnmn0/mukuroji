@@ -23,6 +23,9 @@ import {
   type ImportDryRunReport,
   type ImportJob,
   type ImportSource,
+  type PublicWorkItemTypeCatalog,
+  type PublicWorkItemTypeChangePreview,
+  type PreviewPublicWorkItemTypeChangeRequest,
   type ResolveWorkItemSyncConflictInput,
   type UpdatePublicWorkItemRequest,
   type UpdateWebhookSubscriptionInput,
@@ -30,6 +33,7 @@ import {
   type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleWeekday,
   type WorkItemSyncConflict,
+  type WorkItemTypeChangeResolution,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
 import type {
@@ -48,6 +52,7 @@ import type {
 } from './application/ports'
 import { DeveloperPlatformError } from './errors'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
+import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
 export const PUBLIC_API_RATE_LIMIT = 120
@@ -126,6 +131,26 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
+  /** Returns active Work Item Types and creation field schemas after current RBAC checks. */
+  listWorkItemTypes(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+  ): Promise<PublicWorkItemTypeCatalog>
+  /**
+   * Calculates the impact of a Work Item Type change after current authorization and revision checks.
+   *
+   * @param credential - Authenticated developer credential that owns the request.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item whose type would change.
+   * @param input - Target type, optional Project proposal, and expected revision.
+   * @returns Server-calculated field and workflow impact without mutating the Work Item.
+   */
+  previewTypeChange(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    input: PreviewPublicWorkItemTypeChangeRequest,
+  ): Promise<PublicWorkItemTypeChangePreview>
   /** Work Item 作成 receipt の replay 前に current create RBAC を再評価します。 */
   authorizeCreate(
     credential: AuthenticatedDeveloperCredential,
@@ -550,6 +575,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ))
   })
 
+  router.get('/v1/work-item-types', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.listWorkItemTypes(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+    ))
+  })
+
   router.get('/v1/work-items/:workItemId', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.get(
@@ -557,6 +590,20 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.post('/v1/work-items/:workItemId/work-item-type-preview', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const body = readPreviewPublicWorkItemTypeChangeRequest(await readJson(c))
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const preview = await dependencies.workItems.previewTypeChange(
+      credential,
+      teamId,
+      workItemId,
+      body,
+    )
+    return c.json(projectPublicWorkItemTypeChangePreview(preview, undefined))
   })
 
   router.post('/v1/work-items', async (c) => {
@@ -2448,6 +2495,7 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'customFieldValues',
     'schedule',
     'priority',
+    'workItemTypeId',
   ], 'Work Item body')
   const description = readOptionalString(body.description, 'description', 100_000)
   return {
@@ -2462,6 +2510,9 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
       : {}),
     ...(body.workflowStatusId !== undefined
       ? { workflowStatusId: readIdentifier(body.workflowStatusId, 'workflowStatusId') }
+      : {}),
+    ...(body.workItemTypeId !== undefined
+      ? { workItemTypeId: readIdentifier(body.workItemTypeId, 'workItemTypeId') }
       : {}),
     ...(body.customFieldValues !== undefined
       ? { customFieldValues: readCustomFieldValues(body.customFieldValues, false) }
@@ -2481,6 +2532,8 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
     'customFieldValues',
     'schedule',
     'priority',
+    'workItemTypeId',
+    'typeChangeResolution',
   ], 'Work Item patch')
   const result: UpdatePublicWorkItemRequest = {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
@@ -2498,6 +2551,12 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   if ('workflowStatusId' in body) {
     result.workflowStatusId = readIdentifier(body.workflowStatusId, 'workflowStatusId')
   }
+  if ('workItemTypeId' in body) {
+    result.workItemTypeId = readIdentifier(body.workItemTypeId, 'workItemTypeId')
+  }
+  if ('typeChangeResolution' in body) {
+    result.typeChangeResolution = readPublicWorkItemTypeChangeResolution(body.typeChangeResolution)
+  }
   if ('customFieldValues' in body) {
     result.customFieldValues = readCustomFieldValues(body.customFieldValues, true)
   }
@@ -2513,11 +2572,62 @@ function readUpdatePublicWorkItemRequest(value: unknown): UpdatePublicWorkItemRe
   return result
 }
 
+/**
+ * Reads a public Work Item Type change preview request.
+ *
+ * @param value - Untrusted JSON request body.
+ * @returns A validated preview request.
+ */
+function readPreviewPublicWorkItemTypeChangeRequest(
+  value: unknown,
+): PreviewPublicWorkItemTypeChangeRequest {
+  const body = requireRecord(value, 'Work Item Type preview body is required.')
+  assertAllowedFields(
+    body,
+    ['expectedRevision', 'targetWorkItemTypeId', 'assignedProjectId'],
+    'Work Item Type preview body',
+  )
+  return {
+    expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
+    targetWorkItemTypeId: readIdentifier(body.targetWorkItemTypeId, 'targetWorkItemTypeId'),
+    ...(body.assignedProjectId === undefined
+      ? {}
+      : {
+          assignedProjectId: body.assignedProjectId === null
+            ? null
+            : readIdentifier(body.assignedProjectId, 'assignedProjectId'),
+        }),
+  }
+}
+
 function readDeletePublicWorkItemRequest(value: unknown) {
   const body = requireRecord(value, 'Delete request is required.')
   assertAllowedFields(body, ['expectedRevision'], 'Delete request')
   return {
     expectedRevision: readPositiveInteger(body.expectedRevision, 'expectedRevision'),
+  }
+}
+
+/** Reads the explicit acknowledgement required for a public Work Item Type change. */
+function readPublicWorkItemTypeChangeResolution(
+  value: unknown,
+): WorkItemTypeChangeResolution {
+  const body = requireRecord(value, 'typeChangeResolution must be an object.')
+  assertAllowedFields(
+    body,
+    ['discardCustomFieldIds', 'workflowStatusId'],
+    'typeChangeResolution',
+  )
+  return {
+    discardCustomFieldIds: readStringArray(
+      body.discardCustomFieldIds,
+      'typeChangeResolution.discardCustomFieldIds',
+      200,
+      true,
+    ).map((fieldId) => readIdentifier(fieldId, 'discardCustomFieldId')),
+    ...(body.workflowStatusId === undefined
+      ? {}
+      : { workflowStatusId: readIdentifier(body.workflowStatusId, 'workflowStatusId') }),
   }
 }
 
@@ -3312,6 +3422,7 @@ function readWorkItemFilters(c: Context) {
   const assignedProjectId = c.req.query('assignedProjectId')
   const assigneeUserId = c.req.query('assigneeUserId')
   const workflowStatusId = c.req.query('workflowStatusId')
+  const workItemTypeId = c.req.query('workItemTypeId')
   const updatedAfter = c.req.query('updatedAfter')
   return {
     teamId,
@@ -3323,6 +3434,9 @@ function readWorkItemFilters(c: Context) {
       : {}),
     ...(workflowStatusId
       ? { workflowStatusId: readIdentifier(workflowStatusId, 'workflowStatusId') }
+      : {}),
+    ...(workItemTypeId
+      ? { workItemTypeId: readIdentifier(workItemTypeId, 'workItemTypeId') }
       : {}),
     ...(updatedAfter
       ? { updatedAfter: readIsoTimestamp(updatedAfter, 'updatedAfter') }

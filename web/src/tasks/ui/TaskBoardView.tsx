@@ -1,7 +1,8 @@
-import type {
-  ResolvedWorkItemConfiguration,
-  WorkItemConfiguration,
-  WorkItemPatch,
+import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type ResolvedWorkItemConfiguration,
+  type WorkItemConfiguration,
+  type WorkItemPatch,
 } from '@mukuroji/contracts'
 import { Fragment, useState, type DragEvent } from 'react'
 import type { CanonicalWorkItem } from '../api/tasks'
@@ -22,6 +23,8 @@ import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyC
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeLabel,
 } from '../../work-items/model/workItemDisplay'
 import {
   createProjectStatusTestToken,
@@ -52,6 +55,7 @@ import {
   TaskPriorityBadge,
   TaskStatusBadge,
   TaskViewHeading,
+  TaskWorkItemTypeBadge,
 } from './TaskViewPrimitives'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 
@@ -136,6 +140,7 @@ export function TaskBoardView({
   const visibleFields = new Set((presentation?.columns ?? [
     { field: 'title' },
     { field: 'status' },
+    { field: 'workItemType' },
     { field: 'assignee' },
     { field: 'dueDate' },
     { field: 'priority' },
@@ -219,7 +224,11 @@ export function TaskBoardView({
     setDraggedTaskKey(undefined)
     setDropTargetColumnKey(undefined)
 
-    if (task && task.teamId === column.teamId) {
+    if (
+      task &&
+      task.teamId === column.teamId &&
+      (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === column.workItemTypeId
+    ) {
       void moveTaskToStatus(task, column.status.id).catch(() => undefined)
     }
   }
@@ -239,6 +248,10 @@ export function TaskBoardView({
       {visibleStatusColumns.map((column) => {
         const statusTasks = tasks.filter((task) => isTaskInProjectStatusColumn(task, column))
         const columnConfiguration = configurationsByTeam[column.teamId]?.configuration ?? configuration
+        const canCreateInColumn = resolveWorkItemTypeDefinition(
+          columnConfiguration,
+          column.workItemTypeId,
+        )?.status === 'active'
         const subgroups = presentation?.subgroupBy
           ? groupTaskViewItems(
               statusTasks,
@@ -276,7 +289,12 @@ export function TaskBoardView({
                 ? tasks.find((candidate) => createTaskKey(candidate) === draggedTaskKey)
                 : undefined
 
-              if (!draggedTask || !canEditTask(draggedTask) || draggedTask.teamId !== column.teamId) {
+              if (
+                !draggedTask ||
+                !canEditTask(draggedTask) ||
+                draggedTask.teamId !== column.teamId ||
+                (draggedTask.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) !== column.workItemTypeId
+              ) {
                 return
               }
 
@@ -294,7 +312,7 @@ export function TaskBoardView({
                 </span>
               </span>
               <div className="flex items-center gap-2">
-                {onCreateTaskOpen ? (
+                {onCreateTaskOpen && canCreateInColumn ? (
                   <button
                     aria-label={`${t('tasks.board.addInColumn')}: ${column.label}`}
                     className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-white"
@@ -303,6 +321,7 @@ export function TaskBoardView({
                       projectId: projectId ?? tasks[0]?.assignedProjectId ?? '',
                       source: 'board',
                       teamId: column.teamId,
+                      workItemTypeId: column.workItemTypeId,
                       workflowStatusId: column.status.id,
                     })}
                     type="button"
@@ -472,6 +491,12 @@ export function TaskBoardView({
                           testId={`task-inline-status-${task.id}`}
                           value={task.workflowStatusId}
                           onCommit={(value) => moveTaskToStatus(task, value)}
+                        />
+                      ) : null}
+                      {visibleFields.has('workItemType') ? (
+                        <TaskWorkItemTypeBadge
+                          configuration={taskConfiguration}
+                          task={task}
                         />
                       ) : null}
                       {visibleFields.has('assignee') ? (
@@ -666,6 +691,7 @@ function resolveProjectBoardGroupValue(
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'workItemType': value = resolveWorkItemTypeLabel(task, configuration); break
     case 'project': value = task.assignedProjectId ?? '—'; break
     case 'team': value = task.teamId; break
     default: {

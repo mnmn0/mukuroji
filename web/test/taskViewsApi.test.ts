@@ -91,9 +91,9 @@ describe('saved task-view API', () => {
     const view = {
       ...createSavedTaskViewFixture('migrated-view'),
       migrationWarnings: [{
-        code: 'invalid-layout',
-        fallback: 'reset-to-default',
-        section: 'layout',
+        code: 'deleted-work-item-type',
+        fallback: 'removed',
+        section: 'filter',
       }],
     } satisfies SavedTaskView
     const requests = installJsonResponses([{ view }])
@@ -375,7 +375,11 @@ function createDefinition(): TaskViewDefinition {
     filters: {
       customFields: [{ fieldId: 'risk', operator: 'equals', value: ['high'] }],
       date: { field: 'dueDate', from: '2026-08-01', to: '2026-08-31' },
-      workflowStatuses: [{ teamId: 'core-team', statusId: 'started' }],
+      workflowStatuses: [{
+        teamId: 'core-team',
+        workItemTypeId: 'bug',
+        statusId: 'started',
+      }],
     },
     layout: {
       mode: 'table',

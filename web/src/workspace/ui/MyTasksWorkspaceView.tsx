@@ -1,4 +1,8 @@
-import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
+import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type ResolvedWorkItemConfiguration,
+} from '@mukuroji/contracts'
 import { Fragment, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -14,6 +18,7 @@ import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
+  resolveWorkItemTypeLabel,
   resolveWorkItemWorkflowStatusLabel,
 } from '../../work-items/model/workItemDisplay'
 import {
@@ -219,7 +224,9 @@ export function MyTasksWorkspaceView({
       !onMoveTaskStatus ||
       !carriesTaskKey ||
       (draggedTask && !canMoveTask(draggedTask)) ||
-      (draggedTask && column.teamId !== draggedTask.teamId)
+      (draggedTask && column.teamId !== draggedTask.teamId) ||
+      (draggedTask &&
+        column.workItemTypeId !== (draggedTask.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID))
     ) {
       return
     }
@@ -256,7 +263,10 @@ export function MyTasksWorkspaceView({
       return
     }
 
-    if (column.teamId === task.teamId) {
+    if (
+      column.teamId === task.teamId &&
+      column.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID)
+    ) {
       moveTaskToStatus(task, column.status.id)
     }
   }
@@ -516,12 +526,24 @@ function resolveMyTaskGroupValue(
 ): TaskViewGroupValue {
   const configuration = configurationsByTeam[task.teamId]?.configuration
   let value: string
+  let key: string | undefined
   switch (field) {
     case 'title': value = task.title; break
     case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'workItemType': {
+      const typeLabel = resolveWorkItemTypeLabel(task, configuration)
+      const hasMultipleTeams = Object.keys(configurationsByTeam).length > 1 || teams.length > 1
+      const teamLabel = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId
+      value = hasMultipleTeams ? `${teamLabel} · ${typeLabel}` : typeLabel
+      key = createSearchWorkItemTypeKey(
+        task.teamId,
+        task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      )
+      break
+    }
     case 'project': value = resolveMyTaskProjectLabel(task, teams) ?? '—'; break
     case 'team': value = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId; break
     default: {
@@ -535,5 +557,5 @@ function resolveMyTaskGroupValue(
           : String(customValue)
     }
   }
-  return { key: value, label: value }
+  return { key: key ?? value, label: value }
 }

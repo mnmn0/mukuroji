@@ -179,6 +179,7 @@ function createHarness(
           creatorUserIds: [],
           teamIds: [],
           projectIds: [],
+          workItemTypeIds: [],
           customFieldIds: [],
           relationIds: [],
           statuses: ['todo'],

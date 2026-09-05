@@ -1,10 +1,12 @@
-import type {
-  CustomFieldDefinition,
-  ResolvedWorkItemConfiguration,
-  WorkflowStatusDefinition,
-  WorkItemConfiguration,
-  WorkItemPatch,
-  WorkItemSchedule,
+import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  type CustomFieldDefinition,
+  type ResolvedWorkItemConfiguration,
+  type WorkflowStatusDefinition,
+  type WorkItemConfiguration,
+  type WorkItemPatch,
+  type WorkItemSchedule,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
@@ -13,7 +15,6 @@ import type { WorkspaceMember } from '../../workspace/api/access'
 import type { TaskViewGroupValue } from '../../task-views/model/taskViewPresentation'
 import {
   isCustomFieldApplicable,
-  sortCustomFieldDefinitions,
 } from '../../work-items/model/customFields'
 import {
   matchesWorkItemDefinitionFilter,
@@ -21,11 +22,16 @@ import {
 } from '../../work-items/model/workItemFilters'
 import {
   formatWorkItemCustomFieldValue,
+  createWorkItemTypeWorkflowStatusKey,
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeLabel,
+  resolveWorkItemTypeCustomFields,
+  resolveWorkItemTypeWorkflow,
+  resolveWorkItemTypeWorkflowStatuses,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
-  sortWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
@@ -75,6 +81,9 @@ export type AssigneeFilter = string | 'all'
 /** Task priority filter value or the all-priority sentinel. */
 export type PriorityFilter = WorkItemPriority | 'all'
 
+/** Team-qualified Work Item Type filter key or the all-type sentinel. */
+export type WorkItemTypeFilter = string | 'all'
+
 /** Due-date bucket selected in the task list. */
 export type DueDateFilter = (typeof taskDueDateFilters)[number]
 
@@ -93,6 +102,8 @@ export type TaskScreenViewState = {
   dueDateFilter: DueDateFilter
   /** Priority filter or the all-priority sentinel. */
   priorityFilter: PriorityFilter
+  /** Work Item Type filter or the all-type sentinel. */
+  workItemTypeFilter: WorkItemTypeFilter
   /** Case-insensitive task search query. */
   searchQuery: string
   /** Due-date ordering applied after filtering. */
@@ -111,6 +122,8 @@ export type TaskCreateContext = {
   teamId?: string
   /** Workflow status inherited from a Board column or other status surface. */
   workflowStatusId?: string
+  /** Stable Work Item Type inherited from a type-aware create surface. */
+  workItemTypeId?: string
   /** Explicit schedule inherited from a Calendar range or planning surface. */
   schedule?: WorkItemSchedule
   /** Assignee inherited from an assignee-oriented surface. */
@@ -129,13 +142,15 @@ export type AssigneeFilterOption = {
 
 /** A Team-scoped workflow status column used by filters and boards. */
 export type ProjectTaskStatusColumn = {
-  /** Composite Team and status identity used as a React key and filter value. */
+  /** Composite Team, Work Item Type, and status identity used as a React key and filter value. */
   key: string
   /** Team that owns the workflow status. */
   teamId: string
+  /** Work Item Type whose workflow owns the status. */
+  workItemTypeId: string
   /** Workflow status represented by the column. */
   status: WorkflowStatusDefinition
-  /** Column label, optionally prefixed with the Team name. */
+  /** Column label, optionally prefixed with the Team and Work Item Type names. */
   label: string
 }
 
@@ -206,7 +221,10 @@ export function applyTaskPatchOptimistically(
   }
 
   const nextStatus = patch.workflowStatusId && configuration
-    ? configuration.workflow.statuses.find((status) => status.id === patch.workflowStatusId)
+    ? resolveWorkItemTypeWorkflow(
+        configuration,
+        patch.workItemTypeId ?? task.workItemTypeId,
+      )?.statuses.find((status) => status.id === patch.workflowStatusId)
     : undefined
 
   return {
@@ -219,6 +237,7 @@ export function applyTaskPatchOptimistically(
         ? { assignedProjectId: undefined }
         : { assignedProjectId: patch.assignedProjectId }),
     ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: patch.assigneeUserId }),
+    ...(patch.workItemTypeId === undefined ? {} : { workItemTypeId: patch.workItemTypeId }),
     ...(patch.schedule === undefined
       ? {}
       : {
@@ -259,6 +278,7 @@ export function createTaskInversePatch(
       ? {}
       : { assignedProjectId: task.assignedProjectId ?? null }),
     ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: task.assigneeUserId }),
+    ...(patch.workItemTypeId === undefined ? {} : { workItemTypeId: task.workItemTypeId }),
     ...(patch.schedule === undefined
       ? {}
       : { schedule: task.schedule }),
@@ -296,6 +316,8 @@ export type FilterAndSortProjectTasksOptions = {
   personLabels: Readonly<Record<string, string>>
   /** Priority to retain, or all priorities. */
   priorityFilter: PriorityFilter
+  /** Work Item Type to retain, or all types; omitted for legacy callers. */
+  workItemTypeFilter?: WorkItemTypeFilter
   /** Free-text query matched against task display fields. */
   searchQuery: string
   /** Due-date order applied after filtering. */
@@ -647,6 +669,7 @@ export function resolveProjectTaskConfiguration(
  * @param configurationsByTeam - Team-specific configurations for aggregate Project views.
  * @param fallbackConfiguration - Single-Team configuration used when no Team map is available.
  * @param t - Translator used for localized priority labels.
+ * @param teams - Optional Project directory used to make aggregate type labels readable.
  * @returns Stable grouping key and human-readable label.
  */
 export function resolveProjectTaskGroupValue(
@@ -655,6 +678,7 @@ export function resolveProjectTaskGroupValue(
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   fallbackConfiguration: WorkItemConfiguration | undefined,
   t: TaskTranslator,
+  teams: readonly ProjectDirectoryTeam[] = [],
 ): TaskViewGroupValue {
   const configuration = resolveProjectTaskConfiguration(
     task,
@@ -662,12 +686,22 @@ export function resolveProjectTaskGroupValue(
     fallbackConfiguration,
   )
   let value: string
+  let key: string | undefined
   switch (field) {
     case 'title': value = resolveWorkItemTitle(task); break
     case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'workItemType': {
+      const workItemTypeId = task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID
+      const typeLabel = resolveWorkItemTypeLabel(task, configuration)
+      const hasMultipleTeams = Object.keys(configurationsByTeam).length > 1 || teams.length > 1
+      const teamLabel = teams.find((team) => team.id === task.teamId)?.name ?? task.teamId
+      value = hasMultipleTeams ? `${teamLabel} · ${typeLabel}` : typeLabel
+      key = createSearchWorkItemTypeKey(task.teamId, workItemTypeId)
+      break
+    }
     case 'project': value = task.assignedProjectId ?? '—'; break
     case 'team': value = task.teamId; break
     default: {
@@ -681,7 +715,7 @@ export function resolveProjectTaskGroupValue(
           : String(customValue)
     }
   }
-  return { key: value, label: value }
+  return { key: key ?? value, label: value }
 }
 
 /**
@@ -692,7 +726,7 @@ export function resolveProjectTaskGroupValue(
  * @param teams - Project directory entries used to resolve Team labels.
  * @param fallbackTeamId - Team ID used by a single-Team Project view.
  * @param fallbackConfiguration - Configuration used by a single-Team Project view.
- * @returns Workflow columns ordered by Team ID and configured status order.
+ * @returns Workflow columns ordered by Team ID, Work Item Type, and status order.
  */
 export function createProjectTaskStatusColumns(
   tasks: readonly CanonicalWorkItem[],
@@ -719,13 +753,23 @@ export function createProjectTaskStatusColumns(
 
     const teamName = teams.find((team) => team.id === teamId)?.name ?? teamId
 
-    return sortWorkflowStatuses(configuration.workflow.statuses)
-      .map((status): ProjectTaskStatusColumn => ({
-        key: `${teamId}:${status.id}`,
-        label: showTeamName ? `${teamName} · ${status.name}` : status.name,
-        status,
-        teamId,
-      }))
+    const typeWorkflowStatuses = resolveWorkItemTypeWorkflowStatuses(configuration)
+    const typeIds = new Set(typeWorkflowStatuses.map(({ workItemTypeId }) => workItemTypeId))
+    const showTypeName = typeIds.size > 1
+
+    return typeWorkflowStatuses.map(({ status, workItemTypeId }): ProjectTaskStatusColumn => ({
+      key: createWorkItemTypeWorkflowStatusKey(teamId, workItemTypeId, status.id),
+      label: [
+        showTeamName ? teamName : undefined,
+        showTypeName
+          ? resolveWorkItemTypeDefinition(configuration, workItemTypeId)?.name ?? workItemTypeId
+          : undefined,
+        status.name,
+      ].filter((part): part is string => part !== undefined).join(' · '),
+      status,
+      teamId,
+      workItemTypeId,
+    }))
   })
 }
 
@@ -734,13 +778,15 @@ export function createProjectTaskStatusColumns(
  *
  * @param task - Task evaluated for column membership.
  * @param column - Team-scoped workflow status column.
- * @returns True when both Team ID and workflow status ID match.
+ * @returns True when Team, Work Item Type, and workflow status ID all match.
  */
 export function isTaskInProjectStatusColumn(
   task: CanonicalWorkItem,
   column: ProjectTaskStatusColumn,
 ) {
-  return column.teamId === task.teamId && column.status.id === task.workflowStatusId
+  return column.teamId === task.teamId &&
+    column.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) &&
+    column.status.id === task.workflowStatusId
 }
 
 /**
@@ -774,7 +820,10 @@ export function resolveTaskCustomFieldEntries(
     return []
   }
 
-  return sortCustomFieldDefinitions(configuration.customFields).flatMap((definition) => {
+  return resolveWorkItemTypeCustomFields(
+    configuration,
+    task.workItemTypeId,
+  ).flatMap((definition) => {
     const value = task.customFieldValues[definition.id]
 
     if (value === undefined || !isCustomFieldApplicable(definition, task.assignedProjectId)) {
@@ -925,6 +974,12 @@ export function filterAndSortProjectTasks(
       resolveTaskAssigneeFilterValue(task, options.t) === options.assigneeFilter
     const matchesPriority = options.priorityFilter === 'all' ||
       task.priority === options.priorityFilter
+    const matchesWorkItemType = options.workItemTypeFilter === undefined ||
+      options.workItemTypeFilter === 'all' ||
+      createSearchWorkItemTypeKey(
+        task.teamId,
+        task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      ) === options.workItemTypeFilter
     const matchesDueDate = matchesTaskDueDateFilter(task, options.dueDateFilter, today)
     const matchesDefinition = matchesWorkItemDefinitionFilter(
       task,
@@ -936,6 +991,7 @@ export function filterAndSortProjectTasks(
       !matchesStatus ||
       !matchesAssignee ||
       !matchesPriority ||
+      !matchesWorkItemType ||
       !matchesDueDate ||
       !matchesDefinition
     ) {
@@ -986,6 +1042,8 @@ export function matchesProjectTaskKeyword(
     task.title,
     resolveTaskAssignee(task),
     resolveWorkItemWorkflowStatusLabel(task, configuration),
+    task.workItemTypeId ?? 'default',
+    resolveWorkItemTypeLabel(task, configuration),
     t(`tasks.priority.${task.priority}`),
     task.dueDate,
     deriveTaskScheduleDueDate(task.schedule),
@@ -1010,9 +1068,16 @@ export function resolveEffectiveStatusFilter(
   statusFilter: StatusFilter,
   statusColumns: readonly ProjectTaskStatusColumn[],
 ): StatusFilter {
-  return statusFilter === 'all' || statusColumns.some((column) => column.key === statusFilter)
-    ? statusFilter
-    : 'all'
+  if (statusFilter === 'all' || statusColumns.some((column) => column.key === statusFilter)) {
+    return statusFilter
+  }
+  const separatorIndex = statusFilter.lastIndexOf(':')
+  if (separatorIndex <= 0 || separatorIndex >= statusFilter.length - 1) return 'all'
+  const legacyTeamId = statusFilter.slice(0, separatorIndex)
+  const legacyStatusId = statusFilter.slice(separatorIndex + 1)
+  return statusColumns.find((column) =>
+    column.teamId === legacyTeamId && column.status.id === legacyStatusId
+  )?.key ?? 'all'
 }
 
 /**

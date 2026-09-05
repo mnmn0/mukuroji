@@ -1,6 +1,7 @@
 import type {
   AiTriageDraft,
   RequestFormRoutingTarget,
+  WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import type { RequestSubmissionModel } from './requestForm'
 
@@ -9,6 +10,23 @@ export type RequestRoutingProjectDirectory = ReadonlyMap<string, ReadonlySet<str
 
 /** Active non-guest Workspace member keys that may be copied into a Request conversion form. */
 export type RequestRoutingAssigneeDirectory = ReadonlySet<string>
+
+/**
+ * Resolves the Work Item configuration for the current Request conversion target.
+ *
+ * @param configurations - Team-scoped configurations loaded by the Request Intake page.
+ * @param submission - Current Request submission whose routing is used as the fallback target.
+ * @param currentOverride - Local partial routing override currently applied to the conversion form.
+ * @returns The configuration for the effective Team, or undefined when it is unavailable.
+ */
+export function resolveRequestWorkItemConfiguration(
+  configurations: Readonly<Record<string, WorkItemConfiguration>> | undefined,
+  submission: RequestSubmissionModel,
+  currentOverride: Partial<RequestFormRoutingTarget> = {},
+): WorkItemConfiguration | undefined {
+  const effectiveTeamId = currentOverride.teamId ?? submission.routing.teamId
+  return configurations?.[effectiveTeamId]
+}
 
 /** Checks whether a proposed assignee is present in the current active-member directory. */
 function isActiveAssignee(

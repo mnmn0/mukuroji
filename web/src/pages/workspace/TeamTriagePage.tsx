@@ -5,6 +5,9 @@ import { useCustomers } from '../../customers/queries/useCustomers'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { isActiveProjectAssignmentCandidate } from '../../projects/api/members'
 import { useTeamProjectMembers } from '../../projects/queries/useProjectMembers'
+import { normalizeRequestSubmission } from '../../requests/model/requestForm'
+import { createMappedConversionCustomFieldValues } from '../../requests/model/requestConversion'
+import { useRequestSubmission } from '../../requests/queries/useRequestIntakeQueries'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TriageApiError } from '../../triage/api'
 import { useTriageMutations } from '../../triage/mutations/useTriageMutations'
@@ -24,7 +27,10 @@ import {
   useTriageSettings,
 } from '../../triage/queries/useTriageQueries'
 import { TriageWorkbench } from '../../triage/ui/TriageWorkbench'
+import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
+import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
+import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 /**
@@ -43,6 +49,18 @@ export function TeamTriagePage() {
   const aiEnabled = workspace.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled
   const routeState = useMemo(() => readTriageRouteState(searchParams), [searchParams])
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+  const workItemConfigurationQuery = useWorkItemConfiguration(
+    workspace.accessToken,
+    teamId,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam),
+  )
+  const hasPersonCustomFields = workItemConfigurationQuery.data?.configuration.customFields.some(
+    (definition) => definition.type === 'person',
+  ) ?? false
+  const { data: workspaceAccess, error: workspaceAccessError } = useWorkspaceAccess(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam) && hasPersonCustomFields,
+  )
   const queue = useTriageQueue(
     workspace.accessToken,
     teamId,
@@ -68,6 +86,25 @@ export function TeamTriagePage() {
     workspace.canLoadWorkspaceData && Boolean(activeTeam) && routeState.view === 'queue',
   )
   const selectedEntry = detail.data ? createTriageEntryView(detail.data) : undefined
+  const formSubmissionId = selectedEntry?.entry.source.kind === 'form'
+    ? selectedEntry.entry.source.submissionId
+    : undefined
+  const formSubmissionQuery = useRequestSubmission(
+    workspace.accessToken,
+    formSubmissionId,
+    workspace.canLoadWorkspaceData &&
+      Boolean(activeTeam) &&
+      routeState.view === 'queue' &&
+      selectedEntry?.entry.capabilities.canAcceptCreate === true,
+  )
+  const initialAcceptCustomFieldValues = useMemo(
+    () => createMappedConversionCustomFieldValues(
+      formSubmissionQuery.data
+        ? normalizeRequestSubmission(formSubmissionQuery.data)
+        : undefined,
+    ),
+    [formSubmissionQuery.data],
+  )
   const customerPickerEnabled = workspace.canLoadWorkspaceData &&
     workspace.canReadCustomers &&
     workspace.canManageCustomerRequests &&
@@ -99,6 +136,10 @@ export function TeamTriagePage() {
     }
     return membersByProject
   }, [projectMembers.data?.members])
+  const workItemPersonOptions = useMemo(
+    () => resolveWorkItemPersonOptions(workspaceAccess?.members ?? []),
+    [workspaceAccess?.members],
+  )
   const settings = useTriageSettings(
     workspace.accessToken,
     teamId,
@@ -152,6 +193,8 @@ export function TeamTriagePage() {
         queue.error,
         detail.error,
         settings.error,
+        workItemConfigurationQuery.error,
+        workspaceAccessError,
         mutation.error,
       ]}
     >
@@ -162,6 +205,7 @@ export function TeamTriagePage() {
         canManageConfiguration={canManageConfiguration}
         aiAssistanceEnabled={aiEnabled}
         configuration={settings.data}
+        workItemConfiguration={workItemConfigurationQuery.data?.configuration}
         configurationErrorMessage={configurationErrorMessage}
         customerOptions={customerDirectory.data?.customers.map((customer) => ({
           id: customer.id,
@@ -200,6 +244,8 @@ export function TeamTriagePage() {
         teamName={activeTeam?.name ?? t('workspace.team.missing')}
         visibleProjectIds={activeTeam?.projects.map((project) => project.id)}
         eligibleAssigneeIdsByProject={eligibleAssigneeIdsByProject}
+        workItemPersonOptions={workItemPersonOptions}
+        initialAcceptCustomFieldValues={initialAcceptCustomFieldValues}
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}
         onBulkAction={mutation.applyBulkAction}

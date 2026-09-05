@@ -49,6 +49,7 @@ const triggerTypeLabelKeys: Record<string, MessageKey> = {
   assignee: 'automation.trigger.assigneeChange',
   due: 'automation.trigger.dueDate',
   'custom-field': 'automation.trigger.customFieldChange',
+  'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
   form: 'automation.trigger.formSubmission',
   webhook: 'automation.trigger.webhook',
@@ -300,6 +301,7 @@ export function AutomationManagementPanel({
             locale={locale}
             readOnly={readOnly}
             rules={rules}
+            teams={teams}
             webhookEndpoints={webhooks}
             onCreate={onCreateRule}
             onToggle={onToggleRule}
@@ -366,6 +368,8 @@ type RulesTabProps = {
   locale: Locale
   /** Rule 一覧です。 */
   rules: AutomationRule[]
+  /** Work Item Type trigger で選択できる Team です。 */
+  teams: RecurringTeamOption[]
   /** Webhook trigger selector に表示する endpoint です。 */
   webhookEndpoints: AutomationInboundWebhookEndpoint[]
   /** Mutation 実行中の operation key です。 */
@@ -385,6 +389,7 @@ function RulesTab({
   onToggle,
   readOnly,
   rules,
+  teams,
   webhookEndpoints,
 }: RulesTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
@@ -395,6 +400,7 @@ function RulesTab({
         <AutomationRuleEditor
           isSaving={busyOperation === 'rule:create'}
           locale={locale}
+          teams={teams}
           webhookEndpoints={webhookEndpoints}
           onCreate={onCreate}
         />

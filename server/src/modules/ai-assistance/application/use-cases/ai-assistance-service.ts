@@ -1705,6 +1705,7 @@ function validateDraftAllowedValues(
     requireAllowedMany(draft.filters.creatorUserIds, allowed.creatorUserIds, 'creator')
     requireAllowedMany(draft.filters.teamIds, allowed.teamIds, 'Team')
     requireAllowedMany(draft.filters.projectIds, allowed.projectIds, 'Project')
+    requireAllowedMany(draft.filters.workItemTypeIds, allowed.workItemTypeIds, 'Work Item Type')
     requireAllowedMany(draft.filters.statuses, allowed.statuses, 'status')
     requireAllowedMany(draft.filters.relationIds, allowed.relationIds, 'relation')
     for (const filter of draft.filters.customFields ?? []) {
@@ -2168,6 +2169,7 @@ function validateUniqueAllowedValues(allowed: AiAssistanceAllowedValues): void {
     allowed.creatorUserIds,
     allowed.teamIds,
     allowed.projectIds,
+    allowed.workItemTypeIds,
     allowed.customFieldIds,
     allowed.relationIds,
     allowed.statuses,

@@ -14,7 +14,10 @@ import {
   TeamIssuesApiError,
   updateTeamIssue,
 } from '../src/issues/api'
-import { isCanonicalWorkItem } from '../src/work-items/api/contractValidation'
+import {
+  isCanonicalWorkItem,
+  isWorkItemTypeChangePreview,
+} from '../src/work-items/api/contractValidation'
 
 const originalFetch = globalThis.fetch
 const mutationContext = {
@@ -66,10 +69,45 @@ describe('canonical Work Item API', () => {
           updatedAt: '2026-07-11T23:59:59.999Z',
         },
       },
+      { ...valid, workItemTypeId: 42 },
+      { ...valid, workItemTypeId: { id: 'bug' } },
     ]
     for (const candidate of invalidCandidates) {
       expect(isCanonicalWorkItem(candidate)).toBeFalse()
     }
+  })
+
+  test('requires complete definitions for missing fields in a type-change preview', () => {
+    const definition = {
+      id: 'risk-level',
+      name: 'Risk level',
+      required: true,
+      sortOrder: 0,
+      type: 'select',
+      options: [{ id: 'high', name: 'High', sortOrder: 0 }],
+    }
+    const preview = {
+      currentWorkItemTypeId: 'default',
+      currentWorkflowStatusId: 'active',
+      expectedRevision: 3,
+      lostCustomFieldIds: [],
+      missingRequiredCustomFieldDefinitions: [definition],
+      missingRequiredCustomFieldIds: [definition.id],
+      approvalCompletionTransitionConflict: false,
+      requiresResolution: true,
+      targetInitialWorkflowStatusId: 'backlog',
+      targetWorkItemTypeId: 'incident',
+    }
+
+    expect(isWorkItemTypeChangePreview(preview)).toBeTrue()
+    expect(isWorkItemTypeChangePreview({
+      ...preview,
+      missingRequiredCustomFieldDefinitions: undefined,
+    })).toBeFalse()
+    expect(isWorkItemTypeChangePreview({
+      ...preview,
+      missingRequiredCustomFieldDefinitions: [{ ...definition, type: 42 }],
+    })).toBeFalse()
   })
 
   test('loads unassigned Work Items from the workspace-wide endpoint', async () => {

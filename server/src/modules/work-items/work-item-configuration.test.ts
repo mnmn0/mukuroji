@@ -1,20 +1,31 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { WorkItemConfiguration } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  type WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   DynamoDbWorkItemConfigurationClient,
+  MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES,
   WorkItemConfigurationError,
+  assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,
+  assertWorkItemTypeChangeResolution,
   createWorkItemConfigurationScopeKey,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
+  createWorkItemRelationGraphRevisionIncrementTransactionItem,
   isCanonicalWorkItemRelationIds,
   normalizeCustomFieldValues,
+  previewWorkItemTypeChange,
+  resolveWorkItemType,
+  resolveWorkItemTypeWorkflow,
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
 } from './work-item-configuration'
+import { createMutationAuditContext } from '../audit'
 
 test('validates the built-in workflow and resolves configured statuses', () => {
   const configuration = validateWorkItemConfiguration(DEFAULT_WORK_ITEM_CONFIGURATION)
@@ -29,6 +40,39 @@ test('validates the built-in workflow and resolves configured statuses', () => {
     workflowStatusId: 'done',
     statusCategory: 'completed',
   })
+})
+
+test('resolves the implicit default type to a legacy configuration workflow', () => {
+  const configuration = createConfiguration({
+    workflow: {
+      ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow,
+      id: 'legacy-delivery-workflow',
+      initialStatusId: 'backlog',
+      statuses: [{
+        id: 'backlog',
+        name: 'Backlog',
+        category: 'backlog',
+        sortOrder: 10,
+      }],
+      transitions: [],
+    },
+  })
+
+  expect(resolveWorkItemTypeWorkflow(configuration).id).toBe('legacy-delivery-workflow')
+  expect(resolveWorkflowStatus(configuration).workflowStatusId).toBe('backlog')
+})
+
+test('rejects explicitly empty Work Item Type IDs', () => {
+  const configuration = createConfiguration()
+
+  for (const requestedTypeId of [null, '']) {
+    expectConfigurationError(
+      () => resolveWorkItemType(configuration, requestedTypeId),
+      'InvalidWorkItemConfiguration',
+      'Work Item Type ID is invalid.',
+    )
+  }
+  expect(resolveWorkItemType(configuration, undefined)).toEqual(DEFAULT_WORK_ITEM_TYPE)
 })
 
 test('encodes configuration scope key components before adding delimiters', () => {
@@ -58,6 +102,19 @@ test('rejects duplicate status IDs and broken transition references', () => {
       transitions: [{ fromStatusId: 'todo', toStatusId: 'missing' }],
     },
   })).toThrow('Workflow transition references an invalid status.')
+
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    workflows: [{ ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow }],
+  })).toThrow('Workflow ID must be unique.')
+
+  expect(() => validateWorkItemConfiguration({
+    ...DEFAULT_WORK_ITEM_CONFIGURATION,
+    workflows: [{
+      ...DEFAULT_WORK_ITEM_CONFIGURATION.workflow,
+      id: 'incident-workflow',
+    }],
+  })).toThrow('Workflow status ID must be unique.')
 })
 
 test('enforces allowed workflow transitions', () => {
@@ -71,6 +128,234 @@ test('enforces allowed workflow transitions', () => {
   expect(() => assertWorkflowTransitionAllowed(configuration, 'todo', 'in-progress')).not.toThrow()
   expect(() => assertWorkflowTransitionAllowed(configuration, 'todo', 'done')).toThrow(
     'Transition from "todo" to "done" is not allowed.',
+  )
+})
+
+test('validates and resolves type-specific workflows and custom fields', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('summary', 'text'),
+      field('severity', 'select', { options: options('low', 'high') }),
+    ],
+    workflows: [{
+      id: 'incident-workflow',
+      name: 'Incident workflow',
+      initialStatusId: 'investigating',
+      statuses: [{
+        id: 'investigating',
+        name: 'Investigating',
+        category: 'started',
+        sortOrder: 10,
+      }],
+      transitions: [],
+    }],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'alert-triangle',
+      status: 'active',
+      defaultWorkflowId: 'incident-workflow',
+      customFieldIds: ['summary', 'severity'],
+      requiredCustomFieldIds: ['severity'],
+      detailSections: ['overview', 'custom-fields', 'activity'],
+      allowedChildTypeIds: ['default', 'incident'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(resolveWorkItemType(configuration, 'incident').name).toBe('Incident')
+  expect(resolveWorkItemTypeWorkflow(configuration, 'incident').id).toBe('incident-workflow')
+  expect(normalizeCustomFieldValues(configuration, {
+    summary: 'Database outage',
+    severity: 'high',
+  }, { mode: 'create', workItemTypeId: 'incident' })).toEqual({
+    summary: 'Database outage',
+    severity: 'high',
+  })
+  expect(() => normalizeCustomFieldValues(configuration, {
+    summary: 'Database outage',
+  }, { mode: 'create', workItemTypeId: 'incident' })).toThrow(
+    'Custom field "severity" is required.',
+  )
+})
+
+test('validates type-specific formula dependencies and required fields', () => {
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [
+        field('amount', 'number'),
+        field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+      ],
+      workItemTypes: [{
+        id: 'computed',
+        name: 'Computed',
+        iconToken: 'calculator',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: ['total'],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['default'],
+        sortOrder: 10,
+      }],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Work Item Type "computed" formula field "total" references an unavailable field "amount".',
+  )
+
+  expectConfigurationError(
+    () => createConfiguration({
+      customFields: [
+        field('amount', 'number'),
+        field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+      ],
+      workItemTypes: [{
+        id: 'computed',
+        name: 'Computed',
+        iconToken: 'calculator',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: ['amount', 'total'],
+        requiredCustomFieldIds: ['total'],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['default'],
+        sortOrder: 10,
+      }],
+    }),
+    'InvalidWorkItemConfiguration',
+    'Work Item Type "computed" cannot require a formula field.',
+  )
+})
+
+test('requires explicit resolution for lost fields and invalid statuses on type change', () => {
+  const configuration = createConfiguration({
+    customFields: [field('severity', 'text'), field('owner', 'text')],
+    workItemTypes: [{
+      id: 'request',
+      name: 'Request',
+      iconToken: 'inbox',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['severity'],
+      requiredCustomFieldIds: [],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+  const preview = previewWorkItemTypeChange(
+    configuration,
+    'default',
+    'review',
+    { owner: 'platform' },
+    'request',
+    undefined,
+    7,
+  )
+
+  expect(preview).toMatchObject({
+    expectedRevision: 7,
+    lostCustomFieldIds: ['owner'],
+  })
+  expect(() => assertWorkItemTypeChangeResolution(preview, undefined)).toThrow(
+    'requires an explicit resolution',
+  )
+  expect(assertWorkItemTypeChangeResolution(preview, {
+    discardCustomFieldIds: ['owner'],
+  })).toBe('review')
+})
+
+test('reports empty required values in a Work Item Type change preview', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('summary', 'text'),
+      field('labels', 'multi-select', { options: options('alpha', 'beta') }),
+    ],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['summary', 'labels'],
+      requiredCustomFieldIds: ['summary', 'labels'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(previewWorkItemTypeChange(
+    configuration,
+    'default',
+    'todo',
+    { summary: '', labels: [] },
+    'incident',
+  )).toMatchObject({
+    missingRequiredCustomFieldIds: ['labels', 'summary'],
+    missingRequiredCustomFieldDefinitions: [
+      expect.objectContaining({ id: 'labels', required: true, type: 'multi-select' }),
+      expect.objectContaining({ id: 'summary', required: true, type: 'text' }),
+    ],
+    requiresResolution: true,
+  })
+})
+
+test('does not allow archived types for new Work Items', () => {
+  const configuration = createConfiguration({
+    workItemTypes: [{
+      id: 'legacy',
+      name: 'Legacy',
+      iconToken: 'archive',
+      status: 'archived',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: [],
+      requiredCustomFieldIds: [],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(() => resolveWorkItemType(configuration, 'legacy')).toThrow(
+    'is archived and cannot be used',
+  )
+  expect(resolveWorkItemType(configuration, 'legacy', { allowArchived: true }).status).toBe('archived')
+})
+
+test('enforces allowed child Work Item Types', () => {
+  const configuration = createConfiguration({
+    workItemTypes: [
+      {
+        id: 'parent',
+        name: 'Parent',
+        iconToken: 'folder',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: [],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: ['child'],
+        sortOrder: 10,
+      },
+      {
+        id: 'child',
+        name: 'Child',
+        iconToken: 'check',
+        status: 'active',
+        defaultWorkflowId: 'default-workflow',
+        customFieldIds: [],
+        requiredCustomFieldIds: [],
+        detailSections: ['overview'],
+        allowedChildTypeIds: [],
+        sortOrder: 20,
+      },
+    ],
+  })
+
+  expect(() => assertWorkItemChildTypeAllowed(configuration, 'parent', 'child')).not.toThrow()
+  expect(() => assertWorkItemChildTypeAllowed(configuration, 'child', 'parent')).toThrow(
+    'Work Item Type "parent" cannot be created as a child of "child".',
   )
 })
 
@@ -221,6 +506,33 @@ test('defers formulas that reference required values omitted by quick capture', 
   })).toEqual({})
 })
 
+test('defers formulas that reference Work Item Type required values omitted by quick capture', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('amount', 'number'),
+      field('total', 'formula', { formulaExpression: '{amount} * 2' }),
+    ],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['amount', 'total'],
+      requiredCustomFieldIds: ['amount'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(normalizeCustomFieldValues(configuration, undefined, {
+    allowRequiredMissing: true,
+    mode: 'create',
+    workItemTypeId: 'incident',
+  })).toEqual({})
+})
+
 test('removes stale deferred formula values during a quick-capture update', () => {
   const configuration = createConfiguration({
     customFields: [
@@ -357,6 +669,38 @@ test('rejects empty required values, control characters, and duplicate multi-sel
     { duration: -1 },
     { mode: 'create' },
   )).toThrow('cannot be negative')
+})
+
+test('enforces Work Item Type required fields when values are explicitly empty', () => {
+  const configuration = createConfiguration({
+    customFields: [
+      field('summary', 'text'),
+      field('labels', 'multi-select', { options: options('alpha', 'beta') }),
+    ],
+    workItemTypes: [{
+      id: 'incident',
+      name: 'Incident',
+      iconToken: 'incident',
+      status: 'active',
+      defaultWorkflowId: 'default-workflow',
+      customFieldIds: ['summary', 'labels'],
+      requiredCustomFieldIds: ['summary', 'labels'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+
+  expect(() => normalizeCustomFieldValues(
+    configuration,
+    { summary: '', labels: ['alpha'] },
+    { mode: 'create', workItemTypeId: 'incident' },
+  )).toThrow('Custom field "summary" is required.')
+  expect(() => normalizeCustomFieldValues(
+    configuration,
+    { summary: 'Database outage', labels: [] },
+    { mode: 'create', workItemTypeId: 'incident' },
+  )).toThrow('Custom field "labels" is required.')
 })
 
 test('rejects unsafe patterns and currency values beyond their minor-unit precision', () => {
@@ -498,12 +842,21 @@ test('saves configuration with revision CAS and returns the incremented revision
       UpdateExpression: 'SET #status = :succeeded',
     },
   }
+  const usageConditionCheck = {
+    ConditionCheck: {
+      TableName: 'configuration-table',
+      Key: { scopeKey: 'workspace-1#team#core-team#work-item-configuration', recordKey: 'RELATION_GRAPH' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 4 },
+    },
+  }
 
   const response = await client.saveTeamConfiguration(
     'workspace-1',
     'core-team',
     createConfiguration({ scopeType: 'team', scopeId: 'core-team', revision: 2 }),
-    async () => undefined,
+    async () => [usageConditionCheck],
     [completion],
   )
 
@@ -525,8 +878,303 @@ test('saves configuration with revision CAS and returns the incremented revision
           ConditionExpression: '#token = :token AND #expiresAt >= :now',
         },
       },
+      usageConditionCheck,
       completion,
     ],
+  })
+})
+
+test('rejects an oversized configuration before acquiring the write lock', async () => {
+  const sent: string[] = []
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      sent.push(command.constructor.name)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+  const customFields = Array.from({ length: 20 }, (_, fieldIndex) => field(
+    `large-field-${fieldIndex}`,
+    'select',
+    {
+      options: Array.from({ length: 100 }, (_, optionIndex) => ({
+        id: `option-${optionIndex}`,
+        name: 'x'.repeat(160),
+        sortOrder: optionIndex,
+      })),
+    },
+  ))
+  const configuration = createConfiguration({ customFields })
+  const item = {
+    ...configuration,
+    scopeKey: 'workspace-1#work-item-configuration',
+    recordKey: 'CONFIG',
+    revision: configuration.revision + 1,
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+
+  expect(Buffer.byteLength(JSON.stringify(item), 'utf8'))
+    .toBeGreaterThan(MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES)
+  await expect(client.saveWorkspaceConfiguration(
+    'workspace-1',
+    configuration,
+    async () => undefined,
+  )).rejects.toMatchObject({
+    code: 'WorkItemConfigurationItemTooLarge',
+    status: 413,
+  })
+  expect(sent).toEqual([])
+})
+
+test('writes a configuration audit event in the same transaction as the revision update', async () => {
+  const sent: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sent.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'audit-table',
+  )
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'configuration-audit-1',
+    request: {
+      method: 'PUT',
+      path: '/api/work-item-configuration',
+      body: { revision: 0 },
+    },
+    source: {
+      kind: 'api',
+      method: 'PUT',
+      route: '/api/work-item-configuration',
+    },
+    occurredAt: '2026-07-16T00:00:00.000Z',
+  })
+
+  const response = await client.saveWorkspaceConfiguration(
+    'workspace-1',
+    createConfiguration({ scopeId: 'workspace-1' }),
+    async () => undefined,
+    [],
+    auditContext,
+  )
+
+  expect(response.configuration.revision).toBe(1)
+  const transaction = sent[2]
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Expected a configuration transaction.')
+  }
+  const auditItem = transaction.TransactItems.find((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null || !('Put' in candidate)) {
+      return false
+    }
+    const put = candidate.Put
+    return typeof put === 'object' && put !== null &&
+      'TableName' in put && put.TableName === 'audit-table'
+  })
+  expect(auditItem).toMatchObject({
+    Put: {
+      Item: expect.objectContaining({
+        eventType: 'work-item-configuration.created',
+        entityType: 'work-item-configuration',
+        entityId: 'workspace:workspace-1',
+        action: 'created',
+      }),
+    },
+  })
+})
+
+test('audits Work Item Type policy changes even when policy counts stay the same', async () => {
+  const previousConfiguration = createConfiguration({
+    customFields: [field('summary', 'text'), field('severity', 'text')],
+    revision: 4,
+    workItemTypes: [{
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'incident',
+      defaultWorkflowId: DEFAULT_WORK_ITEM_CONFIGURATION.workflow.id,
+      customFieldIds: ['summary'],
+      requiredCustomFieldIds: ['summary'],
+      detailSections: ['overview'],
+      allowedChildTypeIds: ['default'],
+      sortOrder: 10,
+    }],
+  })
+  const previousType = previousConfiguration.workItemTypes?.[0]
+  if (!previousType) throw new Error('Expected an initial Work Item Type.')
+  const nextConfiguration = createConfiguration({
+    customFields: previousConfiguration.customFields.map((customField) => customField.id === 'summary'
+      ? {
+          ...customField,
+          validation: { minLength: 2 },
+        }
+      : customField),
+    revision: previousConfiguration.revision,
+    workflow: {
+      ...previousConfiguration.workflow,
+      statuses: previousConfiguration.workflow.statuses.map((status, index) => index === 0
+        ? { ...status, name: 'Updated initial status' }
+        : status),
+    },
+    workItemTypes: [{
+      ...previousType,
+      customFieldIds: ['severity'],
+      requiredCustomFieldIds: ['severity'],
+      detailSections: ['description'],
+      allowedChildTypeIds: ['incident'],
+    }],
+  })
+  const sent: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      sent.push(command.input)
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: toStoredConfiguration(previousConfiguration) }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'audit-table',
+  )
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'configuration-policy-audit-1',
+    request: {
+      method: 'PUT',
+      path: '/api/work-item-configuration',
+      body: { revision: previousConfiguration.revision },
+    },
+    source: {
+      kind: 'api',
+      method: 'PUT',
+      route: '/api/work-item-configuration',
+    },
+    occurredAt: '2026-07-16T00:00:00.000Z',
+  })
+
+  await client.saveWorkspaceConfiguration(
+    'workspace-1',
+    nextConfiguration,
+    async () => undefined,
+    [],
+    auditContext,
+  )
+
+  const transaction = sent[2]
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Expected a configuration transaction.')
+  }
+  const auditItem = transaction.TransactItems.find((candidate) => {
+    if (typeof candidate !== 'object' || candidate === null || !('Put' in candidate)) {
+      return false
+    }
+    const put = candidate.Put
+    return typeof put === 'object' && put !== null &&
+      'TableName' in put && put.TableName === 'audit-table'
+  })
+  expect(auditItem).toMatchObject({
+    Put: {
+      Item: expect.objectContaining({
+        changes: expect.arrayContaining([
+          expect.objectContaining({
+            field: 'workItemTypes',
+            before: expect.arrayContaining([
+              expect.objectContaining({
+                id: 'incident',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+            after: expect.arrayContaining([
+              expect.objectContaining({
+                id: 'incident',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+          }),
+          expect.objectContaining({
+            field: 'workflowPolicies',
+            before: expect.arrayContaining([
+              expect.objectContaining({
+                id: DEFAULT_WORK_ITEM_CONFIGURATION.workflow.id,
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+            after: expect.arrayContaining([
+              expect.objectContaining({
+                id: DEFAULT_WORK_ITEM_CONFIGURATION.workflow.id,
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+          }),
+          expect.objectContaining({
+            field: 'customFieldPolicies',
+            before: expect.arrayContaining([
+              expect.objectContaining({
+                id: 'summary',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+            after: expect.arrayContaining([
+              expect.objectContaining({
+                id: 'summary',
+                policyHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/u),
+              }),
+            ]),
+          }),
+        ]),
+      }),
+    },
+  })
+})
+
+test('creates an atomic relation graph revision fence for a related Work Item type change', () => {
+  expect(createWorkItemRelationGraphRevisionIncrementTransactionItem(
+    'configuration-table',
+    'workspace-1',
+    'core-team',
+    4,
+  )).toEqual({
+    Update: {
+      TableName: 'configuration-table',
+      Key: {
+        scopeKey: 'workspace-1#team#core-team#work-item-configuration',
+        recordKey: 'RELATION_GRAPH',
+      },
+      UpdateExpression: 'SET #revision = :nextRevision',
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        '#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'relation-graph',
+        ':schemaVersion': 1,
+        ':expectedRevision': 4,
+        ':nextRevision': 5,
+      },
+    },
   })
 })
 
@@ -832,6 +1480,65 @@ test('creates reciprocal relation edges with endpoint and graph guards in one tr
       }),
     }),
   }))
+})
+
+test('fences relation creation against a concurrent configuration change', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const configurationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'configuration-table',
+      Key: { scopeKey: 'workspace-1#team#core-team#work-item-configuration', recordKey: 'CONFIG' },
+      ConditionExpression: '#revision = :revision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':revision': 3 },
+    },
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: [] }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        transactions.push(command.input)
+        throw {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  await expect(client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'parent',
+    targetWorkItemId: 'child',
+    type: 'parent',
+    expectedGraphRevision: 0,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 1,
+  }, [configurationConditionCheck])).rejects.toMatchObject({
+    code: 'WorkItemConfigurationRevisionConflict',
+    status: 409,
+  })
+  const transactionItems = transactions[0]?.TransactItems
+  expect(transactionItems).toEqual(expect.arrayContaining([
+    configurationConditionCheck,
+  ]))
+  expect(Array.isArray(transactionItems) ? transactionItems.at(-1) : undefined)
+    .toEqual(configurationConditionCheck)
 })
 
 test('derives complete sorted relation projections for create and delete transactions', async () => {

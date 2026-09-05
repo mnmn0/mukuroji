@@ -4,6 +4,7 @@ import {
   type CanonicalWorkItem,
   type ConfirmedWorkItemSchedule,
   type ConfirmWorkItemScheduleChangeResponse,
+  type CustomFieldDefinition,
   type ScheduleDependencyConstraint,
   type ScheduleDependencyType,
   type WorkItemDependencyEndpoint,
@@ -11,6 +12,7 @@ import {
   type WorkItemScheduleChangePreview,
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyConflict,
+  type WorkItemTypeChangePreview,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import {
@@ -46,6 +48,19 @@ const workflowStatusCategories = new Set<string>([
   'completed',
   'canceled',
 ])
+const customFieldTypes = new Set<string>([
+  'text',
+  'number',
+  'boolean',
+  'date',
+  'select',
+  'multi-select',
+  'person',
+  'currency',
+  'duration',
+  'formula',
+])
+const customFieldDurationUnits = new Set<string>(['minutes', 'hours', 'days'])
 
 /**
  * Returns whether a value is one canonical schedule dependency relation type.
@@ -290,6 +305,92 @@ export function readWorkItemScheduleChangePreviewForEndpoint(
 }
 
 /**
+ * Returns whether a value is a complete Work Item Type change preview.
+ *
+ * @param value - Unknown type-change preview response candidate.
+ * @returns Whether the value contains revision, field, and workflow impact data.
+ */
+export function isWorkItemTypeChangePreview(
+  value: unknown,
+): value is WorkItemTypeChangePreview {
+  return isRecord(value) &&
+    isPositiveSafeInteger(value.expectedRevision) &&
+    typeof value.currentWorkItemTypeId === 'string' &&
+    value.currentWorkItemTypeId.length > 0 &&
+    typeof value.currentWorkflowStatusId === 'string' &&
+    value.currentWorkflowStatusId.length > 0 &&
+    typeof value.targetWorkItemTypeId === 'string' &&
+    value.targetWorkItemTypeId.length > 0 &&
+    isStringArray(value.lostCustomFieldIds) &&
+    isOptionalString(value.invalidWorkflowStatusId) &&
+    typeof value.targetInitialWorkflowStatusId === 'string' &&
+    value.targetInitialWorkflowStatusId.length > 0 &&
+    isStringArray(value.missingRequiredCustomFieldIds) &&
+    Array.isArray(value.missingRequiredCustomFieldDefinitions) &&
+    value.missingRequiredCustomFieldDefinitions.every(isCustomFieldDefinition) &&
+    typeof value.approvalCompletionTransitionConflict === 'boolean' &&
+    typeof value.requiresResolution === 'boolean'
+}
+
+/** Returns whether an unknown value is a supported persisted custom-field value. */
+function isCustomFieldValue(value: unknown): boolean {
+  return typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    isFiniteNumber(value) ||
+    (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
+}
+
+/** Returns whether an unknown value is a valid custom-field option. */
+function isCustomFieldOption(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.name === 'string' &&
+    isNonnegativeSafeInteger(value.sortOrder) &&
+    isOptionalString(value.color)
+}
+
+/** Returns whether an unknown value is a valid custom-field validation object. */
+function isCustomFieldValidation(value: unknown): boolean {
+  return isRecord(value) &&
+    Object.keys(value).every((key) =>
+      key === 'min' ||
+      key === 'max' ||
+      key === 'minLength' ||
+      key === 'maxLength' ||
+      key === 'pattern'
+    ) &&
+    (value.min === undefined || isFiniteNumber(value.min)) &&
+    (value.max === undefined || isFiniteNumber(value.max)) &&
+    (value.minLength === undefined || isNonnegativeSafeInteger(value.minLength)) &&
+    (value.maxLength === undefined || isNonnegativeSafeInteger(value.maxLength)) &&
+    isOptionalString(value.pattern)
+}
+
+/** Returns whether an unknown value is a complete custom-field definition. */
+function isCustomFieldDefinition(value: unknown): value is CustomFieldDefinition {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    value.id.length > 0 &&
+    typeof value.name === 'string' &&
+    typeof value.type === 'string' &&
+    customFieldTypes.has(value.type) &&
+    isNonnegativeSafeInteger(value.sortOrder) &&
+    typeof value.required === 'boolean' &&
+    (value.defaultValue === undefined || isCustomFieldValue(value.defaultValue)) &&
+    (value.options === undefined || (
+      Array.isArray(value.options) && value.options.every(isCustomFieldOption)
+    )) &&
+    (value.validation === undefined || isCustomFieldValidation(value.validation)) &&
+    (value.projectIds === undefined || isStringArray(value.projectIds)) &&
+    isOptionalString(value.currencyCode) &&
+    (value.durationUnit === undefined || (
+      typeof value.durationUnit === 'string' &&
+      customFieldDurationUnits.has(value.durationUnit)
+    )) &&
+    isOptionalString(value.formulaExpression)
+}
+
+/**
  * Returns whether a value is a canonical UTC timestamp.
  *
  * @param value - Unknown timestamp candidate.
@@ -370,6 +471,7 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     typeof value.assigneeUserId === 'string' &&
     typeof value.creatorMemberKey === 'string' &&
     typeof value.workflowStatusId === 'string' &&
+    isOptionalString(value.workItemTypeId) &&
     isWorkItemStatusCategory(value.statusCategory) &&
     value.workflowSchemaVersion === WORK_ITEM_CONFIGURATION_SCHEMA_VERSION &&
     isRecord(value.customFieldValues) &&

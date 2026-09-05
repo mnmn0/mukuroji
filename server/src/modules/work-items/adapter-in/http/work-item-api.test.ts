@@ -7,6 +7,7 @@ const {
   createCollaborationStub,
   createDocumentFake,
   createFakeWorkItemConfigurationClient,
+  createTestWorkItemConfiguration,
   createTeamIssuesFake,
   getTestAppDependencies,
   resetTestApp,
@@ -25,6 +26,7 @@ import {
 import {
   type CanonicalWorkItem,
   createDefaultDueDateWorkItemSchedule,
+  DEFAULT_WORK_ITEM_TYPE,
 } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../../planning/planning'
 import { createWorkItemAuthorizationChangedError } from '../../adapter-out/dynamodb/work-item-client'
@@ -49,6 +51,7 @@ afterEach(() => {
 function addInternalWorkItemFields(workItem: CanonicalWorkItem): CanonicalWorkItem {
   return {
     ...workItem,
+    workItemTypeId: undefined,
     priorityUpdatedAt: '2026-06-08T01:00:00.000Z',
     dueDateUpdatedAt: '2026-06-08T01:00:00.000Z',
     sourceRequestId: 'request-internal-1',
@@ -215,6 +218,88 @@ test('allows current system administrators to select an active Webhook Team', as
     locale: 'ja',
     consistentRead: true,
   })
+})
+
+test('lists active Work Item Type creation schemas without exposing formula expressions', async () => {
+  configureFakeProjectClients(false, {
+    systemAdminMemberKeys: ['demo@example.com'],
+    workspaceRole: 'owner',
+  })
+  const configuration = createTestWorkItemConfiguration('team', 'core-team', 12)
+  configuration.customFields = [
+    {
+      id: 'severity',
+      name: 'Severity',
+      type: 'select',
+      sortOrder: 10,
+      required: false,
+      options: [{ id: 'high', name: 'High', sortOrder: 0 }],
+    },
+    {
+      id: 'calculated',
+      name: 'Calculated',
+      type: 'formula',
+      sortOrder: 20,
+      required: false,
+      formulaExpression: '{severity}',
+    },
+  ]
+  configuration.workItemTypes = [
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'incident',
+      name: 'Incident',
+      defaultWorkflowId: configuration.workflow.id,
+      customFieldIds: ['severity', 'calculated'],
+      requiredCustomFieldIds: ['severity'],
+      allowedChildTypeIds: ['incident'],
+      sortOrder: 10,
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'archived',
+      name: 'Archived',
+      status: 'archived',
+      defaultWorkflowId: configuration.workflow.id,
+      allowedChildTypeIds: ['archived'],
+      sortOrder: 20,
+    },
+  ]
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+  const service = createCanonicalPublicWorkItemService()
+  const credential = {
+    kind: 'api-key',
+    workspaceId: 'user#demo@example.com',
+    credentialId: 'type-catalog-key',
+    subjectUserId: 'demo@example.com',
+    scopes: ['work-items:read'],
+  } satisfies AuthenticatedDeveloperCredential
+
+  const catalog = await runWithTestAppDependencies(() =>
+    service.listWorkItemTypes(credential, 'core-team')
+  )
+
+  expect(catalog.configurationRevision).toBe(12)
+  expect(catalog.workItemTypes.map((type) => type.id)).toEqual(['default', 'incident'])
+  expect(catalog.workItemTypes[1]).toMatchObject({
+    id: 'incident',
+    defaultWorkflowId: 'default-workflow',
+    customFields: [
+      expect.objectContaining({
+        id: 'severity',
+        required: true,
+        options: [{ id: 'high', name: 'High', sortOrder: 0 }],
+      }),
+      expect.objectContaining({ id: 'calculated', type: 'formula' }),
+    ],
+  })
+  expect(catalog.workItemTypes[1]?.customFields[1]).not.toHaveProperty('formulaExpression')
 })
 
 test('projects every Public Work Item service result onto the closed response schema', async () => {
@@ -386,6 +471,7 @@ test('projects every Public Work Item service result onto the closed response sc
     expect(item).toBeDefined()
     expect(item).toMatchObject({
       dueDate: '2026-06-18',
+      workItemTypeId: 'default',
       schedule: {
         mode: 'due-date',
         dueDate: '2026-06-18',

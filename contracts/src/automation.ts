@@ -47,6 +47,18 @@ export type AutomationCustomFieldTrigger = {
   fieldId: string
 }
 
+/** Work Item Type changes trigger automation rules. */
+export type AutomationWorkItemTypeTrigger = {
+  /** Trigger discriminator. */
+  type: 'work-item-type'
+  /** Team whose Work Item Type changes are observed. */
+  teamId: string
+  /** Previous stable type identifier filter. */
+  fromWorkItemTypeId?: string
+  /** New stable type identifier filter. */
+  toWorkItemTypeId?: string
+}
+
 /** Comment 作成を検出する trigger です。 */
 export type AutomationCommentTrigger = {
   /** Trigger discriminator です。 */
@@ -79,12 +91,13 @@ export type AutomationScheduleTrigger = {
   schedule: RecurringSchedule
 }
 
-/** Automation rule が扱える8種類の trigger です。 */
+/** Automation rule が扱える9種類の trigger です。 */
 export type AutomationTrigger =
   | AutomationStatusTrigger
   | AutomationAssigneeTrigger
   | AutomationDueTrigger
   | AutomationCustomFieldTrigger
+  | AutomationWorkItemTypeTrigger
   | AutomationCommentTrigger
   | AutomationFormTrigger
   | AutomationWebhookTrigger
@@ -340,6 +353,8 @@ export type AutomationWorkItemTemplatePayload = {
   customFieldValues?: Record<string, AutomationValue>
   /** Work Item の説明です。 */
   description?: string
+  /** Work Item の stable type identifier です。 */
+  workItemTypeId?: string
   /** Work Item に保存する complete canonical schedule です。 */
   schedule: WorkItemSchedule
   /** Work Item の優先度です。 */

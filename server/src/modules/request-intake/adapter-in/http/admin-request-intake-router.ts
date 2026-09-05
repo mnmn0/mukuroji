@@ -1,4 +1,5 @@
 import { Hono, type Context } from 'hono'
+import type { RequestIntakeTransactionItems } from '../../request-intake'
 import type {
   CreateRequestFormInput,
   PublishRequestFormInput,
@@ -77,6 +78,7 @@ export type AdminRequestIntakeClient = {
     formId: string,
     actor: { id: string },
     input: PublishRequestFormInput,
+    additionalTransactionItems?: RequestIntakeTransactionItems,
   ): Promise<unknown>
   /** Lists submissions in a Workspace.
    *
@@ -126,9 +128,12 @@ export type AdminRequestIntakeRouterDependencies = {
    *
    * @param workspaceId The Workspace directory ID.
    * @param draft The current form draft.
-   * @returns A promise that resolves after validation succeeds.
+   * @returns Atomic configuration guards, or undefined when the caller does not provide them.
    */
-  validateFormRoutingReferences(workspaceId: string, draft: RequestFormDraft): Promise<void>
+  validateFormRoutingReferences(
+    workspaceId: string,
+    draft: RequestFormDraft,
+  ): Promise<RequestIntakeTransactionItems | void>
   /** Validates the queue status query parameter.
    *
    * @param value The raw query parameter.
@@ -215,12 +220,16 @@ export function createAdminRequestIntakeRouter(
       const publishInput = readPublishRequestFormInput(await dependencies.readJson(context.req))
       const requestIntake = dependencies.getRequestIntake()
       const current = await requestIntake.getForm(principal.directoryId, formId)
-      await dependencies.validateFormRoutingReferences(principal.directoryId, current.draft)
+      const configurationGuardConditionChecks = await dependencies.validateFormRoutingReferences(
+        principal.directoryId,
+        current.draft,
+      )
       return context.json(await requestIntake.publishForm(
         principal.directoryId,
         formId,
         { id: principal.userKey },
         publishInput,
+        configurationGuardConditionChecks ?? [],
       ))
     } catch (error) {
       return dependencies.mapError(context, error)

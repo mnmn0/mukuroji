@@ -5,8 +5,10 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type ApiScope,
   type CanonicalWorkItem,
+  type CustomFieldDefinition,
   type DueDateWorkItemSchedule,
   type ImportJob,
+  type PublicWorkItemTypeCatalog,
   type WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import {
@@ -122,6 +124,27 @@ function createDefaultWorkItemService(
     },
     async get() {
       return workItem
+    },
+    async listWorkItemTypes(_credential, teamId) {
+      return {
+        teamId,
+        configurationRevision: 1,
+        workItemTypes: [],
+      }
+    },
+    async previewTypeChange() {
+      return {
+        expectedRevision: 1,
+        currentWorkItemTypeId: 'default',
+        currentWorkflowStatusId: 'todo',
+        targetWorkItemTypeId: 'default',
+        lostCustomFieldIds: [],
+        targetInitialWorkflowStatusId: 'todo',
+        missingRequiredCustomFieldIds: [],
+        missingRequiredCustomFieldDefinitions: [],
+        approvalCompletionTransitionConflict: false,
+        requiresResolution: false,
+      }
     },
     async authorizeCreate() {},
     async create() {
@@ -371,6 +394,132 @@ describe('public API router', () => {
     })
   })
 
+  test('exposes the authorized Work Item Type creation schema', async () => {
+    let requestedTeamId: string | undefined
+    const catalog = {
+      teamId: 'team-1',
+      configurationRevision: 7,
+      workItemTypes: [{
+        id: 'incident',
+        name: 'Incident',
+        defaultWorkflowId: 'incident-workflow',
+        workflow: {
+          id: 'incident-workflow',
+          name: 'Incident workflow',
+          initialStatusId: 'incident-open',
+          statuses: [{
+            id: 'incident-open',
+            name: 'Open',
+            category: 'unstarted',
+            sortOrder: 0,
+          }],
+        },
+        customFields: [{
+          id: 'severity',
+          name: 'Severity',
+          required: true,
+          sortOrder: 0,
+          type: 'select',
+          options: [{ id: 'high', name: 'High', sortOrder: 0 }],
+        }],
+      }],
+    } satisfies PublicWorkItemTypeCatalog
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async listWorkItemTypes(_credential, teamId) {
+          requestedTeamId = teamId
+          return catalog
+        },
+      }),
+    })
+    const apiKey = await createApiKey(platform, ['work-items:read'])
+
+    const response = await router.request(
+      'http://localhost/v1/work-item-types?teamId=team-1',
+      { headers: { Authorization: `Bearer ${apiKey.secret}` } },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(catalog)
+    expect(requestedTeamId).toBe('team-1')
+  })
+
+  test('exposes a public Work Item Type change preview', async () => {
+    let received: {
+      teamId: string
+      workItemId: string
+      input: Record<string, unknown>
+    } | undefined
+    const previewDefinition = {
+      id: 'severity',
+      name: 'Severity',
+      required: true,
+      sortOrder: 0,
+      type: 'formula',
+      formulaExpression: '{amount} * 2',
+    } satisfies CustomFieldDefinition
+    const preview = {
+      expectedRevision: 4,
+      currentWorkItemTypeId: 'default',
+      currentWorkflowStatusId: 'todo',
+      targetWorkItemTypeId: 'incident',
+      lostCustomFieldIds: ['customer-impact'],
+      invalidWorkflowStatusId: 'todo',
+      targetInitialWorkflowStatusId: 'incident-open',
+      missingRequiredCustomFieldIds: ['severity'],
+      missingRequiredCustomFieldDefinitions: [previewDefinition],
+      approvalCompletionTransitionConflict: false,
+      requiresResolution: true,
+    }
+    const publicPreview = {
+      ...preview,
+      missingRequiredCustomFieldDefinitions: [{
+        id: 'severity',
+        name: 'Severity',
+        required: true,
+        sortOrder: 0,
+        type: 'formula',
+      }],
+    }
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async previewTypeChange(_credential, teamId, workItemId, input) {
+          received = { teamId, workItemId, input }
+          return preview
+        },
+      }),
+    })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request(
+      'http://localhost/v1/work-items/work-item-1/work-item-type-preview?teamId=team-1',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          expectedRevision: 4,
+          targetWorkItemTypeId: 'incident',
+          assignedProjectId: null,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(publicPreview)
+    expect(received).toEqual({
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      input: {
+        expectedRevision: 4,
+        targetWorkItemTypeId: 'incident',
+        assignedProjectId: null,
+      },
+    })
+  })
+
   test('scopes entitlement idempotency by public API payload', async () => {
     const keys: Array<string | undefined> = []
     const { platform, router } = createTestRouter({
@@ -512,8 +661,28 @@ describe('public API router', () => {
     })
     expect(components.schemas.OAuthAppSummary.properties).not.toHaveProperty('redirectUris')
     expect(components.schemas.CreateOAuthAppInput.properties).not.toHaveProperty('redirectUris')
+    expect(paths['/api/v1/work-item-types']).toHaveProperty('get')
+    expect(
+      paths['/api/v1/work-item-types'].get.responses['200'].content['application/json'].schema,
+    ).toEqual({ $ref: '#/components/schemas/PublicWorkItemTypeCatalog' })
+    expect(components.schemas.PublicCustomFieldDefinition.properties).not.toHaveProperty('formulaExpression')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/external-links']).toHaveProperty('post')
+    expect(paths['/api/v1/work-items/{workItemId}/work-item-type-preview']).toHaveProperty('post')
+    expect(
+      paths['/api/v1/work-items/{workItemId}/work-item-type-preview'].post.responses['200'].content[
+        'application/json'
+      ].schema,
+    ).toEqual({ $ref: '#/components/schemas/PublicWorkItemTypeChangePreview' })
+    expect(
+      components.schemas.PublicWorkItemTypeChangePreview.properties
+        .missingRequiredCustomFieldDefinitions.items,
+    ).toEqual({ $ref: '#/components/schemas/PublicCustomFieldDefinition' })
+    expect(
+      paths['/api/v1/work-items/{workItemId}/work-item-type-preview'].post.requestBody.content[
+        'application/json'
+      ].schema,
+    ).toEqual({ $ref: '#/components/schemas/PreviewPublicWorkItemTypeChangeRequest' })
     expect(paths['/api/developer/external-links/{externalLinkId}']).toHaveProperty('patch')
     expect(
       paths['/api/developer/external-links/{externalLinkId}'].patch.requestBody.content[

@@ -8,6 +8,9 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   ANALYTICS_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  createSearchWorkItemTypeKey,
+  readSearchWorkItemTypeKey,
   type AnalyticsCustomFieldFilter,
   type AnalyticsDateRange,
   type AnalyticsEvidenceInput,
@@ -475,6 +478,8 @@ type AnalyticsWorkItemState = {
   assignedProjectId?: string
   /** Assignee user ID です。 */
   assigneeUserId: string
+  /** Stable Work Item Type identifier です。 */
+  workItemTypeId: string
   /** Workflow status category です。 */
   statusCategory: string
   /** Custom field values です。 */
@@ -1285,6 +1290,7 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
       'Analytics status categories',
       'statusCategories',
     ),
+    ...normalizeAnalyticsWorkItemTypeIds(filter.workItemTypeIds),
     ...(filter.customFields === undefined
       ? {}
       : { customFields: normalizeCustomFieldFilters(filter.customFields) }),
@@ -1294,13 +1300,41 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
   }
 }
 
+/** Normalizes Team-qualified Work Item Type keys used by Analytics filters. */
+function normalizeAnalyticsWorkItemTypeIds(
+  value: unknown,
+): Partial<Pick<AnalyticsFilter, 'workItemTypeIds'>> {
+  if (value === undefined) return {}
+  if (!Array.isArray(value)) {
+    throw invalid('AnalyticsFilterInvalid', 'Analytics Work Item Type IDs must be an array.')
+  }
+  const values = [...new Set(value.map((candidate) => {
+    if (typeof candidate !== 'string') {
+      throw invalid('AnalyticsFilterInvalid', 'Analytics Work Item Type ID is invalid.')
+    }
+    const normalized = candidate.trim()
+    if (
+      normalized.length === 0 ||
+      normalized.length > 512 ||
+      readSearchWorkItemTypeKey(normalized) === undefined
+    ) {
+      throw invalid(
+        'AnalyticsFilterInvalid',
+        'Analytics Work Item Type IDs must be Team-qualified.',
+      )
+    }
+    return normalized
+  }))].sort()
+  return { workItemTypeIds: values }
+}
+
 function normalizeIdentifierListProperty(
   value: unknown,
   label: string,
-  property: 'teamIds' | 'projectIds' | 'assigneeUserIds' | 'statusCategories',
+  property: 'teamIds' | 'projectIds' | 'assigneeUserIds' | 'statusCategories' | 'workItemTypeIds',
 ): Partial<Pick<
   AnalyticsFilter,
-  'teamIds' | 'projectIds' | 'assigneeUserIds' | 'statusCategories'
+  'teamIds' | 'projectIds' | 'assigneeUserIds' | 'statusCategories' | 'workItemTypeIds'
 >> {
   if (value === undefined) return {}
   if (!Array.isArray(value)) {
@@ -1422,6 +1456,7 @@ function normalizeGroupBy(value: unknown): AnalyticsGroupBy {
     dimension !== 'project' &&
     dimension !== 'assignee' &&
     dimension !== 'status' &&
+    dimension !== 'work-item-type' &&
     dimension !== 'custom-field'
   ) {
     throw invalid('AnalyticsGroupByInvalid', 'Analytics group-by dimension is invalid.')
@@ -1600,6 +1635,7 @@ function createCurrentAnalyticsState(item: CanonicalWorkItem): AnalyticsWorkItem
       ? {}
       : { assignedProjectId: item.assignedProjectId }),
     assigneeUserId: item.assigneeUserId,
+    workItemTypeId: item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     statusCategory: item.statusCategory,
     customFieldValues: structuredClone(item.customFieldValues),
     dueDate: item.dueDate,
@@ -1643,6 +1679,7 @@ function normalizeAnalyticsFieldPath(field: string) {
     field === 'title' ||
     field === 'assignedProjectId' ||
     field === 'assigneeUserId' ||
+    field === 'workItemTypeId' ||
     field === 'statusCategory' ||
     field === 'dueDate' ||
     field === 'createdAt' ||
@@ -1681,6 +1718,12 @@ function setAnalyticsStateField(
     } else {
       delete state[field]
     }
+    return
+  }
+  if (field === 'workItemTypeId') {
+    state.workItemTypeId = typeof value === 'string' && value.length > 0
+      ? value
+      : DEFAULT_WORK_ITEM_TYPE_ID
     return
   }
   if (
@@ -1747,6 +1790,13 @@ function matchesAnalyticsFilter(
   ) return false
   if (filter.assigneeUserIds && !filter.assigneeUserIds.includes(state.assigneeUserId)) return false
   if (filter.statusCategories && !filter.statusCategories.includes(state.statusCategory)) return false
+  if (
+    filter.workItemTypeIds &&
+    !filter.workItemTypeIds.includes(createSearchWorkItemTypeKey(
+      state.teamId,
+      state.workItemTypeId,
+    ))
+  ) return false
   return (filter.customFields ?? []).every((customFilter) =>
     matchesCustomFieldFilter(state.customFieldValues[customFilter.fieldId], customFilter)
   )
@@ -2015,6 +2065,12 @@ function analyticsGroupIdentity(state: AnalyticsWorkItemState, groupBy: Analytic
   }
   if (groupBy.dimension === 'status') {
     return { key: state.statusCategory, label: state.statusCategory }
+  }
+  if (groupBy.dimension === 'work-item-type') {
+    return {
+      key: createSearchWorkItemTypeKey(state.teamId, state.workItemTypeId),
+      label: `${state.teamId} · ${state.workItemTypeId}`,
+    }
   }
   if (groupBy.dimension === 'custom-field') {
     const value = state.customFieldValues[groupBy.customFieldId]

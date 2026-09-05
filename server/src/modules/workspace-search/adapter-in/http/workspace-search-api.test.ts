@@ -52,6 +52,7 @@ import type {
   SavedTaskViewCapabilities,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
+import { createSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -1412,7 +1413,12 @@ test('task view endpoints forward the complete lifecycle with current permission
     surface: 'project',
     scope: { kind: 'project', projectId: 'refero', teamId: 'core-team' },
     filters: {
-      workflowStatuses: [{ teamId: 'core-team', statusId: 'review' }],
+      workItemTypeIds: [createSearchWorkItemTypeKey('core-team', 'bug')],
+      workflowStatuses: [{
+        teamId: 'core-team',
+        workItemTypeId: 'bug',
+        statusId: 'review',
+      }],
       customFields: [{ fieldId: 'score', operator: 'greater-than', value: 3 }],
     },
     layout: {
@@ -1465,6 +1471,18 @@ test('task view endpoints forward the complete lifecycle with current permission
             revision: 1,
             workflow,
             customFields: [],
+            workItemTypes: [{
+              id: 'bug',
+              name: 'Bug',
+              iconToken: 'bug',
+              status: 'active',
+              defaultWorkflowId: workflow.id,
+              customFieldIds: [],
+              requiredCustomFieldIds: [],
+              detailSections: ['overview'],
+              allowedChildTypeIds: ['default', 'bug'],
+              sortOrder: 10,
+            }],
           },
         }
       },
@@ -1492,6 +1510,29 @@ test('task view endpoints forward the complete lifecycle with current permission
             revision: 2,
             workflow,
             customFields,
+            workItemTypes: [{
+              id: 'bug',
+              name: 'Bug',
+              iconToken: 'bug',
+              status: 'active',
+              defaultWorkflowId: workflow.id,
+              customFieldIds: [],
+              requiredCustomFieldIds: [],
+              detailSections: ['overview'],
+              allowedChildTypeIds: ['default', 'bug'],
+              sortOrder: 10,
+            }, {
+              id: 'legacy',
+              name: 'Legacy',
+              iconToken: 'archive',
+              status: 'archived',
+              defaultWorkflowId: workflow.id,
+              customFieldIds: [],
+              requiredCustomFieldIds: [],
+              detailSections: ['overview'],
+              allowedChildTypeIds: ['default', 'legacy'],
+              sortOrder: 20,
+            }],
           },
         }
       },
@@ -1595,6 +1636,24 @@ test('task view endpoints forward the complete lifecycle with current permission
   expect(listInput?.access.manageableTeamIds.has('restricted-team')).toBeFalse()
   expect(listInput?.access.activeCustomFieldIds?.has('score')).toBeTrue()
   expect(listInput?.access.activeCustomFieldIds?.has('restricted-score')).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'default'),
+  )).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'bug'),
+  )).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'legacy'),
+  )).toBeTrue()
+  expect(listInput?.access.activeWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('restricted-team', 'bug'),
+  )).toBeTrue()
+  expect(listInput?.access.readableWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('core-team', 'bug'),
+  )).toBeTrue()
+  expect(listInput?.access.readableWorkItemTypeIds?.has(
+    createSearchWorkItemTypeKey('restricted-team', 'bug'),
+  )).toBeFalse()
   expect(listInput?.access.readableCustomFieldIds?.has('score')).toBeTrue()
   expect(listInput?.access.readableCustomFieldIds?.has('restricted-score')).toBeFalse()
   expect(listInput?.access.activeStatusIds?.has('core-team\0review')).toBeTrue()

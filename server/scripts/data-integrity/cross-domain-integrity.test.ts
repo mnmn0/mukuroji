@@ -78,9 +78,14 @@ function createHealthyItems(): CrossDomainIntegrityItem[] {
       workspaceId: 'tenant-secret-a',
       teamId: null,
       workflowStatuses: [
-        { statusId: 'done', category: 'completed' },
-        { statusId: 'todo', category: 'unstarted' },
+        { statusId: 'done', category: 'completed', workflowId: 'default-workflow' },
+        { statusId: 'todo', category: 'unstarted', workflowId: 'default-workflow' },
       ],
+      workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
+        workItemTypeId: 'default',
+        workflowId: 'default-workflow',
+      }],
     },
     { kind: 'team', workspaceId: 'tenant-secret-a', teamId: 'team-secret-a' },
     {
@@ -100,6 +105,7 @@ function createHealthyItems(): CrossDomainIntegrityItem[] {
       teamId: 'team-secret-a',
       workItemId: 'work-secret-a',
       creatorMemberKey: 'owner-secret@example.test',
+      workItemTypeId: 'default',
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       projectId: 'project-secret-a',
@@ -111,6 +117,7 @@ function createHealthyItems(): CrossDomainIntegrityItem[] {
       teamId: 'team-secret-a',
       workItemId: 'work-secret-b',
       creatorMemberKey: 'owner-secret@example.test',
+      workItemTypeId: 'default',
       workflowStatusId: 'done',
       statusCategory: 'completed',
       projectId: 'project-secret-a',
@@ -265,7 +272,7 @@ test('passes a healthy dataset without requiring historical audit resources to r
     'audit-known-resource-tenant',
     'configuration-workflow-status',
     'file-metadata-work-item-project-tenant',
-    'relation-work-item-team-project',
+    'relation-work-item-type-team-project',
     'work-item-creator-membership',
   ])
   expect(result.scope.nonTargets).toContain('historical-audit-resource-liveness')
@@ -429,6 +436,88 @@ test('detects relation endpoint and project corruption without exposing their ID
   expect(serialized).not.toContain('private-cursor')
 })
 
+test('detects disallowed parent-child Work Item Types from effective Team configuration', async () => {
+  const items: CrossDomainIntegrityItem[] = [
+    {
+      kind: 'configuration',
+      workspaceId: 'tenant-secret-a',
+      teamId: 'team-secret-a',
+      workflowStatuses: [{
+        statusId: 'todo',
+        category: 'unstarted',
+        workflowId: 'default-workflow',
+      }],
+      workItemTypeWorkflows: [
+        {
+          allowedChildTypeIds: ['default'],
+          workItemTypeId: 'default',
+          workflowId: 'default-workflow',
+        },
+        {
+          allowedChildTypeIds: [],
+          workItemTypeId: 'parent',
+          workflowId: 'default-workflow',
+        },
+        {
+          allowedChildTypeIds: [],
+          workItemTypeId: 'child',
+          workflowId: 'default-workflow',
+        },
+      ],
+    },
+    { kind: 'team', workspaceId: 'tenant-secret-a', teamId: 'team-secret-a' },
+    {
+      kind: 'workspace-member',
+      workspaceId: 'tenant-secret-a',
+      memberKey: 'owner-secret@example.test',
+    },
+    {
+      kind: 'work-item',
+      workspaceId: 'tenant-secret-a',
+      teamId: 'team-secret-a',
+      workItemId: 'child-item',
+      creatorMemberKey: 'owner-secret@example.test',
+      workItemTypeId: 'child',
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      projectId: null,
+      relationIds: ['parent:parent-item'],
+    },
+    {
+      kind: 'work-item',
+      workspaceId: 'tenant-secret-a',
+      teamId: 'team-secret-a',
+      workItemId: 'parent-item',
+      creatorMemberKey: 'owner-secret@example.test',
+      workItemTypeId: 'parent',
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      projectId: null,
+      relationIds: ['child:child-item'],
+    },
+    {
+      kind: 'relation',
+      workspaceId: 'tenant-secret-a',
+      teamId: 'team-secret-a',
+      sourceWorkItemId: 'child-item',
+      targetWorkItemId: 'parent-item',
+      relationType: 'parent',
+    },
+    {
+      kind: 'relation',
+      workspaceId: 'tenant-secret-a',
+      teamId: 'team-secret-a',
+      sourceWorkItemId: 'parent-item',
+      targetWorkItemId: 'child-item',
+      relationType: 'child',
+    },
+  ]
+
+  const result = await run(items)
+
+  expect(result.failureCodes).toEqual(['RELATION_WORK_ITEM_TYPE_MISMATCH'])
+})
+
 test('checks Work Item Team, Project, and status category without requiring a relation', async () => {
   const items: CrossDomainIntegrityItem[] = [
     {
@@ -442,6 +531,7 @@ test('checks Work Item Team, Project, and status category without requiring a re
       teamId: 'missing-team',
       workItemId: 'unrelated-work-item',
       creatorMemberKey: 'creator@example.test',
+      workItemTypeId: 'default',
       workflowStatusId: 'todo',
       statusCategory: 'completed',
       projectId: 'missing-project',
@@ -572,7 +662,16 @@ test('compares every same-resource domain aggregate and item count', async () =>
     kind: 'configuration',
     workspaceId: 'another-tenant-secret',
     teamId: null,
-    workflowStatuses: [{ statusId: 'todo', category: 'unstarted' }],
+    workflowStatuses: [{
+      statusId: 'todo',
+      category: 'unstarted',
+      workflowId: 'default-workflow',
+    }],
+    workItemTypeWorkflows: [{
+      allowedChildTypeIds: ['default'],
+      workItemTypeId: 'default',
+      workflowId: 'default-workflow',
+    }],
   })
 
   const fileItems = createHealthyItems()

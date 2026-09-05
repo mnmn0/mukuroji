@@ -150,6 +150,7 @@ import {
   type StatusFilter,
   type TaskSortOrder,
   type TaskTab,
+  type WorkItemTypeFilter,
 } from '../model/taskView'
 import {
   formatTaskScheduleRange,
@@ -225,6 +226,21 @@ type TaskUpdateResult = {
   applied: boolean
   /** Updated task, or the original snapshot when the preview was cancelled. */
   task: CanonicalWorkItem
+}
+
+/**
+ * Determines whether a task update can be represented by the generic inverse patch.
+ *
+ * Work Item Type changes require a type-specific reverse resolution, so they must not
+ * enter the generic task undo/redo history.
+ *
+ * @param input - Update patch to classify.
+ * @returns Whether the update is safe for generic undo and redo.
+ */
+function isReversibleTaskUpdate(
+  input: Pick<UpdateTeamIssueInput, 'workItemTypeId'>,
+): boolean {
+  return input.workItemTypeId === undefined
 }
 
 /** Persisted Project Create outcome returned by the route-level mutation. */
@@ -563,6 +579,7 @@ export function TaskScreen({
   })
   const [localAssigneeFilter, setLocalAssigneeFilter] = useState<AssigneeFilter>('all')
   const [localPriorityFilter, setLocalPriorityFilter] = useState<PriorityFilter>('all')
+  const [localWorkItemTypeFilter, setLocalWorkItemTypeFilter] = useState<WorkItemTypeFilter>('all')
   const [localDueDateFilter, setLocalDueDateFilter] = useState<DueDateFilter>('all')
   const [localSortOrder, setLocalSortOrder] = useState<TaskSortOrder>('due-date-asc')
   const [bulkSelection, setBulkSelection] = useState<TaskBulkSelectionState>({
@@ -666,6 +683,7 @@ export function TaskScreen({
   const definitionFilter = viewState?.definitionFilter ?? localDefinitionFilter
   const dueDateFilter = viewState?.dueDateFilter ?? localDueDateFilter
   const priorityFilter = viewState?.priorityFilter ?? localPriorityFilter
+  const workItemTypeFilter = viewState?.workItemTypeFilter ?? localWorkItemTypeFilter
   const searchQuery = viewState?.searchQuery ?? localSearchQuery
   const sortOrder = viewState?.sortOrder ?? localSortOrder
   const statusFilter = viewState?.statusFilter ?? localStatusFilter
@@ -675,6 +693,7 @@ export function TaskScreen({
     definitionFilter,
     dueDateFilter,
     priorityFilter,
+    workItemTypeFilter,
     searchQuery,
     sortOrder,
     statusFilter,
@@ -688,6 +707,7 @@ export function TaskScreen({
     setLocalDefinitionFilter(nextViewState.definitionFilter)
     setLocalDueDateFilter(nextViewState.dueDateFilter)
     setLocalPriorityFilter(nextViewState.priorityFilter)
+    setLocalWorkItemTypeFilter(nextViewState.workItemTypeFilter)
     setLocalSearchQuery(nextViewState.searchQuery)
     setLocalSortOrder(nextViewState.sortOrder)
     setLocalStatusFilter(nextViewState.statusFilter)
@@ -766,6 +786,7 @@ export function TaskScreen({
           locale,
           personLabels,
           priorityFilter,
+          workItemTypeFilter,
           searchQuery,
           sortOrder,
           statusColumns,
@@ -781,6 +802,7 @@ export function TaskScreen({
       locale,
       personLabels,
       priorityFilter,
+      workItemTypeFilter,
       resolvedConfigurationsByTeam,
       searchQuery,
       sortOrder,
@@ -1068,6 +1090,9 @@ export function TaskScreen({
       ...(context?.workflowStatusId
         ? { workflowStatusId: context.workflowStatusId }
         : {}),
+      ...(context?.workItemTypeId
+        ? { workItemTypeId: context.workItemTypeId }
+        : {}),
     }
     setCreateTaskError(undefined)
     setCreateTaskContext(resolvedContext)
@@ -1088,12 +1113,16 @@ export function TaskScreen({
 
     try {
       const updatedTask = await onUpdateTask(task, input)
-      setTaskUndo({
-        forwardPatch: input,
-        inversePatch: createTaskInversePatch(task, input),
-        task: updatedTask,
-        undoToken: createTaskUpdateUndoToken(updatedTask),
-      })
+      if (isReversibleTaskUpdate(input)) {
+        setTaskUndo({
+          forwardPatch: input,
+          inversePatch: createTaskInversePatch(task, input),
+          task: updatedTask,
+          undoToken: createTaskUpdateUndoToken(updatedTask),
+        })
+      } else {
+        setTaskUndo(undefined)
+      }
       setTaskRedo(undefined)
       setTaskAction({
         kind: 'success',
@@ -1280,6 +1309,11 @@ export function TaskScreen({
 
   /** Reverses the most recent successful inline task update. */
   const handleUndoTask = async () => {
+    if (taskUndo && !isReversibleTaskUpdate(taskUndo.forwardPatch)) {
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      return
+    }
     if (
       !taskUndo ||
       !onUpdateTask ||
@@ -1323,6 +1357,11 @@ export function TaskScreen({
 
   /** Reapplies the most recently undone inline task update. */
   const handleRedoTask = async () => {
+    if (taskRedo && !isReversibleTaskUpdate(taskRedo.forwardPatch)) {
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      return
+    }
     if (!taskRedo || !onUpdateTask || isRestoringTask) {
       return
     }
@@ -1402,12 +1441,16 @@ export function TaskScreen({
             const result = await onUpdateIssue(teamId, issueId, input)
             if (result) {
               updatedTask = result
-              setTaskUndo({
-                forwardPatch: input,
-                inversePatch: createTaskInversePatch(detailTask, input),
-                task: result,
-                undoToken: createTaskUpdateUndoToken(result),
-              })
+              if (isReversibleTaskUpdate(input)) {
+                setTaskUndo({
+                  forwardPatch: input,
+                  inversePatch: createTaskInversePatch(detailTask, input),
+                  task: result,
+                  undoToken: createTaskUpdateUndoToken(result),
+                })
+              } else {
+                setTaskUndo(undefined)
+              }
               setTaskRedo(undefined)
               setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
             }
@@ -2692,12 +2735,17 @@ export function TaskScreen({
                   ...currentViewState,
                   priorityFilter: nextPriorityFilter,
                 })}
+                onWorkItemTypeFilterChange={(nextWorkItemTypeFilter) => commitViewState({
+                  ...currentViewState,
+                  workItemTypeFilter: nextWorkItemTypeFilter,
+                })}
                 onResetFilters={() => commitViewState({
                   ...currentViewState,
                   assigneeFilter: 'all',
                   definitionFilter: { category: 'all', customFieldId: '' },
                   dueDateFilter: 'all',
                   priorityFilter: 'all',
+                  workItemTypeFilter: 'all',
                   statusFilter: 'all',
                 })}
                 onProjectUserQueryChange={onProjectUserQueryChange}
@@ -2727,11 +2775,13 @@ export function TaskScreen({
                 personLabels={personLabels}
                 personOptions={personOptions}
                 priorityFilter={priorityFilter}
+                workItemTypeFilter={workItemTypeFilter}
                 projectFiles={projectFiles}
                 projectId={projectId}
                 projectMembers={projectMembers}
                 projectMembersErrorMessage={projectMembersErrorMessage}
                 projectName={resolvedProjectName}
+                teams={teams}
                 planningSnapshot={planningSnapshot}
                 projectUserQuery={projectUserQuery}
                 projectUsers={projectUsers}

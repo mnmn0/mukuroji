@@ -43,6 +43,7 @@ function workItem(
     statusCategory,
     teamId: 'team-1',
     workItemId: 'item-1',
+    workItemTypeId: 'default',
     workflowStatusId,
     workspaceId: 'workspace-1',
   }
@@ -58,13 +59,27 @@ describe('restore drill opaque semantic claims', () => {
     const workspaceClaims = createRestoreDrillSemanticItemClaims({
       kind: 'configuration',
       teamId: null,
-      workflowStatuses: [{ category: 'unstarted', statusId: 'todo' }],
+      workflowStatuses: [{
+        category: 'unstarted',
+        statusId: 'todo',
+        workflowId: 'default-workflow',
+      }],
+      workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
+        workItemTypeId: 'default',
+        workflowId: 'default-workflow',
+      }],
       workspaceId: 'workspace-1',
     }, DIGEST_KEY, 'b'.repeat(64))
     const teamClaims = createRestoreDrillSemanticItemClaims({
       kind: 'configuration',
       teamId: 'team-1',
       workflowStatuses: [],
+      workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
+        workItemTypeId: 'default',
+        workflowId: 'default-workflow',
+      }],
       workspaceId: 'workspace-1',
     }, DIGEST_KEY, 'c'.repeat(64))
     const facts = collectFacts([...workspaceClaims, ...teamClaims])
@@ -83,13 +98,31 @@ describe('restore drill opaque semantic claims', () => {
     const workspaceClaims = createRestoreDrillSemanticItemClaims({
       kind: 'configuration',
       teamId: null,
-      workflowStatuses: [{ category: 'completed', statusId: 'custom' }],
+      workflowStatuses: [{
+        category: 'completed',
+        statusId: 'custom',
+        workflowId: 'default-workflow',
+      }],
+      workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
+        workItemTypeId: 'default',
+        workflowId: 'default-workflow',
+      }],
       workspaceId: 'workspace-1',
     }, DIGEST_KEY, 'b'.repeat(64))
     const teamClaims = createRestoreDrillSemanticItemClaims({
       kind: 'configuration',
       teamId: 'team-1',
-      workflowStatuses: [{ category: 'started', statusId: 'custom' }],
+      workflowStatuses: [{
+        category: 'started',
+        statusId: 'custom',
+        workflowId: 'default-workflow',
+      }],
+      workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['default'],
+        workItemTypeId: 'default',
+        workflowId: 'default-workflow',
+      }],
       workspaceId: 'workspace-1',
     }, DIGEST_KEY, 'c'.repeat(64))
     const facts = collectFacts([...workspaceClaims, ...teamClaims])
@@ -97,6 +130,38 @@ describe('restore drill opaque semantic claims', () => {
       statusRequirement(itemClaims),
       (factToken) => facts.has(factToken),
     )).toBe('WORK_ITEM_STATUS_CATEGORY_MISMATCH')
+  })
+
+  test('does not accept a status from another Work Item Type workflow', async () => {
+    const itemClaims = createRestoreDrillSemanticItemClaims(
+      {
+        ...workItem('todo', 'unstarted'),
+        workItemTypeId: 'type-a',
+      },
+      DIGEST_KEY,
+      ORIGIN,
+    )
+    const configurationClaims = createRestoreDrillSemanticItemClaims({
+      kind: 'configuration',
+      teamId: 'team-1',
+      workflowStatuses: [{
+        category: 'unstarted',
+        statusId: 'todo',
+        workflowId: 'type-b-workflow',
+      }],
+      workItemTypeWorkflows: [{
+        allowedChildTypeIds: ['type-a'],
+        workItemTypeId: 'type-a',
+        workflowId: 'type-a-workflow',
+      }],
+      workspaceId: 'workspace-1',
+    }, DIGEST_KEY, 'b'.repeat(64))
+    const facts = collectFacts(configurationClaims)
+
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      statusRequirement(itemClaims),
+      (factToken) => facts.has(factToken),
+    )).toBe('WORK_ITEM_WORKFLOW_STATUS_UNKNOWN')
   })
 
   test('uses a built-in status only when neither configuration scope exists', async () => {
@@ -141,6 +206,52 @@ describe('restore drill opaque semantic claims', () => {
       relationProject,
       () => false,
     )).toBeUndefined()
+  })
+
+  test('detects disallowed parent-child Work Item Types from opaque endpoint joins', async () => {
+    const relationClaims = createRestoreDrillSemanticItemClaims({
+      kind: 'relation',
+      relationType: 'parent',
+      sourceWorkItemId: 'child-item',
+      sourceWorkItemTypeId: 'child',
+      targetWorkItemId: 'parent-item',
+      targetWorkItemTypeId: 'parent',
+      teamId: 'team-1',
+      workspaceId: 'workspace-1',
+    }, DIGEST_KEY, 'd'.repeat(64))
+    const configurationClaims = createRestoreDrillSemanticItemClaims({
+      kind: 'configuration',
+      teamId: 'team-1',
+      workflowStatuses: [],
+      workItemTypeWorkflows: [
+        {
+          allowedChildTypeIds: [],
+          workItemTypeId: 'parent',
+          workflowId: 'parent-workflow',
+        },
+        {
+          allowedChildTypeIds: [],
+          workItemTypeId: 'child',
+          workflowId: 'child-workflow',
+        },
+      ],
+      workspaceId: 'workspace-1',
+    }, DIGEST_KEY, 'e'.repeat(64))
+    const relationTypeRequirement = relationClaims.find(
+      (claim): claim is RestoreDrillSemanticRequirement =>
+        claim.kind === 'requirement' && claim.branches.some((branch) =>
+          branch.fallbacks.some((fallback) =>
+            fallback.failureCode === 'RELATION_WORK_ITEM_TYPE_MISMATCH'
+          )
+        ),
+    )
+    if (!relationTypeRequirement) throw new Error('relation type requirement missing')
+
+    const facts = collectFacts(configurationClaims)
+    expect(await evaluateRestoreDrillSemanticRequirement(
+      relationTypeRequirement,
+      (factToken) => facts.has(factToken),
+    )).toBe('RELATION_WORK_ITEM_TYPE_MISMATCH')
   })
 
   test('classifies a File target that exists only in another Workspace as cross-tenant', async () => {

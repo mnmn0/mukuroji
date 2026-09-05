@@ -4,8 +4,11 @@ import type {
   Customer,
   CustomerRequest,
   CustomerRequestImportance,
+  CustomFieldValue,
+  WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -28,6 +31,21 @@ import {
 } from '../model/keyboard'
 import type { TriageEntryView } from '../model/triageView'
 import { TriageSourceIcon } from './TriageSourceIcon'
+import {
+  createDefaultCustomFieldValues,
+  isCustomFieldApplicable,
+  parseCustomFieldFormData,
+} from '../../work-items/model/customFields'
+import {
+  createCustomFieldValuePatch,
+  createCustomFieldErrorMessages,
+  resolveWorkItemTypes,
+  resolveWorkItemTypeDefinition,
+  resolveWorkItemTypeFormFields,
+  resolveWorkItemTypeLabel,
+} from '../../work-items/model/workItemDisplay'
+import { WorkItemFieldsEditor, type WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
+import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 
 /** Props accepted by the permission-aware triage entry detail pane, including source context and action state. */
 export type TriageEntryDetailProps = {
@@ -49,8 +67,14 @@ export type TriageEntryDetailProps = {
   readonly visibleProjectIds?: readonly string[]
   /** Active non-guest members keyed by their current Team-qualified Project. */
   readonly eligibleAssigneeIdsByProject?: ReadonlyMap<string, ReadonlySet<string>>
+  /** Active Project members available to person custom fields in the accept form. */
+  readonly workItemPersonOptions?: readonly WorkItemPersonOption[]
+  /** Mapped custom field values loaded from a form-backed Request submission. */
+  readonly initialAcceptCustomFieldValues?: Readonly<Record<string, CustomFieldValue>>
   /** Selected permission-safe entry view. */
   readonly view?: TriageEntryView
+  /** Work Item configuration used to label an accepted canonical Work Item. */
+  readonly workItemConfiguration?: WorkItemConfiguration
   /** Current locale used for dates. */
   readonly locale: 'ja' | 'en'
   /** Whether the selected entry detail is loading. */
@@ -145,10 +169,25 @@ export function TriageEntryDetail({
   teamId,
   eligibleAssigneeIdsByProject,
   visibleProjectIds = [],
+  workItemConfiguration,
+  workItemPersonOptions = [],
+  initialAcceptCustomFieldValues,
   view,
 }: TriageEntryDetailProps) {
+  const hasLoadedWorkItemConfiguration = workItemConfiguration !== undefined
+  const workItemTypes = useMemo(
+    () => hasLoadedWorkItemConfiguration
+      ? resolveWorkItemTypes(workItemConfiguration).filter((type) => type.status === 'active')
+      : [],
+    [hasLoadedWorkItemConfiguration, workItemConfiguration],
+  )
+  const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration && workItemTypes.length > 0
   const [actionMode, setActionMode] = useState<TriageActionMode>()
   const [acceptMode, setAcceptMode] = useState<'create' | 'link'>('create')
+  const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
+    () => workItemTypes[0]?.id ?? 'default',
+  )
+  const [acceptFieldErrors, setAcceptFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const [actionError, setActionError] = useState(false)
   const [actionAnnouncement, setActionAnnouncement] = useState('')
   const [customerRequestError, setCustomerRequestError] = useState(false)
@@ -172,6 +211,29 @@ export function TriageEntryDetail({
   const [isActionMutationPending, setIsActionMutationPending] = useState(false)
   const isActionMutationPendingRef = useRef(false)
   const actionIsPending = isPending || isActionMutationPending || isAiOperationPending
+  const acceptCustomFieldDefinitions = useMemo(() => {
+    if (!workItemConfiguration) return []
+    const selectedType = workItemTypes.find((type) => type.id === selectedWorkItemTypeId) ??
+      workItemTypes[0]
+    return resolveWorkItemTypeFormFields(workItemConfiguration, selectedType?.id)
+  }, [selectedWorkItemTypeId, workItemConfiguration, workItemTypes])
+  const acceptDefaultCustomFieldValues = useMemo(
+    () => createDefaultCustomFieldValues(
+      acceptCustomFieldDefinitions,
+      projectId || undefined,
+    ),
+    [acceptCustomFieldDefinitions, projectId],
+  )
+  const acceptCustomFieldValues = useMemo(
+    () => ({
+      ...acceptDefaultCustomFieldValues,
+      ...initialAcceptCustomFieldValues,
+    }),
+    [acceptDefaultCustomFieldValues, initialAcceptCustomFieldValues],
+  )
+  const hasAcceptCustomFields = acceptCustomFieldDefinitions.some((definition) =>
+    isCustomFieldApplicable(definition, projectId || undefined),
+  )
 
   const submitCustomerRequest = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -198,6 +260,7 @@ export function TriageEntryDetail({
   const closeAction = () => {
     setActionMode(undefined)
     setActionError(false)
+    setAcceptFieldErrors({})
     actionTrigger.current?.focus()
   }
   const activateAction = (
@@ -207,6 +270,7 @@ export function TriageEntryDetail({
     if (actionIsPending) return
     actionTrigger.current = trigger ?? null
     setActionError(false)
+    setAcceptFieldErrors({})
     setActionAnnouncement('')
     setOwnerUserId(view?.entry.ownerUserId ?? '')
     setProjectId(view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '')
@@ -268,6 +332,9 @@ export function TriageEntryDetail({
   }
 
   const entry = view.entry
+  const canCreateWorkItemFromTriage = entry.capabilities.canAcceptCreate && hasCreatableWorkItemType
+  const selectedWorkItemType = workItemTypes.find((type) => type.id === selectedWorkItemTypeId) ??
+    workItemTypes[0]
   const canonicalPath = entry.canonicalWorkItem
     ? createTeamIssuesPath(
         entry.canonicalWorkItem.teamId,
@@ -303,7 +370,7 @@ export function TriageEntryDetail({
       setActionMode('assign')
       return
     }
-    if (entry.capabilities.canAcceptCreate) {
+    if (canCreateWorkItemFromTriage) {
       setAcceptMode('create')
       setActionMode('accept')
       return
@@ -314,8 +381,41 @@ export function TriageEntryDetail({
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!actionMode || !onAction || actionIsPending || isActionMutationPendingRef.current) return
+    if (actionMode === 'accept' && acceptMode === 'create' && !canCreateWorkItemFromTriage) return
     const formData = new FormData(event.currentTarget)
-    const input = createActionInput(entry, actionMode, acceptMode, formData)
+    let customFieldValues: Record<string, CustomFieldValue | null> | undefined
+    if (
+      actionMode === 'accept' &&
+      acceptMode === 'create' &&
+      entry.capabilities.canAcceptCreate
+    ) {
+      const parsedCustomFields = parseCustomFieldFormData(
+        formData,
+        acceptCustomFieldDefinitions,
+        {
+          projectId: readFormValue(formData, 'projectId') || undefined,
+        },
+      )
+      if (parsedCustomFields.errors.length > 0) {
+        setAcceptFieldErrors(createCustomFieldErrorMessages(
+          parsedCustomFields.errors,
+          acceptCustomFieldDefinitions,
+          locale,
+        ))
+        setActionError(false)
+        return
+      }
+      setAcceptFieldErrors({})
+      customFieldValues = createCustomFieldValuePatch(
+        acceptCustomFieldDefinitions,
+        initialAcceptCustomFieldValues,
+        parsedCustomFields.values,
+        readFormValue(formData, 'projectId') || undefined,
+      )
+    } else {
+      setAcceptFieldErrors({})
+    }
+    const input = createActionInput(entry, actionMode, acceptMode, formData, customFieldValues)
     if (!input) {
       setActionError(true)
       return
@@ -367,6 +467,21 @@ export function TriageEntryDetail({
                 ? t('triage.permission.denied')
                 : `${entry.requester.displayName}${entry.requester.guest ? ` · ${t('triage.detail.guest')}` : ''}`}
             </p>
+            {entry.canonicalWorkItem ? (
+              <span className="mt-2 inline-flex items-center gap-1.5 workbench-badge">
+                <WorkItemTypeIcon
+                  className="h-3.5 w-3.5 fill-none stroke-current stroke-[1.8] [stroke-linecap:round] [stroke-linejoin:round]"
+                  iconToken={resolveWorkItemTypeDefinition(
+                    workItemConfiguration,
+                    entry.canonicalWorkItem.workItemTypeId,
+                  )?.iconToken ?? 'work-item'}
+                />
+                {resolveWorkItemTypeLabel(
+                  { workItemTypeId: entry.canonicalWorkItem.workItemTypeId },
+                  workItemConfiguration,
+                )}
+              </span>
+            ) : null}
           </div>
           <span className={stateTone(entry.state)}>{t(stateLabelKeys[entry.state])}</span>
         </div>
@@ -654,7 +769,18 @@ export function TriageEntryDetail({
               <ActionButton disabled={actionIsPending} label={t('triage.action.assign')} onActivate={activateAction} mode="assign" />
             ) : null}
             {(entry.capabilities.canAcceptCreate || entry.capabilities.canAcceptLink) ? (
-              <ActionButton disabled={actionIsPending} shortcut="A" label={t('triage.action.accept')} primary onActivate={activateAction} mode="accept" />
+              <ActionButton
+                disabled={actionIsPending || (
+                  entry.capabilities.canAcceptCreate &&
+                  !hasCreatableWorkItemType &&
+                  !entry.capabilities.canAcceptLink
+                )}
+                shortcut="A"
+                label={t('triage.action.accept')}
+                primary
+                onActivate={activateAction}
+                mode="accept"
+              />
             ) : null}
             {entry.capabilities.canMarkDuplicate ? (
               <ActionButton disabled={actionIsPending} shortcut="D" label={t('triage.action.duplicate')} onActivate={activateAction} mode="duplicate" />
@@ -742,22 +868,72 @@ export function TriageEntryDetail({
                   ) : null}
                 </div>
                 {acceptMode === 'create' && entry.capabilities.canAcceptCreate ? (
-                  <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-                    {t('triage.action.projectId')}
-                    <input
-                      autoFocus
-                      className="workbench-input min-h-10 px-3"
-                      name="projectId"
-                      onChange={(event) => {
-                        setProjectId(event.target.value)
-                        const nextDirtyState = { ...routingDirtyRef.current, project: true }
-                        routingDirtyRef.current = nextDirtyState
-                        setRoutingDirty(nextDirtyState)
-                      }}
-                      placeholder={t('triage.action.projectOptional')}
-                      value={projectId}
-                    />
-                  </label>
+                  <>
+                    <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                      {t('triage.action.workItemType')}
+                      <select
+                        className="workbench-input min-h-10 px-3"
+                        disabled={actionIsPending || !hasCreatableWorkItemType}
+                        name="workItemTypeId"
+                        onChange={(event) => {
+                          setSelectedWorkItemTypeId(event.target.value)
+                          setAcceptFieldErrors({})
+                        }}
+                        value={selectedWorkItemType?.id ?? 'default'}
+                      >
+                        {workItemTypes.map((type) => (
+                          <option key={type.id} value={type.id}>{type.name}</option>
+                        ))}
+                      </select>
+                      {!hasLoadedWorkItemConfiguration ? (
+                        <span className="text-xs font-semibold text-[var(--workbench-muted)]">
+                          {t('tasks.detail.loading')}
+                        </span>
+                      ) : !hasCreatableWorkItemType ? (
+                        <span className="text-xs font-semibold text-amber-700">
+                          {t('tasks.create.noActiveWorkItemTypes')}
+                        </span>
+                      ) : null}
+                      {selectedWorkItemType?.description ? (
+                        <span className="text-xs font-medium text-[var(--workbench-muted)]">
+                          {selectedWorkItemType.description}
+                        </span>
+                      ) : null}
+                    </label>
+                    <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                      {t('triage.action.projectId')}
+                      <input
+                        autoFocus
+                        className="workbench-input min-h-10 px-3"
+                        name="projectId"
+                        onChange={(event) => {
+                          setProjectId(event.target.value)
+                          setAcceptFieldErrors({})
+                          const nextDirtyState = { ...routingDirtyRef.current, project: true }
+                          routingDirtyRef.current = nextDirtyState
+                          setRoutingDirty(nextDirtyState)
+                        }}
+                        placeholder={t('triage.action.projectOptional')}
+                        value={projectId}
+                      />
+                    </label>
+                    {hasAcceptCustomFields ? (
+                      <div className="workbench-panel-muted p-4">
+                        <WorkItemFieldsEditor
+                          definitions={acceptCustomFieldDefinitions}
+                          disabled={actionIsPending}
+                          errors={acceptFieldErrors}
+                          // Keep uncontrolled shared fields mounted while scope applicability changes.
+                          key={`${entry.revision}:${JSON.stringify(initialAcceptCustomFieldValues)}`}
+                          locale={locale}
+                          personOptions={workItemPersonOptions}
+                          projectId={projectId || undefined}
+                          testId="triage-accept-custom-fields"
+                          values={acceptCustomFieldValues}
+                        />
+                      </div>
+                    ) : null}
+                  </>
                 ) : (
                   <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                     {t('triage.action.workItemId')}
@@ -793,7 +969,7 @@ export function TriageEntryDetail({
               <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={closeAction} type="button">
                 {t('triage.action.cancel')}
               </button>
-              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">
+              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending || (actionMode === 'accept' && acceptMode === 'create' && !hasCreatableWorkItemType)} type="submit">
                 {actionIsPending ? t('triage.action.pending') : t('triage.action.submit')}
               </button>
             </div>
@@ -930,6 +1106,7 @@ function createActionInput(
   actionMode: TriageActionMode,
   acceptMode: 'create' | 'link',
   formData: FormData,
+  customFieldValues?: Record<string, CustomFieldValue | null>,
 ): TriageActionInput | undefined {
   const expectedRevision = entry.revision
   if (actionMode === 'assign') {
@@ -945,11 +1122,16 @@ function createActionInput(
   if (actionMode === 'accept') {
     if (acceptMode === 'create' && entry.capabilities.canAcceptCreate) {
       const projectId = readFormValue(formData, 'projectId')
+      const workItemTypeId = readFormValue(formData, 'workItemTypeId')
       return {
         action: 'accept',
         expectedRevision,
         mode: 'create',
         ...(projectId ? { projectId } : {}),
+        ...(workItemTypeId ? { workItemTypeId } : {}),
+        ...(customFieldValues && Object.keys(customFieldValues).length > 0
+          ? { customFieldValues }
+          : {}),
       }
     }
     const workItemId = readFormValue(formData, 'workItemId')

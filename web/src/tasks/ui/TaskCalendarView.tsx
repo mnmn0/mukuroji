@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type {
+  ResolvedWorkItemConfiguration,
+  WorkItemConfiguration,
   WorkItemSchedule,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
@@ -29,8 +31,12 @@ import {
   tryAddTaskTimelineDays,
   unscheduleTaskSchedule,
 } from '../model/taskSchedule'
-import { createTaskKey, type TaskCreateContext } from '../model/taskView'
-import { TaskViewHeading } from './TaskViewPrimitives'
+import {
+  createTaskKey,
+  resolveProjectTaskConfiguration,
+  type TaskCreateContext,
+} from '../model/taskView'
+import { TaskViewHeading, TaskWorkItemTypeBadge } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 
 /** Resolves a localized task-calendar message. */
@@ -76,6 +82,10 @@ type PendingCalendarScheduleChange = {
 
 /** Props for the independent project task calendar view. */
 export type TaskCalendarViewProps = {
+  /** Fallback configuration used for a single-team project view. */
+  configuration?: WorkItemConfiguration
+  /** Team-scoped configurations used to resolve type labels in aggregate views. */
+  configurationsByTeam?: Readonly<Record<string, ResolvedWorkItemConfiguration>>
   /** Project receiving contextual Calendar creates. */
   projectId?: string
   /** Filtered and sorted tasks displayed by canonical primary date. */
@@ -117,6 +127,8 @@ type CalendarSchedulePreviewProps = {
  * @returns The independent project task calendar view.
  */
 export function TaskCalendarView({
+  configuration,
+  configurationsByTeam = {},
   onCreateTaskOpen,
   onRequestScheduleChange,
   onSelectTask,
@@ -387,6 +399,11 @@ export function TaskCalendarView({
                   busy={busyTaskKey === createTaskKey(entry.task)}
                   canEditSchedule={canEditSchedule}
                   entry={entry}
+                  configuration={resolveProjectTaskConfiguration(
+                    entry.task,
+                    configurationsByTeam,
+                    configuration,
+                  )}
                   key={createTaskKey(entry.task)}
                   onDragEnd={() => setDraggedTaskKey(undefined)}
                   onDragStart={(event) => {
@@ -446,6 +463,11 @@ export function TaskCalendarView({
                 busy={busyTaskKey === createTaskKey(entry.task)}
                 canEditSchedule={canEditSchedule}
                 entry={entry}
+                configuration={resolveProjectTaskConfiguration(
+                  entry.task,
+                  configurationsByTeam,
+                  configuration,
+                )}
                 key={createTaskKey(entry.task)}
                 onDragEnd={() => setDraggedTaskKey(undefined)}
                 onDragStart={(event) => {
@@ -495,6 +517,8 @@ type CalendarTaskCardProps = {
   busy: boolean
   /** Whether schedule mutation callbacks are available. */
   canEditSchedule: boolean
+  /** Configuration used to resolve the Work Item Type label. */
+  configuration?: WorkItemConfiguration
   /** Task and canonical schedule rendered by the card. */
   entry: CalendarTaskEntry
   /** Clears drag state after native dragging ends. */
@@ -520,6 +544,7 @@ type CalendarTaskCardProps = {
 function CalendarTaskCard({
   busy,
   canEditSchedule,
+  configuration,
   entry,
   onDragEnd,
   onDragStart,
@@ -554,6 +579,7 @@ function CalendarTaskCard({
         <span className="block text-sm font-semibold leading-5 text-[var(--workbench-text)]">
           {resolveWorkItemTitle(entry.task)}
         </span>
+        <TaskWorkItemTypeBadge configuration={configuration} task={entry.task} />
         <span className="mt-1 block text-[11px] font-bold uppercase tracking-wide">
           {resolveCalendarModeLabel(entry.schedule.mode, t)}
         </span>

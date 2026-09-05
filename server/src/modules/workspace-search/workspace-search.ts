@@ -15,6 +15,10 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  createSearchWorkItemTypeKey,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  readSearchWorkItemStatusKey,
+  readSearchWorkItemTypeKey,
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
   TASK_VIEW_SCHEMA_VERSION,
@@ -46,6 +50,7 @@ import {
   type TaskViewMigrationWarning,
   type TaskViewScope,
   type TaskViewSurface,
+  type TaskViewWorkflowStatusFilter,
   type TaskViewWritableProjectScope,
   type UpdateSavedTaskViewInput,
   type WorkflowStatusCategory,
@@ -169,6 +174,8 @@ export type WorkspaceSearchDocument = {
   creatorUserId?: string
   /** Entity の workflow status code です。 */
   status?: string
+  /** Stable Work Item Type ID for Work Item entities. */
+  workItemTypeId?: string
   /** Custom field value map です。 */
   customFields?: Record<string, SearchCustomFieldValue>
   /** Entity が持つ relation ID です。 */
@@ -342,10 +349,16 @@ export type TaskViewAccessScope = {
   writableProjectScopeKeys: ReadonlySet<string>
   /** 現在存在する custom field ID です。未指定時は削除判定を保留します。 */
   activeCustomFieldIds?: ReadonlySet<string>
+  /** Currently active Team-qualified Work Item Type keys. Omit to defer deletion migration. */
+  activeWorkItemTypeIds?: ReadonlySet<string>
+  /** Team-qualified Work Item Type keys readable by the current viewer. */
+  readableWorkItemTypeIds?: ReadonlySet<string>
   /** Current viewer が値を参照できる custom field ID です。未指定時は active field をすべて許可します。 */
   readableCustomFieldIds?: ReadonlySet<string>
   /** 現在存在する `${teamId}\0${statusId}` 形式の Team-qualified workflow status key です。 */
   activeStatusIds?: ReadonlySet<string>
+  /** Type-qualified workflow status keys currently present in the visible configurations. */
+  activeWorkflowStatusIds?: ReadonlySet<string>
   /** Current viewer が layout で利用できる built-in field です。未指定時はすべて許可します。 */
   readableColumnIds?: ReadonlySet<string>
   /** Active actor identifiers whose filter references may be disclosed to the current viewer. */
@@ -890,6 +903,7 @@ const builtInLayoutFields = new Set([
   'updatedAt',
   'priority',
   'relevance',
+  'workItemType',
 ])
 
 const taskViewBuiltInLayoutFields = new Set([
@@ -1039,6 +1053,7 @@ export function createWorkspaceSearchDocument(
   copyOptionalText(document, input, 'assigneeUserId', 512)
   copyOptionalText(document, input, 'creatorUserId', 512)
   copyOptionalText(document, input, 'status', 256)
+  copyOptionalText(document, input, 'workItemTypeId', 256)
   copyOptionalText(document, input, 'createdAt', 128)
   copyOptionalText(document, input, 'updatedAt', 128)
   if (input.sourceRevision !== undefined) {
@@ -1273,6 +1288,8 @@ export function createWorkItemWorkspaceSearchDocument(input: {
   creatorUserId?: string
   /** Work Item の現在 status です。 */
   status?: string
+  /** Work Item の stable Type ID です。 */
+  workItemTypeId?: string
   /** Work Item の custom field values です。 */
   customFields?: Record<string, SearchCustomFieldValue>
   /** Work Item の relation IDs です。 */
@@ -1304,6 +1321,7 @@ export function createWorkItemWorkspaceSearchDocument(input: {
     ...(input.assigneeUserId ? { assigneeUserId: input.assigneeUserId } : {}),
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.status ? { status: input.status } : {}),
+    ...(input.workItemTypeId ? { workItemTypeId: input.workItemTypeId } : {}),
     ...(input.customFields ? { customFields: input.customFields } : {}),
     ...(input.relationIds ? { relationIds: input.relationIds } : {}),
     ...(input.dueDate ? { dueDate: input.dueDate } : {}),
@@ -3609,6 +3627,25 @@ export function createTaskViewStatusKey(teamId: string, statusId: string) {
 }
 
 /**
+ * Creates the canonical Type-qualified key used by task view status allowlists.
+ *
+ * @param teamId - Team that owns the workflow status.
+ * @param workItemTypeId - Work Item Type whose workflow owns the status.
+ * @param statusId - Stable workflow status identifier within the workflow.
+ * @returns Collision-safe allowlist key for the Team, Work Item Type, and status.
+ */
+export function createTaskViewWorkflowStatusKey(
+  teamId: string,
+  workItemTypeId: string,
+  statusId: string,
+) {
+  return `${requireText(teamId, 'Task view status Team ID')}\0${requireText(
+    workItemTypeId,
+    'Task view Work Item Type ID',
+  )}\0${requireText(statusId, 'Task view status ID')}`
+}
+
+/**
  * Creates the canonical Team-qualified key used by task view Project scopes.
  *
  * @param teamId - Team that owns the Project.
@@ -3697,6 +3734,16 @@ async function sanitizeTaskViewDefinition(
             retainTaskViewCustomField(filter.fieldId, access, warnings, 'filter')
           ),
         }),
+    ...(definition.filters.workItemTypeIds === undefined
+      ? {}
+      : {
+          workItemTypeIds: retainTaskViewWorkItemTypeIds(
+            definition.filters.workItemTypeIds,
+            access.activeWorkItemTypeIds,
+            access.readableWorkItemTypeIds,
+            warnings,
+          ),
+        }),
     ...(definition.filters.statuses === undefined
       ? {}
       : {
@@ -3719,10 +3766,7 @@ async function sanitizeTaskViewDefinition(
               addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
               return false
             }
-            if (
-              !access.activeStatusIds ||
-              access.activeStatusIds.has(createTaskViewStatusKey(status.teamId, status.statusId))
-            ) {
+            if (isTaskViewWorkflowStatusActive(status, access)) {
               return true
             }
             addTaskViewMigrationWarning(
@@ -3798,6 +3842,36 @@ function retainTaskViewReferenceIds(
     if (readableIds.has(referenceId)) return true
     addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
     return false
+  })
+}
+
+/** Removes Work Item Type filters that no longer exist in the active configuration. */
+/**
+ * Retains task-view Work Item Type filters that still exist and are readable.
+ *
+ * @param typeIds - Team-qualified Work Item Type keys stored by the view.
+ * @param activeTypeIds - Currently configured keys, when deletion migration is available.
+ * @param readableTypeIds - Keys visible to the current viewer, when authorization data is available.
+ * @param warnings - Migration warnings collected for removed filters.
+ * @returns The readable active keys in their original order.
+ */
+function retainTaskViewWorkItemTypeIds(
+  typeIds: readonly string[],
+  activeTypeIds: ReadonlySet<string> | undefined,
+  readableTypeIds: ReadonlySet<string> | undefined,
+  warnings: TaskViewMigrationWarning[],
+): string[] {
+  if (!activeTypeIds && !readableTypeIds) return [...typeIds]
+  return typeIds.filter((typeId) => {
+    if (activeTypeIds && !activeTypeIds.has(typeId)) {
+      addTaskViewMigrationWarning(warnings, 'deleted-work-item-type', 'filter', 'removed')
+      return false
+    }
+    if (readableTypeIds && !readableTypeIds.has(typeId)) {
+      addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+      return false
+    }
+    return true
   })
 }
 
@@ -3879,13 +3953,36 @@ function isReadableTaskViewBuiltInField(
   return !enforcePermission || !access.readableColumnIds || access.readableColumnIds.has(field)
 }
 
+/** Returns whether a type-qualified or legacy workflow status is currently active. */
+function isTaskViewWorkflowStatusActive(
+  status: TaskViewWorkflowStatusFilter,
+  access: TaskViewAccessScope,
+) {
+  if (status.workItemTypeId !== undefined && access.activeWorkflowStatusIds) {
+    return access.activeWorkflowStatusIds.has(createTaskViewWorkflowStatusKey(
+      status.teamId,
+      status.workItemTypeId,
+      status.statusId,
+    ))
+  }
+  if (access.activeStatusIds) {
+    return access.activeStatusIds.has(createTaskViewStatusKey(status.teamId, status.statusId))
+  }
+  if (status.workItemTypeId !== undefined || !access.activeWorkflowStatusIds) return true
+  const teamPrefix = `${requireText(status.teamId, 'Task view status Team ID')}\0`
+  const statusSuffix = `\0${requireText(status.statusId, 'Task view status ID')}`
+  return [...access.activeWorkflowStatusIds].some((key) =>
+    key.startsWith(teamPrefix) && key.endsWith(statusSuffix)
+  )
+}
+
 /** Returns whether a legacy unqualified status still exists in any relevant Team workflow. */
 function isTaskViewLegacyStatusActive(
   statusId: string,
   definition: TaskViewDefinition,
   access: TaskViewAccessScope,
 ) {
-  if (!access.activeStatusIds) return true
+  if (!access.activeStatusIds && !access.activeWorkflowStatusIds) return true
   const teamIds = new Set<string>()
   const scopeTeamId = getTaskViewScopeTeamId(definition.scope)
   if (scopeTeamId) teamIds.add(scopeTeamId)
@@ -3897,11 +3994,13 @@ function isTaskViewLegacyStatusActive(
   }
   if (teamIds.size) {
     return [...teamIds].some((teamId) =>
-      access.activeStatusIds?.has(createTaskViewStatusKey(teamId, statusId))
+      isTaskViewWorkflowStatusActive({ teamId, statusId }, access)
     )
   }
   const suffix = `\0${statusId}`
-  return [...access.activeStatusIds].some((key) => key.endsWith(suffix))
+  const activeStatusIds = access.activeStatusIds ?? access.activeWorkflowStatusIds
+  if (!activeStatusIds) return false
+  return [...activeStatusIds].some((key) => key.endsWith(suffix))
 }
 
 /** Appends one deterministic migration warning without exposing an unreadable identifier. */
@@ -4037,7 +4136,29 @@ async function waitForWorkspaceSearchTable(
   throw new Error(`Local DynamoDB table "${tableName}" did not become active.`)
 }
 
-function normalizeWorkspaceSearchFilters(filters: unknown) {
+/** Options controlling normalization of Workspace Search filter identifiers. */
+type WorkspaceSearchFilterNormalizationOptions = {
+  /** Whether task-view callers may retain legacy bare Work Item Type identifiers. */
+  allowUnqualifiedWorkItemTypeIds?: boolean
+}
+
+/** Options controlling normalization of a persisted task-view definition. */
+type TaskViewDefinitionNormalizationOptions = {
+  /** Whether read-time migration may temporarily accept legacy bare Work Item Type identifiers. */
+  allowUnqualifiedWorkItemTypeIds?: boolean
+}
+
+/**
+ * Validates and normalizes Workspace Search filters.
+ *
+ * @param filters - Untrusted filter object received from an API or persisted view.
+ * @param options - Compatibility options for task-view-specific filter scopes.
+ * @returns Canonical filters accepted by the selected search surface.
+ */
+function normalizeWorkspaceSearchFilters(
+  filters: unknown,
+  options: WorkspaceSearchFilterNormalizationOptions = {},
+) {
   if (!isRecordValue(filters)) {
     return invalidFilters('Search filters must be an object.')
   }
@@ -4056,6 +4177,22 @@ function normalizeWorkspaceSearchFilters(filters: unknown) {
   copyFilterStringList(normalized, filters, 'relationIds')
   copyFilterStringList(normalized, filters, 'projectIds')
   copyFilterStringList(normalized, filters, 'teamIds')
+  if (filters.workItemTypeIds !== undefined) {
+    if (!Array.isArray(filters.workItemTypeIds)) {
+      invalidFilters('Search workItemTypeIds is invalid.')
+    }
+    const workItemTypeIds = normalizeStringList(
+      filters.workItemTypeIds,
+      'Search workItemTypeIds',
+      100,
+    )
+    if (!options.allowUnqualifiedWorkItemTypeIds && workItemTypeIds.some((value) =>
+      readSearchWorkItemTypeKey(value) === undefined
+    )) {
+      invalidFilters('Search work item type IDs must be Team-qualified.')
+    }
+    normalized.workItemTypeIds = workItemTypeIds
+  }
   if (filters.customFields) {
     if (!Array.isArray(filters.customFields) || filters.customFields.length > 50) {
       throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Custom field filters are invalid.')
@@ -4090,9 +4227,20 @@ function matchesWorkspaceSearchFilters(
   if (filters.entityTypes?.length && !filters.entityTypes.includes(document.entityType)) return false
   if (filters.assigneeUserIds?.length && (!document.assigneeUserId || !filters.assigneeUserIds.includes(document.assigneeUserId))) return false
   if (filters.creatorUserIds?.length && (!document.creatorUserId || !filters.creatorUserIds.includes(document.creatorUserId))) return false
-  if (filters.statuses?.length && (!document.status || !filters.statuses.includes(document.status))) return false
+  if (filters.statuses?.length && !matchesWorkspaceSearchStatusFilter(document, filters.statuses)) return false
   if (filters.projectIds?.length && (!document.projectId || !filters.projectIds.includes(document.projectId))) return false
   if (filters.teamIds?.length && (!document.teamId || !filters.teamIds.includes(document.teamId))) return false
+  if (
+    filters.workItemTypeIds?.length &&
+    (
+      document.entityType !== 'work-item' ||
+      !document.teamId ||
+      !filters.workItemTypeIds.includes(createSearchWorkItemTypeKey(
+        document.teamId,
+        document.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
+      ))
+    )
+  ) return false
   if (filters.relationIds?.length && !filters.relationIds.every((relationId) => document.relationIds?.includes(relationId))) return false
   if (filters.customFields?.length && !filters.customFields.every((filter) => matchesCustomFieldFilter(document.customFields?.[filter.fieldId], filter))) return false
   if (filters.date) {
@@ -4109,6 +4257,23 @@ function matchesWorkspaceSearchFilters(
     if (!splitKeyword(filters.keyword).every((term) => haystack.includes(term))) return false
   }
   return true
+}
+
+/** Matches a Search status filter against a legacy bare status or a qualified Work Item status key. */
+function matchesWorkspaceSearchStatusFilter(
+  document: WorkspaceSearchDocument,
+  statusFilters: readonly string[],
+): boolean {
+  if (!document.status) return false
+
+  return statusFilters.some((statusFilter) => {
+    const qualifiedStatus = readSearchWorkItemStatusKey(statusFilter)
+    if (!qualifiedStatus) return document.status === statusFilter
+    return document.entityType === 'work-item' &&
+      document.teamId === qualifiedStatus.teamId &&
+      (document.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) === qualifiedStatus.workItemTypeId &&
+      document.status === qualifiedStatus.statusId
+  })
 }
 
 function matchesImmutableWorkspaceSearchFilters(
@@ -4867,7 +5032,10 @@ function createTaskViewCopyName(sourceName: string) {
 }
 
 /** Validates a complete task view definition and returns its canonical representation. */
-function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
+function normalizeTaskViewDefinition(
+  definition: unknown,
+  options: TaskViewDefinitionNormalizationOptions = {},
+): TaskViewDefinition {
   if (!isRecordValue(definition)) {
     return invalidTaskView('Task view definition is required.')
   }
@@ -4877,7 +5045,7 @@ function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
   return {
     surface,
     scope,
-    filters: normalizeTaskViewFilters(definition.filters),
+    filters: normalizeTaskViewFilters(definition.filters, options),
     layout: normalizeTaskViewLayout(definition.layout),
   }
 }
@@ -4918,11 +5086,14 @@ function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewS
 }
 
 /** Validates filters shared by all task surfaces. */
-function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
+function normalizeTaskViewFilters(
+  filters: unknown,
+  options: TaskViewDefinitionNormalizationOptions = {},
+): TaskViewFilters {
   if (!isRecordValue(filters)) {
     return invalidTaskView('Task view filters are invalid.')
   }
-  const base = normalizeWorkspaceSearchFilters(filters)
+  const base = normalizeWorkspaceSearchFilters(filters, options)
   const workflowStatuses = filters.workflowStatuses === undefined
     ? undefined
     : normalizeTaskViewWorkflowStatuses(filters.workflowStatuses)
@@ -4962,15 +5133,25 @@ function normalizeTaskViewWorkflowStatuses(
     if (!isRecordValue(value)) {
       return invalidTaskView('Task view workflow status is invalid.')
     }
+    const workItemTypeId = value.workItemTypeId === undefined
+      ? undefined
+      : requireText(value.workItemTypeId, 'Task view workflow status Work Item Type ID', 256)
     return {
       teamId: requireText(value.teamId, 'Task view workflow status Team ID', 256),
+      ...(workItemTypeId === undefined ? {} : { workItemTypeId }),
       statusId: requireText(value.statusId, 'Task view workflow status ID', 256),
     }
   })
-  return [...new Map(normalized.map((value) => [createTaskViewStatusKey(
-    value.teamId,
-    value.statusId,
-  ), value])).values()]
+  return [...new Map(normalized.map((value) => [
+    value.workItemTypeId === undefined
+      ? createTaskViewStatusKey(value.teamId, value.statusId)
+      : createTaskViewWorkflowStatusKey(
+          value.teamId,
+          value.workItemTypeId,
+          value.statusId,
+        ),
+    value,
+  ])).values()]
 }
 
 /** Validates and deduplicates a bounded string enum list. */
@@ -5348,7 +5529,9 @@ function readStoredTaskView(value: Record<string, unknown>): StoredTaskView {
       ...(createIdempotencyKeyHash ? { createIdempotencyKeyHash } : {}),
       ...(createRequestFingerprint ? { createRequestFingerprint } : {}),
       ...(teamId ? { teamId } : {}),
-      definition: normalizeTaskViewDefinition(value.definition),
+      definition: normalizeTaskViewDefinition(value.definition, {
+        allowUnqualifiedWorkItemTypeIds: true,
+      }),
       revision: requirePositiveInteger(value.revision, 'Task view revision'),
       createdAt: requireText(value.createdAt, 'Task view createdAt', 128),
       updatedAt: requireText(value.updatedAt, 'Task view updatedAt', 128),
@@ -6216,7 +6399,7 @@ function normalizeStringList(values: unknown[], label: string, maxItems: number)
 function copyFilterStringList(
   target: WorkspaceSearchFilters,
   source: Record<string, unknown>,
-  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds',
+  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds' | 'workItemTypeIds',
 ) {
   const value = source[key]
   if (value !== undefined) {
@@ -6431,13 +6614,16 @@ function copyOptionalText<
 function copyOptionalResultFields(result: WorkspaceSearchResult, document: WorkspaceSearchDocument) {
   for (const key of [
     'subtitle', 'body', 'teamId', 'projectId', 'parentId', 'assigneeUserId',
-    'creatorUserId', 'status', 'dueDate', 'createdAt', 'updatedAt',
+    'creatorUserId', 'status', 'workItemTypeId', 'dueDate', 'createdAt', 'updatedAt',
   ] as const) {
     const value = document[key]
     if (value !== undefined) result[key] = value
   }
   if (document.customFields) {
     result.customFields = document.customFields
+  }
+  if (document.entityType === 'work-item' && result.workItemTypeId === undefined) {
+    result.workItemTypeId = DEFAULT_WORK_ITEM_TYPE_ID
   }
 }
 

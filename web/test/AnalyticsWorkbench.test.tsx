@@ -478,7 +478,7 @@ describe('AnalyticsWorkbench', () => {
       />,
     )
 
-    expect(html.match(/aria-pressed="true"/gu)?.length).toBe(3)
+    expect(html.match(/aria-pressed="true"/gu)?.length).toBe(4)
     expect(html).toContain('All teams')
     expect(html).toContain('All projects')
     expect(html).toContain('All statuses')

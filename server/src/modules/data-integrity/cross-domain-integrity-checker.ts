@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
+import { DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import type {
   CrossDomainAuditReference,
   CrossDomainConfigurationItem,
@@ -35,6 +36,7 @@ export type {
   CrossDomainRelationType,
   CrossDomainTeam,
   CrossDomainWorkflowStatus,
+  CrossDomainWorkItemTypeWorkflow,
   CrossDomainWorkflowStatusCategory,
   CrossDomainWorkItem,
   CrossDomainWorkspaceMember,
@@ -187,6 +189,7 @@ const KNOWN_FAILURE_CODES = new Set<string>([
   'RELATION_RECIPROCAL_MISSING',
   'RELATION_TEAM_MISSING',
   'RELATION_TENANT_MISMATCH',
+  'RELATION_WORK_ITEM_TYPE_MISMATCH',
   'RESTORE_AUDIT_DIFFERENCE',
   'RESTORE_CHECK_FAILED',
   'RESTORE_CONFIGURATION_DIFFERENCE',
@@ -211,6 +214,7 @@ const KNOWN_FAILURE_CODES = new Set<string>([
   'WORK_ITEM_STATUS_CATEGORY_MISMATCH',
   'WORK_ITEM_TEAM_MISSING',
   'WORK_ITEM_TENANT_MISMATCH',
+  'WORK_ITEM_TYPE_UNKNOWN',
   'WORK_ITEM_WORKFLOW_STATUS_UNKNOWN',
 ])
 
@@ -219,7 +223,7 @@ export const CROSS_DOMAIN_INTEGRITY_TARGETS = Object.freeze([
   'audit-known-resource-tenant',
   'configuration-workflow-status',
   'file-metadata-work-item-project-tenant',
-  'relation-work-item-team-project',
+  'relation-work-item-type-team-project',
   'work-item-creator-membership',
 ])
 
@@ -1983,15 +1987,34 @@ function checkWorkItems(
   failures: Set<CrossDomainIntegrityFailureCode>,
 ): void {
   for (const item of indexes.workItems.values()) {
-    const teamConfiguration = indexes.configurations.get(configurationKey(item.workspaceId, item.teamId))
-    const workspaceConfiguration = indexes.configurations.get(configurationKey(item.workspaceId, null))
-    const statuses = teamConfiguration?.workflowStatuses ??
-      workspaceConfiguration?.workflowStatuses ?? builtInWorkflowStatuses()
-    const status = statuses.find((candidate) => candidate.statusId === item.workflowStatusId)
-    if (!status) {
-      failures.add('WORK_ITEM_WORKFLOW_STATUS_UNKNOWN')
-    } else if (status.category !== item.statusCategory) {
-      failures.add('WORK_ITEM_STATUS_CATEGORY_MISMATCH')
+    const configuration = findEffectiveConfiguration(indexes, item.workspaceId, item.teamId)
+    let statuses: readonly CrossDomainWorkflowStatus[] = []
+    let shouldCheckStatus = true
+    if (configuration) {
+      const typeWorkflow = configuration.workItemTypeWorkflows.find((candidate) =>
+        candidate.workItemTypeId === item.workItemTypeId,
+      )
+      if (!typeWorkflow) {
+        failures.add('WORK_ITEM_TYPE_UNKNOWN')
+        shouldCheckStatus = false
+      } else {
+        statuses = configuration.workflowStatuses.filter((status) =>
+          status.workflowId === typeWorkflow.workflowId,
+        )
+      }
+    } else if (item.workItemTypeId === DEFAULT_WORK_ITEM_TYPE_ID) {
+      statuses = builtInWorkflowStatuses()
+    } else {
+      failures.add('WORK_ITEM_TYPE_UNKNOWN')
+      shouldCheckStatus = false
+    }
+    if (shouldCheckStatus) {
+      const status = statuses.find((candidate) => candidate.statusId === item.workflowStatusId)
+      if (!status) {
+        failures.add('WORK_ITEM_WORKFLOW_STATUS_UNKNOWN')
+      } else if (status.category !== item.statusCategory) {
+        failures.add('WORK_ITEM_STATUS_CATEGORY_MISMATCH')
+      }
     }
     if (!indexes.members.has(memberKey(item.workspaceId, item.creatorMemberKey))) {
       const otherWorkspaces = indexes.memberWorkspaces.get(item.creatorMemberKey)
@@ -2049,6 +2072,9 @@ function checkRelations(
     const target = findRelationEndpoint(indexes, relation, relation.targetWorkItemId, failures)
     if (source) checkRelationProject(indexes, source, failures)
     if (target) checkRelationProject(indexes, target, failures)
+    if (source && target) {
+      checkRelationWorkItemTypes(indexes, relation, source, target, failures)
+    }
     const reciprocal: CrossDomainRelation = {
       kind: 'relation',
       workspaceId: relation.workspaceId,
@@ -2060,6 +2086,41 @@ function checkRelations(
     if (!indexes.relations.has(relationKey(reciprocal))) {
       failures.add('RELATION_RECIPROCAL_MISSING')
     }
+  }
+}
+
+/** Resolves the Team override before falling back to the Workspace configuration. */
+function findEffectiveConfiguration(
+  indexes: CrossDomainIndexes,
+  workspaceId: string,
+  teamId: string,
+): CrossDomainConfigurationItem | undefined {
+  return indexes.configurations.get(configurationKey(workspaceId, teamId)) ??
+    indexes.configurations.get(configurationKey(workspaceId, null))
+}
+
+/** Verifies parent-child Work Item Type compatibility against effective configuration. */
+function checkRelationWorkItemTypes(
+  indexes: CrossDomainIndexes,
+  relation: CrossDomainRelation,
+  source: CrossDomainWorkItem,
+  target: CrossDomainWorkItem,
+  failures: Set<CrossDomainIntegrityFailureCode>,
+): void {
+  if (relation.relationType !== 'parent' && relation.relationType !== 'child') return
+  const parent = relation.relationType === 'parent' ? target : source
+  const child = relation.relationType === 'parent' ? source : target
+  const configuration = findEffectiveConfiguration(indexes, relation.workspaceId, relation.teamId)
+  const parentType = configuration?.workItemTypeWorkflows.find((candidate) =>
+    candidate.workItemTypeId === parent.workItemTypeId,
+  )
+  const allowedChildTypeIds = parentType?.allowedChildTypeIds ?? (
+    configuration === undefined && parent.workItemTypeId === DEFAULT_WORK_ITEM_TYPE_ID
+      ? [DEFAULT_WORK_ITEM_TYPE_ID]
+      : undefined
+  )
+  if (allowedChildTypeIds !== undefined && !allowedChildTypeIds.includes(child.workItemTypeId)) {
+    failures.add('RELATION_WORK_ITEM_TYPE_MISMATCH')
   }
 }
 
@@ -2368,8 +2429,16 @@ function canonicalizeItem(item: CrossDomainIntegrityItem): string {
       item.kind,
       item.workspaceId,
       item.teamId ?? '',
+      ...item.workItemTypeWorkflows
+        .flatMap((mapping) => [
+          `${mapping.workItemTypeId}\0${mapping.workflowId}`,
+          ...mapping.allowedChildTypeIds.map((childTypeId) =>
+            `${mapping.workItemTypeId}\0child\0${childTypeId}`
+          ),
+        ])
+        .sort(compareUtf8Ordinal),
       ...item.workflowStatuses
-        .map((status) => `${status.statusId}\0${status.category}`)
+        .map((status) => `${status.workflowId}\0${status.statusId}\0${status.category}`)
         .sort(compareUtf8Ordinal),
     ])
   }
@@ -2380,6 +2449,7 @@ function canonicalizeItem(item: CrossDomainIntegrityItem): string {
       item.teamId,
       item.workItemId,
       item.creatorMemberKey,
+      item.workItemTypeId,
       item.workflowStatusId,
       item.statusCategory,
       item.projectId ?? '',
@@ -2512,10 +2582,10 @@ function aggregateDigests(
 /** Returns built-in fallback statuses with their canonical categories. */
 function builtInWorkflowStatuses(): CrossDomainWorkflowStatus[] {
   return [
-    { statusId: 'done', category: 'completed' },
-    { statusId: 'in-progress', category: 'started' },
-    { statusId: 'review', category: 'started' },
-    { statusId: 'todo', category: 'unstarted' },
+    { statusId: 'done', category: 'completed', workflowId: 'default-workflow' },
+    { statusId: 'in-progress', category: 'started', workflowId: 'default-workflow' },
+    { statusId: 'review', category: 'started', workflowId: 'default-workflow' },
+    { statusId: 'todo', category: 'unstarted', workflowId: 'default-workflow' },
   ]
 }
 

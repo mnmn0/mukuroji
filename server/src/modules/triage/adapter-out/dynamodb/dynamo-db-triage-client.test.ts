@@ -21,6 +21,7 @@ import {
 } from './triage-transactions'
 import {
   DynamoDbTriageClient,
+  type TriageCanonicalWorkItemReader,
   type TriageConfigurationReferenceValidator,
   type TriageAdmissionValidator,
 } from './dynamo-db-triage-client'
@@ -101,6 +102,8 @@ function createEntry(): TriageEntry {
 
 /** Optional dependencies for a DynamoDB client test harness. */
 type HarnessOptions = {
+  /** Current canonical Work Item fields used to refresh accepted projections. */
+  readCanonicalWorkItem?: TriageCanonicalWorkItemReader
   /** Live validator invoked by source admission. */
   validateAdmission?: TriageAdmissionValidator
   /** Commit-time settings reference guards. */
@@ -148,6 +151,9 @@ function createHarness(responses: unknown[], options: HarnessOptions = {}) {
       now: () => new Date(NOW),
       id: () => 'triage-manual-1',
       ...(options.customerTableName ? { customerTableName: options.customerTableName } : {}),
+      ...(options.readCanonicalWorkItem
+        ? { readCanonicalWorkItem: options.readCanonicalWorkItem }
+        : {}),
       ...(options.validateAdmission
         ? { validateAdmission: options.validateAdmission }
         : {}),
@@ -1589,6 +1595,44 @@ describe('DynamoDbTriageClient queue indexes', () => {
           }),
         }),
       ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('refreshes canonical Work Item Type snapshots before applying queue filters', async () => {
+    const entry = createEntry()
+    entry.canonicalWorkItem = {
+      teamId: 'support',
+      workItemId: 'work-item-1',
+      projectId: 'project-old',
+      workItemTypeId: 'legacy',
+    }
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      {},
+      { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] },
+      { Item: storedEntry },
+    ], {
+      readCanonicalWorkItem: async () => ({ workItemTypeId: 'incident' }),
+    })
+
+    try {
+      const page = await harness.client.listEntries('workspace-1', 'support', {
+        limit: 10,
+        workItemTypeId: 'incident',
+      })
+
+      expect(page.entries).toHaveLength(1)
+      expect(page.entries[0]?.canonicalWorkItem).toMatchObject({
+        workItemTypeId: 'incident',
+      })
+      expect(page.entries[0]?.canonicalWorkItem).not.toHaveProperty('projectId')
     } finally {
       harness.restore()
     }

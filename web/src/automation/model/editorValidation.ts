@@ -34,7 +34,7 @@ const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000
 
 /** Trigger type が設定値を必須とするか返します。 */
 export function automationTriggerRequiresConfiguration(type: AutomationTrigger['type']) {
-  return type === 'custom-field' || type === 'form' || type === 'webhook'
+  return type === 'custom-field' || type === 'work-item-type' || type === 'form' || type === 'webhook'
 }
 
 /** Trigger type が汎用設定欄を使用するか返します。 */
@@ -119,6 +119,7 @@ export function parseAutomationTemplatePayload(value: string):
     'schedule',
     'teamId',
     'title',
+    'workItemTypeId',
     'workflowStatusId',
   ])
   if (Object.keys(parsed).some((key) => !allowedFields.has(key))) {
@@ -147,6 +148,7 @@ export function parseAutomationTemplatePayload(value: string):
     (parsed.customFieldValues !== undefined && !isRecord(parsed.customFieldValues)) ||
     (parsed.description !== undefined && typeof parsed.description !== 'string') ||
     (parsed.teamId !== undefined && typeof parsed.teamId !== 'string') ||
+    (parsed.workItemTypeId !== undefined && typeof parsed.workItemTypeId !== 'string') ||
     (parsed.workflowStatusId !== undefined && typeof parsed.workflowStatusId !== 'string')
   ) {
     return { error: 'invalid-value' }
@@ -173,6 +175,9 @@ export function parseAutomationTemplatePayload(value: string):
       ...(parsed.priority === undefined ? {} : { priority: parsed.priority }),
       schedule,
       ...(parsed.teamId === undefined ? {} : { teamId: parsed.teamId }),
+      ...(parsed.workItemTypeId === undefined
+        ? {}
+        : { workItemTypeId: parsed.workItemTypeId }),
       ...(parsed.workflowStatusId === undefined
         ? {}
         : { workflowStatusId: parsed.workflowStatusId }),
@@ -314,6 +319,60 @@ export function createAutomationScheduleTrigger(
       ...input,
       timeZone: input.timeZone.trim(),
     }),
+  }
+}
+
+/** Work Item Type change direction accepted by the Automation rule editor. */
+export type AutomationWorkItemTypeTriggerDirection = 'from' | 'to' | 'both'
+
+/** Optional source-side values used when creating an Automation trigger. */
+export type AutomationTriggerOptions = {
+  /** Work Item Type change direction for a Work Item Type trigger. */
+  direction?: AutomationWorkItemTypeTriggerDirection
+  /** Source Work Item Type ID for a Work Item Type trigger. */
+  fromConfiguration?: string
+}
+
+/**
+ * Builds a non-schedule trigger from the editor's compact configuration values.
+ *
+ * @param type - Trigger discriminator selected in the editor.
+ * @param configuration - Primary trigger identifier or value.
+ * @param teamId - Team identity required by Work Item Type triggers.
+ * @param options - Optional source-side Work Item Type trigger values.
+ * @returns A normalized Automation trigger.
+ */
+export function createAutomationTrigger(
+  type: Exclude<AutomationTrigger['type'], 'schedule'>,
+  configuration: string,
+  teamId?: string,
+  options: AutomationTriggerOptions = {},
+): AutomationTrigger {
+  const value = configuration.trim()
+  const fromValue = options.fromConfiguration?.trim()
+
+  switch (type) {
+    case 'assignee':
+      return { type, ...(value ? { assigneeMemberKey: value } : {}) }
+    case 'comment':
+      return { type, kind: 'any' }
+    case 'custom-field':
+      return { type, fieldId: value }
+    case 'work-item-type':
+      return {
+        type,
+        teamId: teamId?.trim() ?? '',
+        ...(options.direction !== 'to' && fromValue ? { fromWorkItemTypeId: fromValue } : {}),
+        ...(options.direction !== 'from' && value ? { toWorkItemTypeId: value } : {}),
+      }
+    case 'due':
+      return { type, reason: value === 'changed' || value === 'overdue' ? value : 'due' }
+    case 'form':
+      return { type, formId: value }
+    case 'status':
+      return { type, ...(value ? { toStatusId: value } : {}) }
+    case 'webhook':
+      return { type, webhookId: value }
   }
 }
 

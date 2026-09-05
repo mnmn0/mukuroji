@@ -522,6 +522,7 @@ function countUnknownAllowedValues(
       countUnknownValues(draft.filters.creatorUserIds, allowedValues.creatorUserIds) +
       countUnknownValues(draft.filters.teamIds, allowedValues.teamIds) +
       countUnknownValues(draft.filters.projectIds, allowedValues.projectIds) +
+      countUnknownValues(draft.filters.workItemTypeIds, allowedValues.workItemTypeIds) +
       countUnknownValues(draft.filters.statuses, allowedValues.statuses) +
       countUnknownValues(draft.filters.relationIds, allowedValues.relationIds) +
       (draft.filters.customFields ?? []).filter(

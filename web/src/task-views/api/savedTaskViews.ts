@@ -1,4 +1,5 @@
 import {
+  readSearchWorkItemTypeKey,
   TASK_VIEW_SCHEMA_VERSION,
   TASK_VIEW_SURFACES,
   type CreateSavedTaskViewInput,
@@ -36,6 +37,7 @@ const taskViewDensities = ['compact', 'comfortable', 'spacious']
 const sortDirections = ['asc', 'desc']
 const migrationCodes = [
   'deleted-custom-field',
+  'deleted-work-item-type',
   'deleted-workflow-status',
   'permission-redacted',
   'inaccessible-scope',
@@ -87,6 +89,7 @@ const taskViewFilterFields = [
   'priorities',
   'dueDatePreset',
   'includeArchived',
+  'workItemTypeIds',
 ]
 
 /**
@@ -458,6 +461,7 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
   if (!hasOptionalStringArray(value.relationIds)) return false
   if (!hasOptionalStringArray(value.projectIds)) return false
   if (!hasOptionalStringArray(value.teamIds)) return false
+  if (!hasOptionalSearchWorkItemTypeKeyArray(value.workItemTypeIds)) return false
   if (!hasOptionalStringArrayFrom(value.workflowCategories, workflowCategories)) return false
   if (!hasOptionalStringArrayFrom(value.priorities, priorities)) return false
   if (value.dueDatePreset !== undefined && !includesString(dueDatePresets, value.dueDatePreset)) {
@@ -467,7 +471,10 @@ function isTaskViewFilters(value: unknown): value is TaskViewFilters {
   if (value.workflowStatuses !== undefined && (
     !Array.isArray(value.workflowStatuses) ||
     !value.workflowStatuses.every((entry) =>
-      isRecord(entry) && typeof entry.teamId === 'string' && typeof entry.statusId === 'string'
+      isRecord(entry) &&
+      typeof entry.teamId === 'string' &&
+      typeof entry.statusId === 'string' &&
+      (entry.workItemTypeId === undefined || typeof entry.workItemTypeId === 'string')
     )
   )) return false
   if (value.customFields !== undefined && (
@@ -651,6 +658,13 @@ function hasOptionalString(value: unknown): value is string | undefined {
 /** Returns whether an optional value is a string array. */
 function hasOptionalStringArray(value: unknown): value is string[] | undefined {
   return value === undefined || isStringArray(value)
+}
+
+/** Returns whether an optional array contains only Team-qualified Work Item Type keys. */
+function hasOptionalSearchWorkItemTypeKeyArray(value: unknown): value is string[] | undefined {
+  return value === undefined || (
+    isStringArray(value) && value.every((entry) => readSearchWorkItemTypeKey(entry) !== undefined)
+  )
 }
 
 /** Returns whether an optional value is an array drawn from an allowed string set. */

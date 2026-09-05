@@ -117,8 +117,10 @@ import {
   useTeamWorkItemConfigurations,
 } from '../../work-items/queries/useWorkItemConfigurations'
 import {
+  resolveConfiguredWorkflowStatuses,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
+  resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -155,6 +157,7 @@ const standardTaskViewFields = [
   'assignee',
   'dueDate',
   'priority',
+  'workItemType',
   'project',
   'team',
 ]
@@ -426,15 +429,24 @@ export function TaskPage() {
   }, [projectId, workItemConfigurationLoadResult.configurationsByTeam])
   const taskViewWorkflowStatuses = useMemo(
     () => Object.entries(workItemConfigurationLoadResult.configurationsByTeam)
-      .flatMap(([teamId, resolved]) => resolved.configuration.workflow.statuses.map((status) => ({
-        statusId: status.id,
-        teamId,
-      }))),
+      .flatMap(([teamId, resolved]) =>
+        resolveWorkItemTypeWorkflowStatuses(resolved.configuration).map(({
+          status,
+          workItemTypeId,
+        }) => ({
+          statusId: status.id,
+          teamId,
+          workItemTypeId,
+        }))
+      ),
     [workItemConfigurationLoadResult.configurationsByTeam],
   )
   const taskViewLegacyStatusIds = useMemo(
-    () => [...new Set(taskViewWorkflowStatuses.map((status) => status.statusId))],
-    [taskViewWorkflowStatuses],
+    () => [...new Set(Object.values(workItemConfigurationLoadResult.configurationsByTeam)
+      .flatMap((resolved) =>
+        resolveConfiguredWorkflowStatuses(resolved.configuration).map((status) => status.id)
+      ))],
+    [workItemConfigurationLoadResult.configurationsByTeam],
   )
   const taskViewFields = useMemo(
     () => [
@@ -486,6 +498,7 @@ export function TaskPage() {
       { id: 'assignee', label: t('tasks.filter.assignee') },
       { id: 'dueDate', label: t('tasks.filter.dueDate') },
       { id: 'priority', label: t('tasks.filter.priority') },
+      { id: 'workItemType', label: t('tasks.column.workItemType') },
       { id: 'project', label: t('workspace.column.project') },
       { id: 'team', label: t('workspace.column.team') },
       ...(taskViewCustomFields.length > 0

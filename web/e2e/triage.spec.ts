@@ -11,6 +11,7 @@ import {
   triageConfigurationFixture,
   triageEntryFixtures,
 } from '../src/triage/fixtures'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 /** Authenticated browser session used by Team Triage scenarios. */
 const triageAuthSession = {
@@ -76,6 +77,17 @@ async function mockTriageApis(page: Page): Promise<TriageApiState> {
   })
   await page.route('**/api/notifications/unread-count', async (route) => {
     await route.fulfill({ json: { unreadCount: 0 } })
+  })
+  await page.route('**/api/teams/core-team/work-item-configuration', async (route) => {
+    expect(route.request().method()).toBe('GET')
+    await route.fulfill({
+      json: {
+        configuration: {
+          ...structuredClone(teamWorkItemConfigurationFixture),
+          customFields: [],
+        },
+      },
+    })
   })
   await page.route('**/api/teams/core-team/triage-settings', async (route) => {
     const request = route.request()

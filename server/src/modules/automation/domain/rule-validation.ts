@@ -25,6 +25,8 @@ const AUTOMATION_UPDATE_FIELDS = new Set([
   'priority',
   'schedule',
   'title',
+  'typeChangeResolution',
+  'workItemTypeId',
   'workflowStatusId',
 ])
 
@@ -37,6 +39,7 @@ const AUTOMATION_CREATE_FIELDS = new Set([
   'schedule',
   'teamId',
   'title',
+  'workItemTypeId',
   'workflowStatusId',
 ])
 
@@ -133,6 +136,25 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
       return {
         type: 'custom-field',
         fieldId: requireBoundedText(trigger.fieldId, 'Custom field ID', 128),
+      }
+    case 'work-item-type':
+      return {
+        type: 'work-item-type',
+        teamId: requireBoundedText(trigger.teamId, 'Work Item Type trigger Team ID', 128),
+        ...(trigger.fromWorkItemTypeId === undefined ? {} : {
+          fromWorkItemTypeId: requireBoundedText(
+            trigger.fromWorkItemTypeId,
+            'From Work Item Type ID',
+            128,
+          ),
+        }),
+        ...(trigger.toWorkItemTypeId === undefined ? {} : {
+          toWorkItemTypeId: requireBoundedText(
+            trigger.toWorkItemTypeId,
+            'To Work Item Type ID',
+            128,
+          ),
+        }),
       }
     case 'comment':
       if (

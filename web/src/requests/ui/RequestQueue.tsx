@@ -1,7 +1,10 @@
 import type {
   AiTriageDraft,
+  CustomFieldDefinition,
+  CustomFieldValue,
   RequestFormRoutingTarget,
   RequestSubmissionActionInput,
+  WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
@@ -9,12 +12,29 @@ import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageD
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
 import {
+  createCustomFieldErrorMessages,
+  resolveWorkItemTypeWorkflow,
+  resolveWorkItemTypeFormFields,
+  resolveWorkItemTypes,
+} from '../../work-items/model/workItemDisplay'
+import {
+  createDefaultCustomFieldValues,
+  isCustomFieldApplicable,
+  parseCustomFieldFormData,
+} from '../../work-items/model/customFields'
+import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
+import {
   type RequestSubmissionModel,
 } from '../model/requestForm'
+import {
+  createMappedConversionCustomFieldValues,
+  resolveRequestConversionWorkItemTypeId,
+} from '../model/requestConversion'
 import { resolveRequestLocalizedText } from '../model/requestFormLogic'
 import {
   canAdoptRequestTriageDraft,
   createSafeTriageRoutingOverride,
+  resolveRequestWorkItemConfiguration,
   type RequestRoutingAssigneeDirectory,
   type RequestRoutingProjectDirectory,
 } from '../model/requestTriageRouting'
@@ -38,6 +58,8 @@ export type RequestQueueProps = {
   projectDirectory?: RequestRoutingProjectDirectory
   /** Active non-guest Workspace member keys used to validate AI assignee proposals before adoption. */
   assigneeDirectory?: RequestRoutingAssigneeDirectory
+  /** Team-scoped Work Item configurations used by the conversion type picker. */
+  workItemConfigurations?: Readonly<Record<string, WorkItemConfiguration>>
   /**
    * 表示 locale です。
    */
@@ -118,6 +140,7 @@ export function RequestQueue({
   onSelectSubmission,
   projectDirectory,
   assigneeDirectory,
+  workItemConfigurations,
   selectedSubmission,
   submissions,
 }: RequestQueueProps) {
@@ -260,6 +283,7 @@ export function RequestQueue({
         onOpenAttachment={onOpenAttachment}
         assigneeDirectory={assigneeDirectory}
         projectDirectory={projectDirectory}
+        workItemConfigurations={workItemConfigurations}
       />
     </div>
   )
@@ -277,6 +301,7 @@ function RequestSubmissionDetail({
   onOperationPendingChange,
   assigneeDirectory,
   projectDirectory,
+  workItemConfigurations,
   submission,
 }: {
   accessToken?: string
@@ -290,17 +315,73 @@ function RequestSubmissionDetail({
   locale: Locale
   projectDirectory?: RequestRoutingProjectDirectory
   assigneeDirectory?: RequestRoutingAssigneeDirectory
+  /** Team-scoped Work Item configurations used by the effective conversion target. */
+  workItemConfigurations?: Readonly<Record<string, WorkItemConfiguration>>
   onAction?: RequestQueueProps['onAction']
   onOpenAttachment?: RequestQueueProps['onOpenAttachment']
   submission?: RequestSubmissionModel
 }) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const [conversionTargetOverride, setConversionTargetOverride] =
+    useState<Partial<RequestFormRoutingTarget>>({})
+  const effectiveRouting: Partial<RequestFormRoutingTarget> = {
+    ...submission?.routing,
+    ...conversionTargetOverride,
+  }
+  const effectiveWorkItemConfiguration = submission
+    ? resolveRequestWorkItemConfiguration(
+        workItemConfigurations,
+        submission,
+        conversionTargetOverride,
+      )
+    : undefined
+  const workItemTypes = useMemo(
+    () => resolveWorkItemTypes(effectiveWorkItemConfiguration).filter((type) => type.status === 'active'),
+    [effectiveWorkItemConfiguration],
+  )
+  const hasLoadedWorkItemConfiguration = effectiveWorkItemConfiguration !== undefined
+  const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration && workItemTypes.length > 0
+  const preferredWorkItemTypeId = resolveRequestConversionWorkItemTypeId(
+    workItemTypes,
+    effectiveRouting.workItemTypeId,
+  )
+  const typeSelectionResetKey = [
+    submission?.id ?? '',
+    effectiveRouting.teamId ?? '',
+    effectiveRouting.workItemTypeId ?? '',
+    preferredWorkItemTypeId,
+  ].join('\u0000')
+  const [selectedWorkItemTypeSelection, setSelectedWorkItemTypeSelection] = useState(() => ({
+    resetKey: typeSelectionResetKey,
+    typeId: preferredWorkItemTypeId,
+  }))
+  const selectedWorkItemTypeId = selectedWorkItemTypeSelection.resetKey === typeSelectionResetKey
+    ? selectedWorkItemTypeSelection.typeId
+    : preferredWorkItemTypeId
+  const effectiveWorkItemTypeId = workItemTypes.some((type) => type.id === selectedWorkItemTypeId)
+    ? selectedWorkItemTypeId
+    : workItemTypes[0]?.id ?? 'default'
+  const conversionProjectId = effectiveRouting.projectId || undefined
+  const conversionFieldDefinitions = effectiveWorkItemConfiguration
+    ? resolveConversionFieldDefinitions(
+        effectiveWorkItemConfiguration,
+        effectiveWorkItemTypeId,
+        conversionProjectId,
+      )
+    : []
+  const conversionCustomFieldValues = createConversionCustomFieldValues(
+    submission,
+    effectiveWorkItemConfiguration,
+    effectiveWorkItemTypeId,
+    conversionProjectId,
+  )
+  const [conversionFieldErrors, setConversionFieldErrors] = useState<
+    Readonly<Record<string, string | undefined>>
+  >({})
   const [actionMode, setActionMode] = useState<ActionMode>()
   const [actionValue, setActionValue] = useState('')
   const [titleOverride, setTitleOverride] = useState('')
   const [descriptionOverride, setDescriptionOverride] = useState('')
-  const [conversionTargetOverride, setConversionTargetOverride] =
-    useState<Partial<RequestFormRoutingTarget>>({})
   const [, setConversionOverrideDirty] =
     useState<ConversionOverrideDirtyState>({ title: false, description: false })
   const conversionOverrideDirtyRef = useRef<ConversionOverrideDirtyState>({
@@ -317,6 +398,7 @@ function RequestSubmissionDetail({
   /** Opens an explicit action and resets transient conversion overrides. */
   const activateAction = (mode: Exclude<ActionMode, undefined>, value = '') => {
     setActionError(false)
+    setConversionFieldErrors({})
     setActionMode(mode)
     setActionValue(value)
     setDescriptionOverride('')
@@ -329,14 +411,16 @@ function RequestSubmissionDetail({
 
   /** Opens the conversion action while preserving any locally edited overrides. */
   const openConversionAction = () => {
+    if (!hasLoadedWorkItemConfiguration) return
     setActionError(false)
+    setConversionFieldErrors({})
     setActionMode('convert')
     setActionValue('')
   }
 
   /** Copies proposed conversion fields while retaining fields omitted by the draft. */
   const applyTriageDraft = (draft: AiTriageDraft) => {
-    if (!submission || isSubmittingRef.current) return
+    if (!submission || isSubmittingRef.current || !hasLoadedWorkItemConfiguration) return
     openConversionAction()
     setTitleOverride((current) => draft.title?.value ?? current)
     setDescriptionOverride((current) => draft.description?.value ?? current)
@@ -380,7 +464,22 @@ function RequestSubmissionDetail({
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!actionMode || !onAction || actionIsPending || isSubmittingRef.current) return
+    if (actionMode === 'convert' && !hasLoadedWorkItemConfiguration) return
 
+    const parsedConversionCustomFields = actionMode === 'convert' &&
+      effectiveWorkItemConfiguration
+      ? parseConversionCustomFieldFormData(
+          new FormData(event.currentTarget),
+          conversionFieldDefinitions,
+          conversionProjectId,
+          locale,
+        )
+      : undefined
+    if (parsedConversionCustomFields && Object.keys(parsedConversionCustomFields.errors).length > 0) {
+      setConversionFieldErrors(parsedConversionCustomFields.errors)
+      return
+    }
+    const conversionCustomFieldOverrides = parsedConversionCustomFields?.values
     const common = { expectedRevision: submission.revision }
     const input: RequestSubmissionActionInput = actionMode === 'assign'
       ? { action: actionMode, assigneeUserId: actionValue.trim(), ...common }
@@ -393,16 +492,23 @@ function RequestSubmissionDetail({
             : {
                 action: 'convert',
                 ...common,
+                ...(effectiveWorkItemTypeId
+                  ? { workItemTypeId: effectiveWorkItemTypeId }
+                  : {}),
                 description: descriptionOverride.trim() || undefined,
                 ...(Object.keys(conversionTargetOverride).length > 0
                   ? { target: conversionTargetOverride }
                   : {}),
                 title: titleOverride.trim() || undefined,
+                ...(conversionCustomFieldOverrides === undefined
+                  ? {}
+                  : { customFieldValues: conversionCustomFieldOverrides }),
               }
 
     isSubmittingRef.current = true
     setIsSubmitting(true)
     setActionError(false)
+    setConversionFieldErrors({})
     try {
       await onAction(submission.id, input)
       setActionMode(undefined)
@@ -430,7 +536,16 @@ function RequestSubmissionDetail({
         )
       : createTeamIssuesPath(submission.workItem.teamId, submission.workItem.id)
     : undefined
-  const effectiveRouting = { ...submission.routing, ...conversionTargetOverride }
+  const effectiveWorkItemWorkflow = effectiveWorkItemConfiguration
+    ? resolveWorkItemTypeWorkflow(effectiveWorkItemConfiguration, effectiveWorkItemTypeId)
+    : undefined
+  const effectiveWorkflowStatusId = conversionTargetOverride.workflowStatusId !== undefined
+    ? effectiveRouting.workflowStatusId
+    : effectiveRouting.workflowStatusId && effectiveWorkItemWorkflow?.statuses.some(
+        (status) => status.id === effectiveRouting.workflowStatusId,
+      )
+      ? effectiveRouting.workflowStatusId
+      : effectiveWorkItemWorkflow?.initialStatusId ?? effectiveRouting.workflowStatusId
 
   return (
     <aside className="workbench-panel min-w-0 overflow-hidden" data-testid="request-submission-detail">
@@ -558,7 +673,7 @@ function RequestSubmissionDetail({
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdoptDraft={adoptTriageDraft}
             onOperationPendingChange={onOperationPendingChange}
-            canAdoptDraft={(draft) => canAdoptRequestTriageDraft(
+            canAdoptDraft={(draft) => hasLoadedWorkItemConfiguration && canAdoptRequestTriageDraft(
               submission,
               draft,
               conversionTargetOverride,
@@ -582,7 +697,7 @@ function RequestSubmissionDetail({
           {submission.capabilities.canRequestMoreInfo ? <ActionButton disabled={actionIsPending} label={t('requests.action.moreInfo')} onClick={() => activateAction('request-more-info')} /> : null}
           {submission.capabilities.canReject ? <ActionButton disabled={actionIsPending} label={t('requests.action.reject')} onClick={() => activateAction('reject')} /> : null}
           {submission.capabilities.canMarkDuplicate ? <ActionButton disabled={actionIsPending} label={t('requests.action.duplicate')} onClick={() => activateAction('mark-duplicate')} /> : null}
-          {submission.capabilities.canConvert ? <ActionButton disabled={actionIsPending} label={t('requests.action.convert')} primary onClick={() => activateAction('convert')} /> : null}
+          {submission.capabilities.canConvert ? <ActionButton disabled={actionIsPending || !hasLoadedWorkItemConfiguration} label={t('requests.action.convert')} primary onClick={() => activateAction('convert')} /> : null}
         </div>
 
         {actionMode ? (
@@ -600,6 +715,37 @@ function RequestSubmissionDetail({
             </h3>
             {actionMode === 'convert' ? (
               <>
+                <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('requests.action.workItemType')}
+                  <select
+                    aria-label={t('requests.action.workItemType')}
+                    className="workbench-input min-h-10 px-3"
+                    disabled={actionIsPending || !hasCreatableWorkItemType}
+                    name="workItemTypeId"
+                    onChange={(event) => {
+                      const nextTypeId = event.target.value
+                      setSelectedWorkItemTypeSelection({
+                        resetKey: typeSelectionResetKey,
+                        typeId: nextTypeId,
+                      })
+                      setConversionFieldErrors({})
+                    }}
+                    value={effectiveWorkItemTypeId}
+                  >
+                    {workItemTypes.map((type) => (
+                      <option key={type.id} value={type.id}>{type.name}</option>
+                    ))}
+                  </select>
+                  {!hasLoadedWorkItemConfiguration ? (
+                    <span className="text-xs font-semibold text-[var(--workbench-muted)]">
+                      {t('tasks.detail.loading')}
+                    </span>
+                  ) : !hasCreatableWorkItemType ? (
+                    <span className="text-xs font-semibold text-amber-700">
+                      {t('tasks.create.noActiveWorkItemTypes')}
+                    </span>
+                  ) : null}
+                </label>
                 <input aria-label={t('requests.action.titleOverride')} className="workbench-input min-h-10 px-3" disabled={actionIsPending} placeholder={t('requests.action.titleOverride')} value={titleOverride} onChange={(event) => {
                   setTitleOverride(event.target.value)
                   const nextDirtyState = { ...conversionOverrideDirtyRef.current, title: true }
@@ -612,8 +758,21 @@ function RequestSubmissionDetail({
                   conversionOverrideDirtyRef.current = nextDirtyState
                   setConversionOverrideDirty(nextDirtyState)
                 }} />
+                {effectiveWorkItemConfiguration ? (
+                  <div className="workbench-panel-muted p-4">
+                    <WorkItemFieldsEditor
+                      definitions={conversionFieldDefinitions}
+                      errors={conversionFieldErrors}
+                      key={`${submission.id}:${effectiveRouting.teamId ?? ''}:${effectiveWorkItemConfiguration.scopeId}:${effectiveWorkItemConfiguration.revision}`}
+                      locale={locale}
+                      values={conversionCustomFieldValues}
+                      projectId={conversionProjectId}
+                      testId="request-conversion-work-item-fields"
+                    />
+                  </div>
+                ) : null}
                 <p className="break-words text-xs font-medium text-[var(--workbench-muted)]">
-                  {effectiveRouting.teamId} · {effectiveRouting.projectId ?? t('requests.routing.teamBacklog')} · {effectiveRouting.workflowStatusId ?? t('requests.routing.initialStatus')} · {effectiveRouting.assigneeUserId} · {t(`requests.priority.${effectiveRouting.priority}`)}
+                  {effectiveRouting.teamId} · {effectiveRouting.projectId ?? t('requests.routing.teamBacklog')} · {effectiveWorkflowStatusId ?? t('requests.routing.initialStatus')} · {effectiveRouting.assigneeUserId} · {t(`requests.priority.${effectiveRouting.priority ?? 'medium'}`)}
                 </p>
               </>
             ) : actionMode === 'assign' || actionMode === 'mark-duplicate' ? (
@@ -638,13 +797,92 @@ function RequestSubmissionDetail({
             {actionError ? <p className="text-sm font-semibold text-red-700" role="alert">{t('requests.action.error')}</p> : null}
             <div className="flex justify-end gap-2">
               <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={() => setActionMode(undefined)} type="button">{t('requests.action.cancel')}</button>
-              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">{isSubmitting ? t('requests.action.pending') : t('requests.action.submit')}</button>
+              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending || (actionMode === 'convert' && !hasCreatableWorkItemType)} type="submit">{isSubmitting ? t('requests.action.pending') : t('requests.action.submit')}</button>
             </div>
           </form>
         ) : null}
       </div>
     </aside>
   )
+}
+
+/**
+ * Returns custom fields applicable to the selected conversion type and project.
+ *
+ * @param configuration - Team-scoped Work Item configuration.
+ * @param typeId - Work Item Type selected for conversion.
+ * @param projectId - Project selected for conversion, when any.
+ * @returns Saveable custom field definitions in display order.
+ */
+function resolveConversionFieldDefinitions(
+  configuration: WorkItemConfiguration,
+  typeId: string,
+  projectId?: string,
+): CustomFieldDefinition[] {
+  return resolveWorkItemTypeFormFields(configuration, typeId).filter((definition) =>
+    definition.type !== 'formula' && isCustomFieldApplicable(definition, projectId),
+  )
+}
+
+/**
+ * Creates the initial conversion field state from mapped answers and defaults.
+ *
+ * @param submission - Submission being converted, when available.
+ * @param configuration - Team-scoped Work Item configuration, when available.
+ * @param typeId - Work Item Type selected for conversion.
+ * @param projectId - Project selected for conversion, when any.
+ * @returns Custom field values allowed by the selected type and project.
+ */
+function createConversionCustomFieldValues(
+  submission: RequestSubmissionModel | undefined,
+  configuration: WorkItemConfiguration | undefined,
+  typeId: string,
+  projectId?: string,
+): Record<string, CustomFieldValue> {
+  const mappedValues = createMappedConversionCustomFieldValues(submission)
+  if (!configuration) return mappedValues
+
+  const definitions = resolveConversionFieldDefinitions(configuration, typeId, projectId)
+  const allowedFieldIds = new Set(definitions.map((definition) => definition.id))
+  const values = {
+    ...createDefaultCustomFieldValues(definitions, projectId),
+    ...mappedValues,
+  }
+
+  return Object.fromEntries(
+    Object.entries(values).filter(([fieldId]) => allowedFieldIds.has(fieldId)),
+  )
+}
+
+/**
+ * Parses and validates custom fields submitted with a request conversion.
+ *
+ * @param formData - Conversion form data containing custom field controls.
+ * @param definitions - Custom fields displayed for the selected type.
+ * @param projectId - Project selected for conversion, when any.
+ * @param locale - Locale used for validation messages.
+ * @returns Explicit field overrides, including null for cleared fields, and messages.
+ */
+function parseConversionCustomFieldFormData(
+  formData: FormData,
+  definitions: readonly CustomFieldDefinition[],
+  projectId: string | undefined,
+  locale: Locale,
+): {
+  values: Record<string, CustomFieldValue | null>
+  errors: Readonly<Record<string, string | undefined>>
+} {
+  const parsed = parseCustomFieldFormData(formData, definitions, { projectId })
+  const values: Record<string, CustomFieldValue | null> = {}
+
+  for (const definition of definitions) {
+    values[definition.id] = parsed.values[definition.id] ?? null
+  }
+
+  return {
+    errors: createCustomFieldErrorMessages(parsed.errors, definitions, locale),
+    values,
+  }
 }
 
 function DetailSection({ children, title }: { children: ReactNode; title: string }) {

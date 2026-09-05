@@ -191,10 +191,11 @@ export const taskViewStoryConfigurationsByTeam = {
 /** Team-scoped workflow columns shared by the board story. */
 export const taskViewStoryStatusColumns = teamWorkItemConfigurationFixture.workflow.statuses.map(
   (status) => ({
-    key: `core-team:${status.id}`,
+    key: `core-team\u0000default\u0000${status.id}`,
     label: status.name,
     status,
     teamId: 'core-team',
+    workItemTypeId: 'default',
   }),
 ) satisfies ProjectTaskStatusColumn[]
 
