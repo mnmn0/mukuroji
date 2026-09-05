@@ -84,7 +84,10 @@ export function createTaskMutationController({
               candidate.id === task.id && candidate.teamId === task.teamId,
             )
             if (existingIndex < 0) return [task, ...currentTasks]
-            return currentTasks.map((candidate, index) => index === existingIndex ? task : candidate)
+            return currentTasks.map((candidate, index) => {
+              if (index !== existingIndex) return candidate
+              return candidate.revision > task.revision ? candidate : task
+            })
           },
           { revalidate: false },
         )
