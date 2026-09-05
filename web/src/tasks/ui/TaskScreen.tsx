@@ -2152,6 +2152,14 @@ export function TaskScreen({
 
   /** Projects normalized action failures into the existing reversible-action feedback surface. */
   const handleProjectTaskActionExecution = useCallback((result: TaskActionExecutionResult) => {
+    if (
+      result.status === 'executed' &&
+      result.actionId === 'create' &&
+      result.result.status === 'failed' &&
+      result.result.failure?.code === 'ProjectTaskCreateFailed'
+    ) {
+      return
+    }
     const errorMessage = resolveTaskActionExecutionFailureMessage(
       result,
       t('taskViews.action.failed'),

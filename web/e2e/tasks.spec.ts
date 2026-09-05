@@ -7839,13 +7839,25 @@ test.describe('authenticated task page', () => {
 
     const createTaskForm = page.getByTestId('create-task-form')
     await createTaskForm.locator('input[name="title"]').fill('retryable-create')
+    const failedCreateResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues',
+    )
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+    const completedFailedCreateResponse = await failedCreateResponse
+    await completedFailedCreateResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
 
-    await expect(createTaskForm).toContainText('タスク作成に失敗しました。')
+    await expect(createTaskForm.getByRole('alert')).toContainText('タスク作成に失敗しました。')
+    await expect(createTaskForm.getByRole('alert')).toHaveCount(1)
+    await expect(page.getByTestId('task-action-feedback')).toHaveCount(0)
     await expect(createTaskForm.locator('input[name="title"]')).toHaveValue('retryable-create')
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.getByTestId('task-row-retryable-create')).toContainText('retryable-create')
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
     expect(requestCounts.issueCreates).toBe(2)
     expect(requestCounts.issueCreateIdempotencyKeys[0]).toBeTruthy()
     expect(requestCounts.issueCreateIdempotencyKeys[0]).toBe(

@@ -354,6 +354,32 @@ function StaleCreateRejectionHarness({ taskScreenProps }: StaleCreateRejectionHa
   )
 }
 
+/** Props for the canonical create failure and retry harness. */
+type CreateFailureRetryHarnessProps = {
+  /** TaskScreen inputs used by the create failure and retry scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Fails the first create request and lets the next request complete successfully. */
+function CreateFailureRetryHarness({ taskScreenProps }: CreateFailureRetryHarnessProps) {
+  const createAttemptRef = useRef(0)
+  const [createAttemptCount, setCreateAttemptCount] = useState(0)
+  const onCreateTask = useCallback(async () => {
+    createAttemptRef.current += 1
+    setCreateAttemptCount(createAttemptRef.current)
+    if (createAttemptRef.current === 1) {
+      throw new Error('作成 API が一時的に失敗しました。')
+    }
+  }, [])
+
+  return (
+    <>
+      <output data-testid="create-failure-attempt-count">{createAttemptCount}</output>
+      <TaskScreen {...taskScreenProps} onCreateTask={onCreateTask} />
+    </>
+  )
+}
+
 /** Props for a harness that settles an older create request successfully. */
 type StaleCreateSuccessHarnessProps = {
   /** TaskScreen inputs used by the replacement-editor success scenario. */
@@ -884,6 +910,41 @@ export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
     await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
     await expect(replacementFormQueries.getByRole('textbox', { name: 'タスク名' })).toBeEnabled()
     await expect(replacementFormQueries.getByRole('button', { name: '登録' })).toBeEnabled()
+  },
+}
+
+/** Shows a rejected create in its form and clears the error after a successful retry. */
+export const CreateFailureUsesFormAlertOnly: Story = {
+  args: {
+    initialTab: 'board',
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <CreateFailureRetryHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const boardCreateButton = canvasElement.querySelector<HTMLElement>(
+      '[data-testid^="project-task-add-"]',
+    )
+    if (!boardCreateButton) throw new Error('Expected a Board column create button.')
+
+    await userEvent.click(boardCreateButton)
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const form = within(createTaskForm)
+    await userEvent.type(form.getByRole('textbox', { name: 'タスク名' }), 'story retry')
+
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(form.getByRole('alert')).toHaveTextContent(
+      '作成 API が一時的に失敗しました。',
+    )
+    await expect(canvas.queryByTestId('task-action-feedback')).not.toBeInTheDocument()
+    await expect(canvas.getAllByRole('alert')).toHaveLength(1)
+    await expect(form.getByRole('button', { name: /^登録$/u })).toBeEnabled()
+    await expect(form.getByRole('textbox', { name: 'タスク名' })).toHaveValue('story retry')
+
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(canvas.queryByTestId('create-task-form')).not.toBeInTheDocument()
+    await expect(canvas.queryByRole('alert')).not.toBeInTheDocument()
+    await expect(canvas.getByTestId('create-failure-attempt-count')).toHaveTextContent('2')
   },
 }
 
