@@ -54,6 +54,14 @@ const storySummary: WorkspaceSummary = {
   tasks: storyTasks.length,
 }
 
+const emptyHomeFocusQueue = {
+  ...focusQueueResponseFixture,
+  sections: focusQueueResponseFixture.sections.map((group) => ({
+    ...group,
+    items: group.section === 'now' || group.section === 'next' ? [] : group.items,
+  })),
+}
+
 const storyPlanningUpdateTargets: PlanningUpdateTargetSummary[] = [{
   target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
   cadence: {
@@ -319,6 +327,19 @@ export const HomeRouteFocusUnavailable: Story = {
     <HomeWorkspaceView
       isFocusUnavailable
       summary={{ ...storySummary, blocked: 0 }}
+      t={t}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The `/home` route with open Work Items but no actionable Now or Next preview. */
+export const HomeRouteEmptyFocusWithOpenTasks: Story = {
+  render: () => (
+    <HomeWorkspaceView
+      focusQueue={emptyHomeFocusQueue}
+      summary={{ ...storySummary, blocked: 0, tasks: 3 }}
       t={t}
       teams={projectDirectoryFixtures}
       workItemConfigurationsByTeam={storyWorkItemConfigurations}
