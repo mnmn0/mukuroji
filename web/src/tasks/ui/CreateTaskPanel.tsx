@@ -696,9 +696,9 @@ export function CreateTaskPanel({
             />
           </div>
         ) : null}
-        {errorMessage ?? fieldErrors.submit ?? fieldErrors.mode ? (
+        {fieldErrors.submit ?? fieldErrors.mode ?? errorMessage ? (
           <p className="text-sm font-semibold text-red-700" role="alert">
-            {errorMessage ?? fieldErrors.submit ?? fieldErrors.mode}
+            {fieldErrors.submit ?? fieldErrors.mode ?? errorMessage}
           </p>
         ) : null}
         {isAssigneeOptionsLoading ? (

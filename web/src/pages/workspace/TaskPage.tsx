@@ -8,7 +8,7 @@ import type {
   WorkItemDependencyEndpoint,
   WorkItemRelation,
 } from '@mukuroji/contracts'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
@@ -825,7 +825,8 @@ export function TaskPage() {
     projectId,
   ])
   const createTaskScopeGenerationRef = useRef(0)
-  useEffect(() => {
+  /** Invalidates pending creates at the layout commit that changes their owning scope. */
+  useLayoutEffect(() => {
     createTaskScopeGenerationRef.current += 1
     return () => {
       createTaskScopeGenerationRef.current += 1
@@ -990,7 +991,7 @@ export function TaskPage() {
     const handleCreatedTask = (createdTask: CanonicalWorkItem) => {
       if (!isCurrentCreateOperation()) return
       reportCreateTaskDirty(false)
-      navigate(createNavigationPath(createdTask))
+      navigate(createNavigationPath(createdTask), { flushSync: true })
     }
     /** Handles create-session errors only while this request owns the active scope. */
     const scopedGuardEnterpriseSession = async <Result,>(request: Promise<Result>) => {

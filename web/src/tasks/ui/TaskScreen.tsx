@@ -677,7 +677,10 @@ export function TaskScreen({
   )
   const scheduleUpdateChainRef = useRef<Promise<void>>(Promise.resolve())
   const detailScrollTopRef = useRef(0)
-  const previousSelectedIssueIdRef = useRef(selectedIssueId)
+  const selectedIssueKey = selectedIssueId
+    ? `${activeProjectTeamId ?? ''}:${selectedIssueId}`
+    : undefined
+  const previousSelectedIssueKeyRef = useRef(selectedIssueKey)
   const detailOriginControlRef = useRef<HTMLElement | null>(null)
   const detailOriginTaskRef = useRef<DetailOriginTask | undefined>(undefined)
   const restoreTaskListFrameRef = useRef<number | undefined>(undefined)
@@ -716,8 +719,11 @@ export function TaskScreen({
     }
     detailFocusFrameRef.current = focusTaskDetailControl('h2')
   }, [])
-  /** Restores list position and the originating detail opener after route navigation. */
-  const restoreTaskListPosition = useCallback(() => {
+  /** Restores list position and the originating detail opener after route navigation.
+   *
+   * @param clearOrigin - Whether the restored origin belongs to a completed route transition.
+   */
+  const restoreTaskListPosition = useCallback((clearOrigin = true) => {
     const scrollTop = detailScrollTopRef.current
     if (detailFocusFrameRef.current !== undefined) {
       cancelAnimationFrame(detailFocusFrameRef.current)
@@ -730,17 +736,25 @@ export function TaskScreen({
       taskContentRef.current?.scrollTo({ top: scrollTop })
       restoreTaskListFrameRef.current = requestAnimationFrame(() => {
         restoreTaskListFrameRef.current = undefined
+        const originTask = detailOriginTaskRef.current
+        const originCandidate = originTask
+          ? Array.from(taskContentRef.current?.querySelectorAll<HTMLElement>(
+              '[data-task-action="open"]',
+            ) ?? []).find((candidate) =>
+              candidate.dataset.taskTeamId === originTask.teamId &&
+              candidate.dataset.taskWorkItemId === originTask.workItemId,
+            )
+          : undefined
         const connectedOriginControl = detailOriginControlRef.current?.isConnected
           ? detailOriginControlRef.current
-          : detailOriginTaskRef.current
-            ? Array.from(taskContentRef.current?.querySelectorAll<HTMLElement>(
-                '[data-task-action="open"]',
-              ) ?? []).find((candidate) =>
-                candidate.dataset.taskTeamId === detailOriginTaskRef.current?.teamId &&
-                candidate.dataset.taskWorkItemId === detailOriginTaskRef.current?.workItemId,
-              )?.querySelector<HTMLElement>('[data-testid^="task-open-detail-"]')
-            : undefined
+          : originCandidate?.matches('button, a, [tabindex]:not([tabindex="-1"])')
+            ? originCandidate
+            : originCandidate?.querySelector<HTMLElement>('[data-testid^="task-open-detail-"]')
         connectedOriginControl?.focus({ preventScroll: true })
+        if (clearOrigin) {
+          detailOriginControlRef.current = null
+          detailOriginTaskRef.current = undefined
+        }
       })
     })
   }, [])
@@ -752,11 +766,17 @@ export function TaskScreen({
     if (!taskRow) return
     const teamId = taskRow.dataset.taskTeamId
     const workItemId = taskRow.dataset.taskWorkItemId
-    if (teamId && workItemId) detailOriginTaskRef.current = { teamId, workItemId }
+    const hasSelectedDetail = Boolean(selectedIssueId || localSelectedDetailTaskKey)
+    const startsListDetailTransition = !hasSelectedDetail || !isDetailOpen
+    if (detailOriginTaskRef.current && !startsListDetailTransition) return
+    if (teamId && workItemId) {
+      detailOriginTaskRef.current = { teamId, workItemId }
+      detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+    }
     detailOriginControlRef.current = target.closest<HTMLElement>('[data-testid^="task-open-detail-"]') ??
-      taskRow.querySelector<HTMLElement>('[data-testid^="task-open-detail-"]') ??
+      target.closest<HTMLElement>('[data-task-action="open"]') ??
       target
-  }, [])
+  }, [isDetailOpen, localSelectedDetailTaskKey, selectedIssueId])
   /** Resolves the exact control that initiated a routed detail action. */
   const resolveDetailFocusOrigin = useCallback((preferredElement?: HTMLElement) => {
     if (preferredElement?.isConnected) return preferredElement
@@ -773,14 +793,14 @@ export function TaskScreen({
       : undefined
   }, [])
   useEffect(() => {
-    const previousSelectedIssueId = previousSelectedIssueIdRef.current
-    const selectedIssueChanged = selectedIssueId !== previousSelectedIssueId
+    const previousSelectedIssueKey = previousSelectedIssueKeyRef.current
+    const selectedIssueChanged = selectedIssueKey !== previousSelectedIssueKey
     const pendingDetailFocus = pendingDetailFocusRef.current
     if (pendingDetailFocus) {
       const routeMatchesPendingFocus = selectedIssueId === pendingDetailFocus.workItemId &&
         (!activeProjectTeamId || activeProjectTeamId === pendingDetailFocus.teamId)
       if (!routeMatchesPendingFocus) {
-        const selectionTransitioned = selectedIssueId !== previousSelectedIssueId
+        const selectionTransitioned = selectedIssueKey !== previousSelectedIssueKey
         if (selectionTransitioned) {
           pendingDetailFocusRef.current = undefined
         } else {
@@ -799,7 +819,8 @@ export function TaskScreen({
           !isSelectedIssueDetailLoading &&
           !isTaskViewLoading &&
           !selectedIssueDetailUnavailable &&
-          (detailMatchesPendingFocus || selectedIssueDetail === undefined)
+          detailMatchesPendingFocus
+        previousSelectedIssueKeyRef.current = selectedIssueKey
         if (!detailSettled || !detailControlWritable) return
         pendingDetailFocusRef.current = undefined
         const activeElement = document.activeElement
@@ -815,16 +836,34 @@ export function TaskScreen({
         if (!userMovedFocus) {
           detailFocusFrameRef.current = focusTaskDetailControl(pendingDetailFocus.selector)
         }
-        previousSelectedIssueIdRef.current = selectedIssueId
         return
       }
     }
-    previousSelectedIssueIdRef.current = selectedIssueId
     if (selectedIssueId && selectedIssueChanged) {
+      const detailMatchesSelectedIssue = selectedIssueDetail?.issue.id === selectedIssueId &&
+        (!activeProjectTeamId || selectedIssueDetail.issue.teamId === activeProjectTeamId)
+      const detailReady = !isLoading &&
+        !isSelectedIssueDetailLoading &&
+        !isTaskViewLoading &&
+        !selectedIssueDetailUnavailable &&
+        detailMatchesSelectedIssue
+      if (!detailReady) {
+        if (activeProjectTeamId) {
+          pendingDetailFocusRef.current = {
+            selector: 'h2',
+            teamId: activeProjectTeamId,
+            workItemId: selectedIssueId,
+          }
+          previousSelectedIssueKeyRef.current = selectedIssueKey
+        }
+        return
+      }
+      previousSelectedIssueKeyRef.current = selectedIssueKey
       scheduleTaskDetailFocus()
       return
     }
-    if (previousSelectedIssueId && !selectedIssueId) {
+    previousSelectedIssueKeyRef.current = selectedIssueKey
+    if (previousSelectedIssueKey && !selectedIssueKey) {
       restoreTaskListPosition()
     }
   }, [
@@ -837,6 +876,7 @@ export function TaskScreen({
     scheduleTaskDetailFocus,
     selectedIssueDetail,
     selectedIssueDetailUnavailable,
+    selectedIssueKey,
     selectedIssueId,
     tasks,
   ])
@@ -1242,13 +1282,21 @@ export function TaskScreen({
     onCreateTaskDirtyChange?.(isDirty)
   }, [onCreateTaskDirtyChange])
 
+  /** Dismisses the create editor and clears its owned draft state. */
+  const dismissCreateTaskEditor = useCallback(() => {
+    reportCreateTaskDirty(false)
+    setCreateTaskError(undefined)
+    setCreateTaskContext(undefined)
+    setIsCreateTaskOpen(false)
+  }, [reportCreateTaskDirty])
+
   /** Confirms whether the current create form may be replaced or discarded. */
   const confirmCreateTaskDiscard = useCallback(() => {
     if (!createTaskDirtyRef.current) return true
     const shouldDiscard = globalThis.window.confirm(t('tasks.create.discardConfirm'))
-    if (shouldDiscard) reportCreateTaskDirty(false)
+    if (shouldDiscard) dismissCreateTaskEditor()
     return shouldDiscard
-  }, [reportCreateTaskDirty, t])
+  }, [dismissCreateTaskEditor, t])
 
   /**
    * Selects a task locally or delegates route-controlled selection to the caller.
@@ -1277,7 +1325,9 @@ export function TaskScreen({
         ...(originElement ? { originElement } : {}),
       }
     }
-    detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+    if (!detailOriginTaskRef.current && !selectedIssueId && !localSelectedDetailTaskKey) {
+      detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+    }
     setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
       key: createTaskViewItemKey(task.teamId, task.id),
       type: 'focus',
@@ -1294,17 +1344,10 @@ export function TaskScreen({
     confirmCreateTaskDiscard,
     scheduleTaskDetailFocus,
     selectedIssueId,
+    localSelectedDetailTaskKey,
     resolveDetailFocusOrigin,
     taskActionCompletion,
   ])
-
-  /** Dismisses a superseded create editor without completing another invocation. */
-  const dismissCreateTaskEditor = useCallback(() => {
-    reportCreateTaskDirty(false)
-    setCreateTaskError(undefined)
-    setCreateTaskContext(undefined)
-    setIsCreateTaskOpen(false)
-  }, [reportCreateTaskDirty])
 
   /**
    * Dismisses a superseded detail editor and any preview owned by its exact invocation.
@@ -1332,7 +1375,7 @@ export function TaskScreen({
     pendingDetailFocusRef.current = undefined
     taskActionCompletion.cancel()
     setIsDetailOpen(false)
-    restoreTaskListPosition()
+    restoreTaskListPosition(false)
   }
 
   /** Opens the shared create panel without cancelling its newly accepted invocation. */

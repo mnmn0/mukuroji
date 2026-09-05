@@ -437,6 +437,9 @@ export function TaskBoardView({
                             className={`min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[#1c1d1f] hover:text-[var(--workbench-primary)] ${
                               wrapText ? 'whitespace-normal break-words' : 'truncate'
                             }`}
+                            data-task-action="open"
+                            data-task-team-id={task.teamId}
+                            data-task-work-item-id={task.id}
                             onClick={() => onSelectTask(task)}
                             type="button"
                           >
@@ -447,6 +450,9 @@ export function TaskBoardView({
                           <button
                             aria-label={`${t('tasks.detail.title')}: ${resolveWorkItemTitle(task)}`}
                             className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)]"
+                            data-task-action="open"
+                            data-task-team-id={task.teamId}
+                            data-task-work-item-id={task.id}
                             onClick={() => onSelectTask(task)}
                             type="button"
                           >
@@ -640,6 +646,9 @@ export function TaskBoardView({
                 <div className="flex items-start gap-2">
                   <button
                     className="min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)]"
+                    data-task-action="open"
+                    data-task-team-id={task.teamId}
+                    data-task-work-item-id={task.id}
                     onClick={() => onSelectTask(task)}
                     type="button"
                   >
