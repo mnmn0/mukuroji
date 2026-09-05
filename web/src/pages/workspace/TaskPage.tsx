@@ -542,6 +542,12 @@ export function TaskPage() {
     'project-relation-candidates',
   )
   const resolvedSelectedIssueTeamId = selectedWorkItemTeamId
+  const selectedIssueDetailTeamId = selectedTeamId && selectedIssueId
+    ? selectedTeamId
+    : resolvedSelectedIssueTeamId
+  const selectedIssueDetailId = selectedTeamId && selectedIssueId
+    ? selectedIssueId
+    : resolvedSelectedIssue?.id
   const collaboration = useIssueCollaboration({
     accessToken,
     issueId: resolvedSelectedIssue?.id,
@@ -565,9 +571,9 @@ export function TaskPage() {
     key: issueDetailKey,
   } = useTeamIssueDetail(
     accessToken,
-    resolvedSelectedIssueTeamId,
-    resolvedSelectedIssue?.id,
-    true,
+    selectedIssueDetailTeamId,
+    selectedIssueDetailId,
+    Boolean(user && !currentUserError),
     'project-issue-detail',
   )
   const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
@@ -709,7 +715,15 @@ export function TaskPage() {
     Boolean(planningProjectRolesKey && isPlanningProjectRolesLoading) ||
     Boolean(projectDirectoryKey && isProjectDirectoryLoading)
   const detailErrorMessage = issueUpdateErrorMessage ?? (
-    detailError ? t('tasks.detail.error') : undefined
+    detailError || (
+      Boolean(selectedIssueId) &&
+      !taskError &&
+      !isProjectTasksLoading &&
+      !isSelectedIssueDetailLoading &&
+      !resolvedSelectedIssue
+    )
+      ? t('tasks.detail.error')
+      : undefined
   )
   const configurationErrorMessage = failedConfigurationTeamIds.length > 0
     ? t('workItems.configuration.loadError')
@@ -1455,7 +1469,10 @@ export function TaskPage() {
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
       onRetryTasks={() => {
-        void mutateProjectTasks().catch(() => undefined)
+        void Promise.all([
+          mutateProjectTasks(),
+          mutateSelectedIssueDetail(),
+        ]).catch(() => undefined)
       }}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
@@ -1484,6 +1501,7 @@ export function TaskPage() {
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
+      selectedIssueId={selectedIssueId}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
       isProjectUsersLoading={Boolean(projectUsersKey && isProjectUsersLoading)}
       isSelectedIssueDetailLoading={Boolean(issueDetailKey && isSelectedIssueDetailLoading)}

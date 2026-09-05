@@ -1,5 +1,6 @@
 import useSWR from 'swr'
 import type { Arguments, KeyedMutator, MutatorCallback, MutatorOptions } from 'swr'
+import { useMemo } from 'react'
 import {
   getProjectIssuesPage,
   getTeamIssueDetail,
@@ -26,49 +27,6 @@ function createProjectIssuesPage(
     ...(current?.canReadCustomerImpact === undefined
       ? {}
       : { canReadCustomerImpact: current.canReadCustomerImpact }),
-  }
-}
-
-/**
- * Loads a Project Work Item page and reconciles one explicitly routed Work Item
- * when a successful Project list response does not contain that exact identity.
- *
- * @param projectId - Project whose assigned Work Items should be loaded.
- * @param accessToken - Bearer token used by both canonical Work Item requests.
- * @param includeArchived - Whether archived Work Items should be included.
- * @param selectedTeamId - Team identity from the routed Work Item, when present.
- * @param selectedIssueId - Work Item identity from the route, when present.
- * @returns The Project page, optionally including the exact routed Work Item.
- */
-async function fetchProjectIssuesPage(
-  projectId: string,
-  accessToken: string,
-  includeArchived: boolean,
-  selectedTeamId?: string,
-  selectedIssueId?: string,
-): Promise<ProjectIssuesPage> {
-  const response = await getProjectIssuesPage(projectId, accessToken, includeArchived)
-  if (!selectedTeamId || !selectedIssueId) return response
-
-  const hasSelectedIssue = response.issues.some((issue) =>
-    issue.teamId === selectedTeamId && issue.id === selectedIssueId,
-  )
-  if (hasSelectedIssue) return response
-
-  const detail = await getTeamIssueDetail(selectedTeamId, selectedIssueId, accessToken)
-  const selectedIssue = detail.issue
-  if (
-    selectedIssue.teamId !== selectedTeamId ||
-    selectedIssue.id !== selectedIssueId ||
-    selectedIssue.assignedProjectId !== projectId ||
-    (!includeArchived && selectedIssue.archivedAt !== undefined)
-  ) {
-    return response
-  }
-
-  return {
-    ...response,
-    issues: [...response.issues, selectedIssue],
   }
 }
 
@@ -134,15 +92,49 @@ export function useProjectIssues(
   const query = useSWR(
     key,
     ([, token, currentProjectId, shouldIncludeArchived]) =>
-      fetchProjectIssuesPage(
-        currentProjectId,
-        token,
-        shouldIncludeArchived,
-        selectedTeamId,
-        selectedIssueId,
-      ),
+      getProjectIssuesPage(currentProjectId, token, shouldIncludeArchived),
     workItemQueryConfig,
   )
+
+  const selectedDetailQuery = useTeamIssueDetail(
+    accessToken,
+    selectedTeamId,
+    selectedIssueId,
+    enabled && Boolean(selectedTeamId && selectedIssueId),
+    'project-issue-detail',
+  )
+  const selectedDetailIssue = selectedDetailQuery.error
+    ? undefined
+    : selectedDetailQuery.data?.issue
+  const reconciledIssues = useMemo(() => {
+    const issues = query.data?.issues
+    if (!issues || !selectedTeamId || !selectedIssueId || !selectedDetailIssue) {
+      return issues
+    }
+
+    const hasSelectedIssue = issues.some((issue) =>
+      issue.teamId === selectedTeamId && issue.id === selectedIssueId,
+    )
+    if (hasSelectedIssue) return issues
+
+    if (
+      selectedDetailIssue.teamId !== selectedTeamId ||
+      selectedDetailIssue.id !== selectedIssueId ||
+      selectedDetailIssue.assignedProjectId !== projectId ||
+      (!includeArchived && selectedDetailIssue.archivedAt !== undefined)
+    ) {
+      return issues
+    }
+
+    return [...issues, selectedDetailIssue]
+  }, [
+    includeArchived,
+    projectId,
+    query.data?.issues,
+    selectedDetailIssue,
+    selectedIssueId,
+    selectedTeamId,
+  ])
 
   /** Adapts the response-shaped SWR cache back to the legacy issue-list mutator. */
   const mutateProjectIssues: KeyedMutator<ProjectIssueList> = async <MutationData = ProjectIssueList>(
@@ -176,7 +168,7 @@ export function useProjectIssues(
 
   return {
     ...query,
-    data: query.data?.issues,
+    data: reconciledIssues,
     canReadCustomerImpact: query.data?.canReadCustomerImpact === true,
     mutate: mutateProjectIssues,
     key,

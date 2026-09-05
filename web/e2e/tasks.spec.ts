@@ -276,10 +276,14 @@ type MockAuthenticatedTaskPageOptions = {
   issueDetailOverrides?: Partial<Record<string, {
     /** HTTP status returned instead of the canonical detail response. */
     status?: number
+    /** Whether the status override should be consumed after one detail request. */
+    statusOnce?: boolean
+    /** Canonical detail returned when the Issue is intentionally absent from list fixtures. */
+    issue?: TeamIssue
     /** Canonical fields overlaid on the detail issue before it is returned. */
     issuePatch?: Partial<TeamIssue>
-    /** Minimum Project list read count before this override becomes active. */
-    afterProjectIssueReads?: number
+    /** Explicitly enables a mutable override after the test reaches its retry boundary. */
+    enabled?: boolean
   }>>
   /**
    * `/api/auth/me` が返す現在ユーザーの上書きです。
@@ -457,6 +461,7 @@ async function mockAuthenticatedTaskPage(
     'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
   const issueDetailOverrides = options.issueDetailOverrides ?? {}
+  const consumedDetailStatusOverrides = new Set<string>()
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
   const forbiddenSchedulePreviewIssueKeys = new Set(
     options.forbiddenSchedulePreviewIssueKeys ?? [],
@@ -1626,20 +1631,25 @@ async function mockAuthenticatedTaskPage(
     const detailOverride = route.request().method() === 'GET'
       ? issueDetailOverrides[createIssueCollaborationKey(teamId, issueId)]
       : undefined
-    const activeDetailOverride = detailOverride && (
-      detailOverride.afterProjectIssueReads === undefined ||
-      (requestCounts.projectIssues.refero ?? 0) >= detailOverride.afterProjectIssueReads
-    )
+    const activeDetailOverride = detailOverride && detailOverride.enabled !== false
       ? detailOverride
       : undefined
     const issue = findTeamIssue(teamIssuesByTeam, teamId, issueId)
       ?? Object.values(taskResponsesByProject)
         .flat()
         .find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
+      ?? activeDetailOverride?.issue
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
-    if (activeDetailOverride?.status !== undefined) {
+    const detailOverrideKey = createIssueCollaborationKey(teamId, issueId)
+    const shouldApplyDetailStatus = activeDetailOverride?.status !== undefined && (
+      !activeDetailOverride.statusOnce || !consumedDetailStatusOverrides.has(detailOverrideKey)
+    )
+    if (shouldApplyDetailStatus) {
+      if (activeDetailOverride.statusOnce) {
+        consumedDetailStatusOverrides.add(detailOverrideKey)
+      }
       await route.fulfill({
         status: activeDetailOverride.status,
         json: { message: `Mock detail response ${activeDetailOverride.status}.` },
@@ -8003,18 +8013,19 @@ test.describe('authenticated task page', () => {
 
   test('一覧にない選択中タスクは最新の canonical detail で補完する', async ({ page }) => {
     const createdTitle = 'canonical-detail-latest'
+    const detailOverride = {
+      enabled: false,
+      issuePatch: {
+        description: 'サーバー側の最新本文です。',
+        revision: 7,
+        title: 'サーバー側の最新タイトル',
+      },
+    }
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       postCreateProjectIssueFailureCount: 1,
       postCreateProjectIssueStaleResponseCount: 1,
       issueDetailOverrides: {
-        [createIssueCollaborationKey('core-team', createdTitle)]: {
-          issuePatch: {
-            description: 'サーバー側の最新本文です。',
-            revision: 7,
-            title: 'サーバー側の最新タイトル',
-          },
-          afterProjectIssueReads: 3,
-        },
+        [createIssueCollaborationKey('core-team', createdTitle)]: detailOverride,
       },
     })
     await page.goto('/projects/refero/issues')
@@ -8025,6 +8036,7 @@ test.describe('authenticated task page', () => {
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page).toHaveURL(new RegExp(`issueId=${createdTitle}`))
+    detailOverride.enabled = true
     await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
     await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(3)
     await expect(page.getByTestId('tasks-error')).toHaveCount(0)
@@ -8043,17 +8055,76 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('同じ Project の履歴選択を切り替えても、一覧にない Issue の detail を表示する', async ({ page }) => {
+    const detailOnlyIssue = createStoredTeamIssue({
+      id: 'detail-only-selection',
+      title: '一覧にない選択先',
+    })
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      issueDetailOverrides: {
+        [createIssueCollaborationKey('core-team', detailOnlyIssue.id)]: {
+          issue: detailOnlyIssue,
+        },
+      },
+    })
+    let documentNavigations = 0
+    let detailReads = 0
+    page.on('request', (request) => {
+      if (request.resourceType() === 'document') documentNavigations += 1
+    })
+    page.on('request', (request) => {
+      if (
+        request.method() === 'GET' &&
+        new URL(request.url()).pathname === '/api/teams/core-team/issues/detail-only-selection'
+      ) {
+        detailReads += 1
+      }
+    })
+    await page.goto('/projects/refero/issues?issueId=wireframe&teamId=core-team')
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: '新しいランディングページのワイヤーフレーム作成',
+    })).toBeVisible()
+
+    const detailOnlyPath = `/projects/refero/issues?issueId=${detailOnlyIssue.id}&teamId=core-team`
+    const currentHistoryState = await page.evaluate(() => window.history.state)
+    const requestCounts = getMockRequestCounts(page)
+    const projectReadsBeforeHistory = requestCounts.projectIssues.refero ?? 0
+    await page.evaluate(({ path, state }) => {
+      window.history.pushState({
+        ...state,
+        idx: (typeof state?.idx === 'number' ? state.idx : 0) + 1,
+        key: 'r7-detail-only-selection',
+      }, '', path)
+    }, { path: detailOnlyPath, state: currentHistoryState })
+    await page.goBack()
+    await expect(page).toHaveURL(/issueId=wireframe&teamId=core-team/)
+    await page.goForward()
+    await expect(page).toHaveURL(new RegExp(`issueId=${detailOnlyIssue.id}&teamId=core-team`))
+    await expect.poll(() => detailReads).toBe(1)
+    expect(requestCounts.projectIssues.refero ?? 0).toBe(projectReadsBeforeHistory)
+    expect(documentNavigations).toBe(1)
+    const taskDetailPane = page.getByTestId('task-detail-pane')
+    await expect(taskDetailPane.getByRole('heading', {
+      name: detailOnlyIssue.title,
+    })).toBeVisible()
+    await expect(page.getByTestId(`task-row-${detailOnlyIssue.id}`)).toBeVisible()
+    await expect(taskDetailPane.getByRole('heading', {
+      name: '新しいランディングページのワイヤーフレーム作成',
+    })).toHaveCount(0)
+  })
+
   for (const detailStatus of [401, 403, 404]) {
     test(`一覧補完の失敗を表示し、POSTを再送しない (${detailStatus})`, async ({ page }) => {
       const createdTitle = `detail-status-${detailStatus}`
+      const detailOverride = {
+        enabled: false,
+        status: detailStatus,
+      }
       await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
         postCreateProjectIssueFailureCount: 1,
         postCreateProjectIssueStaleResponseCount: 1,
         issueDetailOverrides: {
-          [createIssueCollaborationKey('core-team', createdTitle)]: {
-            afterProjectIssueReads: 3,
-            status: detailStatus,
-          },
+          [createIssueCollaborationKey('core-team', createdTitle)]: detailOverride,
         },
       })
       await page.goto('/projects/refero/issues')
@@ -8071,6 +8142,7 @@ test.describe('authenticated task page', () => {
       await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
       await expect(page).toHaveURL(new RegExp(`issueId=${createdTitle}`))
+      detailOverride.enabled = true
       const detailReadsBeforeRetry = detailReads
       await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
       await expect.poll(() => detailReads).toBeGreaterThan(detailReadsBeforeRetry)
@@ -8081,9 +8153,12 @@ test.describe('authenticated task page', () => {
         return
       }
 
-      await expect(page.getByTestId('tasks-error')).toContainText(
-        `Mock detail response ${detailStatus}.`,
-      )
+      await expect(page.getByTestId('task-detail-pane').getByText('タスク詳細を取得できませんでした', {
+        exact: true,
+      })).toBeVisible()
+      for (const taskId of ['wireframe', 'brand-guideline', 'seo-research', 'competitor-report']) {
+        await expect(page.getByTestId(`task-row-${taskId}`).first()).toBeVisible()
+      }
     })
   }
 
@@ -8093,14 +8168,15 @@ test.describe('authenticated task page', () => {
   ]) {
     test(`一覧補完の ${detailCase.label} detail は Project list に注入しない`, async ({ page }) => {
       const createdTitle = `detail-${detailCase.label === 'wrong Project' ? 'project' : 'team'}`
+      const detailOverride = {
+        enabled: false,
+        issuePatch: detailCase.issuePatch,
+      }
       await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
         postCreateProjectIssueFailureCount: 1,
         postCreateProjectIssueStaleResponseCount: 1,
         issueDetailOverrides: {
-          [createIssueCollaborationKey('core-team', createdTitle)]: {
-            afterProjectIssueReads: 3,
-            issuePatch: detailCase.issuePatch,
-          },
+          [createIssueCollaborationKey('core-team', createdTitle)]: detailOverride,
         },
       })
       await page.goto('/projects/refero/issues')
@@ -8111,12 +8187,91 @@ test.describe('authenticated task page', () => {
       await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
       await expect(page).toHaveURL(new RegExp(`issueId=${createdTitle}`))
+      detailOverride.enabled = true
       await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
       await expect(page.getByTestId('tasks-error')).toHaveCount(0)
       await expect(page.getByTestId(`task-row-${createdTitle}`)).toHaveCount(0)
+      await expect(page.getByTestId('task-detail-pane')).toContainText(
+        'タスク詳細を取得できませんでした',
+      )
+      await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+        name: createdTitle,
+      })).toHaveCount(0)
       expect(requestCounts.issueCreates).toBe(1)
     })
   }
+
+  for (const detailStatus of [404, 503]) {
+    test(`明示URLのdetail補完失敗でも一覧を表示し、再試行できる (${detailStatus})`, async ({ page }) => {
+      const detailOnlyIssue = createStoredTeamIssue({
+        id: `detail-only-deep-link-${detailStatus}`,
+        title: `明示URLのdetail-only-${detailStatus}`,
+      })
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+        issueDetailOverrides: {
+          [createIssueCollaborationKey('core-team', detailOnlyIssue.id)]: {
+            issue: detailOnlyIssue,
+            status: detailStatus,
+            statusOnce: true,
+          },
+        },
+      })
+      let detailReads = 0
+      page.on('request', (request) => {
+        const pathname = new URL(request.url()).pathname
+        if (request.method() === 'GET' && pathname === `/api/teams/core-team/issues/${detailOnlyIssue.id}`) {
+          detailReads += 1
+        }
+      })
+      await page.goto(`/projects/refero/issues?issueId=${detailOnlyIssue.id}&teamId=core-team`)
+      for (const taskId of ['wireframe', 'brand-guideline', 'seo-research', 'competitor-report']) {
+        await expect(page.getByTestId(`task-row-${taskId}`).first()).toBeVisible()
+      }
+      await expect(page.getByTestId('task-detail-pane')).toContainText(
+        'タスク詳細を取得できませんでした',
+      )
+      await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+        name: '新しいランディングページのワイヤーフレーム作成',
+      })).toHaveCount(0)
+      const detailReadsBeforeRetry = detailReads
+      await page.getByTestId('project-task-error').getByRole('button', {
+        name: '再読み込み',
+        exact: true,
+      }).click()
+      await expect.poll(() => detailReads).toBeGreaterThan(detailReadsBeforeRetry)
+      await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+        name: detailOnlyIssue.title,
+      })).toBeVisible()
+      await expect(page.getByTestId(`task-row-${detailOnlyIssue.id}`)).toBeVisible()
+      expect(getMockRequestCounts(page).issueCreates).toBe(0)
+    })
+  }
+
+  test('未選択URLのfallback detail失敗も一覧を保ち、detail再試行で回復する', async ({ page }) => {
+    const detailOverride = {
+      enabled: true,
+      status: 503,
+      statusOnce: true,
+    }
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      issueDetailOverrides: {
+        [createIssueCollaborationKey('core-team', 'wireframe')]: detailOverride,
+      },
+    })
+    await page.goto('/projects/refero/issues')
+    await expect(page.getByTestId('task-row-wireframe').first()).toBeVisible()
+    await expect(page.getByTestId('task-detail-pane')).toContainText(
+      'タスク詳細を取得できませんでした',
+    )
+    detailOverride.enabled = true
+    await page.getByTestId('project-task-error').getByRole('button', {
+      name: '再読み込み',
+      exact: true,
+    }).click()
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: '新しいランディングページのワイヤーフレーム作成',
+    })).toBeVisible()
+  })
 
   test('作成後一覧取得の認証失効はログインへ遷移し、作成を重複実行しない', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {

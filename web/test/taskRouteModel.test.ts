@@ -72,7 +72,7 @@ describe('Project task route context', () => {
     expect(ambiguousContext.tasks).toBe(projectIssues)
     expect(ambiguousContext.hasAmbiguousIssueSelection).toBe(true)
     expect(ambiguousContext.requestedIssue).toBeUndefined()
-    expect(ambiguousContext.resolvedSelectedIssue).toBe(coreIssue)
+    expect(ambiguousContext.resolvedSelectedIssue).toBeUndefined()
     expect(ambiguousContext.interactionTeamId).toBeUndefined()
     expect(ambiguousContext.interactionTeam).toBeUndefined()
     expect(ambiguousContext.activeTeam).toBeUndefined()
@@ -97,6 +97,22 @@ describe('Project task route context', () => {
     expect(scopedContext.selectedWorkItemTeamId).toBe('design-team')
   })
 
+  test('does not fall back to another task when an explicit Team Issue is missing', () => {
+    const context = resolveProjectTaskRouteContext({
+      projectId: 'shared-project',
+      projectIssues: [createIssue('visible-issue', 'core-team')],
+      selectedIssueId: 'missing-issue',
+      selectedTeamId: 'core-team',
+      suppressIssueFallback: false,
+      teams: sharedProjectTeams,
+    })
+
+    expect(context.tasks).toHaveLength(1)
+    expect(context.requestedIssue).toBeUndefined()
+    expect(context.resolvedSelectedIssue).toBeUndefined()
+    expect(context.selectedWorkItemTeamId).toBe('core-team')
+  })
+
   test('keeps task-empty Project Teams in configuration scope and honors fallback suppression', () => {
     const coreIssue = createIssue('core-only-issue', 'core-team')
     const aggregateContext = resolveProjectTaskRouteContext({
@@ -107,6 +123,7 @@ describe('Project task route context', () => {
     })
 
     expect(aggregateContext.projectTeams).toEqual(sharedProjectTeams)
+    expect(aggregateContext.resolvedSelectedIssue).toBe(coreIssue)
     expect(aggregateContext.configurationTeamIds).toEqual(['core-team', 'design-team'])
     expect(aggregateContext.selectedWorkItemTeamId).toBe('core-team')
 

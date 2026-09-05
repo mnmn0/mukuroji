@@ -369,6 +369,8 @@ export type TaskScreenProps = {
   defaultCreateTaskOpen?: boolean
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
+  /** Work Item ID explicitly selected by the current route, including unresolved selections. */
+  selectedIssueId?: string
   /** Detail, relations, and activity for the selected Work Item. */
   selectedIssueDetail?: TeamIssueDetail
   /** Customer Request impact aggregated across the current Project. */
@@ -539,6 +541,7 @@ export function TaskScreen({
   resolvedConfigurationsByTeam = emptyResolvedWorkItemConfigurations,
   configurationFailedTeamIds = emptyConfigurationTeamIds,
   selectedIssueDetail,
+  selectedIssueId,
   projectCustomerImpact,
   tasks = [],
   taskErrorMessage,
@@ -929,13 +932,21 @@ export function TaskScreen({
     })
   }, [selectedBulkTaskViewKeys, visibleTaskViewKeys])
 
-  const selectedDetailTask =
-    (localSelectedDetailTaskKey
-      ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
-      : undefined) ??
-    findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
-    visibleTasks[0] ??
-    tasks[0]
+  const selectedDetailTask = selectedIssueId
+    ? (() => {
+      const selectedTasks = tasks.filter((task) =>
+        task.id === selectedIssueId && (!activeProjectTeamId || task.teamId === activeProjectTeamId)
+      )
+      return selectedTasks.length === 1 ? selectedTasks[0] : undefined
+    })()
+    : (
+      (localSelectedDetailTaskKey
+        ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
+        : undefined) ??
+      findTaskBySelection(tasks, initialSelectedTaskId, activeProjectTeamId) ??
+      visibleTasks[0] ??
+      tasks[0]
+    )
   const detailTask = isDetailOpen
     ? resolveLatestTaskSnapshot(selectedDetailTask, selectedIssueDetail?.issue)
     : undefined
@@ -2556,7 +2567,7 @@ export function TaskScreen({
                 ) : null}
               </div>
             ) : null}
-            {taskErrorMessage && onRetryTasks ? (
+            {(taskErrorMessage || detailErrorMessage) && onRetryTasks ? (
               <div
                 className="mx-[clamp(20px,3vw,34px)] mt-2 flex justify-end"
                 data-testid="project-task-error"

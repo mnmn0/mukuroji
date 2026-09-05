@@ -132,6 +132,14 @@ const storyTasks = referoTaskFixtures.map((task, index) => {
   }
 })
 
+const ambiguousSelectionTasks = [
+  ...storyTasks,
+  {
+    ...storyTasks[0],
+    teamId: 'design-team',
+  },
+]
+
 const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
   const baseTask = storyTasks[index % storyTasks.length]
 
@@ -602,6 +610,26 @@ export const Loading: Story = {
 
     await expect(status).toHaveTextContent('タスク一覧を確認しています。')
     await expect(busyRegion).toHaveAttribute('aria-busy', 'true')
+  },
+}
+
+/** An explicit ambiguous route selection stays unresolved instead of opening another task. */
+export const ExplicitAmbiguousSelection: Story = {
+  args: {
+    activeProjectTeamId: undefined,
+    detailErrorMessage: 'タスク詳細を取得できませんでした',
+    selectedIssueId: 'wireframe',
+    tasks: ambiguousSelectionTasks,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const detailPaneElement = canvas.getByTestId('task-detail-pane')
+    const detailPane = within(detailPaneElement)
+
+    await expect(detailPaneElement).toHaveTextContent('タスク詳細を取得できませんでした')
+    await expect(detailPane.queryByRole('heading', {
+      name: 'ワイヤーフレームを確認する',
+    })).not.toBeInTheDocument()
   },
 }
 
