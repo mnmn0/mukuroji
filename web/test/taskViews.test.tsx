@@ -699,7 +699,7 @@ describe('independent task views', () => {
     expect(html).toContain('佐藤 花子 / sato@example.com')
     expect(html).toContain('name="scheduleMode"')
     expect(html).toContain('<option value="unscheduled" selected="">未計画</option>')
-    expect(html).not.toContain('name="scheduleDueDate"')
+    expect(html).toContain('disabled="" type="date" name="scheduleDueDate"')
   })
 
   test('disables task creation when every Work Item Type is archived', () => {

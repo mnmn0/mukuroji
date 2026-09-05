@@ -354,6 +354,8 @@ export const workItemsMessages = {
   'tasks.create.workItemType': 'Work Item Type',
   'tasks.create.archived': 'アーカイブ済み',
   'tasks.create.noActiveWorkItemTypes': 'すべての Work Item Type がアーカイブ済みです。新しく登録するにはいずれかを復元してください。',
+  'tasks.create.quickDetailsRequireDetailed': '入力した日付・工数・ステータス・優先度・カスタム項目を確認するため、詳細登録に戻ってから登録してください。',
+  'tasks.create.discardConfirm': '入力したタスクの内容を破棄しますか？',
   'tasks.board.addInColumn': 'この列に追加',
   'tasks.board.dragHint': 'ドラッグまたはステータス選択で移動',
   'tasks.calendar.addOnDate': 'この日に追加',

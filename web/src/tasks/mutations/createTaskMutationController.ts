@@ -10,6 +10,8 @@ export type TaskCreateMutationControllerOptions = {
   accessToken?: string
   /** Applies the page's enterprise-session policy to the create request. */
   guardEnterpriseSession: <Result>(request: Promise<Result>) => Promise<Result>
+  /** Notifies the owning page after the create endpoint confirms the Work Item. */
+  onCreated?: (task: CanonicalWorkItem) => void
   /** Project whose Work Item list cache is owned by the current route. */
   projectId: string
   /** Revalidates or updates the current Project Work Item cache. */
@@ -48,6 +50,7 @@ export function createTaskMutationController({
   guardEnterpriseSession,
   mutateProjectTasks,
   mutationRequestRunner,
+  onCreated,
   projectId,
 }: TaskCreateMutationControllerOptions) {
   /** Creates one Work Item and preserves it in the current Project cache. */
@@ -70,11 +73,11 @@ export function createTaskMutationController({
         context,
       ),
     ))
-
     let hasRefreshError = false
     let refreshError: unknown
     let highestObservedTask = task
     try {
+      onCreated?.(task)
       if (
         projectId === target.projectId &&
         task.assignedProjectId === target.projectId &&

@@ -492,7 +492,7 @@ export function TaskTableView({
       />
       <section
         aria-label={t('tasks.table.aria')}
-        className="workbench-table mt-3 overflow-hidden"
+        className="workbench-table relative mt-3 overflow-hidden"
         onKeyDown={handleTableKeyDown}
         onPaste={handleTablePaste}
       >
@@ -763,6 +763,8 @@ function TaskTableRow({
       data-row-index={rowIndex}
       data-selected={selected ? 'true' : 'false'}
       data-task-action="open"
+      data-task-team-id={task.teamId}
+      data-task-work-item-id={task.id}
       data-testid={`task-row-${task.id}`}
       onClick={(event) => {
         if (!isInteractiveTaskRowTarget(event.target)) onSelectTask(task)

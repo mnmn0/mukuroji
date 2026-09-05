@@ -8,8 +8,8 @@ import type {
   WorkItemDependencyEndpoint,
   WorkItemRelation,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useState } from 'react'
-import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
@@ -198,6 +198,8 @@ function useProjectFileScope(projectId: string, teamId?: string) {
 export function TaskPage() {
   const location = useLocation()
   const navigate = useNavigate()
+  const createTaskDirtyRef = useRef(false)
+  const createTaskDirtyScopeRef = useRef<string | undefined>(undefined)
   const params = useParams()
   const {
     hasQuickAccessLoadError,
@@ -692,14 +694,6 @@ export function TaskPage() {
     t,
     user,
   })
-  const taskCreateMutation = createTaskMutationController({
-    accessToken,
-    createErrorMessage: t('issues.error.create'),
-    guardEnterpriseSession,
-    mutateProjectTasks,
-    mutationRequestRunner,
-    projectId,
-  })
   const taskErrorMessage = useMemo(() => {
     if (currentUserErrorAction?.kind === 'stay') {
       return t('tasks.error.loading')
@@ -825,6 +819,62 @@ export function TaskPage() {
     user?.attributes['custom:directory_id'] ??
     ''
   ).trim()
+  const taskScopeKey = JSON.stringify([
+    workspaceId,
+    user?.username ?? user?.attributes.email ?? '',
+    projectId,
+  ])
+  const createTaskScopeGenerationRef = useRef(0)
+  useEffect(() => {
+    createTaskScopeGenerationRef.current += 1
+    return () => {
+      createTaskScopeGenerationRef.current += 1
+    }
+  }, [taskScopeKey])
+  const [createTaskDirtyState, setCreateTaskDirtyState] = useState<{
+    /** Whether the current scoped create form has unsaved input. */
+    isDirty: boolean
+    /** Scope identity that owns the dirty create form. */
+    scopeKey: string
+  }>({ isDirty: false, scopeKey: taskScopeKey })
+  const isCreateTaskDirty = createTaskDirtyState.isDirty &&
+    createTaskDirtyState.scopeKey === taskScopeKey
+  const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) =>
+    Boolean(getAuthSession()) && createTaskDirtyRef.current &&
+      createTaskDirtyScopeRef.current === taskScopeKey &&
+      currentLocation.pathname !== nextLocation.pathname,
+  [taskScopeKey],))
+  /** Reports create-form dirtiness to the route-owned navigation guard. */
+  const reportCreateTaskDirty = useCallback((isDirty: boolean) => {
+    if (!isDirty && createTaskDirtyScopeRef.current !== undefined &&
+      createTaskDirtyScopeRef.current !== taskScopeKey) {
+      return
+    }
+    createTaskDirtyRef.current = isDirty
+    createTaskDirtyScopeRef.current = taskScopeKey
+    setCreateTaskDirtyState({ isDirty, scopeKey: taskScopeKey })
+  }, [taskScopeKey])
+  useEffect(() => {
+    if (navigationBlocker.state !== 'blocked') return
+    if (globalThis.window.confirm(t('tasks.create.discardConfirm'))) {
+      reportCreateTaskDirty(false)
+      createTaskDirtyScopeRef.current = undefined
+      navigationBlocker.proceed()
+      return
+    }
+    navigationBlocker.reset()
+  }, [navigationBlocker, reportCreateTaskDirty, t])
+  useEffect(() => {
+    if (!isCreateTaskDirty) return
+    /** Prevents browser unload while the authenticated scoped create form is dirty. */
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      if (!getAuthSession()) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', preventUnload)
+    return () => window.removeEventListener('beforeunload', preventUnload)
+  }, [isCreateTaskDirty])
 
   /** Mirrors the server's manager check for one visible dependency endpoint. */
   const canManageScheduleDependencyEndpoint = (endpoint: WorkItemDependencyEndpoint) =>
@@ -925,20 +975,47 @@ export function TaskPage() {
       teamId: targetTeamId,
     })
 
+    const operationScopeGeneration = createTaskScopeGenerationRef.current
+    const operationAccessToken = accessToken
+    /** Returns whether this create request still owns the active scope and session. */
+    const isCurrentCreateOperation = () =>
+      createTaskScopeGenerationRef.current === operationScopeGeneration &&
+      getAuthSession()?.accessToken === operationAccessToken
+    /** Builds the routed detail URL for a confirmed Work Item in this create scope. */
+    const createNavigationPath = (createdTask: CanonicalWorkItem) => preserveTaskViewUrlState(
+      createProjectIssuesPath(targetProjectId, targetTeamId, createdTask.id),
+      searchParams,
+    )
+    /** Navigates only after this scoped create request has a confirmed server result. */
+    const handleCreatedTask = (createdTask: CanonicalWorkItem) => {
+      if (!isCurrentCreateOperation()) return
+      reportCreateTaskDirty(false)
+      navigate(createNavigationPath(createdTask))
+    }
+    /** Handles create-session errors only while this request owns the active scope. */
+    const scopedGuardEnterpriseSession = async <Result,>(request: Promise<Result>) => {
+      try {
+        return await request
+      } catch (error) {
+        if (isCurrentCreateOperation()) redirectEnterpriseSessionError(error)
+        throw error
+      }
+    }
+    const taskCreateMutation = createTaskMutationController({
+      accessToken,
+      createErrorMessage: t('issues.error.create'),
+      guardEnterpriseSession: scopedGuardEnterpriseSession,
+      mutateProjectTasks,
+      mutationRequestRunner,
+      onCreated: handleCreatedTask,
+      projectId,
+    })
     const createdMutation = await taskCreateMutation.createTask(input, {
       projectId: targetProjectId,
       teamId: targetTeamId,
     })
     const issue = createdMutation.task
-    const navigationPath = preserveTaskViewUrlState(
-      createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
-      searchParams,
-    )
-    let shouldNavigate = true
-    if (createdMutation.refreshError !== undefined) {
-      shouldNavigate = !redirectEnterpriseSessionError(createdMutation.refreshError, navigationPath)
-    }
-    if (shouldNavigate) navigate(navigationPath)
+    const navigationPath = createNavigationPath(issue)
     return { navigationPath, task: issue }
   }
 
@@ -1464,7 +1541,7 @@ export function TaskPage() {
 
   return (
     <TaskScreen
-      key={projectId}
+      key={taskScopeKey}
       aiAssistanceEnabled={aiPlanningAssistanceEnabled}
       aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       renderAiAssistance={taskDetailAiAssistanceRenderer}
@@ -1482,6 +1559,7 @@ export function TaskPage() {
       isProjectQuickAccessSaving={isQuickAccessLoading || isQuickAccessSaving}
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
       isPlanningLoading={isPlanningDependencyLoading}
+      isTaskViewLoading={taskViewController.isLoading}
       locale={locale}
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
@@ -1493,6 +1571,7 @@ export function TaskPage() {
             ]).catch(() => undefined)
           }
         : undefined}
+      onCreateTaskDirtyChange={reportCreateTaskDirty}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}

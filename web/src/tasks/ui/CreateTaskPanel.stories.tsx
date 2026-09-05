@@ -386,6 +386,68 @@ export const DateRangeContextRemainsDetailed: Story = {
   },
 }
 
+/** Retains standard, schedule, and raw custom-field input across a mode round trip. */
+export const ModeRoundTripRetainsDraft: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+    initialMode: 'detailed',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const title = canvas.getByRole('textbox', { name: 'タスク名' })
+    const assignee = canvas.getByRole('combobox', { name: '担当者' })
+    const customField = canvas.getByLabelText('Budget')
+
+    await userEvent.type(title, 'Round trip draft')
+    await userEvent.selectOptions(assignee, 'sato@example.com')
+    await userEvent.type(canvas.getByLabelText('Customer impact'), 'Required context')
+    await userEvent.selectOptions(canvas.getByLabelText('Risk level'), 'moderate')
+
+    await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
+    await userEvent.type(canvas.getByLabelText('期限'), '2026-07-05')
+    await userEvent.click(canvas.getByRole('button', { name: '詳細登録' }))
+    await expect(canvas.getByRole('combobox', { name: 'スケジュール種別' })).toHaveValue('due-date')
+    await expect(canvas.getByLabelText('期限のみ')).toHaveValue('2026-07-05')
+
+    await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
+    await userEvent.clear(canvas.getByLabelText('期限'))
+    await userEvent.click(canvas.getByRole('button', { name: '詳細登録' }))
+    await expect(canvas.getByRole('combobox', { name: 'スケジュール種別' })).toHaveValue('unscheduled')
+
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'スケジュール種別' }), 'date-range')
+    await userEvent.clear(canvas.getByLabelText('開始日'))
+    await userEvent.type(canvas.getByLabelText('開始日'), '2026-07-01')
+    await userEvent.clear(canvas.getByLabelText('終了日'))
+    await userEvent.type(canvas.getByLabelText('終了日'), '2026-07-03')
+    await userEvent.clear(canvas.getByLabelText('予定工数（分）'))
+    await userEvent.type(canvas.getByLabelText('予定工数（分）'), '240')
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: 'ステータス' }), 'ready')
+    await userEvent.selectOptions(canvas.getByRole('combobox', { name: '優先度' }), 'high')
+    await userEvent.type(customField, '99999999')
+
+    await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
+    await userEvent.click(canvas.getByRole('button', { name: '詳細登録' }))
+
+    await expect(canvas.getByRole('textbox', { name: 'タスク名' })).toHaveValue('Round trip draft')
+    await expect(canvas.getByRole('combobox', { name: '担当者' })).toHaveValue('sato@example.com')
+    await expect(canvas.getByRole('combobox', { name: 'ステータス' })).toHaveValue('ready')
+    await expect(canvas.getByRole('combobox', { name: '優先度' })).toHaveValue('high')
+    await expect(canvas.getByLabelText('予定工数（分）')).toHaveValue(240)
+    await expect(canvas.getByRole('combobox', { name: 'スケジュール種別' })).toHaveValue('date-range')
+    await expect(canvas.getByLabelText('開始日')).toHaveValue('2026-07-01')
+    await expect(canvas.getByLabelText('終了日')).toHaveValue('2026-07-03')
+    await expect(canvas.getByLabelText('Budget')).toHaveValue(99999999)
+
+    await userEvent.click(canvas.getByRole('button', { name: 'クイック登録' }))
+    await userEvent.click(canvas.getByRole('button', { name: '登録' }))
+    await expect(canvas.getByText(/入力した日付・工数・ステータス・優先度・カスタム項目を確認するため/u)).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: '詳細登録' }))
+    await expect(canvas.queryByText(/入力した日付・工数・ステータス・優先度・カスタム項目を確認するため/u)).toBeNull()
+    fireEvent.submit(canvas.getByTestId('create-task-form'))
+    await waitFor(() => expect(canvas.getByText('最大値以下で入力してください。')).toBeVisible())
+  },
+}
+
 /** Keeps an invalid inherited assignee visible until the user chooses a valid candidate. */
 export const InvalidContextAssigneeRequiresChoice: Story = {
   args: {
