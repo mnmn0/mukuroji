@@ -7,6 +7,7 @@ import {
   getTeamIssues,
   getWorkspaceWorkItems,
 } from '../api/workItems'
+import { TeamIssuesApiError } from '../api/errors'
 
 /** Complete Project issue response stored in the SWR cache. */
 type ProjectIssuesPage = Awaited<ReturnType<typeof getProjectIssuesPage>>
@@ -34,6 +35,14 @@ const workItemQueryConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
 } as const
+
+/** Returns whether a failed detail revalidation may safely retain validated cached data. */
+function isTransientIssueDetailError(error: unknown): boolean {
+  if (error instanceof TeamIssuesApiError) {
+    return error.status === 408 || error.status === 429 || (error.status >= 500 && error.status < 600)
+  }
+  return error instanceof TypeError
+}
 
 /**
  * Team の Work Item 一覧を取得します。
@@ -103,7 +112,7 @@ export function useProjectIssues(
     enabled && Boolean(selectedTeamId && selectedIssueId),
     'project-issue-detail',
   )
-  const selectedDetailIssue = selectedDetailQuery.error
+  const selectedDetailIssue = selectedDetailQuery.error && !isTransientIssueDetailError(selectedDetailQuery.error)
     ? undefined
     : selectedDetailQuery.data?.issue
   const reconciledIssues = useMemo(() => {

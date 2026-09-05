@@ -8140,6 +8140,105 @@ test.describe('authenticated task page', () => {
     })).toHaveCount(0)
   })
 
+  test('成功済み detail の一時的な再取得失敗でも未保存入力と選択を保持する', async ({ page }) => {
+    const detailOnlyIssue = createStoredTeamIssue({
+      id: 'transient-detail-revalidation',
+      title: '一時失敗の選択対象',
+    })
+    const detailOverride: {
+      /** Whether the detail route should apply this override. */
+      enabled: boolean
+      /** Canonical detail returned after a successful request. */
+      issue: TeamIssue
+      /** Optional HTTP status returned by the detail route. */
+      status?: number
+    } = {
+      enabled: true,
+      issue: detailOnlyIssue,
+    }
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      issueDetailOverrides: {
+        [createIssueCollaborationKey('core-team', detailOnlyIssue.id)]: detailOverride,
+      },
+    })
+    let detailReads = 0
+    page.on('request', (request) => {
+      if (
+        request.method() === 'GET' &&
+        new URL(request.url()).pathname === `/api/teams/core-team/issues/${detailOnlyIssue.id}`
+      ) {
+        detailReads += 1
+      }
+    })
+
+    await page.goto(`/projects/refero/issues?issueId=${detailOnlyIssue.id}&teamId=core-team`)
+    const taskDetailPane = page.getByTestId('task-detail-pane')
+    await expect(taskDetailPane.getByRole('heading', { name: detailOnlyIssue.title })).toBeVisible()
+    const issueInput = taskDetailPane.getByRole('textbox', { name: 'Issue' })
+    await issueInput.fill('未保存の Issue 入力')
+
+    const initialDetailReads = detailReads
+    detailOverride.status = 503
+    await page.waitForTimeout(10_100)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => detailReads).toBeGreaterThan(initialDetailReads)
+
+    await expect(taskDetailPane).toContainText('タスク詳細を取得できませんでした')
+    await expect(taskDetailPane.getByRole('heading', { name: detailOnlyIssue.title })).toBeVisible()
+    await expect(issueInput).toHaveValue('未保存の Issue 入力')
+    await expect(page).toHaveURL(
+      `/projects/refero/issues?issueId=${detailOnlyIssue.id}&teamId=core-team`,
+    )
+    expect(getMockRequestCounts(page).issueCreates).toBe(0)
+
+    detailOverride.status = undefined
+    await page.getByTestId('project-task-error').getByRole('button', {
+      name: '再読み込み',
+      exact: true,
+    }).click()
+    await expect.poll(() => detailReads).toBeGreaterThan(initialDetailReads + 1)
+    await expect(taskDetailPane.getByText('タスク詳細を取得できませんでした', {
+      exact: true,
+    })).toHaveCount(0)
+    await expect(taskDetailPane.getByRole('heading', { name: detailOnlyIssue.title })).toBeVisible()
+    await expect(issueInput).toHaveValue('未保存の Issue 入力')
+    expect(getMockRequestCounts(page).issueCreates).toBe(0)
+
+    let abortDetailRequests = false
+    await page.route(
+      new RegExp(`/api/teams/core-team/issues/${detailOnlyIssue.id}$`),
+      async (route) => {
+        if (abortDetailRequests && route.request().method() === 'GET') {
+          await route.abort('failed')
+          return
+        }
+        await route.fallback()
+      },
+    )
+    abortDetailRequests = true
+    const detailReadsBeforeAbort = detailReads
+    await page.waitForTimeout(10_100)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => detailReads).toBeGreaterThan(detailReadsBeforeAbort)
+    await expect(taskDetailPane).toContainText('タスク詳細を取得できませんでした')
+    await expect(taskDetailPane.getByRole('heading', { name: detailOnlyIssue.title })).toBeVisible()
+    await expect(issueInput).toHaveValue('未保存の Issue 入力')
+    expect(getMockRequestCounts(page).issueCreates).toBe(0)
+
+    abortDetailRequests = false
+    detailOverride.status = 403
+    await page.getByTestId('project-task-error').getByRole('button', {
+      name: '再読み込み',
+      exact: true,
+    }).click()
+    await expect.poll(() => detailReads).toBeGreaterThan(detailReadsBeforeAbort + 1)
+    await expect(taskDetailPane.getByRole('heading', { name: detailOnlyIssue.title })).toHaveCount(0)
+    await expect(issueInput).toHaveCount(0)
+    await expect(taskDetailPane).toContainText('タスク詳細を取得できませんでした')
+    expect(getMockRequestCounts(page).issueCreates).toBe(0)
+
+  })
+
   for (const detailStatus of [401, 403, 404]) {
     test(`一覧補完の失敗を表示し、POSTを再送しない (${detailStatus})`, async ({ page }) => {
       const createdTitle = `detail-status-${detailStatus}`
