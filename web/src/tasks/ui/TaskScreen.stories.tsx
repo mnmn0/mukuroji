@@ -714,6 +714,19 @@ export const Permissions: Story = {
 export const CreateOpen: Story = {
   args: {
     defaultCreateTaskOpen: true,
+    currentUserProjectKey: 'sato@example.com',
+    projectName: 'Refero Strategic Delivery Workspace',
+    teamName: 'コアチーム・プロダクトオペレーション',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByTestId('create-task-destination')).toHaveTextContent(
+      'コアチーム・プロダクトオペレーション / Refero Strategic Delivery Workspace',
+    )
+    await expect(canvas.getByRole('combobox', { name: '担当者' })).toHaveValue(
+      'sato@example.com',
+    )
   },
 }
 

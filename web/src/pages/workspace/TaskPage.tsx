@@ -1467,6 +1467,7 @@ export function TaskPage() {
           onCollaborationSourceChange: handleCollaborationSourceChange,
         } satisfies IssueCollaborationRoute
       }
+      currentUserProjectKey={currentUserProjectKey}
       artifacts={issueArtifacts}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}

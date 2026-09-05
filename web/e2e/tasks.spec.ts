@@ -7669,6 +7669,7 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { name: '新規タスク' }).click()
     const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.getByRole('button', { name: '詳細登録', exact: true }).click()
 
     await createTaskForm.locator('input[name="title"]').fill('新規タスク')
     await createTaskForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
@@ -7698,11 +7699,20 @@ test.describe('authenticated task page', () => {
   })
 
   test('担当者を選択しない新規タスク登録は送信しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      currentUser: {
+        username: 'viewer-not-member@example.com',
+        name: 'Viewer Not Member',
+        isSystemAdmin: true,
+        workspaceRole: 'owner',
+      },
+    })
     await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('button', { name: '新規タスク' }).click()
     const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.getByRole('button', { name: '詳細登録', exact: true }).click()
 
     await createTaskForm.locator('input[name="title"]').fill('担当者未選択タスク')
     await createTaskForm.locator('select[name="scheduleMode"]').selectOption('due-date')
@@ -7711,6 +7721,25 @@ test.describe('authenticated task page', () => {
 
     await expect(createTaskForm.locator('select[name="assigneeUserId"]')).toHaveValue('')
     expect(requestCounts.issueCreates).toBe(0)
+  })
+
+  test('現在の viewer が候補ならクイック登録の担当者を自分に初期化する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      currentUser: {
+        username: 'sato@example.com',
+        name: '佐藤 花子',
+        isSystemAdmin: true,
+        workspaceRole: 'owner',
+      },
+    })
+    await page.goto('/projects/refero/issues')
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
+    const assigneeSelect = createTaskForm.locator('select[name="assigneeUserId"]')
+
+    await expect(assigneeSelect).toHaveValue('sato@example.com')
+    await expect(assigneeSelect.locator('option:checked')).toContainText('自分')
   })
 
   test('担当者候補 API 失敗時は空状態と分けて表示する', async ({ page }) => {

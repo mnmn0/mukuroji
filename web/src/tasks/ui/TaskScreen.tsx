@@ -307,6 +307,8 @@ export type TaskScreenProps = {
   isProjectQuickAccessSaving?: boolean
   /** Initial displayed in the current-user avatar. */
   userInitial: string
+  /** Normalized Project identity for the authenticated viewer, when available. */
+  currentUserProjectKey?: string
   /** Team and Project hierarchy shown by the sidebar. */
   teams: ProjectDirectoryTeam[]
   /** Display name of the current Project. */
@@ -493,6 +495,7 @@ export function TaskScreen({
   isProjectQuickAccess = false,
   isProjectQuickAccessSaving = false,
   userInitial,
+  currentUserProjectKey,
   teams,
   projectName,
   teamName,
@@ -962,6 +965,16 @@ export function TaskScreen({
   const createConfiguration = createTaskContext?.teamId
     ? resolvedConfigurationsByTeam[createTaskContext.teamId]?.configuration ?? configuration
     : configuration
+  const createDestinationProjectId = createTaskContext?.projectId ?? projectId
+  const createDestinationTeam = createTaskContext?.teamId
+    ? teams.find((team) => team.id === createTaskContext.teamId && team.projects.some((project) =>
+        project.id === createDestinationProjectId,
+      ))
+    : resolvedActiveTeam
+  const createDestinationProjectName = createDestinationTeam?.projects.find((project) =>
+    project.id === createDestinationProjectId,
+  )?.name ?? (createDestinationProjectId === projectId ? resolvedProjectName : createDestinationProjectId)
+  const createDestinationTeamName = createDestinationTeam?.name ?? createTaskContext?.teamId ?? resolvedTeamName
 
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
@@ -2592,6 +2605,7 @@ export function TaskScreen({
                 assigneeOptions={assigneeOptions}
                 configuration={createConfiguration}
                 context={createTaskContext}
+                currentUserProjectKey={currentUserProjectKey}
                 errorMessage={createTaskError}
                 isAssigneeOptionsLoading={isAssigneeOptionsLoading}
                 isSubmitting={isCreatingTask}
@@ -2666,7 +2680,9 @@ export function TaskScreen({
                     setIsCreatingTask(false)
                   }
                 }}
-                projectId={projectId}
+                projectId={createDestinationProjectId}
+                projectName={createDestinationProjectName}
+                teamName={createDestinationTeamName}
                 t={t}
                 workspaceMembers={workspaceMembers}
               />
