@@ -197,6 +197,8 @@ type DetailOriginTask = {
   teamId: string
   /** Team-local identifier of the originating Work Item. */
   workItemId: string
+  /** Optional view-specific opener variant used when one task has multiple controls. */
+  openVariant?: string
 }
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 const emptyConfigurationTeamIds: string[] = []
@@ -490,7 +492,7 @@ export type TaskScreenProps = {
     context?: TaskCreateContext,
   ) => Promise<CreatedProjectTaskMutation | void>
   /** Reports whether the inline create form contains values that need discard confirmation. */
-  onCreateTaskDirtyChange?: (isDirty: boolean) => void
+  onCreateTaskDirtyChange?: (isDirty: boolean, discardHandler?: () => void) => void
   /** Loads the next page of Project user candidates. */
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Changes the Project user search query. */
@@ -737,14 +739,19 @@ export function TaskScreen({
       restoreTaskListFrameRef.current = requestAnimationFrame(() => {
         restoreTaskListFrameRef.current = undefined
         const originTask = detailOriginTaskRef.current
-        const originCandidate = originTask
+        const originCandidates = originTask
           ? Array.from(taskContentRef.current?.querySelectorAll<HTMLElement>(
-              '[data-task-action="open"]',
-            ) ?? []).find((candidate) =>
+              '[data-task-action="open"], [data-task-action="context-menu"]',
+            ) ?? []).filter((candidate) =>
               candidate.dataset.taskTeamId === originTask.teamId &&
               candidate.dataset.taskWorkItemId === originTask.workItemId,
             )
-          : undefined
+          : []
+        const originCandidate = originTask?.openVariant
+          ? originCandidates.find((candidate) =>
+              candidate.dataset.taskOpenVariant === originTask.openVariant,
+            ) ?? originCandidates[0]
+          : originCandidates[0]
         const connectedOriginControl = detailOriginControlRef.current?.isConnected
           ? detailOriginControlRef.current
           : originCandidate?.matches('button, a, [tabindex]:not([tabindex="-1"])')
@@ -770,7 +777,12 @@ export function TaskScreen({
     const startsListDetailTransition = !hasSelectedDetail || !isDetailOpen
     if (detailOriginTaskRef.current && !startsListDetailTransition) return
     if (teamId && workItemId) {
-      detailOriginTaskRef.current = { teamId, workItemId }
+      const openVariant = taskRow.dataset.taskOpenVariant
+      detailOriginTaskRef.current = {
+        teamId,
+        workItemId,
+        ...(openVariant ? { openVariant } : {}),
+      }
       detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
     }
     detailOriginControlRef.current = target.closest<HTMLElement>('[data-testid^="task-open-detail-"]') ??
@@ -1276,19 +1288,31 @@ export function TaskScreen({
     })
   }
 
-  /** Reports create-form dirtiness to the route-owned navigation guard. */
-  const reportCreateTaskDirty = useCallback((isDirty: boolean) => {
-    createTaskDirtyRef.current = isDirty
-    onCreateTaskDirtyChange?.(isDirty)
-  }, [onCreateTaskDirtyChange])
-
-  /** Dismisses the create editor and clears its owned draft state. */
+  /** Dismisses the create editor while preserving a same-scope pending submission. */
   const dismissCreateTaskEditor = useCallback(() => {
-    reportCreateTaskDirty(false)
+    onCreateTaskDirtyChange?.(false)
+    createTaskDirtyRef.current = false
     setCreateTaskError(undefined)
     setCreateTaskContext(undefined)
     setIsCreateTaskOpen(false)
-  }, [reportCreateTaskDirty])
+  }, [onCreateTaskDirtyChange])
+
+  /** Invalidates a discarded editor before the route-owned scope changes. */
+  const dismissCreateTaskEditorForScopeChange = useCallback(() => {
+    const nextGeneration = createTaskEditorGenerationRef.current + 1
+    createTaskEditorGenerationRef.current = nextGeneration
+    setCreateTaskEditorGeneration(nextGeneration)
+    dismissCreateTaskEditor()
+  }, [dismissCreateTaskEditor])
+
+  /** Reports create-form dirtiness and the scope-owned discard callback to the route guard. */
+  const reportCreateTaskDirty = useCallback((isDirty: boolean) => {
+    createTaskDirtyRef.current = isDirty
+    onCreateTaskDirtyChange?.(
+      isDirty,
+      isDirty ? dismissCreateTaskEditorForScopeChange : undefined,
+    )
+  }, [dismissCreateTaskEditorForScopeChange, onCreateTaskDirtyChange])
 
   /** Confirms whether the current create form may be replaced or discarded. */
   const confirmCreateTaskDiscard = useCallback(() => {
@@ -1380,8 +1404,9 @@ export function TaskScreen({
 
   /** Opens the shared create panel without cancelling its newly accepted invocation. */
   const showCreateTaskEditor = useCallback((context?: TaskCreateContext) => {
-    setCreateTaskEditorGeneration((generation) => generation + 1)
-    createTaskEditorGenerationRef.current += 1
+    const nextGeneration = createTaskEditorGenerationRef.current + 1
+    createTaskEditorGenerationRef.current = nextGeneration
+    setCreateTaskEditorGeneration(nextGeneration)
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
     )?.id
@@ -1882,6 +1907,15 @@ export function TaskScreen({
         ? taskActionContextMenuState?.returnFocusElement
         : undefined
       const originElement = resolveDetailFocusOrigin(contextMenuOrigin)
+      if (contextMenuOrigin && (!detailOriginTaskRef.current || !isDetailOpen)) {
+        detailOriginTaskRef.current = {
+          teamId: task.teamId,
+          workItemId: task.id,
+          openVariant: 'context-menu',
+        }
+        detailOriginControlRef.current = contextMenuOrigin
+        detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+      }
       pendingDetailFocusRef.current = {
         selector: controlSelector ?? 'h2',
         teamId: task.teamId,
@@ -1902,6 +1936,7 @@ export function TaskScreen({
     confirmCreateTaskDiscard,
     dismissTaskDetailEditor,
     handleSelectDetailTask,
+    isDetailOpen,
     resolveDetailFocusOrigin,
     scheduleTaskDetailFocus,
     selectedIssueId,
@@ -1930,6 +1965,9 @@ export function TaskScreen({
 
     const contextTarget = resolveProjectTaskDirectActionTarget(context)
     if (!confirmCreateTaskDiscard()) {
+      if (cancelAwaitingProjectTaskDirectSchedule(installedRequest)) {
+        releaseProjectTaskDirectActionTarget(directTaskActionsInFlightRef.current, installedRequest)
+      }
       return createCancelledTaskActionResult(
         context.actionId,
         contextTarget ? [contextTarget] : [],
@@ -2180,7 +2218,6 @@ export function TaskScreen({
   const executeBulkTaskActionEntrance = useCallback((
     context: WorkItemActionContext,
   ): Promise<WorkItemActionResult> | WorkItemActionResult => {
-    cancelAwaitingDirectTaskScheduleActions()
     if (!isBulkTaskActionId(context.actionId)) {
       return createFailedTaskActionResult(
         context.actionId,
@@ -2196,6 +2233,7 @@ export function TaskScreen({
         resolveProjectTaskActionTargets(context),
       )
     }
+    cancelAwaitingDirectTaskScheduleActions()
     const targets = resolveProjectTaskActionTargets(context)
     const requestedItems = targets.flatMap((target) => {
       const task = visibleTasks.find((candidate) =>
@@ -2329,13 +2367,13 @@ export function TaskScreen({
     ...(canCreateTaskAction
       ? {
           create: (context) => {
-            cancelAwaitingDirectTaskScheduleActions()
             const createContext = pendingCreateTaskContextRef.current
             pendingCreateTaskContextRef.current = undefined
             if (!confirmCreateTaskDiscard()) {
               pendingCreateTaskContextRef.current = createContext
               return createCancelledTaskActionResult(context.actionId, [])
             }
+            cancelAwaitingDirectTaskScheduleActions()
             const completion = taskActionCompletion.begin(context, dismissCreateTaskEditor)
             showCreateTaskEditor(createContext)
             return completion
@@ -2994,9 +3032,7 @@ export function TaskScreen({
                 onCancel={() => {
                   if (!confirmCreateTaskDiscard()) return
                   taskActionCompletion.cancel('create')
-                  setCreateTaskError(undefined)
-                  setCreateTaskContext(undefined)
-                  setIsCreateTaskOpen(false)
+                  dismissCreateTaskEditor()
                 }}
                 onSubmit={async (input) => {
                   if (createTaskSubmissionInFlightRef.current) return

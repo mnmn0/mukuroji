@@ -1019,6 +1019,10 @@ function TaskTableRow({
           <button
             aria-label={`${t('tasks.action.more')}: ${taskTitle}`}
             className="grid h-9 w-9 place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+            data-task-action="context-menu"
+            data-task-open-variant="context-menu"
+            data-task-team-id={task.teamId}
+            data-task-work-item-id={task.id}
             data-testid={`task-row-actions-${task.id}`}
             onClick={(event) => {
               event.stopPropagation()

@@ -245,6 +245,72 @@ type LateTimelinePreviewHarnessProps = {
   remountOnTabSwitch: boolean
 }
 
+/** Props for a harness that resolves a Gantt schedule preview on demand. */
+type PendingCreateDraftPreviewHarnessProps = {
+  /** TaskScreen inputs used by the pending create-draft preview scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Pending preview state controlled by the Story play function. */
+type PendingCreateDraftPreview = {
+  /** Completes the delayed preview with a canonical server response. */
+  resolve: (preview: WorkItemScheduleChangePreview) => void
+  /** Task used to build the canonical preview response. */
+  task: CanonicalWorkItem
+}
+
+/**
+ * Holds a Gantt preview until the Story play function has entered a create draft.
+ *
+ * @param props - TaskScreen inputs for the pending preview scenario.
+ * @returns A preview resolver control and the nested TaskScreen.
+ */
+function PendingCreateDraftPreviewHarness({ taskScreenProps }: PendingCreateDraftPreviewHarnessProps) {
+  const [previewCallCount, setPreviewCallCount] = useState(0)
+  const pendingPreviewRef = useRef<PendingCreateDraftPreview | undefined>(undefined)
+
+  /** Defers the server preview until the Story explicitly resolves it. */
+  const onPreviewScheduleChange = useCallback((
+    task: CanonicalWorkItem,
+    operation: WorkItemScheduleOperation,
+  ) => {
+    void operation
+    setPreviewCallCount((count) => count + 1)
+    return new Promise<WorkItemScheduleChangePreview>((resolve) => {
+      pendingPreviewRef.current = { resolve, task }
+    })
+  }, [])
+
+  /** Resolves the currently pending preview with the existing canonical fixture. */
+  const resolvePendingPreview = () => {
+    const pendingPreview = pendingPreviewRef.current
+    if (!pendingPreview) return
+    pendingPreview.resolve(createTimelinePreview(pendingPreview.task))
+    pendingPreviewRef.current = undefined
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 p-2">
+        <button
+          data-testid="create-draft-preview-resolve"
+          onClick={resolvePendingPreview}
+          type="button"
+        >
+          Resolve preview
+        </button>
+        <output data-testid="create-draft-preview-count">
+          {previewCallCount}
+        </output>
+      </div>
+      <TaskScreen
+        {...taskScreenProps}
+        onPreviewScheduleChange={onPreviewScheduleChange}
+      />
+    </div>
+  )
+}
+
 /**
  * Keeps the delayed preview resolver outside TaskScreen so a Story play function can settle it
  * after the active Gantt surface has unmounted.
@@ -1290,6 +1356,96 @@ export const TimelinePreviewCancel: Story = {
     await userEvent.click(within(dialog).getByRole('button', { name: 'キャンセル' }))
     await expect(onCancelledTimelineConfirm).toHaveBeenCalledTimes(0)
     await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+  },
+}
+
+/** Keeps a create draft safe while a delayed Gantt preview is accepted or cancelled. */
+export const TimelinePreviewCancelWithCreateDraft: Story = {
+  args: {
+    defaultCreateTaskOpen: true,
+    initialTab: 'gantt',
+    onConfirmScheduleChange: onCancelledTimelineConfirm,
+  },
+  render: (args) => <PendingCreateDraftPreviewHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onCancelledTimelineConfirm.mockClear()
+    const form = canvas.getByTestId('create-task-form')
+    const titleInput = within(form).getByRole('textbox', { name: 'タスク名' })
+
+    const modeSelect = canvasElement.querySelector<HTMLSelectElement>(
+      'select[id^="gantt-mode-"]',
+    )
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+    await userEvent.selectOptions(modeSelect, 'milestone')
+
+    await expect(canvas.getByTestId('create-draft-preview-count')).toHaveTextContent('1')
+    await expect(titleInput).toHaveValue('')
+    await userEvent.type(titleInput, '保留中の作成下書き')
+
+    const originalConfirm = globalThis.window.confirm
+    let discardConfirmCount = 0
+    globalThis.window.confirm = () => {
+      discardConfirmCount += 1
+      return false
+    }
+    try {
+      await userEvent.click(await canvas.findByTestId('task-gantt-add-wireframe'))
+      await expect(titleInput).toHaveValue('保留中の作成下書き')
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+    expect(discardConfirmCount).toBe(1)
+
+    await userEvent.click(canvas.getByTestId('create-draft-preview-resolve'))
+    const dialog = await canvas.findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'キャンセル' }))
+    await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+    await expect(titleInput).toHaveValue('保留中の作成下書き')
+    await expect(onCancelledTimelineConfirm).toHaveBeenCalledTimes(0)
+  },
+}
+
+/** Rejecting a dirty create draft leaves Gantt schedule selection available for retry. */
+export const TimelinePreviewDiscardRejectedKeepsCreateDraft: Story = {
+  args: {
+    defaultCreateTaskOpen: true,
+    initialTab: 'gantt',
+    onPreviewScheduleChange: onDeniedTimelinePreview,
+    onConfirmScheduleChange: onDeniedTimelineConfirm,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onDeniedTimelinePreview.mockClear()
+    const form = canvas.getByTestId('create-task-form')
+    const titleInput = within(form).getByRole('textbox', { name: 'タスク名' })
+    const modeSelect = canvasElement.querySelector<HTMLSelectElement>(
+      'select[id^="gantt-mode-"]',
+    )
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+
+    await userEvent.type(titleInput, '破棄拒否の作成下書き')
+    const originalConfirm = globalThis.window.confirm
+    let discardConfirmCount = 0
+    globalThis.window.confirm = () => {
+      discardConfirmCount += 1
+      return false
+    }
+    try {
+      await userEvent.selectOptions(modeSelect, 'milestone')
+      await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+      await expect(onDeniedTimelinePreview).toHaveBeenCalledTimes(0)
+      expect(discardConfirmCount).toBe(1)
+      await expect(titleInput).toHaveValue('破棄拒否の作成下書き')
+
+      await userEvent.selectOptions(modeSelect, 'milestone')
+      await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+      await expect(onDeniedTimelinePreview).toHaveBeenCalledTimes(0)
+      expect(discardConfirmCount).toBe(2)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+    await expect(titleInput).toHaveValue('破棄拒否の作成下書き')
   },
 }
 

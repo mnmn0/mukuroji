@@ -4765,14 +4765,10 @@ test.describe('authenticated task page', () => {
     )
   })
 
-  test('390px 幅で 200 件の作成タスクを絞り込み、詳細から戻って位置を保つ', async ({ page }) => {
+  test('390px 幅の200件リストから詳細へ移動して戻ると位置を保つ', async ({ page }) => {
     const syntheticTasks = Array.from({ length: 200 }, (_, index) => {
       const fixture = referoTaskFixtures[index % referoTaskFixtures.length]!
-      return {
-        ...fixture,
-        id: `synthetic-${index}`,
-        title: `Synthetic task ${index}`,
-      }
+      return { ...fixture, id: `synthetic-${index}`, title: `Synthetic task ${index}` }
     })
     await mockAuthenticatedTaskPage(page, syntheticTasks)
     await page.setViewportSize({ width: 390, height: 844 })
@@ -4783,29 +4779,23 @@ test.describe('authenticated task page', () => {
     await searchbox.fill('Synthetic task')
     const targetRow = page.getByTestId('task-row-synthetic-150')
     const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
-    let releaseSecondDetail: (() => void) | undefined
-    let secondDetailRequestStarted: (() => void) | undefined
-    const secondDetailRequestGate = new Promise<void>((resolve) => {
-      releaseSecondDetail = resolve
-    })
-    const secondDetailRequestSeen = new Promise<void>((resolve) => {
-      secondDetailRequestStarted = resolve
-    })
-    await page.route(/\/api\/teams\/core-team\/issues\/synthetic-170(?:\?.*)?$/u, async (route) => {
-      if (route.request().method() === 'GET') {
-        secondDetailRequestStarted?.()
-        await secondDetailRequestGate
-      }
-      await route.fallback()
-    })
     await openDetailButton.scrollIntoViewIfNeeded()
     await expect(openDetailButton).toBeVisible()
     const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
     const listUrl = page.url()
+    const detailResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/synthetic-150' &&
+      response.status() === 200,
+    )
     await openDetailButton.focus()
     await page.keyboard.press('Enter')
-
-    await expect(page).toHaveURL(/issueId=synthetic-150/)
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    const completedDetailResponse = await detailResponse
+    await completedDetailResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
     const detailHeading = page.getByTestId('task-detail-pane').getByRole('heading', {
       name: 'Synthetic task 150',
     })
@@ -4820,15 +4810,53 @@ test.describe('authenticated task page', () => {
     await expect(targetRow).toBeVisible()
     await expect(openDetailButton).toBeFocused()
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
+  })
 
+  test('390px 幅の200件リストで詳細AからBへ移動中に戻ってもAを保つ', async ({ page }) => {
+    const syntheticTasks = Array.from({ length: 200 }, (_, index) => {
+      const fixture = referoTaskFixtures[index % referoTaskFixtures.length]!
+      return { ...fixture, id: `synthetic-${index}`, title: `Synthetic task ${index}` }
+    })
+    await mockAuthenticatedTaskPage(page, syntheticTasks)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/projects/refero/issues')
+
+    const mainScroll = page.getByTestId('task-main-scroll')
+    const searchbox = page.getByRole('searchbox', { name: '検索...' })
+    await searchbox.fill('Synthetic task')
+    const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
+    let releaseSecondDetail: (() => void) | undefined
+    let secondDetailRequestStarted: (() => void) | undefined
+    const secondDetailRequestGate = new Promise<void>((resolve) => { releaseSecondDetail = resolve })
+    const secondDetailRequestSeen = new Promise<void>((resolve) => { secondDetailRequestStarted = resolve })
+    await page.route(/\/api\/teams\/core-team\/issues\/synthetic-170(?:\?.*)?$/u, async (route) => {
+      if (route.request().method() === 'GET') {
+        secondDetailRequestStarted?.()
+        await secondDetailRequestGate
+      }
+      await route.fallback()
+    })
+    await openDetailButton.scrollIntoViewIfNeeded()
+    await expect(openDetailButton).toBeVisible()
+    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
+    const listUrl = page.url()
+    const firstDetailResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/synthetic-150' &&
+      response.status() === 200,
+    )
     await openDetailButton.focus()
     await page.keyboard.press('Enter')
-    await expect(page).toHaveURL(/issueId=synthetic-150/)
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await (await firstDetailResponse).finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    const detailHeading = page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'Synthetic task 150',
+    })
     await expect(detailHeading).toBeInViewport()
     await expect(detailHeading).toBeFocused()
-
-    // Keep the list mounted while moving from A to B so the browser history
-    // remains list → A → B and the original list opener can be restored later.
     const secondOpenDetailButton = page.getByTestId('task-open-detail-synthetic-170')
     await expect(secondOpenDetailButton).toBeVisible()
     const secondDetailResponse = page.waitForResponse((response) =>
@@ -4857,16 +4885,46 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
       name: 'Synthetic task 170',
     })).toHaveCount(0)
-
     await page.goBack()
     await expect(page).toHaveURL(listUrl)
     await expect(searchbox).toHaveValue('Synthetic task')
     await expect(openDetailButton).toBeFocused()
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
+  })
 
+  test('390px 幅の200件リストで詳細を閉じてから戻って位置を保つ', async ({ page }) => {
+    const syntheticTasks = Array.from({ length: 200 }, (_, index) => {
+      const fixture = referoTaskFixtures[index % referoTaskFixtures.length]!
+      return { ...fixture, id: `synthetic-${index}`, title: `Synthetic task ${index}` }
+    })
+    await mockAuthenticatedTaskPage(page, syntheticTasks)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/projects/refero/issues')
+
+    const mainScroll = page.getByTestId('task-main-scroll')
+    const searchbox = page.getByRole('searchbox', { name: '検索...' })
+    await searchbox.fill('Synthetic task')
+    const targetRow = page.getByTestId('task-row-synthetic-150')
+    const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
+    await openDetailButton.scrollIntoViewIfNeeded()
+    await expect(openDetailButton).toBeVisible()
+    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
+    const listUrl = page.url()
+    const detailResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/synthetic-150' &&
+      response.status() === 200,
+    )
     await openDetailButton.focus()
     await page.keyboard.press('Enter')
-    await expect(page).toHaveURL(/issueId=synthetic-150/)
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await (await detailResponse).finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    const detailHeading = page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'Synthetic task 150',
+    })
     await expect(detailHeading).toBeInViewport()
     await expect(detailHeading).toBeFocused()
     await page.getByTestId('task-detail-close').click()
@@ -4962,6 +5020,81 @@ test.describe('authenticated task page', () => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
     }))
     await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
+  })
+
+  for (const viewport of [
+    { height: 900, label: '1440px', width: 1440 },
+    { height: 844, label: '390px', width: 390 },
+  ]) {
+    test(`${viewport.label} Board のコンテキスト編集から戻ると同じメニュー操作へフォーカスを戻す`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: viewport.height })
+      await page.goto('/projects/refero/issues')
+      await expect(page.getByTestId('tasks-heading')).toBeVisible()
+      const initialDetailClose = page.getByTestId('task-detail-close')
+      await expect(page.getByTestId('task-detail-pane')).toBeVisible()
+      await expect(initialDetailClose).toBeVisible()
+      await initialDetailClose.click()
+      await expect(initialDetailClose).toHaveCount(0)
+      await page.getByRole('tab', { name: 'ボード', exact: true }).click()
+
+      const menuTrigger = page.getByTestId('task-card-actions-wireframe')
+      await expect(menuTrigger).toBeVisible()
+      const listUrl = page.url()
+      await menuTrigger.click()
+      await page.getByTestId('project-task-action-context-menu')
+        .getByRole('menuitem', { name: /Work Item を編集/u }).click()
+
+      await expect(page).toHaveURL(/issueId=wireframe/u)
+      await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
+      await page.goBack()
+
+      await expect(page).toHaveURL(listUrl)
+      await expect(menuTrigger).toBeVisible()
+      await expect(menuTrigger).toBeFocused()
+    })
+  }
+
+  test('Table のポインターメニュー編集から戻ると元の行へフォーカスを戻す', async ({ page }) => {
+    await page.goto('/projects/refero/issues')
+    await page.getByTestId('task-detail-close').click()
+
+    const menuTrigger = page.getByTestId('task-row-actions-wireframe')
+    const listUrl = page.url()
+    await menuTrigger.click()
+    const menu = page.getByTestId('project-task-action-context-menu')
+    await menu.getByRole('menuitem', { name: /Work Item を編集/u }).click()
+
+    await expect(page).toHaveURL(/issueId=wireframe/u)
+    await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
+    await expect(menuTrigger).toBeFocused()
+  })
+
+  test('Gantt の bar を Table 再表示後に閉じると新しい bar へフォーカスを戻す', async ({ page }) => {
+    await page.goto('/projects/refero/issues')
+    await page.getByTestId('task-detail-close').click()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const originalBar = page.getByTestId('task-gantt-bar-wireframe')
+    await originalBar.click()
+    await expect(page).toHaveURL(/issueId=wireframe/u)
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: '新しいランディングページのワイヤーフレーム作成',
+    })).toBeVisible()
+    await originalBar.evaluate((element) => {
+      element.setAttribute('data-e2e-origin-marker', 'before-task-view-remount')
+    })
+
+    await page.getByRole('tab', { name: 'テーブル', exact: true }).click()
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const remountedBar = page.getByTestId('task-gantt-bar-wireframe')
+    await expect(remountedBar).toBeVisible()
+    await expect(remountedBar).not.toHaveAttribute('data-e2e-origin-marker')
+
+    await page.getByTestId('task-detail-close').click()
+    await expect(remountedBar).toBeFocused()
   })
 
   test('通常の詳細表示は遅延した詳細取得後に見出しへフォーカスを移す', async ({ page }) => {
@@ -6635,6 +6768,201 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('textarea[name="description"]')).toHaveValue('core team detail')
   })
 
+  test('作成中の Team scope 変更は破棄確認を待ち、受理後に古い入力を残さない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, [], undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'core-scope-draft-anchor',
+            teamId: 'core-team',
+            title: 'Core scope anchor',
+          }),
+        ],
+        'design-team': [
+          createStoredTeamIssue({
+            assignedProjectId: 'shared-launch',
+            id: 'design-scope-draft-anchor',
+            teamId: 'design-team',
+            title: 'Design scope anchor',
+          }),
+        ],
+      },
+    })
+
+    await page.goto('/projects/shared-launch/issues?teamId=core-team')
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    const coreForm = page.getByTestId('create-task-form')
+    const coreTitle = coreForm.locator('input[name="title"]')
+    await coreTitle.fill('core-scope-draft')
+
+    let historyEntry = 0
+    const pushRouteEntry = async (path: string) => {
+      historyEntry += 1
+      const state = await page.evaluate(() => window.history.state)
+      await page.evaluate(({ path: nextPath, state: currentState, historyEntry: entry }) => {
+        window.history.pushState({
+          ...currentState,
+          idx: (typeof currentState?.idx === 'number' ? currentState.idx : 0) + 1,
+          key: `dirty-scope-${entry}`,
+        }, '', nextPath)
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }, { historyEntry, path, state })
+    }
+
+    // The Project is Team-scoped, so this same-path aggregate entry uses the real Router history
+    // state rather than a reload or a test-only navigation hook.
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toContain('破棄')
+      await dialog.dismiss()
+    })
+    await pushRouteEntry('/projects/shared-launch/issues')
+    await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=core-team')
+    await expect(coreTitle).toHaveValue('core-scope-draft')
+
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toContain('破棄')
+      await dialog.accept()
+    })
+    await pushRouteEntry('/projects/shared-launch/issues?teamId=design-team')
+    await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+    await expect(page.getByText('core-scope-draft', { exact: true })).toHaveCount(0)
+
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    const designForm = page.getByTestId('create-task-form')
+    const designTitle = designForm.locator('input[name="title"]')
+    await designTitle.fill('design-scope-draft')
+
+    await pushRouteEntry('/projects/shared-launch/issues?teamId=design-team&view=board')
+    await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team&view=board')
+    await expect(designTitle).toHaveValue('design-scope-draft')
+  })
+
+  for (const responseKind of ['success', 'auth'] as const) {
+    test(`Team切替後に旧create ${responseKind} 応答を新画面へ反映しない`, async ({ page }) => {
+      await mockAuthenticatedTaskPage(page, [], undefined, {
+        projectMembersByProject: {
+          'shared-launch': [
+            {
+              id: 'sato@example.com',
+              email: 'sato@example.com',
+              name: '佐藤 花子',
+              role: 'member',
+              updatedAt: '2026-06-08T00:00:00.000Z',
+              workspaceStatus: 'active',
+            },
+          ],
+        },
+        teamWorkItemConfigurations: {
+          'core-team': teamWorkItemConfigurationFixture,
+          'design-team': teamWorkItemConfigurationFixture,
+        },
+        teamIssuesByTeam: {
+          'core-team': [
+            createStoredTeamIssue({
+              assignedProjectId: 'shared-launch',
+              id: 'core-create-scope-anchor',
+              teamId: 'core-team',
+              title: 'Core create scope anchor',
+            }),
+          ],
+          'design-team': [
+            createStoredTeamIssue({
+              assignedProjectId: 'shared-launch',
+              id: 'design-create-scope-anchor',
+              teamId: 'design-team',
+              title: 'Design create scope anchor',
+            }),
+          ],
+        },
+      })
+      let releaseCreate: (() => void) | undefined
+      let createArrived: (() => void) | undefined
+      const createReleased = new Promise<void>((resolve) => {
+        releaseCreate = resolve
+      })
+      const createRequestArrived = new Promise<void>((resolve) => {
+        createArrived = resolve
+      })
+      let createRequestCount = 0
+      await page.route(/.*\/api\/teams\/core-team\/issues(?:\?.*)?$/u, async (route) => {
+        if (route.request().method() !== 'POST') {
+          await route.fallback()
+          return
+        }
+        createRequestCount += 1
+        createArrived?.()
+        await createReleased
+        if (responseKind === 'auth') {
+          await route.fulfill({
+            status: 401,
+            json: { code: 'EnterpriseSessionExpired', message: 'Session expired.' },
+          })
+          return
+        }
+        await route.fallback()
+      })
+
+      await page.goto('/projects/shared-launch/issues?teamId=core-team')
+      await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+      const createForm = page.getByTestId('create-task-form')
+      await createForm.locator('input[name="title"]').fill(`old-${responseKind}-create`)
+      await createForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+      await createForm.getByRole('button', { name: '登録', exact: true }).click()
+      await createRequestArrived
+
+      const historyState = await page.evaluate(() => window.history.state)
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('破棄')
+        await dialog.accept()
+      })
+      await page.evaluate(({ state }) => {
+        window.history.pushState({
+          ...state,
+          idx: (typeof state?.idx === 'number' ? state.idx : 0) + 1,
+          key: 'create-scope-switch',
+        }, '', '/projects/shared-launch/issues?teamId=design-team')
+        window.dispatchEvent(new PopStateEvent('popstate'))
+      }, { state: historyState })
+      await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
+      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+
+      const createResponse = page.waitForResponse((response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/teams/core-team/issues',
+      )
+      releaseCreate?.()
+      const completedCreateResponse = await createResponse
+      await completedCreateResponse.finished()
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      }))
+
+      await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
+      await expect(page).not.toHaveURL(/\/login\?returnTo=/u)
+      await expect(page.getByText(`old-${responseKind}-create`, { exact: true })).toHaveCount(0)
+      await expect(page.getByTestId('task-action-feedback')).toHaveCount(0)
+      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+      expect(createRequestCount).toBe(1)
+
+      await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+      const replacementForm = page.getByTestId('create-task-form')
+      await replacementForm.locator('input[name="title"]').fill(`new-${responseKind}-create`)
+      await replacementForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+      const replacementResponse = page.waitForResponse((response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/teams/design-team/issues',
+      )
+      await replacementForm.getByRole('button', { name: '登録', exact: true }).click()
+      const completedReplacementResponse = await replacementResponse
+      await completedReplacementResponse.finished()
+      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+      await expect(page).toHaveURL(/(?=.*teamId=design-team)(?=.*issueId=)/u)
+      await expect(page.getByTestId('task-detail-pane')).toContainText(`new-${responseKind}-create`)
+    })
+  }
+
   for (const returnBeforeDetailCompletes of [false, true]) {
     test(`同じ issueId の Team 切り替え履歴は ${returnBeforeDetailCompletes ? '遅延中の戻るでも元の詳細と操作フォーカスを保つ' : 'Back/Forward で Team ごとの詳細フォーカスを戻す'}`, async ({ page }) => {
       const coreIssue = createStoredTeamIssue({
@@ -8272,7 +8600,8 @@ test.describe('authenticated task page', () => {
     await createTaskForm.locator('input[name="scheduleEffortMinutes"]').fill('240')
     await createTaskForm.locator('select[name="workflowStatusId"]').selectOption('ready')
     await createTaskForm.locator('select[name="priority"]').selectOption('high')
-    await createTaskForm.getByLabel('Customer impact').fill('Mode roundtrip keeps this valid')
+    await createTaskForm.getByLabel('Customer impact').fill('ModeRoundtripKeepsThisValid')
+    await createTaskForm.getByLabel('Risk level').selectOption('moderate')
     await createTaskForm.getByLabel('Budget').fill('99999999')
 
     await createTaskForm.getByRole('button', { name: 'クイック登録', exact: true }).click()
@@ -8293,10 +8622,10 @@ test.describe('authenticated task page', () => {
     await expect(createTaskForm.getByLabel('Budget')).toHaveValue('99999999')
 
     await createTaskForm.getByLabel('Budget').fill('1000000')
-    await createTaskForm.evaluate((form) => {
-      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
-    })
-    await expect(page.getByTestId('task-row-mode-roundtrip-payload')).toContainText('mode-roundtrip-payload')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+    await expect(page).toHaveURL(/(?:[?&])issueId=mode-roundtrip-payload/u)
+    await expect(page.getByTestId('task-detail-pane')).toContainText('mode-roundtrip-payload')
     expect(requestCounts.issueCreates).toBe(1)
     expect(createBody).toMatchObject({
       assigneeUserId: 'sato@example.com',
@@ -8800,14 +9129,25 @@ test.describe('authenticated task page', () => {
     await firstForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await createRequestArrived
+    const createButton = page.getByRole('button', { name: '新規タスク' })
+    let discardDialogCount = 0
     page.once('dialog', async (dialog) => {
+      discardDialogCount += 1
+      expect(dialog.message()).toContain('破棄')
       await dialog.accept()
     })
-    await page.getByRole('button', { name: '新規タスク' }).click()
-    await page.getByRole('button', { name: '新規タスク' }).click()
+    await createButton.click()
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+    await expect(createButton).toHaveAttribute('aria-expanded', 'false')
+    expect(discardDialogCount).toBe(1)
+
+    await createButton.click()
+    await expect(createButton).toHaveAttribute('aria-expanded', 'true')
     const replacementForm = page.getByTestId('create-task-form')
+    await expect(replacementForm.locator('input[name="title"]')).toHaveValue('')
     await expect(replacementForm.locator('input[name="title"]')).toBeDisabled()
     await expect(replacementForm.getByRole('button', { name: '登録中', exact: true })).toBeDisabled()
+    expect(discardDialogCount).toBe(1)
 
     const createResponse = page.waitForResponse((response) =>
       response.request().method() === 'POST' &&

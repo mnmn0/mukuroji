@@ -78,6 +78,11 @@ export function createTaskMutationController({
     let highestObservedTask = task
     try {
       onCreated?.(task)
+    } catch (error: unknown) {
+      hasRefreshError = true
+      refreshError = error
+    }
+    try {
       if (
         projectId === target.projectId &&
         task.assignedProjectId === target.projectId &&

@@ -200,6 +200,7 @@ export function TaskPage() {
   const navigate = useNavigate()
   const createTaskDirtyRef = useRef(false)
   const createTaskDirtyScopeRef = useRef<string | undefined>(undefined)
+  const createTaskDiscardHandlerRef = useRef<(() => void) | undefined>(undefined)
   const params = useParams()
   const {
     hasQuickAccessLoadError,
@@ -831,7 +832,7 @@ export function TaskPage() {
     return () => {
       createTaskScopeGenerationRef.current += 1
     }
-  }, [taskScopeKey])
+  }, [creationTeam?.id, taskScopeKey])
   const [createTaskDirtyState, setCreateTaskDirtyState] = useState<{
     /** Whether the current scoped create form has unsaved input. */
     isDirty: boolean
@@ -841,23 +842,38 @@ export function TaskPage() {
   const isCreateTaskDirty = createTaskDirtyState.isDirty &&
     createTaskDirtyState.scopeKey === taskScopeKey
   const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) =>
-    Boolean(getAuthSession()) && createTaskDirtyRef.current &&
+    Boolean(getAuthSession()) &&
+      createTaskDirtyRef.current &&
       createTaskDirtyScopeRef.current === taskScopeKey &&
-      currentLocation.pathname !== nextLocation.pathname,
-  [taskScopeKey],))
+      (() => {
+        if (currentLocation.pathname !== nextLocation.pathname) return true
+        const nextSearchParams = new URLSearchParams(nextLocation.search)
+        const nextRouteContext = resolveProjectTaskRouteContext({
+          projectId,
+          projectIssues,
+          selectedIssueId: nextSearchParams.get('issueId') ?? undefined,
+          selectedTeamId: nextSearchParams.get('teamId') ?? undefined,
+          suppressIssueFallback: false,
+          teams,
+        })
+        return nextRouteContext.creationTeam?.id !== creationTeam?.id
+      })(),
+  [creationTeam?.id, projectId, projectIssues, taskScopeKey, teams],))
   /** Reports create-form dirtiness to the route-owned navigation guard. */
-  const reportCreateTaskDirty = useCallback((isDirty: boolean) => {
+  const reportCreateTaskDirty = useCallback((isDirty: boolean, discardHandler?: () => void) => {
     if (!isDirty && createTaskDirtyScopeRef.current !== undefined &&
       createTaskDirtyScopeRef.current !== taskScopeKey) {
       return
     }
     createTaskDirtyRef.current = isDirty
     createTaskDirtyScopeRef.current = taskScopeKey
+    createTaskDiscardHandlerRef.current = isDirty ? discardHandler : undefined
     setCreateTaskDirtyState({ isDirty, scopeKey: taskScopeKey })
   }, [taskScopeKey])
   useEffect(() => {
     if (navigationBlocker.state !== 'blocked') return
     if (globalThis.window.confirm(t('tasks.create.discardConfirm'))) {
+      createTaskDiscardHandlerRef.current?.()
       reportCreateTaskDirty(false)
       createTaskDirtyScopeRef.current = undefined
       navigationBlocker.proceed()
@@ -1564,6 +1580,7 @@ export function TaskPage() {
       locale={locale}
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
+      onCreateTaskDirtyChange={reportCreateTaskDirty}
       onRetryTasks={canRetryTaskQueries
         ? () => {
             void Promise.all([
@@ -1572,7 +1589,6 @@ export function TaskPage() {
             ]).catch(() => undefined)
           }
         : undefined}
-      onCreateTaskDirtyChange={reportCreateTaskDirty}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
