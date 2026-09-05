@@ -2526,6 +2526,9 @@ export function TaskScreen({
     visibleTaskViewKeys,
   ])
 
+  const showClosedCreateTaskError = Boolean(createTaskError) &&
+    (!isCreateTaskOpen || !onCreateTask)
+
   return (
     <section aria-busy={isLoading || isAiOperationPending} className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <TaskHeader
@@ -2628,7 +2631,14 @@ export function TaskScreen({
                 {t('planning.loading')}
               </p>
             ) : null}
-            {taskAction ? (
+            {showClosedCreateTaskError ? (
+              <TaskActionFeedback
+                dismissLabel={t('tasks.action.dismiss')}
+                kind="error"
+                message={createTaskError ?? t('tasks.create.error')}
+                onDismiss={() => setCreateTaskError(undefined)}
+              />
+            ) : taskAction ? (
               <TaskActionFeedback
                 dismissLabel={t('tasks.action.dismiss')}
                 kind={taskAction.kind}

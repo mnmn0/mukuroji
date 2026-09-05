@@ -913,6 +913,38 @@ export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
   },
 }
 
+/** Surfaces a rejected create after its editor was explicitly closed. */
+export const ClosedCreateFailureUsesGlobalAlert: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <StaleCreateRejectionHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const form = within(createTaskForm)
+    await userEvent.type(form.getByRole('textbox', { name: 'タスク名' }), 'closed failure')
+    await userEvent.click(form.getByRole('button', { name: '登録' }))
+    await expect(form.getByRole('button', { name: '登録中' })).toBeDisabled()
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    await expect(canvas.queryByTestId('create-task-form')).toBeNull()
+    await userEvent.click(canvas.getByTestId('reject-stale-create'))
+
+    const globalFailure = await canvas.findByTestId('task-action-feedback')
+    await expect(globalFailure).toHaveTextContent('先行する登録に失敗しました。')
+    await expect(canvas.getAllByRole('alert')).toHaveLength(1)
+    await userEvent.click(within(globalFailure).getByRole('button', { name: '通知を閉じる' }))
+    await expect(canvas.queryByTestId('task-action-feedback')).toBeNull()
+
+    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const reopenedForm = canvas.getByTestId('create-task-form')
+    await expect(within(reopenedForm).queryByRole('alert')).toBeNull()
+  },
+}
+
 /** Shows a rejected create in its form and clears the error after a successful retry. */
 export const CreateFailureUsesFormAlertOnly: Story = {
   args: {

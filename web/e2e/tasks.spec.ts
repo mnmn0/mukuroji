@@ -7865,6 +7865,64 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('閉じた作成フォームの失敗をグローバル通知で確認して閉じられる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    let resolveCreateResponse: (() => void) | undefined
+    const createResponseGate = new Promise<void>((resolve) => {
+      resolveCreateResponse = resolve
+    })
+    let createRequestCount = 0
+    let resolveCreateArrival: (() => void) | undefined
+    const createArrival = new Promise<void>((resolve) => {
+      resolveCreateArrival = resolve
+    })
+    await page.route(/.*\/api\/teams\/core-team\/issues(?:\?.*)?$/, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      createRequestCount += 1
+      resolveCreateArrival?.()
+      await createResponseGate
+      await route.fulfill({
+        status: 500,
+        json: { message: '閉じた作成フォームの失敗' },
+      })
+    })
+
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('closed-failure')
+    const failedCreateResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues',
+    )
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+    await createArrival
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+    resolveCreateResponse?.()
+    const completedFailedCreateResponse = await failedCreateResponse
+    await completedFailedCreateResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+
+    const globalFailure = page.getByTestId('task-action-feedback')
+    await expect(globalFailure).toContainText('閉じた作成フォームの失敗')
+    await expect(globalFailure).toHaveAttribute('role', 'alert')
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+    expect(createRequestCount).toBe(1)
+    await globalFailure.getByRole('button', { name: '通知を閉じる' }).click()
+    await expect(page.getByTestId('task-action-feedback')).toHaveCount(0)
+
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    await expect(page.getByTestId('create-task-form')).toBeVisible()
+    await expect(page.getByTestId('create-task-form').getByRole('alert')).toHaveCount(0)
+  })
+
   test('進行中の古い作成失敗は再表示した作成パネルを変更しない', async ({ page }) => {
     await mockAuthenticatedTaskPage(page)
     let resolveFirstCreateArrival: (() => void) | undefined
