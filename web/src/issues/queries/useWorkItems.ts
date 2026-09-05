@@ -29,6 +29,49 @@ function createProjectIssuesPage(
   }
 }
 
+/**
+ * Loads a Project Work Item page and reconciles one explicitly routed Work Item
+ * when a successful Project list response does not contain that exact identity.
+ *
+ * @param projectId - Project whose assigned Work Items should be loaded.
+ * @param accessToken - Bearer token used by both canonical Work Item requests.
+ * @param includeArchived - Whether archived Work Items should be included.
+ * @param selectedTeamId - Team identity from the routed Work Item, when present.
+ * @param selectedIssueId - Work Item identity from the route, when present.
+ * @returns The Project page, optionally including the exact routed Work Item.
+ */
+async function fetchProjectIssuesPage(
+  projectId: string,
+  accessToken: string,
+  includeArchived: boolean,
+  selectedTeamId?: string,
+  selectedIssueId?: string,
+): Promise<ProjectIssuesPage> {
+  const response = await getProjectIssuesPage(projectId, accessToken, includeArchived)
+  if (!selectedTeamId || !selectedIssueId) return response
+
+  const hasSelectedIssue = response.issues.some((issue) =>
+    issue.teamId === selectedTeamId && issue.id === selectedIssueId,
+  )
+  if (hasSelectedIssue) return response
+
+  const detail = await getTeamIssueDetail(selectedTeamId, selectedIssueId, accessToken)
+  const selectedIssue = detail.issue
+  if (
+    selectedIssue.teamId !== selectedTeamId ||
+    selectedIssue.id !== selectedIssueId ||
+    selectedIssue.assignedProjectId !== projectId ||
+    (!includeArchived && selectedIssue.archivedAt !== undefined)
+  ) {
+    return response
+  }
+
+  return {
+    ...response,
+    issues: [...response.issues, selectedIssue],
+  }
+}
+
 const workItemQueryConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
@@ -72,6 +115,8 @@ export function useTeamIssues(
  * @param projectId - 取得対象の Project ID です。
  * @param enabled - Query を実行するかどうかです。
  * @param includeArchived - Whether the Project query includes archived Work Items.
+ * @param selectedTeamId - Optional Team identity from the routed Work Item.
+ * @param selectedIssueId - Optional Work Item identity from the route.
  * @returns Project Work Item 一覧の SWR state です。
  */
 export function useProjectIssues(
@@ -79,6 +124,8 @@ export function useProjectIssues(
   projectId: string | undefined,
   enabled = true,
   includeArchived = false,
+  selectedTeamId?: string,
+  selectedIssueId?: string,
 ) {
   const key = accessToken && projectId && enabled
     ? ['project-issues', accessToken, projectId, includeArchived] as const
@@ -87,7 +134,13 @@ export function useProjectIssues(
   const query = useSWR(
     key,
     ([, token, currentProjectId, shouldIncludeArchived]) =>
-      getProjectIssuesPage(currentProjectId, token, shouldIncludeArchived),
+      fetchProjectIssuesPage(
+        currentProjectId,
+        token,
+        shouldIncludeArchived,
+        selectedTeamId,
+        selectedIssueId,
+      ),
     workItemQueryConfig,
   )
 

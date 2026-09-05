@@ -272,6 +272,15 @@ async function mockCurrentUser(
  * 認証済みタスク画面 mock の追加設定です。
  */
 type MockAuthenticatedTaskPageOptions = {
+  /** Optional GET detail responses used to exercise selected Work Item reconciliation boundaries. */
+  issueDetailOverrides?: Partial<Record<string, {
+    /** HTTP status returned instead of the canonical detail response. */
+    status?: number
+    /** Canonical fields overlaid on the detail issue before it is returned. */
+    issuePatch?: Partial<TeamIssue>
+    /** Minimum Project list read count before this override becomes active. */
+    afterProjectIssueReads?: number
+  }>>
   /**
    * `/api/auth/me` が返す現在ユーザーの上書きです。
    */
@@ -447,6 +456,7 @@ async function mockAuthenticatedTaskPage(
     'core-team': [...(options.teamIssuesByTeam?.['core-team'] ?? [])],
     'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
+  const issueDetailOverrides = options.issueDetailOverrides ?? {}
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
   const forbiddenSchedulePreviewIssueKeys = new Set(
     options.forbiddenSchedulePreviewIssueKeys ?? [],
@@ -1613,12 +1623,29 @@ async function mockAuthenticatedTaskPage(
     const pathSegments = new URL(route.request().url()).pathname.split('/')
     const teamId = decodeURIComponent(pathSegments[3] ?? '')
     const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const detailOverride = route.request().method() === 'GET'
+      ? issueDetailOverrides[createIssueCollaborationKey(teamId, issueId)]
+      : undefined
+    const activeDetailOverride = detailOverride && (
+      detailOverride.afterProjectIssueReads === undefined ||
+      (requestCounts.projectIssues.refero ?? 0) >= detailOverride.afterProjectIssueReads
+    )
+      ? detailOverride
+      : undefined
     const issue = findTeamIssue(teamIssuesByTeam, teamId, issueId)
       ?? Object.values(taskResponsesByProject)
         .flat()
         .find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    if (activeDetailOverride?.status !== undefined) {
+      await route.fulfill({
+        status: activeDetailOverride.status,
+        json: { message: `Mock detail response ${activeDetailOverride.status}.` },
+      })
+      return
+    }
 
     if (!issue) {
       await route.fulfill({
@@ -1708,7 +1735,9 @@ async function mockAuthenticatedTaskPage(
 
     await route.fulfill({
       json: {
-        issue,
+        issue: activeDetailOverride?.issuePatch
+          ? { ...issue, ...activeDetailOverride.issuePatch }
+          : issue,
         comments: issueCommentsByIssue[createIssueCollaborationKey(teamId, issueId)] ?? [
           {
             id: 'comment-1',
@@ -7932,6 +7961,162 @@ test.describe('authenticated task page', () => {
     )
     expect(requestCounts.issueCreates).toBe(1)
   })
+
+  test('作成後の一覧取得失敗から古い一覧へ再試行しても選択中タスクを保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      postCreateProjectIssueFailureCount: 1,
+      postCreateProjectIssueStaleResponseCount: 2,
+    })
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('refresh-stale-list-create')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(page).toHaveURL(/issueId=refresh-stale-list-create/)
+    const taskRefreshError = page.getByTestId('tasks-error')
+    await expect(taskRefreshError).toContainText('タスク一覧を取得できませんでした')
+    await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
+    await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(3)
+
+    const taskDetailPane = page.getByTestId('task-detail-pane')
+    await expect(taskRefreshError).toHaveCount(0)
+    await expect(taskDetailPane.getByRole('heading', {
+      name: 'refresh-stale-list-create',
+    })).toBeVisible()
+    await expect(taskDetailPane.getByRole('textbox', { name: 'Issue' })).toHaveValue(
+      'refresh-stale-list-create',
+    )
+
+    // SWR keeps completed requests within its 10s deduping interval. Wait past
+    // that boundary so this verifies a real focus-triggered Project GET.
+    await page.waitForTimeout(10_100)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(4)
+    await expect(taskDetailPane.getByRole('heading', {
+      name: 'refresh-stale-list-create',
+    })).toBeVisible()
+    expect(requestCounts.issueCreates).toBe(1)
+  })
+
+  test('一覧にない選択中タスクは最新の canonical detail で補完する', async ({ page }) => {
+    const createdTitle = 'canonical-detail-latest'
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      postCreateProjectIssueFailureCount: 1,
+      postCreateProjectIssueStaleResponseCount: 1,
+      issueDetailOverrides: {
+        [createIssueCollaborationKey('core-team', createdTitle)]: {
+          issuePatch: {
+            description: 'サーバー側の最新本文です。',
+            revision: 7,
+            title: 'サーバー側の最新タイトル',
+          },
+          afterProjectIssueReads: 3,
+        },
+      },
+    })
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: '新規タスク' }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill(createdTitle)
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    await expect(page).toHaveURL(new RegExp(`issueId=${createdTitle}`))
+    await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
+    await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(3)
+    await expect(page.getByTestId('tasks-error')).toHaveCount(0)
+    await expect(page.getByTestId(`task-row-${createdTitle}`)).toContainText(
+      'サーバー側の最新タイトル',
+    )
+    const taskDetailPane = page.getByTestId('task-detail-pane')
+    await expect(taskDetailPane.getByRole('heading', {
+      name: 'サーバー側の最新タイトル',
+    })).toBeVisible()
+    await expect(taskDetailPane.getByRole('textbox', { name: 'Issue' })).toHaveValue(
+      'サーバー側の最新タイトル',
+    )
+    await expect(taskDetailPane.locator('textarea[name="description"]')).toHaveValue(
+      'サーバー側の最新本文です。',
+    )
+  })
+
+  for (const detailStatus of [401, 403, 404]) {
+    test(`一覧補完の失敗を表示し、POSTを再送しない (${detailStatus})`, async ({ page }) => {
+      const createdTitle = `detail-status-${detailStatus}`
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+        postCreateProjectIssueFailureCount: 1,
+        postCreateProjectIssueStaleResponseCount: 1,
+        issueDetailOverrides: {
+          [createIssueCollaborationKey('core-team', createdTitle)]: {
+            afterProjectIssueReads: 3,
+            status: detailStatus,
+          },
+        },
+      })
+      await page.goto('/projects/refero/issues')
+      const requestCounts = getMockRequestCounts(page)
+      let detailReads = 0
+      page.on('request', (request) => {
+        const pathname = new URL(request.url()).pathname
+        if (request.method() === 'GET' && /\/api\/teams\/[^/]+\/issues\/[^/]+$/.test(pathname)) {
+          detailReads += 1
+        }
+      })
+      await page.getByRole('button', { name: '新規タスク' }).click()
+      const createTaskForm = page.getByTestId('create-task-form')
+      await createTaskForm.locator('input[name="title"]').fill(createdTitle)
+      await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+      await expect(page).toHaveURL(new RegExp(`issueId=${createdTitle}`))
+      const detailReadsBeforeRetry = detailReads
+      await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
+      await expect.poll(() => detailReads).toBeGreaterThan(detailReadsBeforeRetry)
+      expect(requestCounts.issueCreates).toBe(1)
+
+      if (detailStatus === 401) {
+        await expect(page).toHaveURL(/\/login\?returnTo=/)
+        return
+      }
+
+      await expect(page.getByTestId('tasks-error')).toContainText(
+        `Mock detail response ${detailStatus}.`,
+      )
+    })
+  }
+
+  for (const detailCase of [
+    { label: 'wrong Project', issuePatch: { assignedProjectId: 'other-project' } },
+    { label: 'wrong Team', issuePatch: { teamId: 'design-team' } },
+  ]) {
+    test(`一覧補完の ${detailCase.label} detail は Project list に注入しない`, async ({ page }) => {
+      const createdTitle = `detail-${detailCase.label === 'wrong Project' ? 'project' : 'team'}`
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+        postCreateProjectIssueFailureCount: 1,
+        postCreateProjectIssueStaleResponseCount: 1,
+        issueDetailOverrides: {
+          [createIssueCollaborationKey('core-team', createdTitle)]: {
+            afterProjectIssueReads: 3,
+            issuePatch: detailCase.issuePatch,
+          },
+        },
+      })
+      await page.goto('/projects/refero/issues')
+      const requestCounts = getMockRequestCounts(page)
+      await page.getByRole('button', { name: '新規タスク' }).click()
+      const createTaskForm = page.getByTestId('create-task-form')
+      await createTaskForm.locator('input[name="title"]').fill(createdTitle)
+      await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+      await expect(page).toHaveURL(new RegExp(`issueId=${createdTitle}`))
+      await page.getByTestId('project-task-error').getByRole('button', { name: '再読み込み', exact: true }).click()
+      await expect(page.getByTestId('tasks-error')).toHaveCount(0)
+      await expect(page.getByTestId(`task-row-${createdTitle}`)).toHaveCount(0)
+      expect(requestCounts.issueCreates).toBe(1)
+    })
+  }
 
   test('作成後一覧取得の認証失効はログインへ遷移し、作成を重複実行しない', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {

@@ -259,6 +259,8 @@ export function TaskPage() {
     projectId,
     Boolean(user && !currentUserError),
     true,
+    selectedTeamId,
+    selectedIssueId,
   )
   const {
     data: projectCustomerImpact,
