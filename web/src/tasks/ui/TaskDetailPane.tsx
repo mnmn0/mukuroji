@@ -406,6 +406,7 @@ export function TaskDetailPane({
               ? 'border-red-200 bg-red-50 text-red-700'
               : 'border-[var(--workbench-border-strong)] bg-white text-[var(--workbench-muted)]'
           }`}
+          tabIndex={errorMessage && !isLoading ? -1 : undefined}
           role={errorMessage && !isLoading ? 'alert' : 'status'}
         >
           {statusMessage}
@@ -1413,7 +1414,7 @@ export function TaskDetailPane({
           </p>
         ) : null}
         {errorMessage ? (
-          <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage}</p>
+          <p className="text-sm font-semibold text-red-700" role="alert" tabIndex={-1}>{errorMessage}</p>
         ) : null}
       </div>
       <form

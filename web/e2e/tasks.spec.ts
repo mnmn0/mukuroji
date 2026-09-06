@@ -4810,6 +4810,9 @@ test.describe('authenticated task page', () => {
     await expect(targetRow).toBeVisible()
     await expect(openDetailButton).toBeFocused()
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
+    const nonOpeningCheckbox = page.getByRole('checkbox', { name: 'Synthetic task 149' })
+    await nonOpeningCheckbox.check()
+    await expect(nonOpeningCheckbox).toBeChecked()
 
     await page.goForward()
     await expect(page).toHaveURL(/issueId=synthetic-150/u)
@@ -10962,6 +10965,75 @@ test.describe('authenticated task page', () => {
       name: '新しいランディングページのワイヤーフレーム作成',
     })).toBeVisible()
   })
+
+  for (const viewport of [
+    { height: 900, name: 'desktop', width: 1440 },
+    { height: 844, name: 'mobile', width: 390 },
+  ]) {
+    test(`選択中のdetail失敗は詳細ペインの見出しへフォーカスする (${viewport.name})`, async ({ page }) => {
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+        issueDetailOverrides: {
+          [createIssueCollaborationKey('core-team', 'wireframe')]: {
+            enabled: true,
+            status: 503,
+          },
+        },
+      })
+      await page.setViewportSize(viewport)
+      await page.goto('/projects/refero/issues')
+
+      await page.getByTestId('task-open-detail-wireframe').first().click()
+      const detailPane = page.getByTestId('task-detail-pane')
+      await expect(detailPane.getByRole('alert').filter({
+        hasText: 'タスク詳細を取得できませんでした',
+      })).toBeVisible()
+      await expect(detailPane.getByRole('heading', {
+        name: '新しいランディングページのワイヤーフレーム作成',
+      })).toBeFocused()
+    })
+  }
+
+  for (const viewport of [
+    { height: 900, name: 'desktop', width: 1440 },
+    { height: 844, name: 'mobile', width: 390 },
+  ]) {
+    test(`detail再取得中に移動したフォーカスをエラー表示が奪わない (${viewport.name})`, async ({ page }) => {
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+      let releaseDetail: (() => void) | undefined
+      let detailRequestArrived: (() => void) | undefined
+      const detailRequestReleased = new Promise<void>((resolve) => {
+        releaseDetail = resolve
+      })
+      const detailRequestSeen = new Promise<void>((resolve) => {
+        detailRequestArrived = resolve
+      })
+      await page.route(/\/api\/teams\/core-team\/issues\/wireframe(?:\?.*)?$/u, async (route) => {
+        if (route.request().method() !== 'GET') {
+          await route.fallback()
+          return
+        }
+        detailRequestArrived?.()
+        await detailRequestReleased
+        await route.fulfill({
+          status: 503,
+          json: { message: 'Detail temporarily unavailable.' },
+        })
+      })
+      await page.setViewportSize(viewport)
+      await page.goto('/projects/refero/issues')
+
+      await page.getByTestId('task-open-detail-wireframe').first().click()
+      await detailRequestSeen
+      const searchbox = page.getByRole('searchbox', { name: '検索...' })
+      await searchbox.focus()
+      releaseDetail?.()
+      const detailPane = page.getByTestId('task-detail-pane')
+      await expect(detailPane.getByRole('alert').filter({
+        hasText: 'タスク詳細を取得できませんでした',
+      })).toBeVisible()
+      await expect(searchbox).toBeFocused()
+    })
+  }
 
   test('作成後一覧取得の認証失効はログインへ遷移し、作成を重複実行しない', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
