@@ -1208,22 +1208,24 @@ export function TaskDetailPane({
         )
       case 'activity':
         return collaboration ? (
-          <IssueCollaborationPanel
-            aiAssistance={collaborationAiAssistance}
-            route={collaborationRoute}
-            artifacts={artifacts}
-            contextDraft={documentContextPromotion.documentContextDraft}
-            key={`${task.teamId ?? ''}:${task.id}`}
-            controller={collaboration}
-            currentMemberKey={currentWorkspaceMemberKey}
-            focusedCommentId={focusedCommentId}
-            focusedRootCommentId={focusedRootCommentId}
-            locale={locale}
-            members={workspaceMembers}
-            onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
-            onCommentDraftDirtyChange={onCommentDraftDirtyChange}
-            onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
-          />
+          <fieldset className="contents" disabled={isIssueSaving}>
+            <IssueCollaborationPanel
+              aiAssistance={collaborationAiAssistance}
+              route={collaborationRoute}
+              artifacts={artifacts}
+              contextDraft={documentContextPromotion.documentContextDraft}
+              key={`${task.teamId ?? ''}:${task.id}`}
+              controller={collaboration}
+              currentMemberKey={currentWorkspaceMemberKey}
+              focusedCommentId={focusedCommentId}
+              focusedRootCommentId={focusedRootCommentId}
+              locale={locale}
+              members={workspaceMembers}
+              onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
+              onCommentDraftDirtyChange={onCommentDraftDirtyChange}
+              onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
+            />
+          </fieldset>
         ) : null
       default:
         return null

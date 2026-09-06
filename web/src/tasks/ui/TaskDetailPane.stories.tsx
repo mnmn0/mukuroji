@@ -1,9 +1,12 @@
 import type { AiPlanningDraft } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
-import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
+import {
+  collaborationWorkspaceMemberFixtures,
+  issueCollaborationControllerFixture,
+} from '../../issues/fixtures'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
@@ -101,6 +104,28 @@ function createUpdateIssueSpy() {
     void issueId
     void input
   })
+}
+
+/** Creates a Work Item update spy whose pending request can be rejected by a story play. */
+function createPendingUpdateIssueSpy() {
+  let rejectPending: (() => void) | undefined
+  const spy = fn(async (
+    teamId: string,
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ) => {
+    void teamId
+    void issueId
+    void input
+    await new Promise<void>((_, reject) => {
+      rejectPending = () => reject('Work Item save failed.')
+    })
+  })
+
+  return {
+    reject: () => rejectPending?.(),
+    spy,
+  }
 }
 
 /** Local Planning draft used to exercise the neutral Task detail renderer slot. */
@@ -317,6 +342,42 @@ export const Default: Story = {
         workflowStatusId: 'review',
       }),
     )
+  },
+}
+
+const pendingUpdateIssue = createPendingUpdateIssueSpy()
+
+/** Keeps comment input disabled only during a rejected Work Item save and retains its body. */
+export const SaveFailureRetainsCommentDraftWhileWorkItemSavePending: Story = {
+  args: {
+    collaboration: issueCollaborationControllerFixture,
+    onUpdateIssue: pendingUpdateIssue.spy,
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const commentBody = canvas.getByRole('textbox', { name: 'コメント本文' })
+    await userEvent.type(commentBody, '保存失敗後も残るコメント')
+
+    const titleInput = canvas.getByRole('textbox', { name: 'Issue' })
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, '保存待ちの詳細変更')
+    await userEvent.selectOptions(
+      canvas.getByRole('combobox', { name: 'ステータス' }),
+      'review',
+    )
+    const customerImpactInput = canvas.getByRole('textbox', {
+      name: 'Customer impact',
+    })
+    await userEvent.clear(customerImpactInput)
+    await userEvent.type(customerImpactInput, 'EnterpriseCustomersCanCompleteSetup')
+    await userEvent.click(canvas.getByRole('button', { name: '変更を保存' }))
+
+    await expect(args.onUpdateIssue).toHaveBeenCalledTimes(1)
+    await expect(commentBody).toBeDisabled()
+    pendingUpdateIssue.reject()
+
+    await waitFor(async () => expect(commentBody).toBeEnabled())
+    await expect(commentBody).toHaveValue('保存失敗後も残るコメント')
   },
 }
 

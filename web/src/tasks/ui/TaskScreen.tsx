@@ -704,6 +704,8 @@ export function TaskScreen({
   const createTaskDirtyRef = useRef(false)
   const commentDraftDirtyRef = useRef(false)
   const commentDraftDirtyScopeRef = useRef<string | undefined>(undefined)
+  /** Monotonic local owner lifetime used to fence delayed Work Item saves. */
+  const commentDraftOwnerGenerationRef = useRef(0)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
   const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
   const onPreviewScheduleChangeRef = useRef(onPreviewScheduleChange)
@@ -1361,6 +1363,14 @@ export function TaskScreen({
 
   /** Reports comment draft ownership while retaining the local preflight signal. */
   const reportCommentDraftDirty = useCallback((isDirty: boolean, scopeKey?: string) => {
+    if (!isDirty && commentDraftDirtyRef.current &&
+        commentDraftDirtyScopeRef.current !== scopeKey) {
+      return
+    }
+    if (isDirty && (!commentDraftDirtyRef.current ||
+        commentDraftDirtyScopeRef.current !== scopeKey)) {
+      commentDraftOwnerGenerationRef.current += 1
+    }
     commentDraftDirtyRef.current = isDirty
     commentDraftDirtyScopeRef.current = isDirty ? scopeKey : undefined
     onCommentDraftDirtyChange?.(isDirty, scopeKey, isDirty ? discardCommentDraft : undefined)
@@ -1456,7 +1466,9 @@ export function TaskScreen({
    */
   const dismissTaskDetailEditor = useCallback((context: WorkItemActionContext) => {
     pendingDetailFocusRef.current = undefined
-    setIsDetailOpen(false)
+    if (!commentDraftDirtyRef.current) {
+      setIsDetailOpen(false)
+    }
     setScheduleUpdateQueue((current) => {
       const cancelled = current.filter((candidate) => candidate.actionContext === context)
       for (const candidate of cancelled) {
@@ -1823,6 +1835,19 @@ export function TaskScreen({
         )
           ? pendingCandidate
           : undefined
+        const shouldConfirmProjectTransfer = commentDraftDirtyRef.current &&
+          input.assignedProjectId !== undefined &&
+          input.assignedProjectId !== projectId
+        const projectTransferCommentScope = shouldConfirmProjectTransfer
+          ? commentDraftDirtyScopeRef.current
+          : undefined
+        const projectTransferCommentGeneration = shouldConfirmProjectTransfer
+          ? commentDraftOwnerGenerationRef.current
+          : undefined
+        if (shouldConfirmProjectTransfer &&
+            !globalThis.window.confirm(t('collaboration.composer.discardConfirm'))) {
+          return
+        }
         if (pendingCandidate && !pendingContext) {
           taskActionCompletion.cancelContext(pendingCandidate)
         }
@@ -1864,6 +1889,12 @@ export function TaskScreen({
             }
           } else {
             updatedTask = (await performTaskUpdate(detailTask, input)).task
+          }
+          if (shouldConfirmProjectTransfer &&
+              commentDraftDirtyRef.current &&
+              commentDraftDirtyScopeRef.current === projectTransferCommentScope &&
+              commentDraftOwnerGenerationRef.current === projectTransferCommentGeneration) {
+            discardCommentDraft()
           }
           if (claimedContext && target) {
             taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(

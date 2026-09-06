@@ -5041,6 +5041,14 @@ test.describe('authenticated task page', () => {
     const commentBody = page.locator('textarea[name="body"]')
     await commentBody.fill('編集失敗後も保持するコメント下書き')
     let editAttempts = 0
+    let releaseEditFailure: (() => void) | undefined
+    let editRequestArrived: (() => void) | undefined
+    const editFailureGate = new Promise<void>((resolve) => {
+      releaseEditFailure = resolve
+    })
+    const editRequest = new Promise<void>((resolve) => {
+      editRequestArrived = resolve
+    })
     await page.route(/\/api\/teams\/core-team\/issues\/wireframe$/u, async (route) => {
       if (route.request().method() === 'PATCH') {
         editAttempts += 1
@@ -5048,6 +5056,8 @@ test.describe('authenticated task page', () => {
           await route.fallback()
           return
         }
+        editRequestArrived?.()
+        await editFailureGate
         await route.fulfill({
           contentType: 'application/json',
           json: { message: '編集に失敗しました。' },
@@ -5064,11 +5074,15 @@ test.describe('authenticated task page', () => {
     const titleInput = detailPane.locator('input[name="title"]')
     await titleInput.fill('編集失敗後もpaneを残す')
     await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await editRequest
+    await expect(commentBody).toBeDisabled()
+    releaseEditFailure?.()
 
     await expect(detailPane).toBeVisible()
     await expect(commentBody).toHaveValue('編集失敗後も保持するコメント下書き')
     await expect(titleInput).toHaveValue('編集失敗後もpaneを残す')
     await expect(detailPane).toContainText('変更を保存できませんでした。もう一度お試しください。')
+    await expect(commentBody).toBeEnabled()
     await expect(detailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
 
     let discardMessage = ''
@@ -5096,6 +5110,104 @@ test.describe('authenticated task page', () => {
     expect(discardAfterSave).toContain('コメント')
     await page.getByTestId('task-row-wireframe').click()
     await expect(commentBody).toHaveValue('')
+  })
+
+  test('コメント下書き中の Project 移動保存は確認拒否で API を送らず保持する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const commentBody = page.locator('textarea[name="body"]')
+    const assignment = detailPane.locator('select[name="assignedProjectId"]')
+    await commentBody.fill('Project 移動確認を拒否して保持するコメント')
+    await expect(assignment).toHaveValue('refero')
+    await assignment.selectOption('')
+
+    let patchCount = 0
+    let failNextPatch = true
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe$/u, async (route) => {
+      if (route.request().method() === 'PATCH') {
+        patchCount += 1
+        if (failNextPatch) {
+          failNextPatch = false
+          await route.fulfill({
+            contentType: 'application/json',
+            json: { message: 'Project 移動に失敗しました。' },
+            status: 500,
+          })
+          return
+        }
+      }
+      await route.fallback()
+    })
+
+    const declinedDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('コメント')
+        await dialog.dismiss()
+        resolve()
+      })
+    })
+    await Promise.all([
+      detailPane.getByRole('button', { name: '変更を保存' }).click(),
+      declinedDialog,
+    ])
+    expect(patchCount).toBe(0)
+    await expect(commentBody).toHaveValue('Project 移動確認を拒否して保持するコメント')
+    await expect(assignment).toHaveValue('')
+
+    const failedMoveDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      detailPane.getByRole('button', { name: '変更を保存' }).click(),
+      failedMoveDialog,
+    ])
+    await expect.poll(() => patchCount).toBe(1)
+    await expect(commentBody).toHaveValue('Project 移動確認を拒否して保持するコメント')
+    await expect(detailPane).toContainText('変更を保存できませんでした。もう一度お試しください。')
+
+    const acceptedMoveDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      detailPane.getByRole('button', { name: '変更を保存' }).click(),
+      acceptedMoveDialog,
+    ])
+    await expect.poll(() => patchCount).toBe(2)
+    await expect(commentBody).toHaveCount(0)
+    let unexpectedDialogCount = 0
+    const unexpectedDialogHandler = async (dialog: Dialog) => {
+      unexpectedDialogCount += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedDialogHandler)
+    await page.getByLabel('メインサイドバー').getByRole('button', {
+      name: 'ブランド刷新',
+      exact: true,
+    }).click()
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+    expect(unexpectedDialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
+  })
+
+  test('詳細アクションが新規作成でキャンセルされてもコメント下書きを保持する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('詳細アクションのキャンセル後も保持するコメント')
+
+    await page.getByTestId('task-row-wireframe').click({ button: 'right' })
+    await page.getByTestId('project-task-action-context-menu')
+      .getByRole('menuitem', { name: /Work Item を編集/u }).click()
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    await expect(page.getByTestId('create-task-form')).toBeVisible()
+    await expect(detailPane).toBeVisible()
+    await expect(commentBody).toHaveValue('詳細アクションのキャンセル後も保持するコメント')
   })
 
   test('詳細の関連更新失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {
