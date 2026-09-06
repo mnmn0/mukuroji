@@ -6807,6 +6807,12 @@ test.describe('authenticated task page', () => {
     await coreTitle.fill('core-scope-draft')
 
     let historyEntry = 0
+    /**
+     * Adds a same-document Router history entry and notifies the app of its popstate transition.
+     *
+     * @param path - URL path to place in the new history entry.
+     * @returns A promise that resolves after the browser history event has been dispatched.
+     */
     const pushRouteEntry = async (path: string) => {
       historyEntry += 1
       const state = await page.evaluate(() => window.history.state)
