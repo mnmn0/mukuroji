@@ -770,7 +770,13 @@ export function TaskScreen({
           : originCandidate?.matches('button, a, [tabindex]:not([tabindex="-1"])')
             ? originCandidate
             : originCandidate?.querySelector<HTMLElement>('[data-testid^="task-open-detail-"]')
-        connectedOriginControl?.focus({ preventScroll: true })
+        const fallbackControl = connectedOriginControl
+          ? undefined
+          : taskContentRef.current?.querySelector<HTMLElement>('input[type="search"]')
+        const focusTarget = connectedOriginControl ?? fallbackControl
+        if (!focusTarget) return
+        if (!connectedOriginControl) focusTarget.scrollIntoView({ block: 'nearest' })
+        focusTarget.focus({ preventScroll: true })
       })
     })
   }, [])
