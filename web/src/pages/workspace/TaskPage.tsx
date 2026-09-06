@@ -9,6 +9,7 @@ import type {
   WorkItemRelation,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { BlockerFunction } from 'react-router'
 import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
@@ -841,7 +842,16 @@ export function TaskPage() {
   }>({ isDirty: false, scopeKey: taskScopeKey })
   const isCreateTaskDirty = createTaskDirtyState.isDirty &&
     createTaskDirtyState.scopeKey === taskScopeKey
-  const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) => {
+  /**
+   * Determines whether a navigation changes the owning scope of a dirty create form.
+   * It also invalidates pending creates when a clean form changes scope and only
+   * blocks navigation while an authenticated session is available.
+   *
+   * @param currentLocation - The location currently owning the create form.
+   * @param nextLocation - The location requested by the navigation.
+   * @returns Whether the navigation must be blocked for discard confirmation.
+   */
+  const shouldBlockCreateNavigation = useCallback<BlockerFunction>(({ currentLocation, nextLocation }) => {
     const nextSearchParams = new URLSearchParams(nextLocation.search)
     const nextRouteContext = resolveProjectTaskRouteContext({
       projectId,
@@ -859,7 +869,8 @@ export function TaskPage() {
       createTaskScopeGenerationRef.current += 1
     }
     return Boolean(getAuthSession()) && hasCurrentDirtyCreate && changesCreateScope
-  }, [creationTeam?.id, projectId, projectIssues, taskScopeKey, teams],))
+  }, [creationTeam?.id, projectId, projectIssues, taskScopeKey, teams])
+  const navigationBlocker = useBlocker(shouldBlockCreateNavigation)
   /** Reports create-form dirtiness to the route-owned navigation guard. */
   const reportCreateTaskDirty = useCallback((isDirty: boolean, discardHandler?: () => void) => {
     if (!isDirty && createTaskDirtyScopeRef.current !== undefined &&
