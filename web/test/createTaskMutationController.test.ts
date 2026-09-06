@@ -33,12 +33,17 @@ function createJsonResponse(body: unknown): Response {
   })
 }
 
-/** Creates a controller and records every cache phase for one confirmed create. */
+/**
+ * Creates a controller and records every cache phase for one confirmed create.
+ *
+ * @param onCreated - Optional callback that simulates the page notification after confirmation.
+ */
 function createControllerHarness(
   createdTask: CanonicalWorkItem,
   initialTasks: CanonicalWorkItem[],
   refreshedTasks: CanonicalWorkItem[],
   refreshCacheTasks: CanonicalWorkItem[] = refreshedTasks,
+  onCreated?: (task: CanonicalWorkItem) => void,
 ) {
   let currentTasks = initialTasks
   let firstUpdaterResult: CanonicalWorkItem[] | undefined
@@ -75,6 +80,7 @@ function createControllerHarness(
       correlationId: 'correlation-test',
       idempotencyKey: 'idempotency-test',
     })),
+    onCreated,
     projectId: 'refero',
   })
 
@@ -125,6 +131,33 @@ describe('create Task mutation controller', () => {
 
     expect(harness.firstUpdaterResult).toEqual([cachedTask])
     expect(harness.currentTasks).toEqual([cachedTask])
+    expect(harness.postCount).toBe(1)
+  })
+
+  test('refreshes the list when the create notification throws', async () => {
+    const createdTask = createFixtureTask({
+      id: 'notification-failed',
+      revision: 1,
+      title: '通知失敗後も一覧へ反映',
+    })
+    const harness = createControllerHarness(
+      createdTask,
+      [],
+      [createdTask],
+      [createdTask],
+      () => {
+        throw new Error('notification failed')
+      },
+    )
+
+    const result = await harness.controller.createTask(createInput, {
+      projectId: 'refero',
+      teamId: 'core-team',
+    })
+
+    expect(result.task).toEqual(createdTask)
+    expect(result.refreshError).toEqual(new Error('notification failed'))
+    expect(harness.currentTasks).toEqual([createdTask])
     expect(harness.postCount).toBe(1)
   })
 

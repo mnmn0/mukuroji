@@ -492,7 +492,7 @@ export function TaskTableView({
       />
       <section
         aria-label={t('tasks.table.aria')}
-        className="workbench-table mt-3 overflow-hidden"
+        className="workbench-table relative mt-3 overflow-hidden"
         onKeyDown={handleTableKeyDown}
         onPaste={handleTablePaste}
       >
@@ -763,6 +763,8 @@ function TaskTableRow({
       data-row-index={rowIndex}
       data-selected={selected ? 'true' : 'false'}
       data-task-action="open"
+      data-task-team-id={task.teamId}
+      data-task-work-item-id={task.id}
       data-testid={`task-row-${task.id}`}
       onClick={(event) => {
         if (!isInteractiveTaskRowTarget(event.target)) onSelectTask(task)
@@ -812,6 +814,7 @@ function TaskTableRow({
                     className={`min-w-0 text-left font-semibold text-[var(--workbench-text)] transition hover:text-[var(--workbench-primary)] ${
                       wrapText ? 'whitespace-normal break-words' : 'truncate'
                     }`}
+                    data-testid={`task-open-detail-${task.id}`}
                     onClick={() => onSelectTask(task)}
                     type="button"
                   >
@@ -1017,6 +1020,10 @@ function TaskTableRow({
           <button
             aria-label={`${t('tasks.action.more')}: ${taskTitle}`}
             className="grid h-9 w-9 place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+            data-task-action="context-menu"
+            data-task-open-variant="context-menu"
+            data-task-team-id={task.teamId}
+            data-task-work-item-id={task.id}
             data-testid={`task-row-actions-${task.id}`}
             onClick={(event) => {
               event.stopPropagation()

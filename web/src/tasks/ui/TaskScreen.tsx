@@ -20,7 +20,15 @@ import {
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type SyntheticEvent,
+} from 'react'
 import {
   clearSucceededBulkSelection,
   updateBulkItemSelection,
@@ -170,6 +178,38 @@ const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
 const emptyTeamIssues: TeamIssue[] = []
 const emptyWorkspaceMembers: WorkspaceMember[] = []
+
+/** Explicit detail control that is awaiting its Team-qualified routed detail commit. */
+type PendingTaskDetailFocus = {
+  /** Control selector scoped to the selected detail pane. */
+  selector: string
+  /** Team that owns the selected Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  workItemId: string
+  /** Element focused when the action began, used to detect deliberate user movement. */
+  originElement?: HTMLElement
+}
+
+/** Team-qualified Work Item identity used to restore a replaced list opener. */
+type DetailOriginTask = {
+  /** Team that owns the originating Work Item. */
+  teamId: string
+  /** Team-local identifier of the originating Work Item. */
+  workItemId: string
+  /** Optional view-specific opener variant used when one task has multiple controls. */
+  openVariant?: string
+}
+
+/** Captured list origin awaiting confirmation of a dirty-editor navigation. */
+type PendingDetailOriginCapture = {
+  /** Exact task identity that would own the accepted detail route. */
+  task: DetailOriginTask
+  /** Focusable control that initiated the candidate detail navigation. */
+  control: HTMLElement
+  /** Scroll position captured immediately before the candidate navigation. */
+  scrollTop: number
+}
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 const emptyConfigurationTeamIds: string[] = []
 const emptyBulkOperationSelections: BulkOperationSelection[] = []
@@ -319,6 +359,8 @@ export type TaskScreenProps = {
   activeProjectTeamId?: string
   /** Whether the task route is still loading its required data. */
   isLoading?: boolean
+  /** Whether the task-view capability scope is still settling for this route. */
+  isTaskViewLoading?: boolean
   /** Project tasks loaded from the API. */
   tasks?: CanonicalWorkItem[]
   /** Project members available as task assignees. */
@@ -459,6 +501,8 @@ export type TaskScreenProps = {
     input: CreateWorkItemInput,
     context?: TaskCreateContext,
   ) => Promise<CreatedProjectTaskMutation | void>
+  /** Reports whether the inline create form contains values that need discard confirmation. */
+  onCreateTaskDirtyChange?: (isDirty: boolean, discardHandler?: () => void) => void
   /** Loads the next page of Project user candidates. */
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Changes the Project user search query. */
@@ -530,6 +574,7 @@ export function TaskScreen({
   isPlanningLoading = false,
   isRelationCandidatesLoading = false,
   isSelectedIssueDetailLoading = false,
+  isTaskViewLoading = false,
   isSystemAdmin = false,
   isLoading = false,
   projectMembers = emptyProjectMembers,
@@ -565,6 +610,7 @@ export function TaskScreen({
   onSelectedIssueChange,
   onProjectQuickAccessToggle,
   onCreateTask,
+  onCreateTaskDirtyChange,
   onRetryPlanning,
   onRetryConfigurations,
   onUpdateIssue,
@@ -643,12 +689,23 @@ export function TaskScreen({
   )
   const scheduleUpdateChainRef = useRef<Promise<void>>(Promise.resolve())
   const detailScrollTopRef = useRef(0)
+  const selectedIssueKey = selectedIssueId
+    ? `${activeProjectTeamId ?? ''}:${selectedIssueId}`
+    : undefined
+  const previousSelectedIssueKeyRef = useRef(selectedIssueKey)
+  const detailOriginControlRef = useRef<HTMLElement | null>(null)
+  const detailOriginTaskRef = useRef<DetailOriginTask | undefined>(undefined)
+  const pendingDetailOriginCaptureRef = useRef<PendingDetailOriginCapture | undefined>(undefined)
+  const restoreTaskListFrameRef = useRef<number | undefined>(undefined)
+  const detailFocusFrameRef = useRef<number | undefined>(undefined)
+  const pendingDetailFocusRef = useRef<PendingTaskDetailFocus | undefined>(undefined)
   const isAiOperationPendingRef = useRef(false)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
   const [createTaskEditorGeneration, setCreateTaskEditorGeneration] = useState(0)
   const createTaskEditorGenerationRef = useRef(0)
-  const createTaskSubmissionInFlightRef = useRef(false)
+  const createTaskSubmissionInFlightRef = useRef<number | undefined>(undefined)
+  const createTaskDirtyRef = useRef(false)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
   const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
   const onPreviewScheduleChangeRef = useRef(onPreviewScheduleChange)
@@ -664,6 +721,237 @@ export function TaskScreen({
   useEffect(() => {
     onSelectedIssueChangeRef.current = onSelectedIssueChange
   }, [onSelectedIssueChange])
+  /** Cancels a detail focus frame that no longer owns the current selection. */
+  const cancelTaskDetailFocus = useCallback(() => {
+    if (detailFocusFrameRef.current !== undefined) {
+      cancelAnimationFrame(detailFocusFrameRef.current)
+      detailFocusFrameRef.current = undefined
+    }
+  }, [])
+  /** Schedules detail control focus after the routed detail DOM is committed. */
+  const scheduleTaskDetailFocus = useCallback((selector = 'h2') => {
+    if (restoreTaskListFrameRef.current !== undefined) {
+      cancelAnimationFrame(restoreTaskListFrameRef.current)
+      restoreTaskListFrameRef.current = undefined
+    }
+    cancelTaskDetailFocus()
+    detailFocusFrameRef.current = focusTaskDetailControl(selector)
+  }, [cancelTaskDetailFocus])
+  /** Restores list position and the originating detail opener after route navigation. */
+  const restoreTaskListPosition = useCallback(() => {
+    const scrollTop = detailScrollTopRef.current
+    if (detailFocusFrameRef.current !== undefined) {
+      cancelAnimationFrame(detailFocusFrameRef.current)
+      detailFocusFrameRef.current = undefined
+    }
+    if (restoreTaskListFrameRef.current !== undefined) {
+      cancelAnimationFrame(restoreTaskListFrameRef.current)
+    }
+    restoreTaskListFrameRef.current = requestAnimationFrame(() => {
+      taskContentRef.current?.scrollTo({ top: scrollTop })
+      restoreTaskListFrameRef.current = requestAnimationFrame(() => {
+        restoreTaskListFrameRef.current = undefined
+        const originTask = detailOriginTaskRef.current
+        const originCandidates = originTask
+          ? Array.from(taskContentRef.current?.querySelectorAll<HTMLElement>(
+              '[data-task-action="open"], [data-task-action="context-menu"]',
+            ) ?? []).filter((candidate) =>
+              candidate.dataset.taskTeamId === originTask.teamId &&
+              candidate.dataset.taskWorkItemId === originTask.workItemId,
+            )
+          : []
+        const originCandidate = originTask?.openVariant
+          ? originCandidates.find((candidate) =>
+              candidate.dataset.taskOpenVariant === originTask.openVariant,
+            ) ?? originCandidates[0]
+          : originCandidates[0]
+        const connectedOriginControl = detailOriginControlRef.current?.isConnected
+          ? detailOriginControlRef.current
+          : originCandidate?.matches('button, a, [tabindex]:not([tabindex="-1"])')
+            ? originCandidate
+            : originCandidate?.querySelector<HTMLElement>('[data-testid^="task-open-detail-"]')
+        const fallbackControl = connectedOriginControl
+          ? undefined
+          : taskContentRef.current?.querySelector<HTMLElement>('input[type="search"]')
+        const focusTarget = connectedOriginControl ?? fallbackControl
+        if (!focusTarget) return
+        if (!connectedOriginControl) focusTarget.scrollIntoView({ block: 'nearest' })
+        focusTarget.focus({ preventScroll: true })
+      })
+    })
+  }, [])
+  /** Retains the actual task-list DOM control that initiated detail navigation. */
+  const captureDetailOriginControl = useCallback((event: SyntheticEvent<HTMLDivElement>) => {
+    if (isAiOperationPendingRef.current) return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const taskRow = target.closest<HTMLElement>('[data-task-action="open"]')
+    if (!taskRow) return
+    const interactiveTarget = target.closest<HTMLElement>(
+      'button, input, select, textarea, a, [contenteditable="true"], [role="button"]',
+    )
+    const detailControl = target.closest<HTMLElement>(
+      '[data-task-action="open"], [data-testid^="task-open-detail-"]',
+    )
+    if (!detailControl) return
+    if (interactiveTarget && interactiveTarget !== taskRow && interactiveTarget !== detailControl) return
+    const teamId = taskRow.dataset.taskTeamId
+    const workItemId = taskRow.dataset.taskWorkItemId
+    const hasSelectedDetail = Boolean(selectedIssueId || localSelectedDetailTaskKey)
+    const startsListDetailTransition = !hasSelectedDetail || !isDetailOpen
+    if (detailOriginTaskRef.current && !startsListDetailTransition) return
+    if (teamId && workItemId) {
+      const openVariant = taskRow.dataset.taskOpenVariant
+      const originTask = {
+        teamId,
+        workItemId,
+        ...(openVariant ? { openVariant } : {}),
+      }
+      const scrollTop = taskContentRef.current?.scrollTop ?? 0
+      if (createTaskDirtyRef.current) {
+        pendingDetailOriginCaptureRef.current = {
+          task: originTask,
+          control: detailControl,
+          scrollTop,
+        }
+        return
+      }
+      detailOriginTaskRef.current = originTask
+      detailScrollTopRef.current = scrollTop
+    }
+    detailOriginControlRef.current = detailControl
+  }, [isDetailOpen, localSelectedDetailTaskKey, selectedIssueId])
+  /** Resolves the exact control that initiated a routed detail action. */
+  const resolveDetailFocusOrigin = useCallback((preferredElement?: HTMLElement) => {
+    if (preferredElement?.isConnected) return preferredElement
+    const activeElement = document.activeElement
+    if (
+      activeElement instanceof HTMLElement &&
+      activeElement !== document.body &&
+      activeElement !== document.documentElement
+    ) {
+      return activeElement
+    }
+    return detailOriginControlRef.current?.isConnected
+      ? detailOriginControlRef.current
+      : undefined
+  }, [])
+  useEffect(() => {
+    const previousSelectedIssueKey = previousSelectedIssueKeyRef.current
+    const selectedIssueChanged = selectedIssueKey !== previousSelectedIssueKey
+    const pendingDetailFocus = pendingDetailFocusRef.current
+    if (pendingDetailFocus) {
+      const routeMatchesPendingFocus = selectedIssueId === pendingDetailFocus.workItemId &&
+        (!activeProjectTeamId || activeProjectTeamId === pendingDetailFocus.teamId)
+      if (!routeMatchesPendingFocus) {
+        const selectionTransitioned = selectedIssueKey !== previousSelectedIssueKey
+        if (selectionTransitioned) {
+          pendingDetailFocusRef.current = undefined
+        } else {
+          return
+        }
+      } else {
+        const detailMatchesPendingFocus = selectedIssueDetail?.issue.id === pendingDetailFocus.workItemId &&
+          selectedIssueDetail.issue.teamId === pendingDetailFocus.teamId
+        const pendingFocusTask = tasks.find((task) =>
+          task.id === pendingDetailFocus.workItemId && task.teamId === pendingDetailFocus.teamId,
+        )
+        const detailControlWritable = pendingDetailFocus.selector === 'h2' || canMutateTask === undefined
+          ? true
+          : pendingFocusTask !== undefined && canMutateTask(pendingFocusTask)
+        const detailSettled = !isLoading &&
+          !isSelectedIssueDetailLoading &&
+          !isTaskViewLoading &&
+          !detailErrorMessage &&
+          !selectedIssueDetailUnavailable &&
+          detailMatchesPendingFocus
+        const detailErrorSettled = !isLoading &&
+          !isSelectedIssueDetailLoading &&
+          !isTaskViewLoading &&
+          Boolean(detailErrorMessage)
+        previousSelectedIssueKeyRef.current = selectedIssueKey
+        if (!detailSettled && !detailErrorSettled) return
+        pendingDetailFocusRef.current = undefined
+        const activeElement = document.activeElement
+        const knownActionControl = activeElement instanceof HTMLElement &&
+          pendingDetailFocus.originElement !== undefined &&
+          (activeElement === pendingDetailFocus.originElement ||
+            pendingDetailFocus.originElement.contains(activeElement))
+        const userMovedFocus = activeElement instanceof HTMLElement &&
+          activeElement.isConnected &&
+          activeElement !== document.body &&
+          activeElement !== document.documentElement &&
+          !knownActionControl
+        if (!userMovedFocus) {
+          if (detailErrorSettled) {
+            if (pendingFocusTask !== undefined && !selectedIssueDetailUnavailable) {
+              scheduleTaskDetailFocus('h2')
+            } else if (pendingDetailFocus.originElement?.isConnected) {
+              pendingDetailFocus.originElement.focus({ preventScroll: true })
+            } else {
+              scheduleTaskDetailFocus('[role="alert"]')
+            }
+          } else {
+            scheduleTaskDetailFocus(detailControlWritable ? pendingDetailFocus.selector : 'h2')
+          }
+        }
+        return
+      }
+    }
+    if (selectedIssueId && selectedIssueChanged) {
+      const detailMatchesSelectedIssue = selectedIssueDetail?.issue.id === selectedIssueId &&
+        (!activeProjectTeamId || selectedIssueDetail.issue.teamId === activeProjectTeamId)
+      const detailReady = !isLoading &&
+        !isSelectedIssueDetailLoading &&
+        !isTaskViewLoading &&
+        !selectedIssueDetailUnavailable &&
+        detailMatchesSelectedIssue
+      if (!detailReady) {
+        if (activeProjectTeamId) {
+          cancelTaskDetailFocus()
+          pendingDetailFocusRef.current = {
+            selector: 'h2',
+            teamId: activeProjectTeamId,
+            workItemId: selectedIssueId,
+          }
+          previousSelectedIssueKeyRef.current = selectedIssueKey
+        }
+        return
+      }
+      previousSelectedIssueKeyRef.current = selectedIssueKey
+      scheduleTaskDetailFocus()
+      return
+    }
+    previousSelectedIssueKeyRef.current = selectedIssueKey
+    if (previousSelectedIssueKey && !selectedIssueKey) {
+      // Keep the first list origin across browser history round trips. A later
+      // list-to-detail interaction captures and replaces it when appropriate.
+      restoreTaskListPosition()
+    }
+  }, [
+    activeProjectTeamId,
+    canMutateTask,
+    cancelTaskDetailFocus,
+    detailErrorMessage,
+    isLoading,
+    isSelectedIssueDetailLoading,
+    isTaskViewLoading,
+    restoreTaskListPosition,
+    scheduleTaskDetailFocus,
+    selectedIssueDetail,
+    selectedIssueDetailUnavailable,
+    selectedIssueKey,
+    selectedIssueId,
+    tasks,
+  ])
+  useEffect(() => () => {
+    if (restoreTaskListFrameRef.current !== undefined) {
+      cancelAnimationFrame(restoreTaskListFrameRef.current)
+    }
+    if (detailFocusFrameRef.current !== undefined) {
+      cancelAnimationFrame(detailFocusFrameRef.current)
+    }
+  }, [])
   useEffect(() => {
     onConfirmScheduleChangeRef.current = onConfirmScheduleChange
     onPreviewScheduleChangeRef.current = onPreviewScheduleChange
@@ -1052,6 +1340,62 @@ export function TaskScreen({
     })
   }
 
+  /** Dismisses the create editor while preserving a same-scope pending submission. */
+  const dismissCreateTaskEditor = useCallback(() => {
+    onCreateTaskDirtyChange?.(false)
+    createTaskDirtyRef.current = false
+    setCreateTaskError(undefined)
+    setCreateTaskContext(undefined)
+    setIsCreateTaskOpen(false)
+  }, [onCreateTaskDirtyChange])
+
+  /** Invalidates a discarded editor before the route-owned scope changes. */
+  const dismissCreateTaskEditorForScopeChange = useCallback(() => {
+    const nextGeneration = createTaskEditorGenerationRef.current + 1
+    createTaskEditorGenerationRef.current = nextGeneration
+    setCreateTaskEditorGeneration(nextGeneration)
+    createTaskSubmissionInFlightRef.current = undefined
+    setIsCreatingTask(false)
+    taskActionCompletion.cancel('create')
+    dismissCreateTaskEditor()
+  }, [dismissCreateTaskEditor, taskActionCompletion])
+
+  /** Reports create-form dirtiness and the scope-owned discard callback to the route guard. */
+  const reportCreateTaskDirty = useCallback((isDirty: boolean) => {
+    createTaskDirtyRef.current = isDirty
+    onCreateTaskDirtyChange?.(
+      isDirty,
+      isDirty ? dismissCreateTaskEditorForScopeChange : undefined,
+    )
+  }, [dismissCreateTaskEditorForScopeChange, onCreateTaskDirtyChange])
+
+  /** Promotes a matching candidate detail origin after its guarded selection is accepted. */
+  const commitPendingDetailOriginCapture = useCallback((task: Pick<CanonicalWorkItem, 'id' | 'teamId'>) => {
+    const pendingOrigin = pendingDetailOriginCaptureRef.current
+    if (!pendingOrigin) return
+    const matchesSelection = pendingOrigin.task.teamId === task.teamId &&
+      pendingOrigin.task.workItemId === task.id
+    pendingDetailOriginCaptureRef.current = undefined
+    if (!matchesSelection) return
+    detailOriginTaskRef.current = pendingOrigin.task
+    detailOriginControlRef.current = pendingOrigin.control
+    detailScrollTopRef.current = pendingOrigin.scrollTop
+  }, [])
+
+  /** Confirms whether the current create form may be replaced or discarded. */
+  const confirmCreateTaskDiscard = useCallback((preservePendingDetailOrigin = false) => {
+    if (!createTaskDirtyRef.current) {
+      if (!preservePendingDetailOrigin) pendingDetailOriginCaptureRef.current = undefined
+      return true
+    }
+    const shouldDiscard = globalThis.window.confirm(t('tasks.create.discardConfirm'))
+    if (shouldDiscard) dismissCreateTaskEditor()
+    if (!preservePendingDetailOrigin || !shouldDiscard) {
+      pendingDetailOriginCaptureRef.current = undefined
+    }
+    return shouldDiscard
+  }, [dismissCreateTaskEditor, t])
+
   /**
    * Selects a task locally or delegates route-controlled selection to the caller.
    *
@@ -1062,8 +1406,31 @@ export function TaskScreen({
     task: CanonicalWorkItem,
     preservePendingAction = false,
   ) => {
-    if (isAiOperationPendingRef.current) return
+    if (isAiOperationPendingRef.current) {
+      pendingDetailOriginCaptureRef.current = undefined
+      return
+    }
+    if (!preservePendingAction && !confirmCreateTaskDiscard(true)) return
+    commitPendingDetailOriginCapture(task)
+    if (!preservePendingAction) pendingDetailFocusRef.current = undefined
     if (!preservePendingAction) taskActionCompletion.cancel()
+    const routedSelectionPending = Boolean(
+      !preservePendingAction && onSelectedIssueChangeRef.current &&
+      (selectedIssueId !== task.id || (activeProjectTeamId && activeProjectTeamId !== task.teamId)),
+    )
+    if (routedSelectionPending) {
+      const originElement = resolveDetailFocusOrigin()
+      cancelTaskDetailFocus()
+      pendingDetailFocusRef.current = {
+        selector: 'h2',
+        teamId: task.teamId,
+        workItemId: task.id,
+        ...(originElement ? { originElement } : {}),
+      }
+    }
+    if (!detailOriginTaskRef.current && !selectedIssueId && !localSelectedDetailTaskKey) {
+      detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+    }
     setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
       key: createTaskViewItemKey(task.teamId, task.id),
       type: 'focus',
@@ -1074,18 +1441,18 @@ export function TaskScreen({
     }
 
     onSelectedIssueChangeRef.current?.(task)
-    const scrollTop = detailScrollTopRef.current
-    if (scrollTop !== 0) {
-      requestAnimationFrame(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
-    }
-  }, [taskActionCompletion])
-
-  /** Dismisses a superseded create editor without completing another invocation. */
-  const dismissCreateTaskEditor = useCallback(() => {
-    setCreateTaskError(undefined)
-    setCreateTaskContext(undefined)
-    setIsCreateTaskOpen(false)
-  }, [])
+    if (!preservePendingAction && !routedSelectionPending) scheduleTaskDetailFocus()
+  }, [
+    activeProjectTeamId,
+    commitPendingDetailOriginCapture,
+    confirmCreateTaskDiscard,
+    scheduleTaskDetailFocus,
+    selectedIssueId,
+    localSelectedDetailTaskKey,
+    resolveDetailFocusOrigin,
+    cancelTaskDetailFocus,
+    taskActionCompletion,
+  ])
 
   /**
    * Dismisses a superseded detail editor and any preview owned by its exact invocation.
@@ -1093,6 +1460,7 @@ export function TaskScreen({
    * @param context - Exact awaiting action whose editor no longer owns user input.
    */
   const dismissTaskDetailEditor = useCallback((context: WorkItemActionContext) => {
+    pendingDetailFocusRef.current = undefined
     setIsDetailOpen(false)
     setScheduleUpdateQueue((current) => {
       const cancelled = current.filter((candidate) => candidate.actionContext === context)
@@ -1108,15 +1476,18 @@ export function TaskScreen({
   /** Closes the detail pane without losing the current list position. */
   const handleCloseDetail = () => {
     if (isAiOperationPendingRef.current) return
+    if (!confirmCreateTaskDiscard()) return
+    pendingDetailFocusRef.current = undefined
     taskActionCompletion.cancel()
-    detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
     setIsDetailOpen(false)
+    restoreTaskListPosition()
   }
 
   /** Opens the shared create panel without cancelling its newly accepted invocation. */
   const showCreateTaskEditor = useCallback((context?: TaskCreateContext) => {
-    setCreateTaskEditorGeneration((generation) => generation + 1)
-    createTaskEditorGenerationRef.current += 1
+    const nextGeneration = createTaskEditorGenerationRef.current + 1
+    createTaskEditorGenerationRef.current = nextGeneration
+    setCreateTaskEditorGeneration(nextGeneration)
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
     )?.id
@@ -1139,6 +1510,7 @@ export function TaskScreen({
     setCreateTaskContext(resolvedContext)
     setIsCreateTaskOpen(true)
     taskContentRef.current?.scrollTo({ top: 0 })
+    return true
   }, [activeProjectTeamId, projectId, teams])
 
   /** Persists an already-confirmed task patch and retains an inverse for undo. */
@@ -1578,7 +1950,6 @@ export function TaskScreen({
     controlSelector?: string,
     waitForMutation = false,
   ): Promise<WorkItemActionResult> | WorkItemActionResult => {
-    cancelAwaitingDirectTaskScheduleActions()
     const target = resolveProjectTaskActionTarget(context)
     const task = target
       ? tasks.find((candidate) =>
@@ -1594,6 +1965,10 @@ export function TaskScreen({
         t('taskViews.action.notFound'),
       )
     }
+    if (!confirmCreateTaskDiscard(true)) {
+      return createCancelledTaskActionResult(context.actionId, [target])
+    }
+    cancelAwaitingDirectTaskScheduleActions()
 
     const completion = waitForMutation
       ? taskActionCompletion.begin(
@@ -1602,13 +1977,55 @@ export function TaskScreen({
         )
       : undefined
     if (!completion) taskActionCompletion.cancel()
+    const isAlreadySelected = selectedIssueId === task.id &&
+      (!activeProjectTeamId || activeProjectTeamId === task.teamId)
+    const routedSelectionPending = Boolean(onSelectedIssueChangeRef.current && !isAlreadySelected)
+    if (routedSelectionPending) {
+      const focusedContextMenuTarget = taskActionContextMenuState?.selection.focusedTarget
+      const contextMenuOrigin = context.trigger === 'context-menu' &&
+        focusedContextMenuTarget?.teamId === task.teamId &&
+        focusedContextMenuTarget.workItemId === task.id
+        ? taskActionContextMenuState?.returnFocusElement
+        : undefined
+      const originElement = resolveDetailFocusOrigin(contextMenuOrigin)
+      cancelTaskDetailFocus()
+      const startsListRouteTransition = (!selectedIssueId && !localSelectedDetailTaskKey) || !isDetailOpen
+      if (contextMenuOrigin && startsListRouteTransition) {
+        detailOriginTaskRef.current = {
+          teamId: task.teamId,
+          workItemId: task.id,
+          openVariant: 'context-menu',
+        }
+        detailOriginControlRef.current = contextMenuOrigin
+        detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+      }
+      pendingDetailFocusRef.current = {
+        selector: controlSelector ?? 'h2',
+        teamId: task.teamId,
+        workItemId: task.id,
+        ...(originElement ? { originElement } : {}),
+      }
+    }
     handleSelectDetailTask(task, true)
-    if (controlSelector) focusTaskDetailControl(controlSelector)
+    if (controlSelector && !routedSelectionPending) {
+      scheduleTaskDetailFocus(controlSelector)
+    } else if (!controlSelector && !routedSelectionPending) {
+      scheduleTaskDetailFocus()
+    }
     return completion ?? createSucceededTaskActionResult(context.actionId, target)
   }, [
     cancelAwaitingDirectTaskScheduleActions,
+    activeProjectTeamId,
+    cancelTaskDetailFocus,
+    confirmCreateTaskDiscard,
     dismissTaskDetailEditor,
     handleSelectDetailTask,
+    isDetailOpen,
+    localSelectedDetailTaskKey,
+    resolveDetailFocusOrigin,
+    scheduleTaskDetailFocus,
+    selectedIssueId,
+    taskActionContextMenuState,
     t,
     taskActionCompletion,
     tasks,
@@ -1632,6 +2049,15 @@ export function TaskScreen({
     if (!installedRequest) return undefined
 
     const contextTarget = resolveProjectTaskDirectActionTarget(context)
+    if (!confirmCreateTaskDiscard()) {
+      if (cancelAwaitingProjectTaskDirectSchedule(installedRequest)) {
+        releaseProjectTaskDirectActionTarget(directTaskActionsInFlightRef.current, installedRequest)
+      }
+      return createCancelledTaskActionResult(
+        context.actionId,
+        contextTarget ? [contextTarget] : [],
+      )
+    }
     const sameWorkItem = contextTarget !== undefined &&
       installedRequest.target.teamId === contextTarget.teamId &&
       installedRequest.target.workItemId === contextTarget.workItemId
@@ -1820,6 +2246,7 @@ export function TaskScreen({
 
     return executeMutation()
   }, [
+    confirmCreateTaskDiscard,
     projectTaskActionDisabledReasons.unavailable,
     t,
     taskActionCompletion,
@@ -1876,7 +2303,6 @@ export function TaskScreen({
   const executeBulkTaskActionEntrance = useCallback((
     context: WorkItemActionContext,
   ): Promise<WorkItemActionResult> | WorkItemActionResult => {
-    cancelAwaitingDirectTaskScheduleActions()
     if (!isBulkTaskActionId(context.actionId)) {
       return createFailedTaskActionResult(
         context.actionId,
@@ -1886,6 +2312,13 @@ export function TaskScreen({
         projectTaskActionDisabledReasons.unavailable,
       )
     }
+    if (!confirmCreateTaskDiscard()) {
+      return createCancelledTaskActionResult(
+        context.actionId,
+        resolveProjectTaskActionTargets(context),
+      )
+    }
+    cancelAwaitingDirectTaskScheduleActions()
     const targets = resolveProjectTaskActionTargets(context)
     const requestedItems = targets.flatMap((target) => {
       const task = visibleTasks.find((candidate) =>
@@ -1921,6 +2354,7 @@ export function TaskScreen({
     return completion
   }, [
     cancelAwaitingDirectTaskScheduleActions,
+    confirmCreateTaskDiscard,
     dismissBulkTaskActionEditor,
     projectId,
     projectTaskActionDisabledReasons.unavailable,
@@ -2018,9 +2452,13 @@ export function TaskScreen({
     ...(canCreateTaskAction
       ? {
           create: (context) => {
-            cancelAwaitingDirectTaskScheduleActions()
             const createContext = pendingCreateTaskContextRef.current
             pendingCreateTaskContextRef.current = undefined
+            if (!confirmCreateTaskDiscard()) {
+              pendingCreateTaskContextRef.current = createContext
+              return createCancelledTaskActionResult(context.actionId, [])
+            }
+            cancelAwaitingDirectTaskScheduleActions()
             const completion = taskActionCompletion.begin(context, dismissCreateTaskEditor)
             showCreateTaskEditor(createContext)
             return completion
@@ -2096,6 +2534,7 @@ export function TaskScreen({
     bulkTaskActionsAvailable,
     cancelAwaitingDirectTaskScheduleActions,
     canCreateTaskAction,
+    confirmCreateTaskDiscard,
     canDirectTaskAction,
     canEditTaskAction,
     canManageTaskRelationAction,
@@ -2527,7 +2966,11 @@ export function TaskScreen({
   ])
 
   const showClosedCreateTaskError = Boolean(createTaskError) &&
-    (!isCreateTaskOpen || !onCreateTask)
+    !isCreateTaskOpen
+  const showCreateTaskPanel = isCreateTaskOpen
+  const createTaskPermissionMessage = !onCreateTask
+    ? t('tasks.create.permissionUnavailable')
+    : undefined
 
   return (
     <section aria-busy={isLoading || isAiOperationPending} className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -2540,6 +2983,7 @@ export function TaskScreen({
             if (isOpen) {
               handleProjectCreateClick()
             } else {
+              if (!confirmCreateTaskDiscard()) return
               taskActionCompletion.cancel('create')
               dismissCreateTaskEditor()
             }
@@ -2568,6 +3012,7 @@ export function TaskScreen({
           <div
             className="workbench-main min-h-0 flex-1 overflow-auto overscroll-contain"
             data-testid="task-main-scroll"
+            onClickCapture={captureDetailOriginControl}
             ref={taskContentRef}
           >
             {configurationErrorMessage ? (
@@ -2658,7 +3103,7 @@ export function TaskScreen({
                   : undefined}
               />
             ) : null}
-            {isCreateTaskOpen && onCreateTask ? (
+            {showCreateTaskPanel ? (
               <CreateTaskPanel
                 key={createTaskContextKey(createTaskContext, createTaskEditorGeneration)}
                 assigneeErrorMessage={assigneeErrorMessage}
@@ -2666,20 +3111,24 @@ export function TaskScreen({
                 configuration={createConfiguration}
                 context={createTaskContext}
                 currentUserProjectKey={currentUserProjectKey}
-                errorMessage={createTaskError}
+                errorMessage={createTaskPermissionMessage ?? createTaskError}
                 isAssigneeOptionsLoading={isAssigneeOptionsLoading}
+                isSubmissionDisabled={!onCreateTask}
                 isSubmitting={isCreatingTask}
                 locale={locale}
+                onDirtyChange={reportCreateTaskDirty}
                 onCancel={() => {
+                  if (!confirmCreateTaskDiscard()) return
                   taskActionCompletion.cancel('create')
-                  setCreateTaskError(undefined)
-                  setCreateTaskContext(undefined)
-                  setIsCreateTaskOpen(false)
+                  dismissCreateTaskEditor()
                 }}
                 onSubmit={async (input) => {
-                  if (createTaskSubmissionInFlightRef.current) return
-                  createTaskSubmissionInFlightRef.current = true
+                  if (createTaskSubmissionInFlightRef.current !== undefined) return
                   const submittedEditorGeneration = createTaskEditorGeneration
+                  if (!onCreateTask) {
+                    return
+                  }
+                  createTaskSubmissionInFlightRef.current = submittedEditorGeneration
                   const pendingContext = resolvePendingTaskActionContext(
                     taskActionCompletion,
                     ['create'],
@@ -2711,6 +3160,7 @@ export function TaskScreen({
                       ))
                     }
                     if (!canUpdateCreateEditor) return
+                    reportCreateTaskDirty(false)
                     setTaskUndo(undefined)
                     setTaskRedo(undefined)
                     setTaskAction({
@@ -2739,8 +3189,10 @@ export function TaskScreen({
                       )
                     }
                   } finally {
-                    createTaskSubmissionInFlightRef.current = false
-                    setIsCreatingTask(false)
+                    if (createTaskSubmissionInFlightRef.current === submittedEditorGeneration) {
+                      createTaskSubmissionInFlightRef.current = undefined
+                      setIsCreatingTask(false)
+                    }
                   }
                 }}
                 projectId={createDestinationProjectId}
@@ -3023,9 +3475,10 @@ function areTaskViewSelectionsEqual(
  * Focuses and reveals a control after React commits a selected-task detail update.
  *
  * @param selector - Selector scoped to the active task detail pane.
+ * @returns The animation frame identifier used for the deferred focus.
  */
-function focusTaskDetailControl(selector: string): void {
-  requestAnimationFrame(() => {
+function focusTaskDetailControl(selector: string): number {
+  return requestAnimationFrame(() => {
     const detailPane = document.querySelector<HTMLElement>('[data-testid="task-detail-pane"]')
     const control = detailPane?.querySelector<HTMLElement>(selector)
     control?.focus()
