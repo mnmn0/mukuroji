@@ -38,6 +38,7 @@ import {
 import {
   BulkOperationToolbar,
   type BulkOperationProjectOption,
+  type BulkOperationMutationContext,
   type BulkOperationSelection,
   type BulkOperationTaskActionRequest,
   type BulkOperationTaskActionInterruption,
@@ -153,6 +154,8 @@ export type TaskTableViewProps = {
   onBulkRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Undoes succeeded items from a bulk operation. */
   onBulkUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
+  /** Checks the exact target before an apply, retry, resume, or undo mutation. */
+  onBeforeBulkMutation?: (context: BulkOperationMutationContext) => boolean
   /** Opens the create-task form when task creation is available. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates a row through the common Work Item action. */
@@ -252,6 +255,7 @@ export function TaskTableView({
   onBulkPreview,
   onBulkRetry,
   onBulkUndo,
+  onBeforeBulkMutation,
   onCreateTaskOpen,
   onSelectTask,
   onTaskActionMenuOpen,
@@ -488,6 +492,7 @@ export function TaskTableView({
         onPreview={onBulkPreview}
         onRetry={onBulkRetry}
         onUndo={onBulkUndo}
+        onBeforeMutation={onBeforeBulkMutation}
         onVisibleSelectionChange={onVisibleTaskSelectionChange}
       />
       <section

@@ -164,6 +164,8 @@ export type TaskDetailPaneProps = {
   collaborationRoute?: IssueCollaborationRoute
   /** Whether the selected Work Item detail is loading. */
   isLoading: boolean
+  /** Whether a bulk mutation currently targets this Work Item. */
+  isBulkOperationPending?: boolean
   /** Whether relation candidates are loading. */
   isRelationCandidatesLoading: boolean
   /** Locale used by form controls and nested panels. */
@@ -270,6 +272,7 @@ export function TaskDetailPane({
   collaborationRoute,
   focusedRootCommentId,
   isLoading,
+  isBulkOperationPending = false,
   isRelationCandidatesLoading,
   locale,
   planningSnapshot,
@@ -299,6 +302,7 @@ export function TaskDetailPane({
   const isAiPlanningOperationPendingRef = useRef(false)
   const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const isAiSummaryOperationPendingRef = useRef(false)
+  const commentDraftDirtyRef = useRef(false)
   const isWorkItemMutationPending = isIssueSaving ||
     isAiPlanningOperationPending ||
     isAiSummaryOperationPending
@@ -525,6 +529,11 @@ export function TaskDetailPane({
   }
   const confirmAiPlanningAdoption = () =>
     shouldConfirmAiPlanningAdoption()
+  /** Mirrors the active collaboration draft state before forwarding it to the route owner. */
+  const handleCommentDraftDirtyChange = (isDirty: boolean) => {
+    commentDraftDirtyRef.current = isDirty
+    onCommentDraftDirtyChange?.(isDirty)
+  }
   // The renderer only constructs inert React elements; the supplied callbacks
   // are invoked later by user events inside the feature-owned assistants.
   // eslint-disable-next-line react-hooks/refs -- the renderer returns inert elements and invokes callbacks only from later user events.
@@ -629,6 +638,22 @@ export function TaskDetailPane({
   /** Handles a Work Item Type selection from the detail editor. */
   const handleWorkItemTypeChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextWorkItemTypeId = event.target.value
+    const nextWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
+      resolvedConfiguration,
+      nextWorkItemTypeId,
+    )
+    const nextDetailSections = nextWorkItemTypeDefinition?.detailSections ??
+      DEFAULT_WORK_ITEM_TYPE.detailSections
+    if (
+      detailSectionOrder.includes('activity') &&
+      !nextDetailSections.includes('activity') &&
+      commentDraftDirtyRef.current &&
+      !globalThis.window.confirm(t('collaboration.composer.discardConfirm'))
+    ) return
+    if (detailSectionOrder.includes('activity') && !nextDetailSections.includes('activity')) {
+      commentDraftDirtyRef.current = false
+      onCommentDraftDirtyChange?.(false)
+    }
     setSelectedWorkItemType({
       identity: workItemTypeSelectionIdentity,
       value: nextWorkItemTypeId,
@@ -1208,7 +1233,7 @@ export function TaskDetailPane({
         )
       case 'activity':
         return collaboration ? (
-          <fieldset className="contents" disabled={isIssueSaving}>
+          <fieldset className="contents" disabled={isIssueSaving || isBulkOperationPending}>
             <IssueCollaborationPanel
               aiAssistance={collaborationAiAssistance}
               route={collaborationRoute}
@@ -1222,7 +1247,7 @@ export function TaskDetailPane({
               locale={locale}
               members={workspaceMembers}
               onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
-              onCommentDraftDirtyChange={onCommentDraftDirtyChange}
+              onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
               onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
             />
           </fieldset>

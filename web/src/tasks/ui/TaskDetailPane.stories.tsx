@@ -1,4 +1,4 @@
-import type { AiPlanningDraft } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE, type AiPlanningDraft } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
@@ -30,6 +30,33 @@ const taskDetailStoryProjects = [
   { id: 'refero', name: 'Refero', tone: 'blue' },
   { id: 'product-roadmap', name: 'プロダクトロードマップ', tone: 'yellow' },
 ] satisfies ProjectDirectoryTeam['projects']
+
+/** Configuration with a type that deliberately omits the Activity section. */
+const activityOptionalTypeConfiguration = {
+  ...teamWorkItemConfigurationFixture,
+  workItemTypes: [
+    DEFAULT_WORK_ITEM_TYPE,
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'activity'),
+      id: 'brief',
+      name: 'Brief',
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'activity-brief',
+      name: 'Activity Brief',
+    },
+  ],
+}
+
+/** Detail fixture used to verify comment retention while a type removes Activity. */
+const activityOptionalTypeDetail = {
+  ...taskViewStorySelectedIssueDetail,
+  resolvedConfiguration: {
+    configuration: activityOptionalTypeConfiguration,
+  },
+} satisfies TeamIssueDetail
 
 const mismatchedIssueDetail = {
   ...taskViewStorySelectedIssueDetail,
@@ -378,6 +405,51 @@ export const SaveFailureRetainsCommentDraftWhileWorkItemSavePending: Story = {
 
     await waitFor(async () => expect(commentBody).toBeEnabled())
     await expect(commentBody).toHaveValue('保存失敗後も残るコメント')
+  },
+}
+
+/** Prompts before a type change removes Activity and clears only after confirmation. */
+export const TypeChangeRemovingActivityProtectsCommentDraft: Story = {
+  args: {
+    collaboration: issueCollaborationControllerFixture,
+    configuration: activityOptionalTypeConfiguration,
+    detail: activityOptionalTypeDetail,
+    onCommentDraftDirtyChange: fn(),
+    onUpdateIssue: createUpdateIssueSpy(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const commentBody = canvas.getByRole('textbox', { name: 'コメント本文' })
+    const typeSelect = canvas.getByRole('combobox', { name: 'Work Item Type' })
+    await userEvent.type(commentBody, 'Activityを除去しても保持するコメント')
+
+    const originalConfirm = globalThis.window.confirm
+    let confirmCount = 0
+    globalThis.window.confirm = (message) => {
+      confirmCount += 1
+      expect(message).toContain('コメント')
+      return false
+    }
+    try {
+      await userEvent.selectOptions(typeSelect, 'activity-brief')
+      await expect(typeSelect).toHaveValue('activity-brief')
+      await expect(commentBody).toHaveValue('Activityを除去しても保持するコメント')
+      expect(confirmCount).toBe(0)
+
+      await userEvent.selectOptions(typeSelect, 'brief')
+      await expect(typeSelect).toHaveValue('activity-brief')
+      await expect(commentBody).toHaveValue('Activityを除去しても保持するコメント')
+      await expect(canvas.getByRole('textbox', { name: 'コメント本文' })).toBeVisible()
+      expect(confirmCount).toBe(1)
+
+      globalThis.window.confirm = () => true
+      await userEvent.selectOptions(typeSelect, 'brief')
+      await expect(typeSelect).toHaveValue('brief')
+      await expect(canvas.queryByRole('textbox', { name: 'コメント本文' })).not.toBeInTheDocument()
+      await expect(args.onCommentDraftDirtyChange).toHaveBeenCalledWith(false)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
   },
 }
 

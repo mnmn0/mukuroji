@@ -9,6 +9,7 @@ import type {
   WorkItemRelation,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { BlockerFunction } from 'react-router'
 import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
@@ -858,7 +859,16 @@ export function TaskPage() {
   })
   const isCommentDraftDirty = commentDraftDirtyState.isDirty &&
     commentDraftDirtyState.scopeKey === commentDraftScopeKey
-  const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) => {
+  /**
+   * Determines whether navigation changes either dirty draft owner.
+   * It invalidates a clean pending create when its owning scope changes and
+   * only blocks navigation while an authenticated session is available.
+   *
+   * @param currentLocation - The location currently owning the create form.
+   * @param nextLocation - The location requested by the navigation.
+   * @returns Whether the navigation must be blocked for discard confirmation.
+   */
+  const shouldBlockDraftNavigation = useCallback<BlockerFunction>(({ currentLocation, nextLocation }) => {
     const nextSearchParams = new URLSearchParams(nextLocation.search)
     const nextRouteContext = resolveProjectTaskRouteContext({
       projectId,
@@ -901,7 +911,8 @@ export function TaskPage() {
     }
     return Boolean(getAuthSession()) && (shouldBlockCreate || shouldBlockComment)
   }, [commentDraftScopeKey, creationTeam?.id, projectId, projectIssues, resolvedSelectedIssue?.id,
-    resolvedSelectedIssueTeamId, selectedIssueDetailId, selectedIssueDetailTeamId, taskScopeKey, teams],))
+    resolvedSelectedIssueTeamId, selectedIssueDetailId, selectedIssueDetailTeamId, taskScopeKey, teams])
+  const navigationBlocker = useBlocker(shouldBlockDraftNavigation)
   /** Reports create-form dirtiness to the route-owned navigation guard. */
   const reportCreateTaskDirty = useCallback((isDirty: boolean, discardHandler?: () => void) => {
     if (!isDirty && createTaskDirtyScopeRef.current !== undefined &&

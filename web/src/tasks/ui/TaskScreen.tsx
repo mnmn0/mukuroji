@@ -132,9 +132,18 @@ import {
   formatTaskSurfaceKeyboardShortcut,
 } from '../../task-views/ui/taskSurfaceKeyboard'
 import type {
+  BulkOperationMutationContext,
   BulkOperationTaskActionInterruption,
   BulkOperationTaskActionRequest,
 } from '../../bulk-operations/ui/BulkOperationToolbar'
+
+/** Local display ownership for each concurrently running destructive bulk mutation. */
+type BulkMutationPendingEntry = {
+  /** Identity used to remove only the mutation that has settled. */
+  owner: object
+  /** Team-qualified Work Item keys whose composers remain protected. */
+  targetKeys: string[]
+}
 import type { CreateWorkItemInput, CanonicalWorkItem } from '../api/tasks'
 import {
   createBulkOperationSelection,
@@ -715,6 +724,7 @@ export function TaskScreen({
   const createTaskDirtyRef = useRef(false)
   const commentDraftDirtyRef = useRef(false)
   const commentDraftDirtyScopeRef = useRef<string | undefined>(undefined)
+  const [bulkMutationPendingEntries, setBulkMutationPendingEntries] = useState<BulkMutationPendingEntry[]>([])
   /** Monotonic local owner lifetime used to fence delayed Work Item saves. */
   const commentDraftOwnerGenerationRef = useRef(0)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
@@ -1265,6 +1275,33 @@ export function TaskScreen({
   const selectedDetailTaskKey = selectedDetailTask
     ? createTaskKey(selectedDetailTask)
     : undefined
+
+  /** Resolves the exact detail keys affected by a destructive bulk mutation. */
+  const resolveBulkMutationTargetKeys = useCallback((
+    context: BulkOperationMutationContext,
+  ): string[] => {
+    const action = context.request?.action ?? context.operation?.action
+    if (!action) return []
+    const items = context.request?.items ?? context.operation?.items ?? []
+    const eligibleItems = context.kind === 'retry'
+      ? context.operation?.items.filter((item) =>
+          item.status === 'ready' || (item.status === 'failed' && item.retryable),
+        ) ?? []
+      : context.kind === 'undo'
+        ? context.operation?.items.filter((item) => item.status === 'succeeded' && item.undoable) ?? []
+        : context.kind === 'resume'
+          ? context.operation?.items.filter((item) =>
+              item.status === 'ready' || (item.status === 'failed' && item.retryable),
+            ) ?? items
+          : items
+    const affectsCurrentProject = context.kind === 'undo'
+      ? action.type === 'move' || action.type === 'archive' && !action.archived
+      : action.type === 'archive' && action.archived ||
+        action.type === 'move' && action.targetProjectId !== projectId
+    return affectsCurrentProject
+      ? eligibleItems.map((item) => `${item.teamId}:${item.workItemId}`)
+      : []
+  }, [projectId])
   const detailAiSessionKey = detailTask
     ? `${detailTask.teamId}:${detailTask.id}:${detailTask.revision}`
     : ''
@@ -1388,6 +1425,83 @@ export function TaskScreen({
     commentDraftDirtyScopeRef.current = undefined
     onCommentDraftDirtyChange?.(false, scopeKey)
   }, [onCommentDraftDirtyChange])
+
+  /** Checks and, when accepted, discards the active comment owner before bulk mutation. */
+  const handleBeforeBulkMutation = useCallback((
+    context: BulkOperationMutationContext,
+  ): boolean => {
+    if (!detailTask || resolveBulkMutationTargetKeys(context).every((key) =>
+      key !== `${detailTask.teamId}:${detailTask.id}`,
+    )) {
+      return true
+    }
+
+    const commentScopeKey = JSON.stringify([detailTask.teamId ?? '', detailTask.id])
+    const ownsDirtyComment = commentDraftDirtyRef.current &&
+      commentDraftDirtyScopeRef.current === commentScopeKey
+    if (ownsDirtyComment && !globalThis.window.confirm(t('collaboration.composer.discardConfirm'))) {
+      return false
+    }
+    if (ownsDirtyComment) {
+      discardCommentDraft()
+      setIsDetailOpen(false)
+    }
+    return true
+  }, [detailTask, discardCommentDraft, resolveBulkMutationTargetKeys, t])
+
+  /** Begins one target-scoped pending marker immediately before bulk dispatch. */
+  const beginBulkMutation = useCallback((context: BulkOperationMutationContext) => {
+    const targetKeys = resolveBulkMutationTargetKeys(context)
+    if (targetKeys.length === 0) return undefined
+    const owner = {}
+    setBulkMutationPendingEntries((currentEntries) => [...currentEntries, { owner, targetKeys }])
+    return owner
+  }, [resolveBulkMutationTargetKeys])
+
+  /** Clears bulk pending state only for the mutation that established it. */
+  const finishBulkMutation = useCallback((owner: object | undefined) => {
+    if (!owner) return
+    setBulkMutationPendingEntries((currentEntries) => {
+      if (!currentEntries.some((entry) => entry.owner === owner)) return currentEntries
+      return currentEntries.filter((entry) => entry.owner !== owner)
+    })
+  }, [])
+
+  /** Applies a bulk mutation while retaining an exact pending-detail owner. */
+  const handleBulkApply = useCallback(async (
+    request: BulkOperationRequest,
+    preview: BulkOperationPreview,
+  ) => {
+    const owner = beginBulkMutation({ kind: 'apply', request })
+    try {
+      if (!onBulkApply) throw new Error('Bulk apply is unavailable')
+      return await onBulkApply(request, preview)
+    } finally {
+      finishBulkMutation(owner)
+    }
+  }, [beginBulkMutation, finishBulkMutation, onBulkApply])
+
+  /** Retries a bulk mutation while retaining an exact pending-detail owner. */
+  const handleBulkRetry = useCallback(async (operationId: string, operation?: BulkOperation) => {
+    const owner = beginBulkMutation({ kind: 'retry', operation })
+    try {
+      if (!onBulkRetry) throw new Error('Bulk retry is unavailable')
+      return await onBulkRetry(operationId, operation)
+    } finally {
+      finishBulkMutation(owner)
+    }
+  }, [beginBulkMutation, finishBulkMutation, onBulkRetry])
+
+  /** Undoes a bulk mutation while retaining an exact pending-detail owner. */
+  const handleBulkUndo = useCallback(async (operationId: string, operation?: BulkOperation) => {
+    const owner = beginBulkMutation({ kind: 'undo', operation })
+    try {
+      if (!onBulkUndo) throw new Error('Bulk undo is unavailable')
+      return await onBulkUndo(operationId, operation)
+    } finally {
+      finishBulkMutation(owner)
+    }
+  }, [beginBulkMutation, finishBulkMutation, onBulkUndo])
 
   /** Reports comment draft ownership while retaining the local preflight signal. */
   const reportCommentDraftDirty = useCallback((isDirty: boolean, scopeKey?: string) => {
@@ -3348,16 +3462,17 @@ export function TaskScreen({
                   ...currentViewState,
                   assigneeFilter: nextAssigneeFilter,
                 })}
-                onBulkApply={onBulkApply}
+                onBeforeBulkMutation={handleBeforeBulkMutation}
+                onBulkApply={onBulkApply ? handleBulkApply : undefined}
                 onBulkOperationComplete={handleBulkOperationComplete}
                 onBulkPreview={onBulkPreview}
-                onBulkRetry={onBulkRetry}
+                onBulkRetry={onBulkRetry ? handleBulkRetry : undefined}
                 onBulkTaskActionRequest={handleBulkTaskActionRequest}
                 onBulkTaskActionRequestConsumed={handleBulkTaskActionRequestConsumed}
                 onBulkTaskActionInterrupted={handleBulkTaskActionInterrupted}
                 onBulkTaskActionMutationStart={handleBulkTaskActionMutationStart}
                 onBulkTaskActionOperationComplete={handleBulkTaskActionOperationComplete}
-                onBulkUndo={onBulkUndo}
+                onBulkUndo={onBulkUndo ? handleBulkUndo : undefined}
                 onCreateTaskOpen={onCreateTask ? handleProjectCreateClick : undefined}
                 onCreateScheduleDependency={onCreateScheduleDependency}
                 onDeleteScheduleDependency={onDeleteScheduleDependency}
@@ -3466,6 +3581,11 @@ export function TaskScreen({
                   focusedCommentId={focusedCommentId}
                   focusedRootCommentId={focusedRootCommentId}
                   isLoading={isSelectedIssueDetailLoading}
+                  isBulkOperationPending={Boolean(
+                    detailTask && bulkMutationPendingEntries.some((entry) =>
+                      entry.targetKeys.includes(`${detailTask.teamId}:${detailTask.id}`),
+                    ),
+                  )}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
                   key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}`}
                   locale={locale}

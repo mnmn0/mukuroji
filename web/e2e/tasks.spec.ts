@@ -2,7 +2,9 @@ import { expect, test } from '@playwright/test'
 import type { Dialog, Locator, Page } from '@playwright/test'
 import {
   COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+  AUTOMATION_SCHEMA_VERSION,
   FOCUS_SCHEMA_VERSION,
   PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -10,6 +12,7 @@ import {
   type AnalyticsExportInput,
   type AnalyticsQueryInput,
   type ApprovalRequest,
+  type BulkOperationAction,
   type ConfirmWorkItemScheduleChangeInput,
   type CuratedContextItem,
   type CustomFieldValue,
@@ -96,6 +99,25 @@ const defaultWorkItemConfiguration = {
     ],
   },
   customFields: [],
+} satisfies WorkItemConfiguration
+
+/** Team configuration used to verify that removing Activity protects dirty comments. */
+const activityOptionalTypeConfiguration = {
+  ...teamWorkItemConfigurationFixture,
+  workItemTypes: [
+    DEFAULT_WORK_ITEM_TYPE,
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'activity'),
+      id: 'brief',
+      name: 'Brief',
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'activity-brief',
+      name: 'Activity Brief',
+    },
+  ],
 } satisfies WorkItemConfiguration
 
 const reciprocalWorkItemRelationTypes = {
@@ -5521,6 +5543,236 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('bulk-selected-count')).toHaveText('0件を選択中')
   })
 
+  test('dirtyコメントの一括移動は適用前に確認し、非破壊bulk編集は本文を保持する', async ({ page }) => {
+    let operationAction: BulkOperationAction = { type: 'move', targetProjectId: 'product-roadmap' }
+    let previewCount = 0
+    let applyCount = 0
+    let holdNextApply = false
+    let releaseBulkApply: (() => void) | undefined
+    let expectedApplyItemIds = ['wireframe']
+    const targetItem = {
+      expectedRevision: 3,
+      teamId: 'core-team',
+      workItemId: 'wireframe',
+    }
+    const secondTargetItem = {
+      expectedRevision: 1,
+      teamId: 'core-team',
+      workItemId: 'brand-guideline',
+    }
+    /** Reads the concrete Work Item IDs from a bulk request for response and ownership assertions. */
+    const readBulkRequestItemIds = (body: unknown): string[] => {
+      if (typeof body !== 'object' || body === null || !('items' in body) || !Array.isArray(body.items)) {
+        throw new Error('Bulk request did not contain an items list.')
+      }
+      return body.items.flatMap((item) => {
+        if (typeof item !== 'object' || item === null || !('workItemId' in item) ||
+            typeof item.workItemId !== 'string') {
+          throw new Error('Bulk request item did not contain a Work Item ID.')
+        }
+        return [item.workItemId]
+      })
+    }
+
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      previewCount += 1
+      const requestBody = route.request().postDataJSON()
+      const requestItemIds = readBulkRequestItemIds(requestBody)
+      expect(requestItemIds).toEqual(expectedApplyItemIds)
+      if (typeof requestBody !== 'object' || requestBody === null ||
+          !('action' in requestBody) || typeof requestBody.action !== 'object' || requestBody.action === null ||
+          !('type' in requestBody.action) || typeof requestBody.action.type !== 'string') {
+        throw new Error('Bulk preview request did not contain an action.')
+      }
+      expect(requestBody.action.type).toBe(operationAction.type)
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          canApply: true,
+          items: requestItemIds.map((workItemId) => ({
+            expectedRevision: workItemId === 'wireframe' ? targetItem.expectedRevision : secondTargetItem.expectedRevision,
+            teamId: 'core-team',
+            workItemId,
+            retryable: false,
+            status: 'ready',
+            undoable: false,
+          })),
+          operationToken: `preview-${previewCount}`,
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      applyCount += 1
+      const requestAction = operationAction
+      const requestBody = route.request().postDataJSON()
+      if (
+        typeof requestBody !== 'object' || requestBody === null ||
+        !('action' in requestBody) || typeof requestBody.action !== 'object' || requestBody.action === null ||
+        !('type' in requestBody.action) || typeof requestBody.action.type !== 'string' ||
+        !('items' in requestBody) || !Array.isArray(requestBody.items)
+      ) {
+        throw new Error('Bulk apply request did not contain a typed action and items list.')
+      }
+      const requestItemIds = readBulkRequestItemIds(requestBody)
+      const expectedRequestItemIds = expectedApplyItemIds
+      expect(requestBody.action.type).toBe(requestAction.type)
+      expect(requestItemIds).toEqual(expectedRequestItemIds)
+      const isHeldApply = holdNextApply
+      holdNextApply = false
+      if (isHeldApply) {
+        await new Promise<void>((resolve) => {
+          releaseBulkApply = resolve
+        })
+        await route.fulfill({
+          json: { message: 'bulk conflict' },
+          status: 409,
+        })
+        return
+      }
+      await route.fulfill({
+        json: {
+          action: requestAction,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: `bulk-operation-${applyCount}`,
+          items: requestItemIds.map((workItemId) => ({
+            expectedRevision: workItemId === 'wireframe' ? targetItem.expectedRevision : secondTargetItem.expectedRevision,
+            teamId: 'core-team',
+            workItemId,
+            resultingRevision: 4,
+            retryable: false,
+            status: 'succeeded',
+            undoable: false,
+          })),
+          revision: applyCount,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: 'succeeded',
+          updatedAt: '2026-06-08T00:00:01.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('一括操作前も残すコメント本文')
+    await page.getByTestId('task-row-wireframe').getByRole('checkbox').check()
+    await page.getByRole('button', { name: '一括移動', exact: true }).click()
+    await page.getByRole('combobox', { name: '移動先プロジェクト' }).selectOption('product-roadmap')
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const preview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(preview).toBeVisible()
+
+    const declineDialog = page.waitForEvent('dialog')
+    const declineClick = preview.getByRole('button', { name: '適用', exact: true }).click()
+    const declined = await declineDialog
+    expect(declined.message()).toContain('コメントの下書きを破棄')
+    await declined.dismiss()
+    await declineClick
+    await expect(body).toHaveValue('一括操作前も残すコメント本文')
+    await expect(preview).toBeVisible()
+    expect(applyCount).toBe(0)
+
+    const acceptDialog = page.waitForEvent('dialog')
+    const acceptClick = preview.getByRole('button', { name: '適用', exact: true }).click()
+    const accepted = await acceptDialog
+    expect(accepted.message()).toContain('コメントの下書きを破棄')
+    await accepted.accept()
+    await acceptClick
+    await expect(preview).toHaveCount(0)
+    expect(applyCount).toBe(1)
+    await expect(page.locator('textarea[name="body"]')).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'プロダクトロードマップ', exact: true }).click()
+    await expect(page).toHaveURL('/projects/product-roadmap/issues?teamId=core-team')
+    await page.getByRole('button', { name: 'Refero', exact: true }).click()
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
+    await page.getByTestId('task-row-wireframe').click()
+    await expect(page).toHaveURL(/issueId=wireframe/u)
+
+    operationAction = { type: 'archive', archived: true }
+    await page.getByTestId('task-row-wireframe').getByRole('checkbox').check()
+    await page.getByRole('button', { name: '一括アーカイブ', exact: true }).click()
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const archivePreview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(archivePreview).toBeVisible()
+    await body.fill('preview後に追記したアーカイブ保護本文')
+    const archiveDeclineDialog = page.waitForEvent('dialog')
+    const archiveDeclineClick = archivePreview.getByRole('button', { name: '適用', exact: true }).click()
+    const archiveDeclined = await archiveDeclineDialog
+    expect(archiveDeclined.message()).toContain('コメントの下書きを破棄')
+    await archiveDeclined.dismiss()
+    await archiveDeclineClick
+    await expect(body).toHaveValue('preview後に追記したアーカイブ保護本文')
+    await expect(archivePreview).toBeVisible()
+    expect(applyCount).toBe(1)
+
+    const archiveAcceptDialog = page.waitForEvent('dialog')
+    const archiveAcceptClick = archivePreview.getByRole('button', { name: '適用', exact: true }).click()
+    const archiveAccepted = await archiveAcceptDialog
+    expect(archiveAccepted.message()).toContain('コメントの下書きを破棄')
+    await archiveAccepted.accept()
+    await archiveAcceptClick
+    await expect(archivePreview).toHaveCount(0)
+    expect(applyCount).toBe(2)
+
+    operationAction = { type: 'edit', patch: { workflowStatusId: 'review' } }
+    await page.getByTestId('task-row-wireframe').click()
+    await expect(page).toHaveURL(/issueId=wireframe/u)
+    await body.fill('非破壊bulk編集では保持する本文')
+    await page.getByTestId('task-row-wireframe').getByRole('checkbox').check()
+    await page.getByRole('button', { name: '一括編集', exact: true }).click()
+    await page.getByRole('textbox', { name: '変更後の値' }).fill('review')
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const editPreview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await editPreview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect(editPreview).toHaveCount(0)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('非破壊bulk編集では保持する本文')
+    expect(applyCount).toBe(3)
+
+    operationAction = { type: 'move', targetProjectId: 'product-roadmap' }
+    holdNextApply = true
+    expectedApplyItemIds = ['wireframe', 'brand-guideline']
+    await page.getByTestId('task-row-wireframe').getByRole('checkbox').check()
+    await page.getByTestId('task-row-brand-guideline').getByRole('checkbox').check()
+    await page.getByRole('button', { name: '一括移動', exact: true }).click()
+    await page.getByRole('combobox', { name: '移動先プロジェクト' }).selectOption('product-roadmap')
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const delayedPreview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(delayedPreview).toBeVisible()
+    const delayedDialog = page.waitForEvent('dialog')
+    const delayedApplyClick = delayedPreview.getByRole('button', { name: '適用', exact: true }).click()
+    const delayedConfirm = await delayedDialog
+    await delayedConfirm.accept()
+    await delayedApplyClick
+
+    await expect.poll(() => releaseBulkApply !== undefined).toBe(true)
+
+    await page.getByTestId('task-row-brand-guideline').click()
+    const pendingBrandGuidelineBody = page.locator('textarea[name="body"]')
+    await expect(pendingBrandGuidelineBody).toBeDisabled()
+
+    await page.getByTestId('task-row-brand-guideline').click({ button: 'right' })
+    await page.getByTestId('project-task-action-context-menu')
+      .getByRole('menuitem', { name: /Work Item をアーカイブ/u }).click()
+    operationAction = { type: 'archive', archived: true }
+    expectedApplyItemIds = ['brand-guideline']
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const secondBulkPreview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(secondBulkPreview).toBeVisible()
+    await secondBulkPreview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect.poll(() => applyCount).toBe(5)
+    await expect(secondBulkPreview).toHaveCount(0)
+
+    await page.getByTestId('task-row-wireframe').click()
+    const delayedWireframeBody = page.locator('textarea[name="body"]')
+    await expect(delayedWireframeBody).toBeDisabled()
+    releaseBulkApply?.()
+    await expect(delayedWireframeBody).toBeEnabled()
+    await expect(page.getByRole('alert').filter({ hasText: 'Work Item の操作を完了できませんでした。' })).toBeVisible()
+    expect(applyCount).toBe(5)
+  })
+
   test('Issue toolbar で検索、ステータス絞り込み、テーブル/ボード切替が動作する', async ({ page }) => {
     await page.goto('/teams/core-team/issues')
 
@@ -6635,6 +6887,88 @@ test.describe('authenticated task page', () => {
     await expect(tableTab).toHaveAttribute('aria-selected', 'true')
     await expect(tableTab).toBeFocused()
     await expect(body).toHaveValue('キーボード移動を拒否して保持するコメント下書き')
+  })
+
+  test('Activityを除去する種別変更はコメント下書きを確認後まで保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamWorkItemConfigurations: { 'core-team': activityOptionalTypeConfiguration },
+    })
+    let previewRequests = 0
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/work-item-type-preview$/u, async (route) => {
+      previewRequests += 1
+      const requestBody = route.request().postDataJSON()
+      const targetWorkItemTypeId = typeof requestBody === 'object' &&
+        requestBody !== null &&
+        'targetWorkItemTypeId' in requestBody &&
+        typeof requestBody.targetWorkItemTypeId === 'string'
+        ? requestBody.targetWorkItemTypeId
+        : ''
+      await route.fulfill({
+        json: {
+          approvalCompletionTransitionConflict: false,
+          currentWorkflowStatusId: 'active',
+          currentWorkItemTypeId: 'default',
+          expectedRevision: 1,
+          lostCustomFieldIds: [],
+          missingRequiredCustomFieldDefinitions: [],
+          missingRequiredCustomFieldIds: [],
+          requiresResolution: false,
+          targetInitialWorkflowStatusId: 'todo',
+          targetWorkItemTypeId,
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const commentBody = page.locator('textarea[name="body"]')
+    const typeSelect = detailPane.getByRole('combobox', { name: 'Work Item Type' })
+    await commentBody.fill('種別変更確認まで保持するコメント')
+    let unexpectedDialogCount = 0
+    /** Records an unexpected discard confirmation while selecting an Activity-preserving type. */
+    const unexpectedDialogHandler = async (dialog: Dialog) => {
+      unexpectedDialogCount += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedDialogHandler)
+
+    await typeSelect.selectOption('activity-brief')
+    await expect(typeSelect).toHaveValue('activity-brief')
+    await expect(commentBody).toHaveValue('種別変更確認まで保持するコメント')
+    expect(previewRequests).toBe(1)
+    expect(unexpectedDialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
+
+    const declinedDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメント')
+      await dialog.dismiss()
+    })
+    await Promise.all([typeSelect.selectOption('brief'), declinedDialog])
+    await expect(typeSelect).toHaveValue('activity-brief')
+    await expect(commentBody).toHaveValue('種別変更確認まで保持するコメント')
+    expect(previewRequests).toBe(1)
+
+    const acceptedDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメント')
+      await dialog.accept()
+    })
+    await Promise.all([typeSelect.selectOption('brief'), acceptedDialog])
+    await expect(typeSelect).toHaveValue('brief')
+    await expect.poll(() => previewRequests).toBe(2)
+    await expect(commentBody).toHaveCount(0)
+    page.on('dialog', unexpectedDialogHandler)
+
+    await typeSelect.selectOption('default')
+    await expect(typeSelect).toHaveValue('default')
+    await expect.poll(() => previewRequests).toBe(2)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+    await page.getByLabel('メインサイドバー').getByRole('button', {
+      name: 'ブランド刷新',
+      exact: true,
+    }).click()
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+    expect(unexpectedDialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
   })
 
   test('作成とコメントの下書きを同時に離れると一度だけまとめて確認する', async ({ page }) => {
