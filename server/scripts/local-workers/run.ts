@@ -15,7 +15,7 @@ for (const key of Object.keys(process.env)) {
 }
 for (const key of ['AWS_ENDPOINT_URL', 'AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS',
   'AWS_ENDPOINT_URL_DYNAMODB', 'DYNAMODB_ENDPOINT', 'SQS_ENDPOINT', 'COGNITO_ENDPOINT',
-  'SECRETS_MANAGER_ENDPOINT', 'AWS_ENDPOINT_URL_SECRETS_MANAGER']) process.env[key] = origin
+  'SECRETS_MANAGER_ENDPOINT', 'AWS_ENDPOINT_URL_SECRETS_MANAGER', 'AWS_ENDPOINT_URL_SECRETSMANAGER']) process.env[key] = origin
 process.env.AWS_ACCESS_KEY_ID = 'test'
 process.env.AWS_SECRET_ACCESS_KEY = 'test'
 process.env.AWS_REGION = 'us-east-1'
