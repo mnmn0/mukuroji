@@ -62,7 +62,7 @@ jobs:
         run: |
           for attempt in {1..300}; do
             docker compose logs floci > "${RUNNER_TEMP}/floci.log"
-            if [ -f .floci/generated/cognito.env ]; then
+            if [ -f .floci/generated/cognito.env ] && [ -f .floci/generated/services.env ]; then
               exit 0
             fi
             sleep 1
@@ -70,6 +70,12 @@ jobs:
 
           cat "${RUNNER_TEMP}/floci.log"
           exit 1
+
+      - name: Exercise local workers
+        run: bun run workers:once
+
+      - name: Exercise local S3 and SQS
+        run: docker compose exec -T floci sh < floci/check-services.sh
 
       - name: Exercise the local API and Work Item schema
         run: |

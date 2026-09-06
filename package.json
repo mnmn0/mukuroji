@@ -9,7 +9,9 @@
     "cdk"
   ],
   "scripts": {
-    "floci:up": "docker compose up -d floci",
+    "floci:up": "docker compose up -d floci dynamodb-admin",
+    "workers:dev": "bun --env-file=.env --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env server/scripts/local-workers/run.ts",
+    "workers:once": "bun run workers:dev --once",
     "floci:down": "docker compose down",
     "oxc:lint": "oxlint .",
     "oxc:lint:github": "oxlint . --format=github",
@@ -34,7 +36,7 @@
     "web:e2e": "playwright test",
     "web:storybook": "bun --filter web storybook",
     "web:build-storybook": "bun --filter web build-storybook",
-    "server:dev": "bun --env-file=.env --filter server dev",
+    "server:dev": "bun --env-file=.env --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env --filter server dev",
     "server:build:lambda": "bun --filter server build:lambda",
     "server:test": "bun --filter server test",
     "ai-assistance:eval": "bun --filter server ai-assistance:eval",
