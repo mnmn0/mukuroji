@@ -39,7 +39,7 @@ import {
   type DragEvent,
   type ReactNode,
 } from 'react'
-import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
+import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
   canManageWorkspaceStructure,
   canMutateWorkspaceContent,
@@ -225,6 +225,7 @@ import {
 } from '../../task-views/model/taskViewSelection'
 import {
   allowTaskAction,
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createSucceededTaskCreateActionResult,
   createSucceededTaskActionResult,
@@ -297,6 +298,14 @@ const taskViewBuiltInFields = [
 type IssueViewMode = 'table' | 'board'
 
 const issueViewPanelId = 'team-issue-view-panel'
+
+/** Resolves the selected Team Issue using the same trimmed membership fallback as the screen. */
+function resolveTeamIssueSelectionId(issues: readonly TeamIssue[], requestedIssueId?: string) {
+  const trimmedIssueId = requestedIssueId?.trim()
+  return trimmedIssueId && issues.some((issue) => issue.id === trimmedIssueId)
+    ? trimmedIssueId
+    : issues[0]?.id
+}
 
 /** Transient Team Issue context-menu target retained independently from keyboard selection. */
 type TeamIssueActionContextMenuState = {
@@ -387,7 +396,7 @@ type TeamIssueScreenProps = {
   /** Whether the current viewer may create an unassigned Work Item in the Team scope. */
   canCreateUnassignedIssue?: boolean
   /** Project destinations where the current viewer may create a Team Issue. */
-  createIssueProjects?: ProjectDirectoryTeam['projects']
+  createIssueProjects?: ProjectDirectoryTeam['projects'][number][]
   /**
    * Related Documents を取得する access token です。
    */
@@ -475,6 +484,10 @@ type TeamIssueScreenProps = {
   collaborationRoute?: IssueCollaborationRoute
   /** Reports an authenticated AI API failure to the route-level session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports retained comment input with the Team-local Issue owner to the navigation guard. */
+  onCommentDraftDirtyChange?: (isDirty: boolean, issueId?: string) => void
+  /** Confirms a destructive Issue selection before action focus or ownership changes. */
+  onBeforeSelectIssue?: (issueId: string) => boolean
   /**
    * タスク担当者として選択できる project member 一覧です。
    */
@@ -554,6 +567,8 @@ export function TeamIssuePage() {
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
+  const commentDraftDirtyRef = useRef(false)
+  const commentDraftDirtyScopeRef = useRef<string | undefined>(undefined)
   const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
@@ -643,10 +658,79 @@ export function TeamIssuePage() {
     teamId,
     Boolean(user && !currentUserError),
   )
-  const resolvedSelectedIssueId = requestedIssueId && issues.some((issue) => issue.id === requestedIssueId)
-    ? requestedIssueId
-    : issues[0]?.id
+  const resolvedSelectedIssueId = resolveTeamIssueSelectionId(issues, requestedIssueId)
   const resolvedSelectedIssue = issues.find((issue) => issue.id === resolvedSelectedIssueId)
+  const commentDraftPrincipalKey = user?.username ?? user?.attributes.email ?? ''
+  const commentDraftWorkspaceKey = user?.attributes['custom:workspace_id'] ??
+    user?.attributes['custom:directory_id'] ?? ''
+  const commentDraftScopeKey = JSON.stringify([
+    teamId,
+    resolvedSelectedIssueId ?? '',
+    commentDraftPrincipalKey,
+    commentDraftWorkspaceKey,
+  ])
+  const [commentDraftDirtyState, setCommentDraftDirtyState] = useState({
+    isDirty: false,
+    scopeKey: commentDraftScopeKey,
+  })
+  const isCommentDraftDirty = commentDraftDirtyState.isDirty &&
+    commentDraftDirtyState.scopeKey === commentDraftScopeKey
+  const navigationBlocker = useBlocker(({ currentLocation, nextLocation }) => {
+    if (!getAuthSession() || !commentDraftDirtyRef.current ||
+      commentDraftDirtyScopeRef.current !== commentDraftScopeKey) return false
+    if (currentLocation.pathname !== nextLocation.pathname) return true
+    const nextIssueId = resolveTeamIssueSelectionId(
+      issues,
+      new URLSearchParams(nextLocation.search).get('issueId') ?? undefined,
+    )
+    return nextIssueId !== resolvedSelectedIssueId
+  })
+  /** Reports comment input only while its exact Team Issue scope is current. */
+  const reportCommentDraftDirty = useCallback((isDirty: boolean, issueId = resolvedSelectedIssueId) => {
+    const reportedScopeKey = JSON.stringify([
+      teamId,
+      issueId ?? '',
+      commentDraftPrincipalKey,
+      commentDraftWorkspaceKey,
+    ])
+    if (reportedScopeKey !== commentDraftScopeKey) return
+    commentDraftDirtyRef.current = isDirty
+    commentDraftDirtyScopeRef.current = commentDraftScopeKey
+    setCommentDraftDirtyState({ isDirty, scopeKey: commentDraftScopeKey })
+  }, [commentDraftPrincipalKey, commentDraftScopeKey, commentDraftWorkspaceKey, resolvedSelectedIssueId, teamId])
+  useEffect(() => {
+    if (navigationBlocker.state !== 'blocked') return
+    if (window.confirm(createTranslator(locale)('collaboration.composer.discardConfirm'))) {
+      reportCommentDraftDirty(false)
+      commentDraftDirtyScopeRef.current = undefined
+      navigationBlocker.proceed()
+    } else {
+      navigationBlocker.reset()
+    }
+  }, [locale, navigationBlocker, reportCommentDraftDirty])
+  /** Confirms a local Issue selection before the action registry mutates focus or ownership. */
+  const confirmCommentDraftIssueChange = useCallback((nextIssueId: string) => {
+    if (!commentDraftDirtyRef.current ||
+      commentDraftDirtyScopeRef.current !== commentDraftScopeKey ||
+      nextIssueId === resolvedSelectedIssueId) return true
+    if (!window.confirm(createTranslator(locale)('collaboration.composer.discardConfirm'))) {
+      return false
+    }
+    reportCommentDraftDirty(false)
+    commentDraftDirtyScopeRef.current = undefined
+    return true
+  }, [commentDraftScopeKey, locale, reportCommentDraftDirty, resolvedSelectedIssueId])
+  useEffect(() => {
+    if (!isCommentDraftDirty) return
+    /** Protects a dirty comment draft from browser-level navigation while authenticated. */
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      if (!getAuthSession()) return
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', preventUnload)
+    return () => window.removeEventListener('beforeunload', preventUnload)
+  }, [isCommentDraftDirty])
   const collaboration = useIssueCollaboration({
     accessToken,
     issueId: resolvedSelectedIssueId,
@@ -1142,6 +1226,8 @@ export function TeamIssuePage() {
         onCollaborationSourceChange: handleCollaborationSourceChange,
       }}
       onAuthenticatedApiError={setAuthenticatedApiError}
+      onBeforeSelectIssue={confirmCommentDraftIssueChange}
+      onCommentDraftDirtyChange={reportCommentDraftDirty}
       canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
@@ -1155,7 +1241,7 @@ export function TeamIssuePage() {
       isLoading={isLoading}
       isPlanningLoading={isPlanningLoading}
       isRelationsLoading={Boolean(detailKey && isIssueDetailLoading)}
-      key={teamId}
+      key={JSON.stringify([teamId, commentDraftPrincipalKey, commentDraftWorkspaceKey])}
       locale={locale}
       onAddRelation={hasWritableWorkItemScope ? handleAddRelation : undefined}
       createIssueProjects={createIssueProjects}
@@ -1229,6 +1315,8 @@ export function TeamIssueScreen({
   collaboration,
   collaborationRoute,
   onAuthenticatedApiError,
+  onCommentDraftDirtyChange,
+  onBeforeSelectIssue,
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
@@ -1297,6 +1385,9 @@ export function TeamIssueScreen({
   })
   const pendingCreateContextRef = useRef<TeamIssueCreateContext | undefined>(undefined)
   const onSelectIssueRef = useRef(onSelectIssue)
+  const selectedIssueIdRef = useRef(selectedIssueId)
+  const commentDraftDirtyRef = useRef(false)
+  const commentDraftOwnerRef = useRef<string | undefined>(undefined)
   const [pendingAiSummaryIssueKey, setPendingAiSummaryIssueKey] = useState<string>()
   const isAiSummaryOperationPendingRef = useRef(false)
   const activeAiSummaryIssueKey = selectedIssueId
@@ -1320,15 +1411,28 @@ export function TeamIssueScreen({
     if (pending) setTaskActionContextMenuState(undefined)
   }, [])
 
-  /** Clears the selected Team Issue only when no Brief operation owns the detail pane. */
-  const clearSelectedIssueIfAllowed = useCallback(() => {
+  /** Clears a failed action's selected Team Issue without closing another Issue's dirty draft. */
+  const clearSelectedIssueIfAllowed = useCallback((owner: WorkItemActionContext | string = '') => {
+    const ownerIssueId = typeof owner === 'string'
+      ? owner || undefined
+      : resolveTaskSurfaceActionTarget(owner)?.workItemId
     if (isAiSummaryOperationPendingRef.current) return
+    const currentIssueId = selectedIssueIdRef.current || undefined
+    if (ownerIssueId !== undefined && currentIssueId !== ownerIssueId) return
+    if (commentDraftDirtyRef.current && commentDraftOwnerRef.current === currentIssueId) return
+    if (commentDraftDirtyRef.current && commentDraftOwnerRef.current !== currentIssueId) {
+      commentDraftDirtyRef.current = false
+      commentDraftOwnerRef.current = undefined
+    }
     onSelectIssueRef.current?.('')
   }, [])
 
   useLayoutEffect(() => {
     activeAiSummaryIssueKeyRef.current = activeAiSummaryIssueKey
   }, [activeAiSummaryIssueKey])
+  useLayoutEffect(() => {
+    selectedIssueIdRef.current = selectedIssueId
+  }, [selectedIssueId])
   useEffect(() => {
     isAiSummaryOperationPendingRef.current = isAiSummaryOperationPending
     if (!isAiSummaryOperationPending) {
@@ -1366,6 +1470,19 @@ export function TeamIssueScreen({
   }
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
+  /** Reports Team-local comment dirtiness while retaining its exact Issue owner. */
+  const handleCommentDraftDirtyChange = useCallback((isDirty: boolean, issueId?: string) => {
+    const reportedIssueId = issueId ?? selectedIssue?.id
+    if (!reportedIssueId) return
+    if (isDirty) {
+      commentDraftDirtyRef.current = true
+      commentDraftOwnerRef.current = reportedIssueId
+    } else if (commentDraftOwnerRef.current === reportedIssueId) {
+      commentDraftDirtyRef.current = false
+      commentDraftOwnerRef.current = undefined
+    }
+    onCommentDraftDirtyChange?.(isDirty, reportedIssueId)
+  }, [onCommentDraftDirtyChange, selectedIssue?.id])
   const dependencySummaries = useMemo(
     () => createWorkItemDependencySummaries(planningSnapshot),
     [planningSnapshot],
@@ -1588,6 +1705,9 @@ export function TeamIssueScreen({
         t('taskViews.action.notFound'),
       )
     }
+    if (onBeforeSelectIssue && !onBeforeSelectIssue(issue.id)) {
+      return createCancelledTaskActionResult(context.actionId, [target])
+    }
 
     const completion = waitForMutation
       ? taskActionCompletion.begin(context, clearSelectedIssueIfAllowed)
@@ -1598,10 +1718,15 @@ export function TeamIssueScreen({
       key: createTaskViewItemKey(issue.teamId, issue.id),
       type: 'focus',
     }))
+    if (selectedIssueIdRef.current !== issue.id) {
+      commentDraftDirtyRef.current = false
+      commentDraftOwnerRef.current = undefined
+    }
+    selectedIssueIdRef.current = issue.id
     onSelectIssueRef.current?.(issue.id)
     if (controlSelector) focusTeamIssueDetailControl(controlSelector)
     return completion ?? createSucceededTaskActionResult(context.actionId, target)
-  }, [clearSelectedIssueIfAllowed, t, taskActionCompletion, teamActionDisabledReasons.unavailable, visibleIssues])
+  }, [clearSelectedIssueIfAllowed, onBeforeSelectIssue, t, taskActionCompletion, teamActionDisabledReasons.unavailable, visibleIssues])
 
   const currentTeamActionTarget = teamActionSelection.targets.length === 1
     ? teamActionSelection.targets[0]
@@ -1978,7 +2103,7 @@ export function TeamIssueScreen({
           isConflict ? t('tasks.action.conflict') : t('taskViews.action.failed'),
           isConflict,
         ))
-        if (canDismissOwner) clearSelectedIssueIfAllowed()
+        if (canDismissOwner) clearSelectedIssueIfAllowed(issueId)
       }
       if (
         selectedIssueUpdateErrorKey &&
@@ -2056,7 +2181,7 @@ export function TeamIssueScreen({
           t('taskViews.action.failed'),
           isConflict,
         ))
-        if (canDismissOwner) clearSelectedIssueIfAllowed()
+        if (canDismissOwner) clearSelectedIssueIfAllowed(issueId)
       }
       throw error
     }
@@ -2093,6 +2218,7 @@ export function TeamIssueScreen({
    */
   const handleOpenIssue = useCallback((issue: TeamIssue) => {
     if (isAiSummaryOperationPendingRef.current) return
+    if (onBeforeSelectIssue && !onBeforeSelectIssue(issue.id)) return
     const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
     setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
       key: issueKey,
@@ -2108,7 +2234,7 @@ export function TeamIssueScreen({
         workItemId: issue.id,
       }),
     )
-  }, [teamActions])
+  }, [onBeforeSelectIssue, teamActions])
 
   /** Opens a revision-bound Team Issue menu without inheriting unrelated selection. */
   const handleTeamIssueActionMenuOpen = useCallback<TeamIssueActionMenuOpenHandler>((
@@ -2464,6 +2590,7 @@ export function TeamIssueScreen({
                 locale={locale}
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
+                onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
                 onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,
@@ -3908,6 +4035,7 @@ function IssueDetailPane({
   onAddRelation,
   onAuthenticatedApiError,
   onAiSummaryOperationPendingChange,
+  onCommentDraftDirtyChange,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -3948,6 +4076,8 @@ function IssueDetailPane({
   onAuthenticatedApiError?: (error: unknown) => void
   /** Reports the keyed Brief operation state to the Team Issue screen. */
   onAiSummaryOperationPendingChange?: (issueKey: string, pending: boolean) => void
+  /** Reports retained comment composer input to the Team Issue navigation guard. */
+  onCommentDraftDirtyChange?: (isDirty: boolean, issueId?: string) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
@@ -3997,6 +4127,7 @@ function IssueDetailPane({
       onAddRelation={onAddRelation}
       onAuthenticatedApiError={onAuthenticatedApiError}
       onAiSummaryOperationPendingChange={onAiSummaryOperationPendingChange}
+      onCommentDraftDirtyChange={onCommentDraftDirtyChange}
       onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
       onDeleteScheduleDependency={onDeleteScheduleDependency}
@@ -4035,6 +4166,7 @@ function IssueDetailContent({
   onAddRelation,
   onAuthenticatedApiError,
   onAiSummaryOperationPendingChange,
+  onCommentDraftDirtyChange,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -4091,6 +4223,8 @@ function IssueDetailContent({
   onAuthenticatedApiError?: (error: unknown) => void
   /** Reports the keyed Brief operation state to the Team Issue screen. */
   onAiSummaryOperationPendingChange?: (issueKey: string, pending: boolean) => void
+  /** Reports retained comment composer input to the Team Issue navigation guard. */
+  onCommentDraftDirtyChange?: (isDirty: boolean, issueId?: string) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   /** Relation 解除 callback です。 */
@@ -4114,6 +4248,12 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const commentDraftDirtyRef = useRef(false)
+  /** Reports this Team Issue's comment dirtiness to the owning screen. */
+  const handleCommentDraftDirtyChange = useCallback((isDirty: boolean) => {
+    commentDraftDirtyRef.current = isDirty
+    onCommentDraftDirtyChange?.(isDirty, issue.id)
+  }, [issue.id, onCommentDraftDirtyChange])
   const aiSummarySource = {
     expectedRevision: issue.revision,
     teamId: issue.teamId,
@@ -4280,6 +4420,21 @@ function IssueDetailContent({
   /** Handles a Work Item Type selection from the Team Issue editor. */
   const handleWorkItemTypeChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextWorkItemTypeId = event.target.value
+    const nextWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
+      configuration,
+      nextWorkItemTypeId,
+    )
+    const nextDetailSections = nextWorkItemTypeDefinition?.detailSections ??
+      DEFAULT_WORK_ITEM_TYPE.detailSections
+    if (
+      detailSectionOrder.includes('activity') &&
+      !nextDetailSections.includes('activity') &&
+      commentDraftDirtyRef.current &&
+      !globalThis.window.confirm(t('collaboration.composer.discardConfirm'))
+    ) return
+    if (detailSectionOrder.includes('activity') && !nextDetailSections.includes('activity')) {
+      handleCommentDraftDirtyChange(false)
+    }
     setSelectedWorkItemType({
       revision: issue.revision,
       value: nextWorkItemTypeId,
@@ -4743,6 +4898,7 @@ function IssueDetailContent({
                 pending,
               )
             }}
+            onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
           />
         ) : null

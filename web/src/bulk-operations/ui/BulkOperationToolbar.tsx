@@ -68,6 +68,16 @@ export type BulkOperationProjectOption = {
   label: string
 }
 
+/** Describes the durable bulk mutation that is about to be dispatched. */
+export type BulkOperationMutationContext = {
+  /** Bulk request used for an apply or resume action. */
+  request?: BulkOperationRequest
+  /** Durable operation used for retry or undo. */
+  operation?: BulkOperation
+  /** Toolbar action that will dispatch the mutation. */
+  kind: 'apply' | 'resume' | 'retry' | 'undo'
+}
+
 /** BulkOperationToolbar の props です。 */
 export type BulkOperationToolbarProps = {
   /** API が request scope として検証する Workspace ID です。 */
@@ -92,11 +102,14 @@ export type BulkOperationToolbarProps = {
   onApply?: (
     request: BulkOperationRequest,
     preview: BulkOperationPreview,
+    resumedOperation?: BulkOperation,
   ) => Promise<BulkOperation>
   /** Failed item だけを再試行します。 */
   onRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** 成功 item を undo します。 */
   onUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
+  /** Checks the exact target before apply, retry, resume, or undo dispatch. */
+  onBeforeMutation?: (context: BulkOperationMutationContext) => boolean
   /** Operation 更新後に selection と親 cache を同期します。 */
   onOperationComplete?: (operation: BulkOperation) => void
   /** Returns an applied operation to the exact canonical request that opened this toolbar. */
@@ -136,6 +149,7 @@ export function BulkOperationToolbar({
   onApply,
   onRetry,
   onUndo,
+  onBeforeMutation,
   onOperationComplete,
   onTaskActionOperationComplete,
   onTaskActionMutationStart,
@@ -291,10 +305,12 @@ export function BulkOperationToolbar({
     }
   }
 
+  /** Applies the preview after the owning surface approves the exact targets. */
   const handleApply = async () => {
     if (!previewedRequest || !activePreview || !onApply) {
       return
     }
+    if (onBeforeMutation && !onBeforeMutation({ kind: 'apply', request: previewedRequest })) return
     if (
       activeTaskActionRequest &&
       onTaskActionMutationStart &&
@@ -331,10 +347,13 @@ export function BulkOperationToolbar({
     }
   }
 
+  /** Retries only the durable operation items approved by the owning surface. */
   const handleRetry = async () => {
     if (!operation || !onRetry) {
       return
     }
+
+    if (onBeforeMutation && !onBeforeMutation({ kind: 'retry', operation })) return
 
     setBusyState('retry')
     setErrorMessage(undefined)
@@ -349,15 +368,18 @@ export function BulkOperationToolbar({
     }
   }
 
+  /** Resumes the current durable operation after the owning surface approves it. */
   const handleResume = async () => {
     if (!operation || !previewedRequest || !preview || !onApply) {
       return
     }
 
+    if (onBeforeMutation && !onBeforeMutation({ kind: 'resume', operation, request: previewedRequest })) return
+
     setBusyState('resume')
     setErrorMessage(undefined)
     try {
-      const nextOperation = await onApply(previewedRequest, preview)
+      const nextOperation = await onApply(previewedRequest, preview, operation)
       setOperation(nextOperation)
       onOperationComplete?.(nextOperation)
     } catch (error) {
@@ -367,12 +389,15 @@ export function BulkOperationToolbar({
     }
   }
 
+  /** Undoes the current durable operation after the owning surface approves it. */
   const handleUndo = async () => {
     if (!operation || !onUndo) {
       return
     }
     const undoToken = resolveBulkOperationTaskActionUndoToken(operation)
     if (!undoToken) return
+
+    if (onBeforeMutation && !onBeforeMutation({ kind: 'undo', operation })) return
 
     setBusyState('undo')
     setErrorMessage(undefined)

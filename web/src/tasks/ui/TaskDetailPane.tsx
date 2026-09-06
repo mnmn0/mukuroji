@@ -164,6 +164,12 @@ export type TaskDetailPaneProps = {
   collaborationRoute?: IssueCollaborationRoute
   /** Whether the selected Work Item detail is loading. */
   isLoading: boolean
+  /** Whether a bulk mutation currently targets this Work Item. */
+  isBulkOperationPending?: boolean
+  /** Whether this pane is retained read-only after its live Project scope disappeared. */
+  isRetainedDetail?: boolean
+  /** Explanation shown when the retained detail can no longer be edited. */
+  readOnlyMessage?: string
   /** Whether relation candidates are loading. */
   isRelationCandidatesLoading: boolean
   /** Locale used by form controls and nested panels. */
@@ -182,6 +188,8 @@ export type TaskDetailPaneProps = {
   onClose?: () => void
   /** Reports combined Work Item AI operation state to the owning task screen. */
   onAiOperationPendingChange?: (pending: boolean) => void
+  /** Reports retained comment composer input to the owning task screen. */
+  onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Cancels an accepted Schedule action when explicit save detects no schedule change. */
   onScheduleNoChange?: (teamId: string, issueId: string) => void
   /** Saves editable fields on the selected Work Item. */
@@ -268,13 +276,17 @@ export function TaskDetailPane({
   collaborationRoute,
   focusedRootCommentId,
   isLoading,
+  isBulkOperationPending = false,
+  isRetainedDetail = false,
   isRelationCandidatesLoading,
   locale,
   planningSnapshot,
+  readOnlyMessage,
   onAddRelation,
   onAuthenticatedApiError,
   onCreateScheduleDependency,
   onAiOperationPendingChange,
+  onCommentDraftDirtyChange,
   onClose,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -296,6 +308,7 @@ export function TaskDetailPane({
   const isAiPlanningOperationPendingRef = useRef(false)
   const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const isAiSummaryOperationPendingRef = useRef(false)
+  const commentDraftDirtyRef = useRef(false)
   const isWorkItemMutationPending = isIssueSaving ||
     isAiPlanningOperationPending ||
     isAiSummaryOperationPending
@@ -418,7 +431,7 @@ export function TaskDetailPane({
     ? detail?.resolvedConfiguration?.configuration ?? configuration
     : configuration
   const needsDetailBeforeEdit = !issue
-  const isReadOnly = !onUpdateIssue || needsDetailBeforeEdit
+  const isReadOnly = isRetainedDetail || !onUpdateIssue || needsDetailBeforeEdit
   const title = resolveWorkItemTitle(issue ?? task)
   const workItemTypes = resolveWorkItemTypes(resolvedConfiguration)
   const selectedWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
@@ -522,6 +535,11 @@ export function TaskDetailPane({
   }
   const confirmAiPlanningAdoption = () =>
     shouldConfirmAiPlanningAdoption()
+  /** Mirrors the active collaboration draft state before forwarding it to the route owner. */
+  const handleCommentDraftDirtyChange = (isDirty: boolean) => {
+    commentDraftDirtyRef.current = isDirty
+    onCommentDraftDirtyChange?.(isDirty)
+  }
   // The renderer only constructs inert React elements; the supplied callbacks
   // are invoked later by user events inside the feature-owned assistants.
   // eslint-disable-next-line react-hooks/refs -- the renderer returns inert elements and invokes callbacks only from later user events.
@@ -626,6 +644,22 @@ export function TaskDetailPane({
   /** Handles a Work Item Type selection from the detail editor. */
   const handleWorkItemTypeChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextWorkItemTypeId = event.target.value
+    const nextWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
+      resolvedConfiguration,
+      nextWorkItemTypeId,
+    )
+    const nextDetailSections = nextWorkItemTypeDefinition?.detailSections ??
+      DEFAULT_WORK_ITEM_TYPE.detailSections
+    if (
+      detailSectionOrder.includes('activity') &&
+      !nextDetailSections.includes('activity') &&
+      commentDraftDirtyRef.current &&
+      !globalThis.window.confirm(t('collaboration.composer.discardConfirm'))
+    ) return
+    if (detailSectionOrder.includes('activity') && !nextDetailSections.includes('activity')) {
+      commentDraftDirtyRef.current = false
+      onCommentDraftDirtyChange?.(false)
+    }
     setSelectedWorkItemType({
       identity: workItemTypeSelectionIdentity,
       value: nextWorkItemTypeId,
@@ -1205,21 +1239,25 @@ export function TaskDetailPane({
         )
       case 'activity':
         return collaboration ? (
-          <IssueCollaborationPanel
-            aiAssistance={collaborationAiAssistance}
-            route={collaborationRoute}
-            artifacts={artifacts}
-            contextDraft={documentContextPromotion.documentContextDraft}
-            key={`${task.teamId ?? ''}:${task.id}`}
-            controller={collaboration}
-            currentMemberKey={currentWorkspaceMemberKey}
-            focusedCommentId={focusedCommentId}
-            focusedRootCommentId={focusedRootCommentId}
-            locale={locale}
-            members={workspaceMembers}
-            onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
-            onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
-          />
+          <fieldset className="contents" disabled={isIssueSaving || isBulkOperationPending}>
+            <IssueCollaborationPanel
+              aiAssistance={collaborationAiAssistance}
+              route={collaborationRoute}
+              artifacts={artifacts}
+              contextDraft={documentContextPromotion.documentContextDraft}
+              key={`${task.teamId ?? ''}:${task.id}`}
+              controller={collaboration}
+              currentMemberKey={currentWorkspaceMemberKey}
+              focusedCommentId={focusedCommentId}
+              focusedRootCommentId={focusedRootCommentId}
+              locale={locale}
+              members={workspaceMembers}
+              onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
+              onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
+              onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
+              readOnlyMessage={isRetainedDetail ? readOnlyMessage : undefined}
+            />
+          </fieldset>
         ) : null
       default:
         return null
@@ -1256,6 +1294,14 @@ export function TaskDetailPane({
             >
               {title}
             </h2>
+            {isRetainedDetail && readOnlyMessage ? (
+              <p
+                className="mt-2 text-sm font-medium text-[var(--workbench-muted)]"
+                data-testid="task-detail-retained-readonly"
+              >
+                {readOnlyMessage}
+              </p>
+            ) : null}
             {isLoading ? (
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
             ) : null}
@@ -1406,7 +1452,9 @@ export function TaskDetailPane({
         </button>
         {isReadOnly && !needsDetailBeforeEdit ? (
           <p className="text-sm font-medium text-[var(--workbench-muted)]">
-            {t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
+            {isRetainedDetail && readOnlyMessage
+              ? readOnlyMessage
+              : t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
           </p>
         ) : null}
         {errorMessage ? (

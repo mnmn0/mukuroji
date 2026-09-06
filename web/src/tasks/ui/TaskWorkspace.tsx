@@ -23,6 +23,7 @@ import {
 } from 'react'
 import type {
   BulkOperationProjectOption,
+  BulkOperationMutationContext,
   BulkOperationSelection,
   BulkOperationTaskActionRequest,
   BulkOperationTaskActionInterruption,
@@ -160,6 +161,7 @@ export type TaskWorkspaceProps = {
   onBulkApply?: (
     request: BulkOperationRequest,
     preview: BulkOperationPreview,
+    resumedOperation?: BulkOperation,
   ) => Promise<BulkOperation>
   /** Synchronizes selection after a bulk operation changes state. */
   onBulkOperationComplete: (operation: BulkOperation) => void
@@ -186,6 +188,8 @@ export type TaskWorkspaceProps = {
   onBulkRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Undoes successful items in a bulk operation. */
   onBulkUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
+  /** Checks the exact target before an apply, retry, resume, or undo mutation. */
+  onBeforeBulkMutation?: (context: BulkOperationMutationContext) => boolean
   /** Changes the selected due-date filter. */
   onDueDateFilterChange: (dueDateFilter: DueDateFilter) => void
   /** Changes the workflow/custom-field definition filter. */
@@ -323,6 +327,7 @@ export function TaskWorkspace({
   onBulkPreview,
   onBulkRetry,
   onBulkUndo,
+  onBeforeBulkMutation,
   onDueDateFilterChange,
   onDefinitionFilterChange,
   onLoadMoreProjectUsers,
@@ -698,6 +703,7 @@ export function TaskWorkspace({
           onBulkPreview={onBulkPreview}
           onBulkRetry={onBulkRetry}
           onBulkUndo={onBulkUndo}
+          onBeforeBulkMutation={onBeforeBulkMutation}
           onCreateTaskOpen={onCreateTaskOpen}
           onUpdateTask={onUpdateTask}
           canMutateTask={canMutateTask}
