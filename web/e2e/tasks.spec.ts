@@ -5770,6 +5770,47 @@ test.describe('authenticated task page', () => {
     await expectTaskSplitPaneLayoutToStayInsideColumns(page)
   })
 
+  for (const viewport of [
+    { height: 900, name: 'desktop', width: 1440 },
+    { height: 844, name: 'mobile', width: 390 },
+  ]) {
+    for (const navigation of ['close', 'back'] as const) {
+      test(`フィルター外になった詳細から一覧の検索欄へ戻る (${viewport.name}, ${navigation})`, async ({ page }) => {
+        await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+        await page.setViewportSize(viewport)
+        await page.goto('/projects/refero/issues?teamId=core-team')
+
+        const searchbox = page.getByRole('searchbox', { name: '検索...' })
+        await searchbox.fill('ワイヤーフレーム')
+        await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+        await expect(page.getByTestId('tasks-count')).toContainText('1')
+        const listUrl = page.url()
+        await page.getByTestId('task-open-detail-wireframe').click()
+        await expect(page).toHaveURL(/issueId=wireframe/u)
+        const detailUrl = page.url()
+
+        const requestCounts = getMockRequestCounts(page)
+        const detailPane = page.getByTestId('task-detail-pane')
+        await detailPane.locator('input[name="title"]').fill('filter-mismatch-after-save')
+        await detailPane.getByRole('button', { name: '変更を保存', exact: true }).click()
+        await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+        await expect(page.getByTestId('task-row-wireframe')).toHaveCount(0)
+
+        if (navigation === 'close') {
+          await page.getByTestId('task-detail-close').click()
+        } else {
+          await page.goBack()
+        }
+
+        await expect(page).toHaveURL(navigation === 'close' ? detailUrl : listUrl)
+        await expect(searchbox).toBeVisible()
+        await expect(searchbox).toBeFocused()
+        await expect(searchbox).toHaveValue('ワイヤーフレーム')
+        await expect(searchbox).toBeInViewport()
+      })
+    }
+  }
+
   test('タブ切り替えとサイドバーの折りたたみが動作する', async ({ page }) => {
     await page.goto('/projects/refero/issues')
 
