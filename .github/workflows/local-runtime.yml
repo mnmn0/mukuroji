@@ -55,21 +55,8 @@ jobs:
       - name: Prepare Floci generated directory
         run: install -d -m 0777 .floci/generated
 
-      - name: Start Floci
-        run: docker compose up -d floci
-
-      - name: Wait for Floci bootstrap
-        run: |
-          for attempt in {1..300}; do
-            docker compose logs floci > "${RUNNER_TEMP}/floci.log"
-            if [ -f .floci/generated/cognito.env ] && [ -f .floci/generated/services.env ]; then
-              exit 0
-            fi
-            sleep 1
-          done
-
-          cat "${RUNNER_TEMP}/floci.log"
-          exit 1
+      - name: Start Floci and wait for bootstrap
+        run: bun run floci:up
 
       - name: Verify generated development environment
         run: |

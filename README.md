@@ -97,7 +97,7 @@ Bun は `packageManager` / `.bun-version` / CI と同じ **1.3.10** を使いま
 
 ```sh
 bun run floci:up
-# docker compose logs floci で「local S3 and SQS ready」を確認してから起動
+# 初期化完了を最大300秒待ちます。成功してから起動
 bun run server:dev
 # 別ターミナル
 bun run workers:dev

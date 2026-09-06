@@ -9,7 +9,7 @@
     "cdk"
   ],
   "scripts": {
-    "floci:up": "docker compose up -d floci dynamodb-admin",
+    "floci:up": "sh floci/up.sh",
     "workers:dev": "bun --env-file=.env --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env server/scripts/local-workers/run.ts",
     "workers:once": "bun run workers:dev --once",
     "floci:down": "docker compose down",
