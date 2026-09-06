@@ -9336,6 +9336,71 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem('mukuroji.auth')))).toBe(true)
   })
 
+  for (const oldPostStatus of [201, 401] as const) {
+    test(`作成破棄の確認直後に完了した旧 POST は遷移先を変更しない (${oldPostStatus})`, async ({ page }) => {
+      await mockAuthenticatedTaskPage(page)
+      let releaseCreate: (() => void) | undefined
+      let createArrived: (() => void) | undefined
+      const createReleased = new Promise<void>((resolve) => {
+        releaseCreate = resolve
+      })
+      const createRequestArrived = new Promise<void>((resolve) => {
+        createArrived = resolve
+      })
+      await page.route(/.*\/api\/teams\/core-team\/issues(?:\?.*)?$/, async (route) => {
+        if (route.request().method() !== 'POST') {
+          await route.fallback()
+          return
+        }
+        createArrived?.()
+        await createReleased
+        if (oldPostStatus === 401) {
+          await route.fulfill({
+            status: 401,
+            json: { code: 'EnterpriseSessionExpired', message: 'Session expired.' },
+          })
+          return
+        }
+        await route.fallback()
+      })
+
+      await page.goto('/projects/refero/issues')
+      await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+      const createTaskForm = page.getByTestId('create-task-form')
+      await createTaskForm.locator('input[name="title"]').fill(`discarded-${oldPostStatus}`)
+      const createResponse = page.waitForResponse((response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/teams/core-team/issues',
+      )
+      await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+      await createRequestArrived
+
+      const discardDialog = new Promise<void>((resolve) => {
+        page.once('dialog', async (dialog) => {
+          expect(dialog.message()).toContain('破棄')
+          await dialog.accept()
+          releaseCreate?.()
+          resolve()
+        })
+      })
+      await page.getByLabel('メインサイドバー').getByRole('button', {
+        name: 'ブランド刷新',
+        exact: true,
+      }).click()
+      await discardDialog
+      const completedCreateResponse = await createResponse
+      await completedCreateResponse.finished()
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      }))
+
+      await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+      await expect(page.getByText(`discarded-${oldPostStatus}`, { exact: true })).toHaveCount(0)
+      await expect(page).not.toHaveURL(/\/login\?returnTo=/)
+      await expect(page.getByTestId('task-action-feedback')).toHaveCount(0)
+    })
+  }
+
   test('作成 POST 成功後の一覧再取得失敗でも作成を重複実行せず詳細へ遷移する', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       postCreateProjectIssueFailureCount: 1,

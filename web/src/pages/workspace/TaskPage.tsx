@@ -873,6 +873,9 @@ export function TaskPage() {
   useEffect(() => {
     if (navigationBlocker.state !== 'blocked') return
     if (globalThis.window.confirm(t('tasks.create.discardConfirm'))) {
+      if (createTaskDirtyRef.current && createTaskDirtyScopeRef.current === taskScopeKey) {
+        createTaskScopeGenerationRef.current += 1
+      }
       createTaskDiscardHandlerRef.current?.()
       reportCreateTaskDirty(false)
       createTaskDirtyScopeRef.current = undefined
@@ -880,7 +883,7 @@ export function TaskPage() {
       return
     }
     navigationBlocker.reset()
-  }, [navigationBlocker, reportCreateTaskDirty, t])
+  }, [navigationBlocker, reportCreateTaskDirty, t, taskScopeKey])
   useEffect(() => {
     if (!isCreateTaskDirty) return
     /** Prevents browser unload while the authenticated scoped create form is dirty. */
