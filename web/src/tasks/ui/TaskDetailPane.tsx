@@ -166,6 +166,10 @@ export type TaskDetailPaneProps = {
   isLoading: boolean
   /** Whether a bulk mutation currently targets this Work Item. */
   isBulkOperationPending?: boolean
+  /** Whether this pane is retained read-only after its live Project scope disappeared. */
+  isRetainedDetail?: boolean
+  /** Explanation shown when the retained detail can no longer be edited. */
+  readOnlyMessage?: string
   /** Whether relation candidates are loading. */
   isRelationCandidatesLoading: boolean
   /** Locale used by form controls and nested panels. */
@@ -273,9 +277,11 @@ export function TaskDetailPane({
   focusedRootCommentId,
   isLoading,
   isBulkOperationPending = false,
+  isRetainedDetail = false,
   isRelationCandidatesLoading,
   locale,
   planningSnapshot,
+  readOnlyMessage,
   onAddRelation,
   onAuthenticatedApiError,
   onCreateScheduleDependency,
@@ -425,7 +431,7 @@ export function TaskDetailPane({
     ? detail?.resolvedConfiguration?.configuration ?? configuration
     : configuration
   const needsDetailBeforeEdit = !issue
-  const isReadOnly = !onUpdateIssue || needsDetailBeforeEdit
+  const isReadOnly = isRetainedDetail || !onUpdateIssue || needsDetailBeforeEdit
   const title = resolveWorkItemTitle(issue ?? task)
   const workItemTypes = resolveWorkItemTypes(resolvedConfiguration)
   const selectedWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
@@ -1249,6 +1255,7 @@ export function TaskDetailPane({
               onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
               onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
               onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
+              readOnlyMessage={isRetainedDetail ? readOnlyMessage : undefined}
             />
           </fieldset>
         ) : null
@@ -1287,6 +1294,14 @@ export function TaskDetailPane({
             >
               {title}
             </h2>
+            {isRetainedDetail && readOnlyMessage ? (
+              <p
+                className="mt-2 text-sm font-medium text-[var(--workbench-muted)]"
+                data-testid="task-detail-retained-readonly"
+              >
+                {readOnlyMessage}
+              </p>
+            ) : null}
             {isLoading ? (
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
             ) : null}
@@ -1437,7 +1452,9 @@ export function TaskDetailPane({
         </button>
         {isReadOnly && !needsDetailBeforeEdit ? (
           <p className="text-sm font-medium text-[var(--workbench-muted)]">
-            {t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
+            {isRetainedDetail && readOnlyMessage
+              ? readOnlyMessage
+              : t(!onUpdateIssue ? 'tasks.detail.readOnlyPermission' : 'tasks.detail.readOnly')}
           </p>
         ) : null}
         {errorMessage ? (

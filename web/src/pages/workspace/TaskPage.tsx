@@ -191,6 +191,30 @@ function useProjectFileScope(projectId: string, teamId?: string) {
   [projectId, teamId])
 }
 
+/** Identifies the Work Item that owns a retained collaboration draft. */
+type CommentDraftOwner = {
+  /** Project scope that owns the draft lifetime. */
+  taskScopeKey: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  issueId: string
+}
+
+/** Captures the route and Work Item owner for one dirty comment draft. */
+type CommentDraftDirtyState = {
+  /** Whether the current comment draft has unsaved input. */
+  isDirty: boolean
+  /** Project scope key captured when the draft became dirty. */
+  taskScopeKey: string
+  /** Route scope key captured when the draft became dirty. */
+  scopeKey: string
+  /** Team owner captured when the draft became dirty. */
+  ownerTeamId?: string
+  /** Work Item owner captured when the draft became dirty. */
+  ownerIssueId?: string
+}
+
 /**
  * Resolves the authenticated Project task route and composes the task feature screen.
  *
@@ -205,6 +229,12 @@ export function TaskPage() {
   const commentDraftDirtyRef = useRef(false)
   const commentDraftDirtyScopeRef = useRef<string | undefined>(undefined)
   const commentDraftDiscardHandlerRef = useRef<(() => void) | undefined>(undefined)
+  const commentDraftOwnerRef = useRef<CommentDraftOwner | undefined>(undefined)
+  const [commentDraftDirtyState, setCommentDraftDirtyState] = useState<CommentDraftDirtyState>({
+    isDirty: false,
+    scopeKey: '',
+    taskScopeKey: '',
+  })
   const blockedDirtyOwnersRef = useRef({ create: false, comment: false, createScopeChanged: false })
   const params = useParams()
   const {
@@ -403,6 +433,33 @@ export function TaskPage() {
       teams,
     ],
   )
+  const workspaceId = (
+    user?.attributes['custom:workspace_id'] ??
+    user?.attributes['custom:directory_id'] ??
+    ''
+  ).trim()
+  // Preserve React Compiler compatibility for the existing memoized route and dirty-owner callbacks.
+  const taskScopeKey = useMemo(() => JSON.stringify([
+    workspaceId,
+    user?.username ?? user?.attributes.email ?? '',
+    projectId,
+  ]), [projectId, user?.attributes, user?.username, workspaceId])
+  const retainedCommentOwnerForQuery = !selectedIssueId &&
+    commentDraftDirtyState.isDirty &&
+    commentDraftDirtyState.taskScopeKey === taskScopeKey &&
+    commentDraftDirtyState.ownerTeamId && commentDraftDirtyState.ownerIssueId &&
+    (!selectedTeamId || selectedTeamId === commentDraftDirtyState.ownerTeamId)
+    ? commentDraftDirtyState
+    : undefined
+  const resolvedSelectedIssueTeamId = selectedWorkItemTeamId
+  const selectedIssueDetailTeamId = selectedTeamId && selectedIssueId
+    ? selectedTeamId
+    : retainedCommentOwnerForQuery?.ownerTeamId
+      ?? resolvedSelectedIssueTeamId
+  const selectedIssueDetailId = selectedTeamId && selectedIssueId
+    ? selectedIssueId
+    : retainedCommentOwnerForQuery?.ownerIssueId
+      ?? resolvedSelectedIssue?.id
   const {
     data: workItemConfigurationLoadResult = emptyProjectWorkItemConfigurationLoadResult,
     error: workItemConfigurationError,
@@ -538,40 +595,6 @@ export function TaskPage() {
     [projectId, taskViewController.writableTeamIds, taskViewScope, teams],
   )
   const {
-    data: relationCandidates = emptyTeamIssues,
-    error: relationCandidatesError,
-    isLoading: isRelationCandidatesLoading,
-    key: relationCandidatesKey,
-  } = useTeamIssues(
-    accessToken,
-    selectedWorkItemTeamId,
-    Boolean(user && !currentUserError),
-    false,
-    'project-relation-candidates',
-  )
-  const resolvedSelectedIssueTeamId = selectedWorkItemTeamId
-  const selectedIssueDetailTeamId = selectedTeamId && selectedIssueId
-    ? selectedTeamId
-    : resolvedSelectedIssueTeamId
-  const selectedIssueDetailId = selectedTeamId && selectedIssueId
-    ? selectedIssueId
-    : resolvedSelectedIssue?.id
-  const collaboration = useIssueCollaboration({
-    accessToken,
-    issueId: resolvedSelectedIssue?.id,
-    projectId: resolvedSelectedIssue?.assignedProjectId ?? projectId,
-    teamId: resolvedSelectedIssueTeamId,
-  })
-  const artifactIssueId = resolvedSelectedIssue?.id
-  const artifactProjectTeamId = selectedWorkItemTeamId
-  const issueFileScope = useWorkItemFileScope(artifactIssueId, resolvedSelectedIssueTeamId)
-  const projectFileScope = useProjectFileScope(projectId, artifactProjectTeamId)
-  const issueArtifacts = useFileArtifacts({
-    accessToken,
-    scope: issueFileScope,
-  })
-  const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
-  const {
     data: rawSelectedIssueDetail,
     error: detailError,
     isLoading: isSelectedIssueDetailLoading,
@@ -596,13 +619,61 @@ export function TaskPage() {
   const selectedIssueDetailScopeMismatch = Boolean(
     rawSelectedIssueDetail && !selectedIssueDetailIsInScope,
   )
+  const liveCommentOwner = commentDraftDirtyState.isDirty &&
+    commentDraftDirtyState.taskScopeKey === taskScopeKey &&
+    commentDraftDirtyState.ownerTeamId && commentDraftDirtyState.ownerIssueId
+    ? {
+        issueId: commentDraftDirtyState.ownerIssueId,
+        taskScopeKey: commentDraftDirtyState.taskScopeKey,
+        teamId: commentDraftDirtyState.ownerTeamId,
+      }
+    : undefined
+  const liveCommentOwnerInProjectList = Boolean(
+    liveCommentOwner && projectIssues.some((issue) =>
+      issue.teamId === liveCommentOwner.teamId && issue.id === liveCommentOwner.issueId,
+    ),
+  )
+  const hasUnavailableCommentOwner = Boolean(
+    liveCommentOwner && (!liveCommentOwnerInProjectList || selectedIssueDetailScopeMismatch),
+  )
+  const {
+    data: relationCandidates = emptyTeamIssues,
+    error: relationCandidatesError,
+    isLoading: isRelationCandidatesLoading,
+    key: relationCandidatesKey,
+  } = useTeamIssues(
+    accessToken,
+    selectedIssueDetailTeamId,
+    Boolean(user && !currentUserError && !hasUnavailableCommentOwner),
+    false,
+    'project-relation-candidates',
+  )
+  const artifactIssueId = selectedIssueDetailId
+  const artifactProjectTeamId = selectedWorkItemTeamId
+  const issueFileScope = useWorkItemFileScope(artifactIssueId, selectedIssueDetailTeamId)
+  const projectFileScope = useProjectFileScope(projectId, artifactProjectTeamId)
+  const issueArtifacts = useFileArtifacts({
+    accessToken,
+    scope: hasUnavailableCommentOwner ? undefined : issueFileScope,
+  })
+  const projectFiles = useFileArtifacts({ accessToken, scope: projectFileScope })
+  const collaborationOwnerMatchesLive = !liveCommentOwner || (
+    liveCommentOwnerInProjectList &&
+    selectedIssueDetailIsInScope &&
+    selectedIssueDetailTeamId === liveCommentOwner.teamId &&
+    selectedIssueDetailId === liveCommentOwner.issueId
+  )
+  const collaboration = useIssueCollaboration({
+    accessToken,
+    enabled: Boolean(user && !currentUserError && collaborationOwnerMatchesLive),
+    issueId: liveCommentOwner?.issueId ?? resolvedSelectedIssue?.id,
+    projectId: liveCommentOwner ? projectId : resolvedSelectedIssue?.assignedProjectId ?? projectId,
+    teamId: liveCommentOwner?.teamId ?? resolvedSelectedIssueTeamId,
+  })
   const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
   const [scheduleRefreshError, setScheduleRefreshError] = useState<unknown>()
-  const selectedIssueUpdateErrorKey = resolvedSelectedIssue
-    ? JSON.stringify([
-        resolvedSelectedIssue.teamId,
-        resolvedSelectedIssue.id,
-      ])
+  const selectedIssueUpdateErrorKey = selectedIssueDetailTeamId && selectedIssueDetailId
+    ? JSON.stringify([selectedIssueDetailTeamId, selectedIssueDetailId])
     : undefined
   const issueUpdateErrorMessage = issueUpdateError && issueUpdateError[0] === selectedIssueUpdateErrorKey
     ? issueUpdateError[1]
@@ -820,16 +891,6 @@ export function TaskPage() {
       .trim()
       .charAt(0)
       .toUpperCase() || 'J'
-  const workspaceId = (
-    user?.attributes['custom:workspace_id'] ??
-    user?.attributes['custom:directory_id'] ??
-    ''
-  ).trim()
-  const taskScopeKey = JSON.stringify([
-    workspaceId,
-    user?.username ?? user?.attributes.email ?? '',
-    projectId,
-  ])
   const createTaskScopeGenerationRef = useRef(0)
   /** Invalidates pending creates at the layout commit that changes their owning scope. */
   useLayoutEffect(() => {
@@ -853,12 +914,8 @@ export function TaskPage() {
       selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? '',
     ]),
   ])
-  const [commentDraftDirtyState, setCommentDraftDirtyState] = useState({
-    isDirty: false,
-    scopeKey: commentDraftScopeKey,
-  })
   const isCommentDraftDirty = commentDraftDirtyState.isDirty &&
-    commentDraftDirtyState.scopeKey === commentDraftScopeKey
+    commentDraftDirtyState.taskScopeKey === taskScopeKey
   /**
    * Determines whether navigation changes either dirty draft owner.
    * It invalidates a clean pending create when its owning scope changes and
@@ -889,18 +946,15 @@ export function TaskPage() {
       : nextRouteContext.resolvedSelectedIssue?.teamId ??
         nextRouteContext.interactionTeamId ?? ''
     const nextOwnerKey = JSON.stringify([nextTeamId, nextIssueId])
-    const currentOwnerKey = JSON.stringify([
-      selectedIssueDetailTeamId ?? resolvedSelectedIssueTeamId ?? '',
-      selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? '',
-    ])
     const pathChanged = currentLocation.pathname !== nextLocation.pathname
-    const ownerChanged = pathChanged || nextOwnerKey !== currentOwnerKey
     const changesCreateScope = pathChanged ||
       nextRouteContext.creationTeam?.id !== creationTeam?.id
     const shouldBlockCreate = createTaskDirtyRef.current &&
       createTaskDirtyScopeRef.current === taskScopeKey && changesCreateScope
+    const retainedCommentOwner = commentDraftOwnerRef.current
     const shouldBlockComment = commentDraftDirtyRef.current &&
-      commentDraftDirtyScopeRef.current === commentDraftScopeKey && ownerChanged
+      retainedCommentOwner?.taskScopeKey === taskScopeKey &&
+      (pathChanged || JSON.stringify([retainedCommentOwner.teamId, retainedCommentOwner.issueId]) !== nextOwnerKey)
     blockedDirtyOwnersRef.current = {
       create: shouldBlockCreate,
       comment: shouldBlockComment,
@@ -910,8 +964,7 @@ export function TaskPage() {
       createTaskScopeGenerationRef.current += 1
     }
     return Boolean(getAuthSession()) && (shouldBlockCreate || shouldBlockComment)
-  }, [commentDraftScopeKey, creationTeam?.id, projectId, projectIssues, resolvedSelectedIssue?.id,
-    resolvedSelectedIssueTeamId, selectedIssueDetailId, selectedIssueDetailTeamId, taskScopeKey, teams])
+  }, [creationTeam?.id, projectId, projectIssues, taskScopeKey, teams])
   const navigationBlocker = useBlocker(shouldBlockDraftNavigation)
   /** Reports create-form dirtiness to the route-owned navigation guard. */
   const reportCreateTaskDirty = useCallback((isDirty: boolean, discardHandler?: () => void) => {
@@ -924,7 +977,7 @@ export function TaskPage() {
     createTaskDiscardHandlerRef.current = isDirty ? discardHandler : undefined
     setCreateTaskDirtyState({ isDirty, scopeKey: taskScopeKey })
   }, [setCreateTaskDirtyState, taskScopeKey])
-  /** Reports comment input only while its exact Work Item route scope is current. */
+  /** Reports comment input only while the authenticated Project scope and exact Work Item owner are current. */
   const reportCommentDraftDirty = useCallback((
     isDirty: boolean,
     scopeKey = JSON.stringify([
@@ -934,12 +987,36 @@ export function TaskPage() {
     discardHandler?: () => void,
   ) => {
     const scopedKey = JSON.stringify([taskScopeKey, scopeKey])
-    if (scopedKey !== commentDraftScopeKey) return
+    if (!isDirty && commentDraftDirtyScopeRef.current !== scopedKey) return
+    const ownerTeamId = selectedIssueDetailTeamId ?? resolvedSelectedIssueTeamId ?? ''
+    const ownerIssueId = selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? ''
+    const liveOwnerKey = JSON.stringify([ownerTeamId, ownerIssueId])
+    const retainedOwner = commentDraftOwnerRef.current
+    const retainedOwnerKey = retainedOwner
+      ? JSON.stringify([retainedOwner.teamId, retainedOwner.issueId])
+      : undefined
+    const acceptedOwner = scopeKey === liveOwnerKey
+      ? { issueId: ownerIssueId, taskScopeKey, teamId: ownerTeamId }
+      : retainedOwner && retainedOwner.taskScopeKey === taskScopeKey && scopeKey === retainedOwnerKey
+        ? retainedOwner
+        : undefined
+    if (isDirty && !acceptedOwner) return
+    if (isDirty) {
+      commentDraftOwnerRef.current = acceptedOwner
+    } else {
+      commentDraftOwnerRef.current = undefined
+    }
     commentDraftDirtyRef.current = isDirty
     commentDraftDirtyScopeRef.current = scopedKey
     commentDraftDiscardHandlerRef.current = isDirty ? discardHandler : undefined
-    setCommentDraftDirtyState({ isDirty, scopeKey: scopedKey })
-  }, [commentDraftScopeKey, resolvedSelectedIssue?.id, resolvedSelectedIssueTeamId,
+    setCommentDraftDirtyState({
+      isDirty,
+      ownerIssueId: isDirty ? acceptedOwner?.issueId : undefined,
+      ownerTeamId: isDirty ? acceptedOwner?.teamId : undefined,
+      scopeKey: scopedKey,
+      taskScopeKey,
+    })
+  }, [resolvedSelectedIssue?.id, resolvedSelectedIssueTeamId,
     selectedIssueDetailId, selectedIssueDetailTeamId, taskScopeKey])
   useEffect(() => {
     if (navigationBlocker.state !== 'blocked') return
@@ -964,9 +1041,15 @@ export function TaskPage() {
       if (hasBlockedComment) {
         const discardHandler = commentDraftDiscardHandlerRef.current
         commentDraftDiscardHandlerRef.current = undefined
-        commentDraftDirtyScopeRef.current = undefined
         discardHandler?.()
-        reportCommentDraftDirty(false)
+        commentDraftDirtyRef.current = false
+        commentDraftDirtyScopeRef.current = undefined
+        commentDraftOwnerRef.current = undefined
+        setCommentDraftDirtyState({
+          isDirty: false,
+          scopeKey: commentDraftScopeKey,
+          taskScopeKey,
+        })
       }
       navigationBlocker.proceed()
       return
@@ -976,8 +1059,10 @@ export function TaskPage() {
     isCommentDraftDirty,
     isCreateTaskDirty,
     navigationBlocker,
+    commentDraftScopeKey,
     reportCommentDraftDirty,
     reportCreateTaskDirty,
+    taskScopeKey,
     t,
   ])
   useEffect(() => {
@@ -1773,7 +1858,7 @@ export function TaskPage() {
       relationCandidates={relationCandidates}
       relationCandidatesErrorMessage={relationCandidatesErrorMessage}
       selectedIssueDetail={selectedIssueDetail}
-      selectedIssueDetailUnavailable={selectedIssueDetailScopeMismatch}
+      selectedIssueDetailUnavailable={selectedIssueDetailScopeMismatch || hasUnavailableCommentOwner}
       suppressIssueFallback={suppressIssueFallback}
       projectCustomerImpact={projectCustomerImpactKey ? projectCustomerImpact : undefined}
       resolvedConfiguration={listConfigurationTeamId ? resolvedConfiguration : undefined}

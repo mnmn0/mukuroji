@@ -128,6 +128,7 @@ export type TaskTableViewProps = {
   onBulkApply?: (
     request: BulkOperationRequest,
     preview: BulkOperationPreview,
+    resumedOperation?: BulkOperation,
   ) => Promise<BulkOperation>
   /** Receives a completed bulk operation so succeeded selections can be cleared. */
   onBulkOperationComplete: (operation: BulkOperation) => void

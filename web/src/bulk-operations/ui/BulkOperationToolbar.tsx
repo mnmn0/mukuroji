@@ -102,6 +102,7 @@ export type BulkOperationToolbarProps = {
   onApply?: (
     request: BulkOperationRequest,
     preview: BulkOperationPreview,
+    resumedOperation?: BulkOperation,
   ) => Promise<BulkOperation>
   /** Failed item だけを再試行します。 */
   onRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
@@ -378,7 +379,7 @@ export function BulkOperationToolbar({
     setBusyState('resume')
     setErrorMessage(undefined)
     try {
-      const nextOperation = await onApply(previewedRequest, preview)
+      const nextOperation = await onApply(previewedRequest, preview, operation)
       setOperation(nextOperation)
       onOperationComplete?.(nextOperation)
     } catch (error) {

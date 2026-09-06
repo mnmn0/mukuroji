@@ -5748,7 +5748,16 @@ test.describe('authenticated task page', () => {
 
     await expect.poll(() => releaseBulkApply !== undefined).toBe(true)
 
-    await page.getByTestId('task-row-brand-guideline').click()
+    const brandNavigationDialog = page.waitForEvent('dialog')
+    const brandNavigationClick = page.getByTestId('task-row-brand-guideline').click()
+    const brandNavigationConfirm = await brandNavigationDialog
+    expect(brandNavigationConfirm.message()).toContain('コメントの下書きを破棄')
+    await brandNavigationConfirm.accept()
+    await brandNavigationClick
+    await expect(page).toHaveURL(/issueId=brand-guideline/u)
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'ブランドガイドラインの更新',
+    })).toBeVisible()
     const pendingBrandGuidelineBody = page.locator('textarea[name="body"]')
     await expect(pendingBrandGuidelineBody).toBeDisabled()
 
@@ -5760,17 +5769,410 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
     const secondBulkPreview = page.getByRole('region', { name: '一括操作の事前確認' })
     await expect(secondBulkPreview).toBeVisible()
+    const secondApplyResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations',
+    )
     await secondBulkPreview.getByRole('button', { name: '適用', exact: true }).click()
+    const completedSecondApplyResponse = await secondApplyResponse
+    await completedSecondApplyResponse.finished()
+    expect(completedSecondApplyResponse.status()).toBe(200)
     await expect.poll(() => applyCount).toBe(5)
     await expect(secondBulkPreview).toHaveCount(0)
 
     await page.getByTestId('task-row-wireframe').click()
+    await expect(page).toHaveURL(/issueId=wireframe/u)
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: '新しいランディングページのワイヤーフレーム作成',
+    })).toBeVisible()
     const delayedWireframeBody = page.locator('textarea[name="body"]')
     await expect(delayedWireframeBody).toBeDisabled()
+    const firstApplyResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations',
+    )
     releaseBulkApply?.()
+    const completedFirstApplyResponse = await firstApplyResponse
+    await completedFirstApplyResponse.finished()
+    expect(completedFirstApplyResponse.status()).toBe(409)
     await expect(delayedWireframeBody).toBeEnabled()
     await expect(page.getByRole('alert').filter({ hasText: 'Work Item の操作を完了できませんでした。' })).toBeVisible()
     expect(applyCount).toBe(5)
+  })
+
+  test('一括操作の部分失敗では失敗対象のコメントを保持し、retry成功後だけ破棄する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    let retryCount = 0
+    const operationAction: BulkOperationAction = { type: 'move', targetProjectId: 'product-roadmap' }
+    const operationItems = [
+      {
+        expectedRevision: 3,
+        retryable: true,
+        status: 'failed' as const,
+        teamId: 'core-team',
+        undoable: false,
+        workItemId: 'wireframe',
+      },
+      {
+        expectedRevision: 1,
+        retryable: false,
+        status: 'succeeded' as const,
+        teamId: 'core-team',
+        undoable: false,
+        workItemId: 'brand-guideline',
+      },
+    ]
+    /** Reads and validates the exact item IDs sent by this partial bulk fixture. */
+    const readPartialRequestItemIds = (body: unknown): string[] => {
+      if (typeof body !== 'object' || body === null || !('items' in body) || !Array.isArray(body.items)) {
+        throw new Error('Partial bulk request did not contain items.')
+      }
+      return body.items.flatMap((item) => {
+        if (typeof item !== 'object' || item === null || !('workItemId' in item) ||
+            typeof item.workItemId !== 'string') {
+          throw new Error('Partial bulk request item did not contain a Work Item ID.')
+        }
+        return [item.workItemId]
+      })
+    }
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      const requestBody = route.request().postDataJSON()
+      expect(readPartialRequestItemIds(requestBody)).toEqual(['wireframe', 'brand-guideline'])
+      if (typeof requestBody !== 'object' || requestBody === null ||
+          !('action' in requestBody) || typeof requestBody.action !== 'object' ||
+          requestBody.action === null || !('type' in requestBody.action) ||
+          requestBody.action.type !== operationAction.type) {
+        throw new Error('Partial bulk preview action did not match the fixture.')
+      }
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          canApply: true,
+          items: operationItems.map((item) => ({ ...item, status: 'ready' as const })),
+          operationToken: 'partial-operation-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      const requestBody = route.request().postDataJSON()
+      expect(readPartialRequestItemIds(requestBody)).toEqual(['wireframe', 'brand-guideline'])
+      if (typeof requestBody !== 'object' || requestBody === null ||
+          !('action' in requestBody) || typeof requestBody.action !== 'object' ||
+          requestBody.action === null || !('type' in requestBody.action) ||
+          requestBody.action.type !== operationAction.type) {
+        throw new Error('Partial bulk apply action did not match the fixture.')
+      }
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: 'partial-operation',
+          items: operationItems,
+          revision: 1,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: 'partial',
+          updatedAt: '2026-06-08T00:00:01.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations\/partial-operation\/retry$/u, async (route) => {
+      retryCount += 1
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: 'partial-operation',
+          items: operationItems.map((item) => ({
+            ...item,
+            resultingRevision: item.workItemId === 'wireframe' ? 4 : undefined,
+            retryable: false,
+            status: 'succeeded' as const,
+          })),
+          revision: 2,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: 'succeeded',
+          updatedAt: '2026-06-08T00:00:02.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('部分失敗した対象だけ保持するコメント本文')
+    await page.getByTestId('task-row-wireframe').getByRole('checkbox').check()
+    await page.getByTestId('task-row-brand-guideline').getByRole('checkbox').check()
+    await page.getByRole('button', { name: '一括移動', exact: true }).click()
+    await page.getByRole('combobox', { name: '移動先プロジェクト' }).selectOption('product-roadmap')
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const preview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(preview).toBeVisible()
+    const applyDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメントの下書きを破棄')
+      await dialog.accept()
+    })
+    const applyResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations',
+    )
+    await Promise.all([
+      applyDialog,
+      preview.getByRole('button', { name: '適用', exact: true }).click(),
+    ])
+    const completedApplyResponse = await applyResponse
+    await completedApplyResponse.finished()
+    expect(completedApplyResponse.status()).toBe(200)
+    await expect(body).toBeEnabled()
+    await expect(body).toHaveValue('部分失敗した対象だけ保持するコメント本文')
+    await expect(page.getByTestId('bulk-retry-failed')).toBeVisible()
+
+    const retryDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメントの下書きを破棄')
+      await dialog.accept()
+    })
+    const retryResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations/partial-operation/retry',
+    )
+    await Promise.all([
+      retryDialog,
+      page.getByTestId('bulk-retry-failed').click(),
+    ])
+    const completedRetryResponse = await retryResponse
+    await completedRetryResponse.finished()
+    expect(completedRetryResponse.status()).toBe(200)
+    expect(retryCount).toBe(1)
+    await expect(body).toHaveCount(0)
+  })
+
+  test('再開時に以前成功した対象の新しいコメント下書きを保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    let applyCount = 0
+    const operationAction: BulkOperationAction = { type: 'move', targetProjectId: 'product-roadmap' }
+    const operationItems = [
+      { expectedRevision: 3, retryable: false, status: 'succeeded' as const, teamId: 'core-team', undoable: false, workItemId: 'wireframe' },
+      { expectedRevision: 1, retryable: true, status: 'ready' as const, teamId: 'core-team', undoable: false, workItemId: 'brand-guideline' },
+    ]
+    /** Reads the selected Work Item IDs from the apply/resume request body. */
+    const readResumeRequestItemIds = (body: unknown): string[] => {
+      if (typeof body !== 'object' || body === null || !('items' in body) || !Array.isArray(body.items)) {
+        throw new Error('Resume request did not contain items.')
+      }
+      return body.items.flatMap((item) => {
+        if (typeof item !== 'object' || item === null || !('workItemId' in item) ||
+            typeof item.workItemId !== 'string') {
+          throw new Error('Resume request item did not contain a Work Item ID.')
+        }
+        return [item.workItemId]
+      })
+    }
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      const requestBody = route.request().postDataJSON()
+      expect(readResumeRequestItemIds(requestBody)).toEqual(['wireframe', 'brand-guideline'])
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          canApply: true,
+          items: operationItems.map((item) => ({ ...item, status: 'ready' as const })),
+          operationToken: 'resume-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      applyCount += 1
+      const requestBody = route.request().postDataJSON()
+      expect(readResumeRequestItemIds(requestBody)).toEqual(['wireframe', 'brand-guideline'])
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: 'resume-operation',
+          items: applyCount === 1
+            ? operationItems
+            : operationItems.map((item) => ({ ...item, retryable: false, status: 'succeeded' as const })),
+          revision: applyCount,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: applyCount === 1 ? 'running' : 'succeeded',
+          updatedAt: '2026-06-08T00:00:01.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('再開前のコメント本文')
+    await page.getByTestId('task-row-wireframe').getByRole('checkbox').check()
+    await page.getByTestId('task-row-brand-guideline').getByRole('checkbox').check()
+    await page.getByRole('button', { name: '一括移動', exact: true }).click()
+    await page.getByRole('combobox', { name: '移動先プロジェクト' }).selectOption('product-roadmap')
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const preview = page.getByRole('region', { name: '一括操作の事前確認' })
+    const discardDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメントの下書きを破棄')
+      await dialog.accept()
+    })
+    const firstApplyResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations',
+    )
+    await Promise.all([discardDialog, preview.getByRole('button', { name: '適用', exact: true }).click()])
+    await (await firstApplyResponse).finished()
+    await expect(page.getByTestId('bulk-resume')).toBeVisible()
+
+    await page.getByTestId('task-row-wireframe').click()
+    await expect(body).toBeVisible()
+    await body.fill('成功済み対象へ追記した新しい下書き')
+    const resumeResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations',
+    )
+    await page.getByTestId('bulk-resume').click()
+    const completedResumeResponse = await resumeResponse
+    await completedResumeResponse.finished()
+    expect(completedResumeResponse.status()).toBe(200)
+    expect(applyCount).toBe(2)
+    await expect(body).toHaveValue('成功済み対象へ追記した新しい下書き')
+  })
+
+  test('一括操作の409失敗ではコメント本文を保持し、再試行の成功後だけ破棄する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    let applyCount = 0
+    let releaseFirstApply: (() => void) | undefined
+    const operationAction: BulkOperationAction = { type: 'move', targetProjectId: 'product-roadmap' }
+    /** Reads the one Work Item ID sent by this delayed failure fixture. */
+    const readSingleBulkRequestItemId = (body: unknown): string => {
+      if (typeof body !== 'object' || body === null || !('items' in body) ||
+          !Array.isArray(body.items) || body.items.length !== 1) {
+        throw new Error('Single-item bulk request did not contain exactly one item.')
+      }
+      const item = body.items[0]
+      if (typeof item !== 'object' || item === null || !('workItemId' in item) ||
+          item.workItemId !== 'wireframe') {
+        throw new Error('Single-item bulk request targeted the wrong Work Item.')
+      }
+      return item.workItemId
+    }
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      const requestBody = route.request().postDataJSON()
+      expect(readSingleBulkRequestItemId(requestBody)).toBe('wireframe')
+      if (typeof requestBody !== 'object' || requestBody === null ||
+          !('action' in requestBody) || typeof requestBody.action !== 'object' ||
+          requestBody.action === null || !('type' in requestBody.action) ||
+          requestBody.action.type !== operationAction.type) {
+        throw new Error('Single-item preview action did not match the fixture.')
+      }
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          canApply: true,
+          items: [{
+            expectedRevision: 3,
+            retryable: false,
+            status: 'ready',
+            teamId: 'core-team',
+            undoable: false,
+            workItemId: 'wireframe',
+          }],
+          operationToken: 'single-failure-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      applyCount += 1
+      const requestBody = route.request().postDataJSON()
+      expect(readSingleBulkRequestItemId(requestBody)).toBe('wireframe')
+      if (typeof requestBody !== 'object' || requestBody === null ||
+          !('action' in requestBody) || typeof requestBody.action !== 'object' ||
+          requestBody.action === null || !('type' in requestBody.action) ||
+          requestBody.action.type !== operationAction.type) {
+        throw new Error('Single-item apply action did not match the fixture.')
+      }
+      if (applyCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirstApply = resolve
+        })
+        await route.fulfill({ json: { message: 'bulk conflict' }, status: 409 })
+        return
+      }
+      await route.fulfill({
+        json: {
+          action: operationAction,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: 'single-failure-operation',
+          items: [{
+            expectedRevision: 3,
+            resultingRevision: 4,
+            retryable: false,
+            status: 'succeeded',
+            teamId: 'core-team',
+            undoable: false,
+            workItemId: 'wireframe',
+          }],
+          revision: 2,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: 'succeeded',
+          updatedAt: '2026-06-08T00:00:02.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('409失敗後も保持するコメント本文')
+    await page.getByTestId('task-row-wireframe').getByRole('checkbox').check()
+    await page.getByRole('button', { name: '一括移動', exact: true }).click()
+    await page.getByRole('combobox', { name: '移動先プロジェクト' }).selectOption('product-roadmap')
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const preview = page.getByRole('region', { name: '一括操作の事前確認' })
+    const firstDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメントの下書きを破棄')
+      await dialog.accept()
+    })
+    const firstResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations',
+    )
+    await Promise.all([firstDialog, preview.getByRole('button', { name: '適用', exact: true }).click()])
+    await expect.poll(() => releaseFirstApply !== undefined).toBe(true)
+    await expect(body).toBeDisabled()
+    await expect(body).toHaveValue('409失敗後も保持するコメント本文')
+    releaseFirstApply?.()
+    const failedResponse = await firstResponse
+    await failedResponse.finished()
+    expect(failedResponse.status()).toBe(409)
+    await expect(body).toBeEnabled()
+    await expect(body).toHaveValue('409失敗後も保持するコメント本文')
+    await expect(page.getByRole('alert').filter({ hasText: 'Work Item の操作を完了できませんでした。' })).toBeVisible()
+    await page.getByRole('button', { name: '一括移動', exact: true }).click()
+    await page.getByRole('combobox', { name: '移動先プロジェクト' }).selectOption('product-roadmap')
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    await expect(page.getByRole('region', { name: '一括操作の事前確認' })).toBeVisible()
+
+    const retryDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメントの下書きを破棄')
+      await dialog.accept()
+    })
+    const retryResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/bulk-operations',
+    )
+    await Promise.all([
+      retryDialog,
+      page.getByRole('region', { name: '一括操作の事前確認' })
+        .getByRole('button', { name: '適用', exact: true }).click(),
+    ])
+    const completedRetryResponse = await retryResponse
+    await completedRetryResponse.finished()
+    expect(completedRetryResponse.status()).toBe(200)
+    expect(applyCount).toBe(2)
+    await expect(body).toHaveCount(0)
   })
 
   test('Issue toolbar で検索、ステータス絞り込み、テーブル/ボード切替が動作する', async ({ page }) => {
@@ -7560,7 +7962,7 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(/issueId=brand-guideline/)
     const oldUpdateResponse = page.waitForResponse((response) =>
       response.request().method() === 'PATCH' &&
-      /\/api\/teams\/core-team\/issues\/seo-research$/u.test(response.url()) &&
+      response.url().endsWith('/api/teams/core-team/issues/seo-research') &&
       response.status() === 500,
     )
     releaseUpdate?.()
@@ -11753,6 +12155,242 @@ test.describe('authenticated task page', () => {
     expect(getMockRequestCounts(page).issueCreates).toBe(0)
 
   })
+
+  for (const selection of [
+    {
+      label: '明示 URL',
+      path: '/projects/refero/issues?issueId=wireframe&teamId=core-team',
+    },
+    {
+      label: '暗黙の初期選択',
+      path: '/projects/refero/issues',
+    },
+    {
+      label: 'Team 指定の暗黙選択',
+      path: '/projects/refero/issues?teamId=core-team',
+    },
+  ]) {
+    test(`${selection.label}で範囲外になった detail のコメント下書きを保持する`, async ({ page }) => {
+      let hasFreshReturn = false
+      const detailOverride: {
+        /** Whether the mutable detail response is active. */
+        enabled: boolean
+        /** Canonical fields returned by the next detail response. */
+        issuePatch?: Partial<TeamIssue>
+      } = { enabled: true }
+      await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+        issueDetailOverrides: {
+          [createIssueCollaborationKey('core-team', 'wireframe')]: detailOverride,
+        },
+      })
+      let removeSelectedTaskFromList = false
+      let returnWithOtherTaskFirst = false
+      let holdNextDetailResponse = false
+      let releaseHeldDetailResponse: (() => void) | undefined
+      await page.route(/.*\/api\/projects\/refero\/issues(?:\?.*)?$/, async (route) => {
+        if (route.request().method() !== 'GET' ||
+            (!removeSelectedTaskFromList && !returnWithOtherTaskFirst)) {
+          await route.fallback()
+          return
+        }
+        const nextTasks = referoTaskFixtures.filter((task) => task.id !== 'wireframe')
+        const returnedTask = referoTaskFixtures.find((task) => task.id === 'wireframe')
+        if (returnWithOtherTaskFirst && !returnedTask) {
+          throw new Error('The external reassignment fixture is missing wireframe.')
+        }
+        await route.fulfill({
+          json: {
+            issues: returnWithOtherTaskFirst
+              ? [...nextTasks, returnedTask]
+              : nextTasks,
+            projectId: 'refero',
+          },
+        })
+      })
+      await page.route(/.*\/api\/teams\/core-team\/issues\/wireframe$/, async (route) => {
+        if (route.request().method() !== 'GET' || !holdNextDetailResponse) {
+          await route.fallback()
+          return
+        }
+        holdNextDetailResponse = false
+        await new Promise<void>((resolve) => {
+          releaseHeldDetailResponse = resolve
+        })
+        await route.fallback()
+      })
+      await page.goto(selection.path)
+
+      const detailPane = page.getByTestId('task-detail-pane')
+      await expect(detailPane.getByRole('heading', {
+        name: '新しいランディングページのワイヤーフレーム作成',
+      })).toBeVisible()
+      const commentBody = page.getByRole('textbox', { name: 'コメント本文' })
+      const draft = `外部再割り当て後も保持するコメント (${selection.label})`
+      await commentBody.fill(draft)
+
+      let detailReads = 0
+      page.on('request', (request) => {
+        if (
+          request.method() === 'GET' &&
+          new URL(request.url()).pathname === '/api/teams/core-team/issues/wireframe'
+        ) {
+          detailReads += 1
+        }
+      })
+      detailOverride.issuePatch = { assignedProjectId: 'other-project' }
+      removeSelectedTaskFromList = true
+      const initialDetailReads = detailReads
+      await page.waitForTimeout(10_100)
+      const projectListResponse = page.waitForResponse((response) =>
+        response.request().method() === 'GET' &&
+        new URL(response.url()).pathname === '/api/projects/refero/issues' &&
+        response.status() === 200,
+      )
+      const detailResponse = page.waitForResponse((response) =>
+        response.request().method() === 'GET' &&
+        new URL(response.url()).pathname === '/api/teams/core-team/issues/wireframe' &&
+        response.status() === 200,
+      )
+      holdNextDetailResponse = selection.label === '暗黙の初期選択'
+      await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+      const completedProjectListResponse = await projectListResponse
+      await completedProjectListResponse.finished()
+      if (selection.label === '暗黙の初期選択') {
+        await expect.poll(() => releaseHeldDetailResponse !== undefined).toBe(true)
+        await page.evaluate(() => new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        }))
+        await expect(page.getByTestId('task-row-wireframe')).toHaveCount(0)
+        await expect(detailPane.getByTestId('task-detail-retained-readonly')).toBeVisible()
+        const gatedCommentBody = page.getByRole('textbox', { name: 'コメント本文' })
+        await expect(gatedCommentBody).toBeVisible()
+        await expect(gatedCommentBody).toHaveValue(draft)
+        await expect(gatedCommentBody).toHaveAttribute('readonly')
+        const gatedWatchButton = detailPane.getByRole('button', { name: /ウォッチ/u }).first()
+        if (await gatedWatchButton.count() > 0) {
+          await expect(gatedWatchButton).toBeDisabled()
+        }
+        releaseHeldDetailResponse?.()
+      }
+      const completedDetailResponse = await detailResponse
+      await completedDetailResponse.finished()
+      await expect.poll(() => detailReads).toBeGreaterThan(initialDetailReads)
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      }))
+
+      await expect(detailPane.getByTestId('task-detail-retained-readonly')).toBeVisible()
+      await expect(page.getByTestId('task-row-wireframe')).toHaveCount(0)
+      await expect(commentBody).toBeVisible()
+      await expect(commentBody).toHaveValue(draft)
+      await expect(commentBody).toHaveAttribute('readonly')
+      const watchButton = detailPane.getByRole('button', { name: /ウォッチ/u }).first()
+      if (await watchButton.count() > 0) {
+        await expect(watchButton).toBeDisabled()
+      }
+      await expect(detailPane.getByRole('heading', {
+        name: '新しいランディングページのワイヤーフレーム作成',
+      })).toBeVisible()
+      expect(getMockRequestCounts(page).issueUpdates).toBe(0)
+      expect(getMockRequestCounts(page).issueComments).toBe(0)
+
+      if (selection.label === '暗黙の初期選択') {
+        removeSelectedTaskFromList = true
+        returnWithOtherTaskFirst = true
+        detailOverride.issuePatch = {
+          assignedProjectId: 'refero',
+          revision: 9,
+          title: 'ワイヤーフレームを確認する（最新）',
+        }
+        const returnedProjectListResponse = page.waitForResponse((response) =>
+          response.request().method() === 'GET' &&
+          new URL(response.url()).pathname === '/api/projects/refero/issues' &&
+          response.status() === 200,
+        )
+        const returnedDetailResponse = page.waitForResponse((response) =>
+          response.request().method() === 'GET' &&
+          new URL(response.url()).pathname === '/api/teams/core-team/issues/wireframe' &&
+          response.status() === 200,
+        )
+        await page.waitForTimeout(10_100)
+        await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+        const [completedReturnedListResponse, completedReturnedDetailResponse] = await Promise.all([
+          returnedProjectListResponse,
+          returnedDetailResponse,
+        ])
+        await completedReturnedListResponse.finished()
+        await completedReturnedDetailResponse.finished()
+        const returnedListBody: unknown = await completedReturnedListResponse.json()
+        if (typeof returnedListBody !== 'object' || returnedListBody === null ||
+            !('issues' in returnedListBody) || !Array.isArray(returnedListBody.issues)) {
+          throw new Error('The returned external-reassignment list was malformed.')
+        }
+        const returnedIssueIds = returnedListBody.issues.flatMap((issue) =>
+          typeof issue === 'object' && issue !== null && 'id' in issue && typeof issue.id === 'string'
+            ? [issue.id]
+            : [],
+        )
+        expect(returnedIssueIds).toContain('wireframe')
+        expect(returnedIssueIds[0]).not.toBe('wireframe')
+        await page.evaluate(() => new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+        }))
+        await expect(detailPane.getByRole('heading', {
+          name: 'ワイヤーフレームを確認する（最新）',
+        })).toBeVisible()
+        const returnedCommentBody = page.getByRole('textbox', { name: 'コメント本文' })
+        await expect(returnedCommentBody).toHaveValue(draft)
+        await expect(returnedCommentBody).not.toHaveAttribute('readonly')
+        hasFreshReturn = true
+      }
+
+      const discardDraftButton = detailPane.getByRole('button', { name: '下書きを破棄' })
+      if (await discardDraftButton.count() > 0) {
+        await discardDraftButton.click()
+      } else {
+        await page.getByRole('textbox', { name: 'コメント本文' }).fill('')
+      }
+      if (await commentBody.count() > 0) {
+        await expect(commentBody).toHaveValue('')
+      }
+      removeSelectedTaskFromList = false
+      detailOverride.issuePatch = undefined
+      await expect(page.getByLabel('メインサイドバー').getByRole('button', {
+        name: 'ブランド刷新',
+        exact: true,
+      })).toBeVisible()
+      await page.getByLabel('メインサイドバー').getByRole('button', {
+        name: 'ブランド刷新',
+        exact: true,
+      }).click()
+      await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+      await page.getByRole('button', { name: 'Refero', exact: true }).click()
+      await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
+      if (!hasFreshReturn) {
+        await page.waitForTimeout(10_100)
+        const restoredProjectListResponse = page.waitForResponse((response) =>
+          response.request().method() === 'GET' &&
+          new URL(response.url()).pathname === '/api/projects/refero/issues' &&
+          response.status() === 200,
+        )
+        await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+        const completedRestoredProjectListResponse = await restoredProjectListResponse
+        await completedRestoredProjectListResponse.finished()
+      }
+      await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+      await page.getByTestId('task-row-wireframe').click()
+      await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+        name: selection.label === '暗黙の初期選択'
+          ? 'ワイヤーフレームを確認する（最新）'
+          : '新しいランディングページのワイヤーフレーム作成',
+      })).toBeVisible()
+      const freshCommentBody = page.getByRole('textbox', { name: 'コメント本文' })
+      await expect(freshCommentBody).toHaveValue('')
+      await expect(freshCommentBody).not.toHaveAttribute('readonly')
+      expect(getMockRequestCounts(page).issueUpdates).toBe(0)
+      expect(getMockRequestCounts(page).issueComments).toBe(0)
+    })
+  }
 
   for (const detailStatus of [401, 403, 404]) {
     test(`一覧補完の失敗を表示し、POSTを再送しない (${detailStatus})`, async ({ page }) => {

@@ -161,6 +161,7 @@ export type TaskWorkspaceProps = {
   onBulkApply?: (
     request: BulkOperationRequest,
     preview: BulkOperationPreview,
+    resumedOperation?: BulkOperation,
   ) => Promise<BulkOperation>
   /** Synchronizes selection after a bulk operation changes state. */
   onBulkOperationComplete: (operation: BulkOperation) => void

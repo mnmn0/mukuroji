@@ -499,6 +499,35 @@ type CanonicalDetailFocusHarnessProps = {
   taskScreenProps: ComponentProps<typeof TaskScreen>
 }
 
+/** Simulates a Project revalidation that removes the live detail owner after a dirty comment. */
+type DirtyCommentScopeLossHarnessProps = {
+  /** TaskScreen inputs used by the retained comment detail scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Keeps the dirty comment detail visible while the live selected detail leaves Project scope. */
+function DirtyCommentScopeLossHarness({
+  taskScreenProps,
+}: DirtyCommentScopeLossHarnessProps) {
+  const [selectedDetailUnavailable, setSelectedDetailUnavailable] = useState(false)
+
+  return (
+    <>
+      <button
+        data-testid="simulate-comment-owner-reassignment"
+        onClick={() => setSelectedDetailUnavailable(true)}
+        type="button"
+      >
+        Simulate external reassignment
+      </button>
+      <TaskScreen
+        {...taskScreenProps}
+        selectedIssueDetailUnavailable={selectedDetailUnavailable}
+      />
+    </>
+  )
+}
+
 /** Keeps a Team-qualified detail available while routed selection permission changes. */
 function CanonicalDetailFocusHarness({
   canMutate,
@@ -1464,6 +1493,38 @@ export const CanonicalDetailDeniedFocusFallsBackToHeading: Story = {
     await waitFor(() => expect(within(canvas.getByTestId('task-detail-pane')).getByRole('heading', {
       name: 'ワイヤーフレームを確認する',
     })).toHaveFocus())
+  },
+}
+
+/** Retains a dirty comment body as read-only detail when Project revalidation removes its owner. */
+export const DirtyCommentRetainsDetailAfterExternalReassignment: Story = {
+  args: {
+    initialSelectedTaskId: 'wireframe',
+    selectedIssueDetail,
+    selectedIssueId: 'wireframe',
+  },
+  render: (args) => <DirtyCommentScopeLossHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const body = await canvas.findByRole('textbox', { name: 'コメント本文' })
+    const draft = '外部再割り当て後も保持するコメント下書き'
+    await userEvent.type(body, draft)
+    await userEvent.click(canvas.getByTestId('simulate-comment-owner-reassignment'))
+    const retainedBody = await canvas.findByRole('textbox', { name: 'コメント本文' })
+    await waitFor(() => {
+      expect(retainedBody).toBeInTheDocument()
+      expect(retainedBody).toBeVisible()
+      expect(retainedBody).toHaveValue(draft)
+      expect(retainedBody).toHaveAttribute('readonly')
+    })
+    await expect(canvas.getByTestId('task-detail-retained-readonly')).toBeVisible()
+    await expect(canvas.getByRole('button', { name: '下書きを破棄' })).toBeVisible()
+    await expect(canvas.getByRole('heading', {
+      name: 'ワイヤーフレームを確認する',
+    })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: '下書きを破棄' }))
+    expect(canvas.queryByTestId('task-detail-retained-readonly')).not.toBeInTheDocument()
+    expect(canvas.queryByRole('textbox', { name: 'コメント本文' })).not.toBeInTheDocument()
   },
 }
 
