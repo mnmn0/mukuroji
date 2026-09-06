@@ -88,7 +88,39 @@ export type IssueConversationTabProps = {
    * HTTP status from the latest accepted-resolution mutation failure.
    */
   resolutionErrorStatus?: number
+  /** Reports whether one of the three local comment composer slots has input to retain. */
+  onDraftDirtyChange?: (isDirty: boolean) => void
 }
+
+/** Values retained for one root, reply, or edit composer slot. */
+type CommentComposerDraft = {
+  /** Raw Markdown text currently entered by the viewer. */
+  bodyMarkdown: string
+  /** Mention member keys selected while editing the raw text. */
+  mentionMemberKeys: string[]
+  /** Whether the viewer has changed this slot since it was opened. */
+  isDirty: boolean
+  /** Monotonic lifetime identity used to reject stale asynchronous results. */
+  lifetimeId: number
+}
+
+/** A reply or edit slot together with the exact target it started from. */
+type TargetedCommentComposerDraft = CommentComposerDraft & {
+  /** Comment identity receiving the reply or edit. */
+  commentId: string
+  /** Canonical version captured when an edit began. */
+  originalVersion?: number
+  /** Canonical body captured when an edit began. */
+  originalBodyMarkdown?: string
+  /** Mention keys captured when an edit began. */
+  originalMentionMemberKeys?: string[]
+}
+
+/** Fixed local composer slots that can own an asynchronous request. */
+type CommentComposerSlot = 'root' | 'reply' | 'edit'
+
+/** Pending lifetime identities owned by the persistent Conversation tab. */
+type PendingComposerSlotLifetimes = Partial<Record<CommentComposerSlot, number>>
 
 /**
  * Inline editor state for selecting, replacing, or editing an accepted resolution.
@@ -132,16 +164,38 @@ export function IssueConversationTab({
   onSetAcceptedResolution,
   readOnlyMessage,
   resolutionErrorStatus,
+  onDraftDirtyChange,
 }: IssueConversationTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const [replyingToId, setReplyingToId] = useState<string | undefined>()
-  const [editingId, setEditingId] = useState<string | undefined>()
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | undefined>()
   const [reactionMenuId, setReactionMenuId] = useState<string | undefined>()
   const [resolutionEditor, setResolutionEditor] = useState<ResolutionEditorState>()
   const [resolutionSourceTarget, setResolutionSourceTarget] =
     useState<ResolutionSourceTarget>()
   const [isResolutionSaving, setIsResolutionSaving] = useState(false)
+  const [rootDraft, setRootDraft] = useState<CommentComposerDraft>({
+    bodyMarkdown: '',
+    isDirty: false,
+    lifetimeId: 0,
+    mentionMemberKeys: [],
+  })
+  const [replyDraft, setReplyDraft] = useState<TargetedCommentComposerDraft>()
+  const [editDraft, setEditDraft] = useState<TargetedCommentComposerDraft>()
+  const replyingToId = replyDraft?.commentId
+  const editingId = editDraft?.commentId
+  const draftStateRef = useRef<{
+    /** Current root composer slot used by asynchronous ownership checks. */
+    root: CommentComposerDraft
+    /** Current reply composer slot, when a reply is open. */
+    reply?: TargetedCommentComposerDraft
+    /** Current edit composer slot, when an edit is open. */
+    edit?: TargetedCommentComposerDraft
+  }>({ root: rootDraft })
+  const mountedRef = useRef(false)
+  /** Ref-backed pending ownership blocks duplicate submits synchronously. */
+  const pendingSlotLifetimesRef = useRef<PendingComposerSlotLifetimes>({})
+  const [pendingSlotLifetimes, setPendingSlotLifetimes] = useState<PendingComposerSlotLifetimes>({})
+  const nextDraftLifetimeIdRef = useRef(1)
   const focusLoadRequestRef = useRef<string | undefined>(undefined)
   const focusedCommentTargetRef = useRef<string | undefined>(undefined)
   const focusedCommentElementRef = useRef<HTMLElement | undefined>(undefined)
@@ -177,6 +231,229 @@ export function IssueConversationTab({
   const resolutionSourceAuthorMemberKey = resolutionEditor?.sourceComment.authorMemberKey
   const focusedCommentTargetId = activeResolutionSourceTarget?.commentId ?? focusedCommentId
   const focusedRootTargetId = activeResolutionSourceTarget?.rootCommentId ?? focusedRootCommentId
+  const retainedReplyDraft = replyDraft && !isReplyDraftWritable(replyDraft, controller, readOnlyMessage)
+    ? replyDraft
+    : undefined
+  const retainedEditDraft = editDraft && !isEditDraftWritable(editDraft, controller, readOnlyMessage)
+    ? editDraft
+    : undefined
+
+  /** Creates an identity for a newly opened local composer slot. */
+  function createDraftLifetimeId() {
+    const lifetimeId = nextDraftLifetimeIdRef.current
+    nextDraftLifetimeIdRef.current += 1
+    return lifetimeId
+  }
+
+  /** Claims one fixed composer slot synchronously before starting its request. */
+  function beginSlotSubmission(slot: CommentComposerSlot, lifetimeId: number) {
+    if (pendingSlotLifetimesRef.current[slot] !== undefined) return false
+    pendingSlotLifetimesRef.current[slot] = lifetimeId
+    setPendingSlotLifetimes({ ...pendingSlotLifetimesRef.current })
+    if (mountedRef.current) onDraftDirtyChange?.(true)
+    return true
+  }
+
+  /** Releases a slot only when the completion belongs to its active request. */
+  function finishSlotSubmission(slot: CommentComposerSlot, lifetimeId: number) {
+    if (pendingSlotLifetimesRef.current[slot] !== lifetimeId) return
+    delete pendingSlotLifetimesRef.current[slot]
+    if (mountedRef.current) {
+      setPendingSlotLifetimes({ ...pendingSlotLifetimesRef.current })
+    }
+    const current = draftStateRef.current
+    if (mountedRef.current) {
+      onDraftDirtyChange?.(
+        current.root.isDirty ||
+        Boolean(current.reply?.isDirty || current.edit?.isDirty) ||
+        Object.keys(pendingSlotLifetimesRef.current).length > 0,
+      )
+    }
+  }
+
+  /** Clears the root slot with a new lifetime so an old request cannot clear it. */
+  function discardRootDraft() {
+    const nextDraft: CommentComposerDraft = {
+      bodyMarkdown: '',
+      isDirty: false,
+      lifetimeId: createDraftLifetimeId(),
+      mentionMemberKeys: [],
+    }
+    setRootDraft(nextDraft)
+    const current = draftStateRef.current
+    reportDraftDirty(nextDraft, current.reply, current.edit)
+  }
+
+  /** Reports the aggregate state of the fixed local composer slots. */
+  function reportDraftDirty(nextRoot: CommentComposerDraft, nextReply?: TargetedCommentComposerDraft, nextEdit?: TargetedCommentComposerDraft) {
+    draftStateRef.current = { edit: nextEdit, reply: nextReply, root: nextRoot }
+    if (mountedRef.current) {
+      onDraftDirtyChange?.(
+        nextRoot.isDirty ||
+        Boolean(nextReply?.isDirty || nextEdit?.isDirty) ||
+        Object.keys(pendingSlotLifetimesRef.current).length > 0,
+      )
+    }
+  }
+
+  /** Updates the root slot without losing raw text when its tab is hidden. */
+  function updateRootDraft(next: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) {
+    const normalizedNext = next.bodyMarkdown.trim()
+      ? next
+      : { ...next, mentionMemberKeys: [] }
+    const nextWithDirty: CommentComposerDraft = {
+      ...normalizedNext,
+      isDirty: hasDraftContentValue(normalizedNext),
+      lifetimeId: draftStateRef.current.root.lifetimeId,
+    }
+    setRootDraft(nextWithDirty)
+    const current = draftStateRef.current
+    reportDraftDirty(nextWithDirty, current.reply, current.edit)
+  }
+
+  /** Updates one fixed targeted slot while retaining raw input across refreshes. */
+  function updateTargetedDraft(
+    slot: 'edit' | 'reply',
+    next: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>,
+  ) {
+    const normalizedNext = next.bodyMarkdown.trim()
+      ? next
+      : { ...next, mentionMemberKeys: [] }
+    const current = draftStateRef.current
+    if (slot === 'edit' && current.edit) {
+      const nextDraft = {
+        ...current.edit,
+        ...normalizedNext,
+        isDirty: isTargetedDraftDirty({ ...current.edit, ...normalizedNext }),
+      }
+      setEditDraft(nextDraft)
+      reportDraftDirty(current.root, current.reply, nextDraft)
+      return
+    }
+    if (slot === 'reply' && current.reply) {
+      const nextDraft = {
+        ...current.reply,
+        ...normalizedNext,
+        isDirty: hasDraftContentValue(normalizedNext),
+      }
+      setReplyDraft(nextDraft)
+      reportDraftDirty(current.root, nextDraft, current.edit)
+    }
+  }
+
+  /** Confirms and closes a reply slot when closing it would discard entered input. */
+  function handleReplyingChange(
+    commentId?: string,
+    discardWithoutConfirmation = false,
+    expectedOwnerId?: string,
+    expectedBodyMarkdown?: string,
+  ) {
+    const current = draftStateRef.current
+    if (
+      commentId === undefined &&
+      expectedOwnerId &&
+      (String(current.reply?.lifetimeId) !== expectedOwnerId ||
+        (expectedBodyMarkdown !== undefined && current.reply?.bodyMarkdown.trim() !== expectedBodyMarkdown))
+    ) return
+    if (!discardWithoutConfirmation && commentId !== undefined && current.reply?.isDirty && current.reply.commentId !== commentId) {
+      if (!window.confirm(t('collaboration.composer.discardConfirm'))) return
+    }
+    if (!discardWithoutConfirmation && commentId === undefined && current.reply?.isDirty) {
+      if (!window.confirm(t('collaboration.composer.discardConfirm'))) return
+    }
+    if (commentId === undefined) {
+      setReplyDraft(undefined)
+      reportDraftDirty(current.root, undefined, current.edit)
+      return
+    }
+    if (current.reply?.commentId === commentId) {
+      return
+    }
+    const existing = controller.comments.find((comment) => comment.id === commentId)
+    if (!existing) return
+    const nextDraft: TargetedCommentComposerDraft = {
+      bodyMarkdown: '',
+      commentId,
+      isDirty: false,
+      lifetimeId: createDraftLifetimeId(),
+      mentionMemberKeys: [],
+    }
+    setReplyDraft(nextDraft)
+    reportDraftDirty(current.root, nextDraft, current.edit)
+  }
+
+  /** Confirms and closes an edit slot when closing it would discard entered input. */
+  function handleEditingChange(
+    commentId?: string,
+    discardWithoutConfirmation = false,
+    expectedOwnerId?: string,
+    expectedBodyMarkdown?: string,
+  ) {
+    const current = draftStateRef.current
+    if (
+      commentId === undefined &&
+      expectedOwnerId &&
+      (String(current.edit?.lifetimeId) !== expectedOwnerId ||
+        (expectedBodyMarkdown !== undefined && current.edit?.bodyMarkdown.trim() !== expectedBodyMarkdown))
+    ) return
+    if (!discardWithoutConfirmation && commentId === undefined && current.edit?.isDirty) {
+      if (!window.confirm(t('collaboration.composer.discardConfirm'))) return
+    }
+    if (!discardWithoutConfirmation && commentId !== undefined && current.edit?.isDirty && current.edit.commentId !== commentId) {
+      if (!window.confirm(t('collaboration.composer.discardConfirm'))) return
+    }
+    if (commentId === undefined) {
+      setEditDraft(undefined)
+      reportDraftDirty(current.root, current.reply, undefined)
+      return
+    }
+    if (current.edit?.commentId === commentId) {
+      return
+    }
+    const comment = controller.comments.find((candidate) => candidate.id === commentId)
+    if (!comment) return
+    const bodyMarkdown = resolveCommentBody(comment)
+    const nextDraft: TargetedCommentComposerDraft = {
+      bodyMarkdown,
+      commentId,
+      isDirty: false,
+      lifetimeId: createDraftLifetimeId(),
+      mentionMemberKeys: [...comment.mentionMemberKeys],
+      originalBodyMarkdown: bodyMarkdown,
+      originalMentionMemberKeys: [...comment.mentionMemberKeys],
+      originalVersion: comment.version ?? 1,
+    }
+    setEditDraft(nextDraft)
+    reportDraftDirty(current.root, current.reply, nextDraft)
+  }
+
+  /** Acknowledges the displayed canonical revision before an explicit edit retry. */
+  function handleEditConflictRetry(commentId: string) {
+    if (pendingSlotLifetimesRef.current.edit !== undefined) return
+    const current = draftStateRef.current.edit
+    const canonical = controller.comments.find((comment) => comment.id === commentId)
+    if (!current || current.commentId !== commentId || !canonical) return
+
+    const nextDraftBaseline: TargetedCommentComposerDraft = {
+      ...current,
+      originalBodyMarkdown: resolveCommentBody(canonical),
+      originalMentionMemberKeys: [...canonical.mentionMemberKeys],
+      originalVersion: canonical.version,
+    }
+    const nextDraft: TargetedCommentComposerDraft = {
+      ...nextDraftBaseline,
+      isDirty: isTargetedDraftDirty(nextDraftBaseline),
+    }
+    setEditDraft(nextDraft)
+    reportDraftDirty(draftStateRef.current.root, draftStateRef.current.reply, nextDraft)
+  }
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -350,11 +627,53 @@ export function IssueConversationTab({
             labelKey="collaboration.composer.label"
             members={members}
             onCancel={undefined}
-            onSubmit={controller.createComment}
+            draft={rootDraft}
+            externallySubmitting={pendingSlotLifetimes.root !== undefined}
+            onDraftChange={updateRootDraft}
+            onSubmit={async (input) => {
+              const submittedDraft = draftStateRef.current.root
+              if (!beginSlotSubmission('root', submittedDraft.lifetimeId)) return false
+              try {
+                const submittedBodyMarkdown = submittedDraft.bodyMarkdown
+                const submittedMentionMemberKeys = [...submittedDraft.mentionMemberKeys]
+                const succeeded = await controller.createComment(input)
+                const current = draftStateRef.current
+                if (
+                  succeeded &&
+                  current.root.lifetimeId === submittedDraft.lifetimeId &&
+                  current.root.bodyMarkdown === submittedBodyMarkdown &&
+                  JSON.stringify(current.root.mentionMemberKeys) === JSON.stringify(submittedMentionMemberKeys)
+                ) {
+                  discardRootDraft()
+                }
+                return succeeded
+              } finally {
+                finishSlotSubmission('root', submittedDraft.lifetimeId)
+              }
+            }}
             onTyping={controller.markTyping}
             submitKey="collaboration.composer.submit"
             t={t}
           />
+        ) : rootDraft.isDirty ? (
+          <div className="grid gap-2">
+            <p className="text-sm font-medium text-[var(--workbench-muted)]">
+              {readOnlyMessage ?? t('collaboration.readOnly')}
+            </p>
+            <textarea
+              aria-label={t('collaboration.composer.label')}
+              className="workbench-input min-h-20 w-full resize-y bg-white px-3 py-2.5 text-sm leading-6"
+              readOnly
+              value={rootDraft.bodyMarkdown}
+            />
+            <button
+              className="min-h-[44px] justify-self-start rounded px-3 text-xs font-semibold text-[var(--workbench-muted)] underline underline-offset-2"
+              onClick={discardRootDraft}
+              type="button"
+            >
+              {t('collaboration.composer.discardDraft')}
+            </button>
+          </div>
         ) : (
           <p className="text-sm font-medium text-[var(--workbench-muted)]">
             {readOnlyMessage ?? t('collaboration.readOnly')}
@@ -366,6 +685,36 @@ export function IssueConversationTab({
           </p>
         ) : null}
       </div>
+
+      {[retainedReplyDraft, retainedEditDraft].filter(
+        (draft): draft is TargetedCommentComposerDraft => draft !== undefined,
+      ).map((draft) => (
+        <div
+          className="mx-5 mt-4 grid gap-2 rounded-md border border-amber-200 bg-amber-50 p-3"
+          key={`retained-draft-${draft === retainedEditDraft ? 'edit' : 'reply'}-${draft.commentId}`}
+        >
+          <p className="text-xs font-semibold text-amber-900">
+            {t('collaboration.composer.targetUnavailable')}
+          </p>
+          <textarea
+            aria-label={t(draft === retainedEditDraft
+              ? 'collaboration.edit.label'
+              : 'collaboration.reply.label')}
+            className="workbench-input min-h-20 w-full resize-y bg-white px-3 py-2.5 text-sm leading-6"
+            readOnly
+            value={draft.bodyMarkdown}
+          />
+          <button
+              className="min-h-[44px] justify-self-start rounded px-3 text-xs font-semibold text-amber-900 underline underline-offset-2"
+            onClick={() => draft === retainedEditDraft
+              ? handleEditingChange(undefined, true)
+              : handleReplyingChange(undefined, true)}
+            type="button"
+          >
+            {t('collaboration.composer.discardDraft')}
+          </button>
+        </div>
+      ))}
 
       {controller.hasLoadError ? (
         <div className="mx-5 mt-4 flex items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2.5">
@@ -587,15 +936,24 @@ export function IssueConversationTab({
                 artifacts={artifacts}
                 comment={thread.root}
                 controller={controller}
+                editDraft={editDraft?.commentId === thread.root.id ? editDraft : undefined}
+                pendingSlotLifetimes={pendingSlotLifetimes}
+                beginSlotSubmission={beginSlotSubmission}
+                finishSlotSubmission={finishSlotSubmission}
+                readOnlyMessage={readOnlyMessage}
+                onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
+                onEditConflictRetry={handleEditConflictRetry}
+                onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
+                replyDraft={replyDraft?.commentId === thread.root.id ? replyDraft : undefined}
                 deleteConfirmationId={deleteConfirmationId}
                 editingId={editingId}
                 focused={focusedCommentTargetId === thread.root.id}
                 locale={locale}
                 members={members}
                 onDeleteConfirmationChange={setDeleteConfirmationId}
-                onEditingChange={setEditingId}
+                onEditingChange={handleEditingChange}
                 onReactionMenuChange={setReactionMenuId}
-                onReplyingChange={setReplyingToId}
+                onReplyingChange={handleReplyingChange}
                 onPromote={onPromoteComment}
                 reactionMenuId={reactionMenuId}
                 replyingToId={replyingToId}
@@ -609,6 +967,15 @@ export function IssueConversationTab({
                       artifacts={artifacts}
                       comment={reply}
                       controller={controller}
+                      editDraft={editDraft?.commentId === reply.id ? editDraft : undefined}
+                      pendingSlotLifetimes={pendingSlotLifetimes}
+                      beginSlotSubmission={beginSlotSubmission}
+                      finishSlotSubmission={finishSlotSubmission}
+                      readOnlyMessage={readOnlyMessage}
+                      onEditDraftChange={(next) => updateTargetedDraft('edit', next)}
+                      onEditConflictRetry={handleEditConflictRetry}
+                      onReplyDraftChange={(next) => updateTargetedDraft('reply', next)}
+                      replyDraft={replyDraft?.commentId === reply.id ? replyDraft : undefined}
                       deleteConfirmationId={deleteConfirmationId}
                       editingId={editingId}
                       focused={focusedCommentTargetId === reply.id}
@@ -617,9 +984,9 @@ export function IssueConversationTab({
                       locale={locale}
                       members={members}
                       onDeleteConfirmationChange={setDeleteConfirmationId}
-                      onEditingChange={setEditingId}
+                      onEditingChange={handleEditingChange}
                       onReactionMenuChange={setReactionMenuId}
-                      onReplyingChange={setReplyingToId}
+                      onReplyingChange={handleReplyingChange}
                       onPromote={onPromoteComment}
                       onAcceptResolution={
                         canManageAcceptedResolution
@@ -707,6 +1074,24 @@ type CommentCardProps = {
    * Comment file attachment を読み書きする controller です。
    */
   artifacts?: FileArtifactsController
+  /** Controlled edit draft for this comment, when its editor is open. */
+  editDraft?: TargetedCommentComposerDraft
+  /** Current issue-level reason writes are unavailable. */
+  readOnlyMessage?: string
+  /** Current pending request owners for the fixed composer slots. */
+  pendingSlotLifetimes: PendingComposerSlotLifetimes
+  /** Claims a slot before starting its asynchronous request. */
+  beginSlotSubmission: (slot: CommentComposerSlot, lifetimeId: number) => boolean
+  /** Releases a slot only when its owning request has settled. */
+  finishSlotSubmission: (slot: CommentComposerSlot, lifetimeId: number) => void
+  /** Retains raw edit text after a comment refresh or tab switch. */
+  onEditDraftChange: (draft: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) => void
+  /** Explicitly adopts the displayed canonical revision for a conflict retry. */
+  onEditConflictRetry: (commentId: string) => void
+  /** Controlled reply draft for this comment, when its editor is open. */
+  replyDraft?: TargetedCommentComposerDraft
+  /** Retains raw reply text after a comment refresh or tab switch. */
+  onReplyDraftChange: (draft: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) => void
   /**
    * 表示する comment です。
    */
@@ -754,11 +1139,21 @@ type CommentCardProps = {
   /**
    * 編集対象を変更します。
    */
-  onEditingChange: (commentId?: string) => void
+  onEditingChange: (
+    commentId?: string,
+    discardWithoutConfirmation?: boolean,
+    expectedOwnerId?: string,
+    expectedBodyMarkdown?: string,
+  ) => void
   /**
    * reply 対象を変更します。
    */
-  onReplyingChange: (commentId?: string) => void
+  onReplyingChange: (
+    commentId?: string,
+    discardWithoutConfirmation?: boolean,
+    expectedOwnerId?: string,
+    expectedBodyMarkdown?: string,
+  ) => void
   /**
    * reaction menu 対象を変更します。
    */
@@ -795,6 +1190,7 @@ function CommentCard({
   comment,
   controller,
   deleteConfirmationId,
+  editDraft,
   editingId,
   focused = false,
   isReply = false,
@@ -802,12 +1198,20 @@ function CommentCard({
   members,
   onDeleteConfirmationChange,
   onAcceptResolution,
+  onEditDraftChange,
+  onEditConflictRetry,
   onEditingChange,
   onPromote,
+  onReplyDraftChange,
   onReactionMenuChange,
   onReplyingChange,
+  pendingSlotLifetimes,
+  beginSlotSubmission,
+  finishSlotSubmission,
   reactionMenuId,
+  readOnlyMessage,
   replyingToId,
+  replyDraft,
   rootComment,
   t,
 }: CommentCardProps) {
@@ -832,6 +1236,12 @@ function CommentCard({
   const acceptedResolution = resolveCurrentAcceptedResolution(rootComment)
   const isAcceptedResolution =
     acceptedResolution?.sourceCommentId === comment.id
+  const hasEditConflict = Boolean(
+    isEditing &&
+    editDraft &&
+    editDraft.originalVersion !== undefined &&
+    comment.version > editDraft.originalVersion,
+  )
 
   return (
     <div
@@ -873,27 +1283,48 @@ function CommentCard({
             ) : null}
           </div>
 
-          {isEditing ? (
+          {isEditing && editDraft && isEditDraftWritable(editDraft, controller, readOnlyMessage) ? (
             <div className="mt-2">
+              {hasEditConflict ? (
+                <div className="mb-2 grid gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950" role="status">
+                  <p className="font-semibold">{t('collaboration.error.conflictLatest')}</p>
+                  <SafeCommentBody bodyMarkdown={bodyMarkdown} />
+                  <button
+                    className="min-h-[44px] justify-self-start rounded px-3 text-xs font-semibold underline underline-offset-2"
+                    disabled={pendingSlotLifetimes.edit !== undefined}
+                    onClick={() => onEditConflictRetry(comment.id)}
+                    type="button"
+                  >
+                    {t('collaboration.error.conflictRetry')}
+                  </button>
+                </div>
+              ) : null}
               <CommentComposer
-                initialBodyMarkdown={bodyMarkdown}
-                initialMentionMemberKeys={comment.mentionMemberKeys}
-                key={`edit-${comment.id}-${comment.version ?? 1}`}
+                draft={editDraft}
+                externallySubmitting={pendingSlotLifetimes.edit !== undefined}
+                key={`edit-${comment.id}`}
                 labelKey="collaboration.edit.label"
                 members={members}
                 onCancel={() => onEditingChange(undefined)}
+                onDraftChange={onEditDraftChange}
                 onSubmit={async (input) => {
-                  const succeeded = await controller.updateComment(comment, {
-                    bodyMarkdown: input.bodyMarkdown,
-                    expectedVersion: comment.version ?? 1,
-                    mentionMemberKeys: input.mentionMemberKeys,
-                  })
+                  const submittedLifetimeId = editDraft.lifetimeId
+                  if (!beginSlotSubmission('edit', submittedLifetimeId)) return false
+                  try {
+                    const succeeded = await controller.updateComment(comment, {
+                      bodyMarkdown: input.bodyMarkdown,
+                      expectedVersion: editDraft.originalVersion ?? comment.version ?? 1,
+                      mentionMemberKeys: input.mentionMemberKeys,
+                    })
 
-                  if (succeeded) {
-                    onEditingChange(undefined)
+                    if (succeeded) {
+                      onEditingChange(undefined, true, String(submittedLifetimeId), input.bodyMarkdown)
+                    }
+
+                    return succeeded
+                  } finally {
+                    finishSlotSubmission('edit', submittedLifetimeId)
                   }
-
-                  return succeeded
                 }}
                 onTyping={controller.markTyping}
                 submitKey="collaboration.edit.save"
@@ -1040,24 +1471,33 @@ function CommentCard({
             </div>
           ) : null}
 
-          {isReplying ? (
+          {isReplying && replyDraft && isReplyDraftWritable(replyDraft, controller, readOnlyMessage) ? (
             <div className="mt-3 rounded-md border border-[#c6e8e3] bg-[#f4fbfa] p-3">
               <CommentComposer
+                draft={replyDraft}
+                externallySubmitting={pendingSlotLifetimes.reply !== undefined}
                 key={`reply-${comment.id}`}
                 labelKey="collaboration.reply.label"
                 members={members}
                 onCancel={() => onReplyingChange(undefined)}
+                onDraftChange={onReplyDraftChange}
                 onSubmit={async (input) => {
-                  const succeeded = await controller.createComment({
-                    ...input,
-                    parentCommentId: comment.id,
-                  })
+                  const submittedLifetimeId = replyDraft.lifetimeId
+                  if (!beginSlotSubmission('reply', submittedLifetimeId)) return false
+                  try {
+                    const succeeded = await controller.createComment({
+                      ...input,
+                      parentCommentId: comment.id,
+                    })
 
-                  if (succeeded) {
-                    onReplyingChange(undefined)
+                    if (succeeded) {
+                      onReplyingChange(undefined, true, String(submittedLifetimeId), input.bodyMarkdown)
+                    }
+
+                    return succeeded
+                  } finally {
+                    finishSlotSubmission('reply', submittedLifetimeId)
                   }
-
-                  return succeeded
                 }}
                 onTyping={controller.markTyping}
                 submitKey="collaboration.reply.submit"
@@ -1501,14 +1941,12 @@ type CommentComposerProps = {
    * mention 候補の Workspace member 一覧です。
    */
   members: WorkspaceMember[]
-  /**
-   * 編集時の初期 Markdown です。
-   */
-  initialBodyMarkdown?: string
-  /**
-   * 編集時の初期 mention member key です。
-   */
-  initialMentionMemberKeys?: string[]
+  /** Fixed slot state owned by the persistent conversation tab. */
+  draft: CommentComposerDraft
+  /** Keeps a remounted composer disabled while its owner request is pending. */
+  externallySubmitting?: boolean
+  /** Stores raw text and mentions in the persistent conversation slot. */
+  onDraftChange: (draft: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) => void
   /**
    * 作成または更新 action です。
    */
@@ -1530,26 +1968,36 @@ type CommentComposerProps = {
 /**
  * Renders the Markdown comment composer and mention picker.
  *
- * @param props - Initial text, mention candidates, and composer actions.
+ * @param props - Persistent slot state, mention candidates, and composer actions.
  * @returns Comment composer form.
  */
 function CommentComposer({
-  initialBodyMarkdown = '',
-  initialMentionMemberKeys = [],
+  draft,
+  externallySubmitting = false,
   labelKey,
   members,
   onCancel,
+  onDraftChange,
   onSubmit,
   onTyping,
   submitKey,
   t,
 }: CommentComposerProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const [bodyMarkdown, setBodyMarkdown] = useState(initialBodyMarkdown)
-  const [mentionMemberKeys, setMentionMemberKeys] = useState(initialMentionMemberKeys)
   const [mentionQuery, setMentionQuery] = useState<string | undefined>()
   const [isPreviewing, setIsPreviewing] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const submitInFlightRef = useRef(false)
+  const currentBodyMarkdown = draft.bodyMarkdown
+  const currentMentionMemberKeys = draft.mentionMemberKeys
+
+  /** Applies one atomic body-and-mention update to the persistent composer slot. */
+  const updateDraft = (
+    nextBodyMarkdown: string,
+    nextMentionMemberKeys = currentMentionMemberKeys,
+  ) => {
+    onDraftChange({ bodyMarkdown: nextBodyMarkdown, mentionMemberKeys: nextMentionMemberKeys })
+  }
   const activeMembers = useMemo(
     () => members.filter((member) => member.status === 'active'),
     [members],
@@ -1569,13 +2017,13 @@ function CommentComposer({
 
   const insertTemplate = (prefix: string, suffix: string, placeholder: string) => {
     const textarea = textareaRef.current
-    const selectionStart = textarea?.selectionStart ?? bodyMarkdown.length
+    const selectionStart = textarea?.selectionStart ?? currentBodyMarkdown.length
     const selectionEnd = textarea?.selectionEnd ?? selectionStart
-    const selectedText = bodyMarkdown.slice(selectionStart, selectionEnd) || placeholder
+    const selectedText = currentBodyMarkdown.slice(selectionStart, selectionEnd) || placeholder
     const insertion = `${prefix}${selectedText}${suffix}`
-    const nextBody = `${bodyMarkdown.slice(0, selectionStart)}${insertion}${bodyMarkdown.slice(selectionEnd)}`
+    const nextBody = `${currentBodyMarkdown.slice(0, selectionStart)}${insertion}${currentBodyMarkdown.slice(selectionEnd)}`
 
-    setBodyMarkdown(nextBody)
+    updateDraft(nextBody)
     onTyping()
     requestAnimationFrame(() => {
       textarea?.focus()
@@ -1585,14 +2033,16 @@ function CommentComposer({
 
   const insertMention = (member: WorkspaceMember) => {
     const textarea = textareaRef.current
-    const cursor = textarea?.selectionStart ?? bodyMarkdown.length
-    const mention = readMentionAtCursor(bodyMarkdown, cursor)
+    const cursor = textarea?.selectionStart ?? currentBodyMarkdown.length
+    const mention = readMentionAtCursor(currentBodyMarkdown, cursor)
     const token = `@${formatIssueMentionLabel(member, activeMembers)}`
     const start = mention?.start ?? cursor
-    const nextBody = `${bodyMarkdown.slice(0, start)}${token} ${bodyMarkdown.slice(cursor)}`
+    const nextBody = `${currentBodyMarkdown.slice(0, start)}${token} ${currentBodyMarkdown.slice(cursor)}`
 
-    setBodyMarkdown(nextBody)
-    setMentionMemberKeys((current) => Array.from(new Set([...current, member.memberKey])))
+    updateDraft(
+      nextBody,
+      Array.from(new Set([...currentMentionMemberKeys, member.memberKey])),
+    )
     setMentionQuery(undefined)
     onTyping()
     requestAnimationFrame(() => {
@@ -1604,13 +2054,14 @@ function CommentComposer({
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const trimmedBody = bodyMarkdown.trim()
+    const trimmedBody = currentBodyMarkdown.trim()
 
-    if (!trimmedBody || isSubmitting) {
+    if (!trimmedBody || isSubmitting || externallySubmitting || submitInFlightRef.current) {
       textareaRef.current?.focus()
       return
     }
 
+    submitInFlightRef.current = true
     setIsSubmitting(true)
     let succeeded = false
     try {
@@ -1618,25 +2069,22 @@ function CommentComposer({
         bodyMarkdown: trimmedBody,
         mentionMemberKeys: resolveIssueMentionMemberKeys(
           trimmedBody,
-          mentionMemberKeys,
+          currentMentionMemberKeys,
           members,
         ),
       })
     } catch (error) {
       console.error('Failed to submit collaboration comment.', error)
     } finally {
+      submitInFlightRef.current = false
       setIsSubmitting(false)
     }
-
-    if (succeeded && !initialBodyMarkdown) {
-      setBodyMarkdown('')
-      setMentionMemberKeys([])
-      setIsPreviewing(false)
-    }
+    if (succeeded) setIsPreviewing(false)
   }
 
   return (
     <form className="grid min-w-0 gap-2.5" onSubmit={(event) => void handleSubmit(event)}>
+      <fieldset className="contents" disabled={isSubmitting || externallySubmitting}>
       <div className="flex min-w-0 flex-wrap items-center gap-1 border-b border-[var(--workbench-border)] pb-2">
         <ComposerToolButton label={t('collaboration.toolbar.bold')} onClick={() => insertTemplate('**', '**', t('collaboration.toolbar.text'))}>
           B
@@ -1652,12 +2100,12 @@ function CommentComposer({
         </ComposerToolButton>
         <ComposerToolButton label={t('collaboration.toolbar.mention')} onClick={() => {
           const textarea = textareaRef.current
-          const cursor = textarea?.selectionStart ?? bodyMarkdown.length
-          const previousCharacter = bodyMarkdown.charAt(cursor - 1)
+          const cursor = textarea?.selectionStart ?? currentBodyMarkdown.length
+          const previousCharacter = currentBodyMarkdown.charAt(cursor - 1)
           const prefix = previousCharacter && /[\p{L}\p{N}_@]/u.test(previousCharacter) ? ' @' : '@'
-          const nextBody = `${bodyMarkdown.slice(0, cursor)}${prefix}${bodyMarkdown.slice(cursor)}`
+          const nextBody = `${currentBodyMarkdown.slice(0, cursor)}${prefix}${currentBodyMarkdown.slice(cursor)}`
 
-          setBodyMarkdown(nextBody)
+          updateDraft(nextBody)
           setMentionQuery('')
           requestAnimationFrame(() => {
             textarea?.focus()
@@ -1668,7 +2116,7 @@ function CommentComposer({
         </ComposerToolButton>
         <button
           aria-pressed={isPreviewing}
-          className="ml-auto rounded px-2 py-1 text-[0.68rem] font-semibold text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)]"
+          className="ml-auto min-h-[44px] min-w-[44px] rounded px-2 py-1 text-[0.68rem] font-semibold text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)]"
           onClick={() => setIsPreviewing((current) => !current)}
           type="button"
         >
@@ -1677,8 +2125,8 @@ function CommentComposer({
       </div>
       {isPreviewing ? (
         <div className="min-h-20 rounded-md border border-[var(--workbench-border)] bg-white px-3 py-2.5">
-          {bodyMarkdown.trim() ? (
-            <SafeCommentBody bodyMarkdown={bodyMarkdown} />
+          {currentBodyMarkdown.trim() ? (
+            <SafeCommentBody bodyMarkdown={currentBodyMarkdown} />
           ) : (
             <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('collaboration.preview.empty')}</p>
           )}
@@ -1692,7 +2140,7 @@ function CommentComposer({
             onChange={(event) => {
               const nextBody = event.target.value
 
-              setBodyMarkdown(nextBody)
+              updateDraft(nextBody)
               setMentionQuery(readMentionAtCursor(nextBody, event.target.selectionStart)?.query)
               onTyping()
             }}
@@ -1703,7 +2151,7 @@ function CommentComposer({
             placeholder={t('collaboration.composer.placeholder')}
             ref={textareaRef}
             required
-            value={bodyMarkdown}
+            value={currentBodyMarkdown}
           />
           {mentionQuery !== undefined && mentionSuggestions.length > 0 ? (
             <div
@@ -1740,15 +2188,15 @@ function CommentComposer({
       )}
       <div className="flex flex-wrap items-center gap-2">
         <button
-          className="workbench-button-primary h-8 px-3 text-xs disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isSubmitting || !bodyMarkdown.trim()}
+          className="workbench-button-primary min-h-[44px] px-3 text-xs disabled:border-slate-300 disabled:bg-slate-300"
+          disabled={isSubmitting || externallySubmitting || !currentBodyMarkdown.trim()}
           type="submit"
         >
-          {t(isSubmitting ? 'collaboration.saving' : submitKey)}
+          {t(isSubmitting || externallySubmitting ? 'collaboration.saving' : submitKey)}
         </button>
         {onCancel ? (
           <button
-            className="h-8 rounded px-2.5 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-white"
+            className="min-h-[44px] rounded px-2.5 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-white"
             onClick={onCancel}
             type="button"
           >
@@ -1759,6 +2207,7 @@ function CommentComposer({
           {t('collaboration.composer.markdown')}
         </p>
       </div>
+      </fieldset>
     </form>
   )
 }
@@ -1852,7 +2301,7 @@ function ComposerToolButton({
   return (
     <button
       aria-label={label}
-      className="grid h-7 min-w-7 place-items-center rounded px-1.5 text-[0.7rem] font-bold text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)]"
+      className="grid min-h-[44px] min-w-[44px] place-items-center rounded px-1.5 text-[0.7rem] font-bold text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)]"
       onClick={onClick}
       title={label}
       type="button"
@@ -1909,11 +2358,63 @@ function CollaborationSkeleton() {
   )
 }
 
+/** Checks whether a targeted draft differs from its captured canonical values. */
+function isTargetedDraftDirty(draft: TargetedCommentComposerDraft) {
+  if (draft.originalBodyMarkdown === undefined) {
+    return hasDraftContentValue(draft)
+  }
+
+  return draft.bodyMarkdown !== draft.originalBodyMarkdown ||
+    JSON.stringify(draft.mentionMemberKeys) !== JSON.stringify(draft.originalMentionMemberKeys ?? [])
+}
+
+/** Returns whether a local slot contains user-owned text or mention state. */
+function hasDraftContentValue(draft: Pick<CommentComposerDraft, 'bodyMarkdown' | 'mentionMemberKeys'>) {
+  return Boolean(draft.bodyMarkdown.trim() || draft.mentionMemberKeys.length)
+}
+
+/** Checks whether a retained reply still has an authorized, visible target. */
+function isReplyDraftWritable(
+  draft: TargetedCommentComposerDraft,
+  controller: IssueCollaborationController,
+  readOnlyMessage?: string,
+) {
+  const comment = controller.comments.find((candidate) => candidate.id === draft.commentId)
+  const rootComment = comment?.parentCommentId
+    ? controller.comments.find((candidate) => candidate.id === (comment.rootCommentId ?? comment.parentCommentId))
+    : comment
+  return Boolean(
+    comment &&
+    !comment.deletedAt &&
+    comment.source !== 'legacy' &&
+    !rootComment?.resolvedAt &&
+    !readOnlyMessage &&
+    controller.capabilities.canComment &&
+    (comment.capabilities?.canReply ?? true),
+  )
+}
+
+/** Checks whether a retained edit still has an authorized, visible target. */
+function isEditDraftWritable(
+  draft: TargetedCommentComposerDraft,
+  controller: IssueCollaborationController,
+  readOnlyMessage?: string,
+) {
+  const comment = controller.comments.find((candidate) => candidate.id === draft.commentId)
+  return Boolean(
+    comment &&
+    !comment.deletedAt &&
+    comment.source !== 'legacy' &&
+    !readOnlyMessage &&
+    comment.capabilities?.canEdit,
+  )
+}
+
 /**
  * Groups a flat comment page into roots and chronologically ordered replies.
  *
  * @param comments - Comments returned by the collaboration API.
- * @returns Thread rows suitable for the conversation feed.
+ * @returns Thread rows suitable for the comment feed.
  */
 function createCommentThreads(comments: TeamIssueComment[]) {
   const rootComments = comments.filter((comment) => !comment.parentCommentId)

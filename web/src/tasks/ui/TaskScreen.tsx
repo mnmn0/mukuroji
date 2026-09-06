@@ -493,6 +493,12 @@ export type TaskScreenProps = {
   ) => Promise<CreatedProjectTaskMutation | void>
   /** Reports whether the inline create form contains values that need discard confirmation. */
   onCreateTaskDirtyChange?: (isDirty: boolean, discardHandler?: () => void) => void
+  /** Reports retained comment composer input to the route-owned navigation guard. */
+  onCommentDraftDirtyChange?: (
+    isDirty: boolean,
+    scopeKey?: string,
+    discardHandler?: () => void,
+  ) => void
   /** Loads the next page of Project user candidates. */
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Changes the Project user search query. */
@@ -601,6 +607,7 @@ export function TaskScreen({
   onProjectQuickAccessToggle,
   onCreateTask,
   onCreateTaskDirtyChange,
+  onCommentDraftDirtyChange,
   onRetryPlanning,
   onRetryConfigurations,
   onUpdateIssue,
@@ -695,6 +702,8 @@ export function TaskScreen({
   const createTaskEditorGenerationRef = useRef(0)
   const createTaskSubmissionInFlightRef = useRef(false)
   const createTaskDirtyRef = useRef(false)
+  const commentDraftDirtyRef = useRef(false)
+  const commentDraftDirtyScopeRef = useRef<string | undefined>(undefined)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
   const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
   const onPreviewScheduleChangeRef = useRef(onPreviewScheduleChange)
@@ -1316,6 +1325,22 @@ export function TaskScreen({
     )
   }, [dismissCreateTaskEditorForScopeChange, onCreateTaskDirtyChange])
 
+  /** Clears only the comment owner currently mounted in this detail pane. */
+  const discardCommentDraft = useCallback(() => {
+    if (!commentDraftDirtyRef.current) return
+    const scopeKey = commentDraftDirtyScopeRef.current
+    commentDraftDirtyRef.current = false
+    commentDraftDirtyScopeRef.current = undefined
+    onCommentDraftDirtyChange?.(false, scopeKey)
+  }, [onCommentDraftDirtyChange])
+
+  /** Reports comment draft ownership while retaining the local preflight signal. */
+  const reportCommentDraftDirty = useCallback((isDirty: boolean, scopeKey?: string) => {
+    commentDraftDirtyRef.current = isDirty
+    commentDraftDirtyScopeRef.current = isDirty ? scopeKey : undefined
+    onCommentDraftDirtyChange?.(isDirty, scopeKey, isDirty ? discardCommentDraft : undefined)
+  }, [discardCommentDraft, onCommentDraftDirtyChange])
+
   /** Confirms whether the current create form may be replaced or discarded. */
   const confirmCreateTaskDiscard = useCallback(() => {
     if (!createTaskDirtyRef.current) return true
@@ -1323,6 +1348,22 @@ export function TaskScreen({
     if (shouldDiscard) dismissCreateTaskEditor()
     return shouldDiscard
   }, [dismissCreateTaskEditor, t])
+
+  /** Confirms and clears only the local owners that an operation will discard. */
+  const confirmDetailOwnerDiscard = useCallback((discardCreateTask: boolean, discardComment: boolean) => {
+    const hasCreateTask = discardCreateTask && createTaskDirtyRef.current
+    const hasComment = discardComment && commentDraftDirtyRef.current
+    if (!hasCreateTask && !hasComment) return true
+    const message = hasCreateTask && hasComment
+      ? `${t('tasks.create.discardConfirm')}\n${t('collaboration.composer.discardConfirm')}`
+      : hasCreateTask
+        ? t('tasks.create.discardConfirm')
+        : t('collaboration.composer.discardConfirm')
+    if (!globalThis.window.confirm(message)) return false
+    if (hasCreateTask) dismissCreateTaskEditor()
+    if (hasComment) discardCommentDraft()
+    return true
+  }, [dismissCreateTaskEditor, discardCommentDraft, t])
 
   /**
    * Selects a task locally or delegates route-controlled selection to the caller.
@@ -1335,7 +1376,11 @@ export function TaskScreen({
     preservePendingAction = false,
   ) => {
     if (isAiOperationPendingRef.current) return
-    if (!preservePendingAction && !confirmCreateTaskDiscard()) return
+    const currentDetailOwnerKey = detailTask ? createTaskKey(detailTask) : undefined
+    const selectionChanges = currentDetailOwnerKey !== createTaskKey(task)
+    if (!preservePendingAction && selectionChanges) {
+      if (!confirmDetailOwnerDiscard(true, true)) return
+    } else if (!preservePendingAction && !confirmCreateTaskDiscard()) return
     if (!preservePendingAction) pendingDetailFocusRef.current = undefined
     if (!preservePendingAction) taskActionCompletion.cancel()
     const routedSelectionPending = Boolean(
@@ -1369,6 +1414,8 @@ export function TaskScreen({
   }, [
     activeProjectTeamId,
     confirmCreateTaskDiscard,
+    confirmDetailOwnerDiscard,
+    detailTask,
     scheduleTaskDetailFocus,
     selectedIssueId,
     localSelectedDetailTaskKey,
@@ -1399,7 +1446,7 @@ export function TaskScreen({
   /** Closes the detail pane without losing the current list position. */
   const handleCloseDetail = () => {
     if (isAiOperationPendingRef.current) return
-    if (!confirmCreateTaskDiscard()) return
+    if (!confirmDetailOwnerDiscard(true, true)) return
     pendingDetailFocusRef.current = undefined
     taskActionCompletion.cancel()
     setIsDetailOpen(false)
@@ -1888,7 +1935,17 @@ export function TaskScreen({
         t('taskViews.action.notFound'),
       )
     }
-    if (!confirmCreateTaskDiscard()) {
+    const isAlreadySelected = detailTask !== undefined &&
+      createTaskKey(detailTask) === createTaskKey(task)
+    const routedSelectionPending = Boolean(
+      onSelectedIssueChangeRef.current &&
+      (selectedIssueId !== task.id ||
+        (activeProjectTeamId !== undefined && activeProjectTeamId !== task.teamId)),
+    )
+    const shouldDiscardDetailOwner = !isAlreadySelected
+    if (shouldDiscardDetailOwner
+      ? !confirmDetailOwnerDiscard(true, true)
+      : !confirmCreateTaskDiscard()) {
       return createCancelledTaskActionResult(context.actionId, [target])
     }
     cancelAwaitingDirectTaskScheduleActions()
@@ -1900,9 +1957,6 @@ export function TaskScreen({
         )
       : undefined
     if (!completion) taskActionCompletion.cancel()
-    const isAlreadySelected = selectedIssueId === task.id &&
-      (!activeProjectTeamId || activeProjectTeamId === task.teamId)
-    const routedSelectionPending = Boolean(onSelectedIssueChangeRef.current && !isAlreadySelected)
     if (routedSelectionPending) {
       const focusedContextMenuTarget = taskActionContextMenuState?.selection.focusedTarget
       const contextMenuOrigin = context.trigger === 'context-menu' &&
@@ -1937,10 +1991,12 @@ export function TaskScreen({
     return completion ?? createSucceededTaskActionResult(context.actionId, target)
   }, [
     cancelAwaitingDirectTaskScheduleActions,
-    activeProjectTeamId,
     cancelTaskDetailFocus,
     confirmCreateTaskDiscard,
+    confirmDetailOwnerDiscard,
+    detailTask,
     dismissTaskDetailEditor,
+    activeProjectTeamId,
     handleSelectDetailTask,
     isDetailOpen,
     resolveDetailFocusOrigin,
@@ -2911,10 +2967,15 @@ export function TaskScreen({
           } : undefined}
           onMobileSidebarOpen={openMobileSidebar}
           onProjectQuickAccessToggle={onProjectQuickAccessToggle}
-          onTabChange={(nextActiveTab) => commitViewState({
-            ...currentViewState,
-            activeTab: nextActiveTab,
-          })}
+          onTabChange={(nextActiveTab) => {
+            const leavesDetail = (nextActiveTab === 'file' || nextActiveTab === 'permissions') &&
+              nextActiveTab !== activeTab
+            if (leavesDetail && !confirmDetailOwnerDiscard(false, true)) return
+            commitViewState({
+              ...currentViewState,
+              activeTab: nextActiveTab,
+            })
+          }}
           projectName={resolvedProjectName}
           t={t}
           tasks={tasks}
@@ -3297,6 +3358,12 @@ export function TaskScreen({
                     : undefined}
                   onClose={handleCloseDetail}
                   onAiOperationPendingChange={reportAiOperationPending}
+                  onCommentDraftDirtyChange={(isDirty) => {
+                    reportCommentDraftDirty(
+                      isDirty,
+                      JSON.stringify([detailTask?.teamId ?? '', detailTask?.id ?? '']),
+                    )
+                  }}
                   onDeleteRelation={canMutateDetailTask && onDeleteRelation
                     ? (issueId, relation) => handleProjectTaskActionRelation(
                         issueId,

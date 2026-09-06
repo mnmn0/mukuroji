@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  createMutationRequestRunner,
+  type MutationRequestRunner,
+} from '../../shared/api/mutationHeaders'
 import {
   addTeamIssueCommentReaction,
   createTeamIssueRealtimeTicket,
@@ -37,6 +40,16 @@ import {
 
 const presenceHeartbeatInterval = 12_000
 const typingIdleDelay = 1_800
+
+/** Identifies one authenticated collaboration scope lifetime. */
+type CollaborationScopeOwner = {
+  /** The enabled/team/issue/project scope captured by the lifetime. */
+  scope: string
+  /** The access token captured by the lifetime. */
+  accessToken?: string
+  /** The request runner retained only for this scope lifetime and its retries. */
+  mutationRunner: MutationRequestRunner
+}
 
 const emptyCapabilities: TeamIssueCollaborationCapabilities = {
   canComment: false,
@@ -220,7 +233,6 @@ export function useIssueCollaboration({
   projectId,
   teamId,
 }: UseIssueCollaborationOptions): IssueCollaborationController {
-  const mutationRunner = useRef(createMutationRequestRunner()).current
   const [clientId] = useState(createPresenceClientId)
   const realtimeSocketRef = useRef<WebSocket | null>(null)
   const lastReplyRevalidatedPagesRef = useRef<TeamIssueCollaborationPage[] | undefined>(undefined)
@@ -228,12 +240,30 @@ export function useIssueCollaboration({
   const typingTimeoutRef = useRef<number | undefined>(undefined)
   const typingRef = useRef(false)
   const collaborationScope = `${enabled ? 'enabled' : 'disabled'}:${teamId ?? ''}:${issueId ?? ''}:${projectId ?? ''}`
+  const scopeOwner = useMemo<CollaborationScopeOwner>(
+    () => ({
+      accessToken,
+      mutationRunner: createMutationRequestRunner(),
+      scope: collaborationScope,
+    }),
+    [accessToken, collaborationScope],
+  )
+  const currentScopeOwnerRef = useRef<CollaborationScopeOwner | undefined>(undefined)
+  useLayoutEffect(() => {
+    currentScopeOwnerRef.current = scopeOwner
+
+    return () => {
+      if (currentScopeOwnerRef.current === scopeOwner) {
+        currentScopeOwnerRef.current = undefined
+      }
+    }
+  }, [scopeOwner])
   const [typingState, setTypingState] = useState({ active: false, scope: '' })
   const [mutationError, setMutationError] = useState<{
     /** API が返した安定 error code です。 */
     code?: string
-    /** Error が属する collaboration scope です。 */
-    scope: string
+    /** Error が属する collaboration owner です。 */
+    owner: CollaborationScopeOwner
     /** API が返した HTTP status です。 */
     status?: number
   }>()
@@ -246,7 +276,7 @@ export function useIssueCollaboration({
   })
   const replyPageStateRef = useRef(replyPageState)
   const typing = typingState.scope === collaborationScope && typingState.active
-  const activeMutationError = mutationError?.scope === collaborationScope ? mutationError : undefined
+  const activeMutationError = mutationError?.owner === scopeOwner ? mutationError : undefined
   const isConfigured = Boolean(enabled && accessToken && teamId && issueId)
   const context = useIssueContext({
     accessToken,
@@ -426,16 +456,29 @@ export function useIssueCollaboration({
   const runMutation = useCallback(async (
     operationKey: string,
     fingerprint: string,
-    request: Parameters<typeof mutationRunner.run>[2],
+    request: Parameters<MutationRequestRunner['run']>[2],
   ) => {
-    setMutationError((current) => current?.scope === collaborationScope ? undefined : current)
+    setMutationError((current) => current?.owner === scopeOwner ? undefined : current)
 
     try {
-      await mutationRunner.run(operationKey, fingerprint, request)
+      await scopeOwner.mutationRunner.run(
+        operationKey,
+        fingerprint,
+        request,
+      )
+      if (currentScopeOwnerRef.current !== scopeOwner) {
+        return false
+      }
       await refresh()
+      if (currentScopeOwnerRef.current !== scopeOwner) {
+        return false
+      }
       return true
     } catch (mutationError) {
       console.error('Issue collaboration mutation failed:', mutationError)
+      if (currentScopeOwnerRef.current !== scopeOwner) {
+        return false
+      }
       const mutationErrorStatus = mutationError instanceof TeamIssuesApiError
         ? mutationError.status
         : undefined
@@ -445,7 +488,7 @@ export function useIssueCollaboration({
 
       setMutationError({
         code: mutationErrorCode,
-        scope: collaborationScope,
+        owner: scopeOwner,
         status: mutationErrorStatus,
       })
       if (mutationErrorStatus === 409) {
@@ -453,7 +496,7 @@ export function useIssueCollaboration({
       }
       return false
     }
-  }, [collaborationScope, mutationRunner, refresh])
+  }, [refresh, scopeOwner])
 
   const createComment = useCallback(async (input: CreateTeamIssueCommentInput) => {
     if (!accessToken || !teamId || !issueId) {

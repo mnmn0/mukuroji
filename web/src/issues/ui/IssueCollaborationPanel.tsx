@@ -119,6 +119,8 @@ export type IssueCollaborationPanelProps = {
   onContextDraftConsumed?: () => void
   /** Receives whether the mounted Brief assistant is performing an AI operation. */
   onAiSummaryOperationPendingChange?: (pending: boolean) => void
+  /** Receives whether a root, reply, or edit composer has unsaved input. */
+  onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Optional outer layout class name. */
   className?: string
 }
@@ -146,6 +148,7 @@ export function IssueCollaborationPanel({
   members,
   onContextDraftConsumed,
   onAiSummaryOperationPendingChange,
+  onCommentDraftDirtyChange,
   readOnlyMessage,
   route,
 }: IssueCollaborationPanelProps) {
@@ -155,6 +158,7 @@ export function IssueCollaborationPanel({
     useState<IssueContextDraft>()
   const [selectedSource, setSelectedSource] = useState<IssueSourceTarget>()
   const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
+  const [hasConversationDraft, setHasConversationDraft] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
   const aiAssistantSessionKey = aiAssistance?.sessionKey
@@ -471,7 +475,11 @@ export function IssueCollaborationPanel({
         id={createCollaborationPanelId(panelIdPrefix)}
         role="tabpanel"
       >
-        {selectedTab === 'conversation' ? (
+        {selectedTab === 'conversation' || hasConversationDraft ? (
+          <div
+            aria-hidden={selectedTab !== 'conversation'}
+            className={selectedTab === 'conversation' ? undefined : 'hidden'}
+          >
           <IssueConversationTab
             artifacts={artifacts}
             canAcceptResolution={
@@ -479,8 +487,8 @@ export function IssueCollaborationPanel({
             }
             controller={controller}
             currentMemberKey={currentMemberKey}
-            focusedCommentId={focusedCommentId}
-            focusedRootCommentId={focusedRootCommentId}
+            focusedCommentId={selectedTab === 'conversation' ? focusedCommentId : undefined}
+            focusedRootCommentId={selectedTab === 'conversation' ? focusedRootCommentId : undefined}
             hasResolutionError={controller.context.hasResolutionMutationError}
             locale={locale}
             members={members}
@@ -519,7 +527,12 @@ export function IssueCollaborationPanel({
             resolutionErrorStatus={
               controller.context.resolutionMutationErrorStatus
             }
+            onDraftDirtyChange={(isDirty) => {
+              setHasConversationDraft(isDirty)
+              onCommentDraftDirtyChange?.(isDirty)
+            }}
           />
+          </div>
         ) : null}
         {selectedTab === 'activity' ? (
           <IssueActivityTab

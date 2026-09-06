@@ -182,6 +182,8 @@ export type TaskDetailPaneProps = {
   onClose?: () => void
   /** Reports combined Work Item AI operation state to the owning task screen. */
   onAiOperationPendingChange?: (pending: boolean) => void
+  /** Reports retained comment composer input to the owning task screen. */
+  onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Cancels an accepted Schedule action when explicit save detects no schedule change. */
   onScheduleNoChange?: (teamId: string, issueId: string) => void
   /** Saves editable fields on the selected Work Item. */
@@ -275,6 +277,7 @@ export function TaskDetailPane({
   onAuthenticatedApiError,
   onCreateScheduleDependency,
   onAiOperationPendingChange,
+  onCommentDraftDirtyChange,
   onClose,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -1217,6 +1220,7 @@ export function TaskDetailPane({
             locale={locale}
             members={workspaceMembers}
             onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
+            onCommentDraftDirtyChange={onCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
           />
         ) : null

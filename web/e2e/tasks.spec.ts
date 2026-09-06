@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import type { Locator, Page } from '@playwright/test'
+import type { Dialog, Locator, Page } from '@playwright/test'
 import {
   COLLABORATION_CONTEXT_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
@@ -5641,6 +5641,664 @@ test.describe('authenticated task page', () => {
     expect(requestCounts.issueComments).toBe(1)
   })
 
+  test('コメント保存後の一覧再取得失敗は保存済み本文を再送しない', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeVisible()
+    const requestCounts = getMockRequestCounts(page)
+    let failNextCollaborationRead = true
+
+    await page.route(
+      /.*\/api\/teams\/[^/]+\/issues\/[^/]+\/collaboration(?:\?.*)?$/,
+      async (route) => {
+        if (route.request().method() === 'GET' && requestCounts.issueComments === 1 && failNextCollaborationRead) {
+          failNextCollaborationRead = false
+          await route.fulfill({ status: 503, json: { message: 'Discussion refresh unavailable.' } })
+          return
+        }
+        await route.fallback()
+      },
+    )
+
+    await page.locator('textarea[name="body"]').fill('保存後の再取得失敗でも一度だけ保存')
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await expect.poll(() => requestCounts.issueComments).toBe(1)
+    await expect(page.getByText('ディスカッションを取得できませんでした。')).toBeVisible()
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+
+    await page.getByRole('button', { name: '再読み込み' }).click()
+    await expect(page.getByTestId('comment-thread-comment-2')).toContainText(
+      '保存後の再取得失敗でも一度だけ保存',
+    )
+    expect(requestCounts.issueComments).toBe(1)
+  })
+
+  test('コメント POST 500 は本文と mention を保持し、再試行を一度だけ送信する', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    let postCount = 0
+    let shouldFail = true
+    const requestBodies: string[] = []
+    const idempotencyKeys: string[] = []
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      postCount += 1
+      requestBodies.push(JSON.stringify(route.request().postDataJSON()))
+      idempotencyKeys.push(route.request().headers()['idempotency-key'] ?? '')
+      if (shouldFail) {
+        await route.fulfill({ status: 500, json: { message: 'Comment save failed.' } })
+        return
+      }
+      await route.fallback()
+    })
+
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('500でも保持する本文 @')
+    const mentionOption = page.getByRole('listbox').getByRole('option', { name: /佐藤 花子/ })
+    await expect(mentionOption).toBeVisible()
+    await mentionOption.click()
+    await body.press('End')
+    await body.type('追記')
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await expect(page.getByTestId('issue-collaboration-panel')).toContainText(
+      '操作を保存できませんでした。再度実行してください。',
+    )
+    await expect(body).toHaveValue(/500でも保持する本文.*佐藤 花子.*追記/)
+    expect(requestBodies[0]).toContain('sato@example.com')
+    expect(idempotencyKeys[0]).not.toBe('')
+
+    shouldFail = false
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await expect.poll(() => postCount).toBe(2)
+    await expect(body).toHaveValue('')
+    expect(requestBodies[1]).toBe(requestBodies[0])
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0])
+    await expect(page.getByTestId('comment-thread-comment-2')).toContainText('500でも保持する本文')
+  })
+
+  test('コメントの送信中は同時送信を抑止し、IME の Enter は送信しない', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    let postCount = 0
+    let releasePost: (() => void) | undefined
+    let postArrived: (() => void) | undefined
+    const postRelease = new Promise<void>((resolve) => {
+      releasePost = resolve
+    })
+    const postRequest = new Promise<void>((resolve) => {
+      postArrived = resolve
+    })
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      postCount += 1
+      postArrived?.()
+      await postRelease
+      await route.fallback()
+    })
+
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('IME と二重送信を確認する本文')
+    await body.evaluate((element) => {
+      element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+      const event = new KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'Enter',
+      })
+      Object.defineProperty(event, 'isComposing', { value: true })
+      element.dispatchEvent(event)
+      element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }))
+    })
+    expect(postCount).toBe(0)
+    await body.press('Enter')
+    await expect(body).toHaveValue(/IME と二重送信を確認する本文\n/)
+    expect(postCount).toBe(0)
+
+    const form = body.locator('xpath=ancestor::form')
+    await form.evaluate((element) => {
+      element.requestSubmit()
+      element.requestSubmit()
+    })
+    await postRequest
+    expect(postCount).toBe(1)
+    releasePost?.()
+    await expect(body).toHaveValue('')
+  })
+
+  test('コメント POST 403 は本文を保持し、権限エラーを表示する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    let postCount = 0
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      postCount += 1
+      await route.fulfill({ status: 403, json: { message: 'Comment forbidden.' } })
+    })
+
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('403でも保持するコメント本文')
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await expect(page.getByTestId('issue-collaboration-panel')).toContainText(
+      '操作を保存できませんでした。再度実行してください。',
+    )
+    await expect(body).toHaveValue('403でも保持するコメント本文')
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    expect(postCount).toBe(1)
+  })
+
+  test('コメント編集 409 は元の version で再試行し、明示確認後だけ最新版で保存する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    let canonicalBody = '背景を確認します。'
+    let canonicalVersion = 1
+    let patchCount = 0
+    const expectedVersions: number[] = []
+    /** Builds the canonical edit fixture returned by the collaboration mock. */
+    const canonicalComment = (): TeamIssueComment => ({
+      authorMemberKey: 'demo@example.com',
+      bodyMarkdown: canonicalBody,
+      capabilities: { canEdit: true, canDelete: true, canResolve: true },
+      createdAt: '2026-06-08T01:00:00.000Z',
+      id: 'comment-1',
+      mentionMemberKeys: [],
+      reactions: [],
+      rootCommentId: 'comment-1',
+      updatedAt: '2026-06-08T01:00:00.000Z',
+      version: canonicalVersion,
+    })
+    await page.route('**/api/teams/core-team/issues/wireframe/collaboration**', async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.fallback()
+        return
+      }
+      await route.fulfill({
+        json: {
+          capabilities: { canComment: true, canReact: true, canWatch: true },
+          comments: [canonicalComment()],
+          presence: [],
+          watch: { automatic: false, explicit: false, reasons: [], subscribed: false, watcherCount: 0 },
+        },
+      })
+    })
+    await page.route('**/api/teams/core-team/issues/wireframe/comments/comment-1', async (route) => {
+      if (route.request().method() !== 'PATCH') {
+        await route.fallback()
+        return
+      }
+      patchCount += 1
+      const payload = route.request().postDataJSON()
+      const expectedVersion = typeof payload === 'object' && payload !== null &&
+        'expectedVersion' in payload && typeof payload.expectedVersion === 'number'
+        ? payload.expectedVersion
+        : undefined
+      const bodyMarkdown = typeof payload === 'object' && payload !== null &&
+        'bodyMarkdown' in payload && typeof payload.bodyMarkdown === 'string'
+        ? payload.bodyMarkdown
+        : undefined
+      expectedVersions.push(expectedVersion ?? -1)
+      if (expectedVersion === 1) {
+        canonicalBody = '別のメンバーが保存した最新本文です。'
+        canonicalVersion = 2
+        await route.fulfill({ status: 409, json: { message: 'Version conflict.' } })
+        return
+      }
+      canonicalBody = bodyMarkdown ?? canonicalBody
+      canonicalVersion = 3
+      await route.fulfill({ json: { comment: canonicalComment() } })
+    })
+
+    const card = page.getByTestId('comment-thread-comment-1')
+    await card.getByRole('button', { name: '編集' }).click()
+    const editor = page.getByRole('textbox', { name: 'コメントを編集' })
+    await editor.fill('409後も保持する編集本文')
+    const saveButton = page.getByRole('button', { name: '編集を保存' })
+    await saveButton.click()
+    await expect(page.getByText('最新の本文を確認してから、入力した変更を再試行してください。')).toBeVisible()
+    await expect(editor).toHaveValue('409後も保持する編集本文')
+
+    await saveButton.click()
+    await expect.poll(() => patchCount).toBe(2)
+    await expect(editor).toHaveValue('409後も保持する編集本文')
+    expect(expectedVersions).toEqual([1, 1])
+
+    await page.getByRole('button', { name: '表示した最新版を確認して編集を続ける' }).click()
+    await expect(editor).toHaveValue('409後も保持する編集本文')
+    await saveButton.click()
+    await expect.poll(() => patchCount).toBe(3)
+    await expect(page.getByTestId('comment-thread-comment-1')).toContainText('409後も保持する編集本文')
+    expect(expectedVersions).toEqual([1, 1, 2])
+  })
+
+  test('旧 Issue のコメント保存完了は A→B→A の新しい下書きを消さない', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    let collaborationReadCount = 0
+    await page.route(
+      '**/api/teams/core-team/issues/wireframe/collaboration**',
+      async (route) => {
+        if (route.request().method() === 'GET') collaborationReadCount += 1
+        await route.fallback()
+      },
+    )
+    let releaseOldComment: (() => void) | undefined
+    let oldCommentArrived: (() => void) | undefined
+    const oldCommentRelease = new Promise<void>((resolve) => {
+      releaseOldComment = resolve
+    })
+    const oldCommentRequest = new Promise<void>((resolve) => {
+      oldCommentArrived = resolve
+    })
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      oldCommentArrived?.()
+      await oldCommentRelease
+      await route.fallback()
+    })
+
+    const oldBody = page.locator('textarea[name="body"]')
+    await oldBody.fill('古い Issue A のコメント')
+    const oldResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/wireframe/comments',
+    )
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await oldCommentRequest
+
+    const leaveDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByTestId('task-open-detail-seo-research').click(),
+      leaveDialog,
+    ])
+    await expect(page).toHaveURL(/issueId=seo-research/)
+    await page.getByTestId('task-open-detail-wireframe').click()
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    const replacementBody = page.locator('textarea[name="body"]')
+    await replacementBody.fill('新しい Issue A のコメント')
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    const readsBeforeStaleCompletion = collaborationReadCount
+
+    releaseOldComment?.()
+    const completedOldResponse = await oldResponse
+    await completedOldResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    expect(collaborationReadCount).toBe(readsBeforeStaleCompletion)
+    await expect(replacementBody).toHaveValue('新しい Issue A のコメント')
+  })
+
+  test('旧 Issue のコメント認証失効は A→B→A の新しい下書きとセッションを変更しない', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    let releaseOldComment: (() => void) | undefined
+    let oldCommentArrived: (() => void) | undefined
+    const oldCommentRelease = new Promise<void>((resolve) => {
+      releaseOldComment = resolve
+    })
+    const oldCommentRequest = new Promise<void>((resolve) => {
+      oldCommentArrived = resolve
+    })
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      oldCommentArrived?.()
+      await oldCommentRelease
+      await route.fulfill({
+        status: 401,
+        json: { code: 'EnterpriseSessionExpired', message: 'Session expired.' },
+      })
+    })
+
+    const oldBody = page.locator('textarea[name="body"]')
+    await oldBody.fill('古い Issue A の認証失効コメント')
+    const oldResponse = page.waitForResponse((response) =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/wireframe/comments',
+    )
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await oldCommentRequest
+
+    const leaveDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByTestId('task-open-detail-seo-research').click(),
+      leaveDialog,
+    ])
+    await expect(page).toHaveURL(/issueId=seo-research/)
+    await page.getByTestId('task-open-detail-wireframe').click()
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    const replacementBody = page.locator('textarea[name="body"]')
+    await replacementBody.fill('新しい Issue A の認証失効後も残すコメント')
+
+    releaseOldComment?.()
+    const completedOldResponse = await oldResponse
+    await completedOldResponse.finished()
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    await expect(replacementBody).toHaveValue('新しい Issue A の認証失効後も残すコメント')
+    await expect(page.getByRole('heading', { name: 'ログイン' })).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem('mukuroji.auth')))).toBe(true)
+  })
+
+  test('A→B→A の同一本文は新しいスコープで再送できる', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(page.getByTestId('task-detail-pane')).toContainText('新しいランディングページのワイヤーフレーム作成')
+    await page.getByRole('tab', { name: /会話/ }).click()
+    let postCount = 0
+    let releasePosts: (() => void) | undefined
+    let firstPostArrived: (() => void) | undefined
+    let firstPostCompleted: (() => void) | undefined
+    let secondPostCompleted: (() => void) | undefined
+    const postsReleased = new Promise<void>((resolve) => {
+      releasePosts = resolve
+    })
+    const firstPost = new Promise<void>((resolve) => {
+      firstPostArrived = resolve
+    })
+    const firstCompletion = new Promise<void>((resolve) => {
+      firstPostCompleted = resolve
+    })
+    const secondCompletion = new Promise<void>((resolve) => {
+      secondPostCompleted = resolve
+    })
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      postCount += 1
+      const requestNumber = postCount
+      if (requestNumber === 1) firstPostArrived?.()
+      await postsReleased
+      if (requestNumber === 1) {
+        await route.fulfill({
+          status: 401,
+          json: { code: 'EnterpriseSessionExpired', message: 'Session expired.' },
+        })
+        firstPostCompleted?.()
+        return
+      }
+      await route.fallback()
+      secondPostCompleted?.()
+    })
+
+    const bodyText = '同じ本文を新しい A で再送するコメント'
+    const oldBody = page.locator('textarea[name="body"]')
+    await expect(oldBody).toBeVisible()
+    await oldBody.fill(bodyText)
+    await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeEnabled()
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await firstPost
+
+    const leaveDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    const seoCollaborationResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/seo-research/collaboration',
+    )
+    await Promise.all([
+      page.getByTestId('task-open-detail-seo-research').click(),
+      leaveDialog,
+      seoCollaborationResponse,
+    ])
+    await expect(page).toHaveURL(/issueId=seo-research/)
+    await expect(page.getByTestId('task-detail-pane')).toContainText('SEO キーワードリサーチ')
+    const wireframeCollaborationResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/wireframe/collaboration',
+    )
+    await Promise.all([
+      page.getByTestId('task-open-detail-wireframe').click(),
+      wireframeCollaborationResponse,
+    ])
+    const replacementBody = page.locator('textarea[name="body"]')
+    await expect(replacementBody).toBeVisible()
+    await expect(replacementBody).toHaveValue('')
+    await expect(page.getByTestId('task-detail-pane')).toContainText('新しいランディングページのワイヤーフレーム作成')
+    await replacementBody.fill(bodyText)
+    await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeEnabled()
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await expect.poll(() => postCount).toBe(2)
+    releasePosts?.()
+
+    await firstCompletion
+    await secondCompletion
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    }))
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    await expect(replacementBody).toHaveValue('')
+    await expect(page.getByRole('heading', { name: 'ログイン' })).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem('mukuroji.auth')))).toBe(true)
+    expect(postCount).toBe(2)
+  })
+
+  test('現在の Issue のコメント認証失効はログインへ戻す', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    let commentRequestCount = 0
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      commentRequestCount += 1
+      await route.fulfill({
+        status: 401,
+        json: { code: 'EnterpriseSessionExpired', message: 'Session expired.' },
+      })
+    })
+
+    await page.locator('textarea[name="body"]').fill('現在の Issue の認証失効を確認するコメント')
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await expect(page).toHaveURL(/\/login\?returnTo=.*issueId%3Dwireframe/)
+    expect(commentRequestCount).toBe(1)
+  })
+
+  test('コメント下書きは同一 Issue のタブ移動を許可し、別 Issue への移動は確認する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await expect(body).toBeVisible()
+    await body.fill('移動確認まで保持するコメント下書き')
+
+    const panel = page.getByTestId('issue-collaboration-panel')
+    let unexpectedDialogMessage: string | undefined
+    /** Records an unexpected leave confirmation while switching internal collaboration tabs. */
+    const unexpectedDialogHandler = async (dialog: Dialog) => {
+      unexpectedDialogMessage = dialog.message()
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedDialogHandler)
+    await panel.getByRole('tab', { name: /判断/ }).click()
+    await panel.getByRole('tab', { name: /会話/ }).click()
+    await expect(body).toHaveValue('移動確認まで保持するコメント下書き')
+    expect(unexpectedDialogMessage).toBeUndefined()
+    page.off('dialog', unexpectedDialogHandler)
+
+    let shouldAcceptDiscard = false
+    let discardDialogCount = 0
+
+    const firstDialogPromise = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        discardDialogCount += 1
+        if (shouldAcceptDiscard) {
+          await dialog.accept()
+        } else {
+          await dialog.dismiss()
+        }
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByTestId('task-open-detail-seo-research').click(),
+      firstDialogPromise,
+    ])
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    await expect(body).toHaveValue('移動確認まで保持するコメント下書き')
+    expect(discardDialogCount).toBe(1)
+
+    shouldAcceptDiscard = true
+    const secondDialogPromise = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        discardDialogCount += 1
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByTestId('task-open-detail-seo-research').click(),
+      secondDialogPromise,
+    ])
+    await expect(page).toHaveURL(/issueId=seo-research/)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+    expect(discardDialogCount).toBe(2)
+  })
+
+  test('Project のデフォルト詳細で同じ Work Item を選び直しても下書きを確認しない', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team')
+    const body = page.locator('textarea[name="body"]')
+    await expect(body).toBeVisible()
+    await body.fill('デフォルト詳細のまま保持するコメント下書き')
+
+    let dialogCount = 0
+    page.on('dialog', async (dialog) => {
+      dialogCount += 1
+      await dialog.dismiss()
+    })
+    await page.getByTestId('task-open-detail-wireframe').click()
+    await expect(body).toHaveValue('デフォルト詳細のまま保持するコメント下書き')
+    expect(dialogCount).toBe(0)
+  })
+
+  test('作成とコメントの下書きを同時に離れると一度だけまとめて確認する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('作成と同時に保持するコメント下書き')
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    const createForm = page.getByTestId('create-task-form')
+    const createTitle = createForm.locator('input[name="title"]')
+    await createTitle.fill('同時に保持する作成下書き')
+
+    const firstDialogPromise = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('タスク')
+        expect(dialog.message()).toContain('コメント')
+        await dialog.dismiss()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByLabel('メインサイドバー').getByRole('button', {
+        name: 'ブランド刷新',
+        exact: true,
+      }).click(),
+      firstDialogPromise,
+    ])
+    await expect(page).toHaveURL(/\/projects\/refero\/issues\?teamId=core-team&issueId=wireframe/)
+    await expect(createTitle).toHaveValue('同時に保持する作成下書き')
+    await expect(commentBody).toHaveValue('作成と同時に保持するコメント下書き')
+
+    const secondDialogPromise = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByLabel('メインサイドバー').getByRole('button', {
+        name: 'ブランド刷新',
+        exact: true,
+      }).click(),
+      secondDialogPromise,
+    ])
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+  })
+
+  test('Files and Permissions はコメントだけを確認し、作成下書きを保持する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('Files 遷移後も保持するコメント下書き')
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    const createTitle = page.getByTestId('create-task-form').locator('input[name="title"]')
+    await createTitle.fill('Files 遷移後も保持する作成下書き')
+
+    const declinedDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('コメント')
+        expect(dialog.message()).not.toContain('タスク')
+        await dialog.dismiss()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByRole('tab', { name: 'ファイル' }).click(),
+      declinedDialog,
+    ])
+    await expect(page.getByRole('heading', { name: 'ファイルビュー' })).toHaveCount(0)
+    await expect(commentBody).toHaveValue('Files 遷移後も保持するコメント下書き')
+    await expect(createTitle).toHaveValue('Files 遷移後も保持する作成下書き')
+
+    const acceptedDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('コメント')
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByRole('tab', { name: 'ファイル' }).click(),
+      acceptedDialog,
+    ])
+    await expect(page.getByRole('heading', { name: 'ファイルビュー' })).toBeVisible()
+    await page.getByRole('tab', { name: 'テーブル' }).click()
+    await expect(createTitle).toHaveValue('Files 遷移後も保持する作成下書き')
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+
+    await page.locator('textarea[name="body"]').fill('権限遷移後も保持するコメント下書き')
+    const permissionsDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('コメント')
+        expect(dialog.message()).not.toContain('タスク')
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByRole('tab', { name: '権限' }).click(),
+      permissionsDialog,
+    ])
+    await expect(page.getByRole('tab', { name: '権限' })).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('tab', { name: 'テーブル' }).click()
+    await expect(createTitle).toHaveValue('Files 遷移後も保持する作成下書き')
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+  })
+
   test('タスク split-pane の作成フォームと詳細ペインが長いラベルでも崩れない', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 860 })
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
@@ -5850,6 +6508,76 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/refero/issues?teamId=core-team')
 
     await expect(page.getByTestId('task-row-割当待ち-issue')).toContainText('割当待ち Issue')
+  })
+
+  test('Team Issue のコメント下書きは内部タブを保持し、別 Issue 遷移だけ確認する', async ({ page }) => {
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    const wireframeRow = page.locator('tr', { has: page.getByTestId('issue-row-wireframe') })
+    const seoRow = page.locator('tr', { has: page.getByTestId('issue-row-seo-research') })
+    await expect(body).toBeVisible()
+    await body.fill('Team Issue で遷移前まで保持する下書き')
+    const initialWireframeFocus = await wireframeRow.getAttribute('data-task-view-focused')
+    const initialWireframeSelection = await wireframeRow.getAttribute('data-task-view-selected')
+    const initialSeoFocus = await seoRow.getAttribute('data-task-view-focused')
+    const initialSeoSelection = await seoRow.getAttribute('data-task-view-selected')
+
+    const panel = page.getByTestId('issue-collaboration-panel')
+    let unexpectedTabDialog = 0
+    /** Fails the Team tab round-trip if an internal tab unexpectedly opens a discard prompt. */
+    const unexpectedTabDialogHandler = async (dialog: Dialog) => {
+      unexpectedTabDialog += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedTabDialogHandler)
+    await panel.getByRole('tab', { name: /活動/ }).click()
+    await panel.getByRole('tab', { name: /会話/ }).click()
+    await expect(body).toHaveValue('Team Issue で遷移前まで保持する下書き')
+    expect(unexpectedTabDialog).toBe(0)
+    page.off('dialog', unexpectedTabDialogHandler)
+
+    const firstDialogPromise = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.dismiss()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByTestId('issue-row-seo-research').click(),
+      firstDialogPromise,
+    ])
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    await expect(body).toHaveValue('Team Issue で遷移前まで保持する下書き')
+    await expect(wireframeRow).toHaveAttribute('data-task-view-focused', initialWireframeFocus ?? '')
+    await expect(wireframeRow).toHaveAttribute('data-task-view-selected', initialWireframeSelection ?? '')
+    await expect(seoRow).toHaveAttribute('data-task-view-focused', initialSeoFocus ?? '')
+    await expect(seoRow).toHaveAttribute('data-task-view-selected', initialSeoSelection ?? '')
+
+    const secondDialogPromise = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByTestId('issue-row-seo-research').click(),
+      secondDialogPromise,
+    ])
+    await expect(page).toHaveURL(/issueId=seo-research/)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+
+    let unexpectedReturnDialog = 0
+    /** Dismisses and records an unexpected prompt while returning to the original Team Issue. */
+    const returnDialogHandler = async (dialog: Dialog) => {
+      unexpectedReturnDialog += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', returnDialogHandler)
+    await page.getByTestId('issue-row-wireframe').click()
+    await expect(page).toHaveURL(/issueId=wireframe/)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+    expect(unexpectedReturnDialog).toBe(0)
+    page.off('dialog', returnDialogHandler)
   })
 
   test('Team Issue の単一期限 editor は range schedule を暗黙に変更しない', async ({ page }) => {
@@ -8779,6 +9507,8 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/refero/issues')
     await page.getByRole('button', { name: '新規タスク' }).click()
     await page.getByTestId('create-task-form').locator('input[name="title"]').fill('logout-draft')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('logout-comment-draft')
 
     await page.route('**/api/auth/sso/discovery?*', async (route) => {
       await route.fulfill({
@@ -8815,6 +9545,31 @@ test.describe('authenticated task page', () => {
     const nextUserCreateForm = page.getByTestId('create-task-form')
     await expect(nextUserCreateForm.locator('input[name="title"]')).toHaveValue('')
     await expect(nextUserCreateForm).not.toContainText('logout-draft')
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+    await expect.poll(() => page.evaluate(() => {
+      const event = new Event('beforeunload', { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    })).toBe(false)
+  })
+
+  test('認証 principal と Workspace の再検証でコメント下書きを別 scope へ持ち越さない', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await expect(body).toBeVisible()
+    await body.fill('旧 Workspace に残さないコメント下書き')
+
+    await page.waitForTimeout(10_100)
+    await mockCurrentUser(page, 'workspace-next@example.com', 'Workspace Next User', 'workspace-next')
+    const currentUserResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/auth/me',
+    )
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    const completedCurrentUserResponse = await currentUserResponse
+    await completedCurrentUserResponse.finished()
+    await expect(page).toHaveURL(/\/projects\/refero\/issues\?teamId=core-team&issueId=wireframe/)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
     await expect.poll(() => page.evaluate(() => {
       const event = new Event('beforeunload', { cancelable: true })
       window.dispatchEvent(event)

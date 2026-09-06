@@ -201,6 +201,10 @@ export function TaskPage() {
   const createTaskDirtyRef = useRef(false)
   const createTaskDirtyScopeRef = useRef<string | undefined>(undefined)
   const createTaskDiscardHandlerRef = useRef<(() => void) | undefined>(undefined)
+  const commentDraftDirtyRef = useRef(false)
+  const commentDraftDirtyScopeRef = useRef<string | undefined>(undefined)
+  const commentDraftDiscardHandlerRef = useRef<(() => void) | undefined>(undefined)
+  const blockedDirtyOwnersRef = useRef({ create: false, comment: false })
   const params = useParams()
   const {
     hasQuickAccessLoadError,
@@ -841,24 +845,57 @@ export function TaskPage() {
   }>({ isDirty: false, scopeKey: taskScopeKey })
   const isCreateTaskDirty = createTaskDirtyState.isDirty &&
     createTaskDirtyState.scopeKey === taskScopeKey
+  const commentDraftScopeKey = JSON.stringify([
+    taskScopeKey,
+    JSON.stringify([
+      selectedIssueDetailTeamId ?? resolvedSelectedIssueTeamId ?? '',
+      selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? '',
+    ]),
+  ])
+  const [commentDraftDirtyState, setCommentDraftDirtyState] = useState({
+    isDirty: false,
+    scopeKey: commentDraftScopeKey,
+  })
+  const isCommentDraftDirty = commentDraftDirtyState.isDirty &&
+    commentDraftDirtyState.scopeKey === commentDraftScopeKey
   const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) =>
-    Boolean(getAuthSession()) &&
-      createTaskDirtyRef.current &&
-      createTaskDirtyScopeRef.current === taskScopeKey &&
-      (() => {
-        if (currentLocation.pathname !== nextLocation.pathname) return true
-        const nextSearchParams = new URLSearchParams(nextLocation.search)
-        const nextRouteContext = resolveProjectTaskRouteContext({
-          projectId,
-          projectIssues,
-          selectedIssueId: nextSearchParams.get('issueId') ?? undefined,
-          selectedTeamId: nextSearchParams.get('teamId') ?? undefined,
-          suppressIssueFallback: false,
-          teams,
-        })
-        return nextRouteContext.creationTeam?.id !== creationTeam?.id
-      })(),
-  [creationTeam?.id, projectId, projectIssues, taskScopeKey, teams],))
+    Boolean(getAuthSession()) && (() => {
+      const nextSearchParams = new URLSearchParams(nextLocation.search)
+      const nextRouteContext = resolveProjectTaskRouteContext({
+        projectId,
+        projectIssues,
+        selectedIssueId: nextSearchParams.get('issueId') ?? undefined,
+        selectedTeamId: nextSearchParams.get('teamId') ?? undefined,
+        suppressIssueFallback: false,
+        teams,
+      })
+      const requestedIssueId = nextSearchParams.get('issueId')
+      const requestedTeamId = nextSearchParams.get('teamId')
+      const hasExplicitOwner = Boolean(requestedIssueId && requestedTeamId)
+      const nextIssueId = hasExplicitOwner
+        ? requestedIssueId ?? ''
+        : nextRouteContext.resolvedSelectedIssue?.id ?? ''
+      const nextTeamId = hasExplicitOwner
+        ? requestedTeamId ?? ''
+        : nextRouteContext.resolvedSelectedIssue?.teamId ??
+          nextRouteContext.interactionTeamId ?? ''
+      const nextOwnerKey = JSON.stringify([nextTeamId, nextIssueId])
+      const currentOwnerKey = JSON.stringify([
+        selectedIssueDetailTeamId ?? resolvedSelectedIssueTeamId ?? '',
+        selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? '',
+      ])
+      const pathChanged = currentLocation.pathname !== nextLocation.pathname
+      const ownerChanged = pathChanged || nextOwnerKey !== currentOwnerKey
+      const createOwnerChanged = pathChanged || nextRouteContext.creationTeam?.id !== creationTeam?.id
+      const shouldBlockCreate = createTaskDirtyRef.current &&
+        createTaskDirtyScopeRef.current === taskScopeKey && createOwnerChanged
+      const shouldBlockComment = commentDraftDirtyRef.current &&
+        commentDraftDirtyScopeRef.current === commentDraftScopeKey && ownerChanged
+      blockedDirtyOwnersRef.current = { create: shouldBlockCreate, comment: shouldBlockComment }
+      return shouldBlockCreate || shouldBlockComment
+    })(),
+  [commentDraftScopeKey, creationTeam?.id, projectId, projectIssues, resolvedSelectedIssue?.id,
+    resolvedSelectedIssueTeamId, selectedIssueDetailId, selectedIssueDetailTeamId, taskScopeKey, teams],))
   /** Reports create-form dirtiness to the route-owned navigation guard. */
   const reportCreateTaskDirty = useCallback((isDirty: boolean, discardHandler?: () => void) => {
     if (!isDirty && createTaskDirtyScopeRef.current !== undefined &&
@@ -869,20 +906,55 @@ export function TaskPage() {
     createTaskDirtyScopeRef.current = taskScopeKey
     createTaskDiscardHandlerRef.current = isDirty ? discardHandler : undefined
     setCreateTaskDirtyState({ isDirty, scopeKey: taskScopeKey })
-  }, [taskScopeKey])
+  }, [setCreateTaskDirtyState, taskScopeKey])
+  /** Reports comment input only while its exact Work Item route scope is current. */
+  const reportCommentDraftDirty = useCallback((
+    isDirty: boolean,
+    scopeKey = JSON.stringify([
+    selectedIssueDetailTeamId ?? resolvedSelectedIssueTeamId ?? '',
+    selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? '',
+    ]),
+    discardHandler?: () => void,
+  ) => {
+    const scopedKey = JSON.stringify([taskScopeKey, scopeKey])
+    if (scopedKey !== commentDraftScopeKey) return
+    commentDraftDirtyRef.current = isDirty
+    commentDraftDirtyScopeRef.current = scopedKey
+    commentDraftDiscardHandlerRef.current = isDirty ? discardHandler : undefined
+    setCommentDraftDirtyState({ isDirty, scopeKey: scopedKey })
+  }, [commentDraftScopeKey, resolvedSelectedIssue?.id, resolvedSelectedIssueTeamId,
+    selectedIssueDetailId, selectedIssueDetailTeamId, taskScopeKey])
   useEffect(() => {
     if (navigationBlocker.state !== 'blocked') return
-    if (globalThis.window.confirm(t('tasks.create.discardConfirm'))) {
-      createTaskDiscardHandlerRef.current?.()
-      reportCreateTaskDirty(false)
-      createTaskDirtyScopeRef.current = undefined
+    const blockedOwners = blockedDirtyOwnersRef.current
+    const hasBlockedCreate = blockedOwners.create && isCreateTaskDirty
+    const hasBlockedComment = blockedOwners.comment && isCommentDraftDirty
+    const confirmMessage = hasBlockedCreate && hasBlockedComment
+      ? `${t('tasks.create.discardConfirm')}\n${t('collaboration.composer.discardConfirm')}`
+      : hasBlockedCreate
+        ? t('tasks.create.discardConfirm')
+        : t('collaboration.composer.discardConfirm')
+    if (globalThis.window.confirm(confirmMessage)) {
+      blockedDirtyOwnersRef.current = { create: false, comment: false }
+      if (hasBlockedCreate) {
+        createTaskDiscardHandlerRef.current?.()
+        reportCreateTaskDirty(false)
+        createTaskDirtyScopeRef.current = undefined
+      }
+      if (hasBlockedComment) {
+        const discardHandler = commentDraftDiscardHandlerRef.current
+        commentDraftDiscardHandlerRef.current = undefined
+        commentDraftDirtyScopeRef.current = undefined
+        discardHandler?.()
+        reportCommentDraftDirty(false)
+      }
       navigationBlocker.proceed()
       return
     }
     navigationBlocker.reset()
-  }, [navigationBlocker, reportCreateTaskDirty, t])
+  }, [isCommentDraftDirty, isCreateTaskDirty, navigationBlocker, reportCommentDraftDirty, reportCreateTaskDirty, t])
   useEffect(() => {
-    if (!isCreateTaskDirty) return
+    if (!isCreateTaskDirty && !isCommentDraftDirty) return
     /** Prevents browser unload while the authenticated scoped create form is dirty. */
     const preventUnload = (event: BeforeUnloadEvent) => {
       if (!getAuthSession()) return
@@ -891,7 +963,7 @@ export function TaskPage() {
     }
     window.addEventListener('beforeunload', preventUnload)
     return () => window.removeEventListener('beforeunload', preventUnload)
-  }, [isCreateTaskDirty])
+  }, [isCommentDraftDirty, isCreateTaskDirty])
 
   /** Mirrors the server's manager check for one visible dependency endpoint. */
   const canManageScheduleDependencyEndpoint = (endpoint: WorkItemDependencyEndpoint) =>
@@ -1589,6 +1661,7 @@ export function TaskPage() {
             ]).catch(() => undefined)
           }
         : undefined}
+      onCommentDraftDirtyChange={reportCommentDraftDirty}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
