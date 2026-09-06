@@ -470,6 +470,7 @@ function CanonicalDetailFocusHarness({
   const listTasks = taskScreenProps.tasks ?? []
   const [detail, setDetail] = useState<TeamIssueDetail | undefined>()
   const [detailCanMutate, setDetailCanMutate] = useState(true)
+  /** Applies the routed selection and its canonical permission state. */
   const selectTask = useCallback((task: CanonicalWorkItem) => {
     setSelectedIssueId(task.id)
     setDetailCanMutate(canMutate)
@@ -500,6 +501,7 @@ function CreatePermissionRevalidationHarness({
 }: CreatePermissionRevalidationHarnessProps) {
   const [canCreate, setCanCreate] = useState(true)
   const [createAttemptCount, setCreateAttemptCount] = useState(0)
+  /** Records a create attempt while the permission revalidation harness is mounted. */
   const onCreateTask = useCallback(async () => {
     setCreateAttemptCount((count) => count + 1)
   }, [])
