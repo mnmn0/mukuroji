@@ -204,7 +204,7 @@ export function TaskPage() {
   const commentDraftDirtyRef = useRef(false)
   const commentDraftDirtyScopeRef = useRef<string | undefined>(undefined)
   const commentDraftDiscardHandlerRef = useRef<(() => void) | undefined>(undefined)
-  const blockedDirtyOwnersRef = useRef({ create: false, comment: false })
+  const blockedDirtyOwnersRef = useRef({ create: false, comment: false, createScopeChanged: false })
   const params = useParams()
   const {
     hasQuickAccessLoadError,
@@ -858,43 +858,49 @@ export function TaskPage() {
   })
   const isCommentDraftDirty = commentDraftDirtyState.isDirty &&
     commentDraftDirtyState.scopeKey === commentDraftScopeKey
-  const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) =>
-    Boolean(getAuthSession()) && (() => {
-      const nextSearchParams = new URLSearchParams(nextLocation.search)
-      const nextRouteContext = resolveProjectTaskRouteContext({
-        projectId,
-        projectIssues,
-        selectedIssueId: nextSearchParams.get('issueId') ?? undefined,
-        selectedTeamId: nextSearchParams.get('teamId') ?? undefined,
-        suppressIssueFallback: false,
-        teams,
-      })
-      const requestedIssueId = nextSearchParams.get('issueId')
-      const requestedTeamId = nextSearchParams.get('teamId')
-      const hasExplicitOwner = Boolean(requestedIssueId && requestedTeamId)
-      const nextIssueId = hasExplicitOwner
-        ? requestedIssueId ?? ''
-        : nextRouteContext.resolvedSelectedIssue?.id ?? ''
-      const nextTeamId = hasExplicitOwner
-        ? requestedTeamId ?? ''
-        : nextRouteContext.resolvedSelectedIssue?.teamId ??
-          nextRouteContext.interactionTeamId ?? ''
-      const nextOwnerKey = JSON.stringify([nextTeamId, nextIssueId])
-      const currentOwnerKey = JSON.stringify([
-        selectedIssueDetailTeamId ?? resolvedSelectedIssueTeamId ?? '',
-        selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? '',
-      ])
-      const pathChanged = currentLocation.pathname !== nextLocation.pathname
-      const ownerChanged = pathChanged || nextOwnerKey !== currentOwnerKey
-      const createOwnerChanged = pathChanged || nextRouteContext.creationTeam?.id !== creationTeam?.id
-      const shouldBlockCreate = createTaskDirtyRef.current &&
-        createTaskDirtyScopeRef.current === taskScopeKey && createOwnerChanged
-      const shouldBlockComment = commentDraftDirtyRef.current &&
-        commentDraftDirtyScopeRef.current === commentDraftScopeKey && ownerChanged
-      blockedDirtyOwnersRef.current = { create: shouldBlockCreate, comment: shouldBlockComment }
-      return shouldBlockCreate || shouldBlockComment
-    })(),
-  [commentDraftScopeKey, creationTeam?.id, projectId, projectIssues, resolvedSelectedIssue?.id,
+  const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) => {
+    const nextSearchParams = new URLSearchParams(nextLocation.search)
+    const nextRouteContext = resolveProjectTaskRouteContext({
+      projectId,
+      projectIssues,
+      selectedIssueId: nextSearchParams.get('issueId') ?? undefined,
+      selectedTeamId: nextSearchParams.get('teamId') ?? undefined,
+      suppressIssueFallback: false,
+      teams,
+    })
+    const requestedIssueId = nextSearchParams.get('issueId')
+    const requestedTeamId = nextSearchParams.get('teamId')
+    const hasExplicitOwner = Boolean(requestedIssueId && requestedTeamId)
+    const nextIssueId = hasExplicitOwner
+      ? requestedIssueId ?? ''
+      : nextRouteContext.resolvedSelectedIssue?.id ?? ''
+    const nextTeamId = hasExplicitOwner
+      ? requestedTeamId ?? ''
+      : nextRouteContext.resolvedSelectedIssue?.teamId ??
+        nextRouteContext.interactionTeamId ?? ''
+    const nextOwnerKey = JSON.stringify([nextTeamId, nextIssueId])
+    const currentOwnerKey = JSON.stringify([
+      selectedIssueDetailTeamId ?? resolvedSelectedIssueTeamId ?? '',
+      selectedIssueDetailId ?? resolvedSelectedIssue?.id ?? '',
+    ])
+    const pathChanged = currentLocation.pathname !== nextLocation.pathname
+    const ownerChanged = pathChanged || nextOwnerKey !== currentOwnerKey
+    const changesCreateScope = pathChanged ||
+      nextRouteContext.creationTeam?.id !== creationTeam?.id
+    const shouldBlockCreate = createTaskDirtyRef.current &&
+      createTaskDirtyScopeRef.current === taskScopeKey && changesCreateScope
+    const shouldBlockComment = commentDraftDirtyRef.current &&
+      commentDraftDirtyScopeRef.current === commentDraftScopeKey && ownerChanged
+    blockedDirtyOwnersRef.current = {
+      create: shouldBlockCreate,
+      comment: shouldBlockComment,
+      createScopeChanged: changesCreateScope,
+    }
+    if (changesCreateScope && !shouldBlockCreate && !shouldBlockComment) {
+      createTaskScopeGenerationRef.current += 1
+    }
+    return Boolean(getAuthSession()) && (shouldBlockCreate || shouldBlockComment)
+  }, [commentDraftScopeKey, creationTeam?.id, projectId, projectIssues, resolvedSelectedIssue?.id,
     resolvedSelectedIssueTeamId, selectedIssueDetailId, selectedIssueDetailTeamId, taskScopeKey, teams],))
   /** Reports create-form dirtiness to the route-owned navigation guard. */
   const reportCreateTaskDirty = useCallback((isDirty: boolean, discardHandler?: () => void) => {
@@ -935,9 +941,11 @@ export function TaskPage() {
         ? t('tasks.create.discardConfirm')
         : t('collaboration.composer.discardConfirm')
     if (globalThis.window.confirm(confirmMessage)) {
-      blockedDirtyOwnersRef.current = { create: false, comment: false }
-      if (hasBlockedCreate) {
+      blockedDirtyOwnersRef.current = { create: false, comment: false, createScopeChanged: false }
+      if (blockedOwners.createScopeChanged) {
         createTaskScopeGenerationRef.current += 1
+      }
+      if (hasBlockedCreate) {
         createTaskDiscardHandlerRef.current?.()
         reportCreateTaskDirty(false)
         createTaskDirtyScopeRef.current = undefined
