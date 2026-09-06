@@ -55,21 +55,23 @@ jobs:
       - name: Prepare Floci generated directory
         run: install -d -m 0777 .floci/generated
 
-      - name: Start Floci
-        run: docker compose up -d floci
+      - name: Start Floci and wait for bootstrap
+        run: bun run floci:up
 
-      - name: Wait for Floci bootstrap
+      - name: Verify generated development environment
         run: |
-          for attempt in {1..300}; do
-            docker compose logs floci > "${RUNNER_TEMP}/floci.log"
-            if [ -f .floci/generated/cognito.env ]; then
-              exit 0
-            fi
-            sleep 1
-          done
+          bun --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env -e '
+            if (process.env.MUKUROJI_WORKSPACE_DIRECTORY_ID !== "workspace#mukuroji-local" ||
+                process.env.MUKUROJI_LOCAL_AWS_RUNTIME !== "floci") {
+              throw new Error("Generated environment did not preserve the local workspace and runtime marker.");
+            }
+          '
 
-          cat "${RUNNER_TEMP}/floci.log"
-          exit 1
+      - name: Exercise local workers
+        run: bun run workers:once
+
+      - name: Exercise local S3 and SQS
+        run: docker compose exec -T floci sh < floci/check-services.sh
 
       - name: Exercise the local API and Work Item schema
         run: |

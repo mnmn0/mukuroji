@@ -89,6 +89,49 @@ user が付けた最新 event だけを承認として受け入れます。
 
 ## 開発
 
+### ローカルの補助サービスとworker
+
+Bun は `packageManager` / `.bun-version` / CI と同じ **1.3.10** を使います。
+`bun --version` で確認してください。バージョン管理ツールまたはBunの公式配布から
+指定版を用意し、PATHの先頭に配置します。
+
+```sh
+bun run floci:up
+# 初期化完了を最大300秒待ちます。成功してから起動
+bun run server:dev
+# 別ターミナル
+bun run workers:dev
+# 別ターミナル
+bun run web:dev
+```
+
+- DynamoDB Admin: http://localhost:8001 （`DYNAMODB_ADMIN_PORT` で変更可）。
+  テーブルの閲覧・編集ができるため、host の loopback だけに公開します。
+- S3: versioning と local Web origin 向け CORS を設定した `mukuroji-files-local` と
+  `mukuroji-work-item-import-local`。ready hook の再実行で既存objectを削除しません。
+- SQS: import、Webhook配送、connector同期の3 queue。それぞれ専用DLQ、
+  visibility timeout 900秒、最大受信回数5回を設定します。
+- `server:dev` と `workers:dev` は `.env`、`.floci/generated/cognito.env`、
+  `.floci/generated/services.env` を読み込みます。generated fileにはsecretを含めません。
+- worker は既存のguard付きhandlerをBunから実行します。Automation / Triageは毎分、
+  Analytics / connector pollingは5分、通知は1時間ごとで、起動時にも1回実行します。
+  SQSとAudit streamは継続pollし、監査の通知・検索・Webhook・connector投影とAutomationを処理します。
+- `bun run workers:once` は各scheduleと各queue・streamの1巡を検証し、失敗時は非zeroで終了します。
+  backlog全件のdrain完了を意味しません。`Ctrl+C` は現在のbatchが終わってから停止します。
+- `docker compose exec -T floci sh < floci/check-services.sh` でS3のversion付き保存・取得、
+  CORS、SQSのvisibilityとDLQを確認できます。検証で作ったobject versionは最後に削除します。
+
+workerは1プロセスで起動してください。Streamのcheckpointはプロセス内に保持し、再起動時は
+保持期間内の先頭から再配送します。既存handlerの冪等性を使い、失敗batchの先へcheckpointを
+進めません。SQSもhandler成功時だけ削除し、失敗時はqueueの再試行とDLQを使います。
+これは開発用runnerで、productionのLambda scaling・IAM・EventBridge配信保証を再現するものではありません。
+WebSocket APIの接続、Enterprise SCIM専用stream worker、tenant operation / restore drillは
+このrunnerの対象外です。S3のGuardDuty malware scanはエミュレートしないため、scan前の
+ファイルを自動的に安全扱いにはしません。
+
+既存volumeに旧schemaのWork Itemがあると、通知workerはfail-closedで停止します。
+ready hookは既存行を上書きしません。データ移行または既存volumeを保存した新環境への切替が必要です。
+
 Floci + Cognito + DynamoDB:
 
 ```sh

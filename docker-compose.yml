@@ -1,4 +1,16 @@
 services:
+  dynamodb-admin:
+    image: aaronshaf/dynamodb-admin:5.3.4@sha256:ac41724cd99706256d405a14a5fb96f51f18c41a630c84fa3357f900cbd16d2e
+    ports:
+      - "127.0.0.1:${DYNAMODB_ADMIN_PORT:-8001}:8001"
+    environment:
+      HOST: 0.0.0.0
+      DYNAMO_ENDPOINT: http://floci:4566
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+    depends_on:
+      - floci
   floci:
     image: "${FLOCI_IMAGE:-floci/floci:1.5.33-compat}"
     ports:
