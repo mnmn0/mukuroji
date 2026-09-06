@@ -937,6 +937,7 @@ export function TaskPage() {
     if (globalThis.window.confirm(confirmMessage)) {
       blockedDirtyOwnersRef.current = { create: false, comment: false }
       if (hasBlockedCreate) {
+        createTaskScopeGenerationRef.current += 1
         createTaskDiscardHandlerRef.current?.()
         reportCreateTaskDirty(false)
         createTaskDirtyScopeRef.current = undefined
@@ -952,7 +953,14 @@ export function TaskPage() {
       return
     }
     navigationBlocker.reset()
-  }, [isCommentDraftDirty, isCreateTaskDirty, navigationBlocker, reportCommentDraftDirty, reportCreateTaskDirty, t])
+  }, [
+    isCommentDraftDirty,
+    isCreateTaskDirty,
+    navigationBlocker,
+    reportCommentDraftDirty,
+    reportCreateTaskDirty,
+    t,
+  ])
   useEffect(() => {
     if (!isCreateTaskDirty && !isCommentDraftDirty) return
     /** Prevents browser unload while the authenticated scoped create form is dirty. */
