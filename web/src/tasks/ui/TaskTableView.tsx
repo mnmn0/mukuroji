@@ -814,6 +814,7 @@ function TaskTableRow({
                     className={`min-w-0 text-left font-semibold text-[var(--workbench-text)] transition hover:text-[var(--workbench-primary)] ${
                       wrapText ? 'whitespace-normal break-words' : 'truncate'
                     }`}
+                    data-testid={`task-open-detail-${task.id}`}
                     onClick={() => onSelectTask(task)}
                     type="button"
                   >
