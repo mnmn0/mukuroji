@@ -71,6 +71,15 @@ jobs:
           cat "${RUNNER_TEMP}/floci.log"
           exit 1
 
+      - name: Verify generated development environment
+        run: |
+          bun --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env -e '
+            if (process.env.MUKUROJI_WORKSPACE_DIRECTORY_ID !== "workspace#mukuroji-local" ||
+                process.env.MUKUROJI_LOCAL_AWS_RUNTIME !== "floci") {
+              throw new Error("Generated environment did not preserve the local workspace and runtime marker.");
+            }
+          '
+
       - name: Exercise local workers
         run: bun run workers:once
 

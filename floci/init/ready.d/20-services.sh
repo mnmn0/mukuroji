@@ -6,6 +6,10 @@ PUBLIC_ENDPOINT_URL="${MUKUROJI_PUBLIC_FLOCI_ENDPOINT:-$ENDPOINT_URL}"
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
 export AWS_DEFAULT_REGION=us-east-1 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
 aws_local() { aws --endpoint-url "$ENDPOINT_URL" "$@"; }
+ensure_queue() {
+  aws_local sqs get-queue-url --queue-name "$1" --query QueueUrl --output text 2>/dev/null ||
+    aws_local sqs create-queue --queue-name "$1" --query QueueUrl --output text
+}
 umask 077
 mkdir -p "$GENERATED_DIR"
 env_file="$(mktemp "$GENERATED_DIR/services.env.XXXXXX")"
@@ -52,6 +56,7 @@ AWS_ENDPOINT_URL_S3=$PUBLIC_ENDPOINT_URL
 AWS_ENDPOINT_URL_SQS=$PUBLIC_ENDPOINT_URL
 SQS_ENDPOINT=$PUBLIC_ENDPOINT_URL
 AWS_REGION=us-east-1
+MUKUROJI_LOCAL_AWS_RUNTIME=floci
 FILE_BUCKET_NAME=mukuroji-files-local
 WORK_ITEM_IMPORT_BUCKET_NAME=mukuroji-work-item-import-local
 DEVELOPER_PLATFORM_TABLE_NAME=mukuroji-developer-platform-local
@@ -59,9 +64,9 @@ EOF
 for entry in WORK_ITEM_IMPORT_QUEUE_URL:work-item-import WEBHOOK_DELIVERY_QUEUE_URL:webhook-delivery CONNECTOR_SYNC_QUEUE_URL:connector-sync; do
   variable="${entry%%:*}"
   name="${entry#*:}"
-  dlq_url="$(aws_local sqs create-queue --queue-name "$name-dlq" --query QueueUrl --output text)"
+  dlq_url="$(ensure_queue "$name-dlq")"
   dlq_arn="$(aws_local sqs get-queue-attributes --queue-url "$dlq_url" --attribute-names QueueArn --query Attributes.QueueArn --output text)"
-  queue_url="$(aws_local sqs create-queue --queue-name "$name" --query QueueUrl --output text)"
+  queue_url="$(ensure_queue "$name")"
   aws_local sqs set-queue-attributes --queue-url "$queue_url" --attributes "{\"VisibilityTimeout\":\"900\",\"RedrivePolicy\":\"{\\\"deadLetterTargetArn\\\":\\\"$dlq_arn\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"}"
   queue_path="$(printf '%s' "$queue_url" | sed 's|^http[s]*://[^/]*||')"
   printf '%s=%s%s\n' "$variable" "${PUBLIC_ENDPOINT_URL%/}" "$queue_path" >>"$env_file"
