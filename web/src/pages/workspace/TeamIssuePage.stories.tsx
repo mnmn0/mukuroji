@@ -1,3 +1,4 @@
+import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import type { WorkItemRelation } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
@@ -60,6 +61,20 @@ const configuredIssues = [
     customFieldValues: workItemCustomFieldValueFixture,
   },
 ] satisfies Extract<TeamIssue, { source: 'dynamodb' }>[]
+
+/** Configuration with a Team Issue type that deliberately omits the Activity section. */
+const activityOptionalTypeConfiguration = {
+  ...teamWorkItemConfigurationFixture,
+  workItemTypes: [
+    DEFAULT_WORK_ITEM_TYPE,
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'activity'),
+      id: 'brief',
+      name: 'Brief',
+    },
+  ],
+}
 
 const storyRelations = [
   {
@@ -136,6 +151,49 @@ type Story = StoryObj<typeof meta>
  * チーム所有 Issue を一覧と詳細ペインで表示する標準状態です。
  */
 export const Default: Story = {}
+
+/** Confirms that a dirty Team Issue comment is retained when Activity would be removed. */
+export const TypeChangeRemovingActivityProtectsCommentDraft: Story = {
+  args: {
+    onCommentDraftDirtyChange: fn(),
+    resolvedConfiguration: { configuration: activityOptionalTypeConfiguration },
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const commentBody = within(canvas.getByTestId('issue-collaboration-panel')).getByRole('textbox')
+    const typeSelect = within(canvas.getByTestId('team-issue-detail-pane')).getByRole('combobox', {
+      name: 'Work Item Type',
+    })
+    const composerButtons = within(canvas.getByTestId('issue-collaboration-panel'))
+      .getAllByRole('button')
+      .filter((button) => /コメント|送信|キャンセル|破棄|プレビュー/u.test(button.textContent ?? ''))
+    for (const button of composerButtons) {
+      expect(button.getBoundingClientRect().height).toBeGreaterThanOrEqual(44)
+    }
+    await userEvent.type(commentBody, 'Team Issue の種別変更でも保持するコメント')
+
+    const originalConfirm = globalThis.window.confirm
+    let confirmCount = 0
+    globalThis.window.confirm = () => {
+      confirmCount += 1
+      return false
+    }
+    try {
+      await userEvent.selectOptions(typeSelect, 'brief')
+      await expect(typeSelect).toHaveValue(DEFAULT_WORK_ITEM_TYPE.id)
+      await expect(commentBody).toHaveValue('Team Issue の種別変更でも保持するコメント')
+      expect(confirmCount).toBe(1)
+
+      globalThis.window.confirm = () => true
+      await userEvent.selectOptions(typeSelect, 'brief')
+      await expect(typeSelect).toHaveValue('brief')
+      await expect(canvas.queryByTestId('issue-collaboration-panel')).not.toBeInTheDocument()
+      expect(args.onCommentDraftDirtyChange).toHaveBeenCalledWith(false, 'onboarding-friction')
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+  },
+}
 
 /** Shared J/K, Space, keyboard Open, and click Open behavior for the Team surface. */
 export const SharedActionSelection: Story = {

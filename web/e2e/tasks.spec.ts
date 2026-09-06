@@ -7396,6 +7396,234 @@ test.describe('authenticated task page', () => {
     page.off('dialog', returnDialogHandler)
   })
 
+  test('Team Issue の canonical 編集失敗でもコメント下書きと詳細を保持する', async ({ page }) => {
+    let shouldFailUpdate = true
+    let successfulUpdateCount = 0
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, async () => {
+      if (shouldFailUpdate) {
+        shouldFailUpdate = false
+        return 'fail'
+      }
+      successfulUpdateCount += 1
+      return undefined
+    })
+    await page.goto('/teams/core-team/issues?issueId=seo-research')
+    await page.getByRole('tab', { name: /会話/ }).click()
+    let unexpectedDialogCount = 0
+    /** Records an unexpected discard prompt during a canonical Team Issue retry. */
+    const unexpectedDialogHandler = async (dialog: Dialog) => {
+      unexpectedDialogCount += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedDialogHandler)
+
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('Team Issue 編集失敗後も保持するコメント')
+    await page.getByTestId('team-issue-row-actions-seo-research').click()
+    const menu = page.getByTestId('team-issue-action-context-menu')
+    await menu.getByRole('menuitem', { name: /Work Item を編集/u }).click()
+
+    const detailPane = page.getByTestId('team-issue-detail-pane')
+    await expect(detailPane.locator('select[name="workflowStatusId"]')).toBeVisible()
+    await detailPane.locator('select[name="workflowStatusId"]').selectOption('review')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect(body).toHaveValue('Team Issue 編集失敗後も保持するコメント')
+    await expect(detailPane).toContainText('issues.error.update')
+    await expect(detailPane.getByRole('button', { name: '変更を保存' })).toBeVisible()
+
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    const requestCounts = getMockRequestCounts(page)
+    await expect.poll(() => requestCounts.issueUpdates).toBe(2)
+    await expect.poll(() => successfulUpdateCount).toBe(1)
+    await expect(body).toHaveValue('Team Issue 編集失敗後も保持するコメント')
+    await expect(detailPane.locator('select[name="workflowStatusId"]')).toHaveValue('review')
+    expect(unexpectedDialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
+  })
+
+  test('Team Issue の Activity を除去する種別変更はコメント下書きを確認する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamWorkItemConfigurations: { 'core-team': activityOptionalTypeConfiguration },
+    })
+    let previewRequests = 0
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/work-item-type-preview$/u, async (route) => {
+      previewRequests += 1
+      const requestBody: unknown = route.request().postDataJSON()
+      const targetWorkItemTypeId = typeof requestBody === 'object' && requestBody !== null &&
+        'targetWorkItemTypeId' in requestBody && typeof requestBody.targetWorkItemTypeId === 'string'
+        ? requestBody.targetWorkItemTypeId
+        : ''
+      await route.fulfill({
+        json: {
+          approvalCompletionTransitionConflict: false,
+          currentWorkflowStatusId: 'active',
+          currentWorkItemTypeId: 'default',
+          expectedRevision: 1,
+          lostCustomFieldIds: [],
+          missingRequiredCustomFieldDefinitions: [],
+          missingRequiredCustomFieldIds: [],
+          requiresResolution: false,
+          targetInitialWorkflowStatusId: 'todo',
+          targetWorkItemTypeId,
+        },
+      })
+    })
+
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    await page.getByRole('tab', { name: /会話/ }).click()
+    const detailPane = page.getByTestId('team-issue-detail-pane')
+    const body = page.locator('textarea[name="body"]')
+    const typeSelect = detailPane.getByRole('combobox', { name: 'Work Item Type' })
+    await body.fill('Team Issue 種別変更確認まで保持するコメント')
+
+    let unexpectedDialogCount = 0
+    /** Records an unexpected discard prompt while selecting an Activity-preserving type or leaving the page. */
+    const unexpectedDialogHandler = async (dialog: Dialog) => {
+      unexpectedDialogCount += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedDialogHandler)
+
+    await typeSelect.selectOption('activity-brief')
+    await expect(typeSelect).toHaveValue('activity-brief')
+    await expect(body).toHaveValue('Team Issue 種別変更確認まで保持するコメント')
+    expect(previewRequests).toBe(1)
+    expect(unexpectedDialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
+
+    const declinedDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメント')
+      await dialog.dismiss()
+    })
+    await Promise.all([typeSelect.selectOption('brief'), declinedDialog])
+    await expect(typeSelect).toHaveValue('activity-brief')
+    await expect(body).toHaveValue('Team Issue 種別変更確認まで保持するコメント')
+    expect(previewRequests).toBe(1)
+
+    const acceptedDialog = page.waitForEvent('dialog').then(async (dialog) => {
+      expect(dialog.message()).toContain('コメント')
+      await dialog.accept()
+    })
+    await Promise.all([typeSelect.selectOption('brief'), acceptedDialog])
+    await expect(typeSelect).toHaveValue('brief')
+    await expect.poll(() => previewRequests).toBe(2)
+    await expect(body).toHaveCount(0)
+
+    page.on('dialog', unexpectedDialogHandler)
+    await typeSelect.selectOption('default')
+    await expect(typeSelect).toHaveValue('default')
+    await expect.poll(() => previewRequests).toBe(2)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+    await page.getByLabel('メインサイドバー').getByRole('button', {
+      name: 'ブランド刷新',
+      exact: true,
+    }).click()
+    await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+    expect(unexpectedDialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
+  })
+
+  test('Team Issue の旧詳細失敗は新しい Issue の詳細を閉じない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    let releaseUpdate: (() => void) | undefined
+    let markUpdateStarted: (() => void) | undefined
+    const updateStarted = new Promise<void>((resolve) => {
+      markUpdateStarted = resolve
+    })
+    await page.route(/\/api\/teams\/core-team\/issues\/seo-research$/u, async (route) => {
+      if (route.request().method() !== 'PATCH') {
+        await route.fallback()
+        return
+      }
+      markUpdateStarted?.()
+      await new Promise<void>((resolve) => {
+        releaseUpdate = resolve
+      })
+      await route.fulfill({
+        status: 500,
+        json: { message: 'issues.error.update' },
+      })
+    })
+
+    await page.goto('/teams/core-team/issues?issueId=seo-research')
+    await page.getByRole('tab', { name: /会話/ }).click()
+    await page.getByTestId('team-issue-row-actions-seo-research').click()
+    await page.getByTestId('team-issue-action-context-menu')
+      .getByRole('menuitem', { name: /Work Item を編集/u }).click()
+    const detailPane = page.getByTestId('team-issue-detail-pane')
+    await detailPane.locator('select[name="workflowStatusId"]').selectOption('review')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await updateStarted
+
+    await page.getByTestId('issue-row-brand-guideline').click()
+    await expect(page).toHaveURL(/issueId=brand-guideline/)
+    const oldUpdateResponse = page.waitForResponse((response) =>
+      response.request().method() === 'PATCH' &&
+      /\/api\/teams\/core-team\/issues\/seo-research$/u.test(response.url()) &&
+      response.status() === 500,
+    )
+    releaseUpdate?.()
+    const settledResponse = await oldUpdateResponse
+    await settledResponse.finished()
+    await expect(page.getByTestId('team-issue-detail-pane')).toContainText('ブランドガイドライン')
+    await expect(page).toHaveURL(/issueId=brand-guideline/)
+  })
+
+  test('Team Issue の Relation 失敗でもコメント下書きと詳細を保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    let shouldFailRelation = true
+    let relationRequestCount = 0
+    await page.route('**/api/teams/core-team/issues/seo-research/relations', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      relationRequestCount += 1
+      if (shouldFailRelation) {
+        shouldFailRelation = false
+        await route.fulfill({
+          status: 409,
+          json: { code: 'WorkItemRelationGraphConflict', message: 'Relation changed.' },
+        })
+        return
+      }
+      await route.fallback()
+    })
+
+    await page.goto('/teams/core-team/issues?issueId=seo-research')
+    await page.getByRole('tab', { name: /会話/ }).click()
+    let unexpectedDialogCount = 0
+    /** Records an unexpected discard prompt during a canonical Team Issue relation retry. */
+    const unexpectedDialogHandler = async (dialog: Dialog) => {
+      unexpectedDialogCount += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedDialogHandler)
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('Team Issue Relation 失敗後も保持するコメント')
+    await page.getByTestId('team-issue-row-actions-seo-research').click()
+    await page.getByTestId('team-issue-action-context-menu')
+      .getByRole('menuitem', { name: /Work Item の関連を管理/u }).click()
+
+    const relationEditor = page.getByTestId('work-item-relations-editor')
+    await expect(relationEditor).toBeVisible()
+    await relationEditor.getByRole('combobox', { name: '関係', exact: true }).selectOption('related')
+    await relationEditor.getByLabel('対象 Work Item').selectOption('brand-guideline')
+    await relationEditor.getByRole('button', { name: '関係を追加' }).click()
+    await expect.poll(() => relationRequestCount).toBe(1)
+    await expect(body).toHaveValue('Team Issue Relation 失敗後も保持するコメント')
+    await expect(relationEditor).toContainText('Relation changed.')
+    await expect(relationEditor).toBeVisible()
+
+    await relationEditor.getByRole('button', { name: '関係を追加' }).click()
+    await expect.poll(() => relationRequestCount).toBe(2)
+    await expect(body).toHaveValue('Team Issue Relation 失敗後も保持するコメント')
+    await expect(page.getByTestId('work-item-relation-related-brand-guideline')).toBeVisible()
+    expect(unexpectedDialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
+  })
+
   test('Team Issue の単一期限 editor は range schedule を暗黙に変更しない', async ({ page }) => {
     const rangedIssue = createStoredTeamIssue({
       dueDate: '2026-08-07',

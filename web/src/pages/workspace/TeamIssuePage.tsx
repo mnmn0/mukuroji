@@ -396,7 +396,7 @@ type TeamIssueScreenProps = {
   /** Whether the current viewer may create an unassigned Work Item in the Team scope. */
   canCreateUnassignedIssue?: boolean
   /** Project destinations where the current viewer may create a Team Issue. */
-  createIssueProjects?: ProjectDirectoryTeam['projects']
+  createIssueProjects?: ProjectDirectoryTeam['projects'][number][]
   /**
    * Related Documents を取得する access token です。
    */
@@ -1385,6 +1385,9 @@ export function TeamIssueScreen({
   })
   const pendingCreateContextRef = useRef<TeamIssueCreateContext | undefined>(undefined)
   const onSelectIssueRef = useRef(onSelectIssue)
+  const selectedIssueIdRef = useRef(selectedIssueId)
+  const commentDraftDirtyRef = useRef(false)
+  const commentDraftOwnerRef = useRef<string | undefined>(undefined)
   const [pendingAiSummaryIssueKey, setPendingAiSummaryIssueKey] = useState<string>()
   const isAiSummaryOperationPendingRef = useRef(false)
   const activeAiSummaryIssueKey = selectedIssueId
@@ -1408,15 +1411,28 @@ export function TeamIssueScreen({
     if (pending) setTaskActionContextMenuState(undefined)
   }, [])
 
-  /** Clears the selected Team Issue only when no Brief operation owns the detail pane. */
-  const clearSelectedIssueIfAllowed = useCallback(() => {
+  /** Clears a failed action's selected Team Issue without closing another Issue's dirty draft. */
+  const clearSelectedIssueIfAllowed = useCallback((owner: WorkItemActionContext | string = '') => {
+    const ownerIssueId = typeof owner === 'string'
+      ? owner || undefined
+      : resolveTaskSurfaceActionTarget(owner)?.workItemId
     if (isAiSummaryOperationPendingRef.current) return
+    const currentIssueId = selectedIssueIdRef.current || undefined
+    if (ownerIssueId !== undefined && currentIssueId !== ownerIssueId) return
+    if (commentDraftDirtyRef.current && commentDraftOwnerRef.current === currentIssueId) return
+    if (commentDraftDirtyRef.current && commentDraftOwnerRef.current !== currentIssueId) {
+      commentDraftDirtyRef.current = false
+      commentDraftOwnerRef.current = undefined
+    }
     onSelectIssueRef.current?.('')
   }, [])
 
   useLayoutEffect(() => {
     activeAiSummaryIssueKeyRef.current = activeAiSummaryIssueKey
   }, [activeAiSummaryIssueKey])
+  useLayoutEffect(() => {
+    selectedIssueIdRef.current = selectedIssueId
+  }, [selectedIssueId])
   useEffect(() => {
     isAiSummaryOperationPendingRef.current = isAiSummaryOperationPending
     if (!isAiSummaryOperationPending) {
@@ -1454,6 +1470,19 @@ export function TeamIssueScreen({
   }
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
+  /** Reports Team-local comment dirtiness while retaining its exact Issue owner. */
+  const handleCommentDraftDirtyChange = useCallback((isDirty: boolean, issueId?: string) => {
+    const reportedIssueId = issueId ?? selectedIssue?.id
+    if (!reportedIssueId) return
+    if (isDirty) {
+      commentDraftDirtyRef.current = true
+      commentDraftOwnerRef.current = reportedIssueId
+    } else if (commentDraftOwnerRef.current === reportedIssueId) {
+      commentDraftDirtyRef.current = false
+      commentDraftOwnerRef.current = undefined
+    }
+    onCommentDraftDirtyChange?.(isDirty, reportedIssueId)
+  }, [onCommentDraftDirtyChange, selectedIssue?.id])
   const dependencySummaries = useMemo(
     () => createWorkItemDependencySummaries(planningSnapshot),
     [planningSnapshot],
@@ -1689,6 +1718,11 @@ export function TeamIssueScreen({
       key: createTaskViewItemKey(issue.teamId, issue.id),
       type: 'focus',
     }))
+    if (selectedIssueIdRef.current !== issue.id) {
+      commentDraftDirtyRef.current = false
+      commentDraftOwnerRef.current = undefined
+    }
+    selectedIssueIdRef.current = issue.id
     onSelectIssueRef.current?.(issue.id)
     if (controlSelector) focusTeamIssueDetailControl(controlSelector)
     return completion ?? createSucceededTaskActionResult(context.actionId, target)
@@ -2069,7 +2103,7 @@ export function TeamIssueScreen({
           isConflict ? t('tasks.action.conflict') : t('taskViews.action.failed'),
           isConflict,
         ))
-        if (canDismissOwner) clearSelectedIssueIfAllowed()
+        if (canDismissOwner) clearSelectedIssueIfAllowed(issueId)
       }
       if (
         selectedIssueUpdateErrorKey &&
@@ -2147,7 +2181,7 @@ export function TeamIssueScreen({
           t('taskViews.action.failed'),
           isConflict,
         ))
-        if (canDismissOwner) clearSelectedIssueIfAllowed()
+        if (canDismissOwner) clearSelectedIssueIfAllowed(issueId)
       }
       throw error
     }
@@ -2556,9 +2590,7 @@ export function TeamIssueScreen({
                 locale={locale}
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
-                onCommentDraftDirtyChange={(isDirty) => {
-                  onCommentDraftDirtyChange?.(isDirty, selectedIssue?.id)
-                }}
+                onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
                 onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,
@@ -4045,7 +4077,7 @@ function IssueDetailPane({
   /** Reports the keyed Brief operation state to the Team Issue screen. */
   onAiSummaryOperationPendingChange?: (issueKey: string, pending: boolean) => void
   /** Reports retained comment composer input to the Team Issue navigation guard. */
-  onCommentDraftDirtyChange?: (isDirty: boolean) => void
+  onCommentDraftDirtyChange?: (isDirty: boolean, issueId?: string) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
@@ -4192,7 +4224,7 @@ function IssueDetailContent({
   /** Reports the keyed Brief operation state to the Team Issue screen. */
   onAiSummaryOperationPendingChange?: (issueKey: string, pending: boolean) => void
   /** Reports retained comment composer input to the Team Issue navigation guard. */
-  onCommentDraftDirtyChange?: (isDirty: boolean) => void
+  onCommentDraftDirtyChange?: (isDirty: boolean, issueId?: string) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   /** Relation 解除 callback です。 */
@@ -4216,6 +4248,12 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const commentDraftDirtyRef = useRef(false)
+  /** Reports this Team Issue's comment dirtiness to the owning screen. */
+  const handleCommentDraftDirtyChange = useCallback((isDirty: boolean) => {
+    commentDraftDirtyRef.current = isDirty
+    onCommentDraftDirtyChange?.(isDirty, issue.id)
+  }, [issue.id, onCommentDraftDirtyChange])
   const aiSummarySource = {
     expectedRevision: issue.revision,
     teamId: issue.teamId,
@@ -4382,6 +4420,21 @@ function IssueDetailContent({
   /** Handles a Work Item Type selection from the Team Issue editor. */
   const handleWorkItemTypeChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextWorkItemTypeId = event.target.value
+    const nextWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
+      configuration,
+      nextWorkItemTypeId,
+    )
+    const nextDetailSections = nextWorkItemTypeDefinition?.detailSections ??
+      DEFAULT_WORK_ITEM_TYPE.detailSections
+    if (
+      detailSectionOrder.includes('activity') &&
+      !nextDetailSections.includes('activity') &&
+      commentDraftDirtyRef.current &&
+      !globalThis.window.confirm(t('collaboration.composer.discardConfirm'))
+    ) return
+    if (detailSectionOrder.includes('activity') && !nextDetailSections.includes('activity')) {
+      handleCommentDraftDirtyChange(false)
+    }
     setSelectedWorkItemType({
       revision: issue.revision,
       value: nextWorkItemTypeId,
@@ -4845,7 +4898,7 @@ function IssueDetailContent({
                 pending,
               )
             }}
-            onCommentDraftDirtyChange={onCommentDraftDirtyChange}
+            onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
             onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
           />
         ) : null
