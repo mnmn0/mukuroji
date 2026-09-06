@@ -5066,7 +5066,6 @@ test.describe('authenticated task page', () => {
 
   test('Table のポインターメニュー編集から戻ると元の行へフォーカスを戻す', async ({ page }) => {
     await page.goto('/projects/refero/issues')
-    await page.getByTestId('task-detail-close').click()
 
     const menuTrigger = page.getByTestId('task-row-actions-wireframe')
     const listUrl = page.url()
@@ -5079,6 +5078,16 @@ test.describe('authenticated task page', () => {
     await page.goBack()
     await expect(page).toHaveURL(listUrl)
     await expect(menuTrigger).toBeFocused()
+
+    const secondMenuTrigger = page.getByTestId('task-row-actions-seo-research')
+    await secondMenuTrigger.click()
+    await page.getByTestId('project-task-action-context-menu')
+      .getByRole('menuitem', { name: /Work Item を編集/u }).click()
+    await expect(page).toHaveURL(/issueId=seo-research/u)
+    await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
+    await expect(secondMenuTrigger).toBeFocused()
   })
 
   test('Gantt の bar を Table 再表示後に閉じると新しい bar へフォーカスを戻す', async ({ page }) => {
@@ -6916,10 +6925,19 @@ test.describe('authenticated task page', () => {
       const createReleased = new Promise<void>((resolve) => {
         releaseCreate = resolve
       })
+      let releaseReplacement: (() => void) | undefined
+      let replacementArrived: (() => void) | undefined
+      const replacementReleased = new Promise<void>((resolve) => {
+        releaseReplacement = resolve
+      })
+      const replacementRequestArrived = new Promise<void>((resolve) => {
+        replacementArrived = resolve
+      })
       const createRequestArrived = new Promise<void>((resolve) => {
         createArrived = resolve
       })
       let createRequestCount = 0
+      let replacementRequestCount = 0
       await page.route(/.*\/api\/teams\/core-team\/issues(?:\?.*)?$/u, async (route) => {
         if (route.request().method() !== 'POST') {
           await route.fallback()
@@ -6934,6 +6952,14 @@ test.describe('authenticated task page', () => {
             json: { code: 'EnterpriseSessionExpired', message: 'Session expired.' },
           })
           return
+        }
+        await route.fallback()
+      })
+      await page.route(/.*\/api\/teams\/design-team\/issues(?:\?.*)?$/u, async (route) => {
+        if (route.request().method() === 'POST') {
+          replacementRequestCount += 1
+          replacementArrived?.()
+          await replacementReleased
         }
         await route.fallback()
       })
@@ -6960,7 +6986,16 @@ test.describe('authenticated task page', () => {
         window.dispatchEvent(new PopStateEvent('popstate'))
       }, { state: historyState })
       await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
-      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+      await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+      const replacementForm = page.getByTestId('create-task-form')
+      await replacementForm.locator('input[name="title"]').fill(`new-${responseKind}-create`)
+      await replacementForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+      const replacementResponse = page.waitForResponse((response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/teams/design-team/issues',
+      )
+      await replacementForm.getByRole('button', { name: '登録', exact: true }).click()
+      await replacementRequestArrived
 
       const createResponse = page.waitForResponse((response) =>
         response.request().method() === 'POST' &&
@@ -6977,23 +7012,16 @@ test.describe('authenticated task page', () => {
       await expect(page).not.toHaveURL(/\/login\?returnTo=/u)
       await expect(page.getByText(`old-${responseKind}-create`, { exact: true })).toHaveCount(0)
       await expect(page.getByTestId('task-action-feedback')).toHaveCount(0)
-      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
-      expect(createRequestCount).toBe(1)
-
-      await page.getByRole('button', { name: '新規タスク', exact: true }).click()
-      const replacementForm = page.getByTestId('create-task-form')
-      await replacementForm.locator('input[name="title"]').fill(`new-${responseKind}-create`)
-      await replacementForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
-      const replacementResponse = page.waitForResponse((response) =>
-        response.request().method() === 'POST' &&
-        new URL(response.url()).pathname === '/api/teams/design-team/issues',
-      )
-      await replacementForm.getByRole('button', { name: '登録', exact: true }).click()
+      await expect(replacementForm.locator('button[type="submit"]')).toBeDisabled()
+      expect(replacementRequestCount).toBe(1)
+      releaseReplacement?.()
       const completedReplacementResponse = await replacementResponse
       await completedReplacementResponse.finished()
-      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
       await expect(page).toHaveURL(/(?=.*teamId=design-team)(?=.*issueId=)/u)
+      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
       await expect(page.getByTestId('task-detail-pane')).toContainText(`new-${responseKind}-create`)
+      expect(createRequestCount).toBe(1)
+      expect(replacementRequestCount).toBe(1)
     })
   }
 

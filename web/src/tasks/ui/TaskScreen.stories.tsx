@@ -452,6 +452,48 @@ type CreatePermissionRevalidationHarnessProps = {
   taskScreenProps: ComponentProps<typeof TaskScreen>
 }
 
+/** Props for the canonical detail focus harness. */
+type CanonicalDetailFocusHarnessProps = {
+  /** Whether the selected canonical detail permits editor controls. */
+  canMutate: boolean
+  /** TaskScreen inputs used by the canonical detail focus scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Keeps a Team-qualified detail available while routed selection permission changes. */
+function CanonicalDetailFocusHarness({
+  canMutate,
+  taskScreenProps,
+}: CanonicalDetailFocusHarnessProps) {
+  const selectedTask = taskScreenProps.tasks?.find((task) => task.id === 'wireframe')
+  const [selectedIssueId, setSelectedIssueId] = useState<string>()
+  const listTasks = taskScreenProps.tasks ?? []
+  const [detail, setDetail] = useState<TeamIssueDetail | undefined>()
+  const [detailCanMutate, setDetailCanMutate] = useState(true)
+  const selectTask = useCallback((task: CanonicalWorkItem) => {
+    setSelectedIssueId(task.id)
+    setDetailCanMutate(canMutate)
+    setDetail({
+      ...selectedIssueDetail,
+      issue: task,
+    })
+    taskScreenProps.onSelectedIssueChange?.(task)
+  }, [canMutate, taskScreenProps])
+
+  if (!selectedTask) throw new Error('Expected the canonical focus fixture task.')
+
+  return (
+    <TaskScreen
+      {...taskScreenProps}
+      canMutateTask={() => detailCanMutate}
+      onSelectedIssueChange={selectTask}
+      selectedIssueDetail={detail}
+      selectedIssueId={selectedIssueId}
+      tasks={listTasks}
+    />
+  )
+}
+
 /** Toggles create permission without remounting the same Project editor. */
 function CreatePermissionRevalidationHarness({
   taskScreenProps,
@@ -1254,6 +1296,55 @@ export const ReadOnlyOpen: Story = {
     expect(onReadOnlySelectedIssueChange).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'wireframe', teamId: 'core-team' }),
     )
+  },
+}
+
+/** Read-only Table title focus survives Board/Table workspace remounts. */
+export const ReadOnlyTableRemountRestoresFocus: Story = {
+  args: {
+    canMutateTask: () => false,
+    initialTab: 'table',
+    onSelectedIssueChange: undefined,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const titleButton = canvas.getByTestId('task-open-detail-wireframe')
+
+    await userEvent.click(titleButton)
+    await userEvent.click(canvas.getByRole('tab', { name: 'ボード' }))
+    await userEvent.click(canvas.getByRole('tab', { name: 'テーブル' }))
+    const remountedTitleButton = canvas.getByTestId('task-open-detail-wireframe')
+    await userEvent.click(canvas.getByTestId('task-detail-close'))
+    await waitFor(() => expect(remountedTitleButton).toHaveFocus())
+  },
+}
+
+/** Canonical detail permission keeps the edit control focus after routed selection. */
+export const CanonicalDetailKeepsEditFocus: Story = {
+  render: (args) => <CanonicalDetailFocusHarness canMutate taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    await userEvent.pointer({ keys: '[MouseRight]', target: canvas.getByTestId('task-row-wireframe') })
+    const menu = within(await documentBody.findByTestId('project-task-action-context-menu'))
+    await userEvent.click(menu.getByRole('menuitem', { name: /Work Item を編集/u }))
+    const detailPane = within(canvas.getByTestId('task-detail-pane'))
+    await waitFor(() => expect(detailPane.getByRole('textbox', { name: 'Issue' })).toHaveFocus())
+  },
+}
+
+/** Canonical detail permission falls back to the safe heading when edit focus is denied. */
+export const CanonicalDetailDeniedFocusFallsBackToHeading: Story = {
+  render: (args) => <CanonicalDetailFocusHarness canMutate={false} taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    await userEvent.pointer({ keys: '[MouseRight]', target: canvas.getByTestId('task-row-wireframe') })
+    const menu = within(await documentBody.findByTestId('project-task-action-context-menu'))
+    await userEvent.click(menu.getByRole('menuitem', { name: /Work Item を編集/u }))
+    await waitFor(() => expect(within(canvas.getByTestId('task-detail-pane')).getByRole('heading', {
+      name: 'ワイヤーフレームを確認する',
+    })).toHaveFocus())
   },
 }
 

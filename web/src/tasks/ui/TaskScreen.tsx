@@ -693,7 +693,7 @@ export function TaskScreen({
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
   const [createTaskEditorGeneration, setCreateTaskEditorGeneration] = useState(0)
   const createTaskEditorGenerationRef = useRef(0)
-  const createTaskSubmissionInFlightRef = useRef(false)
+  const createTaskSubmissionInFlightRef = useRef<number | undefined>(undefined)
   const createTaskDirtyRef = useRef(false)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
   const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
@@ -831,7 +831,7 @@ export function TaskScreen({
           !selectedIssueDetailUnavailable &&
           detailMatchesPendingFocus
         previousSelectedIssueKeyRef.current = selectedIssueKey
-        if (!detailSettled || !detailControlWritable) return
+        if (!detailSettled) return
         pendingDetailFocusRef.current = undefined
         const activeElement = document.activeElement
         const knownActionControl = activeElement instanceof HTMLElement &&
@@ -844,7 +844,7 @@ export function TaskScreen({
           activeElement !== document.documentElement &&
           !knownActionControl
         if (!userMovedFocus) {
-          scheduleTaskDetailFocus(pendingDetailFocus.selector)
+          scheduleTaskDetailFocus(detailControlWritable ? pendingDetailFocus.selector : 'h2')
         }
         return
       }
@@ -1304,8 +1304,11 @@ export function TaskScreen({
     const nextGeneration = createTaskEditorGenerationRef.current + 1
     createTaskEditorGenerationRef.current = nextGeneration
     setCreateTaskEditorGeneration(nextGeneration)
+    createTaskSubmissionInFlightRef.current = undefined
+    setIsCreatingTask(false)
+    taskActionCompletion.cancel('create')
     dismissCreateTaskEditor()
-  }, [dismissCreateTaskEditor])
+  }, [dismissCreateTaskEditor, taskActionCompletion])
 
   /** Reports create-form dirtiness and the scope-owned discard callback to the route guard. */
   const reportCreateTaskDirty = useCallback((isDirty: boolean) => {
@@ -1912,7 +1915,8 @@ export function TaskScreen({
         : undefined
       const originElement = resolveDetailFocusOrigin(contextMenuOrigin)
       cancelTaskDetailFocus()
-      if (contextMenuOrigin && (!detailOriginTaskRef.current || !isDetailOpen)) {
+      const startsListRouteTransition = (!selectedIssueId && !localSelectedDetailTaskKey) || !isDetailOpen
+      if (contextMenuOrigin && startsListRouteTransition) {
         detailOriginTaskRef.current = {
           teamId: task.teamId,
           workItemId: task.id,
@@ -1943,6 +1947,7 @@ export function TaskScreen({
     dismissTaskDetailEditor,
     handleSelectDetailTask,
     isDetailOpen,
+    localSelectedDetailTaskKey,
     resolveDetailFocusOrigin,
     scheduleTaskDetailFocus,
     selectedIssueId,
@@ -3046,12 +3051,12 @@ export function TaskScreen({
                   dismissCreateTaskEditor()
                 }}
                 onSubmit={async (input) => {
-                  if (createTaskSubmissionInFlightRef.current) return
+                  if (createTaskSubmissionInFlightRef.current !== undefined) return
+                  const submittedEditorGeneration = createTaskEditorGeneration
                   if (!onCreateTask) {
                     return
                   }
-                  createTaskSubmissionInFlightRef.current = true
-                  const submittedEditorGeneration = createTaskEditorGeneration
+                  createTaskSubmissionInFlightRef.current = submittedEditorGeneration
                   const pendingContext = resolvePendingTaskActionContext(
                     taskActionCompletion,
                     ['create'],
@@ -3112,8 +3117,10 @@ export function TaskScreen({
                       )
                     }
                   } finally {
-                    createTaskSubmissionInFlightRef.current = false
-                    setIsCreatingTask(false)
+                    if (createTaskSubmissionInFlightRef.current === submittedEditorGeneration) {
+                      createTaskSubmissionInFlightRef.current = undefined
+                      setIsCreatingTask(false)
+                    }
                   }
                 }}
                 projectId={createDestinationProjectId}
