@@ -346,6 +346,7 @@ export const workItemsMessages = {
   'tasks.create.saving': 'Creating',
   'tasks.create.cancel': 'Cancel',
   'tasks.create.error': 'Failed to create the task',
+  'tasks.create.permissionUnavailable': 'You no longer have permission to create tasks in this project.',
   'tasks.create.quick': 'Quick capture',
   'tasks.create.detailed': 'Detailed create',
   'tasks.create.quickDescription': 'Add a title to Triage or Backlog now and complete the details later.',

@@ -4781,7 +4781,6 @@ test.describe('authenticated task page', () => {
     const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
     await openDetailButton.scrollIntoViewIfNeeded()
     await expect(openDetailButton).toBeVisible()
-    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
     const listUrl = page.url()
     const detailResponse = page.waitForResponse((response) =>
       response.request().method() === 'GET' &&
@@ -4789,6 +4788,7 @@ test.describe('authenticated task page', () => {
       response.status() === 200,
     )
     await openDetailButton.focus()
+    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
     await page.keyboard.press('Enter')
     await expect(page).toHaveURL(/issueId=synthetic-150/u)
     const completedDetailResponse = await detailResponse
@@ -4808,6 +4808,16 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(listUrl)
     await expect(searchbox).toHaveValue('Synthetic task')
     await expect(targetRow).toBeVisible()
+    await expect(openDetailButton).toBeFocused()
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
+
+    await page.goForward()
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await expect(detailHeading).toBeFocused()
+    await expect(detailHeading).toBeInViewport()
+
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
     await expect(openDetailButton).toBeFocused()
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
   })
@@ -4838,7 +4848,6 @@ test.describe('authenticated task page', () => {
     })
     await openDetailButton.scrollIntoViewIfNeeded()
     await expect(openDetailButton).toBeVisible()
-    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
     const listUrl = page.url()
     const firstDetailResponse = page.waitForResponse((response) =>
       response.request().method() === 'GET' &&
@@ -4846,6 +4855,7 @@ test.describe('authenticated task page', () => {
       response.status() === 200,
     )
     await openDetailButton.focus()
+    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
     await page.keyboard.press('Enter')
     await expect(page).toHaveURL(/issueId=synthetic-150/u)
     await (await firstDetailResponse).finished()
@@ -4908,7 +4918,6 @@ test.describe('authenticated task page', () => {
     const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
     await openDetailButton.scrollIntoViewIfNeeded()
     await expect(openDetailButton).toBeVisible()
-    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
     const listUrl = page.url()
     const detailResponse = page.waitForResponse((response) =>
       response.request().method() === 'GET' &&
@@ -4916,6 +4925,7 @@ test.describe('authenticated task page', () => {
       response.status() === 200,
     )
     await openDetailButton.focus()
+    const scrollBeforeDetail = await mainScroll.evaluate((element) => element.scrollTop)
     await page.keyboard.press('Enter')
     await expect(page).toHaveURL(/issueId=synthetic-150/u)
     await (await detailResponse).finished()
@@ -6812,19 +6822,37 @@ test.describe('authenticated task page', () => {
 
     // The Project is Team-scoped, so this same-path aggregate entry uses the real Router history
     // state rather than a reload or a test-only navigation hook.
-    page.once('dialog', async (dialog) => {
-      expect(dialog.message()).toContain('破棄')
-      await dialog.dismiss()
+    let firstScopeDialogType: string | undefined
+    let firstScopeDialogMessage: string | undefined
+    const firstScopeDialogHandled = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        firstScopeDialogType = dialog.type()
+        firstScopeDialogMessage = dialog.message()
+        await dialog.dismiss()
+        resolve()
+      })
     })
     await pushRouteEntry('/projects/shared-launch/issues')
+    await firstScopeDialogHandled
+    expect(firstScopeDialogType).toBe('confirm')
+    expect(firstScopeDialogMessage).toContain('破棄')
     await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=core-team')
     await expect(coreTitle).toHaveValue('core-scope-draft')
 
-    page.once('dialog', async (dialog) => {
-      expect(dialog.message()).toContain('破棄')
-      await dialog.accept()
+    let secondScopeDialogType: string | undefined
+    let secondScopeDialogMessage: string | undefined
+    const secondScopeDialogHandled = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        secondScopeDialogType = dialog.type()
+        secondScopeDialogMessage = dialog.message()
+        await dialog.accept()
+        resolve()
+      })
     })
     await pushRouteEntry('/projects/shared-launch/issues?teamId=design-team')
+    await secondScopeDialogHandled
+    expect(secondScopeDialogType).toBe('confirm')
+    expect(secondScopeDialogMessage).toContain('破棄')
     await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
     await expect(page.getByTestId('create-task-form')).toHaveCount(0)
     await expect(page.getByText('core-scope-draft', { exact: true })).toHaveCount(0)
@@ -9913,6 +9941,69 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('create-task-form').locator('input[name="title"]')).toBeVisible()
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(0)
+  })
+
+  test('作成中に権限が失われても入力を保持し、破棄後に移動できる', async ({ page }) => {
+    let permissionRevoked = false
+    await mockAuthenticatedTaskPage(page)
+    await page.route(/.*\/api\/task-views(?:\?.*)?$/u, async (route) => {
+      if (!permissionRevoked) {
+        await route.fallback()
+        return
+      }
+      await route.fulfill({
+        json: {
+          capabilities: {
+            canManageSharedViews: false,
+            canSetTeamDefault: false,
+            canWrite: false,
+            writableProjectScopes: [],
+            writableTeamIds: [],
+          },
+          views: [],
+        },
+      })
+    })
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
+    const titleInput = createTaskForm.locator('input[name="title"]')
+    await titleInput.fill('権限再確認中の下書き')
+
+    permissionRevoked = true
+    await page.waitForTimeout(10_100)
+    const capabilityRefresh = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/task-views' &&
+      response.status() === 200,
+    )
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await (await capabilityRefresh).finished()
+
+    await expect(createTaskForm).toBeVisible()
+    await expect(createTaskForm).toContainText('このプロジェクトでタスクを登録する権限がなくなりました。')
+    await expect(titleInput).toHaveValue('権限再確認中の下書き')
+    const submitButton = createTaskForm.getByRole('button', { name: '登録', exact: true })
+    await expect(submitButton).toBeDisabled()
+    await createTaskForm.evaluate((form) => form.requestSubmit())
+    expect(requestCounts.issueCreates).toBe(0)
+
+    let dialogCount = 0
+    page.on('dialog', async (dialog) => {
+      dialogCount += 1
+      await dialog.accept()
+    })
+    await createTaskForm.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+    expect(dialogCount).toBe(1)
+    await page.getByLabel('メインサイドバー').getByRole('button', {
+      name: 'ホーム',
+      exact: true,
+    }).click()
+    await expect(page).toHaveURL('/home')
+    expect(dialogCount).toBe(1)
+    expect(requestCounts.issueCreates).toBe(0)
   })
 
   test('担当者を選択しない新規タスク登録は送信しない', async ({ page }) => {

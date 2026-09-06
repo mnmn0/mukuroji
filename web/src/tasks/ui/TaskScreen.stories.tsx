@@ -446,6 +446,48 @@ function CreateFailureRetryHarness({ taskScreenProps }: CreateFailureRetryHarnes
   )
 }
 
+/** Props for the same-scope create draft permission revalidation scenario. */
+type CreatePermissionRevalidationHarnessProps = {
+  /** TaskScreen inputs used by the permission revalidation scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Toggles create permission without remounting the same Project editor. */
+function CreatePermissionRevalidationHarness({
+  taskScreenProps,
+}: CreatePermissionRevalidationHarnessProps) {
+  const [canCreate, setCanCreate] = useState(true)
+  const [createAttemptCount, setCreateAttemptCount] = useState(0)
+  const onCreateTask = useCallback(async () => {
+    setCreateAttemptCount((count) => count + 1)
+  }, [])
+
+  return (
+    <>
+      <button
+        data-testid="revoke-create-permission"
+        onClick={() => setCanCreate(false)}
+        type="button"
+      >
+        Revoke create permission
+      </button>
+      <button
+        data-testid="restore-create-permission"
+        onClick={() => setCanCreate(true)}
+        type="button"
+      >
+        Restore create permission
+      </button>
+      <output data-testid="permission-create-attempt-count">{createAttemptCount}</output>
+      <TaskScreen
+        {...taskScreenProps}
+        defaultCreateTaskOpen
+        onCreateTask={canCreate ? onCreateTask : undefined}
+      />
+    </>
+  )
+}
+
 /** Props for a harness that settles an older create request successfully. */
 type StaleCreateSuccessHarnessProps = {
   /** TaskScreen inputs used by the replacement-editor success scenario. */
@@ -943,6 +985,43 @@ export const CreateOpen: Story = {
     await expect(canvas.getByRole('combobox', { name: '担当者' })).toHaveValue(
       'sato@example.com',
     )
+  },
+}
+
+/** Keeps a same-Project draft visible while create permission is revalidated. */
+export const CreateDraftRetainsPermissionLoss: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <CreatePermissionRevalidationHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const formQueries = within(createTaskForm)
+
+    await userEvent.type(formQueries.getByRole('textbox', { name: 'タスク名' }), 'permission draft')
+    await userEvent.click(canvas.getByTestId('revoke-create-permission'))
+
+    await expect(canvas.getByTestId('create-task-form')).toBeInTheDocument()
+    await expect(formQueries.getByRole('alert')).toHaveTextContent(
+      'このプロジェクトでタスクを登録する権限がなくなりました。',
+    )
+    await expect(formQueries.getByRole('button', { name: /^登録$/u })).toBeDisabled()
+    await expect(formQueries.getByRole('textbox', { name: 'タスク名' })).toHaveValue(
+      'permission draft',
+    )
+    if (!(createTaskForm instanceof HTMLFormElement)) {
+      throw new Error('Expected the create task panel to render a form.')
+    }
+    createTaskForm.requestSubmit()
+    await expect(canvas.getByTestId('permission-create-attempt-count')).toHaveTextContent('0')
+
+    await userEvent.click(canvas.getByTestId('restore-create-permission'))
+    await expect(formQueries.queryByRole('alert')).toBeNull()
+    await expect(formQueries.getByRole('button', { name: /^登録$/u })).toBeEnabled()
+    await userEvent.click(formQueries.getByRole('button', { name: /^登録$/u }))
+    await expect(canvas.queryByTestId('create-task-form')).not.toBeInTheDocument()
+    await expect(canvas.getByTestId('permission-create-attempt-count')).toHaveTextContent('1')
   },
 }
 

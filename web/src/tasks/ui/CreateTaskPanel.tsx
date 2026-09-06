@@ -59,6 +59,8 @@ export type CreateTaskPanelProps = {
   isAssigneeOptionsLoading: boolean
   /** Whether a create mutation is currently running. */
   isSubmitting: boolean
+  /** Whether the current permission snapshot must prevent submission. */
+  isSubmissionDisabled?: boolean
   /** Locale used by custom field editors and validation messages. */
   locale: Locale
   /** Closes the creation panel without submitting. */
@@ -95,6 +97,7 @@ export function CreateTaskPanel({
   initialMode,
   isAssigneeOptionsLoading,
   isSubmitting,
+  isSubmissionDisabled = false,
   locale,
   onCancel,
   onDirtyChange,
@@ -253,6 +256,9 @@ export function CreateTaskPanel({
         onSubmit={(event) => {
           event.preventDefault()
           if (submissionInFlightRef.current || isSubmitPending) return
+          if (isSubmissionDisabled) {
+            return
+          }
           if (!hasLoadedWorkItemConfiguration || !hasCreatableWorkItemType) return
 
           const formData = new FormData(event.currentTarget)
@@ -389,7 +395,7 @@ export function CreateTaskPanel({
             <select
               className="workbench-input h-10 px-3"
               data-testid="create-task-work-item-type"
-              disabled={isSubmitPending || !hasCreatableWorkItemType}
+              disabled={isSubmitPending || isSubmissionDisabled || !hasCreatableWorkItemType}
               name="workItemTypeId"
               onChange={(event) => {
                 if (effectiveMode === 'detailed') setMode('detailed')
@@ -494,7 +500,7 @@ export function CreateTaskPanel({
             <div className="flex items-center gap-2">
               <button
                 className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
-                disabled={isSubmitPending || !hasCreatableWorkItemType || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || assigneeOptions.length === 0}
+                disabled={isSubmitPending || isSubmissionDisabled || !hasCreatableWorkItemType || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || assigneeOptions.length === 0}
                 type="submit"
               >
                 {isSubmitPending ? t('tasks.create.saving') : t('tasks.create.submit')}
@@ -591,6 +597,7 @@ export function CreateTaskPanel({
                 className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
                 disabled={
                   isSubmitPending ||
+                  isSubmissionDisabled ||
                   !hasCreatableWorkItemType ||
                   isAssigneeOptionsLoading ||
                   Boolean(assigneeErrorMessage) ||
@@ -696,9 +703,13 @@ export function CreateTaskPanel({
             />
           </div>
         ) : null}
-        {fieldErrors.submit ?? fieldErrors.mode ?? errorMessage ? (
+        {(isSubmissionDisabled
+          ? errorMessage ?? t('tasks.create.permissionUnavailable')
+          : fieldErrors.submit ?? fieldErrors.mode ?? errorMessage) ? (
           <p className="text-sm font-semibold text-red-700" role="alert">
-            {fieldErrors.submit ?? fieldErrors.mode ?? errorMessage}
+            {isSubmissionDisabled
+              ? errorMessage ?? t('tasks.create.permissionUnavailable')
+              : fieldErrors.submit ?? fieldErrors.mode ?? errorMessage}
           </p>
         ) : null}
         {isAssigneeOptionsLoading ? (

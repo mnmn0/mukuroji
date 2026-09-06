@@ -346,6 +346,7 @@ export const workItemsMessages = {
   'tasks.create.saving': '登録中',
   'tasks.create.cancel': 'キャンセル',
   'tasks.create.error': 'タスクを登録できませんでした',
+  'tasks.create.permissionUnavailable': 'このプロジェクトでタスクを登録する権限がなくなりました。',
   'tasks.create.quick': 'クイック登録',
   'tasks.create.detailed': '詳細登録',
   'tasks.create.quickDescription': 'タイトルだけ入力して Triage / Backlog に追加します。あとから詳細を補完できます。',
