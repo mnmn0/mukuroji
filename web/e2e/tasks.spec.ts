@@ -6121,6 +6121,51 @@ test.describe('authenticated task page', () => {
     expect(commentRequestCount).toBe(1)
   })
 
+  test('コメント保存中の同じ Team Issue の Project 再割り当ては保存 owner を失わない', async ({ page }) => {
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    let postCount = 0
+    let releaseComment: (() => void) | undefined
+    let commentArrived: (() => void) | undefined
+    const commentReleased = new Promise<void>((resolve) => {
+      releaseComment = resolve
+    })
+    const commentRequest = new Promise<void>((resolve) => {
+      commentArrived = resolve
+    })
+    await page.route('**/api/teams/core-team/issues/wireframe/comments', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      postCount += 1
+      commentArrived?.()
+      await commentReleased
+      await route.fallback()
+    })
+
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('Project 再割り当て中も保存するコメント')
+    await page.getByRole('button', { name: 'コメントを追加' }).click()
+    await commentRequest
+
+    const assignment = page.locator('aside select[name="assignedProjectId"]')
+    await expect(assignment).toHaveValue('refero')
+    await assignment.selectOption('')
+    const updateResponse = page.waitForResponse((response) =>
+      response.request().method() === 'PATCH' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/wireframe',
+    )
+    await page.getByRole('button', { name: '変更を保存' }).click()
+    await (await updateResponse).finished()
+
+    releaseComment?.()
+    await expect.poll(() => postCount).toBe(1)
+    await expect(body).toHaveValue('')
+    await expect(page.getByTestId('comment-thread-comment-2')).toContainText(
+      'Project 再割り当て中も保存するコメント',
+    )
+  })
+
   test('コメント下書きは同一 Issue のタブ移動を許可し、別 Issue への移動は確認する', async ({ page }) => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const body = page.locator('textarea[name="body"]')
@@ -6194,6 +6239,78 @@ test.describe('authenticated task page', () => {
     await page.getByTestId('task-open-detail-wireframe').click()
     await expect(body).toHaveValue('デフォルト詳細のまま保持するコメント下書き')
     expect(dialogCount).toBe(0)
+  })
+
+  test('Team Issue の未知 detail query は fallback 詳細のコメント下書きを確認しない', async ({ page }) => {
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await expect(body).toBeVisible()
+    await body.fill('未知 detail query でも保持するコメント下書き')
+
+    let dialogCount = 0
+    const unexpectedDialogHandler = async (dialog: Dialog) => {
+      dialogCount += 1
+      await dialog.dismiss()
+    }
+    page.on('dialog', unexpectedDialogHandler)
+    const historyState = await page.evaluate(() => window.history.state)
+    await page.evaluate(({ state }) => {
+      window.history.pushState({
+        ...state,
+        idx: (typeof state?.idx === 'number' ? state.idx : 0) + 1,
+        key: 'unknown-team-detail-owner',
+      }, '', '/teams/core-team/issues?issueId=unknown-detail')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }, { state: historyState })
+    await expect(page).toHaveURL(/issueId=unknown-detail/)
+    await expect(body).toHaveValue('未知 detail query でも保持するコメント下書き')
+
+    await page.evaluate(({ state }) => {
+      window.history.pushState({
+        ...state,
+        idx: (typeof state?.idx === 'number' ? state.idx : 0) + 1,
+        key: 'whitespace-team-detail-owner',
+      }, '', '/teams/core-team/issues?issueId=%20%20')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }, { state: historyState })
+    await expect(page).toHaveURL(/issueId=%20%20/)
+    await expect(body).toHaveValue('未知 detail query でも保持するコメント下書き')
+    expect(dialogCount).toBe(0)
+    page.off('dialog', unexpectedDialogHandler)
+
+    const differentIssueDialog = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('コメント')
+        await dialog.accept()
+        resolve()
+      })
+    })
+    await Promise.all([
+      page.getByTestId('issue-row-seo-research').click(),
+      differentIssueDialog,
+    ])
+    await expect(page).toHaveURL(/issueId=seo-research/)
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
+  })
+
+  test('コメント下書き中のキーボード Files 移動は拒否時に選択とフォーカスを保持する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const body = page.locator('textarea[name="body"]')
+    await body.fill('キーボード移動を拒否して保持するコメント下書き')
+
+    const tableTab = page.getByRole('tab', { name: 'テーブル' })
+    await tableTab.focus()
+    const dialogPromise = new Promise<void>((resolve) => {
+      page.once('dialog', async (dialog) => {
+        expect(dialog.message()).toContain('コメント')
+        await dialog.dismiss()
+        resolve()
+      })
+    })
+    await Promise.all([page.keyboard.press('End'), dialogPromise])
+    await expect(tableTab).toHaveAttribute('aria-selected', 'true')
+    await expect(tableTab).toBeFocused()
+    await expect(body).toHaveValue('キーボード移動を拒否して保持するコメント下書き')
   })
 
   test('作成とコメントの下書きを同時に離れると一度だけまとめて確認する', async ({ page }) => {

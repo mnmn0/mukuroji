@@ -299,6 +299,14 @@ type IssueViewMode = 'table' | 'board'
 
 const issueViewPanelId = 'team-issue-view-panel'
 
+/** Resolves the selected Team Issue using the same trimmed membership fallback as the screen. */
+function resolveTeamIssueSelectionId(issues: readonly TeamIssue[], requestedIssueId?: string) {
+  const trimmedIssueId = requestedIssueId?.trim()
+  return trimmedIssueId && issues.some((issue) => issue.id === trimmedIssueId)
+    ? trimmedIssueId
+    : issues[0]?.id
+}
+
 /** Transient Team Issue context-menu target retained independently from keyboard selection. */
 type TeamIssueActionContextMenuState = {
   /** Pointer or overflow-control position used by the responsive menu layout. */
@@ -650,9 +658,7 @@ export function TeamIssuePage() {
     teamId,
     Boolean(user && !currentUserError),
   )
-  const resolvedSelectedIssueId = requestedIssueId && issues.some((issue) => issue.id === requestedIssueId)
-    ? requestedIssueId
-    : issues[0]?.id
+  const resolvedSelectedIssueId = resolveTeamIssueSelectionId(issues, requestedIssueId)
   const resolvedSelectedIssue = issues.find((issue) => issue.id === resolvedSelectedIssueId)
   const commentDraftPrincipalKey = user?.username ?? user?.attributes.email ?? ''
   const commentDraftWorkspaceKey = user?.attributes['custom:workspace_id'] ??
@@ -673,7 +679,10 @@ export function TeamIssuePage() {
     if (!getAuthSession() || !commentDraftDirtyRef.current ||
       commentDraftDirtyScopeRef.current !== commentDraftScopeKey) return false
     if (currentLocation.pathname !== nextLocation.pathname) return true
-    const nextIssueId = new URLSearchParams(nextLocation.search).get('issueId') ?? issues[0]?.id
+    const nextIssueId = resolveTeamIssueSelectionId(
+      issues,
+      new URLSearchParams(nextLocation.search).get('issueId') ?? undefined,
+    )
     return nextIssueId !== resolvedSelectedIssueId
   })
   /** Reports comment input only while its exact Team Issue scope is current. */

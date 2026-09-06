@@ -2968,13 +2968,15 @@ export function TaskScreen({
           onMobileSidebarOpen={openMobileSidebar}
           onProjectQuickAccessToggle={onProjectQuickAccessToggle}
           onTabChange={(nextActiveTab) => {
+            if (isAiOperationPendingRef.current) return false
             const leavesDetail = (nextActiveTab === 'file' || nextActiveTab === 'permissions') &&
               nextActiveTab !== activeTab
-            if (leavesDetail && !confirmDetailOwnerDiscard(false, true)) return
+            if (leavesDetail && !confirmDetailOwnerDiscard(false, true)) return false
             commitViewState({
               ...currentViewState,
               activeTab: nextActiveTab,
             })
+            return true
           }}
           projectName={resolvedProjectName}
           t={t}

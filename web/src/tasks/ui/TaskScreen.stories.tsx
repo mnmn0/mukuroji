@@ -15,6 +15,7 @@ import {
 } from 'react'
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
 import { TaskScreen } from './TaskScreen'
+import type { TaskDetailAiAssistanceRenderContext } from './TaskDetailPane'
 import {
   createWorkspaceCommandMenuWorkItemActionRegistry,
   WorkspaceCommandMenuContext,
@@ -393,6 +394,44 @@ type StaleCreateRejectionHarnessProps = {
   taskScreenProps: ComponentProps<typeof TaskScreen>
 }
 
+/** Props for the AI operation tab-guard Story harness. */
+type AiOperationPendingHarnessProps = {
+  /** TaskScreen inputs rendered below the deterministic pending control. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Exposes a deterministic pending AI operation for guarded task-tab interactions. */
+function AiOperationPendingHarness({ taskScreenProps }: AiOperationPendingHarnessProps) {
+  const renderAiAssistance = useCallback((context: TaskDetailAiAssistanceRenderContext) => ({
+    planning: (
+      <>
+        <button
+          data-testid="begin-ai-operation"
+          onClick={() => context.onPlanningOperationPendingChange?.(true)}
+          type="button"
+        >
+          Begin AI operation
+        </button>
+        <button
+          data-testid="finish-ai-operation"
+          onClick={() => context.onPlanningOperationPendingChange?.(false)}
+          type="button"
+        >
+          Finish AI operation
+        </button>
+      </>
+    ),
+  }), [])
+
+  return (
+    <TaskScreen
+      {...taskScreenProps}
+      aiAssistanceEnabled
+      renderAiAssistance={renderAiAssistance}
+    />
+  )
+}
+
 /**
  * Holds a create request until the story explicitly rejects it after a replacement editor opens.
  *
@@ -697,6 +736,53 @@ export const Default: Story = {
     }))
     await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
     await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+  },
+}
+
+/** AI operations reject a guarded Files transition without clearing local detail ownership. */
+export const AiOperationPendingBlocksDetailTab: Story = {
+  args: {
+    initialSelectedTaskId: 'wireframe',
+    selectedIssueDetail,
+  },
+  render: (args) => <AiOperationPendingHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const body = await canvas.findByRole('textbox', { name: 'コメント本文' })
+    await userEvent.type(body, 'AI処理中も保持するコメント下書き')
+    await userEvent.click(canvas.getByTestId('begin-ai-operation'))
+
+    const fileTab = canvas.getByRole('tab', { name: 'ファイル' })
+    let confirmCount = 0
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => {
+      confirmCount += 1
+      return true
+    }
+    try {
+      await userEvent.click(fileTab)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+
+    await expect(fileTab).toHaveAttribute('aria-selected', 'false')
+    await expect(body).toHaveValue('AI処理中も保持するコメント下書き')
+    expect(confirmCount).toBe(0)
+
+    await userEvent.click(canvas.getByTestId('finish-ai-operation'))
+    confirmCount = 0
+    globalThis.window.confirm = () => {
+      confirmCount += 1
+      return false
+    }
+    try {
+      await userEvent.click(fileTab)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+    await expect(fileTab).toHaveAttribute('aria-selected', 'false')
+    await expect(body).toHaveValue('AI処理中も保持するコメント下書き')
+    expect(confirmCount).toBe(1)
   },
 }
 

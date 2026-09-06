@@ -149,6 +149,33 @@ function DraftPendingCapabilityHarness(props: ComponentProps<typeof IssueCollabo
   )
 }
 
+/** Renders an edit slot while the target capability is temporarily removed. */
+function DraftEditCapabilityLossHarness(props: ComponentProps<typeof IssueCollaborationPanel>) {
+  const [canEdit, setCanEdit] = useState(true)
+  const controller = {
+    ...props.controller,
+    comments: props.controller.comments.map((comment) => comment.id === 'comment-1'
+      ? {
+          ...comment,
+          capabilities: { ...comment.capabilities, canEdit },
+        }
+      : comment),
+  }
+
+  return (
+    <>
+      <button
+        className="min-h-11 px-3 text-xs"
+        onClick={() => setCanEdit((current) => !current)}
+        type="button"
+      >
+        編集権限を一時停止
+      </button>
+      <IssueCollaborationPanel {...props} controller={controller} />
+    </>
+  )
+}
+
 /** Renders an unresolved thread with a gated reply request for slot ownership checks. */
 function DraftTargetOwnerHarness(props: ComponentProps<typeof IssueCollaborationPanel>) {
   const [requestCount, setRequestCount] = useState(0)
@@ -470,6 +497,7 @@ export const DraftEditRetainsWhenCommentCreationUnavailable: Story = {
       },
     },
   },
+  render: (args) => <DraftEditCapabilityLossHarness {...args} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const details = canvas.getByTestId('comment-thread-details-comment-1')
@@ -482,6 +510,14 @@ export const DraftEditRetainsWhenCommentCreationUnavailable: Story = {
     if (!(editor instanceof HTMLTextAreaElement)) throw new Error('Edit composer textarea is missing.')
     await userEvent.type(editor, ' 編集可能')
     await waitFor(() => expect(editor.value).toContain('編集可能'))
+    await userEvent.click(canvas.getByRole('button', { name: '編集権限を一時停止' }))
+    const retainedEditor = canvas.getByRole('textbox', { name: 'コメントを編集' })
+    await expect(retainedEditor).toHaveAttribute('readonly')
+    await expect(canvas.getByRole('status')).toHaveTextContent('現在編集できません')
+    if (!(retainedEditor instanceof HTMLTextAreaElement)) throw new Error('Retained edit composer textarea is missing.')
+    await expect(retainedEditor.value).toContain('編集可能')
+    await userEvent.click(canvas.getByRole('button', { name: '編集権限を一時停止' }))
+    await expect(canvas.getByRole('textbox', { name: 'コメントを編集' })).not.toHaveAttribute('readonly')
     await userEvent.click(canvas.getByRole('tab', { name: /活動/ }))
     await userEvent.click(canvas.getByRole('tab', { name: /会話/ }))
     const restoredEditor = await canvas.findByRole('textbox', { name: 'コメントを編集' })

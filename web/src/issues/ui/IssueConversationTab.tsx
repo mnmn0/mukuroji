@@ -692,6 +692,7 @@ export function IssueConversationTab({
         <div
           className="mx-5 mt-4 grid gap-2 rounded-md border border-amber-200 bg-amber-50 p-3"
           key={`retained-draft-${draft === retainedEditDraft ? 'edit' : 'reply'}-${draft.commentId}`}
+          role="status"
         >
           <p className="text-xs font-semibold text-amber-900">
             {t('collaboration.composer.targetUnavailable')}

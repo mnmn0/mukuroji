@@ -43,7 +43,7 @@ const typingIdleDelay = 1_800
 
 /** Identifies one authenticated collaboration scope lifetime. */
 type CollaborationScopeOwner = {
-  /** The enabled/team/issue/project scope captured by the lifetime. */
+  /** The enabled/team/issue or project scope captured by the lifetime. */
   scope: string
   /** The access token captured by the lifetime. */
   accessToken?: string
@@ -239,7 +239,8 @@ export function useIssueCollaboration({
   const replyRevalidationIdRef = useRef(0)
   const typingTimeoutRef = useRef<number | undefined>(undefined)
   const typingRef = useRef(false)
-  const collaborationScope = `${enabled ? 'enabled' : 'disabled'}:${teamId ?? ''}:${issueId ?? ''}:${projectId ?? ''}`
+  const collaborationScope = `${enabled ? 'enabled' : 'disabled'}:${teamId ?? ''}:${issueId ?? ''}`
+  const projectWatchScope = `${collaborationScope}:${projectId ?? ''}`
   const scopeOwner = useMemo<CollaborationScopeOwner>(
     () => ({
       accessToken,
@@ -248,7 +249,16 @@ export function useIssueCollaboration({
     }),
     [accessToken, collaborationScope],
   )
+  const projectWatchScopeOwner = useMemo<CollaborationScopeOwner>(
+    () => ({
+      accessToken,
+      mutationRunner: createMutationRequestRunner(),
+      scope: projectWatchScope,
+    }),
+    [accessToken, projectWatchScope],
+  )
   const currentScopeOwnerRef = useRef<CollaborationScopeOwner | undefined>(undefined)
+  const currentProjectWatchScopeOwnerRef = useRef<CollaborationScopeOwner | undefined>(undefined)
   useLayoutEffect(() => {
     currentScopeOwnerRef.current = scopeOwner
 
@@ -258,6 +268,15 @@ export function useIssueCollaboration({
       }
     }
   }, [scopeOwner])
+  useLayoutEffect(() => {
+    currentProjectWatchScopeOwnerRef.current = projectWatchScopeOwner
+
+    return () => {
+      if (currentProjectWatchScopeOwnerRef.current === projectWatchScopeOwner) {
+        currentProjectWatchScopeOwnerRef.current = undefined
+      }
+    }
+  }, [projectWatchScopeOwner])
   const [typingState, setTypingState] = useState({ active: false, scope: '' })
   const [mutationError, setMutationError] = useState<{
     /** API が返した安定 error code です。 */
@@ -276,7 +295,10 @@ export function useIssueCollaboration({
   })
   const replyPageStateRef = useRef(replyPageState)
   const typing = typingState.scope === collaborationScope && typingState.active
-  const activeMutationError = mutationError?.owner === scopeOwner ? mutationError : undefined
+  const activeMutationError = mutationError?.owner === scopeOwner ||
+    mutationError?.owner === projectWatchScopeOwner
+    ? mutationError
+    : undefined
   const isConfigured = Boolean(enabled && accessToken && teamId && issueId)
   const context = useIssueContext({
     accessToken,
@@ -457,26 +479,30 @@ export function useIssueCollaboration({
     operationKey: string,
     fingerprint: string,
     request: Parameters<MutationRequestRunner['run']>[2],
+    owner: CollaborationScopeOwner = scopeOwner,
   ) => {
-    setMutationError((current) => current?.owner === scopeOwner ? undefined : current)
+    const currentOwnerRef = owner === projectWatchScopeOwner
+      ? currentProjectWatchScopeOwnerRef
+      : currentScopeOwnerRef
+    setMutationError((current) => current?.owner === owner ? undefined : current)
 
     try {
-      await scopeOwner.mutationRunner.run(
+      await owner.mutationRunner.run(
         operationKey,
         fingerprint,
         request,
       )
-      if (currentScopeOwnerRef.current !== scopeOwner) {
+      if (currentOwnerRef.current !== owner) {
         return false
       }
       await refresh()
-      if (currentScopeOwnerRef.current !== scopeOwner) {
+      if (currentOwnerRef.current !== owner) {
         return false
       }
       return true
     } catch (mutationError) {
       console.error('Issue collaboration mutation failed:', mutationError)
-      if (currentScopeOwnerRef.current !== scopeOwner) {
+      if (currentOwnerRef.current !== owner) {
         return false
       }
       const mutationErrorStatus = mutationError instanceof TeamIssuesApiError
@@ -488,7 +514,7 @@ export function useIssueCollaboration({
 
       setMutationError({
         code: mutationErrorCode,
-        owner: scopeOwner,
+        owner,
         status: mutationErrorStatus,
       })
       if (mutationErrorStatus === 409) {
@@ -496,7 +522,7 @@ export function useIssueCollaboration({
       }
       return false
     }
-  }, [refresh, scopeOwner])
+  }, [projectWatchScopeOwner, refresh, scopeOwner])
 
   const createComment = useCallback(async (input: CreateTeamIssueCommentInput) => {
     if (!accessToken || !teamId || !issueId) {
@@ -612,8 +638,9 @@ export function useIssueCollaboration({
       (context) => firstPage.watch.projectSubscribed
         ? unsubscribeProjectWatch(projectId, accessToken, context)
         : subscribeProjectWatch(projectId, accessToken, context),
+      projectWatchScopeOwner,
     )
-  }, [accessToken, firstPage, projectId, runMutation])
+  }, [accessToken, firstPage, projectId, projectWatchScopeOwner, runMutation])
 
   const loadMore = useCallback(async () => {
     if (!lastPage?.nextCursor) {
