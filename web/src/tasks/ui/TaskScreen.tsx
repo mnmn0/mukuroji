@@ -766,9 +766,17 @@ export function TaskScreen({
   /** Retains the actual task-list DOM control that initiated detail navigation. */
   const captureDetailOriginControl = useCallback((event: SyntheticEvent<HTMLDivElement>) => {
     const target = event.target
-    if (!(target instanceof HTMLElement)) return
+    if (!(target instanceof Element)) return
     const taskRow = target.closest<HTMLElement>('[data-task-action="open"]')
     if (!taskRow) return
+    const interactiveTarget = target.closest<HTMLElement>(
+      'button, input, select, textarea, a, [contenteditable="true"], [role="button"]',
+    )
+    const detailControl = target.closest<HTMLElement>(
+      '[data-task-action="open"], [data-testid^="task-open-detail-"]',
+    )
+    if (!detailControl) return
+    if (interactiveTarget && interactiveTarget !== taskRow && interactiveTarget !== detailControl) return
     const teamId = taskRow.dataset.taskTeamId
     const workItemId = taskRow.dataset.taskWorkItemId
     const hasSelectedDetail = Boolean(selectedIssueId || localSelectedDetailTaskKey)
@@ -783,9 +791,7 @@ export function TaskScreen({
       }
       detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
     }
-    detailOriginControlRef.current = target.closest<HTMLElement>('[data-testid^="task-open-detail-"]') ??
-      target.closest<HTMLElement>('[data-task-action="open"]') ??
-      target
+    detailOriginControlRef.current = detailControl
   }, [isDetailOpen, localSelectedDetailTaskKey, selectedIssueId])
   /** Resolves the exact control that initiated a routed detail action. */
   const resolveDetailFocusOrigin = useCallback((preferredElement?: HTMLElement) => {
@@ -828,10 +834,15 @@ export function TaskScreen({
         const detailSettled = !isLoading &&
           !isSelectedIssueDetailLoading &&
           !isTaskViewLoading &&
+          !detailErrorMessage &&
           !selectedIssueDetailUnavailable &&
           detailMatchesPendingFocus
+        const detailErrorSettled = !isLoading &&
+          !isSelectedIssueDetailLoading &&
+          !isTaskViewLoading &&
+          Boolean(detailErrorMessage)
         previousSelectedIssueKeyRef.current = selectedIssueKey
-        if (!detailSettled) return
+        if (!detailSettled && !detailErrorSettled) return
         pendingDetailFocusRef.current = undefined
         const activeElement = document.activeElement
         const knownActionControl = activeElement instanceof HTMLElement &&
@@ -844,7 +855,17 @@ export function TaskScreen({
           activeElement !== document.documentElement &&
           !knownActionControl
         if (!userMovedFocus) {
-          scheduleTaskDetailFocus(detailControlWritable ? pendingDetailFocus.selector : 'h2')
+          if (detailErrorSettled) {
+            if (pendingFocusTask !== undefined && !selectedIssueDetailUnavailable) {
+              scheduleTaskDetailFocus('h2')
+            } else if (pendingDetailFocus.originElement?.isConnected) {
+              pendingDetailFocus.originElement.focus({ preventScroll: true })
+            } else {
+              scheduleTaskDetailFocus('[role="alert"]')
+            }
+          } else {
+            scheduleTaskDetailFocus(detailControlWritable ? pendingDetailFocus.selector : 'h2')
+          }
         }
         return
       }
@@ -883,6 +904,7 @@ export function TaskScreen({
     activeProjectTeamId,
     canMutateTask,
     cancelTaskDetailFocus,
+    detailErrorMessage,
     isLoading,
     isSelectedIssueDetailLoading,
     isTaskViewLoading,
@@ -2939,8 +2961,6 @@ export function TaskScreen({
             className="workbench-main min-h-0 flex-1 overflow-auto overscroll-contain"
             data-testid="task-main-scroll"
             onClickCapture={captureDetailOriginControl}
-            onKeyDownCapture={captureDetailOriginControl}
-            onPointerDownCapture={captureDetailOriginControl}
             ref={taskContentRef}
           >
             {configurationErrorMessage ? (
