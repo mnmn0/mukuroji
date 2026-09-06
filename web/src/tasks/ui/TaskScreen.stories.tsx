@@ -1397,6 +1397,27 @@ export const ReadOnlyOpen: Story = {
   },
 }
 
+/** Restores the task search focus when filtering removes the selected detail opener. */
+export const FilteredDetailFallbackFocus: Story = {
+  args: {
+    initialSelectedTaskId: undefined,
+    selectedIssueDetail,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const opener = canvas.getByTestId('task-open-detail-wireframe')
+    await userEvent.click(opener)
+
+    const searchbox = canvas.getByRole('searchbox', { name: '検索...' })
+    await userEvent.clear(searchbox)
+    await userEvent.type(searchbox, '一致しない検索語')
+    await waitFor(() => expect(canvas.queryByTestId('task-row-wireframe')).not.toBeInTheDocument())
+
+    await userEvent.click(canvas.getByTestId('task-detail-close'))
+    await waitFor(() => expect(searchbox).toHaveFocus())
+  },
+}
+
 /** Read-only Table title focus survives Board/Table workspace remounts. */
 export const ReadOnlyTableRemountRestoresFocus: Story = {
   args: {

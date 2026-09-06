@@ -200,6 +200,16 @@ type DetailOriginTask = {
   /** Optional view-specific opener variant used when one task has multiple controls. */
   openVariant?: string
 }
+
+/** Captured list origin awaiting confirmation of a dirty-editor navigation. */
+type PendingDetailOriginCapture = {
+  /** Exact task identity that would own the accepted detail route. */
+  task: DetailOriginTask
+  /** Focusable control that initiated the candidate detail navigation. */
+  control: HTMLElement
+  /** Scroll position captured immediately before the candidate navigation. */
+  scrollTop: number
+}
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 const emptyConfigurationTeamIds: string[] = []
 const emptyBulkOperationSelections: BulkOperationSelection[] = []
@@ -692,6 +702,7 @@ export function TaskScreen({
   const previousSelectedIssueKeyRef = useRef(selectedIssueKey)
   const detailOriginControlRef = useRef<HTMLElement | null>(null)
   const detailOriginTaskRef = useRef<DetailOriginTask | undefined>(undefined)
+  const pendingDetailOriginCaptureRef = useRef<PendingDetailOriginCapture | undefined>(undefined)
   const restoreTaskListFrameRef = useRef<number | undefined>(undefined)
   const detailFocusFrameRef = useRef<number | undefined>(undefined)
   const pendingDetailFocusRef = useRef<PendingTaskDetailFocus | undefined>(undefined)
@@ -770,12 +781,19 @@ export function TaskScreen({
           : originCandidate?.matches('button, a, [tabindex]:not([tabindex="-1"])')
             ? originCandidate
             : originCandidate?.querySelector<HTMLElement>('[data-testid^="task-open-detail-"]')
-        connectedOriginControl?.focus({ preventScroll: true })
+        const fallbackControl = connectedOriginControl
+          ? undefined
+          : taskContentRef.current?.querySelector<HTMLElement>('input[type="search"]')
+        const focusTarget = connectedOriginControl ?? fallbackControl
+        if (!focusTarget) return
+        if (!connectedOriginControl) focusTarget.scrollIntoView({ block: 'nearest' })
+        focusTarget.focus({ preventScroll: true })
       })
     })
   }, [])
   /** Retains the actual task-list DOM control that initiated detail navigation. */
   const captureDetailOriginControl = useCallback((event: SyntheticEvent<HTMLDivElement>) => {
+    if (isAiOperationPendingRef.current) return
     const target = event.target
     if (!(target instanceof Element)) return
     const taskRow = target.closest<HTMLElement>('[data-task-action="open"]')
@@ -795,12 +813,22 @@ export function TaskScreen({
     if (detailOriginTaskRef.current && !startsListDetailTransition) return
     if (teamId && workItemId) {
       const openVariant = taskRow.dataset.taskOpenVariant
-      detailOriginTaskRef.current = {
+      const originTask = {
         teamId,
         workItemId,
         ...(openVariant ? { openVariant } : {}),
       }
-      detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
+      const scrollTop = taskContentRef.current?.scrollTop ?? 0
+      if (createTaskDirtyRef.current) {
+        pendingDetailOriginCaptureRef.current = {
+          task: originTask,
+          control: detailControl,
+          scrollTop,
+        }
+        return
+      }
+      detailOriginTaskRef.current = originTask
+      detailScrollTopRef.current = scrollTop
     }
     detailOriginControlRef.current = detailControl
   }, [isDetailOpen, localSelectedDetailTaskKey, selectedIssueId])
@@ -1376,11 +1404,30 @@ export function TaskScreen({
     onCommentDraftDirtyChange?.(isDirty, scopeKey, isDirty ? discardCommentDraft : undefined)
   }, [discardCommentDraft, onCommentDraftDirtyChange])
 
+  /** Promotes a matching candidate detail origin after its guarded selection is accepted. */
+  const commitPendingDetailOriginCapture = useCallback((task: Pick<CanonicalWorkItem, 'id' | 'teamId'>) => {
+    const pendingOrigin = pendingDetailOriginCaptureRef.current
+    if (!pendingOrigin) return
+    const matchesSelection = pendingOrigin.task.teamId === task.teamId &&
+      pendingOrigin.task.workItemId === task.id
+    pendingDetailOriginCaptureRef.current = undefined
+    if (!matchesSelection) return
+    detailOriginTaskRef.current = pendingOrigin.task
+    detailOriginControlRef.current = pendingOrigin.control
+    detailScrollTopRef.current = pendingOrigin.scrollTop
+  }, [])
+
   /** Confirms whether the current create form may be replaced or discarded. */
-  const confirmCreateTaskDiscard = useCallback(() => {
-    if (!createTaskDirtyRef.current) return true
+  const confirmCreateTaskDiscard = useCallback((preservePendingDetailOrigin = false) => {
+    if (!createTaskDirtyRef.current) {
+      if (!preservePendingDetailOrigin) pendingDetailOriginCaptureRef.current = undefined
+      return true
+    }
     const shouldDiscard = globalThis.window.confirm(t('tasks.create.discardConfirm'))
     if (shouldDiscard) dismissCreateTaskEditor()
+    if (!preservePendingDetailOrigin || !shouldDiscard) {
+      pendingDetailOriginCaptureRef.current = undefined
+    }
     return shouldDiscard
   }, [dismissCreateTaskEditor, t])
 
@@ -1410,12 +1457,19 @@ export function TaskScreen({
     task: CanonicalWorkItem,
     preservePendingAction = false,
   ) => {
-    if (isAiOperationPendingRef.current) return
+    if (isAiOperationPendingRef.current) {
+      pendingDetailOriginCaptureRef.current = undefined
+      return
+    }
     const currentDetailOwnerKey = detailTask ? createTaskKey(detailTask) : undefined
     const selectionChanges = currentDetailOwnerKey !== createTaskKey(task)
     if (!preservePendingAction && selectionChanges) {
-      if (!confirmDetailOwnerDiscard(true, true)) return
-    } else if (!preservePendingAction && !confirmCreateTaskDiscard()) return
+      if (!confirmDetailOwnerDiscard(true, true)) {
+        pendingDetailOriginCaptureRef.current = undefined
+        return
+      }
+    } else if (!preservePendingAction && !confirmCreateTaskDiscard(true)) return
+    commitPendingDetailOriginCapture(task)
     if (!preservePendingAction) pendingDetailFocusRef.current = undefined
     if (!preservePendingAction) taskActionCompletion.cancel()
     const routedSelectionPending = Boolean(
@@ -1448,6 +1502,7 @@ export function TaskScreen({
     if (!preservePendingAction && !routedSelectionPending) scheduleTaskDetailFocus()
   }, [
     activeProjectTeamId,
+    commitPendingDetailOriginCapture,
     confirmCreateTaskDiscard,
     confirmDetailOwnerDiscard,
     detailTask,
@@ -1484,6 +1539,7 @@ export function TaskScreen({
   const handleCloseDetail = () => {
     if (isAiOperationPendingRef.current) return
     if (!confirmDetailOwnerDiscard(true, true)) return
+    pendingDetailOriginCaptureRef.current = undefined
     pendingDetailFocusRef.current = undefined
     taskActionCompletion.cancel()
     setIsDetailOpen(false)
@@ -1985,6 +2041,7 @@ export function TaskScreen({
         )
       : undefined
     if (!target || !task) {
+      pendingDetailOriginCaptureRef.current = undefined
       return createFailedTaskActionResult(
         context.actionId,
         target,
@@ -1994,6 +2051,7 @@ export function TaskScreen({
       )
     }
     if (isAiOperationPendingRef.current) {
+      pendingDetailOriginCaptureRef.current = undefined
       return createCancelledTaskActionResult(context.actionId, [target])
     }
     const isAlreadySelected = detailTask !== undefined &&
@@ -2006,7 +2064,8 @@ export function TaskScreen({
     const shouldDiscardDetailOwner = !isAlreadySelected
     if (shouldDiscardDetailOwner
       ? !confirmDetailOwnerDiscard(true, true)
-      : !confirmCreateTaskDiscard()) {
+      : !confirmCreateTaskDiscard(true)) {
+      pendingDetailOriginCaptureRef.current = undefined
       return createCancelledTaskActionResult(context.actionId, [target])
     }
     cancelAwaitingDirectTaskScheduleActions()

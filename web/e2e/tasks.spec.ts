@@ -4825,6 +4825,105 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(scrollBeforeDetail)
   })
 
+  test('詳細の戻り先は破棄確認を拒否した候補で置き換えない', async ({ page }) => {
+    const syntheticTasks = Array.from({ length: 200 }, (_, index) => {
+      const fixture = referoTaskFixtures[index % referoTaskFixtures.length]!
+      return { ...fixture, id: `synthetic-${index}`, title: `Synthetic task ${index}` }
+    })
+    await mockAuthenticatedTaskPage(page, syntheticTasks)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/projects/refero/issues')
+
+    const mainScroll = page.getByTestId('task-main-scroll')
+    const searchbox = page.getByRole('searchbox', { name: '検索...' })
+    await searchbox.fill('Synthetic task')
+    const openA = page.getByTestId('task-open-detail-synthetic-150')
+    await openA.scrollIntoViewIfNeeded()
+    await expect(openA).toBeVisible()
+    const listUrl = page.url()
+    const detailAResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/synthetic-150' &&
+      response.status() === 200,
+    )
+    await openA.focus()
+    const originalScrollTop = await mainScroll.evaluate((element) => element.scrollTop)
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await (await detailAResponse).finished()
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'Synthetic task 150',
+    })).toBeFocused()
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
+    await expect(openA).toBeFocused()
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(originalScrollTop)
+
+    const openB = page.getByTestId('task-open-detail-synthetic-170')
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    const acceptedCreateTaskForm = page.getByTestId('create-task-form')
+    await acceptedCreateTaskForm.locator('input[name="title"]').fill('draft-before-accepted-detail')
+    await openB.scrollIntoViewIfNeeded()
+    await expect(openB).toBeVisible()
+    const acceptedBScrollTop = await mainScroll.evaluate((element) => element.scrollTop)
+    const acceptedBResponse = page.waitForResponse((response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/api/teams/core-team/issues/synthetic-170' &&
+      response.status() === 200,
+    )
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toContain('破棄')
+      await dialog.accept()
+    })
+    await openB.click()
+    await expect(page).toHaveURL(/issueId=synthetic-170/u)
+    await (await acceptedBResponse).finished()
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'Synthetic task 170',
+    })).toBeFocused()
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
+    await expect(openB).toBeFocused()
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(acceptedBScrollTop)
+
+    await openA.scrollIntoViewIfNeeded()
+    await openA.click()
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'Synthetic task 150',
+    })).toBeFocused()
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
+    await expect(openA).toBeFocused()
+    const retainedAScrollTop = await mainScroll.evaluate((element) => element.scrollTop)
+
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    const createTaskForm = page.getByTestId('create-task-form')
+    const titleInput = createTaskForm.locator('input[name="title"]')
+    await titleInput.fill('draft-before-rejected-detail')
+    await openB.scrollIntoViewIfNeeded()
+    await expect(openB).toBeVisible()
+    page.once('dialog', async (dialog) => {
+      expect(dialog.message()).toContain('破棄')
+      await dialog.dismiss()
+    })
+    await openB.click()
+    await expect(page).toHaveURL(listUrl)
+    await expect(titleInput).toHaveValue('draft-before-rejected-detail')
+
+    page.once('dialog', async (dialog) => {
+      await dialog.accept()
+    })
+    await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+    await expect(createTaskForm).toHaveCount(0)
+    await page.goForward()
+    await expect(page).toHaveURL(/issueId=synthetic-150/u)
+    await page.goBack()
+    await expect(page).toHaveURL(listUrl)
+    await expect(openA).toBeFocused()
+    await expect.poll(() => mainScroll.evaluate((element) => element.scrollTop)).toBe(retainedAScrollTop)
+  })
+
   test('390px 幅の200件リストで詳細AからBへ移動中に戻ってもAを保つ', async ({ page }) => {
     const syntheticTasks = Array.from({ length: 200 }, (_, index) => {
       const fixture = referoTaskFixtures[index % referoTaskFixtures.length]!
@@ -6650,6 +6749,47 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane')).toBeVisible()
     await expectTaskSplitPaneLayoutToStayInsideColumns(page)
   })
+
+  for (const viewport of [
+    { height: 900, name: 'desktop', width: 1440 },
+    { height: 844, name: 'mobile', width: 390 },
+  ]) {
+    for (const navigation of ['close', 'back'] as const) {
+      test(`フィルター外になった詳細から一覧の検索欄へ戻る (${viewport.name}, ${navigation})`, async ({ page }) => {
+        await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+        await page.setViewportSize(viewport)
+        await page.goto('/projects/refero/issues?teamId=core-team')
+
+        const searchbox = page.getByRole('searchbox', { name: '検索...' })
+        await searchbox.fill('ワイヤーフレーム')
+        await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+        await expect(page.getByTestId('tasks-count')).toContainText('1')
+        const listUrl = page.url()
+        await page.getByTestId('task-open-detail-wireframe').click()
+        await expect(page).toHaveURL(/issueId=wireframe/u)
+        const detailUrl = page.url()
+
+        const requestCounts = getMockRequestCounts(page)
+        const detailPane = page.getByTestId('task-detail-pane')
+        await detailPane.locator('input[name="title"]').fill('filter-mismatch-after-save')
+        await detailPane.getByRole('button', { name: '変更を保存', exact: true }).click()
+        await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+        await expect(page.getByTestId('task-row-wireframe')).toHaveCount(0)
+
+        if (navigation === 'close') {
+          await page.getByTestId('task-detail-close').click()
+        } else {
+          await page.goBack()
+        }
+
+        await expect(page).toHaveURL(navigation === 'close' ? detailUrl : listUrl)
+        await expect(searchbox).toBeVisible()
+        await expect(searchbox).toBeFocused()
+        await expect(searchbox).toHaveValue('ワイヤーフレーム')
+        await expect(searchbox).toBeInViewport()
+      })
+    }
+  }
 
   test('タブ切り替えとサイドバーの折りたたみが動作する', async ({ page }) => {
     await page.goto('/projects/refero/issues')
