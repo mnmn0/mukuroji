@@ -5032,6 +5032,99 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
   })
 
+  test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('編集失敗後も保持するコメント下書き')
+    let editAttempts = 0
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe$/u, async (route) => {
+      if (route.request().method() === 'PATCH') {
+        editAttempts += 1
+        if (editAttempts > 1) {
+          await route.fallback()
+          return
+        }
+        await route.fulfill({
+          contentType: 'application/json',
+          json: { message: '編集に失敗しました。' },
+          status: 500,
+        })
+        return
+      }
+      await route.fallback()
+    })
+
+    await page.getByTestId('task-row-wireframe').click({ button: 'right' })
+    await page.getByTestId('project-task-action-context-menu')
+      .getByRole('menuitem', { name: /Work Item を編集/u }).click()
+    const titleInput = detailPane.locator('input[name="title"]')
+    await titleInput.fill('編集失敗後もpaneを残す')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect(detailPane).toBeVisible()
+    await expect(commentBody).toHaveValue('編集失敗後も保持するコメント下書き')
+    await expect(titleInput).toHaveValue('編集失敗後もpaneを残す')
+    await expect(detailPane).toContainText('変更を保存できませんでした。もう一度お試しください。')
+    await expect(detailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
+
+    let discardMessage = ''
+    page.once('dialog', async (dialog) => {
+      discardMessage = dialog.message()
+      await dialog.dismiss()
+    })
+    await page.getByTestId('task-row-seo-research').click()
+    await expect(page).toHaveURL(/(?:[?&])issueId=wireframe/u)
+    expect(discardMessage).toContain('コメント')
+    await expect(commentBody).toHaveValue('編集失敗後も保持するコメント下書き')
+    await expect(titleInput).toHaveValue('編集失敗後もpaneを残す')
+
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await expect.poll(() => editAttempts).toBe(2)
+    await expect(page.getByTestId('task-action-feedback')).toContainText('変更を保存しました。')
+    await expect(commentBody).toHaveValue('編集失敗後も保持するコメント下書き')
+
+    let discardAfterSave = ''
+    page.once('dialog', async (dialog) => {
+      discardAfterSave = dialog.message()
+      await dialog.accept()
+    })
+    await detailPane.getByTestId('task-detail-close').click()
+    expect(discardAfterSave).toContain('コメント')
+    await page.getByTestId('task-row-wireframe').click()
+    await expect(commentBody).toHaveValue('')
+  })
+
+  test('詳細の関連更新失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('関連更新失敗後も保持するコメント下書き')
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/relations$/u, async (route) => {
+      if (route.request().method() === 'POST') {
+        await route.fulfill({
+          contentType: 'application/json',
+          json: { message: '関係更新に失敗しました。' },
+          status: 409,
+        })
+        return
+      }
+      await route.fallback()
+    })
+
+    await page.getByTestId('task-row-wireframe').click({ button: 'right' })
+    await page.getByTestId('project-task-action-context-menu')
+      .getByRole('menuitem', { name: 'Work Item の関連を管理' }).click()
+    const relationEditor = detailPane.getByTestId('work-item-relations-editor')
+    await relationEditor.getByLabel('対象 Work Item').selectOption('brand-guideline')
+    await relationEditor.getByRole('button', { name: '関係を追加' }).click()
+
+    await expect(relationEditor).toContainText('関係更新に失敗しました。')
+    await expect(detailPane).toBeVisible()
+    await expect(commentBody).toHaveValue('関連更新失敗後も保持するコメント下書き')
+  })
+
   for (const viewport of [
     { height: 900, label: '1440px', width: 1440 },
     { height: 844, label: '390px', width: 390 },

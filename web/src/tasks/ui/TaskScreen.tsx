@@ -1866,7 +1866,9 @@ export function TaskScreen({
               resolveTaskMutationErrorMessage(error, t),
               isConflict,
             ))
-            if (canDismissOwner) dismissTaskDetailEditor(claimedContext)
+            if (canDismissOwner && !commentDraftDirtyRef.current) {
+              dismissTaskDetailEditor(claimedContext)
+            }
           }
           throw error
         }
@@ -1937,6 +1939,9 @@ export function TaskScreen({
         'not-found',
         t('taskViews.action.notFound'),
       )
+    }
+    if (isAiOperationPendingRef.current) {
+      return createCancelledTaskActionResult(context.actionId, [target])
     }
     const isAlreadySelected = detailTask !== undefined &&
       createTaskKey(detailTask) === createTaskKey(task)
@@ -2782,7 +2787,9 @@ export function TaskScreen({
           t('taskViews.action.failed'),
           isConflict,
         ))
-        if (canDismissOwner) dismissTaskDetailEditor(claimedContext)
+        if (canDismissOwner && !commentDraftDirtyRef.current) {
+          dismissTaskDetailEditor(claimedContext)
+        }
       }
       throw error
     }

@@ -785,7 +785,10 @@ export const Default: Story = {
 export const AiOperationPendingBlocksDetailTab: Story = {
   args: {
     initialSelectedTaskId: 'wireframe',
+    onBulkApply: fn(),
+    onBulkPreview: fn(),
     selectedIssueDetail,
+    workspaceId: 'workspace-1',
   },
   render: (args) => <AiOperationPendingHarness taskScreenProps={args} />,
   play: async ({ canvasElement }) => {
@@ -803,22 +806,29 @@ export const AiOperationPendingBlocksDetailTab: Story = {
     }
     try {
       await userEvent.click(fileTab)
-    } finally {
-      globalThis.window.confirm = originalConfirm
-    }
+      const secondTaskRow = canvas.getByTestId('task-row-brand-guideline')
+      const secondTaskCheckbox = within(secondTaskRow).getByRole('checkbox')
+      await expect(secondTaskCheckbox).toBeEnabled()
+      await userEvent.click(secondTaskCheckbox)
+      await expect(secondTaskCheckbox).toBeChecked()
+      await waitFor(() => expect(canvas.getByTestId('task-row-brand-guideline')).toHaveAttribute(
+        'data-selected',
+        'true',
+      ))
+      secondTaskRow.focus()
+      await userEvent.keyboard('e')
+      await expect(fileTab).toHaveAttribute('aria-selected', 'false')
+      await expect(body).toHaveValue('AI処理中も保持するコメント下書き')
+      expect(confirmCount).toBe(0)
 
-    await expect(fileTab).toHaveAttribute('aria-selected', 'false')
-    await expect(body).toHaveValue('AI処理中も保持するコメント下書き')
-    expect(confirmCount).toBe(0)
-
-    await userEvent.click(canvas.getByTestId('finish-ai-operation'))
-    confirmCount = 0
-    globalThis.window.confirm = () => {
-      confirmCount += 1
-      return false
-    }
-    try {
-      await userEvent.click(fileTab)
+      await userEvent.click(canvas.getByTestId('finish-ai-operation'))
+      confirmCount = 0
+      globalThis.window.confirm = () => {
+        confirmCount += 1
+        return false
+      }
+      secondTaskRow.focus()
+      await userEvent.keyboard('e')
     } finally {
       globalThis.window.confirm = originalConfirm
     }
