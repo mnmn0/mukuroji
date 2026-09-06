@@ -841,24 +841,25 @@ export function TaskPage() {
   }>({ isDirty: false, scopeKey: taskScopeKey })
   const isCreateTaskDirty = createTaskDirtyState.isDirty &&
     createTaskDirtyState.scopeKey === taskScopeKey
-  const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) =>
-    Boolean(getAuthSession()) &&
-      createTaskDirtyRef.current &&
-      createTaskDirtyScopeRef.current === taskScopeKey &&
-      (() => {
-        if (currentLocation.pathname !== nextLocation.pathname) return true
-        const nextSearchParams = new URLSearchParams(nextLocation.search)
-        const nextRouteContext = resolveProjectTaskRouteContext({
-          projectId,
-          projectIssues,
-          selectedIssueId: nextSearchParams.get('issueId') ?? undefined,
-          selectedTeamId: nextSearchParams.get('teamId') ?? undefined,
-          suppressIssueFallback: false,
-          teams,
-        })
-        return nextRouteContext.creationTeam?.id !== creationTeam?.id
-      })(),
-  [creationTeam?.id, projectId, projectIssues, taskScopeKey, teams],))
+  const navigationBlocker = useBlocker(useCallback(({ currentLocation, nextLocation }) => {
+    const nextSearchParams = new URLSearchParams(nextLocation.search)
+    const nextRouteContext = resolveProjectTaskRouteContext({
+      projectId,
+      projectIssues,
+      selectedIssueId: nextSearchParams.get('issueId') ?? undefined,
+      selectedTeamId: nextSearchParams.get('teamId') ?? undefined,
+      suppressIssueFallback: false,
+      teams,
+    })
+    const changesCreateScope = currentLocation.pathname !== nextLocation.pathname ||
+      nextRouteContext.creationTeam?.id !== creationTeam?.id
+    const hasCurrentDirtyCreate = createTaskDirtyRef.current &&
+      createTaskDirtyScopeRef.current === taskScopeKey
+    if (changesCreateScope && !hasCurrentDirtyCreate) {
+      createTaskScopeGenerationRef.current += 1
+    }
+    return Boolean(getAuthSession()) && hasCurrentDirtyCreate && changesCreateScope
+  }, [creationTeam?.id, projectId, projectIssues, taskScopeKey, teams],))
   /** Reports create-form dirtiness to the route-owned navigation guard. */
   const reportCreateTaskDirty = useCallback((isDirty: boolean, discardHandler?: () => void) => {
     if (!isDirty && createTaskDirtyScopeRef.current !== undefined &&

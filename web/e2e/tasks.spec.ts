@@ -4777,6 +4777,8 @@ test.describe('authenticated task page', () => {
     const mainScroll = page.getByTestId('task-main-scroll')
     const searchbox = page.getByRole('searchbox', { name: '検索...' })
     await searchbox.fill('Synthetic task')
+    await expect(page.getByTestId('task-view-dirty-state')).toHaveText('一時的な変更あり')
+    await expect(page.getByRole('button', { name: '変更をリセット', exact: true })).toBeVisible()
     const targetRow = page.getByTestId('task-row-synthetic-150')
     const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
     await openDetailButton.scrollIntoViewIfNeeded()
@@ -4837,6 +4839,8 @@ test.describe('authenticated task page', () => {
     const mainScroll = page.getByTestId('task-main-scroll')
     const searchbox = page.getByRole('searchbox', { name: '検索...' })
     await searchbox.fill('Synthetic task')
+    await expect(page.getByTestId('task-view-dirty-state')).toHaveText('一時的な変更あり')
+    await expect(page.getByRole('button', { name: '変更をリセット', exact: true })).toBeVisible()
     const openA = page.getByTestId('task-open-detail-synthetic-150')
     await openA.scrollIntoViewIfNeeded()
     await expect(openA).toBeVisible()
@@ -4936,6 +4940,8 @@ test.describe('authenticated task page', () => {
     const mainScroll = page.getByTestId('task-main-scroll')
     const searchbox = page.getByRole('searchbox', { name: '検索...' })
     await searchbox.fill('Synthetic task')
+    await expect(page.getByTestId('task-view-dirty-state')).toHaveText('一時的な変更あり')
+    await expect(page.getByRole('button', { name: '変更をリセット', exact: true })).toBeVisible()
     const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
     let releaseSecondDetail: (() => void) | undefined
     let secondDetailRequestStarted: (() => void) | undefined
@@ -5016,6 +5022,8 @@ test.describe('authenticated task page', () => {
     const mainScroll = page.getByTestId('task-main-scroll')
     const searchbox = page.getByRole('searchbox', { name: '検索...' })
     await searchbox.fill('Synthetic task')
+    await expect(page.getByTestId('task-view-dirty-state')).toHaveText('一時的な変更あり')
+    await expect(page.getByRole('button', { name: '変更をリセット', exact: true })).toBeVisible()
     const targetRow = page.getByTestId('task-row-synthetic-150')
     const openDetailButton = page.getByTestId('task-open-detail-synthetic-150')
     await openDetailButton.scrollIntoViewIfNeeded()
@@ -9541,6 +9549,78 @@ test.describe('authenticated task page', () => {
       await expect(page.getByText(`discarded-${oldPostStatus}`, { exact: true })).toHaveCount(0)
       await expect(page).not.toHaveURL(/\/login\?returnTo=/)
       await expect(page.getByTestId('task-action-feedback')).toHaveCount(0)
+    })
+  }
+
+  for (const oldPostStatus of [201, 401] as const) {
+    test(`保存中にヘッダーで作成フォームを閉じてから Scope を離れても旧 POST は戻らない (${oldPostStatus})`, async ({ page }) => {
+      await mockAuthenticatedTaskPage(page)
+      let createPostAttempts = 0
+      let releaseCreate: (() => void) | undefined
+      let createArrived: (() => void) | undefined
+      const createReleased = new Promise<void>((resolve) => {
+        releaseCreate = resolve
+      })
+      const createRequestArrived = new Promise<void>((resolve) => {
+        createArrived = resolve
+      })
+      await page.route(/.*\/api\/teams\/core-team\/issues(?:\?.*)?$/, async (route) => {
+        if (route.request().method() !== 'POST') {
+          await route.fallback()
+          return
+        }
+        createPostAttempts += 1
+        createArrived?.()
+        await createReleased
+        if (oldPostStatus === 401) {
+          await route.fulfill({
+            status: 401,
+            json: { code: 'EnterpriseSessionExpired', message: 'Session expired.' },
+          })
+          return
+        }
+        await route.fallback()
+      })
+
+      await page.goto('/projects/refero/issues')
+      await page.getByRole('button', { name: '新規タスク', exact: true }).click()
+      const createTaskForm = page.getByTestId('create-task-form')
+      await createTaskForm.locator('input[name="title"]').fill(`closed-pending-${oldPostStatus}`)
+      const createResponse = page.waitForResponse((response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/teams/core-team/issues',
+      )
+      await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+      await createRequestArrived
+
+      const closeDialog = page.waitForEvent('dialog').then(async (dialog) => {
+        expect(dialog.message()).toContain('破棄')
+        await dialog.accept()
+      })
+      await Promise.all([
+        closeDialog,
+        page.getByRole('button', { name: '新規タスク', exact: true }).click(),
+      ])
+      await expect(page.getByTestId('create-task-form')).toHaveCount(0)
+
+      const navigateAway = page.getByLabel('メインサイドバー').getByRole('button', {
+        name: 'ブランド刷新',
+        exact: true,
+      })
+      await navigateAway.dispatchEvent('click')
+      releaseCreate?.()
+      const completedCreateResponse = await createResponse
+      await completedCreateResponse.finished()
+      await page.evaluate(() => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      }))
+
+      await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
+      await expect(page).not.toHaveURL(/issueId=/)
+      await expect(page).not.toHaveURL(/\/login\?returnTo=/)
+      await expect(page.getByText(`closed-pending-${oldPostStatus}`, { exact: true })).toHaveCount(0)
+      expect(createPostAttempts).toBe(1)
+      await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem('mukuroji.auth')))).toBe(true)
     })
   }
 
