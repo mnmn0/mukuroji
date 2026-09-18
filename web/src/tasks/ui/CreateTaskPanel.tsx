@@ -1,5 +1,5 @@
 import type { WorkItemConfiguration, WorkItemSchedule } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -48,6 +48,8 @@ export type CreateTaskPanelProps = {
   configuration?: WorkItemConfiguration
   /** Context inherited from the view that opened the create panel. */
   context?: TaskCreateContext
+  /** Normalized Project identity for the authenticated viewer, when available. */
+  currentUserProjectKey?: string
   /** Error returned by the create mutation. */
   errorMessage?: string
   /** Initial create mode shown by the panel. */
@@ -64,6 +66,10 @@ export type CreateTaskPanelProps = {
   onSubmit: (input: CreateWorkItemInput) => Promise<void>
   /** Project used to resolve project-scoped custom fields. */
   projectId: string
+  /** Display name of the destination Project. */
+  projectName?: string
+  /** Display name of the destination Team. */
+  teamName?: string
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
   /** Workspace members used by person custom fields. */
@@ -81,22 +87,24 @@ export function CreateTaskPanel({
   assigneeOptions,
   configuration,
   context,
+  currentUserProjectKey,
   errorMessage,
-  initialMode = context?.source === 'header' ||
-      (context?.schedule !== undefined && context.schedule.mode !== 'due-date')
-    ? 'detailed'
-    : context ? 'quick' : 'detailed',
+  initialMode,
   isAssigneeOptionsLoading,
   isSubmitting,
   locale,
   onCancel,
   onSubmit,
   projectId,
+  projectName,
+  teamName,
   t,
   workspaceMembers,
 }: CreateTaskPanelProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const [title, setTitle] = useState('')
+  const [isPanelSubmitting, setIsPanelSubmitting] = useState(false)
+  const submissionInFlightRef = useRef(false)
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
   const hasLoadedWorkItemConfiguration = configuration !== undefined
@@ -134,12 +142,35 @@ export function CreateTaskPanel({
       ? undefined
       : workflowStatuses.find((status) => status.category === 'backlog')?.id
   const quickCaptureAllowed = Boolean(quickCaptureStatusId)
-  const [mode, setMode] = useState<CreateTaskMode>(initialMode)
-  const effectiveMode: CreateTaskMode = mode === 'quick' && !quickCaptureAllowed
+  const hasDetailedScheduleContext = context?.schedule?.mode === 'date-range' ||
+    context?.schedule?.mode === 'milestone'
+  const defaultInitialMode: CreateTaskMode = hasDetailedScheduleContext ? 'detailed' : 'quick'
+  const [mode, setMode] = useState<CreateTaskMode>(initialMode ?? defaultInitialMode)
+  const effectiveMode: CreateTaskMode = mode === 'quick' &&
+      (!quickCaptureAllowed || hasDetailedScheduleContext)
     ? 'detailed'
     : mode
-  const initialAssigneeUserId = context?.assigneeUserId ?? ''
-  const quickCaptureAssigneeUserId = initialAssigneeUserId || assigneeOptions[0]?.id || ''
+  const explicitContextAssigneeUserId = context?.assigneeUserId?.trim() ?? ''
+  const contextualAssignee = explicitContextAssigneeUserId
+    ? assigneeOptions.find((member) => member.id === explicitContextAssigneeUserId)
+    : undefined
+  const currentUserAssignee = currentUserProjectKey
+    ? assigneeOptions.find((member) => member.id.trim().toLowerCase() === currentUserProjectKey)
+    : undefined
+  const initialAssigneeUserId = explicitContextAssigneeUserId
+    ? contextualAssignee?.id ?? ''
+    : currentUserAssignee?.id ?? ''
+  const hasInvalidContextAssignee = Boolean(
+    explicitContextAssigneeUserId && contextualAssignee === undefined,
+  )
+  const [selectedAssigneeUserId, setSelectedAssigneeUserId] = useState<string | undefined>(undefined)
+  const assigneeValue = selectedAssigneeUserId === undefined
+    ? initialAssigneeUserId
+    : assigneeOptions.some((member) => member.id === selectedAssigneeUserId)
+      ? selectedAssigneeUserId
+      : ''
+  const hasSelectedAssignee = selectedAssigneeUserId !== undefined
+  const isSubmitPending = isSubmitting || isPanelSubmitting
   const initialSchedule = context?.schedule ?? createDefaultUnscheduledTaskSchedule()
   const [scheduleMode, setScheduleMode] = useState<WorkItemSchedule['mode']>(initialSchedule.mode)
   const quickCaptureDueDate = resolveTaskScheduleEndDate(initialSchedule) ?? ''
@@ -161,13 +192,12 @@ export function CreateTaskPanel({
         id="create-task-form"
         onSubmit={(event) => {
           event.preventDefault()
+          if (submissionInFlightRef.current || isSubmitPending) return
           if (!hasLoadedWorkItemConfiguration || !hasCreatableWorkItemType) return
 
           const formData = new FormData(event.currentTarget)
           const title = String(formData.get('title') ?? '').trim()
-          const assigneeUserId = effectiveMode === 'quick'
-            ? quickCaptureAssigneeUserId
-            : String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
+          const assigneeUserId = String(formData.get('assigneeUserId') ?? initialAssigneeUserId).trim()
           const schedule = effectiveMode === 'quick'
             ? createQuickCaptureSchedule(formData, initialSchedule)
             : createDetailedSchedule(formData, initialSchedule)
@@ -177,7 +207,12 @@ export function CreateTaskPanel({
           const workflowStatus = workflowStatuses.find((status) => status.id === workflowStatusId)
           const priority = resolveTaskPriority(formData.get('priority'))
 
-          if (effectiveMode === 'quick' && !assigneeUserId) {
+          if (!assigneeUserId || !assigneeOptions.some((member) => member.id === assigneeUserId)) {
+            setFieldErrors((currentErrors) => ({
+              ...currentErrors,
+              assignee: t('tasks.create.assigneeRequired'),
+            }))
+            event.currentTarget.reportValidity()
             return
           }
 
@@ -212,6 +247,8 @@ export function CreateTaskPanel({
           }
 
           setFieldErrors({})
+          submissionInFlightRef.current = true
+          setIsPanelSubmitting(true)
           void onSubmit({
             title,
             assigneeUserId,
@@ -221,29 +258,50 @@ export function CreateTaskPanel({
             customFieldValues: effectiveMode === 'detailed' ? parsedCustomFields.values : {},
             priority,
             ...(effectiveMode === 'quick' ? { quickCapture: true } : {}),
+          }).catch((error: unknown) => {
+            setFieldErrors({
+              submit: error instanceof Error ? error.message : t('tasks.create.error'),
+            })
+          }).finally(() => {
+            submissionInFlightRef.current = false
+            setIsPanelSubmitting(false)
           })
         }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)) {
+            event.preventDefault()
+          }
+        }}
       >
+        <fieldset className="contents" disabled={isSubmitPending}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] pb-3">
-          <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-white p-1">
-            {quickCaptureAllowed ? (
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-white p-1">
+              {quickCaptureAllowed && !hasDetailedScheduleContext ? (
+                <button
+                  aria-pressed={effectiveMode === 'quick'}
+                  className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+                  onClick={() => setMode('quick')}
+                  type="button"
+                >
+                  {t('tasks.create.quick')}
+                </button>
+              ) : null}
               <button
-                aria-pressed={effectiveMode === 'quick'}
-                className={`rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
-                onClick={() => setMode('quick')}
+                aria-pressed={effectiveMode === 'detailed'}
+                className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'detailed' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+                onClick={() => setMode('detailed')}
                 type="button"
               >
-                {t('tasks.create.quick')}
+                {t('tasks.create.detailed')}
               </button>
-            ) : null}
-            <button
-              aria-pressed={effectiveMode === 'detailed'}
-              className={`rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'detailed' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
-              onClick={() => setMode('detailed')}
-              type="button"
-            >
-              {t('tasks.create.detailed')}
-            </button>
+            </div>
+            <div className="min-w-0 text-xs font-semibold text-[var(--workbench-muted)]" data-testid="create-task-destination">
+              <span>{t('tasks.create.destination')}: </span>
+              <span className="break-words text-[var(--workbench-text)]">
+                {teamName ? `${teamName} / ` : ''}{projectName ?? projectId}
+              </span>
+            </div>
           </div>
           {context ? (
             <p className="text-xs font-semibold text-[var(--workbench-muted)]">
@@ -257,9 +315,12 @@ export function CreateTaskPanel({
             <select
               className="workbench-input h-10 px-3"
               data-testid="create-task-work-item-type"
-              disabled={isSubmitting || !hasCreatableWorkItemType}
+              disabled={isSubmitPending || !hasCreatableWorkItemType}
               name="workItemTypeId"
-              onChange={(event) => setSelectedWorkItemTypeId(event.target.value)}
+              onChange={(event) => {
+                if (effectiveMode === 'detailed') setMode('detailed')
+                setSelectedWorkItemTypeId(event.target.value)
+              }}
               value={effectiveWorkItemTypeId}
             >
               {workItemTypes.map((type) => (
@@ -297,6 +358,42 @@ export function CreateTaskPanel({
             <p className="text-sm font-medium text-[var(--workbench-muted)]">
               {t('tasks.create.quickDescription')}
             </p>
+            <label className="grid max-w-[420px] gap-1.5 text-sm font-semibold text-[#505967]">
+              {t('tasks.create.assignee')}
+              <select
+                aria-describedby={hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading
+                  ? 'create-task-assignee-context-error'
+                  : fieldErrors.assignee ? 'create-task-assignee-error' : undefined}
+                aria-label={t('tasks.create.assignee')}
+                className="workbench-input min-h-11 px-3"
+                disabled={isSubmitPending || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
+                name="assigneeUserId"
+                onChange={(event) => {
+                  setSelectedAssigneeUserId(event.target.value)
+                }}
+                required
+                value={assigneeValue}
+              >
+                <option disabled hidden value="">
+                  {t('tasks.create.assigneeSelectPlaceholder')}
+                </option>
+                {assigneeOptions.map((member) => (
+                  <option key={member.id} value={member.id}>
+                    {formatProjectMemberOption(member, member.id === currentUserAssignee?.id, t)}
+                  </option>
+                ))}
+              </select>
+              {hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading ? (
+                <span className="text-xs font-semibold text-amber-700" id="create-task-assignee-context-error" role="alert">
+                  {t('tasks.create.assigneeContextInvalid')}
+                </span>
+              ) : null}
+              {fieldErrors.assignee ? (
+                <span className="text-xs font-semibold text-red-700" id="create-task-assignee-error" role="alert">
+                  {fieldErrors.assignee}
+                </span>
+              ) : null}
+            </label>
             <label className="grid max-w-[220px] gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.column.dueDate')}
               <input
@@ -308,15 +405,15 @@ export function CreateTaskPanel({
             </label>
             <div className="flex items-center gap-2">
               <button
-                className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
-                disabled={isSubmitting || !hasCreatableWorkItemType || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || !quickCaptureAssigneeUserId}
+                className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
+                disabled={isSubmitPending || !hasCreatableWorkItemType || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || assigneeOptions.length === 0}
                 type="submit"
               >
-                {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
+                {isSubmitPending ? t('tasks.create.saving') : t('tasks.create.submit')}
               </button>
               <button
-                className="workbench-button-secondary h-10 px-4"
-                disabled={isSubmitting}
+                className="workbench-button-secondary min-h-11 px-4"
+                disabled={isSubmitPending}
                 onClick={onCancel}
                 type="button"
               >
@@ -341,21 +438,33 @@ export function CreateTaskPanel({
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.create.assignee')}
               <select
+                aria-describedby={hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading
+                  ? 'create-task-assignee-context-error'
+                  : undefined}
+                aria-label={t('tasks.create.assignee')}
                 className="workbench-input h-10 px-3"
-                defaultValue={initialAssigneeUserId}
-                disabled={isSubmitting || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
+                disabled={isSubmitPending || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage)}
                 name="assigneeUserId"
+                onChange={(event) => {
+                  setSelectedAssigneeUserId(event.target.value)
+                }}
                 required
+                value={assigneeValue}
               >
                 <option disabled hidden value="">
                   {t('tasks.create.assigneeSelectPlaceholder')}
                 </option>
                 {assigneeOptions.map((member) => (
                   <option key={member.id} value={member.id}>
-                    {formatProjectMemberOption(member)}
+                    {formatProjectMemberOption(member, member.id === currentUserAssignee?.id, t)}
                   </option>
                 ))}
               </select>
+              {hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading ? (
+                <span className="text-xs font-semibold text-amber-700" id="create-task-assignee-context-error" role="alert">
+                  {t('tasks.create.assigneeContextInvalid')}
+                </span>
+              ) : null}
             </label>
             <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
               {t('tasks.column.status')}
@@ -388,9 +497,9 @@ export function CreateTaskPanel({
             </label>
             <div className="flex items-end gap-2">
               <button
-                className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
+                className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
                 disabled={
-                  isSubmitting ||
+                  isSubmitPending ||
                   !hasCreatableWorkItemType ||
                   isAssigneeOptionsLoading ||
                   Boolean(assigneeErrorMessage) ||
@@ -398,11 +507,11 @@ export function CreateTaskPanel({
                 }
                 type="submit"
               >
-                {isSubmitting ? t('tasks.create.saving') : t('tasks.create.submit')}
+                {isSubmitPending ? t('tasks.create.saving') : t('tasks.create.submit')}
               </button>
               <button
-                className="workbench-button-secondary h-10 px-4"
-                disabled={isSubmitting}
+                className="workbench-button-secondary min-h-11 px-4"
+                disabled={isSubmitPending}
                 onClick={onCancel}
                 type="button"
               >
@@ -489,8 +598,10 @@ export function CreateTaskPanel({
             />
           </div>
         ) : null}
-        {errorMessage ? (
-          <p className="text-sm font-semibold text-red-700">{errorMessage}</p>
+        {errorMessage ?? fieldErrors.submit ? (
+          <p className="text-sm font-semibold text-red-700" role="alert">
+            {errorMessage ?? fieldErrors.submit}
+          </p>
         ) : null}
         {isAssigneeOptionsLoading ? (
           <p className="text-sm font-medium text-[#5f6874]">{t('tasks.create.assigneeLoading')}</p>
@@ -501,6 +612,7 @@ export function CreateTaskPanel({
         {!isAssigneeOptionsLoading && !assigneeErrorMessage && assigneeOptions.length === 0 ? (
           <p className="text-sm font-medium text-[#5f6874]">{t('tasks.create.assigneeEmpty')}</p>
         ) : null}
+        </fieldset>
       </form>
     </section>
   )
@@ -672,8 +784,15 @@ function readPlannedEffortMinutes(value: FormDataEntryValue | null): number | un
  * Formats a project member for an assignee select option.
  *
  * @param member - Project member to format.
+ * @param isCurrentViewer - Whether the option represents the authenticated viewer.
+ * @param t - Translator used for the self label.
  * @returns A label containing the display name and email address.
  */
-function formatProjectMemberOption(member: ProjectMember) {
-  return `${member.name ?? member.email} / ${member.email}`
+function formatProjectMemberOption(
+  member: ProjectMember,
+  isCurrentViewer: boolean,
+  t: (key: MessageKey) => string,
+) {
+  const label = `${member.name ?? member.email} / ${member.email}`
+  return isCurrentViewer ? `${label} (${t('tasks.create.self')})` : label
 }
