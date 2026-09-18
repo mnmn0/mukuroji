@@ -245,6 +245,72 @@ type LateTimelinePreviewHarnessProps = {
   remountOnTabSwitch: boolean
 }
 
+/** Props for a harness that resolves a Gantt schedule preview on demand. */
+type PendingCreateDraftPreviewHarnessProps = {
+  /** TaskScreen inputs used by the pending create-draft preview scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Pending preview state controlled by the Story play function. */
+type PendingCreateDraftPreview = {
+  /** Completes the delayed preview with a canonical server response. */
+  resolve: (preview: WorkItemScheduleChangePreview) => void
+  /** Task used to build the canonical preview response. */
+  task: CanonicalWorkItem
+}
+
+/**
+ * Holds a Gantt preview until the Story play function has entered a create draft.
+ *
+ * @param props - TaskScreen inputs for the pending preview scenario.
+ * @returns A preview resolver control and the nested TaskScreen.
+ */
+function PendingCreateDraftPreviewHarness({ taskScreenProps }: PendingCreateDraftPreviewHarnessProps) {
+  const [previewCallCount, setPreviewCallCount] = useState(0)
+  const pendingPreviewRef = useRef<PendingCreateDraftPreview | undefined>(undefined)
+
+  /** Defers the server preview until the Story explicitly resolves it. */
+  const onPreviewScheduleChange = useCallback((
+    task: CanonicalWorkItem,
+    operation: WorkItemScheduleOperation,
+  ) => {
+    void operation
+    setPreviewCallCount((count) => count + 1)
+    return new Promise<WorkItemScheduleChangePreview>((resolve) => {
+      pendingPreviewRef.current = { resolve, task }
+    })
+  }, [])
+
+  /** Resolves the currently pending preview with the existing canonical fixture. */
+  const resolvePendingPreview = () => {
+    const pendingPreview = pendingPreviewRef.current
+    if (!pendingPreview) return
+    pendingPreview.resolve(createTimelinePreview(pendingPreview.task))
+    pendingPreviewRef.current = undefined
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 p-2">
+        <button
+          data-testid="create-draft-preview-resolve"
+          onClick={resolvePendingPreview}
+          type="button"
+        >
+          Resolve preview
+        </button>
+        <output data-testid="create-draft-preview-count">
+          {previewCallCount}
+        </output>
+      </div>
+      <TaskScreen
+        {...taskScreenProps}
+        onPreviewScheduleChange={onPreviewScheduleChange}
+      />
+    </div>
+  )
+}
+
 /**
  * Keeps the delayed preview resolver outside TaskScreen so a Story play function can settle it
  * after the active Gantt surface has unmounted.
@@ -376,6 +442,92 @@ function CreateFailureRetryHarness({ taskScreenProps }: CreateFailureRetryHarnes
     <>
       <output data-testid="create-failure-attempt-count">{createAttemptCount}</output>
       <TaskScreen {...taskScreenProps} onCreateTask={onCreateTask} />
+    </>
+  )
+}
+
+/** Props for the same-scope create draft permission revalidation scenario. */
+type CreatePermissionRevalidationHarnessProps = {
+  /** TaskScreen inputs used by the permission revalidation scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Props for the canonical detail focus harness. */
+type CanonicalDetailFocusHarnessProps = {
+  /** Whether the selected canonical detail permits editor controls. */
+  canMutate: boolean
+  /** TaskScreen inputs used by the canonical detail focus scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Keeps a Team-qualified detail available while routed selection permission changes. */
+function CanonicalDetailFocusHarness({
+  canMutate,
+  taskScreenProps,
+}: CanonicalDetailFocusHarnessProps) {
+  const selectedTask = taskScreenProps.tasks?.find((task) => task.id === 'wireframe')
+  const [selectedIssueId, setSelectedIssueId] = useState<string>()
+  const listTasks = taskScreenProps.tasks ?? []
+  const [detail, setDetail] = useState<TeamIssueDetail | undefined>()
+  const [detailCanMutate, setDetailCanMutate] = useState(true)
+  /** Applies the routed selection and its canonical permission state. */
+  const selectTask = useCallback((task: CanonicalWorkItem) => {
+    setSelectedIssueId(task.id)
+    setDetailCanMutate(canMutate)
+    setDetail({
+      ...selectedIssueDetail,
+      issue: task,
+    })
+    taskScreenProps.onSelectedIssueChange?.(task)
+  }, [canMutate, taskScreenProps])
+
+  if (!selectedTask) throw new Error('Expected the canonical focus fixture task.')
+
+  return (
+    <TaskScreen
+      {...taskScreenProps}
+      canMutateTask={() => detailCanMutate}
+      onSelectedIssueChange={selectTask}
+      selectedIssueDetail={detail}
+      selectedIssueId={selectedIssueId}
+      tasks={listTasks}
+    />
+  )
+}
+
+/** Toggles create permission without remounting the same Project editor. */
+function CreatePermissionRevalidationHarness({
+  taskScreenProps,
+}: CreatePermissionRevalidationHarnessProps) {
+  const [canCreate, setCanCreate] = useState(true)
+  const [createAttemptCount, setCreateAttemptCount] = useState(0)
+  /** Records a create attempt while the permission revalidation harness is mounted. */
+  const onCreateTask = useCallback(async () => {
+    setCreateAttemptCount((count) => count + 1)
+  }, [])
+
+  return (
+    <>
+      <button
+        data-testid="revoke-create-permission"
+        onClick={() => setCanCreate(false)}
+        type="button"
+      >
+        Revoke create permission
+      </button>
+      <button
+        data-testid="restore-create-permission"
+        onClick={() => setCanCreate(true)}
+        type="button"
+      >
+        Restore create permission
+      </button>
+      <output data-testid="permission-create-attempt-count">{createAttemptCount}</output>
+      <TaskScreen
+        {...taskScreenProps}
+        defaultCreateTaskOpen
+        onCreateTask={canCreate ? onCreateTask : undefined}
+      />
     </>
   )
 }
@@ -880,6 +1032,43 @@ export const CreateOpen: Story = {
   },
 }
 
+/** Keeps a same-Project draft visible while create permission is revalidated. */
+export const CreateDraftRetainsPermissionLoss: Story = {
+  args: {
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <CreatePermissionRevalidationHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const formQueries = within(createTaskForm)
+
+    await userEvent.type(formQueries.getByRole('textbox', { name: 'タスク名' }), 'permission draft')
+    await userEvent.click(canvas.getByTestId('revoke-create-permission'))
+
+    await expect(canvas.getByTestId('create-task-form')).toBeInTheDocument()
+    await expect(formQueries.getByRole('alert')).toHaveTextContent(
+      'このプロジェクトでタスクを登録する権限がなくなりました。',
+    )
+    await expect(formQueries.getByRole('button', { name: /^登録$/u })).toBeDisabled()
+    await expect(formQueries.getByRole('textbox', { name: 'タスク名' })).toHaveValue(
+      'permission draft',
+    )
+    if (!(createTaskForm instanceof HTMLFormElement)) {
+      throw new Error('Expected the create task panel to render a form.')
+    }
+    createTaskForm.requestSubmit()
+    await expect(canvas.getByTestId('permission-create-attempt-count')).toHaveTextContent('0')
+
+    await userEvent.click(canvas.getByTestId('restore-create-permission'))
+    await expect(formQueries.queryByRole('alert')).toBeNull()
+    await expect(formQueries.getByRole('button', { name: /^登録$/u })).toBeEnabled()
+    await userEvent.click(formQueries.getByRole('button', { name: /^登録$/u }))
+    await expect(canvas.queryByTestId('create-task-form')).not.toBeInTheDocument()
+    await expect(canvas.getByTestId('permission-create-attempt-count')).toHaveTextContent('1')
+  },
+}
+
 /** Keeps a replacement create editor intact when an older invocation rejects. */
 export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
   args: {
@@ -896,7 +1085,13 @@ export const StaleCreateFailureDoesNotOverwriteReplacement: Story = {
     await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
     await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
 
-    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => true
+    try {
+      await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
     await expect(canvas.queryByTestId('create-task-form')).toBeNull()
     await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
     const replacementForm = canvas.getByTestId('create-task-form')
@@ -929,7 +1124,13 @@ export const ClosedCreateFailureUsesGlobalAlert: Story = {
     await userEvent.click(form.getByRole('button', { name: '登録' }))
     await expect(form.getByRole('button', { name: '登録中' })).toBeDisabled()
 
-    await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => true
+    try {
+      await userEvent.click(canvas.getByRole('button', { name: '新規タスク' }))
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
     await expect(canvas.queryByTestId('create-task-form')).toBeNull()
     await userEvent.click(canvas.getByTestId('reject-stale-create'))
 
@@ -980,6 +1181,58 @@ export const CreateFailureUsesFormAlertOnly: Story = {
   },
 }
 
+/** Keeps detailed-only validation visible after a failed detailed create switches to quick mode. */
+export const DetailedFailureKeepsQuickValidation: Story = {
+  args: {
+    initialTab: 'board',
+    currentUserProjectKey: 'sato@example.com',
+  },
+  render: (args) => <CreateFailureRetryHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const boardCreateButton = canvasElement.querySelector<HTMLElement>(
+      '[data-testid^="project-task-add-"]',
+    )
+    if (!boardCreateButton) throw new Error('Expected a Board column create button.')
+
+    await userEvent.click(boardCreateButton)
+    const createTaskForm = canvas.getByTestId('create-task-form')
+    const form = within(createTaskForm)
+    await userEvent.click(form.getByRole('button', { name: /^詳細登録$/u }))
+    await userEvent.type(form.getByRole('textbox', { name: 'タスク名' }), 'detailed failure')
+    const assignee = createTaskForm.querySelector<HTMLSelectElement>(
+      'select[name="assigneeUserId"]',
+    )
+    if (!assignee) throw new Error('Expected an assignee input.')
+    fireEvent.change(assignee, { target: { value: 'sato@example.com' } })
+    await userEvent.selectOptions(form.getByLabelText('スケジュール種別'), 'date-range')
+    fireEvent.change(form.getByLabelText('開始日'), { target: { value: '2026-07-01' } })
+    fireEvent.change(form.getByLabelText('終了日'), { target: { value: '2026-07-03' } })
+    const riskLevel = createTaskForm.querySelector<HTMLSelectElement>(
+      'select[name="custom-field:risk-level"]',
+    )
+    if (!riskLevel) throw new Error('Expected a risk level input.')
+    await userEvent.selectOptions(riskLevel, 'moderate')
+    const customerImpact = createTaskForm.querySelector<HTMLInputElement>(
+      'input[name="custom-field:customer-impact"]',
+    )
+    if (!customerImpact) throw new Error('Expected a Customer impact input.')
+    fireEvent.change(customerImpact, { target: { value: 'DetailedFailureContext' } })
+    await expect(assignee).toHaveValue('sato@example.com')
+    await expect(customerImpact).toHaveValue('DetailedFailureContext')
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(form.getByRole('alert')).toHaveTextContent(
+      '作成 API が一時的に失敗しました。',
+    )
+
+    await userEvent.click(form.getByRole('button', { name: /^クイック登録$/u }))
+    await userEvent.click(form.getByRole('button', { name: /^登録$/u }))
+    await expect(createTaskForm).toHaveTextContent('詳細登録に戻ってから登録してください。')
+    await expect(canvas.getByTestId('create-failure-attempt-count')).toHaveTextContent('1')
+    await expect(form.getByRole('textbox', { name: 'タスク名' })).toHaveValue('detailed failure')
+  },
+}
+
 /** Resets a same-context replacement editor after an older create succeeds. */
 export const StaleCreateSuccessResetsReplacement: Story = {
   args: {
@@ -1000,7 +1253,13 @@ export const StaleCreateSuccessResetsReplacement: Story = {
     await userEvent.click(firstForm.getByRole('button', { name: '登録' }))
     await expect(firstForm.getByRole('button', { name: '登録中' })).toBeDisabled()
 
-    await userEvent.click(boardCreateButton)
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => true
+    try {
+      await userEvent.click(boardCreateButton)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
     const replacementForm = within(canvas.getByTestId('create-task-form'))
     await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toHaveValue('')
     await expect(replacementForm.getByRole('textbox', { name: 'タスク名' })).toBeDisabled()
@@ -1039,6 +1298,76 @@ export const ReadOnlyOpen: Story = {
     expect(onReadOnlySelectedIssueChange).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'wireframe', teamId: 'core-team' }),
     )
+  },
+}
+
+/** Restores the task search focus when filtering removes the selected detail opener. */
+export const FilteredDetailFallbackFocus: Story = {
+  args: {
+    initialSelectedTaskId: undefined,
+    selectedIssueDetail,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const opener = canvas.getByTestId('task-open-detail-wireframe')
+    await userEvent.click(opener)
+
+    const searchbox = canvas.getByRole('searchbox', { name: '検索...' })
+    await userEvent.clear(searchbox)
+    await userEvent.type(searchbox, '一致しない検索語')
+    await waitFor(() => expect(canvas.queryByTestId('task-row-wireframe')).not.toBeInTheDocument())
+
+    await userEvent.click(canvas.getByTestId('task-detail-close'))
+    await waitFor(() => expect(searchbox).toHaveFocus())
+  },
+}
+
+/** Read-only Table title focus survives Board/Table workspace remounts. */
+export const ReadOnlyTableRemountRestoresFocus: Story = {
+  args: {
+    canMutateTask: () => false,
+    initialTab: 'table',
+    onSelectedIssueChange: undefined,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const titleButton = canvas.getByTestId('task-open-detail-wireframe')
+
+    await userEvent.click(titleButton)
+    await userEvent.click(canvas.getByRole('tab', { name: 'ボード' }))
+    await userEvent.click(canvas.getByRole('tab', { name: 'テーブル' }))
+    const remountedTitleButton = canvas.getByTestId('task-open-detail-wireframe')
+    await userEvent.click(canvas.getByTestId('task-detail-close'))
+    await waitFor(() => expect(remountedTitleButton).toHaveFocus())
+  },
+}
+
+/** Canonical detail permission keeps the edit control focus after routed selection. */
+export const CanonicalDetailKeepsEditFocus: Story = {
+  render: (args) => <CanonicalDetailFocusHarness canMutate taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    await userEvent.pointer({ keys: '[MouseRight]', target: canvas.getByTestId('task-row-wireframe') })
+    const menu = within(await documentBody.findByTestId('project-task-action-context-menu'))
+    await userEvent.click(menu.getByRole('menuitem', { name: /Work Item を編集/u }))
+    const detailPane = within(canvas.getByTestId('task-detail-pane'))
+    await waitFor(() => expect(detailPane.getByRole('textbox', { name: 'Issue' })).toHaveFocus())
+  },
+}
+
+/** Canonical detail permission falls back to the safe heading when edit focus is denied. */
+export const CanonicalDetailDeniedFocusFallsBackToHeading: Story = {
+  render: (args) => <CanonicalDetailFocusHarness canMutate={false} taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    await userEvent.pointer({ keys: '[MouseRight]', target: canvas.getByTestId('task-row-wireframe') })
+    const menu = within(await documentBody.findByTestId('project-task-action-context-menu'))
+    await userEvent.click(menu.getByRole('menuitem', { name: /Work Item を編集/u }))
+    await waitFor(() => expect(within(canvas.getByTestId('task-detail-pane')).getByRole('heading', {
+      name: 'ワイヤーフレームを確認する',
+    })).toHaveFocus())
   },
 }
 
@@ -1220,6 +1549,96 @@ export const TimelinePreviewCancel: Story = {
     await userEvent.click(within(dialog).getByRole('button', { name: 'キャンセル' }))
     await expect(onCancelledTimelineConfirm).toHaveBeenCalledTimes(0)
     await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+  },
+}
+
+/** Keeps a create draft safe while a delayed Gantt preview is accepted or cancelled. */
+export const TimelinePreviewCancelWithCreateDraft: Story = {
+  args: {
+    defaultCreateTaskOpen: true,
+    initialTab: 'gantt',
+    onConfirmScheduleChange: onCancelledTimelineConfirm,
+  },
+  render: (args) => <PendingCreateDraftPreviewHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onCancelledTimelineConfirm.mockClear()
+    const form = canvas.getByTestId('create-task-form')
+    const titleInput = within(form).getByRole('textbox', { name: 'タスク名' })
+
+    const modeSelect = canvasElement.querySelector<HTMLSelectElement>(
+      'select[id^="gantt-mode-"]',
+    )
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+    await userEvent.selectOptions(modeSelect, 'milestone')
+
+    await expect(canvas.getByTestId('create-draft-preview-count')).toHaveTextContent('1')
+    await expect(titleInput).toHaveValue('')
+    await userEvent.type(titleInput, '保留中の作成下書き')
+
+    const originalConfirm = globalThis.window.confirm
+    let discardConfirmCount = 0
+    globalThis.window.confirm = () => {
+      discardConfirmCount += 1
+      return false
+    }
+    try {
+      await userEvent.click(await canvas.findByTestId('task-gantt-add-wireframe'))
+      await expect(titleInput).toHaveValue('保留中の作成下書き')
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+    expect(discardConfirmCount).toBe(1)
+
+    await userEvent.click(canvas.getByTestId('create-draft-preview-resolve'))
+    const dialog = await canvas.findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'キャンセル' }))
+    await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+    await expect(titleInput).toHaveValue('保留中の作成下書き')
+    await expect(onCancelledTimelineConfirm).toHaveBeenCalledTimes(0)
+  },
+}
+
+/** Rejecting a dirty create draft leaves Gantt schedule selection available for retry. */
+export const TimelinePreviewDiscardRejectedKeepsCreateDraft: Story = {
+  args: {
+    defaultCreateTaskOpen: true,
+    initialTab: 'gantt',
+    onPreviewScheduleChange: onDeniedTimelinePreview,
+    onConfirmScheduleChange: onDeniedTimelineConfirm,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onDeniedTimelinePreview.mockClear()
+    const form = canvas.getByTestId('create-task-form')
+    const titleInput = within(form).getByRole('textbox', { name: 'タスク名' })
+    const modeSelect = canvasElement.querySelector<HTMLSelectElement>(
+      'select[id^="gantt-mode-"]',
+    )
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+
+    await userEvent.type(titleInput, '破棄拒否の作成下書き')
+    const originalConfirm = globalThis.window.confirm
+    let discardConfirmCount = 0
+    globalThis.window.confirm = () => {
+      discardConfirmCount += 1
+      return false
+    }
+    try {
+      await userEvent.selectOptions(modeSelect, 'milestone')
+      await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+      await expect(onDeniedTimelinePreview).toHaveBeenCalledTimes(0)
+      expect(discardConfirmCount).toBe(1)
+      await expect(titleInput).toHaveValue('破棄拒否の作成下書き')
+
+      await userEvent.selectOptions(modeSelect, 'milestone')
+      await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+      await expect(onDeniedTimelinePreview).toHaveBeenCalledTimes(0)
+      expect(discardConfirmCount).toBe(2)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+    await expect(titleInput).toHaveValue('破棄拒否の作成下書き')
   },
 }
 

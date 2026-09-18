@@ -565,6 +565,9 @@ function CalendarTaskCard({
           : `${resolveWorkItemTitle(entry.task)}: ${describeCalendarSchedule(entry.schedule, t)}`}
         className="block w-full text-left focus:outline-none focus:ring-2 focus:ring-[var(--workbench-primary)]"
         data-task-calendar-key={createTaskKey(entry.task)}
+        data-task-action="open"
+        data-task-team-id={entry.task.teamId}
+        data-task-work-item-id={entry.task.id}
         data-testid={`task-calendar-item-${entry.task.id}`}
         disabled={busy || (!onSelectTask && !canEditSchedule)}
         draggable={canEditSchedule && !busy}
