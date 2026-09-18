@@ -38,7 +38,7 @@ export type ProjectTaskRouteContext = {
   hasAmbiguousIssueSelection: boolean
   /** Unambiguous Issue explicitly requested by route search parameters. */
   requestedIssue?: TeamIssue
-  /** Explicitly requested Issue or first task used by the detail fallback. */
+  /** Explicitly requested Issue, or the first task when no Issue is route-selected. */
   resolvedSelectedIssue?: TeamIssue
   /** Team used for detail interaction, chosen from explicit Team, Issue, or sole Project Team. */
   interactionTeamId?: string
@@ -141,7 +141,9 @@ export function resolveProjectTaskRouteContext(
   const requestedIssue = hasAmbiguousIssueSelection
     ? undefined
     : requestedIssueCandidates[0]
-  const resolvedSelectedIssue = requestedIssue ?? tasks[0]
+  const resolvedSelectedIssue = requestedIssue ?? (
+    input.selectedIssueId || input.suppressIssueFallback ? undefined : tasks[0]
+  )
   const requestedIssueTeamId = input.selectedIssueId && requestedIssue
     ? requestedIssue.teamId
     : undefined

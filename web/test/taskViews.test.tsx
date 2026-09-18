@@ -681,6 +681,7 @@ describe('independent task views', () => {
       <CreateTaskPanel
         assigneeOptions={taskViewStoryProjectMembers}
         configuration={teamWorkItemConfigurationFixture}
+        initialMode="detailed"
         isAssigneeOptionsLoading={false}
         isSubmitting={false}
         locale="ja"

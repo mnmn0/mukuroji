@@ -1,11 +1,13 @@
 import useSWR from 'swr'
 import type { Arguments, KeyedMutator, MutatorCallback, MutatorOptions } from 'swr'
+import { useMemo } from 'react'
 import {
   getProjectIssuesPage,
   getTeamIssueDetail,
   getTeamIssues,
   getWorkspaceWorkItems,
 } from '../api/workItems'
+import { TeamIssuesApiError } from '../api/errors'
 
 /** Complete Project issue response stored in the SWR cache. */
 type ProjectIssuesPage = Awaited<ReturnType<typeof getProjectIssuesPage>>
@@ -33,6 +35,14 @@ const workItemQueryConfig = {
   dedupingInterval: 10_000,
   shouldRetryOnError: false,
 } as const
+
+/** Returns whether a failed detail revalidation may safely retain validated cached data. */
+function isTransientIssueDetailError(error: unknown): boolean {
+  if (error instanceof TeamIssuesApiError) {
+    return error.status === 408 || error.status === 429 || (error.status >= 500 && error.status < 600)
+  }
+  return error instanceof TypeError
+}
 
 /**
  * Team の Work Item 一覧を取得します。
@@ -72,6 +82,8 @@ export function useTeamIssues(
  * @param projectId - 取得対象の Project ID です。
  * @param enabled - Query を実行するかどうかです。
  * @param includeArchived - Whether the Project query includes archived Work Items.
+ * @param selectedTeamId - Optional Team identity from the routed Work Item.
+ * @param selectedIssueId - Optional Work Item identity from the route.
  * @returns Project Work Item 一覧の SWR state です。
  */
 export function useProjectIssues(
@@ -79,6 +91,8 @@ export function useProjectIssues(
   projectId: string | undefined,
   enabled = true,
   includeArchived = false,
+  selectedTeamId?: string,
+  selectedIssueId?: string,
 ) {
   const key = accessToken && projectId && enabled
     ? ['project-issues', accessToken, projectId, includeArchived] as const
@@ -90,6 +104,56 @@ export function useProjectIssues(
       getProjectIssuesPage(currentProjectId, token, shouldIncludeArchived),
     workItemQueryConfig,
   )
+
+  const selectedDetailQuery = useTeamIssueDetail(
+    accessToken,
+    selectedTeamId,
+    selectedIssueId,
+    enabled && Boolean(selectedTeamId && selectedIssueId),
+    'project-issue-detail',
+  )
+  const selectedDetailIssue = selectedDetailQuery.error && !isTransientIssueDetailError(selectedDetailQuery.error)
+    ? undefined
+    : selectedDetailQuery.data?.issue
+  const reconciledIssues = useMemo(() => {
+    const issues = query.data?.issues
+    if (!issues || !selectedTeamId || !selectedIssueId || !selectedDetailIssue) {
+      return issues
+    }
+
+    const selectedIssueIndex = issues.findIndex((issue) =>
+      issue.teamId === selectedTeamId && issue.id === selectedIssueId,
+    )
+
+    if (
+      selectedDetailIssue.teamId !== selectedTeamId ||
+      selectedDetailIssue.id !== selectedIssueId ||
+      selectedDetailIssue.assignedProjectId !== projectId ||
+      (!includeArchived && selectedDetailIssue.archivedAt !== undefined)
+    ) {
+      return issues
+    }
+
+    if (selectedIssueIndex < 0) {
+      return [...issues, selectedDetailIssue]
+    }
+
+    const existingIssue = issues[selectedIssueIndex]
+    if (!existingIssue || selectedDetailIssue.revision <= existingIssue.revision) {
+      return issues
+    }
+
+    const reconciled = [...issues]
+    reconciled[selectedIssueIndex] = selectedDetailIssue
+    return reconciled
+  }, [
+    includeArchived,
+    projectId,
+    query.data?.issues,
+    selectedDetailIssue,
+    selectedIssueId,
+    selectedTeamId,
+  ])
 
   /** Adapts the response-shaped SWR cache back to the legacy issue-list mutator. */
   const mutateProjectIssues: KeyedMutator<ProjectIssueList> = async <MutationData = ProjectIssueList>(
@@ -123,7 +187,7 @@ export function useProjectIssues(
 
   return {
     ...query,
-    data: query.data?.issues,
+    data: reconciledIssues,
     canReadCustomerImpact: query.data?.canReadCustomerImpact === true,
     mutate: mutateProjectIssues,
     key,
