@@ -54,6 +54,9 @@
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth -c triageIndexDeploymentStage=wake -c teamIssueCommentIndexDeploymentStage=comment"
   },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb-streams": "3.1057.0"
+  },
   "devDependencies": {
     "@playwright/test": "^1.60.0",
     "dependency-cruiser": "^18.1.0",
