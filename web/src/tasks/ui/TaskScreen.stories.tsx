@@ -15,6 +15,7 @@ import {
 } from 'react'
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
 import { TaskScreen } from './TaskScreen'
+import type { TaskDetailAiAssistanceRenderContext } from './TaskDetailPane'
 import {
   createWorkspaceCommandMenuWorkItemActionRegistry,
   WorkspaceCommandMenuContext,
@@ -393,6 +394,44 @@ type StaleCreateRejectionHarnessProps = {
   taskScreenProps: ComponentProps<typeof TaskScreen>
 }
 
+/** Props for the AI operation tab-guard Story harness. */
+type AiOperationPendingHarnessProps = {
+  /** TaskScreen inputs rendered below the deterministic pending control. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Exposes a deterministic pending AI operation for guarded task-tab interactions. */
+function AiOperationPendingHarness({ taskScreenProps }: AiOperationPendingHarnessProps) {
+  const renderAiAssistance = useCallback((context: TaskDetailAiAssistanceRenderContext) => ({
+    planning: (
+      <>
+        <button
+          data-testid="begin-ai-operation"
+          onClick={() => context.onPlanningOperationPendingChange?.(true)}
+          type="button"
+        >
+          Begin AI operation
+        </button>
+        <button
+          data-testid="finish-ai-operation"
+          onClick={() => context.onPlanningOperationPendingChange?.(false)}
+          type="button"
+        >
+          Finish AI operation
+        </button>
+      </>
+    ),
+  }), [])
+
+  return (
+    <TaskScreen
+      {...taskScreenProps}
+      aiAssistanceEnabled
+      renderAiAssistance={renderAiAssistance}
+    />
+  )
+}
+
 /**
  * Holds a create request until the story explicitly rejects it after a replacement editor opens.
  *
@@ -458,6 +497,35 @@ type CanonicalDetailFocusHarnessProps = {
   canMutate: boolean
   /** TaskScreen inputs used by the canonical detail focus scenario. */
   taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Simulates a Project revalidation that removes the live detail owner after a dirty comment. */
+type DirtyCommentScopeLossHarnessProps = {
+  /** TaskScreen inputs used by the retained comment detail scenario. */
+  taskScreenProps: ComponentProps<typeof TaskScreen>
+}
+
+/** Keeps the dirty comment detail visible while the live selected detail leaves Project scope. */
+function DirtyCommentScopeLossHarness({
+  taskScreenProps,
+}: DirtyCommentScopeLossHarnessProps) {
+  const [selectedDetailUnavailable, setSelectedDetailUnavailable] = useState(false)
+
+  return (
+    <>
+      <button
+        data-testid="simulate-comment-owner-reassignment"
+        onClick={() => setSelectedDetailUnavailable(true)}
+        type="button"
+      >
+        Simulate external reassignment
+      </button>
+      <TaskScreen
+        {...taskScreenProps}
+        selectedIssueDetailUnavailable={selectedDetailUnavailable}
+      />
+    </>
+  )
 }
 
 /** Keeps a Team-qualified detail available while routed selection permission changes. */
@@ -741,6 +809,63 @@ export const Default: Story = {
     }))
     await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
     await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+  },
+}
+
+/** AI operations reject a guarded Files transition without clearing local detail ownership. */
+export const AiOperationPendingBlocksDetailTab: Story = {
+  args: {
+    initialSelectedTaskId: 'wireframe',
+    onBulkApply: fn(),
+    onBulkPreview: fn(),
+    selectedIssueDetail,
+    workspaceId: 'workspace-1',
+  },
+  render: (args) => <AiOperationPendingHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const body = await canvas.findByRole('textbox', { name: 'コメント本文' })
+    await userEvent.type(body, 'AI処理中も保持するコメント下書き')
+    await userEvent.click(canvas.getByTestId('begin-ai-operation'))
+
+    const fileTab = canvas.getByRole('tab', { name: 'ファイル' })
+    let confirmCount = 0
+    const originalConfirm = globalThis.window.confirm
+    globalThis.window.confirm = () => {
+      confirmCount += 1
+      return true
+    }
+    try {
+      await userEvent.click(fileTab)
+      const secondTaskRow = canvas.getByTestId('task-row-brand-guideline')
+      const secondTaskCheckbox = within(secondTaskRow).getByRole('checkbox')
+      await expect(secondTaskCheckbox).toBeEnabled()
+      await userEvent.click(secondTaskCheckbox)
+      await expect(secondTaskCheckbox).toBeChecked()
+      await waitFor(() => expect(canvas.getByTestId('task-row-brand-guideline')).toHaveAttribute(
+        'data-selected',
+        'true',
+      ))
+      secondTaskRow.focus()
+      await userEvent.keyboard('e')
+      await expect(fileTab).toHaveAttribute('aria-selected', 'false')
+      await expect(body).toHaveValue('AI処理中も保持するコメント下書き')
+      expect(confirmCount).toBe(0)
+
+      await userEvent.click(canvas.getByTestId('finish-ai-operation'))
+      confirmCount = 0
+      globalThis.window.confirm = () => {
+        confirmCount += 1
+        return false
+      }
+      secondTaskRow.focus()
+      await userEvent.keyboard('e')
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+    await expect(fileTab).toHaveAttribute('aria-selected', 'false')
+    await expect(body).toHaveValue('AI処理中も保持するコメント下書き')
+    expect(confirmCount).toBe(1)
   },
 }
 
@@ -1368,6 +1493,38 @@ export const CanonicalDetailDeniedFocusFallsBackToHeading: Story = {
     await waitFor(() => expect(within(canvas.getByTestId('task-detail-pane')).getByRole('heading', {
       name: 'ワイヤーフレームを確認する',
     })).toHaveFocus())
+  },
+}
+
+/** Retains a dirty comment body as read-only detail when Project revalidation removes its owner. */
+export const DirtyCommentRetainsDetailAfterExternalReassignment: Story = {
+  args: {
+    initialSelectedTaskId: 'wireframe',
+    selectedIssueDetail,
+    selectedIssueId: 'wireframe',
+  },
+  render: (args) => <DirtyCommentScopeLossHarness taskScreenProps={args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const body = await canvas.findByRole('textbox', { name: 'コメント本文' })
+    const draft = '外部再割り当て後も保持するコメント下書き'
+    await userEvent.type(body, draft)
+    await userEvent.click(canvas.getByTestId('simulate-comment-owner-reassignment'))
+    const retainedBody = await canvas.findByRole('textbox', { name: 'コメント本文' })
+    await waitFor(() => {
+      expect(retainedBody).toBeInTheDocument()
+      expect(retainedBody).toBeVisible()
+      expect(retainedBody).toHaveValue(draft)
+      expect(retainedBody).toHaveAttribute('readonly')
+    })
+    await expect(canvas.getByTestId('task-detail-retained-readonly')).toBeVisible()
+    await expect(canvas.getByRole('button', { name: '下書きを破棄' })).toBeVisible()
+    await expect(canvas.getByRole('heading', {
+      name: 'ワイヤーフレームを確認する',
+    })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: '下書きを破棄' }))
+    expect(canvas.queryByTestId('task-detail-retained-readonly')).not.toBeInTheDocument()
+    expect(canvas.queryByRole('textbox', { name: 'コメント本文' })).not.toBeInTheDocument()
   },
 }
 

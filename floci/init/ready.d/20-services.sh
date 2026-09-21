@@ -10,6 +10,21 @@ ensure_queue() {
   aws_local sqs get-queue-url --queue-name "$1" --query QueueUrl --output text 2>/dev/null ||
     aws_local sqs create-queue --queue-name "$1" --query QueueUrl --output text
 }
+ensure_ttl() {
+  table_name="$1"
+  ttl_status="$(aws_local dynamodb describe-time-to-live \
+    --table-name "$table_name" \
+    --query 'TimeToLiveDescription.TimeToLiveStatus' \
+    --output text)"
+  case "$ttl_status" in
+    ENABLED|ENABLING)
+      return 0
+      ;;
+  esac
+  aws_local dynamodb update-time-to-live \
+    --table-name "$table_name" \
+    --time-to-live-specification Enabled=true,AttributeName=expiresAt >/dev/null
+}
 umask 077
 mkdir -p "$GENERATED_DIR"
 env_file="$(mktemp "$GENERATED_DIR/services.env.XXXXXX")"
@@ -26,7 +41,7 @@ if ! aws_local dynamodb describe-table --table-name mukuroji-notifications-local
     --global-secondary-indexes '[{"IndexName":"RecipientStatusIndex","KeySchema":[{"AttributeName":"recipientStatusKey","KeyType":"HASH"},{"AttributeName":"notificationKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}]' >/dev/null
 fi
 for table in mukuroji-collaboration-local mukuroji-notifications-local; do
-  aws_local dynamodb update-time-to-live --table-name "$table" --time-to-live-specification Enabled=true,AttributeName=expiresAt >/dev/null
+  ensure_ttl "$table"
 done
 if ! aws_local dynamodb describe-table --table-name mukuroji-processed-audit-events-local >/dev/null 2>&1; then
   aws_local dynamodb create-table --table-name mukuroji-processed-audit-events-local \
@@ -34,7 +49,7 @@ if ! aws_local dynamodb describe-table --table-name mukuroji-processed-audit-eve
     --attribute-definitions AttributeName=consumerName,AttributeType=S AttributeName=eventId,AttributeType=S \
     --key-schema AttributeName=consumerName,KeyType=HASH AttributeName=eventId,KeyType=RANGE >/dev/null
 fi
-aws_local dynamodb update-time-to-live --table-name mukuroji-processed-audit-events-local --time-to-live-specification Enabled=true,AttributeName=expiresAt >/dev/null
+ensure_ttl mukuroji-processed-audit-events-local
 if ! aws_local dynamodb describe-table --table-name mukuroji-developer-platform-local >/dev/null 2>&1; then
   aws_local dynamodb create-table --table-name mukuroji-developer-platform-local \
     --billing-mode PAY_PER_REQUEST \
@@ -42,7 +57,7 @@ if ! aws_local dynamodb describe-table --table-name mukuroji-developer-platform-
     --key-schema AttributeName=workspaceId,KeyType=HASH AttributeName=recordKey,KeyType=RANGE \
     --global-secondary-indexes '[{"IndexName":"LookupKeyIndex","KeySchema":[{"AttributeName":"lookupKey","KeyType":"HASH"},{"AttributeName":"lookupSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"KEYS_ONLY"}}]' >/dev/null
 fi
-aws_local dynamodb update-time-to-live --table-name mukuroji-developer-platform-local --time-to-live-specification Enabled=true,AttributeName=expiresAt >/dev/null
+ensure_ttl mukuroji-developer-platform-local
 for bucket in mukuroji-files-local mukuroji-work-item-import-local; do
   if ! aws_local s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
     aws_local s3api create-bucket --bucket "$bucket" >/dev/null

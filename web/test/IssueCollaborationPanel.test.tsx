@@ -242,6 +242,49 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('aria-label="Add reaction"')
   })
 
+  /** Keeps stale collaboration controls visible but unable to mutate the retained detail. */
+  test('disables collaboration mutations while a retained detail is read-only', () => {
+    const canonicalComment = {
+      ...issueCollaborationControllerFixture.comments[0],
+      acceptedResolutions: [],
+      capabilities: {
+        canDelete: true,
+        canEdit: true,
+        canReact: true,
+        canReply: true,
+        canResolve: true,
+      },
+      resolvedAt: undefined,
+      resolvedByMemberKey: undefined,
+    }
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        artifacts={{
+          ...fileArtifactsControllerFixture,
+          files: [{ ...imageFileFixture, targetId: 'comment-1', targetType: 'comment' }],
+        }}
+        controller={{
+          ...issueCollaborationControllerFixture,
+          comments: [canonicalComment],
+          hasMore: false,
+          replyPagination: {},
+        }}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+        readOnlyMessage="The retained detail is read-only."
+      />,
+    )
+
+    expect(html).toMatch(/aria-pressed="true"[^>]*disabled=""/)
+    expect(html).toMatch(/disabled=""[^>]*>Delete<\/button>/)
+    expect(html).toMatch(/disabled=""[^>]*>Resolve thread<\/button>/)
+    expect(html).not.toContain('>Reply<')
+    expect(html).toContain('launch-hero.png')
+    expect(html).not.toContain('Attach file')
+    expect(html).not.toContain('Allow guest access')
+  })
+
   test('orders roots by newest timestamp across canonical pages', () => {
     const rootComment = issueCollaborationControllerFixture.comments[0]
     const html = renderToStaticMarkup(
