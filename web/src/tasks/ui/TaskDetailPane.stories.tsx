@@ -1,9 +1,12 @@
-import type { AiPlanningDraft } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE, type AiPlanningDraft } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
-import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
+import {
+  collaborationWorkspaceMemberFixtures,
+  issueCollaborationControllerFixture,
+} from '../../issues/fixtures'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
@@ -27,6 +30,46 @@ const taskDetailStoryProjects = [
   { id: 'refero', name: 'Refero', tone: 'blue' },
   { id: 'product-roadmap', name: 'プロダクトロードマップ', tone: 'yellow' },
 ] satisfies ProjectDirectoryTeam['projects']
+
+/** Configuration with a type that deliberately omits the Activity section. */
+const activityOptionalTypeConfiguration = {
+  ...teamWorkItemConfigurationFixture,
+  workItemTypes: [
+    DEFAULT_WORK_ITEM_TYPE,
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'activity'),
+      id: 'brief',
+      name: 'Brief',
+    },
+    {
+      ...DEFAULT_WORK_ITEM_TYPE,
+      id: 'activity-brief',
+      name: 'Activity Brief',
+    },
+  ],
+}
+
+/** Configuration returned after an external Work Item Type update removes Activity. */
+const activityRemovedFromCurrentTypeConfiguration = {
+  ...activityOptionalTypeConfiguration,
+  workItemTypes: activityOptionalTypeConfiguration.workItemTypes.map((type) =>
+    type.id === DEFAULT_WORK_ITEM_TYPE.id
+      ? {
+          ...type,
+          detailSections: type.detailSections.filter((section) => section !== 'activity'),
+        }
+      : type,
+  ),
+}
+
+/** Detail fixture used to verify comment retention while a type removes Activity. */
+const activityOptionalTypeDetail = {
+  ...taskViewStorySelectedIssueDetail,
+  resolvedConfiguration: {
+    configuration: activityOptionalTypeConfiguration,
+  },
+} satisfies TeamIssueDetail
 
 const mismatchedIssueDetail = {
   ...taskViewStorySelectedIssueDetail,
@@ -101,6 +144,69 @@ function createUpdateIssueSpy() {
     void issueId
     void input
   })
+}
+
+/** Props for the external Work Item Type revalidation regression harness. */
+type ExternalTypeRevalidationHarnessProps = {
+  /** Task detail inputs rendered before and after the simulated external update. */
+  taskDetailPaneProps: TaskDetailPaneProps
+}
+
+/** Simulates a newer Work Item revision whose type no longer exposes Activity. */
+function ExternalTypeRevalidationHarness({
+  taskDetailPaneProps,
+}: ExternalTypeRevalidationHarnessProps) {
+  const [isExternalTypeUpdateApplied, setIsExternalTypeUpdateApplied] = useState(false)
+  const initialDetail = taskDetailPaneProps.detail
+  if (!initialDetail) throw new globalThis.Error('Expected a selected Work Item detail.')
+  const refreshedDetail = isExternalTypeUpdateApplied
+    ? {
+        ...initialDetail,
+        issue: {
+          ...initialDetail.issue,
+          revision: initialDetail.issue.revision + 1,
+          workItemTypeId: 'brief',
+        },
+        resolvedConfiguration: {
+          configuration: activityRemovedFromCurrentTypeConfiguration,
+        },
+      }
+    : initialDetail
+
+  return (
+    <>
+      <button
+        data-testid="simulate-external-type-revalidation"
+        onClick={() => setIsExternalTypeUpdateApplied(true)}
+        type="button"
+      >
+        Simulate external type update
+      </button>
+      <TaskDetailPane {...taskDetailPaneProps} detail={refreshedDetail} />
+    </>
+  )
+}
+
+/** Creates a Work Item update spy whose pending request can be rejected by a story play. */
+function createPendingUpdateIssueSpy() {
+  let rejectPending: (() => void) | undefined
+  const spy = fn(async (
+    teamId: string,
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ) => {
+    void teamId
+    void issueId
+    void input
+    await new Promise<void>((_, reject) => {
+      rejectPending = () => reject('Work Item save failed.')
+    })
+  })
+
+  return {
+    reject: () => rejectPending?.(),
+    spy,
+  }
 }
 
 /** Local Planning draft used to exercise the neutral Task detail renderer slot. */
@@ -317,6 +423,119 @@ export const Default: Story = {
         workflowStatusId: 'review',
       }),
     )
+  },
+}
+
+const pendingUpdateIssue = createPendingUpdateIssueSpy()
+
+/** Keeps comment input disabled only during a rejected Work Item save and retains its body. */
+export const SaveFailureRetainsCommentDraftWhileWorkItemSavePending: Story = {
+  args: {
+    collaboration: issueCollaborationControllerFixture,
+    onUpdateIssue: pendingUpdateIssue.spy,
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const commentBody = canvas.getByRole('textbox', { name: 'コメント本文' })
+    await userEvent.type(commentBody, '保存失敗後も残るコメント')
+
+    const titleInput = canvas.getByRole('textbox', { name: 'Issue' })
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, '保存待ちの詳細変更')
+    await userEvent.selectOptions(
+      canvas.getByRole('combobox', { name: 'ステータス' }),
+      'review',
+    )
+    const customerImpactInput = canvas.getByRole('textbox', {
+      name: 'Customer impact',
+    })
+    await userEvent.clear(customerImpactInput)
+    await userEvent.type(customerImpactInput, 'EnterpriseCustomersCanCompleteSetup')
+    await userEvent.click(canvas.getByRole('button', { name: '変更を保存' }))
+
+    await expect(args.onUpdateIssue).toHaveBeenCalledTimes(1)
+    await expect(commentBody).toBeDisabled()
+    pendingUpdateIssue.reject()
+
+    await waitFor(async () => expect(commentBody).toBeEnabled())
+    await expect(commentBody).toHaveValue('保存失敗後も残るコメント')
+  },
+}
+
+/** Prompts before a type change removes Activity and clears only after confirmation. */
+export const TypeChangeRemovingActivityProtectsCommentDraft: Story = {
+  args: {
+    collaboration: issueCollaborationControllerFixture,
+    configuration: activityOptionalTypeConfiguration,
+    detail: activityOptionalTypeDetail,
+    onCommentDraftDirtyChange: fn(),
+    onUpdateIssue: createUpdateIssueSpy(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const commentBody = canvas.getByRole('textbox', { name: 'コメント本文' })
+    const typeSelect = canvas.getByRole('combobox', { name: 'Work Item Type' })
+    await userEvent.type(commentBody, 'Activityを除去しても保持するコメント')
+
+    const originalConfirm = globalThis.window.confirm
+    let confirmCount = 0
+    globalThis.window.confirm = (message) => {
+      confirmCount += 1
+      expect(message).toContain('コメント')
+      return false
+    }
+    try {
+      await userEvent.selectOptions(typeSelect, 'activity-brief')
+      await expect(typeSelect).toHaveValue('activity-brief')
+      await expect(commentBody).toHaveValue('Activityを除去しても保持するコメント')
+      expect(confirmCount).toBe(0)
+
+      await userEvent.selectOptions(typeSelect, 'brief')
+      await expect(typeSelect).toHaveValue('activity-brief')
+      await expect(commentBody).toHaveValue('Activityを除去しても保持するコメント')
+      await expect(canvas.getByRole('textbox', { name: 'コメント本文' })).toBeVisible()
+      expect(confirmCount).toBe(1)
+
+      globalThis.window.confirm = () => true
+      await userEvent.selectOptions(typeSelect, 'brief')
+      await expect(typeSelect).toHaveValue('brief')
+      await expect(canvas.queryByRole('textbox', { name: 'コメント本文' })).not.toBeInTheDocument()
+      await expect(args.onCommentDraftDirtyChange).toHaveBeenCalledWith(false)
+    } finally {
+      globalThis.window.confirm = originalConfirm
+    }
+  },
+}
+
+/** Retains a dirty comment as read-only when external revalidation removes Activity. */
+export const ExternalTypeRefreshRemovingActivityRetainsCommentDraft: Story = {
+  args: {
+    collaboration: issueCollaborationControllerFixture,
+    configuration: activityOptionalTypeConfiguration,
+    detail: activityOptionalTypeDetail,
+    onCommentDraftDirtyChange: fn(),
+    onUpdateIssue: createUpdateIssueSpy(),
+  },
+  render: ({ showAiAssistance = false, ...args }) => (
+    <ExternalTypeRevalidationHarness
+      taskDetailPaneProps={{
+        ...args,
+        renderAiAssistance: createStoryAiAssistanceRenderer(showAiAssistance),
+      }}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const commentBody = () => canvas.getByRole('textbox', { name: 'コメント本文' })
+
+    await userEvent.type(commentBody(), '外部の種別更新後も保持するコメント')
+    await userEvent.click(canvas.getByTestId('simulate-external-type-revalidation'))
+
+    await waitFor(() => expect(commentBody()).toHaveValue('外部の種別更新後も保持するコメント'))
+    await expect(commentBody()).toHaveAttribute('readonly')
+    await expect(canvas.getByText('コメントは読み取り専用です。')).toBeVisible()
+    await expect(canvas.getByRole('button', { name: /ウォッチ中/u })).toBeDisabled()
+    await expect(canvas.getByRole('button', { name: '削除' })).toBeDisabled()
   },
 }
 

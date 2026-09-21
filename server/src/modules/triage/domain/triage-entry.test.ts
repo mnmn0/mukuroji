@@ -277,7 +277,7 @@ describe('triage entry state machine', () => {
         reasonCode: 'permission-lost',
         checkedAt: '2026-08-09T00:06:00.000Z',
       },
-    })
+    }, NOW)
     expect(deniedProjection.events).toEqual([])
     expect(JSON.stringify(deniedProjection)).not.toContain(reason.trim())
     expect(() => applyTriageAction(createEntry(), {
@@ -457,7 +457,7 @@ describe('triage entry state machine', () => {
         guestVisible: false,
         checkedAt: NOW,
       },
-    }))
+    }), NOW)
     expect(metadata.sourcePreview).toMatchObject({ title: 'Unable to sign in', body: '' })
     expect(metadata.sourcePreview.permalink).toBeUndefined()
     expect(metadata.requester).toEqual({ displayName: 'Requester', guest: false })
@@ -470,7 +470,7 @@ describe('triage entry state machine', () => {
         reasonCode: 'permission-lost',
         checkedAt: NOW,
       },
-    }))
+    }), NOW)
     expect(denied.sourcePreview).toMatchObject({
       title: 'Restricted source',
       body: '',
@@ -487,7 +487,7 @@ describe('triage entry state machine', () => {
         ...createEntry().sourcePreview,
         permalink: 'javascript:alert(1)',
       },
-    }))
+    }), NOW)
     expect(malformedPermalink.sourcePreview.permalink).toBeUndefined()
 
     const expired = projectTriageEntryForResponse(createEntry({

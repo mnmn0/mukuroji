@@ -27,8 +27,8 @@ export type TaskHeaderProps = {
   onMobileSidebarOpen: () => void
   /** Adds or removes the displayed Project from quick access. */
   onProjectQuickAccessToggle?: () => void
-  /** Selects a task view. */
-  onTabChange: (tab: TaskTab) => void
+  /** Selects a task view and returns false when a local guard rejects it. */
+  onTabChange: (tab: TaskTab) => boolean | void
   /** Project name shown in the breadcrumb and heading. */
   projectName: string
   /** Resolves localized task labels. */
@@ -89,8 +89,10 @@ export function TaskHeader({
     event.preventDefault()
     const nextTab = taskTabs[nextTabIndex]
 
-    onTabChange(nextTab)
-    document.getElementById(createTaskTabId(nextTab))?.focus()
+    const accepted = onTabChange(nextTab)
+    if (accepted !== false) {
+      document.getElementById(createTaskTabId(nextTab))?.focus()
+    }
   }
 
   return (

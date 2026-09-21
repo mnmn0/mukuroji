@@ -119,6 +119,8 @@ export type IssueCollaborationPanelProps = {
   onContextDraftConsumed?: () => void
   /** Receives whether the mounted Brief assistant is performing an AI operation. */
   onAiSummaryOperationPendingChange?: (pending: boolean) => void
+  /** Receives whether a root, reply, or edit composer has unsaved input. */
+  onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Optional outer layout class name. */
   className?: string
 }
@@ -146,6 +148,7 @@ export function IssueCollaborationPanel({
   members,
   onContextDraftConsumed,
   onAiSummaryOperationPendingChange,
+  onCommentDraftDirtyChange,
   readOnlyMessage,
   route,
 }: IssueCollaborationPanelProps) {
@@ -155,9 +158,24 @@ export function IssueCollaborationPanel({
     useState<IssueContextDraft>()
   const [selectedSource, setSelectedSource] = useState<IssueSourceTarget>()
   const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
+  const [hasConversationDraft, setHasConversationDraft] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
   const aiAssistantSessionKey = aiAssistance?.sessionKey
+  const contextController = useMemo(() => {
+    if (!readOnlyMessage) return controller.context
+
+    return {
+      ...controller.context,
+      capabilities: {
+        ...controller.context.capabilities,
+        canAcceptResolution: false,
+        canCreate: false,
+        canEdit: false,
+        canReplace: false,
+      },
+    }
+  }, [controller.context, readOnlyMessage])
   const visibleTabs = aiAssistance
     ? [...issueCollaborationTabs]
     : issueCollaborationTabs.filter((tab) => tab !== 'brief')
@@ -376,7 +394,7 @@ export function IssueCollaborationPanel({
                 ? 'border-[#72c9bf] bg-[#e5f7f4] text-[#116b63]'
                 : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:border-[#99d7cf] hover:text-[var(--workbench-text)]'
             }`}
-            disabled={!controller.capabilities.canWatch}
+            disabled={Boolean(readOnlyMessage) || !controller.capabilities.canWatch}
             onClick={() => void controller.toggleWatch()}
             title={formatWatchTitle(
               controller.watch.subscribed ? controller.watch.reasons : [],
@@ -412,7 +430,7 @@ export function IssueCollaborationPanel({
             aria-pressed={controller.watch.projectSubscribed}
             className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2 disabled:opacity-55"
             data-testid="project-watch-toggle"
-            disabled={!controller.capabilities.canWatch}
+            disabled={Boolean(readOnlyMessage) || !controller.capabilities.canWatch}
             onClick={() => void controller.toggleProjectWatch?.()}
             type="button"
           >
@@ -471,21 +489,27 @@ export function IssueCollaborationPanel({
         id={createCollaborationPanelId(panelIdPrefix)}
         role="tabpanel"
       >
-        {selectedTab === 'conversation' ? (
+        {selectedTab === 'conversation' || hasConversationDraft ? (
+          <div
+            aria-hidden={selectedTab !== 'conversation'}
+            className={selectedTab === 'conversation' ? undefined : 'hidden'}
+          >
           <IssueConversationTab
             artifacts={artifacts}
             canAcceptResolution={
-              controller.context.capabilities.canAcceptResolution
+              !readOnlyMessage && controller.context.capabilities.canAcceptResolution
             }
             controller={controller}
             currentMemberKey={currentMemberKey}
-            focusedCommentId={focusedCommentId}
-            focusedRootCommentId={focusedRootCommentId}
+            focusedCommentId={selectedTab === 'conversation' ? focusedCommentId : undefined}
+            focusedRootCommentId={selectedTab === 'conversation' ? focusedRootCommentId : undefined}
             hasResolutionError={controller.context.hasResolutionMutationError}
             locale={locale}
             members={members}
             onPromoteComment={
-              controller.context.capabilities.canCreate && !isAiSummaryOperationPending
+              !readOnlyMessage &&
+              controller.context.capabilities.canCreate &&
+              !isAiSummaryOperationPending
                 ? promoteCommentSource
                 : undefined
             }
@@ -494,6 +518,8 @@ export function IssueCollaborationPanel({
               sourceComment,
               summary,
             ) => {
+              if (readOnlyMessage) return false
+
               const succeeded =
                 await controller.context.setAcceptedResolution(
                   rootComment.id,
@@ -519,7 +545,12 @@ export function IssueCollaborationPanel({
             resolutionErrorStatus={
               controller.context.resolutionMutationErrorStatus
             }
+            onDraftDirtyChange={(isDirty) => {
+              setHasConversationDraft(isDirty)
+              onCommentDraftDirtyChange?.(isDirty)
+            }}
           />
+          </div>
         ) : null}
         {selectedTab === 'activity' ? (
           <IssueActivityTab
@@ -528,7 +559,9 @@ export function IssueCollaborationPanel({
             locale={locale}
             members={members}
             onPromoteActivity={
-              controller.context.capabilities.canCreate && !isAiSummaryOperationPending
+              !readOnlyMessage &&
+              controller.context.capabilities.canCreate &&
+              !isAiSummaryOperationPending
                 ? promoteActivitySource
                 : undefined
             }
@@ -540,7 +573,9 @@ export function IssueCollaborationPanel({
             className={selectedTab === 'brief' ? 'px-5 py-5' : 'hidden'}
           >
             {aiAssistance.renderBrief(
-              controller.context.capabilities.canCreate && !contextDraft
+              !readOnlyMessage &&
+              controller.context.capabilities.canCreate &&
+              !contextDraft
                 ? handleAiSummaryAdopt
                 : undefined,
               handleAiSummaryOperationPendingChange,
@@ -549,7 +584,7 @@ export function IssueCollaborationPanel({
         ) : null}
         {selectedTab === 'decisions' ? (
           <IssueDecisionsTab
-            controller={controller.context}
+            controller={contextController}
             decisionsTabId={createCollaborationTabId(panelIdPrefix, 'decisions')}
             draft={contextDraft}
             focusedContextItemId={route?.focusedContextItemId}
@@ -579,8 +614,8 @@ export function IssueCollaborationPanel({
         ) : null}
         {selectedTab === 'sources' ? (
           <IssueSourcesTab
-            controller={controller.context}
-              focusedContextItemId={sourceFocus.contextItemId}
+            controller={contextController}
+            focusedContextItemId={sourceFocus.contextItemId}
             focusedSourceId={sourceFocus.sourceId}
             focusedSourceKind={sourceFocus.kind}
             locale={locale}
