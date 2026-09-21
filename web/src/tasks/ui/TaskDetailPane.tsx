@@ -403,6 +403,7 @@ export function TaskDetailPane({
               ? 'border-red-200 bg-red-50 text-red-700'
               : 'border-[var(--workbench-border-strong)] bg-white text-[var(--workbench-muted)]'
           }`}
+          tabIndex={errorMessage && !isLoading ? -1 : undefined}
           role={errorMessage && !isLoading ? 'alert' : 'status'}
         >
           {statusMessage}
@@ -1249,7 +1250,12 @@ export function TaskDetailPane({
             <p className="workbench-eyebrow text-[var(--workbench-muted)]">
               {t('tasks.detail.title')}
             </p>
-            <h2 className="mt-1.5 text-lg font-semibold leading-6 text-[var(--workbench-text)]">{title}</h2>
+            <h2
+              className="mt-1.5 text-lg font-semibold leading-6 text-[var(--workbench-text)]"
+              tabIndex={-1}
+            >
+              {title}
+            </h2>
             {isLoading ? (
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
             ) : null}
@@ -1404,7 +1410,7 @@ export function TaskDetailPane({
           </p>
         ) : null}
         {errorMessage ? (
-          <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage}</p>
+          <p className="text-sm font-semibold text-red-700" role="alert" tabIndex={-1}>{errorMessage}</p>
         ) : null}
       </div>
       <form
