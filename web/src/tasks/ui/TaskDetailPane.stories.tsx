@@ -533,7 +533,7 @@ export const ExternalTypeRefreshRemovingActivityRetainsCommentDraft: Story = {
 
     await waitFor(() => expect(commentBody()).toHaveValue('外部の種別更新後も保持するコメント'))
     await expect(commentBody()).toHaveAttribute('readonly')
-    await expect(canvas.getByText('コメントは読み取り専用です。')).toBeVisible()
+    await expect(canvas.getByText('この Work Item でコメントを変更する権限がありません。')).toBeVisible()
     await expect(canvas.getByRole('button', { name: /ウォッチ中/u })).toBeDisabled()
     await expect(canvas.getByRole('button', { name: '削除' })).toBeDisabled()
   },
