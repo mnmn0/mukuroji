@@ -453,28 +453,28 @@ function WorkspaceRouteShell({
           className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden"
         >
           {metadata && !metadata.customHeader ? (
-            <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
-              <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
+            <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-5">
+              <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-3">
                 <div className="flex min-w-0 items-start gap-3">
                   <MobileSidebarButton
                     label={t('sidebar.mobileOpen')}
                     onClick={openMobileSidebar}
                   />
                   <div className="min-w-0">
-                    <p className="workbench-eyebrow">
+                    <p className="workbench-eyebrow max-[600px]:hidden">
                       {t(metadata.eyebrowKey)}
                     </p>
-                    <h1 className="workbench-title mt-2 text-page-title">
+                    <h1 className="workbench-title mt-1.5 break-words text-page-title max-[600px]:mt-1">
                       {title}
                     </h1>
-                    <p className="workbench-description mt-2 max-w-[760px]">
+                    <p className="workbench-description mt-2 max-w-[660px] max-[600px]:text-xs">
                       {description}
                     </p>
                   </div>
                 </div>
 
                 <div className="flex flex-none items-center gap-3">
-                  <div className="hidden text-right max-[720px]:sr-only min-[721px]:block">
+                  <div className="hidden text-right min-[1200px]:block">
                     <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                       {t('workspace.user.label')}
                     </p>
@@ -482,11 +482,11 @@ function WorkspaceRouteShell({
                       {workspace.userLabel}
                     </p>
                   </div>
-                  <div className="grid h-10 w-10 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
+                  <div className="grid h-10 w-10 place-items-center max-[600px]:hidden rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
                     {workspace.userInitial}
                   </div>
                   <button
-                    className="workbench-button-secondary min-h-10 px-4"
+                    className="workbench-button-secondary min-h-[44px] px-3"
                     type="button"
                     onClick={workspace.onLogout}
                   >
@@ -505,7 +505,7 @@ function WorkspaceRouteShell({
           >
             <p className="min-w-0 flex-1">{t('projects.quickAccess.loadError')}</p>
             <button
-              className="workbench-button-secondary min-h-10 px-4"
+              className="workbench-button-secondary min-h-[44px] px-3"
               onClick={() => void workspace.onRetryProjectQuickAccess()}
               type="button"
             >
@@ -523,7 +523,7 @@ function WorkspaceRouteShell({
             >
               <p>{commonErrorMessage}</p>
               <button
-                className="workbench-button-secondary min-h-10 px-4"
+                className="workbench-button-secondary min-h-[44px] px-3"
                 onClick={() => void workspace.onRetryCommonData()}
                 type="button"
               >

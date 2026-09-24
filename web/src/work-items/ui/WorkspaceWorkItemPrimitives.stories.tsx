@@ -29,7 +29,7 @@ const meta = {
   decorators: [
     (Story) => (
       <main className="min-h-screen bg-[var(--workbench-page)] p-6 max-[720px]:p-3">
-        <div className="mx-auto max-w-3xl overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-white">
+        <div className="mx-auto max-w-3xl overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
           <Story />
         </div>
       </main>
@@ -49,6 +49,17 @@ type Story = StoryObj<typeof meta>
 
 /** Standard actionable Work Item row with resolved status and assignee labels. */
 export const TaskListRowDefault: Story = {}
+
+/** Long titles remain readable in narrow dashboard and Home columns. */
+export const TaskListRowLongTitle: Story = {
+  args: {
+    task: {
+      ...storyTask,
+      title: '新しいワークスペースのオンボーディングを改善し、チーム全体でリリース前の最終確認を実施する',
+    },
+  },
+  decorators: [(Story) => <div className="max-w-[340px]"><Story /></div>],
+}
 
 /** Work Item row without an open action, rendered in its disabled state. */
 export const TaskListRowDisabled: Story = {
