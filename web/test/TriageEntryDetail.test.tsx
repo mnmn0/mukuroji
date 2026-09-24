@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
@@ -22,6 +22,15 @@ const aiController: AiAssistanceController = {
 }
 
 describe('TriageEntryDetail', () => {
+  beforeEach(() => {
+    // Keep the fixed AI fixtures within their retention window.
+    setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    setSystemTime()
+  })
+
   test('renders source trace and safe action forms for full visibility', () => {
     const entry = triageEntryFixtures[0]
     if (!entry) throw new Error('Expected a triage fixture.')

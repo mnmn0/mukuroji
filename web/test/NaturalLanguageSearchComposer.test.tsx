@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { SearchCustomFieldFilter } from '@mukuroji/contracts'
 import {
@@ -10,6 +10,15 @@ import { isAiSearchPromptCurrent } from '../src/search/model/aiSearchApplication
 import { NaturalLanguageSearchComposerView } from '../src/search/ui/NaturalLanguageSearchComposer'
 
 describe('NaturalLanguageSearchComposerView', () => {
+  beforeEach(() => {
+    // Keep the fixed AI fixtures within their retention window.
+    setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    setSystemTime()
+  })
+
   test('renders generated filters as editable controls before apply', () => {
     const html = renderToStaticMarkup(
       <NaturalLanguageSearchComposerView

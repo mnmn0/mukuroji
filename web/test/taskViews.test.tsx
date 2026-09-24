@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import type {
   PlanningSnapshot,
   WorkItemScheduleChangePreview,
@@ -54,6 +54,15 @@ const personLabels = {
 }
 
 describe('independent task views', () => {
+  beforeEach(() => {
+    // Keep the fixed AI fixtures within their retention window.
+    setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    setSystemTime()
+  })
+
   test('shows Team-qualified affected Project links', () => {
     const schedule = createDefaultDueDateTaskSchedule('2026-08-08')
     const preview = {

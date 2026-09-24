@@ -56,9 +56,10 @@ base `ecd3ffbd`. Use the listed viewport sizes to reproduce the composition.
 - Text contrast: muted text on white 5.08:1, teal on white 5.47:1, sidebar muted text
   7.22:1. Sidebar focus ring against its background: 10.06:1.
 - Existing real-app workspace-session E2E: 7 passed, with local API stubs.
-- Web unit tests: 1118 passed; the same 22 failures reproduce at the base commit.
-  No new failing cases. Existing stale AI/triage copy assertions are outside this
-  presentation change. The Home assertion now verifies the link text independently
+- Web unit tests: 1141 passed. AI review suites pin their clock within the fixed
+  fixtures' retention window; a regression test verifies withholding at the deadline.
+  This fixes 22 date-dependent failures also reproduced at the base commit.
+  The Home assertion now verifies the link text independently
   of its decorative icon while preserving the Next-section deep-link check.
 
 This is a targeted pass over shared presentation and daily work surfaces. It does not

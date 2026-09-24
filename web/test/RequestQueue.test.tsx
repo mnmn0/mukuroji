@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
@@ -32,6 +32,15 @@ const aiController: AiAssistanceController = {
 }
 
 describe('RequestQueue', () => {
+  beforeEach(() => {
+    // Keep the fixed AI fixtures within their retention window.
+    setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    setSystemTime()
+  })
+
   /** Verifies a delayed completion from submission-a cannot clear submission-b's operation fence. */
   test('ignores a delayed completion from the previous submission', () => {
     const pendingFence = updateRequestAiOperationFence(
