@@ -7,7 +7,8 @@ import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-i
 import { DynamoDbDocumentsClient } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import { DynamoDbTriageClient } from '../../modules/triage'
 import { createApprovalNotificationReader } from '../../modules/files/adapter-out/dynamodb/approval-notification-reader'
-import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications, DynamoDbSlackDeliveryStore } from '../../modules/notifications'
+import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications } from '../../modules/notifications'
+import { DynamoDbSlackDeliveryStore } from '../../modules/notifications/adapter-out/dynamodb/slack-delivery-store'
 import { createProductionTenantAvailability } from './tenant-administration'
 
 /**

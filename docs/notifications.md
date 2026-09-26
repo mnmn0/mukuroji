@@ -84,6 +84,8 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 
 通知設定の **Slack** を有効にして保存すると、その後に発生する担当・メンション・返信・期限などの既存通知を、同じ受信者のSlack送信先にも配信します。`channels.slack` を省略した既存API clientと保存済み設定は無効として扱います。Inboxを無効にしてもSlackだけの配信は可能です。有効化時刻をサーバーで保存し、auditの投影が遅れても、それより古いイベントはSlackへ送りません。設定の頻度変更ではこの時刻を保持し、無効化後の再有効化では更新します。送信直前も現在の有効化時刻を確認するため、以前の配信待ち通知が再有効化で復活することはありません。有効化時刻も旧設定の保存時刻も不明な場合は配信せず、設定の再保存で時刻を確定します。
 
+送信直前の最終確認を通過した通知は、その直後にSlackを無効化・再有効化しても届く場合があります。Slackへの外部送信と設定保存は同一transactionにできないため、すでに送信処理に入った通知の取り消しは保証しません。
+
 管理者は受信者ごとに [Slack Incoming Webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) を作成し、そのURLを次のSecrets Manager IDに**プレーンな文字列**で登録します。
 
 ```text
