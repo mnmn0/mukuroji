@@ -103,3 +103,8 @@ export const ErrorState: Story = {
     errorMessage: '別の管理者が設定を更新しました。最新の revision を読み込んでください。',
   },
 }
+
+/** Workflow section headings and actions stack without compressing the copy. */
+export const Mobile: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}

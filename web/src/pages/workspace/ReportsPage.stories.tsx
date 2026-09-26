@@ -98,6 +98,21 @@ type Story = StoryObj<typeof meta>
  */
 export const Overview: Story = {}
 
+/** Phone reports reveal date controls on demand while keeping the report first. */
+export const MobileFilters: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    if (!window.matchMedia('(max-width: 760px)').matches) return
+    const canvas = within(canvasElement)
+    const disclosure = canvas.getByRole('button', { name: /絞り込み・並べ替え/ })
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    await userEvent.click(disclosure)
+    await expect(canvas.getByTestId('analytics-team-filter')).toBeVisible()
+    await userEvent.click(disclosure)
+    await expect(canvas.getByTestId('analytics-team-filter')).not.toBeVisible()
+  },
+}
+
 /**
  * Widget palette と構成 editor を開いた report builder です。
  */

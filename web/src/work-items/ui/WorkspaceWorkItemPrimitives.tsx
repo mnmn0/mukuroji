@@ -59,20 +59,20 @@ export function TaskListRow({
 
   return (
     <button
-      className="grid w-full grid-cols-[1fr_140px_110px_96px] items-center gap-4 p-5 text-left text-sm font-medium transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-transparent max-[900px]:grid-cols-1"
+      className="group flex w-full min-w-0 flex-wrap items-center gap-x-4 gap-y-3 px-5 py-4 text-left text-sm transition-colors hover:bg-[var(--workbench-surface-muted)] focus-visible:-outline-offset-2 disabled:hover:bg-transparent"
       disabled={!canOpenTask}
       onClick={() => onOpenTask?.(task)}
       type="button"
     >
-      <div className="min-w-0">
-        <p className="truncate text-sm font-semibold text-[var(--workbench-text)]">
+      <div className="min-w-0 basis-full">
+        <p className="break-words text-sm font-semibold leading-6 text-[var(--workbench-text)] group-enabled:group-hover:text-[var(--workbench-primary)]">
           {resolveWorkItemTitle(task)}
         </p>
-        <p className="mt-1 text-[var(--workbench-muted)]">{resolveWorkItemAssignee(task)}</p>
+        <p className="mt-1 truncate text-xs text-[var(--workbench-muted)]">{resolveWorkItemAssignee(task)}</p>
       </div>
       <StatusPill configuration={configuration} task={task} />
-      <span className="text-[var(--workbench-muted)]">{task.dueDate}</span>
-      <span className="workbench-badge justify-self-end max-[900px]:justify-self-start">
+      <span className="text-xs text-[var(--workbench-muted)] tabular-nums">{task.dueDate}</span>
+      <span className="ml-auto text-xs font-medium text-[var(--workbench-primary)]">
         {t('workspace.action.openTask')}
       </span>
     </button>

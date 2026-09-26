@@ -537,7 +537,7 @@ export function WorkspaceAccessPanel({
         />
       </div>
 
-      <div className="grid gap-6 p-5">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-6 p-5">
         {!hasManagementCapability ? (
           <p className="rounded-lg border border-[#99d7cf] bg-[#e5f7f4] px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary)]">
             {t('workspace.access.readOnly')}
@@ -561,14 +561,13 @@ export function WorkspaceAccessPanel({
 
         {canInvite ? (
           <form
-            className="grid gap-4 rounded-lg border border-[#99d7cf] bg-[#f3fbfa] p-4"
+            className="grid min-w-0 gap-4"
             data-testid="workspace-invite-form"
             onSubmit={handleInvite}
           >
             <div>
               <p className="workbench-eyebrow text-[var(--workbench-primary)]">{t('workspace.access.invite.eyebrow')}</p>
               <h3 className="mt-1 text-base font-semibold text-[var(--workbench-text)]">{t('workspace.access.invite.title')}</h3>
-              <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">{t('workspace.access.invite.description')}</p>
             </div>
             <div className="grid grid-cols-[minmax(220px,1fr)_minmax(180px,0.8fr)_180px_auto] items-end gap-3 max-[960px]:grid-cols-2 max-[620px]:grid-cols-1">
               <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
@@ -698,14 +697,14 @@ function WorkspaceMemberLedger({
   )
 
   return (
-    <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+    <section className="min-w-0 border-t border-[var(--workbench-border)] bg-white">
       <LedgerSectionHeader
         description={t('workspace.access.members.description')}
         title={t('workspace.access.members.title')}
       />
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[860px] border-collapse text-left" data-testid="workspace-member-ledger">
-          <thead>
+      <div className="relative overflow-x-auto">
+        <table className="w-full border-collapse text-left min-[761px]:min-w-[860px]" data-testid="workspace-member-ledger">
+          <thead className="max-[760px]:sr-only">
             <tr className="workbench-table-head">
               <th className="px-4 py-3" scope="col">{t('workspace.access.column.member')}</th>
               <th className="px-4 py-3" scope="col">{t('workspace.access.statusLabel')}</th>
@@ -733,33 +732,33 @@ function WorkspaceMemberLedger({
 
               return (
                 <tr
-                  className="border-t border-[var(--workbench-border)] align-middle"
+                  className="border-t border-[var(--workbench-border)] align-middle max-[760px]:grid max-[760px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] max-[760px]:items-center max-[760px]:py-3"
                   data-testid={`workspace-member-${createAccessTestId(member.memberKey)}`}
                   key={member.id}
                 >
-                  <td className="px-4 py-4">
-                    <div className="min-w-[240px]">
+                  <td className="px-4 py-4 max-[760px]:col-span-2 max-[760px]:py-2">
+                    <div className="min-w-0 min-[761px]:min-w-[240px]">
                       <div className="flex flex-wrap items-center gap-2">
-                        <p className="font-semibold text-[var(--workbench-text)]">{member.name?.trim() || member.email}</p>
+                        <p className="break-all font-semibold text-[var(--workbench-text)]">{member.name?.trim() || member.email}</p>
                         {isCurrentMember ? (
                           <span className="workbench-badge-primary">{t('workspace.access.members.you')}</span>
                         ) : null}
                       </div>
-                      <p className="mt-1 text-sm font-medium text-[var(--workbench-muted)]">{member.email}</p>
+                      <p className="mt-1 break-all text-sm text-[var(--workbench-muted)]">{member.email}</p>
                       <p className="mt-1 text-xs font-medium text-[var(--workbench-muted-soft)]">
                         {t('workspace.access.updatedAt').replace('{date}', formatAccessDate(member.updatedAt, locale))}
                       </p>
                     </div>
                   </td>
-                  <td className="px-4 py-4">
+                  <td className="px-4 py-4 max-[760px]:py-2">
                     <AccessStatusBadge
                       label={t(`workspace.access.memberStatus.${member.status}`)}
                       tone={member.status === 'active' ? 'success' : 'neutral'}
                     />
                   </td>
-                  <td className="px-4 py-4">
-                    <label className="grid min-w-[150px] gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-                      <span className="sr-only">{`${member.email} ${t('workspace.access.roleLabel')}`}</span>
+                  <td className="px-4 py-4 max-[760px]:py-2">
+                    <label className="relative grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--workbench-muted)] min-[761px]:min-w-[150px]">
+                      <span className="min-[761px]:sr-only">{t('workspace.access.roleLabel')}</span>
                       <select
                         aria-label={`${member.email} ${t('workspace.access.roleLabel')}`}
                         className="workbench-input min-h-10 px-3 text-sm"
@@ -786,7 +785,7 @@ function WorkspaceMemberLedger({
                       </select>
                     </label>
                   </td>
-                  <td className="px-4 py-4 text-right">
+                  <td className="px-4 py-4 text-right max-[760px]:col-span-2 max-[760px]:py-2">
                     <button
                       className={member.status === 'active'
                         ? 'min-h-10 rounded-md border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:text-slate-400'
@@ -832,7 +831,7 @@ function WorkspaceInvitationLedger({
   onRequestAction: (action: WorkspaceAccessAction) => void
 }) {
   return (
-    <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+    <section className="min-w-0 border-t border-[var(--workbench-border)] bg-white">
       <LedgerSectionHeader
         description={t('workspace.access.invitations.description')}
         title={t('workspace.access.invitations.title')}

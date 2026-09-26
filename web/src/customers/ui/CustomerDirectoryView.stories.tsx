@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import type { Customer, CustomerDetail } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { CustomerDirectoryView } from './CustomerDirectoryView'
@@ -83,7 +84,7 @@ const meta = {
   title: 'Customers/CustomerDirectoryView',
   component: CustomerDirectoryView,
   parameters: { layout: 'fullscreen' },
-  decorators: [(Story) => <div className="min-h-screen bg-[var(--workbench-bg)] p-6"><Story /></div>],
+  decorators: [(Story) => <div className="workbench-shell min-h-screen"><Story /></div>],
   args: {
     canManageCustomerViews: true,
     canViewSensitiveData: true,
@@ -121,6 +122,21 @@ type Story = StoryObj<typeof meta>
 
 /** Customer directory with contacts, source Requests, and a linked Work Item. */
 export const Default: Story = {}
+
+/** Phone customer results precede secondary filters and saved-view controls. */
+export const MobileFilters: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    if (!window.matchMedia('(max-width: 760px)').matches) return
+    const canvas = within(canvasElement)
+    const disclosure = canvas.getByRole('button', { name: /Filters and sorting/ })
+    await expect(canvas.queryByRole('combobox')).not.toBeInTheDocument()
+    await userEvent.click(disclosure)
+    await expect(canvas.getByRole('combobox', { name: 'Tier filter' })).toBeVisible()
+    await userEvent.click(disclosure)
+    await expect(canvas.getByRole('heading', { name: 'Customers' })).toBeVisible()
+  },
+}
 
 /** Empty state after a search returned no matching Customers. */
 export const Empty: Story = {

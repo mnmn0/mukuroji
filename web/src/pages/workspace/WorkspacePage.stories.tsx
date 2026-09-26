@@ -308,16 +308,58 @@ export default meta
 /** Story definitions for the URL-specific Workspace views. */
 type Story = StoryObj<typeof meta>
 
-/** The `/home` route overview with focus and attention queues. */
+/** The `/home` route overview in the complete responsive application shell. */
 export const HomeRoute: Story = {
   render: () => (
-    <HomeWorkspaceView
-      focusQueue={focusQueueResponseFixture}
-      summary={storySummary}
-      t={t}
-      teams={projectDirectoryFixtures}
-      workItemConfigurationsByTeam={storyWorkItemConfigurations}
-    />
+    <WorkspaceRouteStoryHarness context={storyWorkspaceRouteContext} path="/home">
+      <WorkspaceRouteContent>
+        <div className="px-[clamp(20px,3vw,34px)] py-5">
+          <HomeWorkspaceView
+            focusQueue={focusQueueResponseFixture}
+            onOpenTask={onOpenMyTaskAction}
+            summary={storySummary}
+            t={t}
+            teams={projectDirectoryFixtures}
+            workItemConfigurationsByTeam={storyWorkItemConfigurations}
+          />
+        </div>
+      </WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
+  ),
+}
+
+/** English labels and long task titles in the complete Home shell. */
+export const HomeRouteEnglish: Story = {
+  render: () => (
+    <WorkspaceRouteStoryHarness context={{ ...storyWorkspaceRouteContext, locale: 'en' }} path="/home">
+      <WorkspaceRouteContent>
+        <div className="px-[clamp(20px,3vw,34px)] py-5">
+          <HomeWorkspaceView
+            focusQueue={focusQueueResponseFixture}
+            onOpenTask={onOpenMyTaskAction}
+            summary={storySummary}
+            t={englishTranslator}
+            teams={projectDirectoryFixtures}
+            workItemConfigurationsByTeam={storyWorkItemConfigurations}
+          />
+        </div>
+      </WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
+  ),
+}
+
+/** Phone-sized Home shell with the shared accessible navigation drawer. */
+export const HomeRouteMobile: Story = {
+  ...HomeRoute,
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
+/** Initial loading state retains the compact header and navigation. */
+export const HomeRouteLoading: Story = {
+  render: () => (
+    <WorkspaceRouteStoryHarness context={storyWorkspaceRouteContext} path="/home">
+      <WorkspaceRouteContent isLoading><span /></WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
   ),
 }
 
@@ -350,14 +392,21 @@ export const HomeRouteEmptyFocusWithOpenTasks: Story = {
 /** The `/my-tasks` route with Team-scoped workflow columns. */
 export const MyTasksRoute: Story = {
   render: () => (
-    <MyTasksWorkspaceView
-      configurationFailedTeamIds={[]}
-      configurationsByTeam={storyWorkItemConfigurations}
-      onMoveTaskStatus={async () => undefined}
-      t={t}
-      tasks={storyTasks}
-      teams={projectDirectoryFixtures}
-    />
+    <WorkspaceRouteStoryHarness context={storyWorkspaceRouteContext} path="/my-tasks">
+      <WorkspaceRouteContent>
+        <div className="px-[clamp(20px,3vw,34px)] py-5">
+          <MyTasksWorkspaceView
+            configurationFailedTeamIds={[]}
+            configurationsByTeam={storyWorkItemConfigurations}
+            onMoveTaskStatus={async () => undefined}
+            onOpenTask={onOpenMyTaskAction}
+            t={t}
+            tasks={storyTasks}
+            teams={projectDirectoryFixtures}
+          />
+        </div>
+      </WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
   ),
 }
 

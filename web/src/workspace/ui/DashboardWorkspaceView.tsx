@@ -157,7 +157,7 @@ export function DashboardWorkspaceView({
 
   return (
     <div className="grid gap-6">
-      <div className="grid grid-cols-5 gap-4 max-[1320px]:grid-cols-3 max-[900px]:grid-cols-2 max-[680px]:grid-cols-1">
+      <div className="grid grid-cols-2 gap-3 min-[901px]:grid-cols-3 min-[1321px]:grid-cols-5 max-[900px]:[&>:last-child]:col-span-2">
         <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="teal" />
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
         <MetricCard

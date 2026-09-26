@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import type {
   PlanningUpdateTargetSummary,
   ProjectQuickAccessItem,
@@ -102,6 +103,21 @@ type Story = StoryObj<typeof meta>
 
 /** Searchable Project directory with representative Workspace data. */
 export const Default: Story = {}
+
+/** Phone users can reach every directory filter without pushing results offscreen. */
+export const MobileFilters: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    if (!window.matchMedia('(max-width: 760px)').matches) return
+    const canvas = within(canvasElement)
+    const disclosure = canvas.getByRole('button', { name: /絞り込み・並べ替え/ })
+    await expect(canvas.queryByRole('combobox')).not.toBeInTheDocument()
+    await userEvent.click(disclosure)
+    await expect(canvas.getAllByRole('combobox')).toHaveLength(3)
+    await userEvent.click(disclosure)
+    await expect(disclosure).toHaveFocus()
+  },
+}
 
 /** English Project directory with the attention facet selected. */
 export const EnglishAttention: Story = {

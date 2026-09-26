@@ -436,7 +436,7 @@ export function BulkOperationToolbar({
         {(['edit', 'move', 'assign', 'archive'] as const).map((candidate) => (
           <button
             aria-pressed={action === candidate}
-            className={`h-9 rounded-md border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
+            className={`min-h-9 max-[720px]:min-h-11 rounded-md border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${selectedItems.length === 0 ? 'max-[760px]:hidden' : ''} ${
               action === candidate
                 ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] text-[var(--workbench-primary)]'
                 : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-text)] hover:border-[var(--workbench-primary)]'
@@ -458,7 +458,7 @@ export function BulkOperationToolbar({
           {t('bulk.readOnly')}
         </p>
       ) : selectedItems.length === 0 ? (
-        <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('bulk.noSelection')}</p>
+        <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)] max-[760px]:hidden">{t('bulk.noSelection')}</p>
       ) : (
         <div className="mt-3 flex flex-wrap items-end gap-3 border-t border-[var(--workbench-border)] pt-3">
           {action === 'edit' ? (

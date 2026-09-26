@@ -44,6 +44,7 @@ import {
   createWorkItemDependencySummaries,
 } from '../../work-items/model/workItemDependencies'
 import { WorkItemDefinitionFilters } from '../../work-items/ui/WorkItemDefinitionFilters'
+import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
@@ -478,196 +479,203 @@ export function TaskWorkspace({
   return (
     <div className="px-[clamp(18px,2.5vw,30px)] py-4">
       {taskViewToolbar}
-      <div className="workbench-toolbar flex flex-wrap items-center justify-between gap-3 px-3 py-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="relative block">
-            <span className="sr-only">{t('tasks.search')}</span>
-            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5f6874]" />
-            <input
-              aria-label={t('tasks.search')}
-              className="workbench-input h-9 w-[min(250px,calc(100vw-52px))] pl-9 pr-3 placeholder:text-[var(--workbench-muted-soft)]"
-              onChange={(event) => onSearchQueryChange(event.target.value)}
-              placeholder={t('tasks.search')}
-              type="search"
-              value={searchQuery}
-            />
-          </label>
-          <FilterButton
-            icon={<FilterIcon />}
-            label={t('tasks.filter.all')}
-            onClick={() => {
-              setIsStatusMenuOpen(false)
-              setIsAssigneeMenuOpen(false)
-              setIsDueDateMenuOpen(false)
-              setIsPriorityMenuOpen(false)
-              setIsWorkItemTypeMenuOpen(false)
-              setIsSortMenuOpen(false)
-              if (onResetFilters) {
-                onResetFilters()
-              } else {
-                onStatusFilterChange('all')
-                onAssigneeFilterChange('all')
-                onPriorityFilterChange('all')
-                onWorkItemTypeFilterChange('all')
-                onDueDateFilterChange('all')
-                onDefinitionFilterChange({ category: 'all', customFieldId: '' })
-              }
-            }}
+      <div className="workbench-toolbar grid gap-2 px-3 py-2">
+        <label className="relative block">
+          <span className="sr-only">{t('tasks.search')}</span>
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5f6874]" />
+          <input
+            aria-label={t('tasks.search')}
+            className="workbench-input h-9 w-full pl-9 pr-3 placeholder:text-[var(--workbench-muted-soft)] min-[761px]:max-w-sm"
+            onChange={(event) => onSearchQueryChange(event.target.value)}
+            placeholder={t('tasks.search')}
+            type="search"
+            value={searchQuery}
           />
-          <FilterMenu
-            active={statusFilter !== 'all'}
-            buttonId="status-filter-button"
-            icon={<StatusIcon />}
-            isOpen={isStatusMenuOpen}
-            label={t('tasks.filter.status')}
-            menuId="status-filter-menu"
-            onOpenChange={setIsStatusMenuOpen}
-          >
-            {[
-              { key: 'all', label: t('tasks.filter.statusAll') },
-              ...statusColumns,
-            ].map((status) => (
-              <MenuOption
-                checked={statusFilter === status.key}
-                key={status.key}
-                label={status.label}
-                onClick={() => {
-                  onStatusFilterChange(status.key)
-                  setIsStatusMenuOpen(false)
-                }}
-              />
-            ))}
-          </FilterMenu>
-          <FilterMenu
-            active={assigneeFilter !== 'all'}
-            buttonId="assignee-filter-button"
-            icon={<AssigneeIcon />}
-            isOpen={isAssigneeMenuOpen}
-            label={t('tasks.filter.assignee')}
-            menuClassName="max-h-80 w-64 overflow-auto"
-            menuId="assignee-filter-menu"
-            onOpenChange={setIsAssigneeMenuOpen}
-          >
-            {assigneeFilterOptions.map((option) => (
-              <MenuOption
-                checked={assigneeFilter === option.value}
-                key={option.value}
-                label={option.label}
-                onClick={() => {
-                  onAssigneeFilterChange(option.value)
-                  setIsAssigneeMenuOpen(false)
-                }}
-              />
-            ))}
-          </FilterMenu>
-          <FilterMenu
-            active={dueDateFilter !== 'all'}
-            buttonId="due-date-filter-button"
-            icon={<CalendarIcon />}
-            isOpen={isDueDateMenuOpen}
-            label={t('tasks.filter.dueDate')}
-            menuId="due-date-filter-menu"
-            onOpenChange={setIsDueDateMenuOpen}
-          >
-            {taskDueDateFilters.map((filter) => (
-              <MenuOption
-                checked={dueDateFilter === filter}
-                key={filter}
-                label={t(resolveDueDateFilterLabelKey(filter))}
-                onClick={() => {
-                  onDueDateFilterChange(filter)
-                  setIsDueDateMenuOpen(false)
-                }}
-              />
-            ))}
-          </FilterMenu>
-          <FilterMenu
-            active={priorityFilter !== 'all'}
-            buttonId="priority-filter-button"
-            icon={<FlagIcon />}
-            isOpen={isPriorityMenuOpen}
-            label={t('tasks.filter.priority')}
-            menuId="priority-filter-menu"
-            onOpenChange={setIsPriorityMenuOpen}
-          >
-            {priorityFilterOptions.map((priority) => (
-              <MenuOption
-                checked={priorityFilter === priority}
-                key={priority}
-                label={priority === 'all'
-                  ? t('tasks.filter.priorityAll')
-                  : t(`tasks.priority.${priority}`)}
-                onClick={() => {
-                  onPriorityFilterChange(priority)
-                  setIsPriorityMenuOpen(false)
-                }}
-              />
-            ))}
-          </FilterMenu>
-          <FilterMenu
-            active={workItemTypeFilter !== 'all'}
-            buttonId="work-item-type-filter-button"
-            icon={<FilterIcon />}
-            isOpen={isWorkItemTypeMenuOpen}
-            label={workItemTypeFilterLabel}
-            menuClassName="max-h-80 w-64 overflow-auto"
-            menuId="work-item-type-filter-menu"
-            onOpenChange={setIsWorkItemTypeMenuOpen}
-          >
-            <MenuOption
-              checked={workItemTypeFilter === 'all'}
-              label={t('tasks.filter.workItemTypeAll')}
+        </label>
+        <ResponsiveDisclosure
+          label={t('workspace.filters.title')}
+          summary={t('workspace.filters.active').replace('{count}', String([
+            statusFilter !== 'all', assigneeFilter !== 'all', dueDateFilter !== 'all',
+            priorityFilter !== 'all', workItemTypeFilter !== 'all',
+            definitionFilter.category !== 'all', Boolean(definitionFilter.customFieldId),
+          ].filter(Boolean).length))}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <FilterButton
+              icon={<FilterIcon />}
+              label={t('tasks.filter.all')}
               onClick={() => {
-                onWorkItemTypeFilterChange('all')
+                setIsStatusMenuOpen(false)
+                setIsAssigneeMenuOpen(false)
+                setIsDueDateMenuOpen(false)
+                setIsPriorityMenuOpen(false)
                 setIsWorkItemTypeMenuOpen(false)
+                setIsSortMenuOpen(false)
+                if (onResetFilters) {
+                  onResetFilters()
+                } else {
+                  onStatusFilterChange('all')
+                  onAssigneeFilterChange('all')
+                  onPriorityFilterChange('all')
+                  onWorkItemTypeFilterChange('all')
+                  onDueDateFilterChange('all')
+                  onDefinitionFilterChange({ category: 'all', customFieldId: '' })
+                }
               }}
             />
-            {workItemTypeOptions.map((type) => (
+            <FilterMenu
+              active={statusFilter !== 'all'}
+              buttonId="status-filter-button"
+              icon={<StatusIcon />}
+              isOpen={isStatusMenuOpen}
+              label={t('tasks.filter.status')}
+              menuId="status-filter-menu"
+              onOpenChange={setIsStatusMenuOpen}
+            >
+              {[
+                { key: 'all', label: t('tasks.filter.statusAll') },
+                ...statusColumns,
+              ].map((status) => (
+                <MenuOption
+                  checked={statusFilter === status.key}
+                  key={status.key}
+                  label={status.label}
+                  onClick={() => {
+                    onStatusFilterChange(status.key)
+                    setIsStatusMenuOpen(false)
+                  }}
+                />
+              ))}
+            </FilterMenu>
+            <FilterMenu
+              active={assigneeFilter !== 'all'}
+              buttonId="assignee-filter-button"
+              icon={<AssigneeIcon />}
+              isOpen={isAssigneeMenuOpen}
+              label={t('tasks.filter.assignee')}
+              menuClassName="max-h-80 w-64 overflow-auto"
+              menuId="assignee-filter-menu"
+              onOpenChange={setIsAssigneeMenuOpen}
+            >
+              {assigneeFilterOptions.map((option) => (
+                <MenuOption
+                  checked={assigneeFilter === option.value}
+                  key={option.value}
+                  label={option.label}
+                  onClick={() => {
+                    onAssigneeFilterChange(option.value)
+                    setIsAssigneeMenuOpen(false)
+                  }}
+                />
+              ))}
+            </FilterMenu>
+            <FilterMenu
+              active={dueDateFilter !== 'all'}
+              buttonId="due-date-filter-button"
+              icon={<CalendarIcon />}
+              isOpen={isDueDateMenuOpen}
+              label={t('tasks.filter.dueDate')}
+              menuId="due-date-filter-menu"
+              onOpenChange={setIsDueDateMenuOpen}
+            >
+              {taskDueDateFilters.map((filter) => (
+                <MenuOption
+                  checked={dueDateFilter === filter}
+                  key={filter}
+                  label={t(resolveDueDateFilterLabelKey(filter))}
+                  onClick={() => {
+                    onDueDateFilterChange(filter)
+                    setIsDueDateMenuOpen(false)
+                  }}
+                />
+              ))}
+            </FilterMenu>
+            <FilterMenu
+              active={priorityFilter !== 'all'}
+              buttonId="priority-filter-button"
+              icon={<FlagIcon />}
+              isOpen={isPriorityMenuOpen}
+              label={t('tasks.filter.priority')}
+              menuId="priority-filter-menu"
+              onOpenChange={setIsPriorityMenuOpen}
+            >
+              {priorityFilterOptions.map((priority) => (
+                <MenuOption
+                  checked={priorityFilter === priority}
+                  key={priority}
+                  label={priority === 'all'
+                    ? t('tasks.filter.priorityAll')
+                    : t(`tasks.priority.${priority}`)}
+                  onClick={() => {
+                    onPriorityFilterChange(priority)
+                    setIsPriorityMenuOpen(false)
+                  }}
+                />
+              ))}
+            </FilterMenu>
+            <FilterMenu
+              active={workItemTypeFilter !== 'all'}
+              buttonId="work-item-type-filter-button"
+              icon={<FilterIcon />}
+              isOpen={isWorkItemTypeMenuOpen}
+              label={workItemTypeFilterLabel}
+              menuClassName="max-h-80 w-64 overflow-auto"
+              menuId="work-item-type-filter-menu"
+              onOpenChange={setIsWorkItemTypeMenuOpen}
+            >
               <MenuOption
-                checked={workItemTypeFilter === type.id}
-                key={type.id}
-                label={type.name}
+                checked={workItemTypeFilter === 'all'}
+                label={t('tasks.filter.workItemTypeAll')}
                 onClick={() => {
-                  onWorkItemTypeFilterChange(type.id)
+                  onWorkItemTypeFilterChange('all')
                   setIsWorkItemTypeMenuOpen(false)
                 }}
               />
-            ))}
-          </FilterMenu>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <FilterMenu
-            align="right"
-            buttonId="task-sort-button"
-            icon={<CalendarIcon />}
-            isOpen={isSortMenuOpen}
-            label={t(resolveTaskSortOrderLabelKey(sortOrder))}
-            menuId="task-sort-menu"
-            onOpenChange={setIsSortMenuOpen}
-          >
-            {taskSortOrders.map((order) => (
-              <MenuOption
-                checked={sortOrder === order}
-                key={order}
-                label={t(resolveTaskSortOrderLabelKey(order))}
-                onClick={() => {
-                  onSortOrderChange(order)
-                  setIsSortMenuOpen(false)
-                }}
-              />
-            ))}
-          </FilterMenu>
-        </div>
-      </div>
-      <div className="workbench-toolbar mt-3 px-3 py-2">
-        <WorkItemDefinitionFilters
-          configuration={configuration}
-          idPrefix="project-tasks"
-          locale={locale}
-          onChange={onDefinitionFilterChange}
-          personOptions={personOptions}
-          value={definitionFilter}
-        />
+              {workItemTypeOptions.map((type) => (
+                <MenuOption
+                  checked={workItemTypeFilter === type.id}
+                  key={type.id}
+                  label={type.name}
+                  onClick={() => {
+                    onWorkItemTypeFilterChange(type.id)
+                    setIsWorkItemTypeMenuOpen(false)
+                  }}
+                />
+              ))}
+            </FilterMenu>
+            <FilterMenu
+              align="right"
+              buttonId="task-sort-button"
+              icon={<CalendarIcon />}
+              isOpen={isSortMenuOpen}
+              label={t(resolveTaskSortOrderLabelKey(sortOrder))}
+              menuId="task-sort-menu"
+              onOpenChange={setIsSortMenuOpen}
+            >
+              {taskSortOrders.map((order) => (
+                <MenuOption
+                  checked={sortOrder === order}
+                  key={order}
+                  label={t(resolveTaskSortOrderLabelKey(order))}
+                  onClick={() => {
+                    onSortOrderChange(order)
+                    setIsSortMenuOpen(false)
+                  }}
+                />
+              ))}
+            </FilterMenu>
+          </div>
+          <div className="mt-3 border-t border-[var(--workbench-border)] pt-3">
+            <WorkItemDefinitionFilters
+              configuration={configuration}
+              idPrefix="project-tasks"
+              locale={locale}
+              onChange={onDefinitionFilterChange}
+              personOptions={personOptions}
+              value={definitionFilter}
+            />
+          </div>
+        </ResponsiveDisclosure>
       </div>
 
       {taskErrorMessage && activeTab !== 'table' ? (

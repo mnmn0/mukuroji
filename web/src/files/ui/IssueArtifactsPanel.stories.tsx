@@ -14,7 +14,7 @@ const meta = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div className="workbench-shell w-[440px] max-w-[100vw] overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-white shadow-sm">
+      <div className="workbench-shell w-[440px] max-w-[calc(100vw-32px)] overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
         <Story />
       </div>
     ),
@@ -106,7 +106,7 @@ export const Expanded: Story = {
   },
   decorators: [
     (Story) => (
-      <div className="workbench-shell w-[980px] max-w-[100vw] bg-[var(--workbench-canvas)] p-5">
+      <div className="workbench-shell w-[980px] max-w-[calc(100vw-32px)] bg-[var(--workbench-canvas)] p-5">
         <Story />
       </div>
     ),

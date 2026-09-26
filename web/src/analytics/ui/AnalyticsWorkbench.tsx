@@ -1,3 +1,4 @@
+import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
 import type {
   AnalyticsCustomFieldFilter,
   AnalyticsDateRange,
@@ -735,8 +736,8 @@ function AnalyticsEmptyState({
   return (
     <div className="grid min-h-[calc(100svh-1px)] place-items-center bg-[var(--workbench-canvas)] px-6 py-16">
       <section className="workbench-panel w-full max-w-[760px] overflow-hidden text-center">
-        <div className="border-b border-[var(--workbench-border)] bg-gradient-to-br from-[#e5f7f4] via-white to-amber-50 px-8 py-12">
-          <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-[#99d7cf] bg-white text-2xl text-[var(--workbench-primary)]" aria-hidden="true">
+        <div className="border-b border-[var(--workbench-border)] bg-white px-6 py-10">
+          <span className="mx-auto grid h-12 w-12 place-items-center rounded-lg bg-[var(--workbench-surface-muted)] text-2xl text-[var(--workbench-primary)]" aria-hidden="true">
             ↗
           </span>
           <p className="workbench-eyebrow mt-6">{t('analytics.empty.eyebrow')}</p>
@@ -860,199 +861,204 @@ function AnalyticsFilterToolbar({
   )
 
   return (
-    <section className="sticky top-0 z-20 border-b border-[var(--workbench-border)] bg-white/95 px-[clamp(20px,3vw,34px)] py-3 shadow-[0_5px_18px_rgba(23,32,29,0.06)] backdrop-blur" data-testid="analytics-filter-toolbar">
-      <div className="grid grid-cols-[repeat(2,minmax(150px,1fr))_repeat(4,minmax(140px,1fr))] items-start gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-1">
-        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('analytics.filter.from')}
-          <input
-            className="workbench-input min-h-10 px-3"
-            type="date"
-            value={formatAnalyticsCalendarDate(filter.period.from, timeZone)}
-            onChange={(event) => {
-              if (!event.target.value) return
-              onFilterChange?.({
-                ...filter,
-                period: {
-                  ...filter.period,
-                  from: analyticsCalendarDateBoundaryToInstant(
-                    event.target.value,
-                    timeZone,
-                    'start',
-                  ),
-                },
-              })
-            }}
-          />
-        </label>
-        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('analytics.filter.to')}
-          <input
-            className="workbench-input min-h-10 px-3"
-            type="date"
-            value={formatAnalyticsCalendarDate(filter.period.to, timeZone)}
-            onChange={(event) => {
-              if (!event.target.value) return
-              onFilterChange?.({
-                ...filter,
-                period: {
-                  ...filter.period,
-                  to: analyticsCalendarDateBoundaryToInstant(
-                    event.target.value,
-                    timeZone,
-                    'end',
-                  ),
-                },
-              })
-            }}
-          />
-        </label>
-        <AnalyticsMultiSelectFilter
-          allLabel={t('analytics.filter.allTeams')}
-          label={t('analytics.filter.team')}
-          noneLabel={t('analytics.filter.noTeams')}
-          options={teamOptions}
-          selectedValues={filter.teamIds}
-          testId="analytics-team-filter"
-          onChange={(teamIds) => onFilterChange?.({ ...filter, teamIds })}
-        />
-        <AnalyticsMultiSelectFilter
-          allLabel={t('analytics.filter.allProjects')}
-          label={t('analytics.filter.project')}
-          noneLabel={t('analytics.filter.noProjects')}
-          options={projectOptions}
-          selectedValues={filter.projectIds}
-          testId="analytics-project-filter"
-          onChange={(projectIds) => onFilterChange?.({ ...filter, projectIds })}
-        />
-        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-          {t('analytics.filter.assignee')}
-          <input
-            className="workbench-input min-h-10 px-3"
-            placeholder={t('analytics.filter.assigneePlaceholder')}
-            value={assigneeDraft.value}
-            onBlur={assigneeDraft.flush}
-            onChange={(event) => assigneeDraft.update(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault()
-                assigneeDraft.flush()
-              }
-            }}
-          />
-        </label>
-        <AnalyticsMultiSelectFilter
-          allLabel={t('analytics.filter.allStatuses')}
-          label={t('analytics.filter.status')}
-          noneLabel={t('analytics.filter.noStatuses')}
-          options={statusOptions}
-          selectedValues={filter.statusCategories}
-          testId="analytics-status-filter"
-          onChange={(statusCategories) =>
-            onFilterChange?.({ ...filter, statusCategories })}
-        />
-        <AnalyticsMultiSelectFilter
-          allLabel={t('analytics.filter.allWorkItemTypes')}
-          label={t('analytics.filter.workItemType')}
-          noneLabel={t('analytics.filter.noWorkItemTypes')}
-          options={workItemTypeOptions}
-          selectedValues={filter.workItemTypeIds}
-          testId="analytics-work-item-type-filter"
-          onChange={(workItemTypeIds) =>
-            onFilterChange?.({ ...filter, workItemTypeIds })}
-        />
-      </div>
-      <details className="mt-3">
-        <summary className="w-fit cursor-pointer text-xs font-semibold text-[var(--workbench-primary)]">
-          {t('analytics.filter.advanced')}
-        </summary>
-        <div className="mt-3 grid grid-cols-[repeat(4,minmax(170px,1fr))_auto] items-end gap-3 max-[1180px]:grid-cols-2 max-[760px]:grid-cols-1">
-          <div className="col-span-full">
-            <AnalyticsCustomFieldFilters
-              filters={filter.customFields}
-              t={t}
-              onChange={(customFields) => onFilterChange?.({
-                ...filter,
-                customFields,
-              })}
-            />
-          </div>
+    <section className="relative z-20 border-b border-[var(--workbench-border)] bg-white px-[clamp(20px,3vw,34px)] py-3" data-testid="analytics-filter-toolbar">
+      <ResponsiveDisclosure
+        label={t('workspace.filters.title')}
+        summary={`${formatAnalyticsCalendarDate(filter.period.from, timeZone)} – ${formatAnalyticsCalendarDate(filter.period.to, timeZone)}`}
+      >
+        <div className="grid grid-cols-[repeat(2,minmax(150px,1fr))_repeat(4,minmax(140px,1fr))] items-start gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-1">
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('analytics.filter.baselineFrom')}
+            {t('analytics.filter.from')}
             <input
               className="workbench-input min-h-10 px-3"
               type="date"
-              value={forecastBaseline
-                ? formatAnalyticsCalendarDate(forecastBaseline.from, timeZone)
-                : ''}
+              value={formatAnalyticsCalendarDate(filter.period.from, timeZone)}
               onChange={(event) => {
-                if (!event.target.value) {
-                  onForecastBaselineChange?.(undefined)
-                  return
-                }
-                onForecastBaselineChange?.({
-                  from: analyticsCalendarDateBoundaryToInstant(
-                    event.target.value,
-                    timeZone,
-                    'start',
-                  ),
-                  to: forecastBaseline?.to ?? filter.period.to,
+                if (!event.target.value) return
+                onFilterChange?.({
+                  ...filter,
+                  period: {
+                    ...filter.period,
+                    from: analyticsCalendarDateBoundaryToInstant(
+                      event.target.value,
+                      timeZone,
+                      'start',
+                    ),
+                  },
                 })
               }}
             />
           </label>
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('analytics.filter.baselineTo')}
+            {t('analytics.filter.to')}
             <input
               className="workbench-input min-h-10 px-3"
               type="date"
-              value={forecastBaseline
-                ? formatAnalyticsCalendarDate(forecastBaseline.to, timeZone)
-                : ''}
+              value={formatAnalyticsCalendarDate(filter.period.to, timeZone)}
               onChange={(event) => {
-                if (!event.target.value) {
-                  onForecastBaselineChange?.(undefined)
-                  return
-                }
-                onForecastBaselineChange?.({
-                  from: forecastBaseline?.from ?? filter.period.from,
-                  to: analyticsCalendarDateBoundaryToInstant(
-                    event.target.value,
-                    timeZone,
-                    'end',
-                  ),
+                if (!event.target.value) return
+                onFilterChange?.({
+                  ...filter,
+                  period: {
+                    ...filter.period,
+                    to: analyticsCalendarDateBoundaryToInstant(
+                      event.target.value,
+                      timeZone,
+                      'end',
+                    ),
+                  },
                 })
               }}
             />
           </label>
+          <AnalyticsMultiSelectFilter
+            allLabel={t('analytics.filter.allTeams')}
+            label={t('analytics.filter.team')}
+            noneLabel={t('analytics.filter.noTeams')}
+            options={teamOptions}
+            selectedValues={filter.teamIds}
+            testId="analytics-team-filter"
+            onChange={(teamIds) => onFilterChange?.({ ...filter, teamIds })}
+          />
+          <AnalyticsMultiSelectFilter
+            allLabel={t('analytics.filter.allProjects')}
+            label={t('analytics.filter.project')}
+            noneLabel={t('analytics.filter.noProjects')}
+            options={projectOptions}
+            selectedValues={filter.projectIds}
+            testId="analytics-project-filter"
+            onChange={(projectIds) => onFilterChange?.({ ...filter, projectIds })}
+          />
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('analytics.filter.timeZone')}
+            {t('analytics.filter.assignee')}
             <input
               className="workbench-input min-h-10 px-3"
-              value={timeZoneDraft.value}
-              onBlur={timeZoneDraft.flush}
-              onChange={(event) => timeZoneDraft.update(event.target.value)}
+              placeholder={t('analytics.filter.assigneePlaceholder')}
+              value={assigneeDraft.value}
+              onBlur={assigneeDraft.flush}
+              onChange={(event) => assigneeDraft.update(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Enter') {
                   event.preventDefault()
-                  timeZoneDraft.flush()
+                  assigneeDraft.flush()
                 }
               }}
             />
           </label>
-          <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]">
-            <input
-              checked={filter.includeArchived ?? false}
-              className="h-4 w-4 accent-[var(--workbench-primary)]"
-              type="checkbox"
-              onChange={(event) => onFilterChange?.({
-                ...filter,
-                includeArchived: event.target.checked,
-              })}
-            />
-            {t('analytics.filter.includeArchived')}
-          </label>
+          <AnalyticsMultiSelectFilter
+            allLabel={t('analytics.filter.allStatuses')}
+            label={t('analytics.filter.status')}
+            noneLabel={t('analytics.filter.noStatuses')}
+            options={statusOptions}
+            selectedValues={filter.statusCategories}
+            testId="analytics-status-filter"
+            onChange={(statusCategories) =>
+              onFilterChange?.({ ...filter, statusCategories })}
+          />
+          <AnalyticsMultiSelectFilter
+            allLabel={t('analytics.filter.allWorkItemTypes')}
+            label={t('analytics.filter.workItemType')}
+            noneLabel={t('analytics.filter.noWorkItemTypes')}
+            options={workItemTypeOptions}
+            selectedValues={filter.workItemTypeIds}
+            testId="analytics-work-item-type-filter"
+            onChange={(workItemTypeIds) =>
+              onFilterChange?.({ ...filter, workItemTypeIds })}
+          />
         </div>
-      </details>
+        <details className="mt-3">
+          <summary className="w-fit cursor-pointer text-xs font-semibold text-[var(--workbench-primary)]">
+            {t('analytics.filter.advanced')}
+          </summary>
+          <div className="mt-3 grid grid-cols-[repeat(4,minmax(170px,1fr))_auto] items-end gap-3 max-[1180px]:grid-cols-2 max-[760px]:grid-cols-1">
+            <div className="col-span-full">
+              <AnalyticsCustomFieldFilters
+                filters={filter.customFields}
+                t={t}
+                onChange={(customFields) => onFilterChange?.({
+                  ...filter,
+                  customFields,
+                })}
+              />
+            </div>
+            <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('analytics.filter.baselineFrom')}
+              <input
+                className="workbench-input min-h-10 px-3"
+                type="date"
+                value={forecastBaseline
+                  ? formatAnalyticsCalendarDate(forecastBaseline.from, timeZone)
+                  : ''}
+                onChange={(event) => {
+                  if (!event.target.value) {
+                    onForecastBaselineChange?.(undefined)
+                    return
+                  }
+                  onForecastBaselineChange?.({
+                    from: analyticsCalendarDateBoundaryToInstant(
+                      event.target.value,
+                      timeZone,
+                      'start',
+                    ),
+                    to: forecastBaseline?.to ?? filter.period.to,
+                  })
+                }}
+              />
+            </label>
+            <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('analytics.filter.baselineTo')}
+              <input
+                className="workbench-input min-h-10 px-3"
+                type="date"
+                value={forecastBaseline
+                  ? formatAnalyticsCalendarDate(forecastBaseline.to, timeZone)
+                  : ''}
+                onChange={(event) => {
+                  if (!event.target.value) {
+                    onForecastBaselineChange?.(undefined)
+                    return
+                  }
+                  onForecastBaselineChange?.({
+                    from: forecastBaseline?.from ?? filter.period.from,
+                    to: analyticsCalendarDateBoundaryToInstant(
+                      event.target.value,
+                      timeZone,
+                      'end',
+                    ),
+                  })
+                }}
+              />
+            </label>
+            <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('analytics.filter.timeZone')}
+              <input
+                className="workbench-input min-h-10 px-3"
+                value={timeZoneDraft.value}
+                onBlur={timeZoneDraft.flush}
+                onChange={(event) => timeZoneDraft.update(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    timeZoneDraft.flush()
+                  }
+                }}
+              />
+            </label>
+            <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]">
+              <input
+                checked={filter.includeArchived ?? false}
+                className="h-4 w-4 accent-[var(--workbench-primary)]"
+                type="checkbox"
+                onChange={(event) => onFilterChange?.({
+                  ...filter,
+                  includeArchived: event.target.checked,
+                })}
+              />
+              {t('analytics.filter.includeArchived')}
+            </label>
+          </div>
+        </details>
+      </ResponsiveDisclosure>
     </section>
   )
 }

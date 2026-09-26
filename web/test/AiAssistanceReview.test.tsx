@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import {
@@ -11,6 +11,15 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 const t = createTranslator('en')
 
 describe('AiAssistanceReview', () => {
+  beforeEach(() => {
+    // Keep the fixed AI fixtures within their retention window.
+    setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    setSystemTime()
+  })
+
   test('keeps evidence, uncertainty, and review actions adjacent to an available draft', () => {
     const html = renderToStaticMarkup(
       <AiAssistanceReview
@@ -30,6 +39,30 @@ describe('AiAssistanceReview', () => {
     expect(html).toContain('Adopt draft')
     expect(html).toContain('Reject draft')
     expect(html).toContain('Generation details')
+  })
+
+  /** Withholds retained content and adoption exactly when its retention window ends. */
+  test('hides the draft and adoption at its retention deadline', () => {
+    setSystemTime(new Date(aiSummaryGenerationFixture.expiresAt))
+    let renderedDraft = false
+    const html = renderToStaticMarkup(
+      <AiAssistanceReview
+        generation={aiSummaryGenerationFixture}
+        locale="en"
+        onAdopt={() => undefined}
+        renderDraft={() => {
+          renderedDraft = true
+          return 'EXPIRED GENERATED TEXT'
+        }}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('This draft is unavailable because its retention period ended.')
+    expect(renderedDraft).toBe(false)
+    expect(html).not.toContain('EXPIRED GENERATED TEXT')
+    expect(html).not.toContain('Launch readiness notes')
+    expect(html).not.toContain('Adopt draft')
   })
 
   test('uses instance-unique heading identifiers when multiple assistants share a page', () => {

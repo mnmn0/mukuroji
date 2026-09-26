@@ -47,3 +47,9 @@ export const Default: Story = {
     teamId: 'team-1',
   },
 }
+
+/** Date and numeric inputs stay within the phone form width. */
+export const Mobile: Story = {
+  ...Default,
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}

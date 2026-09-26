@@ -140,6 +140,14 @@ export const English: Story = {
   },
 }
 
+/** Counts retain a quiet, readable treatment alongside the active destination. */
+export const UnreadInbox: Story = {
+  args: {
+    activeNavId: 'inbox',
+    inboxCount: 128,
+  },
+}
+
 /** Sidebar with the create modal open. */
 export const CreateModalOpen: Story = {
   args: {

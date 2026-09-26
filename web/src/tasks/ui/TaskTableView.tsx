@@ -912,7 +912,7 @@ function TaskTableRow({
           case 'dueDate': return (
             <td
               {...columnCellProps}
-              className={`${wrapText ? 'break-words' : 'whitespace-nowrap'} ${cellPadding} ${
+              className={`whitespace-normal break-words ${cellPadding} ${
                 resolveWorkflowStatusCategory(task) === 'completed'
                   ? 'text-[#8f99a8] line-through'
                   : overdue ? 'text-red-700' : 'text-[#505967]'

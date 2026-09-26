@@ -35,19 +35,22 @@ export function MetricCard({
   value,
 }: MetricCardProps) {
   const toneClassNames: Record<MetricCardTone, string> = {
-    amber: 'bg-amber-50 text-amber-700 border-amber-200',
-    teal: 'bg-[#e5f7f4] text-[var(--workbench-primary)] border-[#99d7cf]',
-    emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-    red: 'bg-red-50 text-red-700 border-red-200',
+    amber: 'bg-amber-600',
+    teal: 'bg-[var(--workbench-primary)]',
+    emerald: 'bg-emerald-600',
+    red: 'bg-red-600',
   }
 
   return (
     <section
-      className={`rounded-lg border bg-white p-4 shadow-[0_1px_2px_rgba(23,32,29,0.04)] ${toneClassNames[tone]}`}
+      className="min-w-0 rounded-lg border border-[var(--workbench-border)] bg-white p-4 sm:p-5"
       data-testid={testId}
     >
-      <p className="text-xs font-semibold text-[var(--workbench-text)]">{label}</p>
-      <p className="mt-2 text-3xl font-semibold leading-none text-current">
+      <p className="flex items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">
+        <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${toneClassNames[tone]}`} />
+        {label}
+      </p>
+      <p className="mt-3 text-3xl font-semibold leading-none tracking-tight text-[var(--workbench-text)] tabular-nums">
         {srValue ? <span aria-hidden="true">{value}</span> : value}
         {srValue ? <span className="sr-only">{srValue}</span> : null}
       </p>
@@ -149,11 +152,11 @@ export function InfoGrid({ items, t }: InfoGridProps) {
     <div className="grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
       {items.map(([titleKey, descriptionKey]) => (
         <section
-          className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]"
+          className="border-t border-[var(--workbench-border)] py-5"
           key={titleKey}
         >
-          <h2 className="text-lg font-semibold text-[#0d1833]">{t(titleKey)}</h2>
-          <p className="mt-3 text-sm font-bold leading-6 text-[#526381]">
+          <h2 className="text-base font-semibold text-[var(--workbench-text)]">{t(titleKey)}</h2>
+          <p className="mt-2 text-sm leading-6 text-[var(--workbench-muted)]">
             {t(descriptionKey)}
           </p>
         </section>

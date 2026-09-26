@@ -168,6 +168,22 @@ async function mockAuthenticatedSearchPage(page: Page) {
   return { savedViewMutations, searchRequests }
 }
 
+test('Workspace search keeps the search field and results within a narrow phone', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 844 })
+  await mockAuthenticatedSearchPage(page)
+  await page.goto('/search?v=1&q=launch&type=work-item')
+
+  const input = page.getByTestId('workspace-search-input')
+  await expect(input).toHaveValue('launch')
+  await expect(page.getByText('Workspace launch review', { exact: true })).toBeVisible()
+  const bounds = await input.boundingBox()
+  expect(bounds).not.toBeNull()
+  if (!bounds) throw new Error('The search field must be visible.')
+  expect(bounds.x).toBeGreaterThanOrEqual(0)
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(320)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(320)
+})
+
 test('Workspace searchはURL state、highlight、cursor pageを復元する', async ({ page }) => {
   const state = await mockAuthenticatedSearchPage(page)
   await page.goto('/search?v=1&q=launch&type=work-item&status=review&layout=board&group=status&columns=title,status')

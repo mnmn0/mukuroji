@@ -356,8 +356,10 @@ export function MyTasksWorkspaceView({
           return (
             <section
               aria-label={column.label}
-              className={`workbench-panel min-h-[420px] min-w-[260px] transition ${
-                isDropTarget ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40' : ''
+              className={`min-h-[420px] min-w-[260px] rounded-lg border transition-colors ${
+                isDropTarget
+                  ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40'
+                  : 'border-transparent bg-[var(--workbench-surface-muted)]'
               }`}
               data-testid={`my-tasks-column-${createWorkspaceTaskTestToken(column.key)}`}
               key={column.key}

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { AiAssistanceGeneration, AiPlanningDraft } from '@mukuroji/contracts'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
@@ -19,6 +19,15 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 const t = createTranslator('en')
 
 describe('AI workflow integration surfaces', () => {
+  beforeEach(() => {
+    // Keep the fixed AI fixtures within their retention window.
+    setSystemTime(new Date('2026-08-26T00:00:00.000Z'))
+  })
+
+  afterEach(() => {
+    setSystemTime()
+  })
+
   test('keeps a Document source body out of the idle Brief markup', () => {
     const protectedBody = 'DOCUMENT_COMMENT_BODY_NOT_AUTHORIZED_FOR_IDLE_MARKUP'
     const html = renderToStaticMarkup(

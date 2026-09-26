@@ -938,7 +938,7 @@ export function Sidebar({
   return (
     <>
       <aside
-        className={`relative flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[var(--workbench-sidebar)] py-4 text-white shadow-[1px_0_0_rgba(255,255,255,0.08)] transition-[width,padding] duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[292px] max-w-[calc(100vw-32px)] px-4'} ${className}`}
+        className={`relative flex h-dvh max-h-dvh min-h-0 flex-none flex-col overflow-hidden bg-[var(--workbench-sidebar)] [--workbench-focus:#5eead4] py-4 text-white shadow-[1px_0_0_rgba(255,255,255,0.08)] transition-[width,padding] duration-200 min-[981px]:h-svh min-[981px]:max-h-svh ${isCollapsed ? 'w-[76px] px-3' : 'w-[256px] max-w-[calc(100vw-32px)] px-3'} ${className}`}
         aria-label={resolvedLabels.ariaLabel}
         data-collapsed={isCollapsed}
         inert={isCreateModalOpen || isQuickAccessManagerOpen || archiveTarget ? true : undefined}
@@ -951,7 +951,7 @@ export function Sidebar({
           <div className={`flex min-w-0 items-center gap-3 ${isCollapsed ? 'justify-center' : ''}`}>
             <BrandMark />
             <span
-              className={`truncate text-app-brand font-semibold tracking-[0.01em] transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
+              className={`truncate text-xl font-semibold tracking-tight transition-opacity ${isCollapsed ? 'sr-only' : ''}`}
             >
               {workspaceName}
             </span>
@@ -987,7 +987,7 @@ export function Sidebar({
               <span className={isCollapsed ? 'sr-only' : 'truncate'}>{resolvedLabels.search}</span>
             </span>
             {isCollapsed ? null : (
-              <kbd className="rounded border border-white/15 bg-black/10 px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-slate-300">
+              <kbd className="shrink-0 whitespace-nowrap rounded border border-white/15 bg-black/10 px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.04em] text-slate-300">
                 {resolvedLabels.searchShortcut}
               </kbd>
             )}
@@ -1013,7 +1013,7 @@ export function Sidebar({
         <div className="mt-5 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1">
           <section aria-label={resolvedLabels.quickAccess}>
             {!isCollapsed ? (
-              <div className="flex h-8 items-center justify-between px-1 text-app-meta font-semibold uppercase tracking-[0.08em] text-slate-300">
+              <div className="flex h-8 items-center justify-between px-1 text-[11px] font-medium tracking-[0.04em] text-[var(--workbench-sidebar-muted)]">
                 <span className="truncate">{resolvedLabels.quickAccess}</span>
                 <button
                   ref={quickAccessManageButtonRef}
@@ -1061,7 +1061,7 @@ export function Sidebar({
 
           <section aria-label={resolvedLabels.currentTeam} className="mt-5">
             {!isCollapsed ? (
-              <p className="px-1 text-app-meta font-semibold uppercase tracking-[0.08em] text-slate-300">
+              <p className="px-1 text-[11px] font-medium tracking-[0.04em] text-[var(--workbench-sidebar-muted)]">
                 {resolvedLabels.currentTeam}
               </p>
             ) : null}
@@ -1092,7 +1092,7 @@ export function Sidebar({
                 {isTeamSwitcherOpen ? (
                   <div
                     aria-label={resolvedLabels.switchTeam}
-                    className="mt-1 rounded-xl border border-white/10 bg-[#21302c] p-2 shadow-xl"
+                    className="mt-1 rounded-lg border border-white/10 bg-[#21302c] p-2 shadow-xl"
                     onKeyDown={(event) => {
                       if (event.key === 'Escape') {
                         event.preventDefault()
@@ -1203,7 +1203,7 @@ export function Sidebar({
           </button>
           {isMoreOpen ? (
             <div
-              className="mt-1 space-y-1 rounded-xl border border-white/10 bg-[#21302c] p-1.5 shadow-xl"
+              className="mt-1 space-y-1 rounded-lg border border-white/10 bg-[#21302c] p-1.5 shadow-xl"
             >
               {onShowAllProjects ? (
                 <button
@@ -1391,7 +1391,7 @@ function SidebarQuickAccessManagerModal({
         aria-busy={isBusy}
         aria-labelledby={titleId}
         aria-modal="true"
-        className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 text-[var(--workbench-text)] shadow-[0_24px_80px_rgba(15,23,42,0.28)]"
+        className="w-full max-w-lg rounded-lg border border-[var(--workbench-border)] bg-white p-5 text-[var(--workbench-text)] shadow-xl"
         onKeyDown={(event) => {
           if (event.key === 'Escape' && !isBusy) {
             event.preventDefault()
@@ -2145,8 +2145,8 @@ function NavButton({
 
   return (
     <button
-      className={`group relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
-        active ? 'bg-teal-500/20 text-white' : 'text-slate-100'
+      className={`group relative flex min-h-10 max-[980px]:min-h-[44px] w-full items-center gap-3 rounded-md text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
+        active ? 'bg-white/10 text-white' : 'text-slate-200'
       }`}
       type="button"
       aria-label={collapsed ? accessibleLabel : undefined}
@@ -2155,13 +2155,13 @@ function NavButton({
       onClick={() => onSelect(id)}
     >
       {active ? (
-        <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
+        <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-teal-300" aria-hidden="true" />
       ) : null}
       <Icon className="h-5 w-5 flex-none text-slate-100 transition group-hover:text-white" />
       <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{label}</span>
       {badge ? (
         <span
-          className={`grid h-6 min-w-6 place-items-center rounded-full bg-teal-500 px-2 text-app-caption font-bold leading-none text-white shadow-[0_8px_20px_rgba(20,184,166,0.28)] ${collapsed ? 'absolute right-0 top-0 h-5 min-w-5 px-1 text-app-micro' : ''}`}
+          className={`grid h-5 min-w-5 place-items-center rounded bg-white/15 px-1.5 text-app-caption font-semibold leading-none text-white ${collapsed ? 'absolute right-0 top-0 h-5 min-w-5 px-1 text-app-micro' : ''}`}
           aria-label={badgeLabel}
         >
           {badge}
@@ -2259,13 +2259,13 @@ function QuickAccessProjectButton({
     <button
       aria-current={active ? 'page' : undefined}
       aria-label={collapsed ? accessibleLabel : undefined}
-      className={`relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${active ? 'bg-teal-500/20 text-white' : 'text-slate-100'}`}
+      className={`relative flex h-9 w-full items-center gap-3 rounded-lg text-left text-app-body font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${active ? 'bg-white/10 text-white' : 'text-slate-200'}`}
       onClick={() => onSelect(project.projectId, project.teamId)}
       title={collapsed ? accessibleLabel : project.teamName}
       type="button"
     >
       {active ? (
-        <span aria-hidden="true" className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" />
+        <span aria-hidden="true" className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-teal-300" />
       ) : null}
       <ProjectGlyph tone={tone} />
       <span className={collapsed ? 'sr-only' : 'min-w-0 flex-1 truncate'}>{project.name}</span>
@@ -2321,7 +2321,7 @@ function SubNavButton({
     <button
       aria-label={collapsed ? label : undefined}
       className={`relative flex h-8 w-full items-center gap-3 rounded-lg text-left text-app-meta font-medium transition hover:bg-white/10 hover:text-white ${collapsed ? 'justify-center px-0' : 'px-2'} ${
-        active ? 'bg-teal-500/20 text-white' : 'text-slate-100'
+        active ? 'bg-white/10 text-white' : 'text-slate-200'
       }`}
       type="button"
       aria-current={active ? 'page' : undefined}
@@ -2329,9 +2329,9 @@ function SubNavButton({
       onClick={onClick}
     >
       {active ? (
-        <span className="absolute inset-y-1 left-0 w-1 rounded-full bg-teal-400" aria-hidden="true" />
+        <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-teal-300" aria-hidden="true" />
       ) : null}
-      <Icon className="h-[18px] w-[18px] flex-none text-slate-100" />
+      <Icon className="h-[18px] w-[18px] flex-none fill-none stroke-current stroke-2 text-slate-100" />
       <span className={collapsed ? 'sr-only' : 'min-w-0 truncate'}>{label}</span>
     </button>
   )

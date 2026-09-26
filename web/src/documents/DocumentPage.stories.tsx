@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, within } from 'storybook/test'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import {
   documentBacklinkFixtures,
@@ -94,6 +95,17 @@ type Story = StoryObj<typeof meta>
  * Typed blocks を編集できる page の既定状態です。
  */
 export const RichTextPage: Story = {}
+
+/** Rich text and wide tables remain contained within the phone editor canvas. */
+export const MobileEditor: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const editor = canvas.getByTestId('document-editor')
+    await expect(editor.scrollWidth).toBeLessThanOrEqual(editor.clientWidth)
+    await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth)
+  },
+}
 
 /**
  * Favorites、recent、templates、Project spaces をまとめた landing です。
