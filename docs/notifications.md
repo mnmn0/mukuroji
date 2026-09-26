@@ -102,7 +102,7 @@ CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` の�
 
 送信先を修復した後、運用者は該当rowのversionを条件に `slackAttempts: 0`、`slackDeliveryStatus: pending`、元の `slackQueueShard`（`slack#<番号>`）、現在時刻の `slackNextAttemptAt` を戻して再試行できます。送信済みrowの再投入は重複投稿になるため、Slack側の着信を先に確認します。`notification-schedule` runtime controlで停止できます。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Slack`）が15分以上の状態で3回続くと滞留アラームを出します。破損候補は最大10ページまで越えて後続を処理し、`InvalidQueueCandidates` とworker失敗で検出します。破損した正本は自動で書き換えず、運用者が確認・修復します。
 
-送信前にInboxのversionが変わった場合は、そのclaimを解放して試行回数を戻します。Directory・enterprise・system adminの認可snapshotは同じworker呼び出し内で5秒間だけ共有し、Work Itemやメンバーの現在状態は通知ごとに再取得します。1 shardあたり毎分2件のため、滞留アラームが続く場合はdue indexの最古時刻と件数、破損候補、送信先の制限を調査してください。
+送信前にInboxのversionが変わった場合は、そのclaimを解放して試行回数を戻します。Directory・enterpriseの認可snapshotは同じworker呼び出し内で5秒間だけ共有します。Cognitoグループとsystem admin判定は配信ごとに再取得・評価し、Work Itemやメンバーの現在状態も通知ごとに再取得します。1 shardあたり毎分2件のため、滞留アラームが続く場合はdue indexの最古時刻と件数、破損候補、送信先の制限を調査してください。
 
 Document由来の通知は、送信のたびにInboxと同じDocuments取得機能で現在のprivate ACL、親Documentの継承ACL、archive状態を確認します。Enterprise RBACは `documents.read/write/manage` の権限を評価し、Work Item権限や過去のProject roleでは代用しません。参照不可・削除済みのDocumentは送信せず、取得の一時障害は再試行します。
 
