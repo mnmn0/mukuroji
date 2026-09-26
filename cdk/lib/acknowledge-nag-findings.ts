@@ -15,6 +15,7 @@ const deadLetterQueuePaths = [
   'AutomationScheduleDlq/Resource',
   'AnalyticsScheduleDlq/Resource',
   'NotificationScheduleDlq/Resource',
+  'SlackNotificationDlq/Resource',
   'RequestEmailIngestionDlq/Resource',
 ] as const;
 const lambdaPaths = [
@@ -57,6 +58,7 @@ const managedPolicyRolePaths = [
   'ConnectorPollFunction/ServiceRole/Resource',
   'AnalyticsScheduleFunction/ServiceRole/Resource',
   'NotificationScheduleFunction/ServiceRole/Resource',
+  'SlackNotificationFunction/ServiceRole/Resource',
   'RequestEmailIngestionFunction/ServiceRole/Resource',
   'AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource',
 ] as const;
@@ -193,6 +195,12 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'AutomationScheduleInboundWebhookSecretCleanupPolicy/Resource',
       'TenantSecretsCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
+  ],
+  // The multi-tenant sender reads only server-derived, recipient-hashed Slack destinations.
+  // The trailing wildcard also covers the Secrets Manager ARN's generated suffix.
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
+    ['SlackNotificationFunction/ServiceRole/DefaultPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
@@ -401,6 +409,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<RequestIntakeTable608708D4.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-inbound-webhooks/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',

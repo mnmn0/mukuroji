@@ -40,6 +40,7 @@ import { buildConnectorWorkers } from './subsystems/workers/connectors';
 import { buildEnterpriseIdentityWorkers } from './subsystems/workers/enterprise-identity';
 import { buildRequestEmailWorker } from './subsystems/workers/request-email';
 import { buildScheduleWorkers } from './subsystems/workers/schedules';
+import { buildSlackNotificationWorker } from './subsystems/workers/slack-notifications';
 import { buildTenantOperationWorker } from './subsystems/workers/tenant-operation';
 import { buildTriageScheduleWorker } from './subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
@@ -202,6 +203,12 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
       workerChannels,
+    });
+    buildSlackNotificationWorker(this, {
+      dataStores,
+      lambdaBuildPaths,
+      parameters,
+      runtimeControls,
     });
     const scheduleWorkers = buildScheduleWorkers(this, {
       dataStores,

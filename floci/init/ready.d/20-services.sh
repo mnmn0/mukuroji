@@ -40,6 +40,13 @@ if ! aws_local dynamodb describe-table --table-name mukuroji-notifications-local
     --key-schema AttributeName=recipientKey,KeyType=HASH AttributeName=notificationKey,KeyType=RANGE \
     --global-secondary-indexes '[{"IndexName":"RecipientStatusIndex","KeySchema":[{"AttributeName":"recipientStatusKey","KeyType":"HASH"},{"AttributeName":"notificationKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}]' >/dev/null
 fi
+slack_index_count="$(aws_local dynamodb describe-table --table-name mukuroji-notifications-local \
+  --query 'length(Table.GlobalSecondaryIndexes[?IndexName==`SlackDeliveryIndex`])' --output text)"
+if [ "$slack_index_count" = 0 ]; then
+  aws_local dynamodb update-table --table-name mukuroji-notifications-local \
+    --attribute-definitions AttributeName=slackQueueShard,AttributeType=S AttributeName=slackNextAttemptAt,AttributeType=S \
+    --global-secondary-index-updates '[{"Create":{"IndexName":"SlackDeliveryIndex","KeySchema":[{"AttributeName":"slackQueueShard","KeyType":"HASH"},{"AttributeName":"slackNextAttemptAt","KeyType":"RANGE"}],"Projection":{"ProjectionType":"KEYS_ONLY"}}}]' >/dev/null
+fi
 for table in mukuroji-collaboration-local mukuroji-notifications-local; do
   ensure_ttl "$table"
 done

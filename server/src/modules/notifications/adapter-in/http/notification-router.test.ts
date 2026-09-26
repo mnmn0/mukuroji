@@ -9,6 +9,39 @@ import {
 import { createNotificationRouter } from './notification-router'
 
 describe('createNotificationRouter', () => {
+  test('saves Slack only for the authenticated recipient and rejects malformed opt-ins', async () => {
+    const dependencies = createDependencies(1)
+    const notifications: NotificationClient = {
+      ...dependencies.getNotifications(),
+      async savePreferences(input) {
+        expect(input.workspaceId).toBe('workspace-token')
+        expect(input.memberKey).toBe('member-token')
+        expect(input.preferences.channels.slack).toBe(true)
+        expect(Reflect.has(input.preferences, 'slackEnabledAt')).toBe(false)
+        return { ...input.preferences, version: 1, slackEnabledAt: '2026-09-26T10:00:00.000Z' }
+      },
+    }
+    const router = createNotificationRouter({ ...dependencies, getNotifications: () => notifications })
+    for (const slack of [true, 'true', 1]) {
+      const response = await router.request('/api/notification-preferences', {
+        method: 'PUT', headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...DEFAULT_NOTIFICATION_PREFERENCES, workspaceId: 'other-workspace', slackEnabledAt: '2000-01-01T00:00:00Z',
+          channels: { ...DEFAULT_NOTIFICATION_PREFERENCES.channels, slack } }),
+      })
+      expect(response.status).toBe(slack === true ? 200 : 400)
+      expect(await response.json()).not.toHaveProperty('slackEnabledAt')
+    }
+  })
+  test('omits internal Slack activation metadata from preference reads', async () => {
+    const dependencies = createDependencies(1)
+    const router = createNotificationRouter({ ...dependencies, getNotifications: () => ({
+      ...dependencies.getNotifications(),
+      getPreferences: async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES, slackEnabledAt: '2026-09-26T10:00:00.000Z' }),
+    }) })
+    const response = await router.request('/api/notification-preferences', { headers: { Authorization: 'Bearer token' } })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual(DEFAULT_NOTIFICATION_PREFERENCES)
+  })
   test('keeps notification clients isolated between app instances', async () => {
     const first = createNotificationRouter(createDependencies(1))
     const second = createNotificationRouter(createDependencies(2))

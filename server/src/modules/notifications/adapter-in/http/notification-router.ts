@@ -7,6 +7,7 @@ import {
   type NotificationItem,
   type NotificationVisibilityFilter,
   type UpdateNotificationPreferencesInput,
+  type NotificationPreferences,
 } from '../../notifications'
 
 /**
@@ -169,10 +170,10 @@ export function createNotificationRouter<
 
     try {
       const principal = await dependencies.authenticate(accessToken, context)
-      return context.json(await dependencies.getNotifications().getPreferences({
+      return context.json(toPublicPreferences(await dependencies.getNotifications().getPreferences({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
-      }))
+      })))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -193,13 +194,19 @@ export function createNotificationRouter<
         memberKey: principal.userKey,
         preferences: readNotificationPreferencesInput(body),
       })
-      return context.json(preferences)
+      return context.json(toPublicPreferences(preferences))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
   })
 
   return router
+}
+
+/** Removes internal delivery eligibility metadata from the existing HTTP preference contract. */
+function toPublicPreferences(preferences: NotificationPreferences) {
+  const { slackEnabledAt: _internalActivation, ...publicPreferences } = preferences
+  return publicPreferences
 }
 
 /** Removes persistence-only authorization metadata before a notification is serialized. */
@@ -252,6 +259,9 @@ function readNotificationPreferencesInput(
 ): UpdateNotificationPreferencesInput {
   const channels = isRecord(value.channels) ? value.channels : {}
   const quietHours = isRecord(value.quietHours) ? value.quietHours : {}
+  if (channels.slack !== undefined && typeof channels.slack !== 'boolean') {
+    throw new NotificationError(400, 'InvalidNotificationPreferences', 'Slack preference must be boolean.')
+  }
 
   return {
     version: Number(value.version),
@@ -259,6 +269,7 @@ function readNotificationPreferencesInput(
       inApp: channels.inApp as boolean,
       email: channels.email as boolean,
       push: channels.push as boolean,
+      ...(channels.slack === undefined ? {} : { slack: channels.slack }),
     },
     frequency: value.frequency as UpdateNotificationPreferencesInput['frequency'],
     quietHours: {

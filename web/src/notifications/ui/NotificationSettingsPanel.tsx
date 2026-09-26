@@ -7,7 +7,7 @@ import type {
 } from '../api'
 import type { NotificationPreferencesController } from '../mutations/useNotifications'
 
-const notificationChannelKeys = ['inApp', 'email', 'push'] as const satisfies readonly (keyof NotificationChannels)[]
+const notificationChannelKeys = ['inApp', 'email', 'push', 'slack'] as const satisfies readonly (keyof NotificationChannels)[]
 const notificationFrequencyOptions = ['instant', 'hourly', 'daily', 'weekly'] as const satisfies readonly NotificationFrequency[]
 
 /**
@@ -117,7 +117,7 @@ export function NotificationSettingsPanel({
                   </span>
                 </span>
                 <input
-                  checked={draft.channels[channel]}
+                  checked={Boolean(draft.channels[channel])}
                   className="h-5 w-5 flex-none accent-[var(--workbench-primary)]"
                   data-testid={`notification-channel-${channel}`}
                   type="checkbox"
