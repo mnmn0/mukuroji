@@ -29,6 +29,7 @@ const controlledFunctionScopes = new Map([
   ],
   ['EnterpriseScimGroupJobFunction351DCF72', 'enterprise-scim-group-job'],
   ['NotificationScheduleFunction633E4F4C', 'notification-schedule'],
+  ['SlackNotificationFunctionE618FDB5', 'notification-schedule'],
   ['RealtimeHandlerFunction8A4BF05B', 'realtime'],
   ['RequestEmailIngestionFunction84289AE7', 'request-intake-email'],
   ['TenantAccessCapabilityFunction394667B9', 'tenant-operation-execution'],
@@ -499,13 +500,13 @@ test('grants every controlled data-plane role only the exact configuration ARN',
     }],
     Version: '2012-10-17',
   });
-  expect(readPolicy.Roles).toHaveLength(22);
+  expect(readPolicy.Roles).toHaveLength(23);
   expect(readPolicy.Roles).toEqual(
     expect.arrayContaining(controlledRoleReferences),
   );
 });
 
-test('binds exact runtime-control settings through API config and twenty-one direct environments', () => {
+test('binds exact runtime-control settings through API config and twenty-two direct environments', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const lambdaEntries = Object.entries(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),
