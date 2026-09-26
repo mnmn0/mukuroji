@@ -22,18 +22,22 @@ Bedrock model allowlist、Lambda/local認証、live evaluationの運用契約は
 bun install
 ```
 
-ローカル環境を初めて起動する前に `openssl rand -hex 32` を3回実行し、それぞれ独立した
+ローカル環境を初めて起動する前に `openssl rand -hex 32` を2回実行し、それぞれ独立した
 64桁の小文字hex出力をgit管理外の `.env` に保存してください。Docker Compose が Floci
 コンテナへ渡すのは Workspace audit key だけで、ready hook がその形式を検証します。
-Enterprise credential/state secret は host 上の `server:dev` と `floci:deploy-backend` が
+Enterprise credential secret は host 上の `server:dev` と `floci:deploy-backend` が
 `.env` から直接読み込み、Floci コンテナには渡しません。保存後は `chmod 600 .env` で
 owner以外からの読み取りを禁止してください。
 
 ```dotenv
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
 ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<different-64-character-lowercase-hex-output>
-ENTERPRISE_SSO_STATE_SECRET=<third-64-character-lowercase-hex-output>
 ```
+
+ローカルのSSOも既定では無効です。以前の `.env` に `ENTERPRISE_SSO_STATE_SECRET` がある場合、
+SSOを使わなければ削除し、`bun run floci:up` で生成設定を更新してください。SSOを使う場合のみ、
+独立したstate secret、Hosted UI、外部IdPを含む5項目の設定を揃えます。Flociが作る検証用OAuth
+clientだけでは外部SSOを有効にしません。
 
 Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
 

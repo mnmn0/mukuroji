@@ -1205,6 +1205,15 @@ for project_id in refero product-roadmap shared-launch brand-refresh; do
   assert_present "$(read_directory_attribute "$project_member_key" 'updatedAt')" "initial owner project updatedAt ($project_id)"
 done
 
+# The emulator's isolated OAuth client is not a configured external federation.
+# Publish empty runtime settings unless an external provider or Hosted UI is supplied.
+RUNTIME_SSO_CLIENT_ID=""
+RUNTIME_SSO_REDIRECT_URI=""
+if [ -n "$ENTERPRISE_IDP_NAME" ] || [ -n "${COGNITO_HOSTED_UI_DOMAIN:-}" ]; then
+  RUNTIME_SSO_CLIENT_ID="$SSO_CLIENT_ID"
+  RUNTIME_SSO_REDIRECT_URI="$SSO_REDIRECT_URI"
+fi
+
 umask 077
 mkdir -p "$GENERATED_DIR"
 COGNITO_ENV_TEMP_FILE="$(mktemp "$GENERATED_DIR/cognito.env.XXXXXX")"
@@ -1223,8 +1232,8 @@ COGNITO_USER_POOL_NAME=$POOL_NAME
 COGNITO_USER_POOL_CLIENT_NAME=$CLIENT_NAME
 COGNITO_CLIENT_ID=$CLIENT_ID
 COGNITO_SSO_USER_POOL_CLIENT_NAME=$SSO_CLIENT_NAME
-COGNITO_SSO_CLIENT_ID=$SSO_CLIENT_ID
-COGNITO_SSO_REDIRECT_URI=$SSO_REDIRECT_URI
+COGNITO_SSO_CLIENT_ID=$RUNTIME_SSO_CLIENT_ID
+COGNITO_SSO_REDIRECT_URI=$RUNTIME_SSO_REDIRECT_URI
 COGNITO_TEST_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_EMAIL=$PROJECT_MEMBER_KEY

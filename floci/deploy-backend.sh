@@ -107,30 +107,30 @@ if [ "${#ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET}" -lt 32 ] ||
   exit 2
 fi
 
-if [ "${#ENTERPRISE_SSO_STATE_SECRET}" -lt 32 ] ||
-  [ "${#ENTERPRISE_SSO_STATE_SECRET}" -gt 256 ]; then
-  echo 'ENTERPRISE_SSO_STATE_SECRET must contain between 32 and 256 characters.' >&2
-  exit 2
-fi
-
-if [ "$ENTERPRISE_SSO_STATE_SECRET" = "$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" ]; then
-  echo 'ENTERPRISE_SSO_STATE_SECRET must differ from ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET.' >&2
-  exit 2
-fi
-
 if is_missing "$CLIENT_ID"; then
   echo "COGNITO_CLIENT_ID is required. Run the Floci ready hook before deploying the backend." >&2
   exit 2
 fi
 
-if is_missing "$SSO_CLIENT_ID"; then
-  echo "COGNITO_SSO_CLIENT_ID is required. Run the Floci ready hook before deploying the backend." >&2
-  exit 2
-fi
-
-if [ "$SSO_CLIENT_ID" = "$CLIENT_ID" ]; then
-  echo "COGNITO_SSO_CLIENT_ID must differ from COGNITO_CLIENT_ID." >&2
-  exit 2
+if [ -n "$SSO_CLIENT_ID$COGNITO_HOSTED_UI_DOMAIN$COGNITO_SSO_REDIRECT_URI$COGNITO_ENTERPRISE_IDP_NAME$ENTERPRISE_SSO_STATE_SECRET" ]; then
+  if is_missing "$SSO_CLIENT_ID" ||
+    is_missing "$COGNITO_HOSTED_UI_DOMAIN" ||
+    is_missing "$COGNITO_SSO_REDIRECT_URI" ||
+    is_missing "$COGNITO_ENTERPRISE_IDP_NAME" ||
+    is_missing "$ENTERPRISE_SSO_STATE_SECRET"; then
+    echo 'SSO requires all five runtime settings, or all five must be empty to disable it.' >&2
+    exit 2
+  fi
+  if [ "${#ENTERPRISE_SSO_STATE_SECRET}" -lt 32 ] ||
+    [ "${#ENTERPRISE_SSO_STATE_SECRET}" -gt 256 ] ||
+    [ "$ENTERPRISE_SSO_STATE_SECRET" = "$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" ]; then
+    echo 'ENTERPRISE_SSO_STATE_SECRET must be an independent secret of 32 to 256 characters.' >&2
+    exit 2
+  fi
+  if [ "$SSO_CLIENT_ID" = "$CLIENT_ID" ]; then
+    echo "COGNITO_SSO_CLIENT_ID must differ from COGNITO_CLIENT_ID." >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "$GENERATED_DIR"
