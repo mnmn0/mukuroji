@@ -6,6 +6,7 @@ import { authorizeNotificationDelivery, createNotificationDeliveryAuthorizationC
 import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
 import { DynamoDbDocumentsClient } from '../../modules/documents/adapter-out/dynamodb/dynamo-db-documents-client'
 import { DynamoDbTriageClient } from '../../modules/triage'
+import { createApprovalNotificationReader } from '../../modules/files/adapter-out/dynamodb/approval-notification-reader'
 import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications, DynamoDbSlackDeliveryStore } from '../../modules/notifications'
 import { createProductionTenantAvailability } from './tenant-administration'
 
@@ -16,8 +17,11 @@ import { createProductionTenantAvailability } from './tenant-administration'
 export function createProductionSlackNotificationHandler() {
   const tableName = process.env.NOTIFICATIONS_TABLE_NAME?.trim()
   const identityTableName = process.env.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
-  if (!tableName || !identityTableName) throw new Error('Slack notification runtime is not configured.')
-  const store = new DynamoDbSlackDeliveryStore(createDynamoDbDocumentClient(createDynamoDbClient()), tableName)
+  const fileTableName = process.env.FILE_PROOFING_TABLE_NAME?.trim()
+  if (!tableName || !identityTableName || !fileTableName) throw new Error('Slack notification runtime is not configured.')
+  const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
+  const store = new DynamoDbSlackDeliveryStore(documentClient, tableName)
+  const readApproval = createApprovalNotificationReader(documentClient, fileTableName)
   const enterpriseIdentity = new DynamoDbEnterpriseIdentityReadClient(identityTableName)
   const documents = new DynamoDbDocumentsClient({ autoCreateLocal: false })
   const triage = new DynamoDbTriageClient()
@@ -42,9 +46,11 @@ export function createProductionSlackNotificationHandler() {
           workspaceId: delivery.workspaceId,
           notificationCandidates: notification.reasons.map((reason) => ({ memberKey: delivery.memberKey, reason })),
           dueDate: delivery.dueDate,
+          targetId: delivery.targetId,
+          fileId: delivery.fileId,
           outboxStatus: 'pending',
         }, delivery.memberKey, enterpriseIdentity, authorizationCache,
-        (request) => documents.get(request), (workspaceId, teamId, entryId) => triage.getEntry(workspaceId, teamId, entryId))
+        (request) => documents.get(request), (workspaceId, teamId, entryId) => triage.getEntry(workspaceId, teamId, entryId), readApproval)
       },
     })
   }

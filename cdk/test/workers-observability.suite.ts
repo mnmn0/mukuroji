@@ -19,6 +19,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
       DOCUMENTS_TABLE_NAME: { Ref: 'DocumentsTable7E808EE5' },
       REQUEST_INTAKE_TABLE_NAME: Match.anyValue(),
       COLLABORATION_TABLE_NAME: Match.anyValue(),
+      FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
       MUKUROJI_RUNTIME_CONTROL_SCOPE: 'notification-schedule',
     }) },
   });
@@ -69,6 +70,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
     {
       Effect: 'Allow', Action: 'dynamodb:GetItem',
       Resource: [
+        { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
         { 'Fn::GetAtt': ['RequestIntakeTable608708D4', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
       ],

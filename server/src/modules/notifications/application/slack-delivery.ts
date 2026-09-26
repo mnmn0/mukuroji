@@ -24,6 +24,10 @@ export type SlackDelivery = {
   expiresAt: number
   /** Original scheduled due date, when this is a due/overdue notification. */
   dueDate?: string
+  /** Original approval target, retained independently from its parent Work Item. */
+  targetId?: string
+  /** Original file subject, when the source is file-backed. */
+  fileId?: string
   /** Validated notification contents and authorization scope. */
   notification: NotificationItem
 }
@@ -130,7 +134,13 @@ export async function deliverDueSlackNotifications(dependencies: SlackDeliveryDe
         Math.max(0, (dependencies.now().getTime() - Date.parse(delivery.scheduledAt ?? delivery.nextAttemptAt)) / 1_000))
       if (dependencies.now().getTime() >= deadline) break
       const token = dependencies.createToken()
-      if (!await dependencies.store.claim(delivery, token, new Date(dependencies.now().getTime() + 60_000))) continue
+      try {
+        if (!await dependencies.store.claim(delivery, token, new Date(dependencies.now().getTime() + 60_000))) continue
+      } catch {
+        // A lost claim response may already own a lease; leave it for expiry and continue other recipients.
+        failed = true
+        continue
+      }
       try {
         if (delivery.attempts >= 5) {
           await dependencies.store.finish(delivery, token, 'failed', undefined, 'SlackAttemptsExhausted')

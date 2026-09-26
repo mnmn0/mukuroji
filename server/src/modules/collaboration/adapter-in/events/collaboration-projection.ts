@@ -47,7 +47,7 @@ import {
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
 } from '../../../notifications'
-import { isMissingFileObjectVersionError } from '../../../files'
+import { isMissingFileObjectVersionError, type ApprovalNotificationReader } from '../../../files'
 import type {
   BatchItemFailure,
   BatchResponse,
@@ -1345,6 +1345,7 @@ export function createNotificationProjectionItem(
     entityId: event.entityId,
     entityKey: event.scopeKey,
     targetId: event.targetId,
+    fileId: event.fileId,
     issueId: event.issueId,
     triageEntryId: event.triageEntryId,
     commentId: event.commentId,
@@ -1533,6 +1534,7 @@ export type EnterpriseNotificationAuthorization = {
  * @param cognitoGroupIds - Current recipient Cognito groups for direct group assignments.
  * @param readOnlyRecipient - A current watcher needs only read access, including reminder deliveries.
  * @param permissionCeiling - Current external collaborator permission ceiling, when applicable.
+ * @param contentPermission - Independent content permission for non-Planning sources.
  * @returns Whether Enterprise is authoritative and whether the member can perform the action.
  */
 export function resolveEnterpriseNotificationAuthorization(
@@ -1544,6 +1546,7 @@ export function resolveEnterpriseNotificationAuthorization(
   cognitoGroupIds: string[] = [],
   readOnlyRecipient = false,
   permissionCeiling?: EnterprisePermissionId[],
+  contentPermission: EnterprisePermissionId = 'work-items.read',
 ): EnterpriseNotificationAuthorization {
   if (snapshot.workspaceId !== event.workspaceId) {
     return { authoritative: false, allowed: false }
@@ -1586,7 +1589,7 @@ export function resolveEnterpriseNotificationAuthorization(
     event.planningNotificationKind === 'overdue')
   const permissions: EnterprisePermissionId[] = event.planningNotificationKind
     ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
-    : ['work-items.read']
+    : [contentPermission]
   const allowed = permissions.some((permission) => evaluateEnterpriseAccess({
     permission,
     principal: {
@@ -1786,6 +1789,7 @@ export async function hasCurrentSystemAdminMembership(
  * @param enterpriseIdentity - Authoritative Enterprise snapshot reader.
  * @param enterpriseSnapshotCache - Invocation-local Enterprise snapshots.
  * @param enforceContentAuthorization - Applies content RBAC and full-Team visibility for external delivery.
+ * @param readApproval - Current approval and file visibility reader for external delivery.
  * @returns Whether the recipient currently has access to the notification's source.
  */
 async function isEligibleRecipient(
@@ -1796,6 +1800,7 @@ async function isEligibleRecipient(
   enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> | undefined,
   enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
   enforceContentAuthorization = false,
+  readApproval?: ApprovalNotificationReader,
 ) {
   const memberResult = await documentClient.send(
     new GetCommand({
@@ -1824,6 +1829,11 @@ async function isEligibleRecipient(
   if (enforceContentAuthorization) {
     const role = readWorkspaceNotificationRole(member.role)
     if (!enterpriseIdentity || !role) return false
+    if (event.eventType.startsWith('approval.')) {
+      if (!readApproval || !event.targetId || !event.teamId || !event.issueId) return false
+      if (!await readApproval({ workspaceId: event.workspaceId, teamId: event.teamId, issueId: event.issueId,
+        approvalId: event.targetId, fileId: event.fileId, guest: role === 'guest' })) return false
+    }
     let snapshot = enterpriseSnapshotCache.get(event.workspaceId)
     if (!snapshot) {
       snapshot = enterpriseIdentity.getSnapshot(event.workspaceId)
@@ -1836,7 +1846,7 @@ async function isEligibleRecipient(
     const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' || event.planningNotificationKind === 'overdue')
     const permissions: EnterprisePermissionId[] = event.planningNotificationKind
       ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
-      : ['work-items.read']
+      : [event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read']
     if (!boundary.allowed || permissionCeiling && !permissions.some((permission) => permissionCeiling?.includes(permission))) return false
     const username = readString(member.username) ?? readString(member.email) ?? memberKey
     const currentGroups = await readNotificationCognitoGroups(username)
@@ -1869,6 +1879,7 @@ async function isEligibleRecipient(
         cognitoGroupIds,
         readOnlyRecipient,
         permissionCeiling,
+        event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read',
       )
     }
   }
@@ -1948,6 +1959,7 @@ async function readNotificationCognitoGroups(username: string): Promise<string[]
  * @param cache - Invocation-local, short-lived snapshots; canonical source/member reads are never cached.
  * @param readDocument - Permission-filtered Documents reader; missing capability denies document delivery.
  * @param readTriage - Current permission-safe Triage reader; missing capability denies Triage delivery.
+ * @param readApproval - Current approval/file reader; missing capability denies approval delivery.
  * @returns Whether the notification's recipient still has access.
  */
 export async function authorizeNotificationDelivery(
@@ -1957,6 +1969,7 @@ export async function authorizeNotificationDelivery(
   cache: NotificationDeliveryAuthorizationCache = createNotificationDeliveryAuthorizationCache(),
   readDocument?: (request: GetDocumentRequest) => Promise<unknown>,
   readTriage?: (workspaceId: string, teamId: string, entryId: string) => Promise<Pick<TriageEntry, 'permission' | 'retention' | 'projectId' | 'ownerUserId'>>,
+  readApproval?: ApprovalNotificationReader,
 ): Promise<boolean> {
   if (cache.expiresAt <= Date.now()) {
     cache.directories.clear()
@@ -2069,7 +2082,7 @@ export async function authorizeNotificationDelivery(
   return isEligibleRecipient(
     refreshed, memberKey, directory,
     new Map<string, Promise<boolean>>(), enterpriseIdentity, cache.enterpriseSnapshots,
-    true,
+    true, readApproval,
   )
 }
 

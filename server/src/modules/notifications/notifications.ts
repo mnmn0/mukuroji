@@ -822,26 +822,33 @@ export function createNotificationRecipientKey(workspaceId: string, memberKey: s
   return `${requireText(workspaceId, 'Notification workspace ID')}#${normalizeMemberKey(memberKey)}`
 }
 
-/** 保存 row を安全な preference に変換し、invalid row は default へ戻します。 */
+/**
+ * Parses stored preferences, preserving the legacy default fallback unless strict reads are requested.
+ * @param value - Stored row; an absent row always uses legacy defaults.
+ * @param strict - Rejects corrupt existing rows so external delivery can retry and alert.
+ * @returns Validated notification preferences.
+ */
 export function parseStoredNotificationPreferences(
   value: Record<string, unknown> | undefined,
+  strict = false,
 ): NotificationPreferences {
-  if (!value || value.itemType !== 'preferences') {
-    return cloneDefaultPreferences()
-  }
-
+  if (!value) return cloneDefaultPreferences()
   try {
+    if (value.itemType !== 'preferences' || strict && readNonNegativeInteger(value.version) === undefined) {
+      throw new Error('Invalid stored notification preferences.')
+    }
     const normalized = normalizeNotificationPreferencesInput({
       version: readNonNegativeInteger(value.version) ?? 0,
-      channels: value.channels as NotificationChannels,
-      frequency: value.frequency as NotificationFrequency,
-      quietHours: value.quietHours as NotificationQuietHours,
+      channels: value.channels,
+      frequency: value.frequency,
+      quietHours: value.quietHours,
     })
     return {
       ...normalized,
       ...(readTimestamp(value.updatedAt) ? { updatedAt: readTimestamp(value.updatedAt) } : {}),
     }
   } catch {
+    if (strict) throw new Error('Invalid stored notification preferences.')
     return cloneDefaultPreferences()
   }
 }
@@ -1129,8 +1136,21 @@ function resolveNotificationState(row: Record<string, unknown>, now: Date): Noti
   return readTimestamp(row.readAt) ? 'read' : 'unread'
 }
 
+/** Untrusted preference fields from API or persistence inputs. */
+type NotificationPreferenceFields = {
+  /** Optimistic revision. */
+  version: unknown
+  /** Channel values. */
+  channels: unknown
+  /** Delivery frequency. */
+  frequency: unknown
+  /** Quiet-hour values. */
+  quietHours: unknown
+}
+
+/** Validates preference values at both API and persistence boundaries. */
 function normalizeNotificationPreferencesInput(
-  value: UpdateNotificationPreferencesInput | NotificationPreferences,
+  value: NotificationPreferenceFields,
 ): UpdateNotificationPreferencesInput {
   const version = readNonNegativeInteger(value.version)
   if (version === undefined) {
@@ -1138,7 +1158,7 @@ function normalizeNotificationPreferencesInput(
   }
   const channels = value.channels
   if (
-    !channels ||
+    !isRecord(channels) ||
     typeof channels.inApp !== 'boolean' ||
     typeof channels.email !== 'boolean' ||
     typeof channels.push !== 'boolean' ||
@@ -1146,13 +1166,14 @@ function normalizeNotificationPreferencesInput(
   ) {
     throw new NotificationError(400, 'InvalidNotificationPreferences', 'Notification channels are invalid.')
   }
-  if (!['instant', 'hourly', 'daily', 'weekly'].includes(value.frequency)) {
+  if (value.frequency !== 'instant' && value.frequency !== 'hourly' && value.frequency !== 'daily' && value.frequency !== 'weekly') {
     throw new NotificationError(400, 'InvalidNotificationPreferences', 'Notification frequency is invalid.')
   }
   const quietHours = value.quietHours
   if (
-    !quietHours ||
+    !isRecord(quietHours) ||
     typeof quietHours.enabled !== 'boolean' ||
+    typeof quietHours.start !== 'string' || typeof quietHours.end !== 'string' || typeof quietHours.timeZone !== 'string' ||
     !/^([01]\d|2[0-3]):[0-5]\d$/.test(quietHours.start) ||
     !/^([01]\d|2[0-3]):[0-5]\d$/.test(quietHours.end) ||
     !isValidTimeZone(quietHours.timeZone)
@@ -1161,9 +1182,10 @@ function normalizeNotificationPreferencesInput(
   }
   return {
     version,
-    channels: { ...channels },
+    channels: { inApp: channels.inApp, email: channels.email, push: channels.push,
+      ...(typeof channels.slack === 'boolean' ? { slack: channels.slack } : {}) },
     frequency: value.frequency,
-    quietHours: { ...quietHours },
+    quietHours: { enabled: quietHours.enabled, start: quietHours.start, end: quietHours.end, timeZone: quietHours.timeZone },
   }
 }
 

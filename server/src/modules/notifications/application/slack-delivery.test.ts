@@ -149,6 +149,33 @@ describe('Slack notification delivery application', () => {
     await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
     expect(f.sends()).toBe(1)
   })
+  test('a transient claim failure preserves unrelated deliveries and queue health', async () => {
+    const f = fixture()
+    const unavailable = { ...f.delivery, notificationKey: 'unavailable', scheduledAt: '2026-09-26T11:30:00.000Z' }
+    f.dependencies.store.listDue = async (shard) => ({
+      deliveries: shard === 'slack#0' ? [unavailable, f.delivery] : shard === 'slack#1' ? [f.delivery] : [], invalidCount: 0,
+    })
+    f.dependencies.store.claim = async (delivery) => {
+      if (delivery.notificationKey === 'unavailable') throw new Error('Throttled')
+      return true
+    }
+    await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
+    expect(f.sends()).toBe(2)
+    expect(f.finishes.map((finish) => finish.status)).toEqual(['sent', 'sent'])
+    expect(f.health).toEqual([[1_800, 0]])
+  })
+  test('corrupt preferences are retried and eventually reported rather than suppressed', async () => {
+    for (const attempts of [0, 4]) {
+      const f = fixture()
+      f.delivery.attempts = attempts
+      f.dependencies.store.getPreferences = async () => { throw new Error('Invalid stored preferences') }
+      await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
+      expect(f.sends()).toBe(0)
+      expect(f.finishes[0]?.status).toBe(attempts === 4 ? 'failed' : 'pending')
+      expect(f.finishes[0]?.code).toBe('SlackDeliveryUnavailable')
+      expect(f.failures).toHaveLength(attempts === 4 ? 1 : 0)
+    }
+  })
   test('releases repeated unsent Inbox conflicts without exhausting delivery attempts', async () => {
     const f = fixture()
     f.dependencies.store.renew = async () => false

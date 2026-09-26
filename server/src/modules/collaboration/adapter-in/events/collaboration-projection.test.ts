@@ -2,6 +2,8 @@ import { describe, expect, spyOn, test } from 'bun:test'
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
 import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
+import type { ApprovalNotificationSource } from '../../../files'
+import { DEFAULT_NOTIFICATION_PREFERENCES } from '../../../notifications/notifications'
 import { S3Client } from '@aws-sdk/client-s3'
 import {
   WORK_ITEM_SCHEMA_VERSION,
@@ -145,6 +147,59 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('preserves approval source and requires current file visibility and Files permission', async () => {
+    const keys = ['WORK_ITEMS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const event = createProjectionEvent({ eventType: 'approval.requested', teamId: 'core', projectId: 'platform', issueId: 'example',
+      targetId: 'approval-1', fileId: 'file-1', notificationCandidates: [{ memberKey, reason: 'approval-requested' }] })
+    const candidate = { memberKey, reasons: ['approval-requested'] }
+    const row = createNotificationProjectionItem(event, candidate, createNotificationProjectionDeliveryState(
+      `${event.workspaceId}#${memberKey}`, event.occurredAt, DEFAULT_NOTIFICATION_PREFERENCES,
+    ))
+    expect(row).toMatchObject({ targetId: 'approval-1', fileId: 'file-1' })
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    cache.directories.set(event.workspaceId, Promise.resolve([
+      { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+    ]))
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      roleAssignments: [{ workspaceId: event.workspaceId, assignmentId: 'assignment-1', principalKind: 'member', principalId: memberKey,
+        roleId: 'custom:reader', source: 'direct', scope: { workspaceId: event.workspaceId, kind: 'workspace' } }],
+      customRoles: [{ workspaceId: event.workspaceId, roleId: 'custom:reader', name: 'Reader', permissions: ['work-items.read'],
+        guestAssignable: true, revision: 1, createdAt: event.occurredAt, updatedAt: event.occurredAt }],
+    })
+    const identity = { getSnapshot: async () => snapshot }
+    const reads: ApprovalNotificationSource[] = []
+    let visible = true
+    /** Exercises one fresh source read on every delivery. */
+    const readApproval = async (source: ApprovalNotificationSource) => { reads.push(source); return visible }
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      return { Item: command.input.TableName === 'WORK_ITEMS_TABLE_NAME' ? createRealtimeWorkItem()
+        : { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    try {
+      /** Reuses the directory snapshot while checking current Files permissions and visibility. */
+      const authorize = () => authorizeNotificationDelivery(event, memberKey, identity, cache, undefined, undefined, readApproval)
+      expect(await authorize()).toBe(false)
+      snapshot.customRoles[0]!.permissions = ['files.read']
+      expect(await authorize()).toBe(true)
+      visible = false
+      expect(await authorize()).toBe(false)
+      expect(reads).toHaveLength(3)
+      expect(reads[0]).toEqual({ workspaceId: event.workspaceId, teamId: 'core', issueId: 'example',
+        approvalId: 'approval-1', fileId: 'file-1', guest: false })
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
   test('rechecks all assignee-only reasons while preserving independent mention delivery', async () => {
     const keys = ['WORK_ITEMS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
     const previous = keys.map((key) => process.env[key])

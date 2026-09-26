@@ -106,6 +106,10 @@ CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` の�
 
 Document由来の通知は、送信のたびにInboxと同じDocuments取得機能で現在のprivate ACL、親Documentの継承ACL、archive状態を確認します。Enterprise RBACは `documents.read/write/manage` の権限を評価し、Work Item権限や過去のProject roleでは代用しません。参照不可・削除済みのDocumentは送信せず、取得の一時障害は再試行します。
 
+承認通知は承認IDとファイルIDを保持し、送信ごとに現在の承認・ファイルを強整合readします。削除済みファイル、guest公開を取り消したファイルは送信せず、Enterpriseでは `files.read` と外部メンバーのpermission ceilingを評価します。旧通知にファイルIDがない場合も、現在の承認rowからファイル対象を解決します。承認の対象が確認できない通知は送信しません。
+
+保存済み通知設定が破損している場合は、Slack無効化として通知を破棄せず、最大5試行の再試行・失敗監視へ進めます。未保存の設定は従来どおりSlack無効です。1件のclaimが一時的に失敗しても同じbatchと後続shardの処理を続け、queue healthを記録したうえでworker失敗を通知します。
+
 Triage通知も現在のEntryを取得し、送信時点のProjectと担当者を照合します。`metadata-only` / `denied` またはredactedなsourceは、保存済みの本文を外部に出さないためSlack配信を抑止します。Work Item / TriageのEnterprise権限も現在の `work-items.read` で評価し、Project未所属のTeam通知にはTeam全体の閲覧権限を要求します。
 
 Workspace直下のPlanning通知もWorkspaceリソースで認可します。担当者向けreminder/overdueには更新権限、ウォッチャーには現在の購読と閲覧権限を要求します。Cognitoグループは全ページを取得して再評価し、SCIM無効化・guest許可・外部ドメイン制限・permission ceilingも適用します。

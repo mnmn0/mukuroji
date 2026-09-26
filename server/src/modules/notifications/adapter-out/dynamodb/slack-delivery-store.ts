@@ -144,7 +144,7 @@ export class DynamoDbSlackDeliveryStore implements SlackDeliveryStore {
       TableName: this.#tableName, ConsistentRead: true,
       Key: { recipientKey: delivery.recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY },
     }))
-    return parseStoredNotificationPreferences(result.Item)
+    return parseStoredNotificationPreferences(result.Item, true)
   }
 }
 
@@ -168,12 +168,15 @@ function parseDelivery(row: Record<string, unknown> | undefined, recipientKey: s
   ) throw invalidRow()
   const notification = toNotificationItem(row, recipientKey, now, true)
   if (!notification) throw invalidRow()
+  if ([row.fileId, row.targetId].some((value) => value !== undefined && (typeof value !== 'string' || !value.trim()))) throw invalidRow()
   return {
     workspaceId: row.workspaceId, memberKey: row.recipientMemberKey, recipientKey, notificationKey,
     attempts: row.slackAttempts, version: row.version, nextAttemptAt: row.slackNextAttemptAt,
     scheduledAt: typeof row.deliveryAfter === 'string' ? row.deliveryAfter : row.slackNextAttemptAt,
     notification, expiresAt: row.expiresAt,
     ...(typeof row.dueDate === 'string' ? { dueDate: row.dueDate } : {}),
+    ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),
+    ...(typeof row.targetId === 'string' ? { targetId: row.targetId } : {}),
   }
 }
 

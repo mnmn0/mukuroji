@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbSlackDeliveryStore } from './slack-delivery-store'
 import { slackDeliveryShard } from '../../domain/slack-delivery'
+import { DEFAULT_NOTIFICATION_PREFERENCES } from '../../notifications'
 
 const now = new Date('2026-09-26T12:00:00.000Z')
 const recipientKey = 'workspace-1#member@example.test'
@@ -32,6 +33,30 @@ function fixture(item: Record<string, unknown> = row) {
 }
 
 describe('Slack DynamoDB delivery queue', () => {
+  test('keeps approval source identity for authorization after queueing', async () => {
+    const f = fixture({ ...row, fileId: 'file-1', targetId: 'approval-1' })
+    expect((await f.store.listDue(shard, now, 2)).deliveries[0]).toMatchObject({ fileId: 'file-1', targetId: 'approval-1' })
+  })
+  test('distinguishes absent legacy preferences from malformed persisted preferences', async () => {
+    const delivery = (await fixture().store.listDue(shard, now, 2)).deliveries[0]
+    if (!delivery) throw new Error('Expected delivery')
+    const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES, itemType: 'preferences' }
+    for (const item of [undefined, preferences]) {
+      const store = new DynamoDbSlackDeliveryStore({ async send(command) {
+        expect(command.input).toMatchObject({ ConsistentRead: true,
+          Key: { recipientKey, notificationKey: '!PREFERENCES' } })
+        return { Item: item }
+      } }, 'notifications')
+      expect((await store.getPreferences(delivery)).channels.slack).toBeFalsy()
+    }
+    for (const item of [
+      {}, { ...preferences, version: -1 }, { ...preferences, frequency: 'invalid' },
+      { ...preferences, channels: { ...preferences.channels, slack: 'true' } },
+      { ...preferences, quietHours: { ...preferences.quietHours, timeZone: 'invalid/zone' } },
+    ]) {
+      await expect(fixture(item).store.getPreferences(delivery)).rejects.toThrow('Invalid stored notification preferences')
+    }
+  })
   test('rechecks canonical rows strongly and supports Slack without Inbox', async () => {
     const f = fixture()
     const { deliveries: [delivery] } = await f.store.listDue(shard, now, 2)
