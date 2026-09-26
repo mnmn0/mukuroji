@@ -83,7 +83,7 @@ export function TeamMembersView({
 
   return (
     <div className="grid gap-6">
-      <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
+      <div className="grid grid-cols-2 gap-3 min-[1181px]:grid-cols-4">
         <MetricCard
           label={t('workspace.members.metric.members')}
           value={members.length}
@@ -112,7 +112,7 @@ export function TeamMembersView({
         t={t}
       />
 
-      <section className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-[0_18px_42px_rgba(30,52,88,0.05)]">
+      <section className="workbench-panel overflow-hidden">
         <div className="border-b border-slate-100">
           <SectionHeader
             title={t('workspace.members.directoryTitle')}

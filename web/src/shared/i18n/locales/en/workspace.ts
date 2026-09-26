@@ -2,6 +2,8 @@
  * English messages for the workspace domain.
  */
 export const workspaceMessages = {
+  'workspace.filters.title': 'Filters and sorting',
+  'workspace.filters.active': '{count} active filters',
   'dashboard.loadError': 'Account information could not be verified. Try again later.',
   'dashboard.logout': 'Log out',
   'projects.error.loading': 'Failed to load teams and projects',

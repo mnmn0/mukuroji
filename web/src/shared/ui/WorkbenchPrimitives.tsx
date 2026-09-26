@@ -43,7 +43,7 @@ export function MetricCard({
 
   return (
     <section
-      className="min-w-0 rounded-lg border border-[var(--workbench-border)] bg-white p-5"
+      className="min-w-0 rounded-lg border border-[var(--workbench-border)] bg-white p-4 sm:p-5"
       data-testid={testId}
     >
       <p className="flex items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">
@@ -152,11 +152,11 @@ export function InfoGrid({ items, t }: InfoGridProps) {
     <div className="grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
       {items.map(([titleKey, descriptionKey]) => (
         <section
-          className="rounded-lg border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.05)]"
+          className="border-t border-[var(--workbench-border)] py-5"
           key={titleKey}
         >
-          <h2 className="text-lg font-semibold text-[#0d1833]">{t(titleKey)}</h2>
-          <p className="mt-3 text-sm font-bold leading-6 text-[#526381]">
+          <h2 className="text-base font-semibold text-[var(--workbench-text)]">{t(titleKey)}</h2>
+          <p className="mt-2 text-sm leading-6 text-[var(--workbench-muted)]">
             {t(descriptionKey)}
           </p>
         </section>

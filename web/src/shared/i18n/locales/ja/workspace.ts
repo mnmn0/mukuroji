@@ -2,6 +2,8 @@
  * Japanese messages for the workspace domain.
  */
 export const workspaceMessages = {
+  'workspace.filters.title': '絞り込み・並べ替え',
+  'workspace.filters.active': '{count}件の条件を適用中',
   'dashboard.loadError': 'アカウント情報を確認できませんでした。時間をおいて再度お試しください。',
   'dashboard.logout': 'ログアウト',
   'projects.error.loading': 'チームとプロジェクトを取得できませんでした',

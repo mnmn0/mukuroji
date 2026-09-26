@@ -763,6 +763,8 @@ export const Default: Story = {
     await expect(quickAccessButton).toHaveAttribute('aria-pressed', 'false')
     await userEvent.click(quickAccessButton)
     await expect(onProjectQuickAccessToggle).toHaveBeenCalledTimes(1)
+    const disclosure = canvas.queryByRole('button', { name: /絞り込み・並べ替え/ })
+    if (disclosure) await userEvent.click(disclosure)
     const statusButton = canvas.getByRole('button', { name: 'ステータス' })
 
     await userEvent.click(statusButton)
@@ -809,6 +811,25 @@ export const Default: Story = {
     }))
     await expect(statusButton).toHaveAttribute('aria-expanded', 'false')
     await expect(canvas.queryByRole('menu')).not.toBeInTheDocument()
+  },
+}
+
+/** Phone filters remain reachable by keyboard without displacing the task list. */
+export const MobileFilters: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    if (!window.matchMedia('(max-width: 760px)').matches) return
+    const canvas = within(canvasElement)
+    const disclosure = canvas.getByRole('button', { name: /絞り込み・並べ替え/ })
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    await expect(canvas.queryByRole('button', { name: 'ステータス' })).not.toBeInTheDocument()
+    disclosure.focus()
+    await userEvent.keyboard('{Enter}')
+    await userEvent.click(canvas.getByRole('button', { name: 'ステータス' }))
+    await userEvent.keyboard('{Escape}')
+    await userEvent.click(disclosure)
+    await expect(disclosure).toHaveFocus()
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
   },
 }
 

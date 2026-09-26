@@ -50,6 +50,11 @@ type Story = StoryObj<typeof meta>
  */
 export const Page: Story = {}
 
+/** Public-document navigation wraps with export and language controls on phones. */
+export const Mobile: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
 /**
  * Read-only SVG canvas を使う公開 Whiteboard です。
  */

@@ -8,6 +8,7 @@ import type {
   CustomerWorkItemSummary,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
 
 /** Props for the Customer directory and selected Customer detail view. */
 export type CustomerDirectoryViewProps = {
@@ -115,118 +116,128 @@ export function CustomerDirectoryView({
             />
           </label>
         ) : null}
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <FilterSelect
-            label={t('customers.filters.tier')}
-            options={customerTierOptions}
-            value={filters.tier}
-            onChange={(value) => onFiltersChange({ ...filters, tier: value })}
-            t={t}
-          />
-          <FilterSelect
-            label={t('customers.filters.size')}
-            options={customerSizeOptions}
-            value={filters.size}
-            onChange={(value) => onFiltersChange({ ...filters, size: value })}
-            t={t}
-          />
-          <FilterSelect
-            label={t('customers.filters.status')}
-            options={customerStatusOptions}
-            value={filters.status}
-            onChange={(value) => onFiltersChange({ ...filters, status: value })}
-            t={t}
-          />
-          <FilterSelect
-            label={t('customers.filters.health')}
-            options={customerHealthOptions}
-            value={filters.health}
-            onChange={(value) => onFiltersChange({ ...filters, health: value })}
-            t={t}
-          />
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-          {canViewSensitiveData ? (
-            <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-              <span>{t('customers.filters.minBusinessValue')}</span>
-              <input
-                className="workbench-input min-h-10 w-full"
-                inputMode="numeric"
-                min="0"
-                max="100"
-                onChange={(event) => onFiltersChange({
-                  ...filters,
-                  minBusinessValue: event.target.value ? Number(event.target.value) : undefined,
-                })}
-                type="number"
-                value={filters.minBusinessValue ?? ''}
+        <ResponsiveDisclosure
+          label={t('workspace.filters.title')}
+          summary={t('workspace.filters.active').replace('{count}', String([
+            filters.tier, filters.size, filters.status, filters.health,
+            filters.minBusinessValue !== undefined, filters.minRequestCount !== undefined,
+          ].filter(Boolean).length))}
+        >
+          <div className="grid gap-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <FilterSelect
+                label={t('customers.filters.tier')}
+                options={customerTierOptions}
+                value={filters.tier}
+                onChange={(value) => onFiltersChange({ ...filters, tier: value })}
+                t={t}
               />
-            </label>
-          ) : null}
-          <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-            <span>{t('customers.filters.minRequestCount')}</span>
-            <input
-              className="workbench-input min-h-10 w-full"
-              inputMode="numeric"
-              min="0"
-              onChange={(event) => onFiltersChange({
-                ...filters,
-                minRequestCount: event.target.value && Number.isSafeInteger(Number(event.target.value))
-                  ? Number(event.target.value)
-                  : undefined,
-              })}
-              step="1"
-              type="number"
-              value={filters.minRequestCount ?? ''}
-            />
-          </label>
-          <FilterSelect
-            label={t('customers.filters.sortBy')}
-            options={canViewSensitiveData ? customerSortOptions : customerSafeSortOptions}
-            value={filters.sortBy ?? 'updatedAt'}
-            onChange={(value) => onFiltersChange({ ...filters, sortBy: value })}
-            t={t}
-            includeEmpty={false}
-          />
-          <FilterSelect
-            label={t('customers.filters.direction')}
-            options={customerSortDirectionOptions}
-            value={filters.sortDirection ?? 'descending'}
-            onChange={(value) => onFiltersChange({ ...filters, sortDirection: value })}
-            t={t}
-            includeEmpty={false}
-          />
-          <FilterSelect
-            label={t('customers.filters.groupBy')}
-            options={canViewSensitiveData ? customerGroupOptions : customerSafeGroupOptions}
-            value={effectiveGroupBy}
-            onChange={onGroupByChange}
-            t={t}
-          />
-        </div>
-        <div className="flex flex-wrap items-end gap-3 border-t border-[var(--workbench-border)] pt-3">
-          <label className="grid min-w-[220px] flex-1 gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-            <span>{t('customers.filters.savedView')}</span>
-            <select
-              className="workbench-input min-h-10 w-full"
-              value={savedViews.find((view) => matchesSavedView(view, filters, effectiveGroupBy))?.id ?? ''}
-              onChange={(event) => {
-                const view = savedViews.find((candidate) => candidate.id === event.target.value)
-                if (view) onApplySavedView(view)
-              }}
-            >
-              <option value="">{t('customers.filters.chooseSavedView')}</option>
-              {savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}
-            </select>
-          </label>
-          {canManageCustomerViews ? (
-            <SaveViewControl isSaving={isSavingView} onSave={onSaveView} t={t} />
-          ) : null}
-          {saveViewError ? <span className="text-sm font-semibold text-red-700" role="alert">{saveViewError}</span> : null}
-          <span className="ml-auto text-sm font-semibold text-[var(--workbench-muted)]">
-            {t('customers.requestCount').replace('{count}', String(customers.reduce((sum, customer) => sum + customer.requestCount, 0)))}
-          </span>
-        </div>
+              <FilterSelect
+                label={t('customers.filters.size')}
+                options={customerSizeOptions}
+                value={filters.size}
+                onChange={(value) => onFiltersChange({ ...filters, size: value })}
+                t={t}
+              />
+              <FilterSelect
+                label={t('customers.filters.status')}
+                options={customerStatusOptions}
+                value={filters.status}
+                onChange={(value) => onFiltersChange({ ...filters, status: value })}
+                t={t}
+              />
+              <FilterSelect
+                label={t('customers.filters.health')}
+                options={customerHealthOptions}
+                value={filters.health}
+                onChange={(value) => onFiltersChange({ ...filters, health: value })}
+                t={t}
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {canViewSensitiveData ? (
+                <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+                  <span>{t('customers.filters.minBusinessValue')}</span>
+                  <input
+                    className="workbench-input min-h-10 w-full"
+                    inputMode="numeric"
+                    min="0"
+                    max="100"
+                    onChange={(event) => onFiltersChange({
+                      ...filters,
+                      minBusinessValue: event.target.value ? Number(event.target.value) : undefined,
+                    })}
+                    type="number"
+                    value={filters.minBusinessValue ?? ''}
+                  />
+                </label>
+              ) : null}
+              <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+                <span>{t('customers.filters.minRequestCount')}</span>
+                <input
+                  className="workbench-input min-h-10 w-full"
+                  inputMode="numeric"
+                  min="0"
+                  onChange={(event) => onFiltersChange({
+                    ...filters,
+                    minRequestCount: event.target.value && Number.isSafeInteger(Number(event.target.value))
+                      ? Number(event.target.value)
+                      : undefined,
+                  })}
+                  step="1"
+                  type="number"
+                  value={filters.minRequestCount ?? ''}
+                />
+              </label>
+              <FilterSelect
+                label={t('customers.filters.sortBy')}
+                options={canViewSensitiveData ? customerSortOptions : customerSafeSortOptions}
+                value={filters.sortBy ?? 'updatedAt'}
+                onChange={(value) => onFiltersChange({ ...filters, sortBy: value })}
+                t={t}
+                includeEmpty={false}
+              />
+              <FilterSelect
+                label={t('customers.filters.direction')}
+                options={customerSortDirectionOptions}
+                value={filters.sortDirection ?? 'descending'}
+                onChange={(value) => onFiltersChange({ ...filters, sortDirection: value })}
+                t={t}
+                includeEmpty={false}
+              />
+              <FilterSelect
+                label={t('customers.filters.groupBy')}
+                options={canViewSensitiveData ? customerGroupOptions : customerSafeGroupOptions}
+                value={effectiveGroupBy}
+                onChange={onGroupByChange}
+                t={t}
+              />
+            </div>
+            <div className="flex flex-wrap items-end gap-3 border-t border-[var(--workbench-border)] pt-3">
+              <label className="grid min-w-0 basis-[220px] flex-1 gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+                <span>{t('customers.filters.savedView')}</span>
+                <select
+                  className="workbench-input min-h-10 w-full"
+                  value={savedViews.find((view) => matchesSavedView(view, filters, effectiveGroupBy))?.id ?? ''}
+                  onChange={(event) => {
+                    const view = savedViews.find((candidate) => candidate.id === event.target.value)
+                    if (view) onApplySavedView(view)
+                  }}
+                >
+                  <option value="">{t('customers.filters.chooseSavedView')}</option>
+                  {savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}
+                </select>
+              </label>
+              {canManageCustomerViews ? (
+                <SaveViewControl isSaving={isSavingView} onSave={onSaveView} t={t} />
+              ) : null}
+              {saveViewError ? <span className="text-sm font-semibold text-red-700" role="alert">{saveViewError}</span> : null}
+              <span className="ml-auto text-sm font-semibold text-[var(--workbench-muted)]">
+                {t('customers.requestCount').replace('{count}', String(customers.reduce((sum, customer) => sum + customer.requestCount, 0)))}
+              </span>
+            </div>
+          </div>
+        </ResponsiveDisclosure>
       </div>
 
       {errorMessage ? (

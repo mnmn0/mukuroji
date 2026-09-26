@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, within } from 'storybook/test'
 import type { WorkspaceAccess } from '../api'
 import { WorkspaceAccessPanel } from './WorkspaceAccessPanel'
 
@@ -185,6 +186,16 @@ type Story = StoryObj<typeof meta>
  * owner が member と invitation を管理する標準状態です。
  */
 export const OwnerManagement: Story = {}
+
+/** Member roles and lifecycle actions fit a phone without page-level scrolling. */
+export const MobileManagement: Story = {
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('combobox', { name: 'member@example.com Workspace ロール' })).toBeVisible()
+    await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth)
+  },
+}
 
 /**
  * 配信失敗と期限切れ invitation の復旧操作を確認する状態です。

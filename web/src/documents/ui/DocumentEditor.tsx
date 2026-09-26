@@ -110,7 +110,7 @@ export function DocumentEditor({
   return (
     <article
       aria-label={t('documents.editor.aria')}
-      className="mx-auto w-full max-w-[820px] px-[clamp(22px,5vw,72px)] pb-32 pt-10"
+      className="mx-auto w-full min-w-0 max-w-[820px] px-[clamp(16px,5vw,72px)] pb-24 pt-6 sm:pt-10"
       data-testid="document-editor"
     >
       <div className="mb-8 flex items-center justify-between gap-4">
@@ -129,7 +129,7 @@ export function DocumentEditor({
         ) : null}
       </div>
 
-      <div className="grid gap-2">
+      <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
         {document.blocks.map((block, index) => (
           <EditableBlock
             block={block}
@@ -289,7 +289,7 @@ function EditableBlock({
 }) {
   return (
     <section
-      className="group relative rounded-lg border border-transparent px-3 py-2 transition focus-within:border-[var(--workbench-border)] focus-within:bg-white hover:border-[var(--workbench-border)]"
+      className="group relative min-w-0 rounded-lg border border-transparent px-3 py-2 transition focus-within:border-[var(--workbench-border)] focus-within:bg-white hover:border-[var(--workbench-border)]"
       data-block-id={block.id}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -299,7 +299,7 @@ function EditableBlock({
       onFocus={() => onActiveAnchorChange?.(block.id)}
     >
       {editable ? (
-        <div className="absolute -left-[42px] top-2 hidden items-center gap-0.5 group-hover:flex group-focus-within:flex">
+        <div className="mb-2 hidden items-center gap-0.5 group-hover:flex group-focus-within:flex sm:absolute sm:-left-[42px] sm:top-2 sm:mb-0">
           <button
             aria-label={t('documents.editor.moveUp')}
             className="grid h-7 w-7 place-items-center rounded text-xs text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)] disabled:opacity-30"
@@ -413,7 +413,7 @@ function ParagraphBlockEditor({
   return (
     <textarea
       aria-label={t('documents.block.paragraph')}
-      className="min-h-10 w-full resize-y border-0 bg-transparent px-0 py-1 text-[1rem] font-medium leading-7 text-[var(--workbench-text)] outline-none placeholder:text-[var(--workbench-muted-soft)]"
+      className="min-h-10 w-full min-w-0 resize-y border-0 bg-transparent px-0 py-1 text-[1rem] leading-7 text-[var(--workbench-text)] outline-none placeholder:text-[var(--workbench-muted-soft)] [field-sizing:content]"
       onChange={(event) => onChange({ ...block, text: event.target.value })}
       placeholder={t('documents.editor.paragraphPlaceholder')}
       rows={Math.max(1, block.text.split('\n').length)}

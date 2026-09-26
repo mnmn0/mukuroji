@@ -1391,7 +1391,7 @@ function SidebarQuickAccessManagerModal({
         aria-busy={isBusy}
         aria-labelledby={titleId}
         aria-modal="true"
-        className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-5 text-[var(--workbench-text)] shadow-[0_24px_80px_rgba(15,23,42,0.28)]"
+        className="w-full max-w-lg rounded-lg border border-[var(--workbench-border)] bg-white p-5 text-[var(--workbench-text)] shadow-xl"
         onKeyDown={(event) => {
           if (event.key === 'Escape' && !isBusy) {
             event.preventDefault()

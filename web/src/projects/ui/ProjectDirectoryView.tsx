@@ -5,6 +5,7 @@ import type {
   PlanningUpdateTargetSummary,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
+import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
 import {
   PROJECT_DIRECTORY_UNASSIGNED_ID,
   isProjectDirectoryStatusFilter,
@@ -218,7 +219,7 @@ export function ProjectDirectoryView({
   return (
     <section aria-label={t('projects.directory.title')} className="grid gap-5">
       <div className="workbench-panel p-4 sm:p-5">
-        <div className="grid grid-cols-[minmax(220px,2fr)_repeat(3,minmax(150px,1fr))] gap-3 max-[1100px]:grid-cols-2 max-[680px]:grid-cols-1">
+        <div className="grid grid-cols-[minmax(220px,2fr)_minmax(0,3fr)] items-end gap-3 max-[1100px]:grid-cols-1">
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('projects.directory.searchLabel')}
             <span className="relative block">
@@ -234,65 +235,74 @@ export function ProjectDirectoryView({
             </span>
           </label>
 
-          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('projects.directory.teamFilter')}
-            <select
-              className="workbench-input h-11 w-full px-3 disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)]"
-              disabled={isTeamFilterLocked}
-              value={filters.teamId ?? ''}
-              onChange={(event) => onTeamChange(event.currentTarget.value || undefined)}
-            >
-              {!isTeamFilterLocked ? (
-                <option value="">{t('projects.directory.filterAll')}</option>
-              ) : null}
-              {teams.map((team) => (
-                <option key={team.id} value={team.id}>{team.name}</option>
-              ))}
-            </select>
-          </label>
+          <ResponsiveDisclosure
+            label={t('workspace.filters.title')}
+            summary={t('workspace.filters.active').replace('{count}', String([
+              !isTeamFilterLocked && Boolean(filters.teamId), filters.status !== 'all',
+              Boolean(filters.assigneeId), filters.quickAccessOnly,
+            ].filter(Boolean).length))}
+          >
+            <div className="grid grid-cols-3 gap-3 max-[760px]:grid-cols-1">
+              <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('projects.directory.teamFilter')}
+                <select
+                  className="workbench-input h-11 w-full px-3 disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)]"
+                  disabled={isTeamFilterLocked}
+                  value={filters.teamId ?? ''}
+                  onChange={(event) => onTeamChange(event.currentTarget.value || undefined)}
+                >
+                  {!isTeamFilterLocked ? (
+                    <option value="">{t('projects.directory.filterAll')}</option>
+                  ) : null}
+                  {teams.map((team) => (
+                    <option key={team.id} value={team.id}>{team.name}</option>
+                  ))}
+                </select>
+              </label>
 
-          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('projects.directory.statusFilter')}
-            <select
-              className="workbench-input h-11 w-full px-3"
-              value={filters.status}
-              onChange={(event) => {
-                if (isProjectDirectoryStatusFilter(event.currentTarget.value)) {
-                  onStatusChange(event.currentTarget.value)
-                }
-              }}
-            >
-              {statusFilters.map((status) => (
-                <option key={status} value={status}>
-                  {status === 'all'
-                    ? t('projects.directory.filterAll')
-                    : t(statusMessageKeys[status])}
-                </option>
-              ))}
-            </select>
-          </label>
+              <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('projects.directory.statusFilter')}
+                <select
+                  className="workbench-input h-11 w-full px-3"
+                  value={filters.status}
+                  onChange={(event) => {
+                    if (isProjectDirectoryStatusFilter(event.currentTarget.value)) {
+                      onStatusChange(event.currentTarget.value)
+                    }
+                  }}
+                >
+                  {statusFilters.map((status) => (
+                    <option key={status} value={status}>
+                      {status === 'all'
+                        ? t('projects.directory.filterAll')
+                        : t(statusMessageKeys[status])}
+                    </option>
+                  ))}
+                </select>
+              </label>
 
-          <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
-            {t('projects.directory.assigneeFilter')}
-            <select
-              className="workbench-input h-11 w-full px-3"
-              value={filters.assigneeId ?? ''}
-              onChange={(event) => onAssigneeChange(event.currentTarget.value || undefined)}
-            >
-              <option value="">{t('projects.directory.filterAll')}</option>
-              {hasUnassignedProjects ? (
-                <option value={PROJECT_DIRECTORY_UNASSIGNED_ID}>
-                  {t('projects.directory.assignee.unassigned')}
-                </option>
-              ) : null}
-              {assignees.map((assignee) => (
-                <option key={assignee.id} value={assignee.id}>{assignee.label}</option>
-              ))}
-            </select>
-          </label>
+              <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('projects.directory.assigneeFilter')}
+                <select
+                  className="workbench-input h-11 w-full px-3"
+                  value={filters.assigneeId ?? ''}
+                  onChange={(event) => onAssigneeChange(event.currentTarget.value || undefined)}
+                >
+                  <option value="">{t('projects.directory.filterAll')}</option>
+                  {hasUnassignedProjects ? (
+                    <option value={PROJECT_DIRECTORY_UNASSIGNED_ID}>
+                      {t('projects.directory.assignee.unassigned')}
+                    </option>
+                  ) : null}
+                  {assignees.map((assignee) => (
+                    <option key={assignee.id} value={assignee.id}>{assignee.label}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </ResponsiveDisclosure>
         </div>
-
-        <div className="mt-4 flex min-w-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workbench-border)] pt-4">
+        <div className="col-span-full flex min-w-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workbench-border)] pt-3">
           <button
             aria-pressed={filters.quickAccessOnly}
             className={`inline-flex min-h-10 items-center gap-2 rounded-lg border px-3 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)] focus:ring-offset-2 ${
@@ -494,7 +504,7 @@ function ProjectDirectoryListRow({
         <StarIcon selected={project.isQuickAccess} />
       </button>
 
-      <div className="min-w-0">
+      <div className={`min-w-0 ${onArchiveProject ? '' : 'max-[760px]:col-span-2'}`}>
         <button
           aria-label={formatProjectDirectoryMessage(
             t('projects.directory.open'),
@@ -510,7 +520,7 @@ function ProjectDirectoryListRow({
           >
             {project.projectName.trim().charAt(0).toLocaleUpperCase() || 'P'}
           </span>
-          <span className="min-w-0 truncate text-sm font-semibold text-[var(--workbench-text)] underline-offset-4 group-hover:underline">
+          <span className="min-w-0 break-words text-sm font-semibold leading-6 text-[var(--workbench-text)] underline-offset-4 group-hover:underline">
             {project.projectName}
           </span>
         </button>

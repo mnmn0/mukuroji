@@ -62,5 +62,76 @@ base `ecd3ffbd`. Use the listed viewport sizes to reproduce the composition.
   The Home assertion now verifies the link text independently
   of its decorative icon while preserving the Next-section deep-link check.
 
-This is a targeted pass over shared presentation and daily work surfaces. It does not
-claim an exhaustive accessibility audit or verification of every administrative screen.
+## Application-wide follow-up
+
+The follow-up covers every application screen family through shared presentation and
+targeted layout repairs. The initial cross-screen audit found defects already present
+at the base: access management overflowed the phone viewport, a document table expanded
+its editor grid, task dates overlapped the next column, and report filters displaced
+the report content on phones. These are now corrected.
+
+The design sequence is consistent across screens: identify the current scope, scan the
+content, then filter or act. Search remains directly available; secondary task, project,
+customer, and report controls use the same phone disclosure. Desktop controls remain visible.
+Collapsing a disclosure preserves its input state. Shared surfaces use fine borders
+without competing shadows; summary metrics use two columns on phones. Member roles
+and actions remain visible in a stacked ledger, and project names wrap in directory
+rows. The public document header wraps its language, export, and sign-in controls.
+Workflow selectors keep their full width above the add/remove actions, and workload
+forms use the same responsive inputs and action colors as the rest of the application.
+
+The Refero capability remained unavailable. The follow-up uses the same documented
+fallback rules and the rendered baseline as its reference. Data visualizations retain
+semantic colors; boards and tables retain intentional local scrolling. This is a UI
+change, with no new dependencies, backend changes, or permission changes.
+
+### Screen coverage
+
+The static Storybook build is checked at 1440 × 900, 390 × 900, and 320 × 900.
+The coverage manifest in [application-ui-coverage.json](workspace-ui/application-ui-coverage.json)
+records each story, viewport, browser error, and document width. It includes every
+Storybook family and representative empty, error, read-only, and English variants.
+
+| Application routes / surfaces | Representative Storybook coverage |
+| --- | --- |
+| Login, SSO callback, recovery, password reset | LoginPage, Enterprise SSO Callback, Security Recovery, Public Pages |
+| Home, dashboard, My Tasks, inbox, help | WorkspaceRoutes and Workspace Help |
+| Focus and personal/team policy | Focus Queue, Focus Policy |
+| Teams, members, projects | WorkspaceRoutes and ProjectDirectoryView |
+| Team issues and project tasks | Issue Page, Task Screen; table, board, calendar, files, permissions, creation and detail |
+| Triage and request intake | Team Workbench, Intake Page, Public Form |
+| Customers and impact | CustomerDirectoryView, Customer Impact Panel |
+| Search and saved views | Search Results, Command Menu, View Toolbar; real-route Search E2E |
+| Timeline, roadmap, portfolio, workload | PlanningPage, StatusUpdateComposer, TeamWorkloadView, WorkloadPlanningControls |
+| Documents, goal documents, public shares | Documents Workspace library/editor/whiteboard and Public Share; goal documents use the same workspace |
+| Reports | ReportsPage overview/builder/empty/English |
+| Settings | Access, tenant administration, enterprise security tabs, automation, developer platform, AI policy and work-item configuration |
+| Privacy, terms, support, not found | Public Pages |
+
+### Responsive examples
+
+All images use synthetic Storybook fixtures.
+
+| Task list | Report overview |
+| --- | --- |
+| ![Phone task list](workspace-ui/tasks-mobile.png) | ![Phone report overview](workspace-ui/reports-mobile.png) |
+
+| Document editor | Member management |
+| --- | --- |
+| ![Phone document editor](workspace-ui/document-mobile.png) | ![Phone member ledger](workspace-ui/access-mobile.png) |
+
+### Follow-up verification
+
+- Production build, Storybook build, Web lint, root lint, dependency boundaries, and
+  unused-dependency checks pass.
+- Web unit tests: 1,141 pass. Real-app E2E: 221 pass using mocked API responses and
+  local Chrome, including the added 320px search regression.
+- Phone disclosure keyboard activation, filter-menu Escape/focus restoration, draft
+  retention through collapse/resize, role selection visibility, document containment,
+  and public-header containment pass at the tested widths.
+- Reduced-motion emulation verifies the disclosure transition is suppressed. Phone
+  disclosure controls and shared form controls measure at least 44px high. Shared
+  text and focus colors retain the contrast ratios recorded above.
+- Browser checks do not substitute for a screen-reader audit or live API integration.
+  Storybook fixtures cover layout and UI states; E2E covers the existing route flows.
+  Wide tables, timelines, and whiteboards intentionally scroll inside their containers.

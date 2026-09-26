@@ -21,7 +21,7 @@ export function SecurityToggle({
   onChange: (checked: boolean) => void
 }) {
   return (
-    <label className="flex min-w-0 items-start gap-3 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-4">
+    <label className="flex min-w-0 items-start gap-3 border-t border-[var(--workbench-border)] py-4">
       <input
         checked={checked}
         className="mt-0.5 h-5 w-5 flex-none accent-[var(--workbench-primary)]"
@@ -67,11 +67,11 @@ export function SecurityNumberField({
   onChange: (value: number) => void
 }) {
   return (
-    <label className="grid gap-2 rounded-lg border border-[var(--workbench-border)] p-4 text-sm font-semibold text-[var(--workbench-text)]">
+    <label className="grid min-w-0 gap-2 border-t border-[var(--workbench-border)] py-4 text-sm font-semibold text-[var(--workbench-text)]">
       {label}
-      <span className="flex min-w-0 overflow-hidden rounded-md border border-[var(--workbench-border)] bg-white focus-within:border-[var(--workbench-primary)]">
+      <span className="flex min-w-0 overflow-hidden rounded-md border border-[var(--workbench-border-strong)] bg-white focus-within:border-[var(--workbench-primary)] focus-within:ring-2 focus-within:ring-[var(--workbench-primary)]/20">
         <input
-          className="min-h-10 min-w-0 flex-1 border-0 bg-transparent px-3 outline-none"
+          className="min-h-11 min-w-0 flex-1 border-0 bg-transparent px-3 outline-none"
           disabled={disabled}
           max={max}
           min={min}

@@ -86,7 +86,7 @@ export function TeamOverviewView({
 
   return (
     <div className="grid gap-6">
-      <div className="grid grid-cols-4 gap-4 max-[1180px]:grid-cols-2 max-[680px]:grid-cols-1">
+      <div className="grid grid-cols-2 gap-3 min-[1181px]:grid-cols-4">
         <MetricCard
           label={t('workspace.metric.projects')}
           testId="team-overview-projects"

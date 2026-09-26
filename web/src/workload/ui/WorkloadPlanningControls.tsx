@@ -204,7 +204,7 @@ export function WorkloadPlanningControls({
   }
 
   return (
-    <section className="grid gap-5 border border-slate-200 bg-white p-5 shadow-[0_18px_42px_rgba(30,52,88,0.04)]" data-testid="workload-planning-controls">
+    <section className="workbench-panel grid min-w-0 gap-5 p-5" data-testid="workload-planning-controls">
       <div>
         <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--workbench-primary)]">{t('workload.controls.eyebrow')}</p>
         <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-[#0d1833]">{t('workload.controls.title')}</h2>
@@ -373,12 +373,12 @@ function ProfileForm({
 
 /** Renders a compact form card. */
 function ControlCard({ children, description, title }: { children: ReactNode; description: string; title: string }) {
-  return <div className="grid gap-3 rounded-lg border border-slate-200 bg-[#fbfcfd] p-4"><div><h3 className="text-sm font-bold text-[#0d1833]">{title}</h3><p className="mt-1 text-xs font-medium leading-5 text-[var(--workbench-muted)]">{description}</p></div>{children}</div>
+  return <div className="grid min-w-0 gap-3 border-t border-[var(--workbench-border)] pt-4"><div><h3 className="text-sm font-semibold text-[var(--workbench-text)]">{title}</h3><p className="mt-1 text-xs leading-5 text-[var(--workbench-muted)]">{description}</p></div>{children}</div>
 }
 
 /** Renders a labeled input with shared Workbench styling. */
 function Field({ label, max, min, onChange, placeholder, step, type = 'text', value }: { label: string; max?: string; min?: string; onChange: (value: string) => void; placeholder?: string; step?: string; type?: string; value: string }) {
-  return <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">{label}<input className={inputClass} max={max} min={min} placeholder={placeholder} step={step} type={type} value={value} onChange={(event) => onChange(event.target.value)} /></label>
+  return <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">{label}<input className={inputClass} max={max} min={min} placeholder={placeholder} step={step} type={type} value={value} onChange={(event) => onChange(event.target.value)} /></label>
 }
 
 /** Renders the high-level result of an unsaved assignment preview. */
@@ -439,6 +439,6 @@ function formatHours(minutes: number): string {
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`
 }
 
-const inputClass = 'min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold text-[var(--workbench-text)] outline-none transition focus:border-[#6fbfb4] focus:ring-4 focus:ring-[#dff5f1]'
-const buttonClass = 'rounded-md bg-[#0d1833] px-3 py-2 text-xs font-bold text-white transition hover:bg-[#1c315d] disabled:cursor-not-allowed disabled:opacity-50'
-const secondaryButtonClass = 'rounded-md border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-[#526381] transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50'
+const inputClass = 'workbench-input min-h-10 w-full px-3'
+const buttonClass = 'workbench-button-primary px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50'
+const secondaryButtonClass = 'workbench-button-secondary px-3 py-2 text-xs disabled:cursor-not-allowed disabled:opacity-50'

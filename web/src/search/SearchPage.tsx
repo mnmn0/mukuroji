@@ -886,7 +886,7 @@ function SearchToolbar({
       >
         <fieldset className="contents" disabled={isAiOperationPending}>
       <div className="flex min-w-0 flex-wrap items-center gap-3">
-        <label className="relative min-w-[260px] flex-1">
+        <label className="relative min-w-0 basis-60 flex-1">
           <span className="sr-only">{t('search.input.label')}</span>
           <span aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--workbench-muted)]">⌕</span>
           <input
@@ -906,7 +906,7 @@ function SearchToolbar({
         ) : null}
       </div>
 
-      <div className="flex flex-wrap gap-2" role="group" aria-label={t('search.filters.types')}>
+      <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label={t('search.filters.types')}>
         {searchEntityTypes.map((type) => (
           <ToggleChip
             active={entityTypes.includes(type)}
@@ -919,7 +919,7 @@ function SearchToolbar({
         ))}
       </div>
 
-      <details className="rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3">
+      <details className="mt-3 border-y border-[var(--workbench-border)] py-3">
         <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-text)]">{t('search.filters.title')}</summary>
         <div className="mt-4 grid gap-4">
           <div className="grid gap-2">

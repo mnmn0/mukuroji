@@ -544,7 +544,7 @@ function WorkspaceRouteShell({
         </section>
         {quickAccessFeedbackMessage ? (
           <div
-            className="fixed bottom-5 right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-[0_18px_50px_rgba(15,23,42,0.22)]"
+            className="fixed bottom-5 right-5 z-[90] flex max-w-[min(420px,calc(100vw-40px))] items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-4 py-3 text-sm font-semibold text-[var(--workbench-text)] shadow-lg"
             role={workspace.quickAccessFeedback?.kind === 'error' ? 'alert' : 'status'}
           >
             <span className="min-w-0 flex-1">{quickAccessFeedbackMessage}</span>

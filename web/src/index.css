@@ -93,7 +93,7 @@
   touch-action: manipulation;
 }
 
-:where(button, a, input, select, textarea):focus-visible {
+:where(button, a, input, select, textarea, summary):focus-visible {
   outline: 2px solid var(--workbench-focus);
   outline-offset: 2px;
 }
@@ -183,7 +183,6 @@ textarea {
     border: 1px solid var(--workbench-border);
     border-radius: 8px;
     background: var(--workbench-surface);
-    box-shadow: 0 1px 2px rgba(23, 32, 29, 0.04);
   }
 
   .workbench-panel-muted {
@@ -196,10 +195,11 @@ textarea {
     border: 1px solid var(--workbench-border);
     border-radius: 8px;
     background: var(--workbench-surface);
-    box-shadow: 0 1px 2px rgba(23, 32, 29, 0.03);
   }
 
   .workbench-input {
+    min-width: 0;
+    max-width: 100%;
     border: 1px solid var(--workbench-border-strong);
     border-radius: 7px;
     background: var(--workbench-surface);
@@ -318,7 +318,6 @@ textarea {
     border: 1px solid var(--workbench-border);
     border-radius: 8px;
     background: var(--workbench-surface);
-    box-shadow: 0 1px 2px rgba(23, 32, 29, 0.04);
   }
 
   .workbench-table-head {
@@ -344,5 +343,14 @@ textarea {
     .workbench-table [data-column-pin] {
       position: static !important;
     }
+  }
+}
+
+/* Touch sizing takes precedence over desktop utility heights. */
+@media (max-width: 760px) {
+  .workbench-button-primary,
+  .workbench-button-secondary,
+  .workbench-input {
+    min-height: 44px;
   }
 }

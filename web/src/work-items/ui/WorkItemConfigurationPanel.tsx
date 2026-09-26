@@ -458,8 +458,8 @@ export function WorkflowConfigurationSection({
         </div>
         <div className="grid gap-3">
           {allowMultipleWorkflows ? (
-            <div className="flex items-end gap-2">
-              <label className="grid min-w-0 flex-1 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+            <div className="grid grid-cols-2 items-end gap-2">
+              <label className="col-span-2 grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
                 {t('workItems.configuration.workflowSelect')}
                 <select
                   aria-label={t('workItems.configuration.workflowSelect')}
@@ -509,7 +509,7 @@ export function WorkflowConfigurationSection({
 
       <div className="grid grid-cols-[minmax(0,0.92fr)_minmax(520px,1.08fr)] gap-0 max-[1320px]:grid-cols-1">
         <div className="min-w-0 border-r border-[var(--workbench-border)] p-5 max-[1320px]:border-b max-[1320px]:border-r-0">
-          <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="mb-4 flex items-center justify-between gap-3 max-[680px]:flex-col max-[680px]:items-start">
             <div>
               <h4 className="text-sm font-semibold text-[var(--workbench-text)]">
                 {t('workItems.configuration.statusRailTitle')}
