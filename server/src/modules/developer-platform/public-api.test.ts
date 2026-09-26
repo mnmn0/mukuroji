@@ -210,8 +210,8 @@ function createTestRouter(input: {
   managementPrincipal?: DeveloperManagementPrincipal
   /** Management authentication の request context を検証する override です。 */
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
-  /** Commercial entitlement policy used by the focused router test. */
-  enforceEntitlement?: PublicApiDependencies['enforceEntitlement']
+  /** Workspace lifecycle guard used by the focused router test. */
+  enforceActiveWorkspace?: PublicApiDependencies['enforceActiveWorkspace']
   /** Credential request limiter used by admission-order tests. */
   rateLimits?: PublicApiDependencies['rateLimits']
   platform?: InMemoryDeveloperPlatformClient
@@ -227,7 +227,7 @@ function createTestRouter(input: {
     ...(input.rateLimits ? { rateLimits: input.rateLimits } : {}),
     authenticateManagement: input.authenticateManagement ??
       (async () => input.managementPrincipal ?? managementPrincipal),
-    enforceEntitlement: input.enforceEntitlement ?? (async () => undefined),
+    enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
@@ -289,15 +289,15 @@ describe('public API router', () => {
     ])
   })
 
-  test('enforces Developer Platform entitlement after resolving the credential Workspace', async () => {
-    const observations: Array<{ workspaceId: string; method: string }> = []
+  test('enforces lifecycle after resolving the credential Workspace', async () => {
+    const observations: string[] = []
     const { platform, router } = createTestRouter({
-      async enforceEntitlement(workspaceId, method) {
-        observations.push({ workspaceId, method })
+      async enforceActiveWorkspace(workspaceId) {
+        observations.push(workspaceId)
         throw new PublicApiServiceError(
           403,
           'forbidden',
-          'Developer Platform is not enabled for this Workspace.',
+          'This Workspace is closing.',
         )
       },
     })
@@ -310,39 +310,9 @@ describe('public API router', () => {
     expect(response.status).toBe(403)
     expect(await response.json()).toMatchObject({
       code: 'forbidden',
-      detail: 'Developer Platform is not enabled for this Workspace.',
+      detail: 'This Workspace is closing.',
     })
-    expect(observations).toEqual([{ workspaceId: 'workspace-1', method: 'GET' }])
-  })
-
-  test('scopes entitlement idempotency by public API route', async () => {
-    const keys: Array<string | undefined> = []
-    const { platform, router } = createTestRouter({
-      async enforceEntitlement(_workspaceId, _method, idempotencyKey) {
-        keys.push(idempotencyKey)
-      },
-    })
-    const apiKey = await createApiKey(platform, ['work-items:read'])
-    const headers = {
-      Authorization: `Bearer ${apiKey.secret}`,
-      'Idempotency-Key': 'shared-caller-key',
-    }
-
-    const [collection, detail] = await Promise.all([
-      router.request('http://localhost/v1/work-items?teamId=team-1', { headers }),
-      router.request(
-        'http://localhost/v1/work-items/work-item-1?teamId=team-1',
-        { headers },
-      ),
-    ])
-
-    expect(collection.status).toBe(200)
-    expect(detail.status).toBe(200)
-    expect(keys).toHaveLength(2)
-    expect(keys[0]).not.toBe(keys[1])
-    expect(keys.every((key) =>
-      /^tenant-meter:v1:[a-f0-9]{64}:[a-f0-9]{64}$/u.test(key ?? '')
-    )).toBe(true)
+    expect(observations).toEqual(['workspace-1'])
   })
 
   test('returns canonical schedules, including explicitly unscheduled Work Items', async () => {
@@ -520,39 +490,11 @@ describe('public API router', () => {
     })
   })
 
-  test('scopes entitlement idempotency by public API payload', async () => {
-    const keys: Array<string | undefined> = []
+  test('rejects an oversized idempotent body before the lifecycle check', async () => {
+    let lifecycleCalls = 0
     const { platform, router } = createTestRouter({
-      async enforceEntitlement(_workspaceId, _method, idempotencyKey) {
-        keys.push(idempotencyKey)
-      },
-    })
-    const apiKey = await createApiKey(platform, ['work-items:write'])
-    const request = (title: string) => router.request(
-      'http://localhost/v1/work-items',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey.secret}`,
-          'Content-Type': 'application/json',
-          'Idempotency-Key': 'shared-payload-key',
-        },
-        body: JSON.stringify({ teamId: 'team-1', title }),
-      },
-    )
-
-    await request('First payload')
-    await request('Second payload')
-
-    expect(keys).toHaveLength(2)
-    expect(keys[0]).not.toBe(keys[1])
-  })
-
-  test('rejects an oversized idempotent body before entitlement metering', async () => {
-    let entitlementCalls = 0
-    const { platform, router } = createTestRouter({
-      async enforceEntitlement() {
-        entitlementCalls += 1
+      async enforceActiveWorkspace() {
+        lifecycleCalls += 1
       },
     })
     const apiKey = await createApiKey(platform, ['work-items:write'])
@@ -570,13 +512,13 @@ describe('public API router', () => {
     expect(response.status).toBe(413)
     expect(await response.json()).toMatchObject({
       code: 'invalid_request',
-      detail: 'The metered request body is too large.',
+      detail: 'The request body is too large.',
     })
-    expect(entitlementCalls).toBe(0)
+    expect(lifecycleCalls).toBe(0)
   })
 
-  test('does not meter a request rejected by credential rate limiting', async () => {
-    let entitlementCalls = 0
+  test('does not check lifecycle for a request rejected by credential rate limiting', async () => {
+    let lifecycleCalls = 0
     const { platform, router } = createTestRouter({
       rateLimits: {
         async consumeRateLimit() {
@@ -589,8 +531,8 @@ describe('public API router', () => {
           }
         },
       },
-      async enforceEntitlement() {
-        entitlementCalls += 1
+      async enforceActiveWorkspace() {
+        lifecycleCalls += 1
       },
     })
     const apiKey = await createApiKey(platform, ['work-items:read'])
@@ -600,7 +542,7 @@ describe('public API router', () => {
     })
 
     expect(response.status).toBe(429)
-    expect(entitlementCalls).toBe(0)
+    expect(lifecycleCalls).toBe(0)
   })
 
   test('redacts error messages, stacks, causes, and unsafe codes from log fields', () => {

@@ -2019,7 +2019,7 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
   expect(eventSource?.Properties).toEqual(expect.objectContaining({
     BatchSize: 10,
     BisectBatchOnFunctionError: true,
-    Enabled: true,
+    Enabled: { 'Fn::If': ['AiAssistanceConfigured', true, false] },
     FunctionResponseTypes: ['ReportBatchItemFailures'],
     MaximumRetryAttempts: 3,
     ParallelizationFactor: 1,

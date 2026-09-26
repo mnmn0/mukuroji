@@ -841,6 +841,8 @@ describe('Team Triage API composition', () => {
 
   test('projects Team-scoped Enterprise read and write permissions without widening them', async () => {
     await withTestEnvironment({
+      COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+      ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
       COGNITO_CLIENT_ID: 'mukuroji-main-client',
       COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
       COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',

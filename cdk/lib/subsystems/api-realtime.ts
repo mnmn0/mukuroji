@@ -196,6 +196,7 @@ function createApiRuntimeConfigurationLine(
  * @param description - Operational purpose shown in Secrets Manager.
  * @param values - Canonical API environment names and non-secret deployment-time values.
  * @param secretValues - Canonical names whose values are loaded from nested secrets.
+ * @param secretConditions - Conditions that replace disabled nested secrets with empty values.
  * @returns The retained configuration secret.
  */
 function createApiRuntimeConfigurationSecret(
@@ -207,6 +208,7 @@ function createApiRuntimeConfigurationSecret(
   description: string,
   values: Readonly<Record<string, string>>,
   secretValues: Readonly<Record<string, secretsmanager.ISecret>> = {},
+  secretConditions: Readonly<Record<string, cdk.CfnCondition>> = {},
 ): secretsmanager.Secret {
   const secretNamePrefix = cdk.Names.uniqueResourceName(scope, {
     allowedSpecialCharacters: '-',
@@ -236,6 +238,15 @@ function createApiRuntimeConfigurationSecret(
     cdk.Fn.base64(configurationRevision),
   ];
   for (const [name, kind, source] of lines) {
+    const condition = secretConditions[name];
+    if (condition) {
+      secretStringParts.push(cdk.Fn.conditionIf(
+        condition.logicalId,
+        cdk.Fn.join('', [`\n${kind}:${name}:`, cdk.Fn.base64(source)]),
+        `\nvalue:${name}:`,
+      ).toString());
+      continue;
+    }
     secretStringParts.push(`\n${kind}:${name}:`);
     secretStringParts.push(cdk.Fn.base64(source));
   }
@@ -343,6 +354,9 @@ function bindApiRuntimeConfiguration(
       'Revision-bound Enterprise Identity token-hash value consumed by the API.',
       enterpriseIdentityTokenHashSecret.valueAsString,
     );
+  const enterpriseSsoConfigured = new cdk.CfnCondition(scope, 'EnterpriseSsoConfigured', {
+    expression: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(enterpriseSsoStateSecret.valueAsString, '')),
+  });
   const enterpriseSsoStateValueSecret =
     createApiRuntimeSensitiveValueSecret(
       scope,
@@ -350,7 +364,13 @@ function bindApiRuntimeConfiguration(
       'api-enterprise-sso-state',
       apiRuntimeConfigurationRevision.valueAsString,
       'Revision-bound Enterprise SSO state-signing value consumed by the API.',
-      enterpriseSsoStateSecret.valueAsString,
+      // Secrets Manager rejects empty strings. Preserve the retained resource with
+      // an inert marker; the disabled envelope never references or loads this value.
+      cdk.Fn.conditionIf(
+        enterpriseSsoConfigured.logicalId,
+        enterpriseSsoStateSecret.valueAsString,
+        'SSO-disabled-no-signing-key',
+      ).toString(),
     );
   const requestTokenHashValueSecret =
     createApiRuntimeSensitiveValueSecret(
@@ -494,6 +514,7 @@ function bindApiRuntimeConfiguration(
         workspaceAuditPseudonymValueSecret,
       REQUEST_TOKEN_HASH_SECRET: requestTokenHashValueSecret,
     },
+    { ENTERPRISE_SSO_STATE_SECRET: enterpriseSsoConfigured },
   );
 
   apiFunction.addEnvironment(
@@ -842,7 +863,7 @@ export function buildApiRuntime(
   if (!apiFunction.role) {
     throw new Error('API Lambda execution role was not created.');
   }
-  apiFunction.role.attachInlinePolicy(new iam.Policy(
+  const apiBedrockModelInvokePolicy = new iam.Policy(
     scope,
     'ApiBedrockModelInvokePolicy',
     {
@@ -851,7 +872,13 @@ export function buildApiRuntime(
         resources: [aiBedrockModelArn.valueAsString],
       })],
     },
-  ));
+  );
+  apiFunction.role.attachInlinePolicy(apiBedrockModelInvokePolicy);
+  const apiBedrockModelInvokePolicyResource = apiBedrockModelInvokePolicy.node.defaultChild;
+  if (!(apiBedrockModelInvokePolicyResource instanceof iam.CfnPolicy)) {
+    throw new Error('API Bedrock model IAM policy was not created.');
+  }
+  apiBedrockModelInvokePolicyResource.cfnOptions.condition = input.parameters.aiAssistanceConfigured;
   const apiBedrockDestinationModelInvokePolicy = new iam.Policy(
     scope,
     'ApiBedrockDestinationModelInvokePolicy',

@@ -19,7 +19,8 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
   }));
   expect(parameters.CognitoSsoUserPoolClientId).toEqual(expect.objectContaining({
     Type: 'String',
-    AllowedPattern: '^[A-Za-z0-9]+$',
+    Default: '',
+    AllowedPattern: '^(?:|[A-Za-z0-9]+)$',
   }));
   expect(parameters.WorkspaceDirectoryId).toEqual(expect.objectContaining({
     Type: 'String',
@@ -117,7 +118,6 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
   }));
   for (const secretParameterName of [
     'EnterpriseIdentityTokenHashSecret',
-    'EnterpriseSsoStateSecret',
     'RequestEmailWebhookSecret',
     'RequestTokenHashSecret',
   ]) {
@@ -132,9 +132,7 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
   for (const parameterName of [
     'CognitoUserPoolId',
     'CognitoUserPoolClientId',
-    'CognitoSsoUserPoolClientId',
     'EnterpriseIdentityTokenHashSecret',
-    'EnterpriseSsoStateSecret',
     'WorkspaceDirectoryId',
     'WorkspaceAuditPseudonymKey',
     'InitialOwnerEmail',
@@ -145,9 +143,6 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     'AlarmSecondaryTopicName',
     'ApiRuntimeConfigurationRevision',
     'ApplicationCommitSha',
-    'AiBedrockInputPricePerMillionTokensUsd',
-    'AiBedrockModelArn',
-    'AiBedrockOutputPricePerMillionTokensUsd',
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }

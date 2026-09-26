@@ -22,18 +22,22 @@ Bedrock model allowlist、Lambda/local認証、live evaluationの運用契約は
 bun install
 ```
 
-ローカル環境を初めて起動する前に `openssl rand -hex 32` を3回実行し、それぞれ独立した
+ローカル環境を初めて起動する前に `openssl rand -hex 32` を2回実行し、それぞれ独立した
 64桁の小文字hex出力をgit管理外の `.env` に保存してください。Docker Compose が Floci
 コンテナへ渡すのは Workspace audit key だけで、ready hook がその形式を検証します。
-Enterprise credential/state secret は host 上の `server:dev` と `floci:deploy-backend` が
+Enterprise credential secret は host 上の `server:dev` と `floci:deploy-backend` が
 `.env` から直接読み込み、Floci コンテナには渡しません。保存後は `chmod 600 .env` で
 owner以外からの読み取りを禁止してください。
 
 ```dotenv
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
 ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<different-64-character-lowercase-hex-output>
-ENTERPRISE_SSO_STATE_SECRET=<third-64-character-lowercase-hex-output>
 ```
+
+ローカルのSSOも既定では無効です。以前の `.env` に `ENTERPRISE_SSO_STATE_SECRET` がある場合、
+SSOを使わなければ削除し、`bun run floci:up` で生成設定を更新してください。SSOを使う場合のみ、
+独立したstate secret、Hosted UI、外部IdPを含む5項目の設定を揃えます。Flociが作る検証用OAuth
+clientだけでは外部SSOを有効にしません。
 
 Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
 
@@ -274,7 +278,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
 - `AI_ASSISTANCE_BEDROCK_REGION`: AI assistanceが呼ぶBedrock Runtime region。本番はLambdaの`AWS_REGION`、localのJP既定は`ap-northeast-1`
 - `AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD` / `AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD`: exact model/profile用にdeploy時レビューしたstandard token単価。両方を設定した場合だけgeneration auditへ推定costを保存します。
-- `AI_ASSISTANCE_DEFAULT_MODEL_ID` / `AI_ASSISTANCE_ALLOWED_MODEL_IDS`: defaultとcomma-separated allowlist。本番CDKは両方を同じexact `AiBedrockModelId`（既定 `jp.anthropic.claude-sonnet-4-6`）へ固定します。
+- `AI_ASSISTANCE_DEFAULT_MODEL_ID` / `AI_ASSISTANCE_ALLOWED_MODEL_IDS`: defaultとcomma-separated allowlist。本番CDKは両方を同じexact `AiBedrockModelId`（有効化時は `jp.anthropic.claude-sonnet-4-6`、未設定時はAI無効）へ固定します。
 - `AI_ASSISTANCE_TABLE_NAME`: AI generation recordをAI専用key prefixで保存する既存Workspace Search table名。本番CDKは同tableへ自動bindします。
 - `AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE` / `AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE`: 新しいgeneration idempotency keyのUTC 1分固定窓上限（既定32 / 4）。
 - `AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE` / `AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION`: 同じatomic reservationで管理するworst-case token budget（既定32,000,000 / 4,000,000 / 1,000,000）。
@@ -286,7 +290,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
-- `TENANT_ADMINISTRATION_TABLE_NAME`: tenant profile、entitlement、governance、lifecycle を保存する DynamoDB table 名。ローカル既定値は `mukuroji-tenant-administration-local`
+- `TENANT_ADMINISTRATION_TABLE_NAME`: tenant profile、governance、lifecycle を保存する DynamoDB table 名。ローカル既定値は `mukuroji-tenant-administration-local`
 - `ENTERPRISE_IDENTITY_TABLE_NAME`: Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/domain/policy/role、SCIM identity/group、provisioning run、service account、break-glass metadata を保存する DynamoDB table 名。Enterprise Identity 専用 GSI はなく、ローカル既定値は `mukuroji-enterprise-identity-local`
 - `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET`: SCIM bearer token と service account credential を HMAC-SHA-256 する32–256文字の安定した secret。DynamoDB には credential kind・Workspace・credential ID で domain-separated な digest だけを保存します。作成・rotate response の raw credential は通常一回だけ表示し、同じ idempotency request の応答消失時に限り10分以内は同じ値を回復できます。
 - `MUKUROJI_AUTOMATION_TABLE` / `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
@@ -436,6 +440,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
+  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -464,6 +469,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
+  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -492,6 +498,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
+  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \

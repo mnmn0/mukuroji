@@ -10,6 +10,7 @@ const {
   expectStableWorkspaceMutationAuditContexts,
   resetTestApp,
   setTestAppDependencies,
+  withTestEnvironment,
 } = createApiTestHarness()
 import {
   CognitoServiceError,
@@ -71,6 +72,13 @@ test('returns a supported MFA challenge without attempting Workspace reconciliat
 })
 
 test('rechecks enforced SSO before completing password and MFA challenges', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+  }, async () => {
   const calls = configureFakeProjectClients(true, {
     newPasswordChallengeTokens: true,
     mfaChallengeTokens: true,
@@ -170,6 +178,7 @@ test('rechecks enforced SSO before completing password and MFA challenges', asyn
     email: 'recovery@outside.example',
     session: 'local-recovery-session',
   }])
+  })
 })
 
 test('completes an MFA challenge and binds server-verified assurance to the access token', async () => {

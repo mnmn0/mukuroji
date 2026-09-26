@@ -115,6 +115,8 @@ export interface StackParameters {
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
   /** Full Git commit SHA bundled into the deployed API runtime. */
   readonly applicationCommitSha: cdk.CfnParameter;
+  /** Whether an explicit Bedrock model configuration enables AI assistance. */
+  readonly aiAssistanceConfigured: cdk.CfnCondition;
   /** Exact Bedrock model identifier allowed for AI assistance. */
   readonly aiBedrockModelId: cdk.CfnParameter;
   /** Reviewed Bedrock input-token price in USD per one million tokens. */
@@ -333,11 +335,11 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   );
   const aiBedrockModelId = new cdk.CfnParameter(stack, 'AiBedrockModelId', {
     type: 'String',
-    default: defaultAiBedrockModelId,
-    allowedValues: [defaultAiBedrockModelId],
-    minLength: 1,
+    default: '',
+    allowedValues: ['', defaultAiBedrockModelId],
+    minLength: 0,
     maxLength: 256,
-    allowedPattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$',
+    allowedPattern: '^(?:|[A-Za-z0-9][A-Za-z0-9._:-]{0,255})$',
     constraintDescription:
       'AiBedrockModelId must be one exact Bedrock model or inference-profile identifier.',
     description:
@@ -348,9 +350,10 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     'AiBedrockInputPricePerMillionTokensUsd',
     {
       type: 'String',
-      minLength: 1,
+      default: '',
+      minLength: 0,
       maxLength: 32,
-      allowedPattern: aiBedrockTokenPricePattern,
+      allowedPattern: `^(?:|${aiBedrockTokenPricePattern.slice(1, -1)})$`,
       constraintDescription:
         'AiBedrockInputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
       description:
@@ -362,9 +365,10 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     'AiBedrockOutputPricePerMillionTokensUsd',
     {
       type: 'String',
-      minLength: 1,
+      default: '',
+      minLength: 0,
       maxLength: 32,
-      allowedPattern: aiBedrockTokenPricePattern,
+      allowedPattern: `^(?:|${aiBedrockTokenPricePattern.slice(1, -1)})$`,
       constraintDescription:
         'AiBedrockOutputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
       description:
@@ -373,9 +377,10 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
   );
   const aiBedrockModelArn = new cdk.CfnParameter(stack, 'AiBedrockModelArn', {
     type: 'String',
-    minLength: 1,
+    default: '',
+    minLength: 0,
     maxLength: 2_048,
-    allowedPattern: buildAiBedrockModelArnPattern(stack),
+    allowedPattern: `^(?:|${buildAiBedrockModelArnPattern(stack).slice(1, -1)})$`,
     constraintDescription:
       'AiBedrockModelArn must be one exact foundation-model or inference-profile ARN in the deployment partition.',
     description:
@@ -405,6 +410,29 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
       )),
     },
   );
+  const aiAssistanceConfigured = new cdk.CfnCondition(stack, 'AiAssistanceConfigured', {
+    expression: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(aiBedrockModelId.valueAsString, '')),
+  });
+  new cdk.CfnRule(stack, 'AiAssistanceConfigurationComplete', {
+    assertions: [{
+      assert: cdk.Fn.conditionOr(
+        cdk.Fn.conditionAnd(
+          cdk.Fn.conditionEquals(aiBedrockModelId.valueAsString, ''),
+          cdk.Fn.conditionEquals(aiBedrockModelArn.valueAsString, ''),
+          cdk.Fn.conditionEquals(aiBedrockDestinationModelArns.valueAsString, ''),
+          cdk.Fn.conditionEquals(aiBedrockInputPricePerMillionTokensUsd.valueAsString, ''),
+          cdk.Fn.conditionEquals(aiBedrockOutputPricePerMillionTokensUsd.valueAsString, ''),
+        ),
+        cdk.Fn.conditionAnd(
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(aiBedrockModelId.valueAsString, '')),
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(aiBedrockModelArn.valueAsString, '')),
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(aiBedrockInputPricePerMillionTokensUsd.valueAsString, '')),
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(aiBedrockOutputPricePerMillionTokensUsd.valueAsString, '')),
+        ),
+      ),
+      assertDescription: 'Leave all AI parameters empty to disable AI, or provide a complete reviewed model configuration.',
+    }],
+  });
   new cdk.CfnRule(stack, 'DefaultAiBedrockModelCompatibility', {
     ruleCondition: cdk.Fn.conditionEquals(
       aiBedrockModelId.valueAsString,
@@ -536,19 +564,22 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     'CognitoSsoUserPoolClientId',
     {
       type: 'String',
-      allowedPattern: '^[A-Za-z0-9]+$',
+      default: '',
+      allowedPattern: '^(?:|[A-Za-z0-9]+)$',
       description:
         'Dedicated public Cognito app client ID restricted to enterprise Hosted UI login.',
     },
   );
   const cognitoHostedUiDomain = new cdk.CfnParameter(stack, 'CognitoHostedUiDomain', {
     type: 'String',
-    minLength: 1,
+    default: '',
+    minLength: 0,
     description: 'HTTPS Cognito managed-login domain used for enterprise federation.',
   });
   const cognitoSsoRedirectUri = new cdk.CfnParameter(stack, 'CognitoSsoRedirectUri', {
     type: 'String',
-    allowedPattern: '^https://[^\\s]+$',
+    default: '',
+    allowedPattern: '^(?:|https://[^\\s]+)$',
     description: 'Exact SPA callback URI registered on the Cognito app client.',
   });
   const cognitoEnterpriseIdpName = new cdk.CfnParameter(
@@ -556,7 +587,8 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     'CognitoEnterpriseIdpName',
     {
       type: 'String',
-      minLength: 1,
+      default: '',
+      minLength: 0,
       maxLength: 128,
       description: 'Cognito identity-provider name used by enterprise SAML/OIDC federation.',
     },
@@ -566,12 +598,35 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     'EnterpriseSsoStateSecret',
     {
       type: 'String',
-      minLength: 32,
+      default: '',
+      minLength: 0,
+      allowedPattern: '^(?:|[\\s\\S]{32,256})$',
       maxLength: 256,
       noEcho: true,
       description: 'Secret used only to sign short-lived enterprise SSO state.',
     },
   );
+  new cdk.CfnRule(stack, 'EnterpriseSsoConfigurationComplete', {
+    assertions: [{
+      assert: cdk.Fn.conditionOr(
+        cdk.Fn.conditionAnd(
+          cdk.Fn.conditionEquals(cognitoSsoUserPoolClientId.valueAsString, ''),
+          cdk.Fn.conditionEquals(cognitoHostedUiDomain.valueAsString, ''),
+          cdk.Fn.conditionEquals(cognitoSsoRedirectUri.valueAsString, ''),
+          cdk.Fn.conditionEquals(cognitoEnterpriseIdpName.valueAsString, ''),
+          cdk.Fn.conditionEquals(enterpriseSsoStateSecret.valueAsString, ''),
+        ),
+        cdk.Fn.conditionAnd(
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(cognitoSsoUserPoolClientId.valueAsString, '')),
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(cognitoHostedUiDomain.valueAsString, '')),
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(cognitoSsoRedirectUri.valueAsString, '')),
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(cognitoEnterpriseIdpName.valueAsString, '')),
+          cdk.Fn.conditionNot(cdk.Fn.conditionEquals(enterpriseSsoStateSecret.valueAsString, '')),
+        ),
+      ),
+      assertDescription: 'Leave every SSO parameter empty to use password login, or configure all SSO parameters together.',
+    }],
+  });
   new cdk.CfnRule(stack, 'EnterpriseSecretSeparation', {
     assertions: [{
       assert: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(
@@ -635,6 +690,7 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     restoreDrillCleanupApproverRoleArn,
     apiRuntimeConfigurationRevision,
     applicationCommitSha,
+    aiAssistanceConfigured,
     aiBedrockModelId,
     aiBedrockInputPricePerMillionTokensUsd,
     aiBedrockOutputPricePerMillionTokensUsd,

@@ -338,6 +338,16 @@ function createExpectedConfigurationEnvelope(
       Object.hasOwn(candidate, 'NestedSecret')
       ? candidate.NestedSecret
       : undefined;
+    if (name === 'ENTERPRISE_SSO_STATE_SECRET') {
+      parts.push({
+        'Fn::If': [
+          'EnterpriseSsoConfigured',
+          join('', [`\nsecret:${name}:`, nested]),
+          `\nvalue:${name}:`,
+        ],
+      });
+      continue;
+    }
     parts.push(
       `\n${nested === undefined ? 'value' : 'secret'}:${name}:`,
     );
@@ -459,6 +469,12 @@ function resolveMaximumString(
     );
   }
 
+  const conditional = expression['Fn::If'];
+  if (Array.isArray(conditional) && conditional.length === 3) {
+    return [conditional[1], conditional[2]]
+      .map((branch) => resolveMaximumString(branch, parameters, resources))
+      .sort((left, right) => Buffer.byteLength(right) - Buffer.byteLength(left))[0] ?? '';
+  }
   const joinExpression = expression['Fn::Join'];
   if (Array.isArray(joinExpression) &&
       typeof joinExpression[0] === 'string' &&
@@ -569,7 +585,43 @@ function resolveApiEnvironmentValue(
   ].join('');
 }
 
+/**
+ * Resolves the SSO condition while preserving all other deployment expressions.
+ * @param value - Synthesized expression to inspect.
+ * @param enabled - Whether SSO is configured for this deployment.
+ * @returns The selected SSO branch with other intrinsics unchanged.
+ */
+function resolveSsoCondition(value: unknown, enabled: boolean): unknown {
+  if (Array.isArray(value)) return value.map((entry) => resolveSsoCondition(entry, enabled));
+  if (!isRecord(value)) return value;
+  const conditional = value['Fn::If'];
+  if (Array.isArray(conditional) && conditional[0] === 'EnterpriseSsoConfigured') {
+    return resolveSsoCondition(conditional[enabled ? 1 : 2], enabled);
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
+    [key, resolveSsoCondition(entry, enabled)]));
+}
+
 describe('API runtime configuration externalization', () => {
+  test('hydrates disabled SSO as an empty direct value without loading an empty nested secret', () => {
+    const template = requireRecord(synthesizedTemplate.toJSON(), 'CloudFormation template');
+    const parameters = requireRecordProperty(template, 'Parameters');
+    const resources = requireRecordProperty(template, 'Resources');
+    const conditions = requireRecordProperty(template, 'Conditions');
+    expect(conditions.EnterpriseSsoConfigured).toEqual({
+      'Fn::Not': [{ 'Fn::Equals': [ref('EnterpriseSsoStateSecret'), ''] }],
+    });
+    const envelope = requireRecordProperty(
+      requireRecord(resources[API_WORKFLOW_SECRET_LOGICAL_ID], 'Workflow secret'), 'Properties',
+    ).SecretString;
+    const disabled = resolveMaximumString(resolveSsoCondition(envelope, false), parameters, resources);
+    expect(disabled).toContain('\nvalue:ENTERPRISE_SSO_STATE_SECRET:\n');
+    expect(disabled).not.toContain('\nsecret:ENTERPRISE_SSO_STATE_SECRET:');
+    const enabled = resolveMaximumString(resolveSsoCondition(envelope, true), parameters, resources);
+    expect(enabled).toContain('\nsecret:ENTERPRISE_SSO_STATE_SECRET:');
+    expect(enabled).not.toContain('\nvalue:ENTERPRISE_SSO_STATE_SECRET:');
+  });
+
   test('maps every canonical runtime name to its exact deployment source', () => {
     const template = requireRecord(
       synthesizedTemplate.toJSON(),
@@ -687,7 +739,11 @@ describe('API runtime configuration externalization', () => {
       expect(secret.UpdateReplacePolicy).toBe('Retain');
       expect(secret.DeletionPolicy).toBe('Retain');
       const properties = requireRecordProperty(secret, 'Properties');
-      expect(properties.SecretString).toEqual(ref(parameterLogicalId));
+      expect(properties.SecretString).toEqual(
+        parameterLogicalId === 'EnterpriseSsoStateSecret'
+          ? { 'Fn::If': ['EnterpriseSsoConfigured', ref(parameterLogicalId), 'SSO-disabled-no-signing-key'] }
+          : ref(parameterLogicalId),
+      );
       expect(properties.Name).toEqual({
         'Fn::Join': [
           '-',

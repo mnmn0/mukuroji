@@ -12,10 +12,8 @@ import type {
   RequestTenantClosureInput,
   RequestTenantExportInput,
   TenantAdministrationSnapshot,
-  TenantBillingPeriod,
   TenantClosureStep,
   TenantDefaultPolicy,
-  TenantEntitlement,
   TenantExportStep,
   TenantGovernanceEnforcement,
   TenantGovernancePolicy,
@@ -23,12 +21,9 @@ import type {
   TenantOperationStepProof,
   TenantProfile,
   TenantRetentionReconciliation,
-  TenantUsage,
-  UpdateTenantEntitlementInput,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
 } from '@mukuroji/contracts'
-import type { TenantFeature } from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
   TENANT_CLOSURE_STEPS,
@@ -37,24 +32,17 @@ import {
   TenantAdministrationError,
   advanceTenantOperation,
   assertTenantActive,
-  assertTenantFeatureEnabled,
   assertTenantGovernanceEnforced,
-  assertTenantSeatAvailable,
-  beginTenantUsageMutation,
   createDefaultTenantAdministrationSnapshot,
   failTenantOperation,
   isTenantOperationActive,
   pauseTenantOperation,
   repairTenantClosureOperation,
-  recordTenantBillingPeriod,
-  reserveTenantUsage,
   resumeTenantOperation,
   validateTenantBoolean,
-  validateTenantFeatures,
   validateTenantGovernanceEnforcement,
   validateTenantInteger,
   validateTenantLocale,
-  validateTenantPlan,
   validateTenantRegion,
   verifyTenantClosure,
 } from '../../domain/tenant-administration'
@@ -63,8 +51,6 @@ import type {
   TenantAdministrationAuditWriter,
   TenantAuditRetentionProcessor,
   TenantAdministrationClient,
-  TenantSeatMeter,
-  TenantSeatMutationInput,
 } from '../../application/ports/tenant-administration-port'
 import {
   createTenantDeletedMemberAlias,
@@ -91,54 +77,20 @@ type TenantOperationTransitionOptions = {
   requireInactiveExecutionLease?: boolean
 }
 
-/** Durable, expiring receipt for one metered request reservation. */
-type TenantUsageReceipt = {
-  /** Canonical Workspace identifier. */
-  workspaceId: string
-  /** Commercial feature whose usage was reserved. */
-  feature: TenantFeature
-  /** Number of units reserved by the request. */
-  additionalUnits: number
-  /** Fingerprint that binds the key to its metering payload. */
-  requestFingerprint: string
-  /** Usage revision committed with this receipt. */
-  usageRevision: number
-  /** Receipt creation timestamp. */
-  createdAt: string
-  /** DynamoDB TTL epoch seconds. */
-  expiresAt: number
-}
-
-/** Parsed metering idempotency scope and request binding. */
-type TenantUsageIdempotency = {
-  /** Stable input used to derive the durable receipt key. */
-  receiptKeyInput: string
-  /** Optional request digest used to reject key reuse with another payload. */
-  requestBinding?: string
-}
-
 const PROFILE_RECORD_KEY = 'PROFILE'
-const ENTITLEMENT_RECORD_KEY = 'ENTITLEMENT'
-const USAGE_RECORD_KEY = 'USAGE'
 const GOVERNANCE_RECORD_KEY = 'GOVERNANCE'
 const ACTIVE_OPERATION_RECORD_KEY = 'ACTIVE_OPERATION'
 const OPERATION_EXECUTION_LEASE_RECORD_KEY = 'OPERATION_EXECUTION_LEASE'
-const BILLING_PERIOD_RECORD_PREFIX = 'BILLING#'
 const OPERATION_RECORD_PREFIX = 'OPERATION#'
 const OPERATION_HISTORY_RECORD_PREFIX = 'OPERATION_HISTORY#'
-const USAGE_RECEIPT_RECORD_PREFIX = 'USAGE_RECEIPT#'
 const RETENTION_JOB_RECORD_KEY = 'RETENTION_JOB'
 const RETENTION_RECONCILIATION_PAGE_SIZE = 22
-const USAGE_RECEIPT_RETENTION_SECONDS = 35 * 24 * 60 * 60
-const TENANT_METERING_IDEMPOTENCY_PATTERN =
-  /^tenant-meter:v1:([a-f0-9]{64}):([a-f0-9]{64})$/u
 
 /**
  * DynamoDB-backed tenant administration state and workflow adapter.
  */
 export class DynamoDbTenantAdministrationClient implements
   TenantAdministrationClient,
-  TenantSeatMeter<TenantTransactionItem>,
   TenantAuditRetentionProcessor {
   /** DynamoDB table containing tenant control-plane records. */
   private readonly tableName: string
@@ -203,7 +155,6 @@ export class DynamoDbTenantAdministrationClient implements
   async ensureSnapshot(
     workspaceId: string,
     ownerMemberKey: string,
-    activeSeats = 1,
   ): Promise<TenantAdministrationSnapshot> {
     try {
       const snapshot = await this.getSnapshot(workspaceId)
@@ -224,7 +175,6 @@ export class DynamoDbTenantAdministrationClient implements
       ownerMemberKey,
       now,
       this.governanceEnforcement,
-      activeSeats,
     )
     try {
       const retentionJob: TenantRetentionReconciliation | undefined =
@@ -244,15 +194,6 @@ export class DynamoDbTenantAdministrationClient implements
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           createPutTransactionItem(this.tableName, workspaceId, PROFILE_RECORD_KEY, 'profile', snapshot.profile),
-          createPutTransactionItem(this.tableName, workspaceId, ENTITLEMENT_RECORD_KEY, 'entitlement', snapshot.entitlement),
-          createPutTransactionItem(this.tableName, workspaceId, USAGE_RECORD_KEY, 'usage', snapshot.usage),
-          createPutTransactionItem(
-            this.tableName,
-            workspaceId,
-            createBillingPeriodRecordKey(snapshot.usage.periodStart),
-            'billing-period',
-            recordTenantBillingPeriod(snapshot.usage),
-          ),
           createPutTransactionItem(this.tableName, workspaceId, GOVERNANCE_RECORD_KEY, 'governance', snapshot.governance),
           ...(retentionJob
             ? [{
@@ -275,17 +216,14 @@ export class DynamoDbTenantAdministrationClient implements
 
   /** Reads the tenant aggregate with strongly consistent record reads. */
   async getSnapshot(workspaceId: string): Promise<TenantAdministrationSnapshot> {
-    const [profile, entitlement, usage, governance] = await Promise.all([
+    const [profile, governance] = await Promise.all([
       this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
-      this.readRecord(workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
-      this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
       this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
     ])
     const [
       activeOperation,
       recentOperations,
       retentionReconciliation,
-      storedBillingPeriods,
     ] = await Promise.all([
       this.readActiveOperation(workspaceId),
       this.readRecentOperations(workspaceId),
@@ -294,17 +232,10 @@ export class DynamoDbTenantAdministrationClient implements
         RETENTION_JOB_RECORD_KEY,
         readTenantRetentionReconciliation,
       ),
-      this.readBillingPeriods(workspaceId),
     ])
-    const billingPeriods = storedBillingPeriods.length > 0
-      ? storedBillingPeriods
-      : [recordTenantBillingPeriod(usage)]
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       profile,
-      entitlement,
-      usage,
-      billingPeriods,
       governance,
       governanceEnforcement: this.governanceEnforcement,
       recentOperations,
@@ -364,101 +295,6 @@ export class DynamoDbTenantAdministrationClient implements
       },
       governance.revision,
     )
-    return updated
-  }
-
-  /** Updates entitlement state while preserving the current usage boundary. */
-  async updateEntitlement(
-    workspaceId: string,
-    actorMemberKey: string,
-    input: UpdateTenantEntitlementInput,
-  ): Promise<TenantEntitlement> {
-    const [current, usage, governance, profile] = await Promise.all([
-      this.readRecord(workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
-      this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
-      this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
-      this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
-    ])
-    assertTenantActive(profile)
-    if (current.revision !== input.expectedRevision) {
-      throw revisionConflict('TenantEntitlementRevisionConflict')
-    }
-    const seatLimit = validateTenantInteger(input.seatLimit, 1_000_000, 'InvalidTenantSeatLimit')
-    if (usage.activeSeats > seatLimit) {
-      throw new TenantAdministrationError(
-        409,
-        'TenantSeatLimitBelowUsage',
-        'Tenant seat limit cannot be lower than current active seats.',
-      )
-    }
-    const updated: TenantEntitlement = {
-      ...current,
-      plan: validateTenantPlan(input.plan),
-      features: validateTenantFeatures(input.features),
-      seatLimit,
-      usageQuota: validateTenantInteger(input.usageQuota, 1_000_000_000, 'InvalidTenantUsageQuota'),
-      gracePeriodDays: validateTenantInteger(input.gracePeriodDays, 90, 'InvalidTenantGracePeriod'),
-      revision: current.revision + 1,
-      updatedAt: this.now(),
-    }
-    const auditPut = this.createAuditPut({
-      workspaceId,
-      actorMemberKey,
-      eventType: 'tenant.entitlement.updated',
-      entityId: workspaceId,
-      action: 'updated',
-      path: '/api/tenant/entitlement',
-      requestMethod: 'PATCH',
-      idempotencyKey: `tenant-entitlement:${workspaceId}:${updated.revision}`,
-      before: current,
-      after: updated,
-      metadata: { kind: 'tenant-entitlement' },
-      retentionDays: governance.auditRetentionDays,
-      legalHold: governance.legalHold,
-      occurredAt: updated.updatedAt,
-    })
-    const items: TenantTransactionItem[] = [
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: createStateItem(
-            workspaceId,
-            ENTITLEMENT_RECORD_KEY,
-            'entitlement',
-            updated,
-          ),
-          ConditionExpression: 'revision = :expectedRevision',
-          ExpressionAttributeValues: { ':expectedRevision': current.revision },
-        },
-      },
-      createRevisionConditionCheck(
-        this.tableName,
-        workspaceId,
-        USAGE_RECORD_KEY,
-        usage.revision,
-      ),
-      createRevisionConditionCheck(
-        this.tableName,
-        workspaceId,
-        GOVERNANCE_RECORD_KEY,
-        governance.revision,
-      ),
-      createRevisionConditionCheck(
-        this.tableName,
-        workspaceId,
-        PROFILE_RECORD_KEY,
-        profile.revision,
-      ),
-    ]
-    if (auditPut) items.push(auditPut)
-    try {
-      await this.documentClient.send(new TransactWriteCommand({ TransactItems: items }))
-    } catch (error) {
-      if (isConditionalFailure(error)) {
-        throw revisionConflict('TenantEntitlementRevisionConflict')
-      }
-      throw toTenantPersistenceError(error)
-    }
     return updated
   }
 
@@ -668,118 +504,6 @@ export class DynamoDbTenantAdministrationClient implements
     }
   }
 
-  /** Checks one feature against the current strongly consistent entitlement. */
-  async assertFeature(workspaceId: string, feature: TenantFeature): Promise<void> {
-    await this.assertActive(workspaceId)
-    const entitlement = await this.readRecord(
-      workspaceId,
-      ENTITLEMENT_RECORD_KEY,
-      readTenantEntitlement,
-    )
-    assertTenantFeatureEnabled(entitlement, feature)
-  }
-
-  /**
-   * Prepares a seat counter mutation for the same transaction as membership state.
-   *
-   * @param input - Authoritative membership transition being metered.
-   * @returns Conditional tenant usage and audit transaction items.
-   */
-  async prepareSeatMutation(
-    input: TenantSeatMutationInput,
-  ): Promise<readonly TenantTransactionItem[]> {
-    const [entitlement, current, governance, profile] = await Promise.all([
-      this.readRecord(input.workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
-      this.readRecord(input.workspaceId, USAGE_RECORD_KEY, readTenantUsage),
-      this.readRecord(input.workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
-      this.readRecord(input.workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
-    ])
-    assertTenantActive(profile)
-    if (input.direction === 'activate') {
-      assertTenantSeatAvailable(entitlement, current)
-    } else if (current.activeSeats === 0) {
-      throw new TenantAdministrationError(
-        503,
-        'TenantSeatCounterCorrupt',
-        'Tenant seat state is inconsistent with active membership.',
-      )
-    }
-    const periodUsage = beginTenantUsageMutation(
-      current,
-      input.occurredAt,
-    )
-    const activeSeats = input.direction === 'activate'
-      ? periodUsage.activeSeats + 1
-      : periodUsage.activeSeats - 1
-    const updated: TenantUsage = {
-      ...periodUsage,
-      activeSeats,
-      updatedAt: input.occurredAt,
-    }
-    const currentBillingPeriod = await this.readOptionalRecord(
-      input.workspaceId,
-      createBillingPeriodRecordKey(updated.periodStart),
-      readTenantBillingPeriod,
-    )
-    const billingPeriod = recordTenantBillingPeriod(updated, currentBillingPeriod)
-    const items: TenantTransactionItem[] = []
-    if (input.direction === 'activate') {
-      items.push(createRevisionConditionCheck(
-        this.tableName,
-        input.workspaceId,
-        ENTITLEMENT_RECORD_KEY,
-        entitlement.revision,
-      ))
-    }
-    items.push({
-      Put: {
-        TableName: this.tableName,
-        Item: createStateItem(input.workspaceId, USAGE_RECORD_KEY, 'usage', updated),
-        ConditionExpression: 'revision = :expectedRevision',
-        ExpressionAttributeValues: { ':expectedRevision': current.revision },
-      },
-    }, createBillingPeriodTransactionItem(
-      this.tableName,
-      input.workspaceId,
-      billingPeriod,
-      currentBillingPeriod,
-    ), createRevisionConditionCheck(
-      this.tableName,
-      input.workspaceId,
-      GOVERNANCE_RECORD_KEY,
-      governance.revision,
-    ), createRevisionConditionCheck(
-      this.tableName,
-      input.workspaceId,
-      PROFILE_RECORD_KEY,
-      profile.revision,
-    ))
-    const auditPut = this.createAuditPut({
-      workspaceId: input.workspaceId,
-      actorMemberKey: 'meter:seat',
-      eventType: input.direction === 'activate'
-        ? 'tenant.seat.assigned'
-        : 'tenant.seat.released',
-      entityId: input.workspaceId,
-      privateMemberKey: input.memberKey,
-      action: input.direction === 'activate' ? 'assigned' : 'released',
-      path: '/internal/tenant/seats',
-      requestMethod: 'INTERNAL',
-      idempotencyKey:
-        `tenant-seat:${input.workspaceId}:${input.memberKey}:${input.direction}:${updated.revision}`,
-      before: current,
-      after: updated,
-      metadata: {
-        direction: input.direction,
-      },
-      retentionDays: governance.auditRetentionDays,
-      legalHold: governance.legalHold,
-      occurredAt: input.occurredAt,
-    })
-    if (auditPut) items.push(auditPut)
-    return items
-  }
-
   /**
    * Applies one bounded, resumable page of audit TTL reconciliation.
    *
@@ -970,180 +694,6 @@ export class DynamoDbTenantAdministrationClient implements
       }
       throw toTenantPersistenceError(error)
     }
-  }
-
-  /**
-   * Applies a feature and quota check before atomically persisting metered usage.
-   *
-   * @param workspaceId - Canonical Workspace identifier.
-   * @param feature - Commercial feature being metered.
-   * @param additionalUnits - Number of usage units to reserve.
-   * @param idempotencyKey - Optional request key used to replay a committed reservation.
-   * @returns Current-period usage after the reservation or a matching replay.
-   */
-  async reserveUsage(
-    workspaceId: string,
-    feature: TenantFeature,
-    additionalUnits: number,
-    idempotencyKey?: string,
-  ): Promise<TenantUsage> {
-    const now = this.now()
-    const currentEpochSeconds = toEpochSeconds(now)
-    const meteringIdempotency = readTenantUsageIdempotency(idempotencyKey)
-    const receiptRecordKey = meteringIdempotency
-      ? createUsageReceiptRecordKey(
-          workspaceId,
-          feature,
-          meteringIdempotency.receiptKeyInput,
-        )
-      : undefined
-    const requestFingerprint = createUsageRequestFingerprint(
-      feature,
-      additionalUnits,
-      meteringIdempotency?.requestBinding,
-    )
-    const [
-      entitlement,
-      current,
-      governance,
-      profile,
-      existingReceipt,
-    ] = await Promise.all([
-      this.readRecord(workspaceId, ENTITLEMENT_RECORD_KEY, readTenantEntitlement),
-      this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
-      this.readRecord(workspaceId, GOVERNANCE_RECORD_KEY, readTenantGovernance),
-      this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
-      receiptRecordKey
-        ? this.readOptionalRecord(
-            workspaceId,
-            receiptRecordKey,
-            readTenantUsageReceipt,
-          )
-        : Promise.resolve(undefined),
-    ])
-    assertTenantActive(profile)
-    assertTenantFeatureEnabled(entitlement, feature)
-    if (existingReceipt && existingReceipt.expiresAt > currentEpochSeconds) {
-      assertTenantUsageReceipt(
-        existingReceipt,
-        workspaceId,
-        feature,
-        additionalUnits,
-        requestFingerprint,
-        current,
-      )
-      return current
-    }
-    const updated = reserveTenantUsage(entitlement, current, additionalUnits, now)
-    const currentBillingPeriod = await this.readOptionalRecord(
-      workspaceId,
-      createBillingPeriodRecordKey(updated.periodStart),
-      readTenantBillingPeriod,
-    )
-    const billingPeriod = recordTenantBillingPeriod(updated, currentBillingPeriod)
-    const auditPut = this.createAuditPut({
-      workspaceId,
-      actorMemberKey: `meter:${feature}`,
-      eventType: 'tenant.usage.reserved',
-      entityId: workspaceId,
-      action: 'reserved',
-      path: '/internal/tenant/usage',
-      requestMethod: 'INTERNAL',
-      idempotencyKey: `tenant-usage:${workspaceId}:${feature}:${updated.revision}`,
-      before: current,
-      after: updated,
-      metadata: { feature, additionalUnits },
-      retentionDays: governance.auditRetentionDays,
-      legalHold: governance.legalHold,
-      occurredAt: updated.updatedAt,
-    })
-    const items: TenantTransactionItem[] = [
-      createRevisionConditionCheck(
-        this.tableName,
-        workspaceId,
-        ENTITLEMENT_RECORD_KEY,
-        entitlement.revision,
-      ),
-      createRevisionConditionCheck(
-        this.tableName,
-        workspaceId,
-        GOVERNANCE_RECORD_KEY,
-        governance.revision,
-      ),
-      createRevisionConditionCheck(
-        this.tableName,
-        workspaceId,
-        PROFILE_RECORD_KEY,
-        profile.revision,
-      ),
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: createStateItem(workspaceId, USAGE_RECORD_KEY, 'usage', updated),
-          ConditionExpression: 'revision = :expectedRevision',
-          ExpressionAttributeValues: { ':expectedRevision': current.revision },
-        },
-      },
-      createBillingPeriodTransactionItem(
-      this.tableName,
-      workspaceId,
-      billingPeriod,
-      currentBillingPeriod,
-      ),
-    ]
-    if (receiptRecordKey) {
-      const receipt: TenantUsageReceipt = {
-        workspaceId,
-        feature,
-        additionalUnits,
-        requestFingerprint,
-        usageRevision: updated.revision,
-        createdAt: now,
-        expiresAt: toTenantReceiptExpiry(now),
-      }
-      items.push({
-        Put: {
-          TableName: this.tableName,
-          Item: createUsageReceiptStateItem(receiptRecordKey, receipt),
-          ConditionExpression:
-            'attribute_not_exists(recordKey) OR expiresAt <= :currentEpochSeconds',
-          ExpressionAttributeValues: {
-            ':currentEpochSeconds': currentEpochSeconds,
-          },
-        },
-      })
-    }
-    if (auditPut) items.push(auditPut)
-    try {
-      await this.documentClient.send(new TransactWriteCommand({ TransactItems: items }))
-    } catch (error) {
-      if (isConditionalFailure(error)) {
-        if (receiptRecordKey) {
-          const [replayedReceipt, replayedUsage] = await Promise.all([
-            this.readOptionalRecord(
-              workspaceId,
-              receiptRecordKey,
-              readTenantUsageReceipt,
-            ),
-            this.readRecord(workspaceId, USAGE_RECORD_KEY, readTenantUsage),
-          ])
-          if (replayedReceipt && replayedReceipt.expiresAt > currentEpochSeconds) {
-            assertTenantUsageReceipt(
-              replayedReceipt,
-              workspaceId,
-              feature,
-              additionalUnits,
-              requestFingerprint,
-              replayedUsage,
-            )
-            return replayedUsage
-          }
-        }
-        throw revisionConflict('TenantUsageRevisionConflict')
-      }
-      throw toTenantPersistenceError(error)
-    }
-    return updated
   }
 
   /** Creates a new export operation after enforcing one active operation per tenant. */
@@ -1540,62 +1090,6 @@ export class DynamoDbTenantAdministrationClient implements
       )
     }
     return operation
-  }
-
-  /** Reads the newest invoice-ready tenant billing periods. */
-  private async readBillingPeriods(workspaceId: string): Promise<TenantBillingPeriod[]> {
-    let response
-    try {
-      response = await this.documentClient.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-        ExpressionAttributeValues: {
-          ':workspaceId': workspaceId,
-          ':prefix': BILLING_PERIOD_RECORD_PREFIX,
-        },
-        ConsistentRead: true,
-        ScanIndexForward: false,
-        Limit: 13,
-      }))
-    } catch (error) {
-      throw toTenantPersistenceError(error)
-    }
-    const rawItems: unknown = response.Items
-    if (rawItems === undefined) return []
-    if (!Array.isArray(rawItems)) {
-      throw new TenantAdministrationError(
-        503,
-        'TenantAdministrationCorrupt',
-        'Tenant billing history is invalid.',
-      )
-    }
-    return rawItems.map((rawItem) => {
-      if (
-        !isRecord(rawItem) ||
-        typeof rawItem.recordKey !== 'string' ||
-        !rawItem.recordKey.startsWith(BILLING_PERIOD_RECORD_PREFIX)
-      ) {
-        throw tenantAdministrationCorrupt(
-          'Tenant billing history key is invalid.',
-        )
-      }
-      const billingPeriod = this.parseStateItem(
-        rawItem,
-        workspaceId,
-        rawItem.recordKey,
-        readTenantBillingPeriod,
-      )
-      if (
-        rawItem.recordKey !== createBillingPeriodRecordKey(
-          billingPeriod.periodStart,
-        )
-      ) {
-        throw tenantAdministrationCorrupt(
-          'Tenant billing history period is inconsistent.',
-        )
-      }
-      return billingPeriod
-    })
   }
 
   /** Reads the newest lifecycle operation snapshots for result inspection. */
@@ -2324,40 +1818,6 @@ function createPutTransactionItem<T extends object>(
 }
 
 /**
- * Creates a conditional billing-period write that joins the authoritative usage mutation.
- *
- * @param tableName - Tenant administration table name.
- * @param workspaceId - Canonical Workspace identifier.
- * @param value - Updated invoice-ready period aggregate.
- * @param current - Existing period aggregate, when this is an update.
- * @returns One create-or-revision-checked transaction item.
- */
-function createBillingPeriodTransactionItem(
-  tableName: string,
-  workspaceId: string,
-  value: TenantBillingPeriod,
-  current?: TenantBillingPeriod,
-): TenantTransactionItem {
-  return {
-    Put: {
-      TableName: tableName,
-      Item: createStateItem(
-        workspaceId,
-        createBillingPeriodRecordKey(value.periodStart),
-        'billing-period',
-        value,
-      ),
-      ConditionExpression: current
-        ? 'revision = :expectedRevision'
-        : 'attribute_not_exists(recordKey)',
-      ...(current
-        ? { ExpressionAttributeValues: { ':expectedRevision': current.revision } }
-        : {}),
-    },
-  }
-}
-
-/**
  * Creates a revision condition that serializes related aggregate mutations.
  *
  * @param tableName - Tenant administration table name.
@@ -2419,11 +1879,6 @@ function readEpochSeconds(value: string): number {
   return Math.floor(timestamp / 1_000)
 }
 
-/** Creates the tenant-partition sort key for one UTC billing period. */
-function createBillingPeriodRecordKey(periodStart: string): string {
-  return `${BILLING_PERIOD_RECORD_PREFIX}${periodStart}`
-}
-
 /**
  * Creates a newest-first sortable history key for one tenant operation.
  *
@@ -2463,29 +1918,6 @@ function createStateItem<T extends object>(
     updatedAt,
     payload: JSON.stringify(value),
     ...(lifecycleStatus ? { lifecycleStatus } : {}),
-  }
-}
-
-/**
- * Creates an expiring, digest-keyed usage reservation receipt item.
- *
- * @param recordKey - Digest-derived receipt sort key.
- * @param receipt - Safe receipt payload that excludes the raw idempotency key.
- * @returns DynamoDB item with a top-level TTL attribute.
- */
-function createUsageReceiptStateItem(
-  recordKey: string,
-  receipt: TenantUsageReceipt,
-): Record<string, unknown> {
-  return {
-    ...createStateItem(
-      receipt.workspaceId,
-      recordKey,
-      'usage-receipt',
-      receipt,
-    ),
-    updatedAt: receipt.createdAt,
-    expiresAt: receipt.expiresAt,
   }
 }
 
@@ -2551,28 +1983,6 @@ function readTenantProfile(value: unknown): TenantProfile {
   }
 }
 
-/** Parses one invoice-ready billing aggregate from durable state. */
-function readTenantBillingPeriod(value: unknown): TenantBillingPeriod {
-  if (!isRecord(value)) throw new Error('invalid billing period')
-  return {
-    workspaceId: readRequiredString(value.workspaceId),
-    periodStart: readRequiredString(value.periodStart),
-    periodEnd: readRequiredString(value.periodEnd),
-    meteredUnits: validateTenantInteger(
-      value.meteredUnits,
-      1_000_000_000,
-      'InvalidTenantBillingUsage',
-    ),
-    activeSeatHighWaterMark: validateTenantInteger(
-      value.activeSeatHighWaterMark,
-      1_000_000,
-      'InvalidTenantBillingSeats',
-    ),
-    revision: readRevision(value.revision),
-    updatedAt: readRequiredString(value.updatedAt),
-  }
-}
-
 function readTenantDefaultPolicy(value: unknown): TenantDefaultPolicy {
   if (!isRecord(value)) throw new Error('invalid policy')
   const defaultMemberRole = value.defaultMemberRole === 'member' || value.defaultMemberRole === 'guest'
@@ -2581,68 +1991,6 @@ function readTenantDefaultPolicy(value: unknown): TenantDefaultPolicy {
   if (defaultMemberRole === undefined) throw new Error('invalid member role')
   return {
     defaultMemberRole,
-  }
-}
-
-function readTenantEntitlement(value: unknown): TenantEntitlement {
-  if (!isRecord(value)) throw new Error('invalid entitlement')
-  return {
-    workspaceId: readRequiredString(value.workspaceId),
-    plan: validateTenantPlan(value.plan),
-    features: validateTenantFeatures(value.features),
-    seatLimit: validateTenantInteger(value.seatLimit, 1_000_000, 'InvalidTenantSeatLimit'),
-    usageQuota: validateTenantInteger(value.usageQuota, 1_000_000_000, 'InvalidTenantUsageQuota'),
-    gracePeriodDays: validateTenantInteger(value.gracePeriodDays, 90, 'InvalidTenantGracePeriod'),
-    revision: readRevision(value.revision),
-    updatedAt: readRequiredString(value.updatedAt),
-  }
-}
-
-function readTenantUsage(value: unknown): TenantUsage {
-  if (!isRecord(value)) throw new Error('invalid usage')
-  const gracePeriodEndsAt = value.gracePeriodEndsAt === undefined
-    ? undefined
-    : readRequiredString(value.gracePeriodEndsAt)
-  return {
-    workspaceId: readRequiredString(value.workspaceId),
-    activeSeats: validateTenantInteger(value.activeSeats, 1_000_000, 'InvalidTenantActiveSeats'),
-    periodUsage: validateTenantInteger(value.periodUsage, 1_000_000_000, 'InvalidTenantPeriodUsage'),
-    periodStart: readRequiredString(value.periodStart),
-    periodEnd: readRequiredString(value.periodEnd),
-    ...(gracePeriodEndsAt ? { gracePeriodEndsAt } : {}),
-    revision: readRevision(value.revision),
-    updatedAt: readRequiredString(value.updatedAt),
-  }
-}
-
-/**
- * Parses one durable metering idempotency receipt.
- *
- * @param value - Serialized receipt payload.
- * @returns Validated receipt state.
- */
-function readTenantUsageReceipt(value: unknown): TenantUsageReceipt {
-  if (!isRecord(value)) throw new Error('invalid usage receipt')
-  const requestFingerprint = readRequiredString(value.requestFingerprint)
-  if (!/^[a-f0-9]{64}$/u.test(requestFingerprint)) {
-    throw new Error('invalid usage receipt fingerprint')
-  }
-  return {
-    workspaceId: readRequiredString(value.workspaceId),
-    feature: readTenantFeature(value.feature),
-    additionalUnits: validateTenantInteger(
-      value.additionalUnits,
-      1_000_000_000,
-      'InvalidUsageUnits',
-    ),
-    requestFingerprint,
-    usageRevision: readRevision(value.usageRevision),
-    createdAt: readRequiredString(value.createdAt),
-    expiresAt: validateTenantInteger(
-      value.expiresAt,
-      Number.MAX_SAFE_INTEGER,
-      'InvalidTenantUsageReceiptExpiry',
-    ),
   }
 }
 
@@ -2885,52 +2233,6 @@ function readAuditCursorEventId(
 }
 
 /**
- * Creates a digest-only sort key for one usage reservation receipt.
- *
- * @param workspaceId - Canonical Workspace identifier.
- * @param feature - Commercial feature being metered.
- * @param receiptKeyInput - Validated raw or server-scoped receipt-key input.
- * @returns A non-secret DynamoDB record key.
- */
-function createUsageReceiptRecordKey(
-  workspaceId: string,
-  feature: TenantFeature,
-  receiptKeyInput: string,
-): string {
-  const digest = createHash('sha256')
-    .update(workspaceId)
-    .update('\0')
-    .update(feature)
-    .update('\0')
-    .update(receiptKeyInput)
-    .digest('hex')
-  return `${USAGE_RECEIPT_RECORD_PREFIX}${digest}`
-}
-
-/**
- * Binds a usage idempotency key to its feature and unit count.
- *
- * @param feature - Commercial feature being metered.
- * @param additionalUnits - Requested unit count.
- * @param requestBinding - Optional digest binding the key to request semantics.
- * @returns A stable SHA-256 request fingerprint.
- */
-function createUsageRequestFingerprint(
-  feature: TenantFeature,
-  additionalUnits: number,
-  requestBinding?: string,
-): string {
-  const hash = createHash('sha256')
-    .update(feature)
-    .update('\0')
-    .update(String(additionalUnits))
-  if (requestBinding) {
-    hash.update('\0').update(requestBinding)
-  }
-  return hash.digest('hex')
-}
-
-/**
  * Creates a deterministic operation identifier without persisting the raw request key.
  *
  * @param workspaceId - Canonical Workspace identifier.
@@ -2958,30 +2260,6 @@ function createTenantOperationId(
 }
 
 /**
- * Converts an ISO timestamp to whole epoch seconds.
- *
- * @param value - Tenant clock timestamp.
- * @returns Epoch seconds suitable for DynamoDB TTL comparisons.
- */
-function toEpochSeconds(value: string): number {
-  const timestamp = Date.parse(value)
-  if (Number.isNaN(timestamp)) {
-    throw new TenantAdministrationError(500, 'InvalidTenantClock', 'Tenant clock is invalid.')
-  }
-  return Math.floor(timestamp / 1_000)
-}
-
-/**
- * Calculates the bounded TTL for a usage reservation receipt.
- *
- * @param createdAt - Receipt creation timestamp.
- * @returns DynamoDB TTL epoch seconds.
- */
-function toTenantReceiptExpiry(createdAt: string): number {
-  return toEpochSeconds(createdAt) + USAGE_RECEIPT_RETENTION_SECONDS
-}
-
-/**
  * Validates an optional request idempotency key before it reaches hashing logic.
  *
  * @param value - Candidate request header value.
@@ -3002,73 +2280,6 @@ function readOptionalTenantIdempotencyKey(value: string | undefined): string | u
     )
   }
   return normalized
-}
-
-/**
- * Reads an optional metering scope while retaining compatibility with internal keys.
- *
- * @param value - Candidate scoped or legacy idempotency key.
- * @returns Receipt-key input and optional request binding.
- */
-function readTenantUsageIdempotency(
-  value: string | undefined,
-): TenantUsageIdempotency | undefined {
-  const normalized = readOptionalTenantIdempotencyKey(value)
-  if (!normalized) return undefined
-  const scoped = normalized.match(TENANT_METERING_IDEMPOTENCY_PATTERN)
-  if (!scoped) return { receiptKeyInput: normalized }
-  const receiptKeyInput = scoped[1]
-  const requestBinding = scoped[2]
-  if (!receiptKeyInput || !requestBinding) {
-    throw new TenantAdministrationError(
-      400,
-      'InvalidTenantIdempotencyKey',
-      'Tenant idempotency key is invalid.',
-    )
-  }
-  return {
-    receiptKeyInput,
-    requestBinding,
-  }
-}
-
-/**
- * Confirms a metering receipt belongs to the current request and committed usage.
- *
- * @param receipt - Durable receipt found for the digest-derived key.
- * @param workspaceId - Canonical Workspace identifier.
- * @param feature - Commercial feature being metered.
- * @param additionalUnits - Requested unit count.
- * @param requestFingerprint - Current request fingerprint.
- * @param usage - Current durable usage aggregate.
- */
-function assertTenantUsageReceipt(
-  receipt: TenantUsageReceipt,
-  workspaceId: string,
-  feature: TenantFeature,
-  additionalUnits: number,
-  requestFingerprint: string,
-  usage: TenantUsage,
-): void {
-  if (
-    receipt.workspaceId !== workspaceId ||
-    receipt.feature !== feature ||
-    receipt.additionalUnits !== additionalUnits ||
-    receipt.requestFingerprint !== requestFingerprint
-  ) {
-    throw new TenantAdministrationError(
-      409,
-      'TenantUsageIdempotencyConflict',
-      'Tenant usage idempotency key was already used for another request.',
-    )
-  }
-  if (usage.workspaceId !== workspaceId || usage.revision < receipt.usageRevision) {
-    throw new TenantAdministrationError(
-      503,
-      'TenantAdministrationCorrupt',
-      'Tenant usage receipt is inconsistent with current usage.',
-    )
-  }
 }
 
 /**
@@ -3096,26 +2307,6 @@ function assertTenantOperationReplay(
       'Tenant operation idempotency key was already used for another request.',
     )
   }
-}
-
-/**
- * Parses one tenant feature discriminator from durable state.
- *
- * @param value - Candidate feature value.
- * @returns A validated tenant feature.
- */
-function readTenantFeature(value: unknown): TenantFeature {
-  if (
-    value === 'documents' ||
-    value === 'analytics' ||
-    value === 'automation' ||
-    value === 'developer-platform' ||
-    value === 'sso' ||
-    value === 'scim'
-  ) {
-    return value
-  }
-  throw new Error('invalid tenant feature')
 }
 
 function readEncryptionKeyPolicy(value: unknown): 'aws-managed' | 'customer-managed' {

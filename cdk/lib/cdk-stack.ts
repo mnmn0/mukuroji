@@ -176,6 +176,7 @@ export class CdkStack extends cdk.Stack {
     const aiAssistanceObservabilityWorker = buildAiAssistanceObservabilityWorker(
       this,
       {
+        aiAssistanceConfigured: parameters.aiAssistanceConfigured,
         applicationCommitSha: parameters.applicationCommitSha.valueAsString,
         dataStores,
         lambdaBuildPaths,

@@ -37,15 +37,12 @@ function createTenantAdministrationFake(
   ensureCalls: Array<{
     workspaceId: string
     ownerMemberKey: string
-    activeSeats: number | undefined
   }>,
 ): TenantAdministrationClient {
   const snapshot = createDefaultTenantAdministrationSnapshot(
     'user#demo@example.com',
     'demo@example.com',
     '2026-08-02T00:00:00.000Z',
-    undefined,
-    4,
   )
   snapshot.profile.defaultPolicy.defaultMemberRole = defaultMemberRole
   /** Fails when a route unexpectedly reaches an unrelated tenant capability. */
@@ -54,16 +51,13 @@ function createTenantAdministrationFake(
   }
   return {
     async assertActive() {},
-    async ensureSnapshot(workspaceId, ownerMemberKey, activeSeats) {
-      ensureCalls.push({ workspaceId, ownerMemberKey, activeSeats })
+    async ensureSnapshot(workspaceId, ownerMemberKey) {
+      ensureCalls.push({ workspaceId, ownerMemberKey })
       return snapshot
     },
     async getSnapshot() { return unavailable() },
     async updateProfile() { return unavailable() },
-    async updateEntitlement() { return unavailable() },
     async updateGovernance() { return unavailable() },
-    async assertFeature() { return unavailable() },
-    async reserveUsage() { return unavailable() },
     async requestExport() { return unavailable() },
     async requestClosure() { return unavailable() },
     async getOperation() { return unavailable() },
@@ -562,7 +556,6 @@ test('uses the tenant default role when an invitation omits its role', async () 
   const ensureCalls: Array<{
     workspaceId: string
     ownerMemberKey: string
-    activeSeats: number | undefined
   }> = []
   setTestAppDependencies({
     tenantAdministration: createTenantAdministrationFake('guest', ensureCalls),
@@ -586,7 +579,7 @@ test('uses the tenant default role when an invitation omits its role', async () 
   expect(ensureCalls).toEqual([{
     workspaceId: 'user#demo@example.com',
     ownerMemberKey: 'demo@example.com',
-    activeSeats: 4,
+
   }])
   expectStableWorkspaceMutationAuditContexts(calls.workspaceMutationAuditContexts, {
     actorId: 'demo@example.com',

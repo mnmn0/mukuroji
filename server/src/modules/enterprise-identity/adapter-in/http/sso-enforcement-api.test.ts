@@ -25,12 +25,35 @@ afterEach(() => {
   resetTestApp()
 })
 
+test('rejects partial SSO configuration instead of falling back to password login', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: '',
+    COGNITO_ENTERPRISE_IDP_NAME: '',
+    COGNITO_HOSTED_UI_DOMAIN: '',
+    ENTERPRISE_SSO_STATE_SECRET: '',
+  }, async () => {
+    configureFakeProjectClients(true, { passwordAuthTokens: true })
+    const discovery = await app.request('/api/auth/sso/discovery?email=demo%40example.com')
+    expect(discovery.status).toBe(503)
+    const login = await app.request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'demo@example.com', password: 'Password123!' }),
+    })
+    expect(login.status).toBe(503)
+    expect(await login.json()).toMatchObject({ code: 'EnterpriseSsoConfigurationIncomplete' })
+  })
+})
+
 test('requires server-attested SSO for a user in an enforced domain', async () => {
   await withTestEnvironment({
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_USER_POOL_ID: 'ap-northeast-1_mukuroji',
   }, async () => {
     const calls = configureFakeProjectClients(true)
@@ -145,5 +168,38 @@ test('requires server-attested SSO for a user in an enforced domain', async () =
     })
     expect(calls.cognitoIdentityProviderDescriptions).toEqual(['EnterpriseOidc'])
     expect(calls.cognitoSsoAppClientDescriptions).toEqual(['mukuroji-sso-client'])
+  })
+})
+
+test('disables SSO discovery and saved SSO enforcement when deployment settings are omitted', async () => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: '',
+    COGNITO_SSO_REDIRECT_URI: '',
+    COGNITO_ENTERPRISE_IDP_NAME: '',
+    COGNITO_HOSTED_UI_DOMAIN: '',
+    ENTERPRISE_SSO_STATE_SECRET: '',
+  }, async () => {
+    configureFakeProjectClients(true, { passwordAuthTokens: true })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    let discoveryCalls = 0
+    identity.discoverSso = async () => {
+      discoveryCalls += 1
+      throw new Error('Disabled deployment must not consult saved SSO policy.')
+    }
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    const discovery = await app.request('/api/auth/sso/discovery?email=demo%40example.com')
+    expect(discovery.status).toBe(200)
+    expect(await discovery.json()).toMatchObject({ ssoRequired: false })
+    const login = await app.request('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'demo@example.com', password: 'Password123!' }),
+    })
+    expect(login.status).toBe(200)
+    const profile = await app.request('/api/auth/me', {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    expect(profile.status).toBe(200)
+    expect(discoveryCalls).toBe(0)
   })
 })

@@ -76,7 +76,7 @@ export function createProductionAutomationEventHandler() {
   const actionExecutor = createAutomationActionExecutor(
     actionDependencies,
   )
-  const tenantFeatureGate = createProductionTenantFeatureGate('automation')
+  const tenantFeatureGate = createProductionTenantFeatureGate()
   const processor = createAutomationEventProcessor(
     automationRepository,
     {
@@ -104,7 +104,7 @@ export function createProductionAutomationScheduleHandler() {
       new DynamoDbTeamIssuesClient(),
     ),
   )
-  const tenantFeatureGate = createProductionTenantFeatureGate('automation')
+  const tenantFeatureGate = createProductionTenantFeatureGate()
 
   return (event: AutomationScheduleEvent = {}) =>
     processAutomationSchedule(

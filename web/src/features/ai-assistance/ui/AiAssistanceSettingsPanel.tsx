@@ -1,3 +1,4 @@
+import { AiAssistanceApiError } from '../api/errors'
 import type {
   AiAssistancePolicy,
   AiAssistancePreference,
@@ -109,6 +110,8 @@ export function AiAssistanceSettingsPanelContainer({
 
   return (
     <AiAssistanceSettingsPanel
+      deploymentEnabled={preference?.deploymentEnabled !== false &&
+        !(policyQuery.error instanceof AiAssistanceApiError && policyQuery.error.code === 'AiAssistanceDisabled')}
       canManagePolicy={canManagePolicy}
       hasPolicyRevisionConflict={hasPolicyRevisionConflict}
       hasPreferenceRevisionConflict={hasPreferenceRevisionConflict}
@@ -191,6 +194,8 @@ export function AiAssistanceSettingsPanelContainer({
  * remains behind explicit callbacks supplied by the authenticated container.
  */
 export type AiAssistanceSettingsPanelProps = {
+  /** Whether this deployment has a configured provider, regardless of saved preferences. */
+  deploymentEnabled?: boolean
   /** Whether the Workspace policy section may be rendered. */
   canManagePolicy: boolean
   /** Whether the editable Workspace policy differs from its latest server revision. */
@@ -253,6 +258,7 @@ export type AiAssistanceSettingsPanelProps = {
  * @returns A flat settings panel with no automatic saves.
  */
 export function AiAssistanceSettingsPanel({
+  deploymentEnabled = true,
   canManagePolicy,
   hasPolicyRevisionConflict = false,
   hasPreferenceRevisionConflict = false,
@@ -280,6 +286,14 @@ export function AiAssistanceSettingsPanel({
   t,
 }: AiAssistanceSettingsPanelProps) {
   const policyValidation = policy ? validatePolicy(policy) : undefined
+
+  if (!deploymentEnabled) {
+    return (
+      <section className="workbench-panel p-5" data-testid="ai-assistance-settings-panel">
+        <p role="status">{t('ai.settings.deploymentDisabled')}</p>
+      </section>
+    )
+  }
 
   return (
     <section className="workbench-panel overflow-hidden" data-testid="ai-assistance-settings-panel">

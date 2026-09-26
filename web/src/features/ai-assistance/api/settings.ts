@@ -126,6 +126,7 @@ function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
 function parseAiAssistancePreference(value: unknown): AiAssistancePreference {
   if (!isRecord(value) ||
     value.schemaVersion !== 1 ||
+    (value.deploymentEnabled !== undefined && typeof value.deploymentEnabled !== 'boolean') ||
     typeof value.enabled !== 'boolean' ||
     !isNonNegativeInteger(value.revision) ||
     !isIsoTimestamp(value.updatedAt)) {
@@ -135,6 +136,7 @@ function parseAiAssistancePreference(value: unknown): AiAssistancePreference {
   return {
     schemaVersion: 1,
     enabled: value.enabled,
+    ...(typeof value.deploymentEnabled === 'boolean' ? { deploymentEnabled: value.deploymentEnabled } : {}),
     revision: value.revision,
     updatedAt: value.updatedAt,
   }

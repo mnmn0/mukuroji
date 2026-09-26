@@ -2,16 +2,12 @@ import type {
   RequestTenantClosureInput,
   RequestTenantExportInput,
   TenantAdministrationSnapshot,
-  TenantBillingPeriod,
   TenantDefaultPolicy,
-  TenantEntitlement,
   TenantGovernanceEnforcement,
   TenantGovernancePolicy,
   TenantOperation,
   TenantProfile,
   TenantRetentionReconciliation,
-  TenantUsage,
-  UpdateTenantEntitlementInput,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
 } from '@mukuroji/contracts'
@@ -63,30 +59,6 @@ export async function updateTenantProfile(
     }),
     'profile',
     isTenantProfile,
-  )
-}
-
-/**
- * Updates tenant plan, feature, seat, and quota entitlement fields.
- *
- * @param accessToken - Bearer token used for the mutation.
- * @param input - Revision-checked entitlement update.
- * @param mutationContext - Idempotency and request mutation context.
- * @returns The updated tenant entitlement.
- */
-export async function updateTenantEntitlement(
-  accessToken: string,
-  input: UpdateTenantEntitlementInput,
-  mutationContext: MutationRequestContext,
-): Promise<TenantEntitlement> {
-  return readResponseEntity(
-    await sendTenantRequest('/tenant/entitlement', accessToken, {
-      body: JSON.stringify(input),
-      headers: createMutationHeaders(mutationContext),
-      method: 'PATCH',
-    }),
-    'entitlement',
-    isTenantEntitlement,
   )
 }
 
@@ -274,12 +246,8 @@ function readResponseEntity<T>(
 function readTenantAdministrationSnapshot(value: unknown): TenantAdministrationSnapshot {
   if (
     isRecord(value) &&
-    value.schemaVersion === 2 &&
+    value.schemaVersion === 3 &&
     isTenantProfile(value.profile) &&
-    isTenantEntitlement(value.entitlement) &&
-    isTenantUsage(value.usage) &&
-    Array.isArray(value.billingPeriods) &&
-    value.billingPeriods.every(isTenantBillingPeriod) &&
     Array.isArray(value.recentOperations) &&
     value.recentOperations.every(isTenantOperation) &&
     isTenantGovernancePolicy(value.governance) &&
@@ -289,11 +257,8 @@ function readTenantAdministrationSnapshot(value: unknown): TenantAdministrationS
     (value.activeOperation === undefined || isTenantOperation(value.activeOperation))
   ) {
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       profile: value.profile,
-      entitlement: value.entitlement,
-      usage: value.usage,
-      billingPeriods: value.billingPeriods,
       recentOperations: value.recentOperations,
       governance: value.governance,
       governanceEnforcement: value.governanceEnforcement,
@@ -350,49 +315,6 @@ function isTenantProfile(value: unknown): value is TenantProfile {
 function isTenantDefaultPolicy(value: unknown): value is TenantDefaultPolicy {
   return isRecord(value) &&
     (value.defaultMemberRole === 'member' || value.defaultMemberRole === 'guest')
-}
-
-function isTenantEntitlement(value: unknown): value is TenantEntitlement {
-  return isRecord(value) &&
-    typeof value.workspaceId === 'string' &&
-    (value.plan === 'starter' || value.plan === 'growth' || value.plan === 'enterprise') &&
-    Array.isArray(value.features) &&
-    value.features.every(isTenantFeature) &&
-    isNonNegativeInteger(value.seatLimit) &&
-    isNonNegativeInteger(value.usageQuota) &&
-    isNonNegativeInteger(value.gracePeriodDays) &&
-    isRevisionedRecord(value)
-}
-
-function isTenantFeature(value: unknown): value is TenantEntitlement['features'][number] {
-  return value === 'documents' ||
-    value === 'analytics' ||
-    value === 'automation' ||
-    value === 'developer-platform' ||
-    value === 'sso' ||
-    value === 'scim'
-}
-
-function isTenantUsage(value: unknown): value is TenantUsage {
-  return isRecord(value) &&
-    typeof value.workspaceId === 'string' &&
-    isNonNegativeInteger(value.activeSeats) &&
-    isNonNegativeInteger(value.periodUsage) &&
-    typeof value.periodStart === 'string' &&
-    typeof value.periodEnd === 'string' &&
-    (value.gracePeriodEndsAt === undefined || typeof value.gracePeriodEndsAt === 'string') &&
-    isRevisionedRecord(value)
-}
-
-/** Returns true for one invoice-ready tenant billing aggregate. */
-function isTenantBillingPeriod(value: unknown): value is TenantBillingPeriod {
-  return isRecord(value) &&
-    typeof value.workspaceId === 'string' &&
-    typeof value.periodStart === 'string' &&
-    typeof value.periodEnd === 'string' &&
-    isNonNegativeInteger(value.meteredUnits) &&
-    isNonNegativeInteger(value.activeSeatHighWaterMark) &&
-    isRevisionedRecord(value)
 }
 
 function isTenantGovernancePolicy(value: unknown): value is TenantGovernancePolicy {

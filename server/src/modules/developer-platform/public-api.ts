@@ -57,8 +57,8 @@ import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
 export const PUBLIC_API_RATE_LIMIT = 120
 
-/** Maximum request body hashed for one entitlement metering receipt. */
-const PUBLIC_API_METERING_BODY_MAX_BYTES = 10 * 1024 * 1024
+/** Maximum accepted public API request body size. */
+const PUBLIC_API_BODY_MAX_BYTES = 10 * 1024 * 1024
 
 /** OAuth token endpoint が一 client ID に許可する1分あたりの request 数です。 */
 export const OAUTH_TOKEN_CLIENT_RATE_LIMIT = 30
@@ -331,12 +331,8 @@ export type PublicApiDependencies = {
   idempotency: IdempotencyPort
   /** Credential-scoped rate-limit port. */
   rateLimits: RateLimitPort
-  /** Enforces Developer Platform entitlement and mutation usage for one Workspace request. */
-  enforceEntitlement(
-    workspaceId: string,
-    method: string,
-    idempotencyKey?: string,
-  ): Promise<void>
+  /** Rejects public access to a closing or closed Workspace. */
+  enforceActiveWorkspace(workspaceId: string): Promise<void>
   /** Cognito bearer token と request metadata を current Workspace principal へ解決します。 */
   authenticateManagement(
     authorization: string,
@@ -1917,90 +1913,46 @@ async function authenticatePublicRequest(
     c.header('Retry-After', String(rateLimit.retryAfterSeconds ?? 1))
     throw new PublicApiServiceError(429, 'rate_limited', 'API rate limit exceeded.', true)
   }
-  await dependencies.enforceEntitlement(
-    credential.workspaceId,
-    c.req.method,
-    await createPublicApiUsageIdempotencyScope(c),
-  )
+  await validatePublicApiRequestBody(c)
+  await dependencies.enforceActiveWorkspace(credential.workspaceId)
   return credential
 }
 
 /**
- * Binds a public API idempotency key to its method, route, and payload.
- *
- * @param context - Current public API request context.
- * @returns A route-scoped digest, or undefined when no key was supplied.
+ * Enforces the public API body bound independently of commercial metering.
+ * @param context - Authenticated, rate-limit-admitted request.
+ * @returns Completes when the body fits the supported request limit.
  */
-async function createPublicApiUsageIdempotencyScope(
-  context: Context,
-): Promise<string | undefined> {
-  const value = context.req.header('Idempotency-Key')?.trim()
-  if (!value) return undefined
-  if (value.length > 256 || containsAsciiControl(value, false)) {
-    throw new PublicApiServiceError(
-      400,
-      'invalid_request',
-      'Idempotency-Key must contain 1 to 256 characters without control characters.',
-    )
-  }
-  if (context.req.raw.bodyUsed) {
-    throw new PublicApiServiceError(
-      503,
-      'temporarily_unavailable',
-      'Request idempotency could not be evaluated.',
-      true,
-    )
-  }
+async function validatePublicApiRequestBody(context: Context): Promise<void> {
   const contentLength = context.req.header('Content-Length')
-  if (
-    contentLength !== undefined &&
-    /^\d+$/u.test(contentLength) &&
-    Number(contentLength) > PUBLIC_API_METERING_BODY_MAX_BYTES
-  ) {
-    throw publicApiMeteringBodyTooLarge()
+  if (contentLength !== undefined && /^\d+$/u.test(contentLength) &&
+    Number(contentLength) > PUBLIC_API_BODY_MAX_BYTES) {
+    throw publicApiBodyTooLarge()
   }
-  const requestDigest = createHash('sha256')
-    .update(context.req.header('Content-Type') ?? '')
-    .update('\0')
-  const bodyReader = context.req.raw.clone().body?.getReader()
+  const reader = context.req.raw.clone().body?.getReader()
+  if (!reader) return
   let bodyBytes = 0
-  if (bodyReader) {
-    try {
-      while (true) {
-        const chunk = await bodyReader.read()
-        if (chunk.done) break
-        bodyBytes += chunk.value.byteLength
-        if (bodyBytes > PUBLIC_API_METERING_BODY_MAX_BYTES) {
-          await bodyReader.cancel().catch(() => undefined)
-          throw publicApiMeteringBodyTooLarge()
-        }
-        requestDigest.update(chunk.value)
+  try {
+    while (true) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      bodyBytes += chunk.value.byteLength
+      if (bodyBytes > PUBLIC_API_BODY_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        throw publicApiBodyTooLarge()
       }
-    } finally {
-      bodyReader.releaseLock()
     }
+  } finally {
+    reader.releaseLock()
   }
-  const url = new URL(context.req.url)
-  const scopeDigest = createHash('sha256')
-    .update(context.req.method.toUpperCase())
-    .update('\0')
-    .update(context.req.path)
-    .update('\0')
-    .update(url.search)
-    .update('\0')
-    .update(context.req.header('If-Match') ?? '')
-    .update('\0')
-    .update(value)
-    .digest('hex')
-  return `tenant-meter:v1:${scopeDigest}:${requestDigest.digest('hex')}`
 }
 
-/** Creates the stable public API response used for an oversized metering body. */
-function publicApiMeteringBodyTooLarge(): PublicApiServiceError {
+/** Creates the stable public API response used for an oversized body. */
+function publicApiBodyTooLarge(): PublicApiServiceError {
   return new PublicApiServiceError(
     413,
     'invalid_request',
-    'The metered request body is too large.',
+    'The request body is too large.',
   )
 }
 

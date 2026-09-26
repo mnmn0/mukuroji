@@ -4,17 +4,14 @@ import type {
   RequestTenantExportInput,
   TenantAdministrationSnapshot,
   TenantDefaultPolicy,
-  UpdateTenantEntitlementInput,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
 } from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
   validateTenantBoolean,
-  validateTenantFeatures,
   validateTenantInteger,
   validateTenantLocale,
-  validateTenantPlan,
   validateTenantRegion,
 } from '../../domain/tenant-administration'
 import type {
@@ -34,8 +31,6 @@ export type TenantAdministrationPrincipal = {
 export type TenantAdministrationInitialization = {
   /** Stable member key of the active Workspace owner. */
   ownerMemberKey: string
-  /** Number of active Workspace members that currently consume seats. */
-  activeSeats: number
 }
 
 /** Dependencies injected into the tenant administration HTTP adapter. */
@@ -46,13 +41,11 @@ export type TenantAdministrationRouterDependencies<
   authenticate(accessToken: string, context: Context): Promise<Principal>
   /** Enforces Workspace owner/admin authorization at the route boundary. */
   requireAdministration(principal: Principal): void
-  /** Restricts commercial entitlement mutations to the trusted system control plane. */
-  requireEntitlementAdministration(principal: Principal): void
   /** Provides the tenant administration application port. */
   client: TenantAdministrationClient
   /** Provides authorized access to completed export artifacts. */
   tenantExportDownload: TenantExportDownloadPort
-  /** Resolves authoritative owner and seat state for first-time initialization. */
+  /** Resolves authoritative owner state for first-time initialization. */
   resolveInitialization(
     principal: Principal,
   ): Promise<TenantAdministrationInitialization>
@@ -63,7 +56,7 @@ export type TenantAdministrationRouterDependencies<
 }
 
 /**
- * Creates tenant profile, entitlement, governance, export, and closure routes.
+ * Creates tenant profile, governance, export, and closure routes.
  *
  * @param dependencies - Auth, application, parsing, and error-boundary dependencies.
  * @returns A Hono router mounted by the API composition root.
@@ -93,24 +86,6 @@ export function createTenantAdministrationRouter<
       const input = readTenantProfileInput(await dependencies.readJson(context.req))
       return context.json({
         profile: await dependencies.client.updateProfile(
-          principal.directoryId,
-          principal.userKey,
-          input,
-        ),
-      })
-    } catch (error) {
-      return dependencies.mapError(context, error)
-    }
-  })
-
-  router.patch('/api/tenant/entitlement', async (context) => {
-    try {
-      const principal = await requirePrincipal(context, dependencies)
-      dependencies.requireEntitlementAdministration(principal)
-      await ensureTenantInitialized(principal, dependencies)
-      const input = readTenantEntitlementInput(await dependencies.readJson(context.req))
-      return context.json({
-        entitlement: await dependencies.client.updateEntitlement(
           principal.directoryId,
           principal.userKey,
           input,
@@ -257,7 +232,6 @@ async function ensureTenantInitialized<
   return await dependencies.client.ensureSnapshot(
     principal.directoryId,
     initialization.ownerMemberKey,
-    initialization.activeSeats,
   )
 }
 
@@ -279,18 +253,6 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     region: validateTenantRegion(body.region),
     locale: validateTenantLocale(body.locale),
     defaultPolicy: readTenantDefaultPolicy(body.defaultPolicy),
-    expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
-  }
-}
-
-function readTenantEntitlementInput(value: unknown): UpdateTenantEntitlementInput {
-  const body = readRecord(value)
-  return {
-    plan: validateTenantPlan(body.plan),
-    features: validateTenantFeatures(body.features),
-    seatLimit: validateTenantInteger(body.seatLimit, 1_000_000, 'InvalidTenantSeatLimit'),
-    usageQuota: validateTenantInteger(body.usageQuota, 1_000_000_000, 'InvalidTenantUsageQuota'),
-    gracePeriodDays: validateTenantInteger(body.gracePeriodDays, 90, 'InvalidTenantGracePeriod'),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }

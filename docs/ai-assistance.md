@@ -6,24 +6,25 @@ Mukuroji の AI assistance は Mastra から Amazon Bedrock Runtime の Converse
 
 ## Production configuration
 
-既定の model ID は `jp.anthropic.claude-sonnet-4-6`、Bedrock Runtime region は API Lambda と
+AI は CDK 未設定で無効です。有効にする場合は model ID に `jp.anthropic.claude-sonnet-4-6` を明示し、下記の関連 parameter をまとめて指定します。Bedrock Runtime region は API Lambda と
 同じ `AWS::Region` です。JP Geo inference profile は Tokyo (`ap-northeast-1`) または Osaka
-(`ap-northeast-3`) からだけ呼び出せるため、既定 model ID を使う stack はそのどちらかへ
+(`ap-northeast-3`) からだけ呼び出せるため、この model ID を使う stack はそのどちらかへ
 deployします。Tokyo からは Tokyo と Osaka の両方へ route されます。
 
-CDK deploy では次の parameter を固定します。
+CDK deploy では次の parameter を固定します。全項目未設定ならproviderも永続storeも初期化せず、保存済みpolicyにかかわらず生成を拒否します。設定画面に無効状態を表示し、個人設定から有効化できません。Webはserverのavailabilityを使いますが、緊急時には `VITE_AI_ASSISTANCE_ENABLED=false` でもUIを隠せます。既存stackでの無効化は[CDK手順](../cdk/README.md#optional-sso-and-ai)に従い全値を空にしてruntime revisionを更新します。
 
 | Parameter | Contract |
 | --- | --- |
 | `AiBedrockModelId` | Runtime の default と allowlist の両方に使う、現在サポートしている exact model ID。現在は `jp.anthropic.claude-sonnet-4-6` のみを許可する。 |
-| `AiBedrockInputPricePerMillionTokensUsd` | deploy時にAWS公式料金表と照合した、model IDのstandard input 100万token当たりUSD。defaultは持たない。 |
-| `AiBedrockOutputPricePerMillionTokensUsd` | deploy時にAWS公式料金表と照合した、model IDのstandard output 100万token当たりUSD。defaultは持たない。 |
-| `AiBedrockModelArn` | API Lambda が `bedrock:InvokeModel` できる exact foundation-model / inference-profile ARN。default はなく、account と source region を確認して指定する。 |
+| `AiBedrockInputPricePerMillionTokensUsd` | deploy時にAWS公式料金表と照合した、model IDのstandard input 100万token当たりUSD。無効時のdefaultは空。 |
+| `AiBedrockOutputPricePerMillionTokensUsd` | deploy時にAWS公式料金表と照合した、model IDのstandard output 100万token当たりUSD。無効時のdefaultは空。 |
+| `AiBedrockModelArn` | API Lambda が `bedrock:InvokeModel` できる exact foundation-model / inference-profile ARN。無効時のdefaultは空。有効化時はaccount と source region を確認して指定する。 |
 | `AiBedrockDestinationModelArns` | Cross-Region profile が必要とする exact destination foundation-model ARN の comma-separated list。Direct foundation-model invocation だけは空にできる。 |
 
 JP Sonnet 4.6 を Tokyo から使う例です。`<account-id>` は deploy 対象 account に置き換えます。
 
 ```text
+AiBedrockModelId=jp.anthropic.claude-sonnet-4-6
 AiBedrockModelArn=arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6
 AiBedrockDestinationModelArns=arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6
 ```

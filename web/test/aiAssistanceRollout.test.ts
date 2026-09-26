@@ -5,15 +5,15 @@ import {
 } from '../src/features/ai-assistance/model/aiAssistanceRollout'
 
 describe('AI assistance UI rollout', () => {
-  /** Verifies rollout remains disabled until deployment opts in explicitly. */
-  test('stays disabled unless the deployment opts in explicitly', () => {
-    expect(isAiAssistanceUiEnabled({})).toBe(false)
+  /** Verifies the API owns availability while builds retain an explicit kill switch. */
+  test('defaults to server availability and honors the UI kill switch', () => {
+    expect(isAiAssistanceUiEnabled({})).toBe(true)
     expect(isAiAssistanceUiEnabled({ VITE_AI_ASSISTANCE_ENABLED: 'false' })).toBe(false)
-    expect(isAiAssistanceUiEnabled({ VITE_AI_ASSISTANCE_ENABLED: '1' })).toBe(false)
+    expect(isAiAssistanceUiEnabled({ VITE_AI_ASSISTANCE_ENABLED: false })).toBe(false)
   })
 
-  /** Verifies only the explicit true value enables the rollout. */
-  test('accepts only the explicit true rollout value', () => {
+  /** Verifies explicit true values also permit server-gated controls. */
+  test('accepts explicit true rollout values', () => {
     expect(isAiAssistanceUiEnabled({ VITE_AI_ASSISTANCE_ENABLED: true })).toBe(true)
     expect(isAiAssistanceUiEnabled({ VITE_AI_ASSISTANCE_ENABLED: 'true' })).toBe(true)
   })

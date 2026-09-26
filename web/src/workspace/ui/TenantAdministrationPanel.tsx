@@ -3,11 +3,9 @@ import {
   useState,
 } from 'react'
 import type {
-  TenantFeature,
   TenantOperation,
   TenantProfile,
   TenantGovernancePolicy,
-  TenantEntitlement,
   TenantAdministrationSnapshot,
 } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
@@ -30,16 +28,6 @@ type RevisionedDraft<Value> = {
   /** Locally edited value. */
   value: Value
 }
-
-/** Supported tenant features shown as entitlement controls. */
-const tenantFeatures: readonly TenantFeature[] = [
-  'documents',
-  'analytics',
-  'automation',
-  'developer-platform',
-  'sso',
-  'scim',
-]
 
 /** Flat governance notes displayed below tenant administration controls. */
 const tenantAdministrationInfoItems: ReadonlyArray<
@@ -147,7 +135,6 @@ export function TenantAdministrationPanelContainer({
       activeOperation={activeOperation}
       closureConfirmation={closureConfirmation}
       data={data}
-      entitlement={data.entitlement}
       exportFormat={exportFormat}
       governance={governance}
       isSaving={mutations.isSaving}
@@ -185,8 +172,6 @@ type TenantAdministrationPanelProps = {
   closureConfirmation: string
   /** Current aggregate returned by the server. */
   data: TenantAdministrationSnapshot
-  /** Read-only commercial entitlement assigned by the system control plane. */
-  entitlement: TenantEntitlement
   /** Selected export format. */
   exportFormat: 'jsonl' | 'csv'
   /** Editable governance draft. */
@@ -224,7 +209,7 @@ type TenantAdministrationPanelProps = {
 }
 
 /**
- * Renders the tenant control plane with profile, usage, governance, and lifecycle controls.
+ * Renders the tenant control plane with profile, governance, and lifecycle controls.
  *
  * @param props - Tenant aggregate, drafts, callbacks, and localized labels.
  * @returns Tenant administration settings panel.
@@ -234,7 +219,6 @@ export function TenantAdministrationPanel({
   activeOperation,
   closureConfirmation,
   data,
-  entitlement,
   exportFormat,
   governance,
   isSaving,
@@ -253,14 +237,6 @@ export function TenantAdministrationPanel({
   profile,
   t,
 }: TenantAdministrationPanelProps) {
-  const usagePercent = Math.min(
-    100,
-    Math.round((data.usage.periodUsage / Math.max(entitlement.usageQuota, 1)) * 100),
-  )
-  const seatPercent = Math.min(
-    100,
-    Math.round((data.usage.activeSeats / Math.max(entitlement.seatLimit, 1)) * 100),
-  )
   const operationSteps = activeOperation?.kind === 'export'
     ? 3
     : 6
@@ -301,22 +277,8 @@ export function TenantAdministrationPanel({
         ) : null}
       </div>
 
-      <div className="grid border-b border-[var(--workbench-border)] px-5 py-6 sm:grid-cols-3 sm:divide-x sm:divide-[var(--workbench-border)] sm:px-7">
-        <TenantMetric label={t('workspace.tenantAdministration.metric.plan')} value={entitlement.plan} />
-        <TenantMetric
-          label={t('workspace.tenantAdministration.metric.seats')}
-          value={`${data.usage.activeSeats} / ${entitlement.seatLimit}`}
-          progress={seatPercent}
-        />
-        <TenantMetric
-          label={t('workspace.tenantAdministration.metric.usage')}
-          value={`${data.usage.periodUsage.toLocaleString(locale)} / ${entitlement.usageQuota.toLocaleString(locale)}`}
-          progress={usagePercent}
-        />
-      </div>
-
       <div className="grid px-5 sm:px-7 xl:grid-cols-2 xl:gap-x-8">
-        <section className="border-t border-[var(--workbench-border)] py-7">
+        <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.profileTitle')} meta={t('workspace.tenantAdministration.profileMeta')} />
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
@@ -373,50 +335,6 @@ export function TenantAdministrationPanel({
           </button>
         </section>
 
-        <section className="border-t border-[var(--workbench-border)] py-7">
-          <SectionHeader title={t('workspace.tenantAdministration.entitlementTitle')} meta={t('workspace.tenantAdministration.entitlementMeta')} />
-          <div className="mt-5 grid gap-4 sm:grid-cols-3">
-            <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('workspace.tenantAdministration.plan')}
-              <input className="workbench-input" disabled readOnly value={entitlement.plan} />
-            </label>
-            <ReadOnlyNumberField label={t('workspace.tenantAdministration.seatLimit')} value={entitlement.seatLimit} />
-            <ReadOnlyNumberField label={t('workspace.tenantAdministration.usageQuota')} value={entitlement.usageQuota} />
-          </div>
-          <fieldset className="mt-4">
-            <legend className="text-sm font-semibold text-[var(--workbench-text)]">{t('workspace.tenantAdministration.features')}</legend>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {tenantFeatures.map((feature) => {
-                const checked = entitlement.features.includes(feature)
-                return (
-                  <span className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${checked ? 'border-[#8acfc3] bg-[#ecfaf7] text-[var(--workbench-primary)]' : 'border-[var(--workbench-border)] text-[var(--workbench-muted)]'}`} key={feature}>
-                    {feature}
-                  </span>
-                )
-              })}
-            </div>
-          </fieldset>
-          <div className="mt-5 border-t border-[var(--workbench-border)] pt-4">
-            <p className="text-sm font-semibold text-[var(--workbench-text)]">
-              {t('workspace.tenantAdministration.invoiceHistory')}
-            </p>
-            <div className="mt-2 grid gap-2">
-              {data.billingPeriods.slice(0, 3).map((period) => (
-                <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] py-2 text-xs last:border-b-0" key={period.periodStart}>
-                  <span className="font-semibold text-[var(--workbench-text)]">
-                    {period.periodStart.slice(0, 7)}
-                  </span>
-                  <span className="text-right text-[var(--workbench-muted)]">
-                    {t('workspace.tenantAdministration.metric.usage')}: {' '}
-                    {period.meteredUnits.toLocaleString(locale)} · {' '}
-                    {t('workspace.tenantAdministration.metric.seats')}: {' '}
-                    {period.activeSeatHighWaterMark.toLocaleString(locale)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
 
         <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.governanceTitle')} meta={t('workspace.tenantAdministration.governanceMeta')} />
@@ -569,33 +487,12 @@ function formatTenantOperationTimestamp(timestamp: string, locale: string): stri
   }).format(date)
 }
 
-/** Compact usage metric with an optional progress bar. */
-function TenantMetric({ label, value, progress }: { label: string; value: string; progress?: number }) {
-  return (
-    <div className="py-1 sm:px-6 sm:first:pl-0 sm:last:pr-0">
-      <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{label}</p>
-      <p className="mt-2 text-xl font-semibold tracking-[-0.02em] text-[var(--workbench-text)]">{value}</p>
-      {progress === undefined ? null : <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[#e7efef]"><div className="h-full rounded-full bg-[var(--workbench-primary)]" style={{ width: `${progress}%` }} /></div>}
-    </div>
-  )
-}
-
 /** Numeric input used by tenant capacity and retention forms. */
 function NumberField({ disabled = false, label, min = 0, value, onChange }: { disabled?: boolean; label: string; min?: number; value: number; onChange: (value: number) => void }) {
   return (
     <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
       {label}
       <input className="workbench-input" disabled={disabled} min={min} onChange={(event) => onChange(Number(event.target.value))} type="number" value={value} />
-    </label>
-  )
-}
-
-/** Read-only numeric field used for server-assigned commercial limits. */
-function ReadOnlyNumberField({ label, value }: { label: string; value: number }) {
-  return (
-    <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-      {label}
-      <input className="workbench-input" disabled readOnly type="number" value={value} />
     </label>
   )
 }

@@ -97,8 +97,53 @@ const CONFIGURATION = {
   updatedAt: NOW,
 } satisfies TriageConfiguration
 
+test('omitted model disables AI even with stale provider and budget settings', async () => {
+  const model = Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+  const budget = Bun.env.AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE
+  const bearer = Bun.env.AWS_BEARER_TOKEN_BEDROCK
+  delete Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+  Bun.env.AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE = 'invalid-unused-budget'
+  Bun.env.AWS_BEARER_TOKEN_BEDROCK = 'unused-when-disabled'
+  try {
+    const { aiAssistanceService } = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    const actor = {
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      actorId: 'member-1',
+      auditActorKind: 'user',
+      traceId: 'trace-1',
+      canManagePolicy: true,
+    } satisfies import('../../modules/ai-assistance').AiAssistanceActor
+    expect(await aiAssistanceService.getPreference(actor)).toMatchObject({
+      deploymentEnabled: false,
+      enabled: false,
+    })
+    await expect(aiAssistanceService.getPolicy(actor)).rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
+    await expect(aiAssistanceService.updatePreference(actor, {
+      enabled: true, expectedRevision: 0,
+    })).rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
+    await expect(aiAssistanceService.generate(actor, {
+      task: 'search', query: 'Find open work', locale: 'en',
+    }, {
+      /** Fails if a disabled deployment attempts to read source data. */
+      async resolveContext() { throw new Error('Disabled AI must not read source data.') },
+      /** Fails if a disabled deployment attempts to resolve AI authorization. */
+      async isAuthorizationCurrent() { throw new Error('Disabled AI must not read authorization data.') },
+    }, 'disabled-generation')).rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
+  } finally {
+    if (model === undefined) delete Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+    else Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = model
+    if (budget === undefined) delete Bun.env.AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE
+    else Bun.env.AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE = budget
+    if (bearer === undefined) delete Bun.env.AWS_BEARER_TOKEN_BEDROCK
+    else Bun.env.AWS_BEARER_TOKEN_BEDROCK = bearer
+  }
+})
+
 test('lazily rejects Bedrock bearer-token authentication before creating a provider', () => {
   const originalBearerToken = Bun.env.AWS_BEARER_TOKEN_BEDROCK
+  const originalModel = Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+  Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = 'jp.anthropic.claude-sonnet-4-6'
   Bun.env.AWS_BEARER_TOKEN_BEDROCK = 'must-not-be-used'
   try {
     const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
@@ -111,6 +156,8 @@ test('lazily rejects Bedrock bearer-token authentication before creating a provi
       canManagePolicy: false,
     })).toThrow('AWS_BEARER_TOKEN_BEDROCK is not supported')
   } finally {
+    if (originalModel === undefined) delete Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+    else Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = originalModel
     if (originalBearerToken === undefined) {
       delete Bun.env.AWS_BEARER_TOKEN_BEDROCK
     } else {
@@ -123,6 +170,8 @@ test('lazily rejects a non-positive AI generation budget setting', () => {
   const environmentName = 'AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE'
   const original = Bun.env[environmentName]
   Bun.env[environmentName] = '0'
+  const originalModel = Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+  Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = 'jp.anthropic.claude-sonnet-4-6'
   try {
     const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
     expect(() => dependencies.aiAssistanceService.getPolicy({
@@ -134,6 +183,8 @@ test('lazily rejects a non-positive AI generation budget setting', () => {
       canManagePolicy: false,
     })).toThrow(`${environmentName} must be a positive integer.`)
   } finally {
+    if (originalModel === undefined) delete Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+    else Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = originalModel
     if (original === undefined) {
       delete Bun.env[environmentName]
     } else {
@@ -147,6 +198,8 @@ test('lazily rejects incomplete or invalid Bedrock pricing configuration', () =>
   const outputName = 'AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD'
   const originalInput = Bun.env[inputName]
   const originalOutput = Bun.env[outputName]
+  const originalModel = Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+  Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = 'jp.anthropic.claude-sonnet-4-6'
   try {
     Bun.env[inputName] = '3'
     delete Bun.env[outputName]
@@ -172,6 +225,8 @@ test('lazily rejects incomplete or invalid Bedrock pricing configuration', () =>
       canManagePolicy: false,
     })).toThrow(`${inputName} must be a positive decimal number.`)
   } finally {
+    if (originalModel === undefined) delete Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID
+    else Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = originalModel
     if (originalInput === undefined) delete Bun.env[inputName]
     else Bun.env[inputName] = originalInput
     if (originalOutput === undefined) delete Bun.env[outputName]

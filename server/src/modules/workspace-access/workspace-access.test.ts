@@ -15,8 +15,8 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceMember,
-  type WorkspaceSeatMeter,
-  type WorkspaceSeatMutationInput,
+  type WorkspaceMembershipGuard,
+  type WorkspaceMembershipMutationInput,
 } from './workspace-access'
 
 const workspaceId = 'user#demo@example.com'
@@ -117,7 +117,7 @@ function createDocumentClient(
  * @param auditTableName - Optional Audit table name.
  * @param auditPseudonymKey - Optional audit pseudonym key.
  * @param documentsTableName - Optional Documents table name.
- * @param seatMeter - Optional tenant seat-meter transaction contributor.
+ * @param membershipGuard - Optional tenant lifecycle transaction contributor.
  * @returns Configured Workspace Access adapter.
  */
 function createWorkspaceAccessClientWithDocumentAuthorization(
@@ -130,7 +130,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
   auditTableName?: string | null,
   auditPseudonymKey?: string,
   documentsTableName?: string,
-  seatMeter?: WorkspaceSeatMeter,
+  membershipGuard?: WorkspaceMembershipGuard,
 ): DynamoDbWorkspaceAccessClient {
   return new DynamoDbWorkspaceAccessClient(
     tableName,
@@ -144,7 +144,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
     new DynamoDbDocumentAuthorizationRevisionMutationAdapter(
       documentsTableName,
     ),
-    seatMeter,
+    membershipGuard,
   )
 }
 
@@ -1472,22 +1472,30 @@ test('serializes member deactivation with the Planning graph revision', async ()
   })
 })
 
-test('joins seat release to the authoritative member deactivation transaction', async () => {
+test.each(['deactivate', 'role', 'directory'])(
+  'joins the lifecycle condition to the %s membership transaction', async (operation) => {
   const actor = createWorkspaceMember('demo@example.com')
-  const target = createWorkspaceMember('member@example.com', 'member')
+  const target: WorkspaceMember = {
+    ...createWorkspaceMember('member@example.com', 'member'),
+    ...(operation === 'directory' ? {
+      provisioningSource: 'directory',
+      externalIdentityId: 'directory-member-1',
+    } : {}),
+  }
   const transactionInputs: Array<Record<string, unknown>> = []
-  const seatInputs: WorkspaceSeatMutationInput[] = []
-  const seatMeter: WorkspaceSeatMeter = {
-    async prepareSeatMutation(input) {
-      seatInputs.push(input)
+  const membershipInputs: WorkspaceMembershipMutationInput[] = []
+  const membershipGuard: WorkspaceMembershipGuard = {
+    async prepareMembershipMutation(input) {
+      membershipInputs.push(input)
       return [{
-        Put: {
+        ConditionCheck: {
           TableName: 'TenantAdministrationTable',
-          Item: {
+          Key: {
             workspaceId: input.workspaceId,
-            recordKey: 'USAGE',
+            recordKey: 'PROFILE',
           },
-          ConditionExpression: 'revision = :expectedRevision',
+          ConditionExpression: 'lifecycleStatus = :active',
+          ExpressionAttributeValues: { ':active': 'active' },
         },
       }]
     },
@@ -1509,36 +1517,45 @@ test('joins seat release to the authoritative member deactivation transaction', 
     undefined,
     undefined,
     'DocumentsTable',
-    seatMeter,
+    membershipGuard,
   )
 
-  await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
-    status: 'deactivated',
-    expectedVersion: target.version,
-    expectedPlanningRevision: 7,
-    expectedDocumentAuthorizationRevision: 3,
-  })
+  if (operation === 'directory') {
+    await client.reconcileDirectoryMember(workspaceId, {
+      memberKey: target.memberKey,
+      email: target.email,
+      name: 'Directory managed member',
+      role: 'member',
+      externalIdentityId: 'directory-member-1',
+      expectedVersion: target.version,
+      expectedPlanningRevision: 7,
+    })
+  } else {
+    await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+      ...(operation === 'deactivate' ? { status: 'deactivated' } : { role: 'admin' }),
+      expectedVersion: target.version,
+      expectedPlanningRevision: 7,
+      expectedDocumentAuthorizationRevision: 3,
+    })
+  }
 
-  expect(seatInputs).toEqual([{
+  expect(membershipInputs).toEqual([{
     workspaceId,
     memberKey: target.memberKey,
-    direction: 'deactivate',
+    direction: operation === 'deactivate' ? 'deactivate' : 'activate',
     occurredAt: now.toISOString(),
   }])
   expect(transactionInputs[0]).toMatchObject({
-    TransactItems: [
-      {},
-      {},
-      {},
-      {},
+    TransactItems: expect.arrayContaining([
       {
-        Put: {
+        ConditionCheck: {
           TableName: 'TenantAdministrationTable',
-          Item: { workspaceId, recordKey: 'USAGE' },
-          ConditionExpression: 'revision = :expectedRevision',
+          Key: { workspaceId, recordKey: 'PROFILE' },
+          ConditionExpression: 'lifecycleStatus = :active',
+          ExpressionAttributeValues: { ':active': 'active' },
         },
       },
-    ],
+    ]),
   })
 })
 

@@ -12,20 +12,20 @@
 | `AlarmSecondaryTopicName` | yes | 全 CloudWatch alarm の secondary action に使う、primary と異なる同一 account/region 内の既存 standard SNS topic 名。 |
 | `CognitoUserPoolId` | yes | 既存 Cognito user pool ID。access token の issuer と IAM scope に使います。 |
 | `CognitoUserPoolClientId` | yes | client secret なし、`ALLOW_USER_PASSWORD_AUTH` 有効の既存 password/API public app client ID。access token の `client_id` と照合します。 |
-| `CognitoSsoUserPoolClientId` | yes | Password client とは異なる、Hosted UI authorization-code + PKCE 専用 public app client ID。 |
-| `CognitoHostedUiDomain` | yes | Enterprise SSO authorization-code flow に使う Cognito managed login domain。 |
-| `CognitoSsoRedirectUri` | yes | App client callback に完全一致で登録した HTTPS SPA callback URI。 |
-| `CognitoEnterpriseIdpName` | yes | Cognito に接続した SAML/OIDC provider 名。 |
+| `CognitoSsoUserPoolClientId` | SSO有効時 | Password client とは異なる、Hosted UI authorization-code + PKCE 専用 public app client ID。 |
+| `CognitoHostedUiDomain` | SSO有効時 | Enterprise SSO authorization-code flow に使う Cognito managed login domain。 |
+| `CognitoSsoRedirectUri` | SSO有効時 | App client callback に完全一致で登録した HTTPS SPA callback URI。 |
+| `CognitoEnterpriseIdpName` | SSO有効時 | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
 | `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
 | `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
-| `AiBedrockModelId` | no | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
-| `AiBedrockInputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |
-| `AiBedrockOutputPricePerMillionTokensUsd` | yes | deploy時にAWS公式料金表と照合した、選択modelのstandard output 100万token当たりUSD。 |
-| `AiBedrockModelArn` | yes | API Lambdaに `bedrock:InvokeModel` を許可するexact foundation-modelまたはinference-profile ARN。wildcardは使用できません。 |
-| `AiBedrockDestinationModelArns` | JP既定profileではyes | Cross-Region inference profileの全destination foundation-model ARNを空白なしcomma-separatedで指定します。Direct model invocationでは空にします。指定時だけprofile ARN一致condition付きIAM statementを作ります。 |
+| `AiBedrockModelId` | AI有効時 | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
+| `AiBedrockInputPricePerMillionTokensUsd` | AI有効時 | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |
+| `AiBedrockOutputPricePerMillionTokensUsd` | AI有効時 | deploy時にAWS公式料金表と照合した、選択modelのstandard output 100万token当たりUSD。 |
+| `AiBedrockModelArn` | AI有効時 | API Lambdaに `bedrock:InvokeModel` を許可するexact foundation-modelまたはinference-profile ARN。wildcardは使用できません。 |
+| `AiBedrockDestinationModelArns` | AI有効時のJP profileではyes | Cross-Region inference profileの全destination foundation-model ARNを空白なしcomma-separatedで指定します。Direct model invocationでは空にします。指定時だけprofile ARN一致condition付きIAM statementを作ります。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
@@ -35,12 +35,23 @@
 | `RequestEmailWebhookSecret` | yes | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `EnterpriseIdentityTokenHashSecret` | yes | SCIM bearer token と service account credential の kind・Workspace・credential-ID domain-separated digest、および10分間の idempotency response recovery 用 token 導出に使う32–256文字の安定した secret。CloudFormation では `NoEcho` です。 |
-| `EnterpriseSsoStateSecret` | yes | 短命な OAuth state を署名する専用の32–256文字 secret。CloudFormation では `NoEcho` です。 |
+| `EnterpriseSsoStateSecret` | SSO有効時 | 短命な OAuth state を署名する専用の32–256文字 secret。CloudFormation では `NoEcho` です。 |
 | `FileRetentionDays` | no | soft delete 後の metadata と S3 noncurrent version の保持日数。既定値は 30 日です。live current object の有効期限ではありません。 |
 | `FileUploadUrlTtlSeconds` | no | direct upload URL の有効秒数。既定値 600、範囲 60–3600 秒です。bucket policy もこの上限より古い upload 署名を拒否します。 |
 | `FileDownloadUrlTtlSeconds` | no | malware scan 済み file の download URL 有効秒数。既定値 300、範囲 60–3600 秒です。bucket policy もこの上限より古い download 署名を拒否します。 |
 
 `WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
+
+### Optional SSO and AI
+
+SSO と AI は独立したオプションです。新規 stack では、それぞれの関連 parameter をすべて省略すると無効になります。一部だけの指定は CloudFormation rule が拒否します。SSOはruntimeでも不完全な設定を拒否し、password loginへ暗黙に切り替えません。
+
+- SSO: `CognitoSsoUserPoolClientId`、`CognitoHostedUiDomain`、`CognitoSsoRedirectUri`、`CognitoEnterpriseIdpName`、`EnterpriseSsoStateSecret` の5項目をまとめて設定します。未設定時はSSO discovery/redirectと保存済みdomainのSSO強制を使わず、通常のpassword/MFA loginを使います。
+- AI: `AiBedrockModelId`、`AiBedrockModelArn`、input/outputの両token単価をまとめて設定します。現在サポートするJP profileには `AiBedrockDestinationModelArns` も必要です。未設定時は保存済みWorkspace policyにかかわらずAI操作を拒否し、Bedrock呼び出しIAM policyを作らず、AI observabilityのstream mappingを無効にします。データ保持のため既存table、queue、log、worker定義は維持します。Webの別途opt-in buildは不要です。
+
+既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARNも空にします。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
+
+Workspace、複数Project/Team、権限、監査、backup、export/closureは引き続き利用できます。商用plan、seat quota、月次課金集計はありません。
 
 ### Retired Workspace Search migration resources
 
@@ -631,6 +642,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
+  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -659,6 +671,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
+  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -699,6 +712,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
+  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
@@ -727,6 +741,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
+  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
   --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \

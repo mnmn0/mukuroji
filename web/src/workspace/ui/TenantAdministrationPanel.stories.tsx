@@ -7,7 +7,7 @@ import { createTranslator } from '../../shared/i18n/i18n'
 import { TenantAdministrationPanel } from './TenantAdministrationPanel'
 
 const snapshot = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   profile: {
     workspaceId: 'workspace-1',
     ownerMemberKey: 'owner@example.com',
@@ -21,45 +21,6 @@ const snapshot = {
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-08-01T00:00:00.000Z',
   },
-  entitlement: {
-    workspaceId: 'workspace-1',
-    plan: 'growth',
-    features: ['documents', 'analytics', 'automation'],
-    seatLimit: 25,
-    usageQuota: 100_000,
-    gracePeriodDays: 7,
-    revision: 3,
-    updatedAt: '2026-08-01T00:00:00.000Z',
-  },
-  usage: {
-    workspaceId: 'workspace-1',
-    activeSeats: 18,
-    periodUsage: 42_350,
-    periodStart: '2026-08-01T00:00:00.000Z',
-    periodEnd: '2026-09-01T00:00:00.000Z',
-    revision: 18,
-    updatedAt: '2026-08-02T00:00:00.000Z',
-  },
-  billingPeriods: [
-    {
-      workspaceId: 'workspace-1',
-      periodStart: '2026-08-01T00:00:00.000Z',
-      periodEnd: '2026-09-01T00:00:00.000Z',
-      meteredUnits: 42_350,
-      activeSeatHighWaterMark: 19,
-      revision: 18,
-      updatedAt: '2026-08-02T00:00:00.000Z',
-    },
-    {
-      workspaceId: 'workspace-1',
-      periodStart: '2026-07-01T00:00:00.000Z',
-      periodEnd: '2026-08-01T00:00:00.000Z',
-      meteredUnits: 91_420,
-      activeSeatHighWaterMark: 18,
-      revision: 51,
-      updatedAt: '2026-07-31T23:30:00.000Z',
-    },
-  ],
   recentOperations: [],
   governance: {
     workspaceId: 'workspace-1',
@@ -121,7 +82,6 @@ const meta = {
     activeOperation: undefined,
     closureConfirmation: '',
     data: snapshot,
-    entitlement: snapshot.entitlement,
     exportFormat: 'jsonl',
     governance: snapshot.governance,
     isSaving: false,
@@ -151,7 +111,7 @@ export default meta
 /** Tenant administration story type. */
 type Story = StoryObj<typeof meta>
 
-/** Standard tenant control-plane state with recent billing history. */
+/** Standard tenant control-plane state with Workspace governance and lifecycle history. */
 export const Standard: Story = {}
 
 /** Legal-hold reconciliation state that blocks account closure. */

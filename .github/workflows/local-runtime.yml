@@ -35,7 +35,6 @@ jobs:
       AWS_DEFAULT_REGION: us-east-1
       AWS_SECRET_ACCESS_KEY: test
       ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: '2222222222222222222222222222222222222222222222222222222222222222'
-      ENTERPRISE_SSO_STATE_SECRET: '3333333333333333333333333333333333333333333333333333333333333333'
       FLOCI_IMAGE: floci/floci:1.5.33-compat
       MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: '1111111111111111111111111111111111111111111111111111111111111111'
     steps:
@@ -64,6 +63,10 @@ jobs:
             if (process.env.MUKUROJI_WORKSPACE_DIRECTORY_ID !== "workspace#mukuroji-local" ||
                 process.env.MUKUROJI_LOCAL_AWS_RUNTIME !== "floci") {
               throw new Error("Generated environment did not preserve the local workspace and runtime marker.");
+            }
+            for (const name of ["COGNITO_SSO_CLIENT_ID", "COGNITO_SSO_REDIRECT_URI",
+              "COGNITO_HOSTED_UI_DOMAIN", "COGNITO_ENTERPRISE_IDP_NAME", "ENTERPRISE_SSO_STATE_SECRET"]) {
+              if (process.env[name]) throw new Error("Default local SSO must be disabled.");
             }
           '
 

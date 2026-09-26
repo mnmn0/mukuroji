@@ -9,7 +9,7 @@ export { API_RUNTIME_ENVIRONMENT_VARIABLE_NAMES } from '@mukuroji/contracts'
 const API_RUNTIME_CONFIGURATION_HEADER =
   'mukuroji-api-runtime-configuration-v2\n'
 const API_RUNTIME_CONFIGURATION_RECORD_PATTERN =
-  /^(value|secret):([A-Z][A-Z0-9_]*):([A-Za-z0-9+/]+={0,2})$/
+  /^(value|secret):([A-Z][A-Z0-9_]*):([A-Za-z0-9+/]*={0,2})$/
 const API_RUNTIME_CONFIGURATION_REVISION_PATTERN =
   /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/
 const API_RUNTIME_CONFIGURATION_REVISION_RECORD_PATTERN =
@@ -228,7 +228,16 @@ function parseApiRuntimeConfigurationGroup(
       throw createInvalidApiRuntimeEnvironmentError()
     }
 
-    const decodedValue = decodeApiRuntimeConfigurationValue(encodedValue)
+    const optionalSsoValue = kind === 'value' && [
+      'COGNITO_SSO_CLIENT_ID',
+      'COGNITO_HOSTED_UI_DOMAIN',
+      'COGNITO_SSO_REDIRECT_URI',
+      'COGNITO_ENTERPRISE_IDP_NAME',
+      'ENTERPRISE_SSO_STATE_SECRET',
+    ].includes(name)
+    const decodedValue = optionalSsoValue && encodedValue === ''
+      ? ''
+      : decodeApiRuntimeConfigurationValue(encodedValue)
     configuredNames.add(name)
     if (kind === 'value') {
       hydratedValues.set(name, decodedValue)

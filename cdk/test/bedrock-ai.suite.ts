@@ -43,56 +43,59 @@ function requireRecordProperty(
   return requireRecord(record[name], name);
 }
 
-test('AI assistance parameters pin one exact model and validate the JP default', () => {
+test('AI assistance is opt-in with one exact model and validated JP configuration', () => {
   const document = synthesizedTemplate.toJSON();
   const parameters = document.Parameters;
 
   expect(parameters.AiBedrockModelId).toEqual({
-    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$',
-    AllowedValues: ['jp.anthropic.claude-sonnet-4-6'],
+    AllowedPattern: '^(?:|[A-Za-z0-9][A-Za-z0-9._:-]{0,255})$',
+    AllowedValues: ['', 'jp.anthropic.claude-sonnet-4-6'],
     ConstraintDescription:
       'AiBedrockModelId must be one exact Bedrock model or inference-profile identifier.',
-    Default: 'jp.anthropic.claude-sonnet-4-6',
+    Default: '',
     Description:
       'Currently supported exact Bedrock model identifier allowlisted for every AI assistance request.',
     MaxLength: 256,
-    MinLength: 1,
+    MinLength: 0,
     Type: 'String',
   });
   expect(parameters.AiBedrockInputPricePerMillionTokensUsd).toEqual({
+    Default: '',
     AllowedPattern:
-      '^(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?))$',
+      '^(?:|(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?)))$',
     ConstraintDescription:
       'AiBedrockInputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
     Description:
       'Deployment-reviewed Bedrock standard input-token price in USD per one million tokens for AiBedrockModelId.',
     MaxLength: 32,
-    MinLength: 1,
+    MinLength: 0,
     Type: 'String',
   });
   expect(parameters.AiBedrockOutputPricePerMillionTokensUsd).toEqual({
+    Default: '',
     AllowedPattern:
-      '^(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?))$',
+      '^(?:|(?:(?:0\\.[0-9]*[1-9][0-9]*)|(?:[1-9][0-9]{0,5}(?:\\.[0-9]+)?|1000000(?:\\.0+)?)))$',
     ConstraintDescription:
       'AiBedrockOutputPricePerMillionTokensUsd must be a positive decimal number no greater than 1000000.',
     Description:
       'Deployment-reviewed Bedrock standard output-token price in USD per one million tokens for AiBedrockModelId.',
     MaxLength: 32,
-    MinLength: 1,
+    MinLength: 0,
     Type: 'String',
   });
   expect(parameters.AiBedrockModelArn).toEqual({
+    Default: '',
     AllowedPattern:
-      '^arn:(?:aws|aws-us-gov|aws-cn):bedrock:(?:[a-z0-9-]*::foundation-model/[A-Za-z0-9._:-]+|[a-z0-9-]+:[0-9]{12}:(?:inference-profile|application-inference-profile)/[A-Za-z0-9._:-]+)$',
+      '^(?:|arn:(?:aws|aws-us-gov|aws-cn):bedrock:(?:[a-z0-9-]*::foundation-model/[A-Za-z0-9._:-]+|[a-z0-9-]+:[0-9]{12}:(?:inference-profile|application-inference-profile)/[A-Za-z0-9._:-]+))$',
     ConstraintDescription:
       'AiBedrockModelArn must be one exact foundation-model or inference-profile ARN in the deployment partition.',
     Description:
       'Exact Bedrock model or inference-profile ARN that the API Lambda may invoke.',
     MaxLength: 2_048,
-    MinLength: 1,
+    MinLength: 0,
     Type: 'String',
   });
-  expect(parameters.AiBedrockModelArn.Default).toBeUndefined();
+  expect(parameters.AiBedrockModelArn.Default).toBe('');
   expect(parameters.AiBedrockDestinationModelArns).toEqual({
     AllowedPattern:
       '^(?:|arn:(?:aws|aws-us-gov|aws-cn):bedrock:[a-z0-9-]*::foundation-model/[A-Za-z0-9._:-]+(?:,arn:(?:aws|aws-us-gov|aws-cn):bedrock:[a-z0-9-]*::foundation-model/[A-Za-z0-9._:-]+)*)$',
@@ -299,7 +302,7 @@ test('API role invokes only exact configured Bedrock resources without streaming
     'PolicyDocument',
   );
 
-  expect(modelPolicy.Condition).toBeUndefined();
+  expect(modelPolicy.Condition).toBe('AiAssistanceConfigured');
   expect(modelPolicyDocument.Statement).toEqual([{
     Action: 'bedrock:InvokeModel',
     Effect: 'Allow',
@@ -333,4 +336,69 @@ test('API role invokes only exact configured Bedrock resources without streaming
   expect(bedrockPolicyDocument).not.toContain('"Resource":"*"');
   expect(bedrockPolicyDocument).not.toContain('foundation-model/*');
   expect(bedrockPolicyDocument).not.toContain('inference-profile/*');
+});
+
+/**
+ * Evaluates the small CloudFormation rule subset used by optional service configuration.
+ * @param expression Synthesized intrinsic expression.
+ * @param values Deployment parameter values.
+ * @returns The resolved scalar value.
+ */
+function evaluateConfigurationRule(
+  expression: unknown,
+  values: Readonly<Record<string, string>>,
+): unknown {
+  if (!isRecord(expression)) return expression;
+  if (typeof expression.Ref === 'string') return values[expression.Ref];
+  for (const name of ['Fn::Equals', 'Fn::Not', 'Fn::And', 'Fn::Or']) {
+    const operands = expression[name];
+    if (!Array.isArray(operands)) continue;
+    const results = operands.map((operand: unknown) => evaluateConfigurationRule(operand, values));
+    if (name === 'Fn::Equals') return results[0] === results[1];
+    if (name === 'Fn::Not') return !results[0];
+    if (name === 'Fn::And') return results.every((result) => result === true);
+    return results.some((result) => result === true);
+  }
+  throw new Error('Unexpected optional service rule expression.');
+}
+
+test('optional service rules accept disabled defaults and reject partial deployment settings', () => {
+  const document = synthesizedTemplate.toJSON();
+  const configurations = [
+    {
+      rule: 'EnterpriseSsoConfigurationComplete',
+      parameters: ['CognitoSsoUserPoolClientId', 'CognitoHostedUiDomain',
+        'CognitoSsoRedirectUri', 'CognitoEnterpriseIdpName', 'EnterpriseSsoStateSecret'],
+    },
+    {
+      rule: 'AiAssistanceConfigurationComplete',
+      parameters: ['AiBedrockModelId', 'AiBedrockModelArn',
+        'AiBedrockInputPricePerMillionTokensUsd', 'AiBedrockOutputPricePerMillionTokensUsd'],
+    },
+  ];
+  for (const configuration of configurations) {
+    const rule = requireRecord(document.Rules[configuration.rule], configuration.rule);
+    if (!Array.isArray(rule.Assertions) || rule.Assertions.length !== 1) {
+      throw new Error('Expected one completeness assertion.');
+    }
+    const assertion = requireRecord(rule.Assertions[0], 'completeness assertion').Assert;
+    const disabled: Record<string, string> = { AiBedrockDestinationModelArns: '' };
+    for (const name of configuration.parameters) {
+      expect(document.Parameters[name].Default).toBe('');
+      disabled[name] = '';
+    }
+    expect(evaluateConfigurationRule(assertion, disabled)).toBe(true);
+    const configured = { ...disabled };
+    for (const name of configuration.parameters) configured[name] = 'configured';
+    expect(evaluateConfigurationRule(assertion, configured)).toBe(true);
+    for (const name of configuration.parameters) {
+      expect(evaluateConfigurationRule(assertion, { ...disabled, [name]: 'configured' })).toBe(false);
+      expect(evaluateConfigurationRule(assertion, { ...configured, [name]: '' })).toBe(false);
+    }
+    if (configuration.rule === 'AiAssistanceConfigurationComplete') {
+      expect(evaluateConfigurationRule(assertion, { ...disabled, AiBedrockDestinationModelArns: 'orphan' })).toBe(false);
+      expect(evaluateConfigurationRule(document.Conditions.AiAssistanceConfigured, disabled)).toBe(false);
+      expect(evaluateConfigurationRule(document.Conditions.AiAssistanceConfigured, configured)).toBe(true);
+    }
+  }
 });

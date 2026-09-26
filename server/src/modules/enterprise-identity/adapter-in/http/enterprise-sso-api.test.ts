@@ -276,6 +276,10 @@ test('rejects a Cognito SSO app client that can escape the enterprise IdP contra
     configureFakeProjectClients(true)
     setTestAppDependencies({ enterpriseIdentity: identity })
     await withTestEnvironment({
+      COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+      COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+      COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+      ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
       COGNITO_SSO_CLIENT_ID: 'mukuroji-main-client',
     }, async () => {
       const sharedClient = await startSso()

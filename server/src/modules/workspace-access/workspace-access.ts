@@ -476,23 +476,23 @@ export type WorkspaceAccessTransactWriteItem = NonNullable<
   TransactWriteCommandInput['TransactItems']
 >[number]
 
-/** Input passed to the cross-module tenant seat meter. */
-export type WorkspaceSeatMutationInput = {
+/** Input passed to the cross-module tenant lifecycle guard. */
+export type WorkspaceMembershipMutationInput = {
   /** Canonical Workspace identifier. */
   workspaceId: string
-  /** Stable member key whose active status changed. */
+  /** Stable member key whose membership is being changed. */
   memberKey: string
-  /** Direction of the authoritative membership transition. */
+  /** Desired membership state after the authoritative write. */
   direction: 'activate' | 'deactivate'
   /** Timestamp shared by every item in the membership transaction. */
   occurredAt: string
 }
 
-/** Capability that contributes tenant seat metering to a membership transaction. */
-export interface WorkspaceSeatMeter {
-  /** Prepares conditional seat counter and audit transaction items. */
-  prepareSeatMutation(
-    input: WorkspaceSeatMutationInput,
+/** Capability that contributes tenant lifecycle guarding to a membership transaction. */
+export interface WorkspaceMembershipGuard {
+  /** Prepares conditional lifecycle transaction items. */
+  prepareMembershipMutation(
+    input: WorkspaceMembershipMutationInput,
   ): Promise<readonly WorkspaceAccessTransactWriteItem[]>
 }
 
@@ -503,8 +503,8 @@ export type DynamoDbWorkspaceAccessClientOptions = {
     DocumentAuthorizationRevisionMutationPort<
       WorkspaceAccessTransactWriteItem
     >
-  /** Optional tenant seat meter joined to membership state transitions. */
-  readonly seatMeter?: WorkspaceSeatMeter
+  /** Optional tenant lifecycle guard joined to membership state transitions. */
+  readonly membershipGuard?: WorkspaceMembershipGuard
 }
 
 /** `workspace-created` identity だけが補償処理で安全に削除できることを判定します。 */
@@ -531,8 +531,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     DocumentAuthorizationRevisionMutationPort<
       WorkspaceAccessTransactWriteItem
     >
-  /** Tenant seat meter that joins authoritative membership transactions. */
-  private readonly seatMeter?: WorkspaceSeatMeter
+  /** Tenant lifecycle guard that joins authoritative membership transactions. */
+  private readonly membershipGuard?: WorkspaceMembershipGuard
   /** immutable audit event を保存する DynamoDB table 名です。 */
   private readonly auditTableName?: string
   /** Workspace/member/invitation の公開 audit ID を導出する固定 HMAC key です。 */
@@ -558,7 +558,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param auditTableName - Optional Audit table name.
    * @param auditPseudonymKey - Optional audit pseudonym key.
    * @param documentAuthorizationRevisionMutationPort - Optional Documents revision port.
-   * @param seatMeter - Optional tenant seat metering transaction contributor.
+   * @param membershipGuard - Optional tenant lifecycle guarding transaction contributor.
    */
   constructor(
     tableName?: string,
@@ -573,7 +573,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       DocumentAuthorizationRevisionMutationPort<
         WorkspaceAccessTransactWriteItem
       >,
-    seatMeter?: WorkspaceSeatMeter,
+    membershipGuard?: WorkspaceMembershipGuard,
   )
   constructor(
     tableNameOrOptions: string | DynamoDbWorkspaceAccessClientOptions =
@@ -595,7 +595,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       DocumentAuthorizationRevisionMutationPort<
         WorkspaceAccessTransactWriteItem
       >,
-    seatMeter?: WorkspaceSeatMeter,
+    membershipGuard?: WorkspaceMembershipGuard,
   ) {
     const options =
       typeof tableNameOrOptions === 'string'
@@ -620,7 +620,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     this.documentAuthorizationRevisionMutationPort =
       options?.documentAuthorizationRevisionMutationPort ??
       documentAuthorizationRevisionMutationPort
-    this.seatMeter = options?.seatMeter ?? seatMeter
+    this.membershipGuard = options?.membershipGuard ?? membershipGuard
     this.auditTableName = auditTableName ?? undefined
     this.auditPseudonymKey = auditPseudonymKey || undefined
   }
@@ -1523,7 +1523,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       version: invitation.version + 1,
       updatedAt: nowIso,
     }
-    const seatMutations = await this.prepareSeatMutation(
+    const membershipConditions = await this.prepareMembershipMutation(
       normalizedWorkspaceId,
       member.memberKey,
       'activate',
@@ -1591,7 +1591,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     if (member.role === 'owner') {
       transactItems.push({ Update: createOwnerCountUpdate(this.tableName, normalizedWorkspaceId, 1, nowIso) })
     }
-    transactItems.push(...seatMutations)
+    transactItems.push(...membershipConditions)
     const aggregateItemCount = transactItems.length
 
     transactItems.push(
@@ -1710,14 +1710,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       return target
     }
 
-    const seatMutations = target.status === nextStatus
-      ? []
-      : await this.prepareSeatMutation(
-          normalizedWorkspaceId,
-          target.memberKey,
-          nextStatus === 'active' ? 'activate' : 'deactivate',
-          nowIso,
-        )
+    const membershipConditions = await this.prepareMembershipMutation(
+      normalizedWorkspaceId,
+      target.memberKey,
+      nextStatus === 'active' ? 'activate' : 'deactivate',
+      nowIso,
+    )
 
     const memberEventType = roleChanged && !statusChanged
       ? 'member.role-changed'
@@ -1807,7 +1805,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    transactItems.push(...seatMutations)
+    transactItems.push(...membershipConditions)
 
     if (memberAuditPut) {
       transactItems.push(memberAuditPut)
@@ -1908,7 +1906,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         createdAt: nowIso,
         updatedAt: nowIso,
       } satisfies WorkspaceMember
-      const seatMutations = await this.prepareSeatMutation(
+      const membershipConditions = await this.prepareMembershipMutation(
         normalizedWorkspaceId,
         member.memberKey,
         'activate',
@@ -1942,7 +1940,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         input.expectedPlanningRevision,
         nowIso,
       )]
-      transactItems.push(...seatMutations)
+      transactItems.push(...membershipConditions)
       if (auditPut) transactItems.push(auditPut)
 
       try {
@@ -2049,14 +2047,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    const seatMutations = existing.status === 'deactivated'
-      ? await this.prepareSeatMutation(
-          normalizedWorkspaceId,
-          existing.memberKey,
-          'activate',
-          nowIso,
-        )
-      : []
+    const membershipConditions = await this.prepareMembershipMutation(
+      normalizedWorkspaceId,
+      existing.memberKey,
+      'activate',
+      nowIso,
+    )
 
     const auditPut = this.createWorkspaceAuditPut(auditContext, {
       directoryId: normalizedWorkspaceId,
@@ -2142,7 +2138,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         ),
       )
     }
-    transactItems.push(...seatMutations)
+    transactItems.push(...membershipConditions)
     if (auditPut) transactItems.push(auditPut)
 
     try {
@@ -2239,7 +2235,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       updatedAt: nowIso,
       deactivatedAt: nowIso,
     } satisfies WorkspaceMember
-    const seatMutations = await this.prepareSeatMutation(
+    const membershipConditions = await this.prepareMembershipMutation(
       normalizedWorkspaceId,
       existing.memberKey,
       'deactivate',
@@ -2298,7 +2294,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         nowIso,
       ),
     )
-    transactItems.push(...seatMutations)
+    transactItems.push(...membershipConditions)
     if (auditPut) transactItems.push(auditPut)
 
     try {
@@ -2339,22 +2335,22 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   }
 
   /**
-   * Prepares tenant seat writes for one authoritative member status transition.
+   * Prepares tenant lifecycle conditions for one authoritative member status transition.
    *
    * @param workspaceId - Canonical Workspace identifier.
    * @param memberKey - Stable member key whose status changed.
-   * @param direction - Whether a seat is being assigned or released.
+   * @param direction - Whether a membership is being activated or deactivated.
    * @param occurredAt - Timestamp shared with the membership mutation.
-   * @returns Transaction items contributed by the configured seat meter.
+   * @returns Transaction items contributed by the configured lifecycle guard.
    */
-  private async prepareSeatMutation(
+  private async prepareMembershipMutation(
     workspaceId: string,
     memberKey: string,
     direction: 'activate' | 'deactivate',
     occurredAt: string,
   ): Promise<WorkspaceAccessTransactWriteItem[]> {
-    if (!this.seatMeter) return []
-    return [...await this.seatMeter.prepareSeatMutation({
+    if (!this.membershipGuard) return []
+    return [...await this.membershipGuard.prepareMembershipMutation({
       workspaceId,
       memberKey,
       direction,

@@ -1,20 +1,15 @@
 import type {
   TenantAdministrationSnapshot,
-  TenantBillingPeriod,
   TenantClosureStep,
   TenantDefaultPolicy,
-  TenantEntitlement,
   TenantExportStep,
-  TenantFeature,
   TenantGovernanceEnforcement,
   TenantGovernancePolicy,
   TenantLocale,
   TenantOperation,
   TenantOperationStepProof,
   TenantOperationStatus,
-  TenantPlan,
   TenantProfile,
-  TenantUsage,
 } from '@mukuroji/contracts'
 
 /** Minimum audit retention accepted by the tenant governance policy. */
@@ -22,12 +17,6 @@ export const TENANT_MIN_AUDIT_RETENTION_DAYS = 30
 
 /** Maximum audit retention accepted by the tenant governance policy. */
 export const TENANT_MAX_AUDIT_RETENTION_DAYS = 2_555
-
-/** Maximum active seats accepted by the tenant entitlement policy. */
-export const TENANT_MAX_SEAT_LIMIT = 1_000_000
-
-/** Maximum metered units accepted by the tenant entitlement policy. */
-export const TENANT_MAX_USAGE_QUOTA = 1_000_000_000
 
 /** Default data-plane governance controls used by local development. */
 export const DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT: TenantGovernanceEnforcement = {
@@ -135,118 +124,6 @@ export function createDefaultTenantPolicy(): TenantDefaultPolicy {
 }
 
 /**
- * Creates the default plan entitlement for a tenant.
- *
- * @param workspaceId - Canonical Workspace identifier.
- * @param now - Entitlement creation timestamp.
- * @param activeSeats - Authoritative active seats that must remain entitled during initialization.
- * @returns A compatibility entitlement that preserves pre-rollout feature access.
- */
-export function createDefaultTenantEntitlement(
-  workspaceId: string,
-  now: string,
-  activeSeats = 1,
-): TenantEntitlement {
-  return {
-    workspaceId,
-    plan: 'enterprise',
-    features: [
-      'documents',
-      'analytics',
-      'automation',
-      'developer-platform',
-      'sso',
-      'scim',
-    ],
-    seatLimit: Math.max(
-      5,
-      validateTenantInteger(
-        activeSeats,
-        TENANT_MAX_SEAT_LIMIT,
-        'InvalidTenantActiveSeats',
-      ),
-    ),
-    usageQuota: 10_000,
-    gracePeriodDays: 7,
-    revision: 0,
-    updatedAt: now,
-  }
-}
-
-/**
- * Creates an empty usage period anchored to the supplied timestamp.
- *
- * @param workspaceId - Canonical Workspace identifier.
- * @param now - Current timestamp used to calculate the period.
- * @param activeSeats - Authoritative active member count at initialization.
- * @returns A current-period usage record initialized from active membership.
- */
-export function createDefaultTenantUsage(
-  workspaceId: string,
-  now: string,
-  activeSeats = 1,
-): TenantUsage {
-  const current = new Date(now)
-  if (Number.isNaN(current.getTime())) {
-    throw new TenantAdministrationError(500, 'InvalidTenantClock', 'Tenant clock is invalid.')
-  }
-  const periodStart = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), 1))
-  const periodEnd = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 1))
-  return {
-    workspaceId,
-    activeSeats: validateTenantInteger(
-      activeSeats,
-      TENANT_MAX_SEAT_LIMIT,
-      'InvalidTenantActiveSeats',
-    ),
-    periodUsage: 0,
-    periodStart: periodStart.toISOString(),
-    periodEnd: periodEnd.toISOString(),
-    revision: 0,
-    updatedAt: now,
-  }
-}
-
-/**
- * Creates or advances the invoice-ready aggregate for a usage period.
- *
- * @param usage - Authoritative tenant usage after the current mutation.
- * @param current - Existing aggregate for the same billing period, when present.
- * @returns A revisioned period aggregate aligned with the usage counter.
- */
-export function recordTenantBillingPeriod(
-  usage: TenantUsage,
-  current?: TenantBillingPeriod,
-): TenantBillingPeriod {
-  if (
-    current &&
-    (
-      current.workspaceId !== usage.workspaceId ||
-      current.periodStart !== usage.periodStart ||
-      current.periodEnd !== usage.periodEnd
-    )
-  ) {
-    throw new TenantAdministrationError(
-      503,
-      'TenantBillingPeriodMismatch',
-      'Tenant billing period state is inconsistent.',
-    )
-  }
-  return {
-    workspaceId: usage.workspaceId,
-    periodStart: usage.periodStart,
-    periodEnd: usage.periodEnd,
-    meteredUnits: usage.periodUsage,
-    activeSeatHighWaterMark: Math.max(
-      current?.activeSeatHighWaterMark ?? 0,
-      usage.activeSeats,
-    ),
-    revision: current ? current.revision + 1 : 0,
-    updatedAt: usage.updatedAt,
-  }
-}
-
-/**
  * Creates the default governance policy for a tenant.
  *
  * @param workspaceId - Canonical Workspace identifier.
@@ -280,7 +157,6 @@ export function createDefaultTenantGovernance(
  * @param ownerMemberKey - Current owner member key.
  * @param now - Snapshot creation timestamp.
  * @param enforcement - Controls implemented by the deployed data plane.
- * @param activeSeats - Authoritative active member count at initialization.
  * @returns A complete default tenant administration aggregate.
  */
 export function createDefaultTenantAdministrationSnapshot(
@@ -288,25 +164,16 @@ export function createDefaultTenantAdministrationSnapshot(
   ownerMemberKey: string,
   now: string,
   enforcement: TenantGovernanceEnforcement = DEFAULT_TENANT_GOVERNANCE_ENFORCEMENT,
-  activeSeats = 1,
 ): TenantAdministrationSnapshot {
   const normalizedEnforcement = validateTenantGovernanceEnforcement(enforcement)
-  const usage = createDefaultTenantUsage(workspaceId, now, activeSeats)
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     profile: createDefaultTenantProfile(
       workspaceId,
       ownerMemberKey,
       now,
       normalizedEnforcement.dataResidency,
     ),
-    entitlement: createDefaultTenantEntitlement(
-      workspaceId,
-      now,
-      usage.activeSeats,
-    ),
-    usage,
-    billingPeriods: [recordTenantBillingPeriod(usage)],
     recentOperations: [],
     governance: createDefaultTenantGovernance(
       workspaceId,
@@ -386,49 +253,6 @@ export function validateTenantLocale(value: unknown): TenantLocale {
 }
 
 /**
- * Validates a tenant plan.
- *
- * @param value - Candidate plan.
- * @returns The validated plan.
- */
-export function validateTenantPlan(value: unknown): TenantPlan {
-  if (value === 'starter' || value === 'growth' || value === 'enterprise') {
-    return value
-  }
-  throw new TenantAdministrationError(400, 'InvalidTenantPlan', 'Tenant plan is invalid.')
-}
-
-/**
- * Validates a feature list and rejects duplicates.
- *
- * @param value - Candidate feature list.
- * @returns A normalized feature list.
- */
-export function validateTenantFeatures(value: unknown): TenantFeature[] {
-  if (!Array.isArray(value) || value.length > 20) {
-    throw new TenantAdministrationError(400, 'InvalidTenantFeatures', 'Tenant features are invalid.')
-  }
-  const features: TenantFeature[] = []
-  for (const candidate of value) {
-    if (
-      candidate !== 'documents' &&
-      candidate !== 'analytics' &&
-      candidate !== 'automation' &&
-      candidate !== 'developer-platform' &&
-      candidate !== 'sso' &&
-      candidate !== 'scim'
-    ) {
-      throw new TenantAdministrationError(400, 'InvalidTenantFeatures', 'Tenant features are invalid.')
-    }
-    if (features.includes(candidate)) {
-      throw new TenantAdministrationError(400, 'DuplicateTenantFeature', 'Tenant features must be unique.')
-    }
-    features.push(candidate)
-  }
-  return features
-}
-
-/**
  * Validates a region-like AWS data residency identifier.
  *
  * @param value - Candidate region.
@@ -481,135 +305,6 @@ export function validateTenantInteger(
     return value
   }
   throw new TenantAdministrationError(400, code, 'Tenant numeric value is invalid.')
-}
-
-/**
- * Applies a metered usage reservation with a server-side quota check.
- *
- * @param entitlement - Current tenant entitlement.
- * @param usage - Current tenant usage.
- * @param additionalUnits - Units to reserve.
- * @param now - Current timestamp.
- * @returns The next usage record after the reservation.
- */
-export function reserveTenantUsage(
-  entitlement: TenantEntitlement,
-  usage: TenantUsage,
-  additionalUnits: number,
-  now: string,
-): TenantUsage {
-  const units = validateTenantInteger(additionalUnits, TENANT_MAX_USAGE_QUOTA, 'InvalidUsageUnits')
-  const periodUsage = beginTenantUsageMutation(usage, now)
-  const nextUsage = periodUsage.periodUsage + units
-  if (nextUsage > entitlement.usageQuota) {
-    const current = new Date(now)
-    const graceEndsAt = periodUsage.gracePeriodEndsAt
-      ? new Date(periodUsage.gracePeriodEndsAt)
-      : new Date(current.getTime() + entitlement.gracePeriodDays * 86_400_000)
-    if (Number.isNaN(graceEndsAt.getTime()) || current >= graceEndsAt) {
-      throw new TenantAdministrationError(
-        429,
-        'TenantUsageQuotaExceeded',
-        'Tenant usage quota has been exceeded.',
-      )
-    }
-    return {
-      ...periodUsage,
-      periodUsage: nextUsage,
-      gracePeriodEndsAt: graceEndsAt.toISOString(),
-    }
-  }
-  return {
-    ...periodUsage,
-    periodUsage: nextUsage,
-  }
-}
-
-/**
- * Opens one revisioned usage mutation and rolls an expired UTC period forward.
- *
- * This helper does not apply quota policy, so authoritative seat releases remain
- * available even after usage grace has expired.
- *
- * @param usage - Current durable tenant usage.
- * @param now - Mutation timestamp.
- * @returns A revisioned usage candidate aligned to the current UTC period.
- */
-export function beginTenantUsageMutation(
-  usage: TenantUsage,
-  now: string,
-): TenantUsage {
-  const current = new Date(now)
-  if (Number.isNaN(current.getTime())) {
-    throw new TenantAdministrationError(500, 'InvalidTenantClock', 'Tenant clock is invalid.')
-  }
-  const periodEnd = new Date(usage.periodEnd)
-  if (Number.isNaN(periodEnd.getTime())) {
-    throw new TenantAdministrationError(503, 'InvalidTenantUsagePeriod', 'Tenant usage period is invalid.')
-  }
-  let periodUsage: TenantUsage = usage
-  if (current >= periodEnd) {
-    periodUsage = {
-      ...usage,
-      periodUsage: 0,
-      ...getTenantUsagePeriod(current),
-      gracePeriodEndsAt: undefined,
-    }
-  }
-  return {
-    ...periodUsage,
-    revision: usage.revision + 1,
-    updatedAt: now,
-  }
-}
-
-/** Calculates the UTC calendar-month boundary used by tenant metering. */
-function getTenantUsagePeriod(current: Date): { periodStart: string; periodEnd: string } {
-  const periodStart = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), 1))
-  const periodEnd = new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 1))
-  return {
-    periodStart: periodStart.toISOString(),
-    periodEnd: periodEnd.toISOString(),
-  }
-}
-
-/**
- * Ensures a tenant feature is enabled before a server-side operation starts.
- *
- * @param entitlement - Current tenant entitlement.
- * @param feature - Feature required by the operation.
- * @throws TenantAdministrationError when the feature is not enabled.
- */
-export function assertTenantFeatureEnabled(
-  entitlement: TenantEntitlement,
-  feature: TenantFeature,
-): void {
-  if (!entitlement.features.includes(feature)) {
-    throw new TenantAdministrationError(
-      403,
-      'TenantFeatureNotEntitled',
-      'The tenant is not entitled to this feature.',
-    )
-  }
-}
-
-/**
- * Ensures a tenant has capacity for another active seat.
- *
- * @param entitlement - Current tenant entitlement.
- * @param usage - Current tenant usage.
- */
-export function assertTenantSeatAvailable(
-  entitlement: TenantEntitlement,
-  usage: TenantUsage,
-): void {
-  if (usage.activeSeats >= entitlement.seatLimit) {
-    throw new TenantAdministrationError(
-      403,
-      'TenantSeatLimitExceeded',
-      'The tenant seat limit has been exceeded.',
-    )
-  }
 }
 
 /**

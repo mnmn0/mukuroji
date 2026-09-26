@@ -65,6 +65,8 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',
@@ -963,6 +965,8 @@ test('denies an ambiguous Project URL even when a qualified assignment matches o
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(true, {
       workspaceRole: 'member',
@@ -1017,6 +1021,8 @@ test('hides Workspace-scoped immutable Planning context after an Initiative move
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(false, {
       workspaceRole: 'member',
@@ -1177,6 +1183,8 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(false, {
       workspaceRole: 'member',
@@ -1581,6 +1589,8 @@ test('preserves an empty Team and Team-scoped Planning aggregates for a director
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(false, {
       workspaceRole: 'member',
@@ -2042,7 +2052,14 @@ test('enforces service-account Project scope before recording successful use', a
   })
 })
 
-test('uses an active break-glass elevation to repair an IP allowlist lockout', async () => {
+test.each([false, true])('repairs a lockout through break-glass with partial SSO configuration: %s', async (partialSso) => {
+  await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: partialSso ? 'incomplete-sso-client' : '',
+    COGNITO_HOSTED_UI_DOMAIN: '',
+    COGNITO_SSO_REDIRECT_URI: '',
+    COGNITO_ENTERPRISE_IDP_NAME: '',
+    ENTERPRISE_SSO_STATE_SECRET: '',
+  }, async () => {
   configureFakeProjectClients(true, { workspaceRole: 'member' })
   const workspaceId = 'user#demo@example.com'
   const timestamp = new Date()
@@ -2146,6 +2163,12 @@ test('uses an active break-glass elevation to repair an IP allowlist lockout', a
     'Content-Type': 'application/json',
   }
 
+  const recoveryTest = await app.request('/api/enterprise/security/break-glass/test', {
+    method: 'POST',
+    headers,
+  })
+  expect(recoveryTest.status).toBe(200)
+
   const activation = await app.request(
     '/api/enterprise/security/break-glass/activate',
     {
@@ -2184,9 +2207,9 @@ test('uses an active break-glass elevation to repair an IP allowlist lockout', a
     activation: { id: string }
   }
   expect(snapshotResponse.status).toBe(200)
-  expect(alternateSessionResponse.status).toBe(403)
+  expect(alternateSessionResponse.status).toBe(partialSso ? 503 : 403)
   expect(await alternateSessionResponse.json()).toMatchObject({
-    code: 'EnterpriseSessionIpDenied',
+    code: partialSso ? 'EnterpriseSsoConfigurationIncomplete' : 'EnterpriseSessionIpDenied',
   })
   expect(await identity.getActiveBreakGlassActivation(
     workspaceId,
@@ -2213,6 +2236,17 @@ test('uses an active break-glass elevation to repair an IP allowlist lockout', a
   })
   expect((await identity.getSnapshot(workspaceId)).policy?.ipAllowlist).toEqual([])
 
+  const revocation = await app.request('/api/enterprise/security/break-glass/revoke-activation', {
+    method: 'POST',
+    headers,
+  })
+  expect(revocation.status).toBe(200)
+  expect(await identity.getActiveBreakGlassActivation(
+    workspaceId,
+    'demo@example.com',
+    createHash('sha256').update(accessToken).digest('base64url'),
+  )).toBeUndefined()
+
   verifyRecoveryDomainDuringMfa = true
   const managedDomainActivation = await app.request(
     '/api/enterprise/security/break-glass/activate',
@@ -2238,4 +2272,5 @@ test('uses an active break-glass elevation to repair an IP allowlist lockout', a
     'demo@example.com',
     createHash('sha256').update(alternateAccessToken).digest('base64url'),
   )).toBeUndefined()
+  })
 })

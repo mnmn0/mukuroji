@@ -2,6 +2,7 @@
  * AI assistance domain messages in English.
  */
 export const aiAssistanceMessages = {
+  'ai.settings.deploymentDisabled': 'AI assistance is disabled in this deployment.',
   'ai.review.title': 'AI draft',
   'ai.review.generated': 'Generated',
   'ai.review.sources': '{count} sources',
