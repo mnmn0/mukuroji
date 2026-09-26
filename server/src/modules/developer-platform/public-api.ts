@@ -119,6 +119,7 @@ export interface PublicWorkItemService {
     workItemId: string,
     continuation: string | undefined,
     limit: number,
+    assignedProjectId?: string,
   ): Promise<{
     /** Authorized, non-deleted comments in this page. */
     items: TeamIssueCommentResponseItem[]
@@ -132,6 +133,8 @@ export interface PublicWorkItemService {
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
     workItemId: string,
+    assignedProjectId?: string,
+    assigneeUserId?: string,
   ): Promise<void>
   /** Adds an idempotent, authorization-fenced canonical comment and audit event. */
   addComment(
@@ -140,6 +143,8 @@ export interface PublicWorkItemService {
     workItemId: string,
     body: string,
     context: PublicMutationContext,
+    assignedProjectId?: string,
+    assigneeUserId?: string,
   ): Promise<TeamIssueCommentResponseItem>
   /** Credential owner の current RBAC で Work Items を bounded page 取得します。 */
   list(
@@ -622,13 +627,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const assignedProjectId = c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId')
     return c.json(await createSignedContinuationPage(c, dependencies, {
       workspaceId: credential.workspaceId,
       actorId: `credential:${credential.credentialId}`,
       resource: `/v1/work-items/${encodeURIComponent(workItemId)}/comments`,
-      filters: { teamId },
+      filters: { teamId, ...(assignedProjectId ? { assignedProjectId } : {}) },
     }, (continuation, limit) => dependencies.workItems.listComments(
-      credential, teamId, workItemId, continuation, limit,
+      credential, teamId, workItemId, continuation, limit, assignedProjectId,
     ), (comment) => comment.createdAt))
   })
 
@@ -636,14 +642,16 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
     const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
     const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const assignedProjectId = c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId')
+    const assigneeUserId = c.req.query('assigneeUserId') === undefined ? undefined : readRouteId(c.req.query('assigneeUserId') ?? '', 'assigneeUserId')
     const input = requireRecord(await readJson(c), 'Comment body is required.')
     assertAllowedFields(input, ['body'], 'Comment')
     const body = readRequiredString(input.body, 'body')
     return executeIdempotentJson(c, dependencies, credential, { body }, async (context) => ({
       status: 201,
-      body: await dependencies.workItems.addComment(credential, teamId, workItemId, body, context),
+      body: await dependencies.workItems.addComment(credential, teamId, workItemId, body, context, assignedProjectId, assigneeUserId),
     }), {
-      authorizeReplay: () => dependencies.workItems.authorizeComment(credential, teamId, workItemId),
+      authorizeReplay: () => dependencies.workItems.authorizeComment(credential, teamId, workItemId, assignedProjectId, assigneeUserId),
     })
   })
 

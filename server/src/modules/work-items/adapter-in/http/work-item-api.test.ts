@@ -60,12 +60,23 @@ test('public progress uses canonical comments with current authorization fences 
     subjectUserId: 'demo@example.com', scopes: ['work-items:read', 'work-items:write'],
   }
   const service = createCanonicalPublicWorkItemService()
+  await expect(runWithTestAppDependencies(() => service.addComment(
+    credential, 'core-team', 'onboarding-friction', 'Rejected', { requestId: 'scope-request', idempotencyKey: 'scope-key' }, 'another-project',
+  ))).rejects.toMatchObject({ status: 403 })
+  await expect(runWithTestAppDependencies(() => service.addComment(
+    credential, 'core-team', 'onboarding-friction', 'Rejected', { requestId: 'scope-request', idempotencyKey: 'scope-key' }, undefined, 'another-member',
+  ))).rejects.toMatchObject({ status: 403 })
+  expect(writes).toHaveLength(0)
+  await expect(runWithTestAppDependencies(() => service.authorizeComment(
+    credential, 'core-team', 'onboarding-friction', 'another-project',
+  ))).rejects.toMatchObject({ status: 403 })
   const response = await runWithTestAppDependencies(() => service.addComment(
     credential, 'core-team', 'onboarding-friction', 'Tests passed', { requestId: 'progress-request', idempotencyKey: 'progress-operation' },
+    'refero', 'sato@example.com',
   ))
   expect(response).toMatchObject({ id: 'progress', body: 'Tests passed', actorUserId: 'demo@example.com' })
   expect(writes).toHaveLength(1)
-  expect(writes[0]).toMatchObject({ workspaceId: 'workspace-1', teamId: 'core-team', issueId: 'onboarding-friction', mentionMemberKeys: [] })
+  expect(writes[0]).toMatchObject({ workspaceId: 'workspace-1', teamId: 'core-team', issueId: 'onboarding-friction', projectId: 'refero', assigneeMemberKey: 'sato@example.com', mentionMemberKeys: [] })
   expect(writes[0]?.authorizationConditionChecks?.length).toBeGreaterThan(0)
   expect(writes[0]?.auditContext).toMatchObject({ actor: { id: 'demo@example.com' }, source: { kind: 'api', method: 'POST' } })
   configureFakeProjectClients(false, { directoryId: 'workspace-1' })
@@ -89,7 +100,7 @@ test('public comment reads hide deleted bodies, retain continuation, and recheck
     },
   }), collaboration: createCollaborationStub({
     async getThread(input) {
-      expect(input).toMatchObject({ includeReplies: true, includeScopeState: false, limit: 10 })
+      expect(input).toMatchObject({ includeReplies: true, newestFirst: true, includeScopeState: false, limit: 10 })
       if (moveDuringRead) moved = true
       return {
         comments: [comment, { ...comment, id: 'deleted', bodyMarkdown: 'DO NOT RETURN', deletedAt: comment.updatedAt }],
@@ -102,11 +113,21 @@ test('public comment reads hide deleted bodies, retain continuation, and recheck
     kind: 'api-key', workspaceId: 'workspace-1', credentialId: 'comments-key', subjectUserId: 'demo@example.com', scopes: ['work-items:read'],
   }
   const service = createCanonicalPublicWorkItemService()
+  await expect(runWithTestAppDependencies(() => service.listComments(
+    credential, 'core-team', 'onboarding-friction', undefined, 10, 'another-project',
+  ))).rejects.toMatchObject({ status: 403 })
   const page = await runWithTestAppDependencies(() => service.listComments(credential, 'core-team', 'onboarding-friction', undefined, 10))
   expect(page).toMatchObject({ items: [{ id: 'progress', body: 'Progress' }], hasMore: true, nextContinuation: 'next-internal-page' })
   expect(page.items).toHaveLength(1)
   moveDuringRead = true
   await expect(runWithTestAppDependencies(() => service.listComments(credential, 'core-team', 'onboarding-friction', undefined, 10))).rejects.toMatchObject({ status: 409 })
+  await expect(runWithTestAppDependencies(() => service.listComments(
+    credential, 'core-team', 'onboarding-friction', undefined, 10, 'refero',
+  ))).rejects.toMatchObject({ status: 403 })
+  moved = false
+  await expect(runWithTestAppDependencies(() => service.listComments(
+    credential, 'core-team', 'onboarding-friction', undefined, 10, 'refero',
+  ))).rejects.toMatchObject({ status: 403 })
 })
 
 /**

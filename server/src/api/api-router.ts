@@ -41829,15 +41829,19 @@ function createPublicWorkItemTypeCatalog(
 export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
   return {
     /** Reads bounded canonical discussion pages and rechecks access after the read. */
-    async listComments(credential, teamId, workItemId, continuation, limit) {
+    async listComments(credential, teamId, workItemId, continuation, limit, assignedProjectId) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.read', teamId, evaluateProjectScopes: true,
       })
       const before = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      if (assignedProjectId !== undefined && before.detail.issue.assignedProjectId !== assignedProjectId) {
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item is outside the requested Project.')
+      }
       const page = await workItemDependencies.collaboration.getThread({
         entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, workItemId),
         viewerMemberKey: principal.userKey,
         includeReplies: true,
+        newestFirst: true,
         includeScopeState: false,
         limit,
         cursor: continuation,
@@ -41846,6 +41850,9 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         permission: 'work-items.read', teamId, evaluateProjectScopes: true,
       })
       const after = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'viewer')
+      if (assignedProjectId !== undefined && after.detail.issue.assignedProjectId !== assignedProjectId) {
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item is outside the requested Project.')
+      }
       if (before.detail.issue.assignedProjectId !== after.detail.issue.assignedProjectId) {
         throw new PublicApiServiceError(409, 'conflict', 'Work Item assignment changed. Reload the discussion.')
       }
@@ -41862,21 +41869,33 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     /** Revalidates comment write permissions for receipt replay. */
-    async authorizeComment(credential, teamId, workItemId) {
+    async authorizeComment(credential, teamId, workItemId, assignedProjectId, assigneeUserId) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write', teamId, evaluateProjectScopes: true,
       })
       requireWorkspaceBusinessWrite(principal)
-      await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      if (assignedProjectId !== undefined && detail.issue.assignedProjectId !== assignedProjectId) {
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item is outside the requested Project.')
+      }
+      if (assigneeUserId !== undefined && detail.issue.assigneeUserId !== assigneeUserId) {
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item is assigned to another member.')
+      }
     },
 
     /** Persists a progress note through the existing fenced collaboration transaction. */
-    async addComment(credential, teamId, workItemId, body, mutationContext) {
+    async addComment(credential, teamId, workItemId, body, mutationContext, assignedProjectId, assigneeUserId) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write', teamId, evaluateProjectScopes: true,
       })
       requireWorkspaceBusinessWrite(principal)
       const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      if (assignedProjectId !== undefined && detail.issue.assignedProjectId !== assignedProjectId) {
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item is outside the requested Project.')
+      }
+      if (assigneeUserId !== undefined && detail.issue.assigneeUserId !== assigneeUserId) {
+        throw new PublicApiServiceError(403, 'forbidden', 'Work Item is assigned to another member.')
+      }
       const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, workItemId)
       const authorizationConditionChecks = await createCollaborationCommentAuthorizationConditionChecks(
         principal, context, teamId, detail.issue.assignedProjectId,
@@ -41901,7 +41920,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         auditContext: createPublicMutationAuditContext(principal, mutationContext, {
           method: 'POST',
           path: `/api/v1/work-items/${encodeURIComponent(workItemId)}/comments`,
-          query: { teamId },
+          query: { teamId, ...(assignedProjectId ? { assignedProjectId } : {}), ...(assigneeUserId ? { assigneeUserId } : {}) },
           body: { body },
         }),
       })

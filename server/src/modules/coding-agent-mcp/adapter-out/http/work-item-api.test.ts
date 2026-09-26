@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import { createAgentWorkItemApi } from './work-item-api'
+import { createAgentTasks } from '../../application/agent-tasks'
 
 const config = { origin: 'https://mukuroji.example.test', token: 'secret-test-token', teamId: 'team' }
 const validTask = { id: 'task', teamId: 'team', revision: 1, title: 'Task', assigneeUserId: 'agent',
@@ -46,4 +47,54 @@ test('validates JSON, task scope, pagination, and response size before exposing 
   await expect(malformed.get('task')).rejects.toMatchObject({ code: 'invalid_response' })
   const huge = createAgentWorkItemApi(config, async () => Response.json({ ...validTask, description: 'x'.repeat(2 * 1024 * 1024) }))
   await expect(huge.get('task')).rejects.toMatchObject({ code: 'response_limit' })
+})
+
+test('preserves only bounded allowlisted idempotency retry metadata', async () => {
+  for (const retryable of [true, false]) {
+    const api = createAgentWorkItemApi(config, async () => Response.json({
+      status: 409, code: 'idempotency_conflict', retryable, detail: 'secret-test-token',
+    }, { status: 409, headers: { 'Content-Type': 'application/problem+json', 'Retry-After': '5' } }))
+    await expect(api.update('task', { expectedRevision: 1, title: 'New' }, 'same-key')).rejects.toMatchObject({
+      code: 'idempotency_conflict', retryable, retryAfterSeconds: 5,
+    })
+    try { await api.get('task') } catch (error) { expect(String(error)).not.toContain('secret-test-token') }
+  }
+  for (const body of ['{bad', JSON.stringify({ code: 'conflict', status: 409, retryable: true }), JSON.stringify({ status: 409, code: 'idempotency_conflict', retryable: true, detail: 's'.repeat(70_000) })]) {
+    const api = createAgentWorkItemApi(config, async () => new Response(body, { status: 409, headers: { 'Content-Type': 'application/problem+json' } }))
+    await expect(api.get('task')).rejects.toMatchObject({ code: 'conflict', retryable: false })
+  }
+})
+
+test('carries configured Project and assignee fences on comment requests', async () => {
+  const api = createAgentWorkItemApi(config, async (url, init) => {
+    expect(url.searchParams.get('assignedProjectId')).toBe('project')
+    if (init.method === 'GET') return Response.json({ items: [], hasMore: false })
+    expect(url.searchParams.get('assigneeUserId')).toBe('agent')
+    return Response.json({ id: 'note', actorUserId: 'agent', body: 'Progress', createdAt: validTask.createdAt })
+  })
+  await api.comments('task', undefined, 10, 'project')
+  await api.comment('task', 'Progress', 'key', 'project', 'agent')
+})
+
+test('restarts oversized queue scans with smaller cursor-bound pages and preserves complete status and selection', async () => {
+  const rows = Array.from({ length: 71 }, (_, index) => ({ ...validTask, id: String(index),
+    description: index < 50 ? '' : '\u0001'.repeat(100_000),
+    priority: index === 70 ? 'high' : 'medium',
+  }))
+  const starts: number[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    const limit = Number(url.searchParams.get('limit'))
+    const cursor = url.searchParams.get('cursor')
+    if (!cursor) starts.push(limit)
+    const [cursorLimit, offset] = cursor ? cursor.split(':').map(Number) : [limit, 0]
+    expect(cursorLimit).toBe(limit)
+    const next = offset + limit
+    return Response.json({ items: rows.slice(offset, next), hasMore: next < rows.length,
+      ...(next < rows.length ? { nextCursor: `${limit}:${next}` } : {}),
+    })
+  })
+  const service = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent' })
+  expect(await service.status({})).toMatchObject({ total: 71, counts: { unstarted: 71 } })
+  expect(await service.next({})).toMatchObject({ action: 'start', task: { id: '70' } })
+  expect(starts).toEqual([50, 10, 2, 50, 10, 2])
 })

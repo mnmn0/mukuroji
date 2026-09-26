@@ -1451,6 +1451,7 @@ const paths = {
       parameters: [
         idPathParameter('workItemId', 'Work Item ID'),
         { name: 'teamId', in: 'query', required: true, schema: { type: 'string' } },
+        { name: 'assignedProjectId', in: 'query', description: 'Optional Project fence checked before and after reading comments.', schema: { type: 'string', minLength: 1, maxLength: 256 } },
         ...publicCursorParameters,
       ],
       responses: {
@@ -1467,6 +1468,8 @@ const paths = {
       parameters: [
         idPathParameter('workItemId', 'Work Item ID'),
         { name: 'teamId', in: 'query', required: true, schema: { type: 'string' } },
+        { name: 'assignedProjectId', in: 'query', description: 'Optional Project fence enforced by the comment transaction and receipt replay authorization.', schema: { type: 'string', minLength: 1, maxLength: 256 } },
+        { name: 'assigneeUserId', in: 'query', description: 'Optional assignee fence enforced by the comment transaction and receipt replay authorization.', schema: { type: 'string', minLength: 1, maxLength: 256 } },
         ...idempotencyParameters,
       ],
       requestBody: jsonRequestBody('CreatePublicWorkItemCommentRequest'),

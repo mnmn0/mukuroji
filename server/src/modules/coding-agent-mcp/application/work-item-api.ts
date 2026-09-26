@@ -68,9 +68,9 @@ export interface AgentWorkItemApi {
   /** Updates a task with revision CAS and durable idempotency. */
   update(id: string, input: UpdatePublicWorkItemRequest, key: string): Promise<AgentTask>
   /** Reads comments and replies without exposing internal cursors. */
-  comments(id: string, cursor?: string, limit?: number): Promise<AgentPage<TeamIssueCommentResponseItem>>
+  comments(id: string, cursor?: string, limit?: number, assignedProjectId?: string): Promise<AgentPage<TeamIssueCommentResponseItem>>
   /** Adds a progress note without overwriting task instructions. */
-  comment(id: string, body: string, key: string): Promise<TeamIssueCommentResponseItem>
+  comment(id: string, body: string, key: string, assignedProjectId?: string, assigneeUserId?: string): Promise<TeamIssueCommentResponseItem>
 }
 
 /** Safe, transport-independent error that may be returned to the MCP client. */

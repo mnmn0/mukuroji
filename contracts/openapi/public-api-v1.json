@@ -7333,6 +7333,16 @@
             }
           },
           {
+            "description": "Optional Project fence checked before and after reading comments.",
+            "in": "query",
+            "name": "assignedProjectId",
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "前 response の opaque nextCursor です。発行から15分で失効します。",
             "in": "query",
             "name": "cursor",
@@ -7438,6 +7448,26 @@
             "name": "teamId",
             "required": true,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional Project fence enforced by the comment transaction and receipt replay authorization.",
+            "in": "query",
+            "name": "assignedProjectId",
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional assignee fence enforced by the comment transaction and receipt replay authorization.",
+            "in": "query",
+            "name": "assigneeUserId",
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
               "type": "string"
             }
           },

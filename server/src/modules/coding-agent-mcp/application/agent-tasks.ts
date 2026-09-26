@@ -58,12 +58,25 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
 
   /** Scans a complete bounded assignment queue; partial scans never masquerade as empty work. */
   async function queue(input: AgentTaskFilters = {}): Promise<AgentTask[]> {
+    for (const limit of [50, 10, 2, 1]) {
+      try {
+        return await queueAtPageSize(input, limit)
+      } catch (error) {
+        if (!(error instanceof AgentTaskError) || error.code !== 'response_limit' || limit === 1) throw error
+        // Cursors bind the page size, so restart the read from the beginning.
+      }
+    }
+    throw new AgentTaskError('response_limit', 'A single task exceeds the response limit.')
+  }
+
+  /** Reads at most 1,000 result slots, retaining a stable page size for every cursor. */
+  async function queueAtPageSize(input: AgentTaskFilters, limit: number): Promise<AgentTask[]> {
     const tasks = new Map<string, AgentTask>()
     const cursors = new Set<string>()
     let cursor: string | undefined
     const selection = filters({ ...input, assigneeUserId: scope.assigneeUserId })
-    for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
-      const page = await api.list(selection, cursor, 50)
+    for (let pageNumber = 0; pageNumber < 1_000 / limit; pageNumber += 1) {
+      const page = await api.list(selection, cursor, limit)
       for (const task of page.items) {
         inScope(task)
         if (task.assigneeUserId !== scope.assigneeUserId) {
@@ -78,7 +91,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       cursor = page.nextCursor
       cursors.add(cursor)
     }
-    throw new AgentTaskError('queue_limit', 'The queue exceeded 20 pages. Narrow the Project or Work Item Type filter and retry.')
+    throw new AgentTaskError('queue_limit', 'The queue exceeded 1,000 result slots. Narrow the Project or Work Item Type filter and retry.')
   }
 
   /** Resolves semantic blockers through authorized reads, without leaking inaccessible targets. */
@@ -172,7 +185,10 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     transition,
     /** Applies metadata changes using revision CAS; assignment and workflow changes have dedicated paths. */
     async update(id: string, input: Pick<UpdatePublicWorkItemRequest, 'expectedRevision' | 'title' | 'description' | 'priority' | 'customFieldValues'>, key: string) {
-      await owned(id)
+      const task = await owned(id)
+      if (input.expectedRevision > task.revision) {
+        throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before updating it.')
+      }
       return api.update(id, input, key)
     },
     /** Creates assigned work within the operator-selected Project boundary. */
@@ -183,12 +199,12 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     /** Adds a durable progress, blocker, or completion report to the existing discussion. */
     async report(id: string, message: string, key: string) {
       await owned(id)
-      return api.comment(id, `[${scope.agentName}]\n\n${message}`, key)
+      return api.comment(id, `[${scope.agentName}]\n\n${message}`, key, scope.assignedProjectId, scope.assigneeUserId)
     },
     /** Reads existing discussion without changing the task description or state. */
     async comments(id: string, cursor?: string, limit?: number) {
       inScope(await api.get(id))
-      return api.comments(id, cursor, limit)
+      return api.comments(id, cursor, limit, scope.assignedProjectId)
     },
   }
 }

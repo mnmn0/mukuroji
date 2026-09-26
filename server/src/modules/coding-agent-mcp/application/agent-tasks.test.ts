@@ -123,7 +123,28 @@ describe('agent task lifecycle', () => {
       async update() { writes += 1; return task('one', { revision: 3, statusCategory: 'started' }) },
     })
     await expect(service.transition('one', 2, 'coding', 'start', 'future')).rejects.toMatchObject({ code: 'conflict' })
+    await expect(service.update('one', { expectedRevision: 2, title: 'Overwrite' }, 'future')).rejects.toMatchObject({ code: 'conflict' })
     expect(writes).toBe(0)
+  })
+
+  test('replays stale metadata updates and forwards comment scope to the canonical API', async () => {
+    const { service } = fixture()
+    expect(await service.update('one', { expectedRevision: 1, title: 'New' }, 'edit')).toMatchObject({ revision: 2 })
+    expect(await service.update('one', { expectedRevision: 1, title: 'New' }, 'edit')).toMatchObject({ revision: 2 })
+    const { api } = fixture([task('one', { assignedProjectId: 'project' })], {
+      async comments(_id, _cursor, _limit, project) {
+        expect(project).toBe('project')
+        return { items: [], hasMore: false }
+      },
+      async comment(_id, body, _key, project, assignee) {
+        expect(project).toBe('project')
+        expect(assignee).toBe('agent-member')
+        return { id: 'comment', actorUserId: 'member', body, createdAt: '2026-09-01T00:00:00.000Z' }
+      },
+    })
+    const scoped = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent-member', assignedProjectId: 'project' })
+    await scoped.comments('one')
+    await scoped.report('one', 'Progress', 'note')
   })
 
   test('rejects blockers, inaccessible blockers, wrong assignment, invalid transitions, and Project escapes', async () => {

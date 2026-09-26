@@ -31,6 +31,46 @@ const catalogSchema: z.ZodType<AgentCatalog> = z.object({
 const commentSchema = z.object({
   id: identifier, actorUserId: identifier, body: z.string(), createdAt: z.iso.datetime(),
 })
+const idempotencyProblemSchema = z.object({
+  status: z.literal(409), code: z.literal('idempotency_conflict'), retryable: z.boolean(),
+})
+
+/** Reads a bounded response while always releasing its stream, including on overflow. */
+async function readBody(response: Response, maximumBytes: number): Promise<string> {
+  if (!response.body) throw new AgentTaskError('invalid_response', 'The public API returned an empty response.')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    for (;;) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      size += chunk.value.byteLength
+      if (size > maximumBytes) throw new AgentTaskError('response_limit', 'API response exceeded the size limit. Reduce the page size or task content.')
+      chunks.push(chunk.value)
+    }
+  } finally {
+    await reader.cancel()
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
+  return new TextDecoder().decode(bytes)
+}
+
+/** Extracts only allowlisted retry metadata; remote messages and malformed bodies remain private. */
+async function readIdempotencyProblem(response: Response) {
+  if (response.status !== 409 || !response.headers.get('content-type')?.includes('application/problem+json')) {
+    await response.body?.cancel()
+    return undefined
+  }
+  try {
+    const parsed = idempotencyProblemSchema.safeParse(JSON.parse(await readBody(response, 64 * 1024)))
+    return parsed.success ? parsed.data : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /** Creates a validated page schema that rejects missing or contradictory cursors. */
 function pageSchema<T>(item: z.ZodType<T>): z.ZodType<AgentPage<T>> {
@@ -86,40 +126,21 @@ export function createAgentWorkItemApi(
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
       if (!response.ok) {
-        await response.body?.cancel()
+        const problem = await readIdempotencyProblem(response)
         const retry = response.headers.get('Retry-After')
         const retrySeconds = retry && /^\d{1,6}$/.test(retry) ? Number(retry) : undefined
         const code = response.status === 401 ? 'unauthorized' : response.status === 403 ? 'forbidden' :
-          response.status === 404 ? 'not_found' : response.status === 409 ? 'conflict' :
+          response.status === 404 ? 'not_found' : response.status === 409 ? (problem?.code ?? 'conflict') :
           response.status === 429 ? 'rate_limited' : response.status >= 500 ? 'unavailable' : 'invalid_request'
         throw new AgentTaskError(code,
-          `Public API returned HTTP ${response.status}. ${code === 'conflict' ? 'Reload the task; for an uncertain previous response retry the identical arguments and idempotencyKey.' : 'Check the credential, task access, and current workflow/field requirements.'}`,
-          response.status === 429 || response.status >= 500, retrySeconds)
+          `Public API returned HTTP ${response.status}. ${problem?.retryable ? 'The original operation is still in progress. Retry only the identical arguments and idempotencyKey.' : code === 'conflict' ? 'Reload the task; for an uncertain previous response retry the identical arguments and idempotencyKey.' : 'Check the credential, task access, and current workflow/field requirements.'}`,
+          problem?.retryable === true || response.status === 429 || response.status >= 500, retrySeconds)
       }
       if (!response.headers.get('content-type')?.includes('application/json') || !response.body) {
         await response.body?.cancel()
         throw new AgentTaskError('invalid_response', 'The public API did not return JSON.')
       }
-      const reader = response.body.getReader()
-      const chunks: Uint8Array[] = []
-      let size = 0
-      try {
-        for (;;) {
-          const chunk = await reader.read()
-          if (chunk.done) break
-          size += chunk.value.byteLength
-          if (size > 2 * 1024 * 1024) {
-            throw new AgentTaskError('response_limit', 'API response exceeded 2 MiB. Reduce the page size or task content.')
-          }
-          chunks.push(chunk.value)
-        }
-      } finally {
-        await reader.cancel()
-      }
-      const bytes = new Uint8Array(size)
-      let offset = 0
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length }
-      const parsed = schema.safeParse(JSON.parse(new TextDecoder().decode(bytes)))
+      const parsed = schema.safeParse(JSON.parse(await readBody(response, 2 * 1024 * 1024)))
       if (!parsed.success) throw new AgentTaskError('invalid_response', 'The public API response did not match the supported contract.')
       return parsed.data
     } catch (error) {
@@ -156,8 +177,8 @@ export function createAgentWorkItemApi(
     /** Forwards revision and idempotency without silently retrying conflicts. */
     async update(id, input, key) { return scoped(await request(`work-items/${encodeURIComponent(id)}`, taskSchema, 'PATCH', input, key), id) },
     /** Reads a bounded canonical discussion page. */
-    async comments(id, cursor, limit = 50) { return request(`work-items/${encodeURIComponent(id)}/comments`, pageSchema(commentSchema), 'GET', undefined, undefined, { cursor, limit }) },
+    async comments(id, cursor, limit = 50, assignedProjectId) { return request(`work-items/${encodeURIComponent(id)}/comments`, pageSchema(commentSchema), 'GET', undefined, undefined, { cursor, limit, assignedProjectId }) },
     /** Appends one idempotent progress comment. */
-    async comment(id, body, key) { return request(`work-items/${encodeURIComponent(id)}/comments`, commentSchema, 'POST', { body }, key) },
+    async comment(id, body, key, assignedProjectId, assigneeUserId) { return request(`work-items/${encodeURIComponent(id)}/comments`, commentSchema, 'POST', { body }, key, { assignedProjectId, assigneeUserId }) },
   }
 }

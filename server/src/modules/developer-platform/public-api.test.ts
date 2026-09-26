@@ -268,19 +268,23 @@ describe('public API router', () => {
     let creates = 0
     let allowed = true
     const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
-      async addComment(credential, teamId, id, body) {
+      async addComment(credential, teamId, id, body, _context, project, assignee) {
         expect(credential.workspaceId).toBe('workspace-1')
         expect(teamId).toBe('team-1')
         expect(id).toBe('work-item-1')
+        expect(project).toBe('project-1')
+        expect(assignee).toBe('user-1')
         creates += 1
         return { id: 'comment-1', actorUserId: credential.subjectUserId, body, createdAt: NOW.toISOString() }
       },
-      async authorizeComment() {
+      async authorizeComment(_credential, _team, _id, project, assignee) {
+        expect(project).toBe('project-1')
+        expect(assignee).toBe('user-1')
         if (!allowed) throw new PublicApiServiceError(403, 'forbidden', 'Access removed.')
       },
     }) })
     const credential = await createApiKey(platform, ['work-items:read', 'work-items:write'])
-    const path = '/v1/work-items/work-item-1/comments?teamId=team-1'
+    const path = '/v1/work-items/work-item-1/comments?teamId=team-1&assignedProjectId=project-1&assigneeUserId=user-1'
     const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'progress-key' }
     const send = (body = 'Tests pass. PR #123') => router.request(path, { method: 'POST', headers, body: JSON.stringify({ body }) })
     expect((await send()).status).toBe(201)
@@ -289,6 +293,8 @@ describe('public API router', () => {
     expect(replay.headers.get('Idempotency-Replayed')).toBe('true')
     expect(creates).toBe(1)
     expect((await send('Different content')).status).toBe(409)
+    expect((await router.request(path.replace('project-1', 'project-2'), { method: 'POST', headers, body: JSON.stringify({ body: 'Tests pass. PR #123' }) })).status).toBe(409)
+    expect((await router.request(path.replace('project-1', ''), { method: 'POST', headers, body: JSON.stringify({ body: 'x' }) })).status).toBe(400)
     allowed = false
     expect((await send()).status).toBe(403)
     expect(creates).toBe(1)
@@ -298,16 +304,17 @@ describe('public API router', () => {
     expect((await router.request(path)).status).toBe(401)
   })
 
-  test('preserves empty comment page continuations and binds cursors to Team, task, credential, and limit', async () => {
+  test('preserves empty comment page continuations and binds cursors to Team, Project, task, credential, and limit', async () => {
     const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
-      async listComments(_credential, _team, _id, continuation) {
+      async listComments(_credential, _team, _id, continuation, _limit, project) {
+        expect(project).toBe('project-1')
         return continuation ? { items: [{ id: 'comment', actorUserId: 'user-1', body: 'Progress', createdAt: NOW.toISOString() }], hasMore: false }
           : { items: [], hasMore: true, nextContinuation: 'internal-cursor' }
       },
     }) })
     const credential = await createApiKey(platform, ['work-items:read'])
     const headers = { Authorization: `Bearer ${credential.secret}` }
-    const path = '/v1/work-items/work-item-1/comments?teamId=team-1&limit=1'
+    const path = '/v1/work-items/work-item-1/comments?teamId=team-1&limit=1&assignedProjectId=project-1'
     const first = await router.request(path, { headers })
     const body = await first.json()
     expect(body).toMatchObject({ items: [], hasMore: true })
@@ -316,6 +323,7 @@ describe('public API router', () => {
     expect((await router.request(path + query, { headers })).status).toBe(200)
     expect((await router.request(path.replace('work-item-1', 'work-item-2') + query, { headers })).status).toBe(400)
     expect((await router.request(path.replace('team-1', 'team-2') + query, { headers })).status).toBe(400)
+    expect((await router.request(path.replace('project-1', 'project-2') + query, { headers })).status).toBe(400)
     expect((await router.request(path.replace('limit=1', 'limit=2') + query, { headers })).status).toBe(400)
     const other = await createApiKey(platform, ['work-items:read'])
     expect((await router.request(path + query, { headers: { Authorization: `Bearer ${other.secret}` } })).status).toBe(400)
