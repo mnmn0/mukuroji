@@ -41828,6 +41828,93 @@ function createPublicWorkItemTypeCatalog(
  */
 export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
   return {
+    /** Reads bounded canonical discussion pages and rechecks access after the read. */
+    async listComments(credential, teamId, workItemId, continuation, limit) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read', teamId, evaluateProjectScopes: true,
+      })
+      const before = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+      const page = await workItemDependencies.collaboration.getThread({
+        entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, workItemId),
+        viewerMemberKey: principal.userKey,
+        includeReplies: true,
+        includeScopeState: false,
+        limit,
+        cursor: continuation,
+      })
+      const current = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read', teamId, evaluateProjectScopes: true,
+      })
+      const after = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'viewer')
+      if (before.detail.issue.assignedProjectId !== after.detail.issue.assignedProjectId) {
+        throw new PublicApiServiceError(409, 'conflict', 'Work Item assignment changed. Reload the discussion.')
+      }
+      return {
+        items: page.comments.filter((comment) => !comment.deletedAt).map((comment) => ({
+          id: comment.id,
+          actorUserId: comment.authorMemberKey,
+          body: comment.bodyMarkdown,
+          createdAt: comment.createdAt,
+        })),
+        hasMore: page.nextCursor !== undefined,
+        ...(page.nextCursor ? { nextContinuation: page.nextCursor } : {}),
+      }
+    },
+
+    /** Revalidates comment write permissions for receipt replay. */
+    async authorizeComment(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.write', teamId, evaluateProjectScopes: true,
+      })
+      requireWorkspaceBusinessWrite(principal)
+      await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+    },
+
+    /** Persists a progress note through the existing fenced collaboration transaction. */
+    async addComment(credential, teamId, workItemId, body, mutationContext) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.write', teamId, evaluateProjectScopes: true,
+      })
+      requireWorkspaceBusinessWrite(principal)
+      const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, workItemId)
+      const authorizationConditionChecks = await createCollaborationCommentAuthorizationConditionChecks(
+        principal, context, teamId, detail.issue.assignedProjectId,
+      )
+      const comment = await workItemDependencies.collaboration.createComment({
+        workspaceId: principal.directoryId,
+        teamId,
+        issueId: workItemId,
+        workItemTitle: detail.issue.title,
+        entityKey,
+        projectId: detail.issue.assignedProjectId,
+        projectEntityKey: detail.issue.assignedProjectId
+          ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+          : undefined,
+        assigneeMemberKey: detail.issue.assigneeUserId,
+        actorMemberKey: principal.userKey,
+        bodyMarkdown: body,
+        mentionMemberKeys: [],
+        automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
+        deepLink: createTeamIssueDeepLink(teamId, workItemId),
+        authorizationConditionChecks,
+        auditContext: createPublicMutationAuditContext(principal, mutationContext, {
+          method: 'POST',
+          path: `/api/v1/work-items/${encodeURIComponent(workItemId)}/comments`,
+          query: { teamId },
+          body: { body },
+        }),
+      })
+      await projectWorkspaceSearchDocumentBestEffort(() => createCommentSearchDocument(
+        principal.directoryId, teamId, detail.issue, comment,
+      ), 'Public Work Item comment creation')
+      return {
+        id: comment.id,
+        actorUserId: comment.authorMemberKey,
+        body: comment.bodyMarkdown,
+        createdAt: comment.createdAt,
+      }
+    },
     async list(credential, filters, continuation, limit) {
       const teamId = typeof filters.teamId === 'string' ? filters.teamId : ''
       if (!teamId) {
@@ -43730,6 +43817,7 @@ function mapPublicApiAdapterError(error: unknown) {
     error instanceof WorkspaceAccessError ||
     error instanceof WorkItemConfigurationError ||
     error instanceof PlanningError ||
+    error instanceof CollaborationError ||
     error instanceof DocumentError ||
     error instanceof CognitoServiceError
   ) {

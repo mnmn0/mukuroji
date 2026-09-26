@@ -44,6 +44,23 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 
 ## Cursor pagination
 
+### Work Item comments
+
+`GET /api/v1/work-items/{workItemId}/comments?teamId={teamId}` は、現在の閲覧権限で
+canonicalコメントと返信を新しい順に取得します。`limit`/`cursor` と通常のsigned paginationを使い、
+削除済みコメントは返しません。legacy eventコメントの未移行fallbackは含みません。
+
+同じpathへの `POST` は `work-items:write` と `Idempotency-Key` を要求し、
+`{ "body": "進捗、検証結果、PRリンクなど" }`（1–4096文字）を受け付けます。
+作成者はcredentialから解決し、Team/Projectの現在権限、canonical親row、監査、
+コメントの冪等作成には既存Collaborationのtransactionを使います。
+保存したコメントはWebのタスク詳細にも表示されます。
+
+一覧要素・作成応答は `{ id, actorUserId, body, createdAt }` です。
+[Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
+
+### Pagination contract
+
 一覧 response は `{ items, hasMore, nextCursor? }` を返す。`nextCursor` は署名された opaque token であり、client は decode、編集、永続的な bookmark としての利用をしない。同じ filter、sort、Workspace scope で次 request の `cursor` にそのまま渡す。
 
 - `limit` は 1–100、既定値は 50 とする。

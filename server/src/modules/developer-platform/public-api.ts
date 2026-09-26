@@ -34,6 +34,7 @@ import {
   type WorkItemScheduleWeekday,
   type WorkItemSyncConflict,
   type WorkItemTypeChangeResolution,
+  type TeamIssueCommentResponseItem,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
 import type {
@@ -111,6 +112,35 @@ export type PublicImportSourceInput = {
 
 /** Public Work Item API と既存 canonical service の境界です。 */
 export interface PublicWorkItemService {
+  /** Reads canonical comments after checking current Work Item visibility. */
+  listComments(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Authorized, non-deleted comments in this page. */
+    items: TeamIssueCommentResponseItem[]
+    /** Whether the canonical discussion has another page. */
+    hasMore: boolean
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
+  /** Rechecks current write access before replaying a comment receipt. */
+  authorizeComment(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<void>
+  /** Adds an idempotent, authorization-fenced canonical comment and audit event. */
+  addComment(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    body: string,
+    context: PublicMutationContext,
+  ): Promise<TeamIssueCommentResponseItem>
   /** Credential owner の current RBAC で Work Items を bounded page 取得します。 */
   list(
     credential: AuthenticatedDeveloperCredential,
@@ -586,6 +616,35 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.get('/v1/work-items/:workItemId/comments', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return c.json(await createSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: `/v1/work-items/${encodeURIComponent(workItemId)}/comments`,
+      filters: { teamId },
+    }, (continuation, limit) => dependencies.workItems.listComments(
+      credential, teamId, workItemId, continuation, limit,
+    ), (comment) => comment.createdAt))
+  })
+
+  router.post('/v1/work-items/:workItemId/comments', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const input = requireRecord(await readJson(c), 'Comment body is required.')
+    assertAllowedFields(input, ['body'], 'Comment')
+    const body = readRequiredString(input.body, 'body')
+    return executeIdempotentJson(c, dependencies, credential, { body }, async (context) => ({
+      status: 201,
+      body: await dependencies.workItems.addComment(credential, teamId, workItemId, body, context),
+    }), {
+      authorizeReplay: () => dependencies.workItems.authorizeComment(credential, teamId, workItemId),
+    })
   })
 
   router.post('/v1/work-items/:workItemId/work-item-type-preview', async (c) => {

@@ -614,6 +614,33 @@ const components = {
         },
       },
     },
+    PublicWorkItemComment: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id', 'actorUserId', 'body', 'createdAt'],
+      properties: {
+        id: { type: 'string' },
+        actorUserId: { type: 'string' },
+        body: { type: 'string' },
+        createdAt: { type: 'string', format: 'date-time' },
+      },
+    },
+    CreatePublicWorkItemCommentRequest: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['body'],
+      properties: { body: { type: 'string', minLength: 1, maxLength: 4096 } },
+    },
+    PublicWorkItemCommentPage: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['items', 'hasMore'],
+      properties: {
+        items: { type: 'array', items: schemaRef('PublicWorkItemComment') },
+        hasMore: { type: 'boolean' },
+        nextCursor: { type: 'string' },
+      },
+    },
     PublicWorkItemTypeCatalog: {
       type: 'object',
       additionalProperties: false,
@@ -1411,6 +1438,39 @@ const paths = {
       requestBody: jsonRequestBody('CreatePublicWorkItemRequest'),
       responses: {
         '201': jsonResponse('Work Item を作成しました。', schemaRef('WorkItem'), true),
+        ...problemResponses,
+      },
+    },
+  },
+  '/api/v1/work-items/{workItemId}/comments': {
+    get: {
+      operationId: 'listPublicWorkItemComments',
+      tags: ['Work Items'],
+      summary: 'Read canonical comments and replies, excluding deleted comments',
+      security: publicApiSecurity('work-items:read'),
+      parameters: [
+        idPathParameter('workItemId', 'Work Item ID'),
+        { name: 'teamId', in: 'query', required: true, schema: { type: 'string' } },
+        ...publicCursorParameters,
+      ],
+      responses: {
+        '200': jsonResponse('Canonical discussion page', schemaRef('PublicWorkItemCommentPage')),
+        ...problemResponses,
+      },
+    },
+    post: {
+      operationId: 'createPublicWorkItemComment',
+      tags: ['Work Items'],
+      summary: 'Add an idempotent progress note to the canonical discussion',
+      security: publicApiSecurity('work-items:write'),
+      parameters: [
+        idPathParameter('workItemId', 'Work Item ID'),
+        { name: 'teamId', in: 'query', required: true, schema: { type: 'string' } },
+        ...idempotencyParameters,
+      ],
+      requestBody: jsonRequestBody('CreatePublicWorkItemCommentRequest'),
+      responses: {
+        '201': jsonResponse('Created comment', schemaRef('PublicWorkItemComment'), true),
         ...problemResponses,
       },
     },

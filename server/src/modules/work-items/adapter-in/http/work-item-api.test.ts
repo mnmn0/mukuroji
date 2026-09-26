@@ -42,6 +42,73 @@ afterEach(() => {
   resetTestApp()
 })
 
+test('public progress uses canonical comments with current authorization fences and audit identity', async () => {
+  configureFakeProjectClients(true, { directoryId: 'workspace-1', workspaceRole: 'owner' })
+  const writes: Parameters<CollaborationClient['createComment']>[0][] = []
+  setTestAppDependencies({ collaboration: createCollaborationStub({
+    async createComment(input) {
+      writes.push(input)
+      return {
+        id: 'progress', rootCommentId: 'progress', authorMemberKey: input.actorMemberKey,
+        bodyMarkdown: input.bodyMarkdown, version: 1, mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
+        createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+      }
+    },
+  }) })
+  const credential: AuthenticatedDeveloperCredential = {
+    kind: 'api-key', workspaceId: 'workspace-1', credentialId: 'progress-key',
+    subjectUserId: 'demo@example.com', scopes: ['work-items:read', 'work-items:write'],
+  }
+  const service = createCanonicalPublicWorkItemService()
+  const response = await runWithTestAppDependencies(() => service.addComment(
+    credential, 'core-team', 'onboarding-friction', 'Tests passed', { requestId: 'progress-request', idempotencyKey: 'progress-operation' },
+  ))
+  expect(response).toMatchObject({ id: 'progress', body: 'Tests passed', actorUserId: 'demo@example.com' })
+  expect(writes).toHaveLength(1)
+  expect(writes[0]).toMatchObject({ workspaceId: 'workspace-1', teamId: 'core-team', issueId: 'onboarding-friction', mentionMemberKeys: [] })
+  expect(writes[0]?.authorizationConditionChecks?.length).toBeGreaterThan(0)
+  expect(writes[0]?.auditContext).toMatchObject({ actor: { id: 'demo@example.com' }, source: { kind: 'api', method: 'POST' } })
+  configureFakeProjectClients(false, { directoryId: 'workspace-1' })
+  await expect(runWithTestAppDependencies(() => service.authorizeComment(credential, 'core-team', 'onboarding-friction'))).rejects.toMatchObject({ status: 403 })
+})
+
+test('public comment reads hide deleted bodies, retain continuation, and recheck Project assignment', async () => {
+  configureFakeProjectClients(true, { directoryId: 'workspace-1', workspaceRole: 'owner' })
+  let moveDuringRead = false
+  let moved = false
+  const base = getTestAppDependencies().workItems.teamIssues
+  const comment = {
+    id: 'progress', rootCommentId: 'progress', authorMemberKey: 'demo@example.com', bodyMarkdown: 'Progress',
+    version: 1, mentionMemberKeys: [], reactions: [], acceptedResolutions: [],
+    createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z',
+  }
+  setTestAppDependencies({ teamIssues: createTeamIssuesFake({ ...base,
+    async getTeamIssueDetail(...args) {
+      const detail = await base.getTeamIssueDetail(...args)
+      return moved ? { ...detail, issue: { ...detail.issue, assignedProjectId: undefined } } : detail
+    },
+  }), collaboration: createCollaborationStub({
+    async getThread(input) {
+      expect(input).toMatchObject({ includeReplies: true, includeScopeState: false, limit: 10 })
+      if (moveDuringRead) moved = true
+      return {
+        comments: [comment, { ...comment, id: 'deleted', bodyMarkdown: 'DO NOT RETURN', deletedAt: comment.updatedAt }],
+        nextCursor: 'next-internal-page', presence: [],
+        watch: { subscribed: false, explicit: false, automatic: false, reasons: [], watcherCount: 0 },
+      }
+    },
+  }) })
+  const credential: AuthenticatedDeveloperCredential = {
+    kind: 'api-key', workspaceId: 'workspace-1', credentialId: 'comments-key', subjectUserId: 'demo@example.com', scopes: ['work-items:read'],
+  }
+  const service = createCanonicalPublicWorkItemService()
+  const page = await runWithTestAppDependencies(() => service.listComments(credential, 'core-team', 'onboarding-friction', undefined, 10))
+  expect(page).toMatchObject({ items: [{ id: 'progress', body: 'Progress' }], hasMore: true, nextContinuation: 'next-internal-page' })
+  expect(page.items).toHaveLength(1)
+  moveDuringRead = true
+  await expect(runWithTestAppDependencies(() => service.listComments(credential, 'core-team', 'onboarding-friction', undefined, 10))).rejects.toMatchObject({ status: 409 })
+})
+
 /**
  * Adds every current server-only Work Item field to an API test fixture.
  *
