@@ -100,10 +100,10 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     for (const relation of task.relationIds) {
       if (!relation.startsWith('blockedBy:')) continue
       try {
-        const dependency = await api.get(relation.slice('blockedBy:'.length))
+        const dependency = inScope(await api.get(relation.slice('blockedBy:'.length)))
         if (dependency.statusCategory !== 'completed') unresolvedCount += 1
       } catch (error) {
-        if (error instanceof AgentTaskError && ['not_found', 'forbidden'].includes(error.code)) {
+        if (error instanceof AgentTaskError && ['not_found', 'forbidden', 'out_of_scope'].includes(error.code)) {
           unresolvedCount += 1
         } else throw error
       }

@@ -174,4 +174,22 @@ describe('agent task lifecycle', () => {
     const failure = fixture([task()], { async get() { throw new AgentTaskError('unavailable', 'Down', true) } })
     await expect(failure.service.get('one')).rejects.toMatchObject({ code: 'unavailable' })
   })
+
+  test('treats an accessible completed blocker outside the configured Project as unresolved', async () => {
+    for (const assignedProjectId of ['project', 'outside']) {
+      const { api } = fixture([
+        task('one', { assignedProjectId: 'project', relationIds: ['blockedBy:dep'] }),
+        task('dep', { assignedProjectId, assigneeUserId: 'another-member', statusCategory: 'completed' }),
+      ])
+      const service = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent-member', assignedProjectId: 'project' })
+      const blocked = assignedProjectId !== 'project'
+      expect(await service.get('one')).toMatchObject({ blockers: { unresolvedCount: blocked ? 1 : 0 } })
+      expect(await service.next({})).toMatchObject({ action: blocked ? 'none' : 'start', blockedCount: blocked ? 1 : 0 })
+      if (blocked) {
+        await expect(service.transition('one', 1, 'coding', 'start', 'claim')).rejects.toMatchObject({ code: 'blocked' })
+      } else {
+        expect(await service.transition('one', 1, 'coding', 'start', 'claim')).toMatchObject({ statusCategory: 'started' })
+      }
+    }
+  })
 })
