@@ -104,6 +104,10 @@ CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` の�
 
 送信前にInboxのversionが変わった場合は、そのclaimを解放して試行回数を戻します。Directory・enterprise・system adminの認可snapshotは同じworker呼び出し内で5秒間だけ共有し、Work Itemやメンバーの現在状態は通知ごとに再取得します。1 shardあたり毎分2件のため、滞留アラームが続く場合はdue indexの最古時刻と件数、破損候補、送信先の制限を調査してください。
 
+Document由来の通知は、送信のたびにInboxと同じDocuments取得機能で現在のprivate ACL、親Documentの継承ACL、archive状態を確認します。Enterprise RBACは `documents.read/write/manage` の権限を評価し、Work Item権限や過去のProject roleでは代用しません。参照不可・削除済みのDocumentは送信せず、取得の一時障害は再試行します。
+
+Triage通知も現在のEntryを取得し、送信時点のProjectと担当者を照合します。`metadata-only` / `denied` またはredactedなsourceは、保存済みの本文を外部に出さないためSlack配信を抑止します。Work Item / TriageのEnterprise権限も現在の `work-items.read` で評価し、Project未所属のTeam通知にはTeam全体の閲覧権限を要求します。
+
 ## Due / overdue scan
 
 EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。

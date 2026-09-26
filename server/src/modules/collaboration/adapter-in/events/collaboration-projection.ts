@@ -17,7 +17,9 @@ import {
   S3Client,
   type Tag,
 } from '@aws-sdk/client-s3'
-import type { EnterpriseIdentitySnapshot } from '@mukuroji/contracts'
+import type { EnterpriseIdentitySnapshot, TriageEntry } from '@mukuroji/contracts'
+import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
+import { TriageError } from '../../../triage'
 import { isCanonicalWorkItemRecord } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
@@ -38,6 +40,8 @@ import {
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
   slackDeliveryShard,
+  isDocumentDeliveryVisible,
+  resolveDocumentDeliveryAccess,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
 } from '../../../notifications'
@@ -1510,7 +1514,7 @@ export type EnterpriseNotificationAuthorization = {
 }
 
 /**
- * Resolves the authoritative Enterprise access required by one cadence notification.
+ * Resolves authoritative Enterprise Work Item access, with write access for cadence recipients.
  *
  * Legacy project-member access remains the fallback path when the current Enterprise snapshot
  * does not make it non-authoritative, matching the cadence configuration path's boundary.
@@ -1529,13 +1533,14 @@ export function resolveEnterpriseNotificationAuthorization(
   snapshot: EnterpriseIdentitySnapshot,
   projectScopeOwnerTeamId?: string,
 ): EnterpriseNotificationAuthorization {
-  if (snapshot.workspaceId !== event.workspaceId || event.planningNotificationKind === undefined) {
+  if (snapshot.workspaceId !== event.workspaceId) {
     return { authoritative: false, allowed: false }
   }
   const normalizedMemberKey = normalizeMemberKey(memberKey)
   if (!normalizedMemberKey) return { authoritative: false, allowed: false }
 
   const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, [])
+  if (directoryPrincipal.deprovisioned) return { authoritative: true, allowed: false }
   const authoritative = directoryPrincipal.directoryManaged ||
     directoryPrincipal.compatibleRoleAssignments.some((assignment) =>
       assignment.principalKind === 'member' &&
@@ -1758,6 +1763,17 @@ export async function hasCurrentSystemAdminMembership(
   return false
 }
 
+/**
+ * Rechecks active membership and current scoped content permissions.
+ * @param event - Notification with refreshed canonical resource scope.
+ * @param memberKey - Normalized recipient key.
+ * @param directoryItems - Current active directory and legacy Project memberships.
+ * @param currentSystemAdminCache - Invocation-local Cognito membership reads.
+ * @param enterpriseIdentity - Authoritative Enterprise snapshot reader.
+ * @param enterpriseSnapshotCache - Invocation-local Enterprise snapshots.
+ * @param enforceContentAuthorization - Applies content RBAC and full-Team visibility for external delivery.
+ * @returns Whether the recipient currently has access to the notification's source.
+ */
 async function isEligibleRecipient(
   event: AuditProjectionEvent,
   memberKey: string,
@@ -1765,6 +1781,7 @@ async function isEligibleRecipient(
   currentSystemAdminCache: Map<string, Promise<boolean>>,
   enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> | undefined,
   enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
+  enforceContentAuthorization = false,
 ) {
   const memberResult = await documentClient.send(
     new GetCommand({
@@ -1789,7 +1806,7 @@ async function isEligibleRecipient(
   let enterpriseAuthorization: EnterpriseNotificationAuthorization | undefined
   if (
     enterpriseIdentity &&
-    event.planningNotificationKind !== undefined &&
+    (event.planningNotificationKind !== undefined || enforceContentAuthorization) &&
     (event.projectId !== undefined || event.teamId !== undefined)
   ) {
     const role = readWorkspaceNotificationRole(member.role)
@@ -1799,11 +1816,13 @@ async function isEligibleRecipient(
         snapshotPromise = enterpriseIdentity.getSnapshot(event.workspaceId)
         enterpriseSnapshotCache.set(event.workspaceId, snapshotPromise)
       }
+      const snapshot = await snapshotPromise
+      if (snapshot.workspaceId !== event.workspaceId) return false
       enterpriseAuthorization = resolveEnterpriseNotificationAuthorization(
         event,
         memberKey,
         role,
-        await snapshotPromise,
+        snapshot,
         readUniqueNotificationProjectOwnerTeamId(event, directoryItems),
       )
     }
@@ -1811,8 +1830,12 @@ async function isEligibleRecipient(
 
   if (enterpriseAuthorization?.authoritative) {
     if (enterpriseAuthorization.allowed) return true
-  } else if (hasEligibleProjectAccess(event, memberKey, directoryItems)) {
-    return true
+  } else {
+    const legacyAllowed = hasEligibleProjectAccess(event, memberKey, directoryItems)
+    const teamProjects = directoryItems.filter((item) => item.entryType === 'project' &&
+      item.teamId === event.teamId && item.projectId && !item.archivedAt)
+    if (legacyAllowed && (!enforceContentAuthorization || event.projectId || !event.teamId ||
+      teamProjects.length > 0 && teamProjects.every((project) => hasEligibleProjectAccess(project, memberKey, directoryItems)))) return true
   }
 
   const username = readString(member.username) ?? readString(member.email) ?? memberKey
@@ -1852,6 +1875,8 @@ export function createNotificationDeliveryAuthorizationCache(): NotificationDeli
  * @param memberKey - Canonical recipient member key.
  * @param enterpriseIdentity - Authoritative enterprise identity reader.
  * @param cache - Invocation-local, short-lived snapshots; canonical source/member reads are never cached.
+ * @param readDocument - Permission-filtered Documents reader; missing capability denies document delivery.
+ * @param readTriage - Current permission-safe Triage reader; missing capability denies Triage delivery.
  * @returns Whether the notification's recipient still has access.
  */
 export async function authorizeNotificationDelivery(
@@ -1859,6 +1884,8 @@ export async function authorizeNotificationDelivery(
   memberKey: string,
   enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>,
   cache: NotificationDeliveryAuthorizationCache = createNotificationDeliveryAuthorizationCache(),
+  readDocument?: (request: GetDocumentRequest) => Promise<unknown>,
+  readTriage?: (workspaceId: string, teamId: string, entryId: string) => Promise<Pick<TriageEntry, 'permission' | 'retention' | 'projectId' | 'ownerUserId'>>,
 ): Promise<boolean> {
   if (cache.expiresAt <= Date.now()) {
     cache.directories.clear()
@@ -1866,10 +1893,72 @@ export async function authorizeNotificationDelivery(
     cache.enterpriseSnapshots.clear()
     cache.expiresAt = Date.now() + 5_000
   }
-  const currentScope = await readCurrentWorkItemScope(event)
+  if (event.eventType.startsWith('document.')) {
+    if (!readDocument || !event.entityId) return false
+    const result = await documentClient.send(new GetCommand({
+      TableName: requireEnv('WORKSPACE_ACCESS_TABLE_NAME'),
+      Key: { workspaceId: event.workspaceId, recordKey: `MEMBER#${memberKey}` }, ConsistentRead: true,
+    }))
+    const member = result.Item
+    if (!isActiveWorkspaceNotificationMember(memberKey, member)) return false
+    const workspaceRole = readWorkspaceNotificationRole(member?.role)
+    if (!workspaceRole) return false
+    let directoryPromise = cache.directories.get(event.workspaceId)
+    if (!directoryPromise) {
+      directoryPromise = readProjectDirectory(event.workspaceId)
+      cache.directories.set(event.workspaceId, directoryPromise)
+    }
+    let enterprisePromise = cache.enterpriseSnapshots.get(event.workspaceId)
+    if (!enterprisePromise) {
+      enterprisePromise = enterpriseIdentity.getSnapshot(event.workspaceId)
+      cache.enterpriseSnapshots.set(event.workspaceId, enterprisePromise)
+    }
+    const directory = await directoryPromise
+    const projects = directory.flatMap((item) => {
+      if (item.entryType !== 'project' || !item.projectId || !item.teamId ||
+        !hasActiveNotificationScope(item, directory) ||
+        readUniqueNotificationProjectOwnerTeamId(item, directory) !== item.teamId) return []
+      return [{ teamId: item.teamId, projectId: item.projectId }]
+    })
+    const projectRoles: Record<string, DocumentProjectRole> = {}
+    for (const item of directory) {
+      if (item.entryType === 'project-member' && normalizeMemberKey(item.memberKey) === memberKey &&
+        item.projectId && (item.role === 'viewer' || item.role === 'member' || item.role === 'manager') &&
+        projects.some((project) => project.projectId === item.projectId && (!item.teamId || project.teamId === item.teamId))) {
+        projectRoles[item.projectId] = item.role
+      }
+    }
+    const username = readString(member?.username) ?? readString(member?.email) ?? memberKey
+    let systemAdmin = cache.systemAdmins.get(username)
+    if (!systemAdmin) {
+      systemAdmin = isCurrentSystemAdmin(username)
+      cache.systemAdmins.set(username, systemAdmin)
+    }
+    return isDocumentDeliveryVisible(event.workspaceId, event.entityId, resolveDocumentDeliveryAccess({
+      workspaceId: event.workspaceId, memberKey, workspaceRole, projectRoles, projects,
+      isSystemAdmin: await systemAdmin, snapshot: await enterprisePromise,
+    }), readDocument)
+  }
+  let sourceEvent = event
+  if (event.triageEntryId) {
+    if (!event.teamId || !readTriage) return false
+    try {
+      const entry = await readTriage(event.workspaceId, event.teamId, event.triageEntryId)
+      if (entry.permission.visibility !== 'full' || entry.retention.redactedAt !== undefined) return false
+      const ownerOnly = event.notificationCandidates.length > 0 && event.notificationCandidates.every(({ reason }) =>
+        ['assignee', 'assignment', 'due', 'overdue', 'sla', 'triage-sla', 'escalation', 'triage-assignment'].includes(reason))
+      if (!event.issueId && ownerOnly && normalizeMemberKey(entry.ownerUserId) !== memberKey) return false
+      const { projectId: _historicalProjectId, ...withoutProject } = event
+      sourceEvent = { ...withoutProject, ...(entry.projectId ? { projectId: entry.projectId } : {}) }
+    } catch (error: unknown) {
+      if (error instanceof TriageError && error.status === 404) return false
+      throw error
+    }
+  }
+  const currentScope = await readCurrentWorkItemScope(sourceEvent)
   if (!currentScope.exists) return false
   const scoped = refreshScheduledNotificationEvent(
-    currentScope.checked ? overlayCurrentWorkItemNotificationScope(event, currentScope) : event,
+    currentScope.checked ? overlayCurrentWorkItemNotificationScope(sourceEvent, currentScope) : sourceEvent,
     currentScope,
   )
   if (!scoped) return false
@@ -1892,6 +1981,7 @@ export async function authorizeNotificationDelivery(
   return isEligibleRecipient(
     refreshed, memberKey, directory,
     cache.systemAdmins, enterpriseIdentity, cache.enterpriseSnapshots,
+    true,
   )
 }
 

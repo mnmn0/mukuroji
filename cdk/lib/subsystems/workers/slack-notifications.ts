@@ -44,6 +44,8 @@ export function buildSlackNotificationWorker(scope: cdk.Stack, input: ScheduleWo
       WORKSPACE_ACCESS_TABLE_NAME: stores.workspaceAccessTable.tableName,
       WORK_ITEMS_TABLE_NAME: stores.workItemsTable.tableName,
       PLANNING_TABLE_NAME: stores.planningTable.tableName,
+      DOCUMENTS_TABLE_NAME: stores.documentsTable.tableName,
+      REQUEST_INTAKE_TABLE_NAME: stores.requestIntakeTable.tableName,
       COGNITO_USER_POOL_ID: parameters.cognitoUserPoolId.valueAsString,
       SYSTEM_ADMIN_GROUPS: parameters.systemAdminGroups.valueAsString,
     },
@@ -55,10 +57,11 @@ export function buildSlackNotificationWorker(scope: cdk.Stack, input: ScheduleWo
   worker.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:Query'], resources: [`${stores.notificationsTable.tableArn}/index/SlackDeliveryIndex`],
   }));
-  for (const table of [stores.enterpriseIdentityTable, stores.tenantAdministrationTable, stores.workspaceAccessTable, stores.workItemsTable, stores.planningTable]) {
+  for (const table of [stores.enterpriseIdentityTable, stores.tenantAdministrationTable, stores.workspaceAccessTable, stores.workItemsTable, stores.planningTable, stores.documentsTable]) {
     worker.addToRolePolicy(new iam.PolicyStatement({ actions: ['dynamodb:GetItem', 'dynamodb:Query'], resources: [table.tableArn] }));
   }
   worker.addToRolePolicy(new iam.PolicyStatement({ actions: ['dynamodb:Query'], resources: [stores.projectDirectoryTable.tableArn] }));
+  worker.addToRolePolicy(new iam.PolicyStatement({ actions: ['dynamodb:GetItem'], resources: [stores.requestIntakeTable.tableArn] }));
   worker.addToRolePolicy(new iam.PolicyStatement({ actions: ['cognito-idp:AdminListGroupsForUser'], resources: [parameters.cognitoUserPoolArn] }));
   worker.addToRolePolicy(new iam.PolicyStatement({
     actions: ['secretsmanager:GetSecretValue'],

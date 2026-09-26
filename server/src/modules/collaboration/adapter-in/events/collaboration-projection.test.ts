@@ -1,4 +1,6 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
+import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import { S3Client } from '@aws-sdk/client-s3'
 import {
   WORK_ITEM_SCHEMA_VERSION,
@@ -8,6 +10,8 @@ import {
 } from '@mukuroji/contracts'
 import {
   cleanupDeletedFileProjection,
+  authorizeNotificationDelivery,
+  createNotificationDeliveryAuthorizationCache,
   createCuratedContextSearchParentCondition,
   createDynamoBatchItemFailure,
   createNotificationProjectionDeliveryState,
@@ -140,6 +144,102 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('uses current Triage restrictions, owner and Project before external delivery', async () => {
+    const previousTable = process.env.WORKSPACE_ACCESS_TABLE_NAME
+    process.env.WORKSPACE_ACCESS_TABLE_NAME = 'workspace-access-test'
+    const memberKey = 'member@example.com'
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {},
+    }))
+    try {
+      const event = createProjectionEvent({ eventType: 'triage.assigned', teamId: 'core', triageEntryId: 'entry-1',
+        projectId: 'platform', notificationCandidates: [{ memberKey, reason: 'triage-assignment' }] })
+      const cache = createNotificationDeliveryAuthorizationCache()
+      cache.expiresAt = Date.now() + 60_000
+      cache.directories.set(event.workspaceId, Promise.resolve([
+        { entryType: 'team', teamId: 'core' },
+        { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        { entryType: 'project', teamId: 'core', projectId: 'private' },
+        { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+      ]))
+      cache.systemAdmins.set(memberKey, Promise.resolve(false))
+      const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+      const current = { permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: event.occurredAt },
+        retention: { expiresAt: '2099-01-01T00:00:00.000Z' }, projectId: 'platform', ownerUserId: memberKey,
+      } satisfies NonNullable<Awaited<ReturnType<NonNullable<Parameters<typeof authorizeNotificationDelivery>[5]>>>>
+      /** Authorizes the same queued event against the current mutable Triage source. */
+      const authorize = () => authorizeNotificationDelivery(event, memberKey, identity, cache, undefined, async () => current)
+      expect(await authorize()).toBe(true)
+      current.projectId = 'private'
+      expect(await authorize()).toBe(false)
+      current.projectId = 'platform'
+      current.ownerUserId = 'other@example.com'
+      expect(await authorize()).toBe(false)
+      current.ownerUserId = memberKey
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache, undefined, async () => ({
+        ...current, permission: { ...current.permission, visibility: 'metadata-only' },
+      }))).toBe(false)
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache, undefined, async () => ({
+        ...current, retention: { ...current.retention, redactedAt: event.occurredAt },
+      }))).toBe(false)
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache, undefined, async () => ({
+        permission: current.permission, retention: current.retention, ownerUserId: memberKey,
+      }))).toBe(false)
+      const snapshot = createRealtimeEnterpriseSnapshot({
+        roleAssignments: [{ workspaceId: event.workspaceId, assignmentId: 'assignment-1', principalKind: 'member',
+          principalId: memberKey, roleId: 'custom:documents-only', source: 'direct',
+          scope: { workspaceId: event.workspaceId, kind: 'workspace' } }],
+        customRoles: [{ workspaceId: event.workspaceId, roleId: 'custom:documents-only', name: 'Documents only',
+          permissions: ['documents.read'], guestAssignable: false, revision: 1,
+          createdAt: event.occurredAt, updatedAt: event.occurredAt }],
+      })
+      cache.enterpriseSnapshots.set(event.workspaceId, Promise.resolve(snapshot))
+      expect(await authorize()).toBe(false)
+      snapshot.customRoles[0]!.permissions = ['work-items.read']
+      expect(await authorize()).toBe(true)
+    } finally {
+      send.mockRestore()
+      if (previousTable === undefined) delete process.env.WORKSPACE_ACCESS_TABLE_NAME
+      else process.env.WORKSPACE_ACCESS_TABLE_NAME = previousTable
+    }
+  })
+  test('rechecks current document visibility for a queued mention even without Work Item scope', async () => {
+    const previousTable = process.env.WORKSPACE_ACCESS_TABLE_NAME
+    process.env.WORKSPACE_ACCESS_TABLE_NAME = 'workspace-access-test'
+    const reads: GetDocumentRequest[] = []
+    const commands: unknown[] = []
+    const memberKey = 'member@example.com'
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      commands.push(command)
+      return { Item: { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    try {
+      const event = createProjectionEvent({ eventType: 'document.comment.created', entityId: 'private-document' })
+      const cache = createNotificationDeliveryAuthorizationCache()
+      cache.expiresAt = Date.now() + 60_000
+      cache.directories.set(event.workspaceId, Promise.resolve([]))
+      cache.systemAdmins.set(memberKey, Promise.resolve(false))
+      const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache, async (request) => {
+        reads.push(request)
+        throw new DocumentError(403, 'DocumentViewDenied', 'Denied')
+      })).toBe(false)
+      expect(reads).toEqual([{ workspaceId: event.workspaceId, documentId: 'private-document', access: {
+        memberKey, workspaceRole: 'member', isSystemAdmin: false, projectRoles: {},
+      } }])
+      expect(commands[0]).toBeInstanceOf(GetCommand)
+      if (commands[0] instanceof GetCommand) expect(commands[0].input.ConsistentRead).toBe(true)
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache, async () => ({}))).toBe(true)
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache, async () => {
+        throw new DocumentError(403, 'DocumentViewDenied', 'Grant revoked')
+      })).toBe(false)
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(false)
+    } finally {
+      send.mockRestore()
+      if (previousTable === undefined) delete process.env.WORKSPACE_ACCESS_TABLE_NAME
+      else process.env.WORKSPACE_ACCESS_TABLE_NAME = previousTable
+    }
+  })
   test('queues only opted-in Slack notifications at the planned delivery time', () => {
     const event = createProjectionEvent()
     for (const slack of [true, false]) {

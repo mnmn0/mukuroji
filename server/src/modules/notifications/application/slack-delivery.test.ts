@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import { deliverDueSlackNotifications, type SlackDelivery, type SlackDeliveryDependencies, type SlackDeliveryFailure, type SlackSendResult } from './slack-delivery'
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '../notifications'
+import { DocumentError } from '../../documents'
+import { isDocumentDeliveryVisible } from './document-delivery'
 
 /** Creates an isolated queue fixture with a controllable Slack outcome. */
 function fixture(result: SlackSendResult = { succeeded: true, retryable: false }) {
@@ -42,6 +44,20 @@ function fixture(result: SlackSendResult = { succeeded: true, retryable: false }
 }
 
 describe('Slack notification delivery application', () => {
+  test('does not post private document content after the Documents capability denies the recipient', async () => {
+    const f = fixture()
+    f.delivery.notification.eventType = 'document.comment.created'
+    f.delivery.notification.entityId = 'private-document'
+    f.delivery.notification.title = 'Private document title'
+    f.dependencies.isAuthorized = (delivery) => isDocumentDeliveryVisible(
+      delivery.workspaceId, delivery.notification.entityId,
+      { memberKey: delivery.memberKey, workspaceRole: 'member' },
+      async () => { throw new DocumentError(403, 'DocumentViewDenied', 'Denied') },
+    )
+    expect(await deliverDueSlackNotifications(f.dependencies)).toBe(0)
+    expect(f.sends()).toBe(0)
+    expect(f.finishes[0]?.status).toBe('suppressed')
+  })
   test('sends the existing notification with Inbox disabled and does not replay a completed job', async () => {
     const f = fixture()
     expect(await deliverDueSlackNotifications(f.dependencies)).toBe(1)
