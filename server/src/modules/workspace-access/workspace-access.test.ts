@@ -1472,22 +1472,30 @@ test('serializes member deactivation with the Planning graph revision', async ()
   })
 })
 
-test('joins the lifecycle condition to the authoritative member deactivation transaction', async () => {
+test.each(['deactivate', 'role', 'directory'])(
+  'joins the lifecycle condition to the %s membership transaction', async (operation) => {
   const actor = createWorkspaceMember('demo@example.com')
-  const target = createWorkspaceMember('member@example.com', 'member')
+  const target: WorkspaceMember = {
+    ...createWorkspaceMember('member@example.com', 'member'),
+    ...(operation === 'directory' ? {
+      provisioningSource: 'directory',
+      externalIdentityId: 'directory-member-1',
+    } : {}),
+  }
   const transactionInputs: Array<Record<string, unknown>> = []
   const membershipInputs: WorkspaceMembershipMutationInput[] = []
   const membershipGuard: WorkspaceMembershipGuard = {
     async prepareMembershipMutation(input) {
       membershipInputs.push(input)
       return [{
-        Put: {
+        ConditionCheck: {
           TableName: 'TenantAdministrationTable',
-          Item: {
+          Key: {
             workspaceId: input.workspaceId,
-            recordKey: 'USAGE',
+            recordKey: 'PROFILE',
           },
-          ConditionExpression: 'revision = :expectedRevision',
+          ConditionExpression: 'lifecycleStatus = :active',
+          ExpressionAttributeValues: { ':active': 'active' },
         },
       }]
     },
@@ -1512,33 +1520,42 @@ test('joins the lifecycle condition to the authoritative member deactivation tra
     membershipGuard,
   )
 
-  await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
-    status: 'deactivated',
-    expectedVersion: target.version,
-    expectedPlanningRevision: 7,
-    expectedDocumentAuthorizationRevision: 3,
-  })
+  if (operation === 'directory') {
+    await client.reconcileDirectoryMember(workspaceId, {
+      memberKey: target.memberKey,
+      email: target.email,
+      name: 'Directory managed member',
+      role: 'member',
+      externalIdentityId: 'directory-member-1',
+      expectedVersion: target.version,
+      expectedPlanningRevision: 7,
+    })
+  } else {
+    await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+      ...(operation === 'deactivate' ? { status: 'deactivated' } : { role: 'admin' }),
+      expectedVersion: target.version,
+      expectedPlanningRevision: 7,
+      expectedDocumentAuthorizationRevision: 3,
+    })
+  }
 
   expect(membershipInputs).toEqual([{
     workspaceId,
     memberKey: target.memberKey,
-    direction: 'deactivate',
+    direction: operation === 'deactivate' ? 'deactivate' : 'activate',
     occurredAt: now.toISOString(),
   }])
   expect(transactionInputs[0]).toMatchObject({
-    TransactItems: [
-      {},
-      {},
-      {},
-      {},
+    TransactItems: expect.arrayContaining([
       {
-        Put: {
+        ConditionCheck: {
           TableName: 'TenantAdministrationTable',
-          Item: { workspaceId, recordKey: 'USAGE' },
-          ConditionExpression: 'revision = :expectedRevision',
+          Key: { workspaceId, recordKey: 'PROFILE' },
+          ConditionExpression: 'lifecycleStatus = :active',
+          ExpressionAttributeValues: { ':active': 'active' },
         },
       },
-    ],
+    ]),
   })
 })
 

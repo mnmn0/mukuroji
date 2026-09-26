@@ -480,9 +480,9 @@ export type WorkspaceAccessTransactWriteItem = NonNullable<
 export type WorkspaceMembershipMutationInput = {
   /** Canonical Workspace identifier. */
   workspaceId: string
-  /** Stable member key whose active status changed. */
+  /** Stable member key whose membership is being changed. */
   memberKey: string
-  /** Direction of the authoritative membership transition. */
+  /** Desired membership state after the authoritative write. */
   direction: 'activate' | 'deactivate'
   /** Timestamp shared by every item in the membership transaction. */
   occurredAt: string
@@ -1710,14 +1710,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       return target
     }
 
-    const membershipConditions = target.status === nextStatus
-      ? []
-      : await this.prepareMembershipMutation(
-          normalizedWorkspaceId,
-          target.memberKey,
-          nextStatus === 'active' ? 'activate' : 'deactivate',
-          nowIso,
-        )
+    const membershipConditions = await this.prepareMembershipMutation(
+      normalizedWorkspaceId,
+      target.memberKey,
+      nextStatus === 'active' ? 'activate' : 'deactivate',
+      nowIso,
+    )
 
     const memberEventType = roleChanged && !statusChanged
       ? 'member.role-changed'
@@ -2049,14 +2047,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
-    const membershipConditions = existing.status === 'deactivated'
-      ? await this.prepareMembershipMutation(
-          normalizedWorkspaceId,
-          existing.memberKey,
-          'activate',
-          nowIso,
-        )
-      : []
+    const membershipConditions = await this.prepareMembershipMutation(
+      normalizedWorkspaceId,
+      existing.memberKey,
+      'activate',
+      nowIso,
+    )
 
     const auditPut = this.createWorkspaceAuditPut(auditContext, {
       directoryId: normalizedWorkspaceId,
