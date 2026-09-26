@@ -33,7 +33,7 @@ function fixture(result: SlackSendResult = { succeeded: true, retryable: false }
       claim: async () => true,
       renew: async () => true,
       release: async () => { releases += 1 },
-      getPreferences: async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
+      getPreferences: async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES, slackEnabledAt: '2026-09-26T10:00:00.000Z',
         channels: { inApp: false, email: false, push: false, slack: true } }),
       finish: async (_delivery, _token, status, next, code) => {
         finishes.push({ status, next, code }); pending = false
@@ -80,7 +80,7 @@ describe('Slack notification delivery application', () => {
     for (const reason of ['quiet', 'snoozed']) {
       const f = fixture()
       if (reason === 'quiet') {
-        f.dependencies.store.getPreferences = async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
+        f.dependencies.store.getPreferences = async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES, slackEnabledAt: '2026-09-26T10:00:00.000Z',
           channels: { inApp: true, email: false, push: false, slack: true },
           quietHours: { enabled: true, start: '11:00', end: '13:00', timeZone: 'UTC' } })
       } else f.delivery.notification.snoozedUntil = '2026-09-26T13:00:00.000Z'
@@ -101,7 +101,7 @@ describe('Slack notification delivery application', () => {
     for (const change of ['disable', 'quiet-hours']) {
       const f = fixture()
       let changed = false
-      f.dependencies.store.getPreferences = async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
+      f.dependencies.store.getPreferences = async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES, slackEnabledAt: '2026-09-26T10:00:00.000Z',
         channels: { inApp: true, email: false, push: false, slack: change !== 'disable' || !changed },
         quietHours: { enabled: change === 'quiet-hours' && changed, start: '11:00', end: '13:00', timeZone: 'UTC' },
       })
@@ -125,6 +125,16 @@ describe('Slack notification delivery application', () => {
       expect(exhausted.failures[0]?.shard).toStartWith('slack-failed#')
       expect(JSON.stringify(exhausted.failures)).not.toContain('member@example.test')
     }
+  })
+  test('does not revive older queued notifications after Slack is re-enabled during authorization', async () => {
+    const f = fixture()
+    let enabledAt = '2026-09-26T10:00:00.000Z'
+    f.dependencies.store.getPreferences = async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: false, push: false, slack: true }, slackEnabledAt: enabledAt })
+    f.dependencies.isAuthorized = async () => { enabledAt = '2026-09-26T12:00:00.000Z'; return true }
+    expect(await deliverDueSlackNotifications(f.dependencies)).toBe(0)
+    expect(f.sends()).toBe(0)
+    expect(f.finishes[0]?.status).toBe('suppressed')
   })
   test('authorization failures fail closed and keep bounded retry work', async () => {
     const f = fixture()

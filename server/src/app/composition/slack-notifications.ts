@@ -34,7 +34,6 @@ export function createProductionSlackNotificationHandler() {
     return response.SecretString
   })
   return () => {
-    const authorizationCache = createNotificationDeliveryAuthorizationCache()
     return deliverDueSlackNotifications({
       store, send, telemetry: createSlackDeliveryTelemetry(), createToken: randomUUID, now: () => new Date(),
       /** Rechecks tenant availability and the recipient's current source visibility. */
@@ -49,7 +48,7 @@ export function createProductionSlackNotificationHandler() {
           targetId: delivery.targetId,
           fileId: delivery.fileId,
           outboxStatus: 'pending',
-        }, delivery.memberKey, enterpriseIdentity, authorizationCache,
+        }, delivery.memberKey, enterpriseIdentity, createNotificationDeliveryAuthorizationCache(),
         (request) => documents.get(request), (workspaceId, teamId, entryId) => triage.getEntry(workspaceId, teamId, entryId), readApproval)
       },
     })

@@ -65,6 +65,8 @@ export type NotificationPreferences = {
   quietHours: NotificationQuietHours
   /** 最終保存時刻です。未保存の default では省略します。 */
   updatedAt?: string
+  /** Server-owned start of the current Slack opt-in period; omitted from HTTP preferences. */
+  slackEnabledAt?: string
 }
 
 /** Notification preference を置き換える入力です。 */
@@ -594,10 +596,20 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
     const preferences = normalizeNotificationPreferencesInput(input.preferences)
     const now = normalizeDate(input.now ?? new Date(), 'Notification preference update time')
+    let slackEnabledAt: string | undefined
+    if (preferences.channels.slack) {
+      const current = preferences.version > 0
+        ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
+            TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
+          }))).Item, true)
+        : undefined
+      slackEnabledAt = current?.channels.slack ? current.slackEnabledAt ?? now.toISOString() : now.toISOString()
+    }
     const next: NotificationPreferences = {
       ...preferences,
       version: preferences.version + 1,
       updatedAt: now.toISOString(),
+      ...(slackEnabledAt ? { slackEnabledAt } : {}),
     }
 
     try {
@@ -843,14 +855,30 @@ export function parseStoredNotificationPreferences(
       frequency: value.frequency,
       quietHours: value.quietHours,
     })
+    if (value.slackEnabledAt !== undefined && !readTimestamp(value.slackEnabledAt)) throw new Error('Invalid Slack activation time.')
+    const slackEnabledAt = normalized.channels.slack
+      ? readTimestamp(value.slackEnabledAt) ?? readTimestamp(value.updatedAt)
+      : undefined
     return {
       ...normalized,
+      ...(slackEnabledAt ? { slackEnabledAt } : {}),
       ...(readTimestamp(value.updatedAt) ? { updatedAt: readTimestamp(value.updatedAt) } : {}),
     }
   } catch {
     if (strict) throw new Error('Invalid stored notification preferences.')
     return cloneDefaultPreferences()
   }
+}
+
+/**
+ * Binds Slack delivery to the server-recorded opt-in period, including delayed audit projection.
+ * @param preferences - Current stored preferences and activation boundary.
+ * @param occurredAt - Original notification event time, not its projection or retry time.
+ * @returns Whether the event occurred during the current Slack opt-in period.
+ */
+export function isSlackNotificationEligible(preferences: NotificationPreferences, occurredAt: string): boolean {
+  const enabledAt = Date.parse(preferences.slackEnabledAt ?? '')
+  return preferences.channels.slack === true && Number.isFinite(enabledAt) && Date.parse(occurredAt) >= enabledAt
 }
 
 /** Frequency と quiet hours から channel delivery plan を作成します。 */

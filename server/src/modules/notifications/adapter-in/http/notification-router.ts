@@ -7,6 +7,7 @@ import {
   type NotificationItem,
   type NotificationVisibilityFilter,
   type UpdateNotificationPreferencesInput,
+  type NotificationPreferences,
 } from '../../notifications'
 
 /**
@@ -169,10 +170,10 @@ export function createNotificationRouter<
 
     try {
       const principal = await dependencies.authenticate(accessToken, context)
-      return context.json(await dependencies.getNotifications().getPreferences({
+      return context.json(toPublicPreferences(await dependencies.getNotifications().getPreferences({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
-      }))
+      })))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -193,13 +194,19 @@ export function createNotificationRouter<
         memberKey: principal.userKey,
         preferences: readNotificationPreferencesInput(body),
       })
-      return context.json(preferences)
+      return context.json(toPublicPreferences(preferences))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
   })
 
   return router
+}
+
+/** Removes internal delivery eligibility metadata from the existing HTTP preference contract. */
+function toPublicPreferences(preferences: NotificationPreferences) {
+  const { slackEnabledAt: _internalActivation, ...publicPreferences } = preferences
+  return publicPreferences
 }
 
 /** Removes persistence-only authorization metadata before a notification is serialized. */

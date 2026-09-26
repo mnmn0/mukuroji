@@ -44,6 +44,7 @@ import {
   resolveDocumentDeliveryAccess,
   resolveNotificationRecipientBoundary,
   requiresCurrentWorkItemAssignee,
+  isSlackNotificationEligible,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
 } from '../../../notifications'
@@ -1305,7 +1306,7 @@ export function createNotificationProjectionDeliveryState(
     inboxState,
     recipientStatusKey: `${recipientKey}#${inboxState}`,
     ...(inboxState === 'archived' ? { archivedAt: occurredAt } : {}),
-    deliveryChannels: deliveryPlan.channels,
+    deliveryChannels: deliveryPlan.channels.filter((channel) => channel !== 'slack' || isSlackNotificationEligible(preferences, occurredAt)),
     deliveryAfter: deliveryPlan.deliveryAfter,
     deliveryFrequency: deliveryPlan.frequency,
   }
@@ -1826,6 +1827,11 @@ async function isEligibleRecipient(
   let permissionCeiling: EnterprisePermissionId[] | undefined
   const readOnlyRecipient = event.notificationCandidates.length > 0 &&
     event.notificationCandidates.every((candidate) => candidate.reason === 'watcher')
+  const selectedWorkspaceRecipient = event.eventType === 'automation.notification.requested' &&
+    !event.teamId && !event.projectId && !event.issueId && !event.planningTargetId &&
+    event.notificationCandidates.some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey && candidate.reason === 'automation')
+  const contentPermission = selectedWorkspaceRecipient ? 'workspace.read'
+    : event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read'
   if (enforceContentAuthorization) {
     const role = readWorkspaceNotificationRole(member.role)
     if (!enterpriseIdentity || !role) return false
@@ -1846,7 +1852,7 @@ async function isEligibleRecipient(
     const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' || event.planningNotificationKind === 'overdue')
     const permissions: EnterprisePermissionId[] = event.planningNotificationKind
       ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
-      : [event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read']
+      : [contentPermission]
     if (!boundary.allowed || permissionCeiling && !permissions.some((permission) => permissionCeiling?.includes(permission))) return false
     const username = readString(member.username) ?? readString(member.email) ?? memberKey
     const currentGroups = await readNotificationCognitoGroups(username)
@@ -1879,7 +1885,7 @@ async function isEligibleRecipient(
         cognitoGroupIds,
         readOnlyRecipient,
         permissionCeiling,
-        event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read',
+        contentPermission,
       )
     }
   }
@@ -1888,7 +1894,7 @@ async function isEligibleRecipient(
     if (enterpriseAuthorization.allowed) return true
   } else {
     const legacyAllowed = hasEligibleProjectAccess(event, memberKey, directoryItems) &&
-      (!enforceContentAuthorization || event.teamId || event.projectId || member.role !== 'guest')
+      (!enforceContentAuthorization || event.teamId || event.projectId || member.role !== 'guest' || selectedWorkspaceRecipient)
     const teamProjects = directoryItems.filter((item) => item.entryType === 'project' &&
       item.teamId === event.teamId && item.projectId && !item.archivedAt)
     if (legacyAllowed && (!enforceContentAuthorization || event.projectId || !event.teamId ||
@@ -1906,7 +1912,7 @@ async function isEligibleRecipient(
   return currentSystemAdmin
 }
 
-/** Short-lived authorization snapshots shared only within one delivery invocation. */
+/** Authorization snapshots for one delivery; production creates a fresh instance for each notification. */
 export type NotificationDeliveryAuthorizationCache = {
   /** Refresh boundary; cached lookups are reused only within a five-second window. */
   expiresAt: number
@@ -1956,7 +1962,7 @@ async function readNotificationCognitoGroups(username: string): Promise<string[]
  * @param event - Stored notification source and scope.
  * @param memberKey - Canonical recipient member key.
  * @param enterpriseIdentity - Authoritative enterprise identity reader.
- * @param cache - Invocation-local, short-lived snapshots; canonical source/member reads are never cached.
+ * @param cache - Snapshots for this delivery only; callers must not reuse them for another notification.
  * @param readDocument - Permission-filtered Documents reader; missing capability denies document delivery.
  * @param readTriage - Current permission-safe Triage reader; missing capability denies Triage delivery.
  * @param readApproval - Current approval/file reader; missing capability denies approval delivery.

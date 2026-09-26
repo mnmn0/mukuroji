@@ -82,7 +82,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 
 ## Slack 配信
 
-通知設定の **Slack** を有効にして保存すると、その後に作成される担当・メンション・返信・期限などの既存通知を、同じ受信者のSlack送信先にも配信します。`channels.slack` を省略した既存API clientと保存済み設定は無効として扱います。Inboxを無効にしてもSlackだけの配信は可能です。既存の通知をさかのぼって送ることはありません。
+通知設定の **Slack** を有効にして保存すると、その後に発生する担当・メンション・返信・期限などの既存通知を、同じ受信者のSlack送信先にも配信します。`channels.slack` を省略した既存API clientと保存済み設定は無効として扱います。Inboxを無効にしてもSlackだけの配信は可能です。有効化時刻をサーバーで保存し、auditの投影が遅れても、それより古いイベントはSlackへ送りません。設定の頻度変更ではこの時刻を保持し、無効化後の再有効化では更新します。送信直前も現在の有効化時刻を確認するため、以前の配信待ち通知が再有効化で復活することはありません。有効化時刻も旧設定の保存時刻も不明な場合は配信せず、設定の再保存で時刻を確定します。
 
 管理者は受信者ごとに [Slack Incoming Webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) を作成し、そのURLを次のSecrets Manager IDに**プレーンな文字列**で登録します。
 
@@ -102,7 +102,7 @@ CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` の�
 
 送信先を修復した後、運用者は該当rowのversionを条件に `slackAttempts: 0`、`slackDeliveryStatus: pending`、元の `slackQueueShard`（`slack#<番号>`）、現在時刻の `slackNextAttemptAt` を戻して再試行できます。送信済みrowの再投入は重複投稿になるため、Slack側の着信を先に確認します。`notification-schedule` runtime controlで停止できます。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Slack`）が15分以上の状態で3回続くと滞留アラームを出します。破損候補は最大10ページまで越えて後続を処理し、`InvalidQueueCandidates` とworker失敗で検出します。破損した正本は自動で書き換えず、運用者が確認・修復します。
 
-送信前にInboxのversionが変わった場合は、そのclaimを解放して試行回数を戻します。Directory・enterpriseの認可snapshotは同じworker呼び出し内で5秒間だけ共有します。Cognitoグループとsystem admin判定は配信ごとに再取得・評価し、Work Itemやメンバーの現在状態も通知ごとに再取得します。1 shardあたり毎分2件のため、滞留アラームが続く場合はdue indexの最古時刻と件数、破損候補、送信先の制限を調査してください。
+送信前にInboxのversionが変わった場合は、そのclaimを解放して試行回数を戻します。Directory・Enterprise・Cognitoグループとsystem admin判定は配信ごとに再取得・評価し、通知間で認可snapshotを共有しません。Work Itemやメンバーの現在状態も通知ごとに再取得します。1 shardあたり毎分2件のため、滞留アラームが続く場合はdue indexの最古時刻と件数、破損候補、送信先の制限を調査してください。
 
 Document由来の通知は、送信のたびにInboxと同じDocuments取得機能で現在のprivate ACL、親Documentの継承ACL、archive状態を確認します。Enterprise RBACは `documents.read/write/manage` の権限を評価し、Work Item権限や過去のProject roleでは代用しません。参照不可・削除済みのDocumentは送信せず、取得の一時障害は再試行します。
 
@@ -113,6 +113,8 @@ Document由来の通知は、送信のたびにInboxと同じDocuments取得機�
 Triage通知も現在のEntryを取得し、送信時点のProjectと担当者を照合します。`metadata-only` / `denied` またはredactedなsourceは、保存済みの本文を外部に出さないためSlack配信を抑止します。Work Item / TriageのEnterprise権限も現在の `work-items.read` で評価し、Project未所属のTeam通知にはTeam全体の閲覧権限を要求します。
 
 Workspace直下のPlanning通知もWorkspaceリソースで認可します。担当者向けreminder/overdueには更新権限、ウォッチャーには現在の購読と閲覧権限を要求します。Cognitoグループは全ページを取得して再評価し、SCIM無効化・guest許可・外部ドメイン制限・permission ceilingも適用します。
+
+Workspace全体のAutomation notifyで明示的に選ばれたactiveなguest受信者にも、Inboxと同じ通知を配信します。現在のWorkspace閲覧権限とguest・外部アクセス制限を適用し、TeamやProject、Planningを参照する通知の認可は引き続き各sourceの権限で評価します。
 
 Work Itemの担当者だけに向けた通知は、担当変更・状態変更・日程変更も含め、現在の担当者との一致をInboxと共通の条件で確認します。Cognitoから削除済みの受信者は再試行せず配信を抑止し、一時的なCognito障害のみ再試行します。通知設定は認可処理の後にも読み直し、その間のSlack無効化・quiet hours変更を反映します。
 

@@ -1,5 +1,5 @@
 import type { NotificationItem, NotificationPreferences } from '../notifications'
-import { createNotificationDeliveryPlan } from '../notifications'
+import { createNotificationDeliveryPlan, isSlackNotificationEligible } from '../notifications'
 import { SLACK_DELIVERY_SHARDS, slackFailedDeliveryShard } from '../domain/slack-delivery'
 
 /** One durable Slack delivery, bound to its original recipient. */
@@ -149,13 +149,13 @@ export async function deliverDueSlackNotifications(dependencies: SlackDeliveryDe
           continue
         }
         const initialPreferences = await dependencies.store.getPreferences(delivery)
-        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !initialPreferences.channels.slack || !await dependencies.isAuthorized(delivery)) {
+        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isSlackNotificationEligible(initialPreferences, delivery.notification.occurredAt) || !await dependencies.isAuthorized(delivery)) {
           await dependencies.store.finish(delivery, token, 'suppressed')
           continue
         }
         // Recheck preferences after potentially slow authorization, before the final lease fence and send.
         const preferences = await dependencies.store.getPreferences(delivery)
-        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !preferences.channels.slack) {
+        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !isSlackNotificationEligible(preferences, delivery.notification.occurredAt)) {
           await dependencies.store.finish(delivery, token, 'suppressed')
           continue
         }

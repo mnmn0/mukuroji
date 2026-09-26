@@ -6,6 +6,7 @@ export {
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
   requiresCurrentWorkItemAssignee,
+  isSlackNotificationEligible,
   toNotificationItem,
   type CountUnreadNotificationsInput,
   type ListNotificationsInput,

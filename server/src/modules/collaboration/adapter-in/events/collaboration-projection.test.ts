@@ -147,6 +147,46 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('keeps explicitly selected workspace Automation notifications visible to active guests', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    let active = true
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role: 'guest', status: active ? 'active' : 'removed' }, $metadata: {},
+    }))
+    const event = createProjectionEvent({ eventType: 'automation.notification.requested',
+      notificationCandidates: [{ memberKey, reason: 'automation' }] })
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    try {
+      expect(await authorizeNotificationDelivery(event, memberKey, identity)).toBe(true)
+      expect(await authorizeNotificationDelivery({ ...event, notificationCandidates: [] }, memberKey, identity)).toBe(false)
+      expect(await authorizeNotificationDelivery({ ...event, eventType: 'comment.created' }, memberKey, identity)).toBe(false)
+      active = false
+      expect(await authorizeNotificationDelivery(event, memberKey, identity)).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('never queues delayed events from before the current Slack activation boundary', () => {
+    const candidate = { memberKey: 'member@example.com', reasons: ['mention'] }
+    const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: false, push: false, slack: true }, slackEnabledAt: '2026-07-12T12:00:00.000Z' }
+    for (const occurredAt of ['2026-07-12T11:59:59.999Z', '2026-07-12T12:00:00.000Z']) {
+      const event = createProjectionEvent({ occurredAt })
+      const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences)
+      const row = createNotificationProjectionItem(event, candidate, state)
+      expect(row.slackQueueShard !== undefined).toBe(occurredAt === preferences.slackEnabledAt)
+      expect(row.inAppVisible).toBe(true)
+    }
+    const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', '2026-07-12T12:00:00.000Z',
+      { ...preferences, slackEnabledAt: undefined })
+    expect(state.deliveryChannels).toEqual(['inApp'])
+  })
   test('preserves approval source and requires current file visibility and Files permission', async () => {
     const keys = ['WORK_ITEMS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
     const previous = keys.map((key) => process.env[key])
@@ -498,7 +538,7 @@ describe('collaboration projection pure helpers', () => {
     const event = createProjectionEvent()
     for (const slack of [true, false]) {
       const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, {
-        version: 0, channels: { inApp: false, email: false, push: false, slack },
+        version: 0, channels: { inApp: false, email: false, push: false, slack }, slackEnabledAt: event.occurredAt,
         frequency: 'hourly', quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
       })
       const item = createNotificationProjectionItem(event, { memberKey: 'member@example.com', reasons: ['mention'] }, state)
