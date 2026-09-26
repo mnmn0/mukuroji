@@ -112,7 +112,16 @@ export type PublicImportSourceInput = {
 
 /** Public Work Item API と既存 canonical service の境界です。 */
 export interface PublicWorkItemService {
-  /** Reads canonical comments after checking current Work Item visibility. */
+  /**
+   * Reads canonical comments after checking current Work Item visibility.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item whose discussion is requested.
+   * @param continuation - Internal continuation unwrapped from the signed public cursor.
+   * @param limit - Maximum number of comments in the page.
+   * @param assignedProjectId - Optional Project restriction for authorization and cursor scope.
+   * @returns Authorized, non-deleted comments and any remaining internal continuation.
+   */
   listComments(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
@@ -128,7 +137,15 @@ export interface PublicWorkItemService {
     /** Internal continuation wrapped by the public API's signed cursor. */
     nextContinuation?: string
   }>
-  /** Rechecks current write access before replaying a comment receipt. */
+  /**
+   * Rechecks current write access before replaying a comment receipt.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item whose comment receipt would be replayed.
+   * @param assignedProjectId - Optional Project restriction rechecked before replay.
+   * @param assigneeUserId - Optional assignee restriction rechecked before replay.
+   * @returns A promise that resolves only when the current scope and write checks pass.
+   */
   authorizeComment(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
@@ -136,7 +153,17 @@ export interface PublicWorkItemService {
     assignedProjectId?: string,
     assigneeUserId?: string,
   ): Promise<void>
-  /** Adds an idempotent, authorization-fenced canonical comment and audit event. */
+  /**
+   * Adds an idempotent, authorization-fenced canonical comment and audit event.
+   * @param credential - Authenticated developer credential used for current RBAC and author identity.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item receiving the comment.
+   * @param body - Validated comment text.
+   * @param context - Request, correlation, and idempotency identifiers for this mutation.
+   * @param assignedProjectId - Optional Project restriction enforced when persisting the comment.
+   * @param assigneeUserId - Optional assignee restriction enforced when persisting the comment.
+   * @returns The created canonical comment response item.
+   */
   addComment(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
@@ -166,7 +193,13 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
-  /** Returns active Work Item Types and creation field schemas after current RBAC checks. */
+  /**
+   * Returns active Work Item Types and creation field schemas after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team whose current configuration is requested.
+   * @param assignedProjectId - Optional authorized Project used to restrict field metadata.
+   * @returns The authorized type catalog with fields projected to the requested Project scope.
+   */
   listWorkItemTypes(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
