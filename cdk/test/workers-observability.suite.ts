@@ -8,6 +8,37 @@ import {
   synthesizedTemplate,
 } from './test-support';
 
+test('Slack notifications use the sparse due queue with bounded execution and recipient-secret access', () => {
+  const template = synthesizedTemplate;
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Delivers opted-in Inbox notifications to recipient-bound Slack destinations.',
+    Timeout: 300,
+    TracingConfig: { Mode: 'Active' },
+    Environment: { Variables: Match.objectLike({
+      NOTIFICATIONS_TABLE_NAME: { Ref: 'NotificationsTable76DCFC6C' },
+      MUKUROJI_RUNTIME_CONTROL_SCOPE: 'notification-schedule',
+    }) },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'rate(1 minute)',
+    Targets: Match.arrayWith([Match.objectLike({ Arn: { 'Fn::GetAtt': ['SlackNotificationFunctionE618FDB5', 'Arn'] } })]),
+  });
+  template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+    FunctionName: { Ref: 'SlackNotificationFunctionE618FDB5' },
+    MaximumRetryAttempts: 0,
+    DestinationConfig: { OnFailure: { Destination: Match.anyValue() } },
+  });
+  const policies = template.findResources('AWS::IAM::Policy');
+  const slackPolicies = Object.entries(policies).filter(([id]) => id.startsWith('SlackNotificationFunction'));
+  expect(slackPolicies).toHaveLength(1);
+  const serialized = JSON.stringify(slackPolicies);
+  expect(serialized).toContain('secretsmanager:GetSecretValue');
+  expect(serialized).toContain('mukuroji/automation-webhooks/*/slack-*');
+  expect(serialized).toContain('/index/SlackDeliveryIndex');
+  expect(serialized).not.toContain('secretsmanager:PutSecretValue');
+  expect(serialized).not.toContain('dynamodb:Scan');
+});
+
 test('enterprise identity CONTROL stream runs bounded asynchronous maintenance', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
@@ -1851,7 +1882,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 25);
+  template.resourceCountIs('AWS::SQS::Queue', 26);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1951,7 +1982,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 28);
+  }, 29);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',

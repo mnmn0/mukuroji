@@ -57,6 +57,11 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'enterprise-scim-group-job',
   },
   {
+    filename: 'slack-notifications-handler.ts',
+    exportName: 'handler',
+    surface: 'notification-schedule',
+  },
+  {
     filename: 'notification-schedule-handler.ts',
     exportName: 'handler',
     surface: 'notification-schedule',

@@ -37,6 +37,8 @@ export type NotificationChannels = {
   email: boolean
   /** Push delivery plan を作成するかどうかです。 */
   push: boolean
+  /** Whether newly created notifications should also be delivered to Slack. */
+  slack?: boolean
 }
 
 /** Notification delivery を止める quiet hours です。 */
@@ -753,6 +755,8 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           { AttributeName: 'recipientKey', AttributeType: 'S' },
           { AttributeName: 'notificationKey', AttributeType: 'S' },
           { AttributeName: 'recipientStatusKey', AttributeType: 'S' },
+          { AttributeName: 'slackQueueShard', AttributeType: 'S' },
+          { AttributeName: 'slackNextAttemptAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'recipientKey', KeyType: 'HASH' },
@@ -765,6 +769,13 @@ export class DynamoDbNotificationsClient implements NotificationClient {
             { AttributeName: 'notificationKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
+        }, {
+          IndexName: 'SlackDeliveryIndex',
+          KeySchema: [
+            { AttributeName: 'slackQueueShard', KeyType: 'HASH' },
+            { AttributeName: 'slackNextAttemptAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
         }],
         BillingMode: 'PAY_PER_REQUEST',
       }))
@@ -829,7 +840,7 @@ export function createNotificationDeliveryPlan(
   if (!Number.isFinite(occurredTime)) {
     throw new TypeError('Notification occurredAt must be an ISO 8601 timestamp.')
   }
-  const channels = (['inApp', 'email', 'push'] as const).filter(
+  const channels = (['inApp', 'email', 'push', 'slack'] as const).filter(
     (channel) => normalized.channels[channel],
   )
   const frequencyDelay = normalized.frequency === 'hourly'
@@ -904,10 +915,19 @@ function applyNotificationAction(
   return next
 }
 
-function toNotificationItem(
+/**
+ * Validates a stored notification for Inbox or external delivery.
+ * @param value - Untrusted stored row.
+ * @param recipientKey - Expected recipient partition.
+ * @param now - State evaluation time.
+ * @param includeExternalOnly - Includes notifications whose Inbox channel is disabled.
+ * @returns Validated notification, or undefined for non-notification rows.
+ */
+export function toNotificationItem(
   value: Record<string, unknown> | undefined,
   recipientKey: string,
   now: Date,
+  includeExternalOnly = false,
 ): NotificationItem | undefined {
   if (!value) {
     return undefined
@@ -999,7 +1019,7 @@ function toNotificationItem(
   if (value.inAppVisible !== undefined && typeof value.inAppVisible !== 'boolean') {
     throw invalidNotificationData()
   }
-  if (value.inAppVisible === false) {
+  if (value.inAppVisible === false && !includeExternalOnly) {
     return undefined
   }
   const deepLink = readText(value.deepLink)
@@ -1105,7 +1125,8 @@ function normalizeNotificationPreferencesInput(
     !channels ||
     typeof channels.inApp !== 'boolean' ||
     typeof channels.email !== 'boolean' ||
-    typeof channels.push !== 'boolean'
+    typeof channels.push !== 'boolean' ||
+    (channels.slack !== undefined && typeof channels.slack !== 'boolean')
   ) {
     throw new NotificationError(400, 'InvalidNotificationPreferences', 'Notification channels are invalid.')
   }
@@ -1137,6 +1158,7 @@ function notificationPreferencesMatchUpdate(
   return current.channels.inApp === expected.channels.inApp &&
     current.channels.email === expected.channels.email &&
     current.channels.push === expected.channels.push &&
+    Boolean(current.channels.slack) === Boolean(expected.channels.slack) &&
     current.frequency === expected.frequency &&
     current.quietHours.enabled === expected.quietHours.enabled &&
     current.quietHours.start === expected.quietHours.start &&

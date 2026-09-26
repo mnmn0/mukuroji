@@ -37,6 +37,7 @@ import {
   createNotificationDeliveryPlan,
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
+  slackDeliveryShard,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
 } from '../../../notifications'
@@ -265,7 +266,7 @@ export type NotificationProjectionDeliveryState = {
   /** In-app 無効時に保存する archive timestamp です。 */
   archivedAt?: string
   /** 有効な delivery channel 一覧です。 */
-  deliveryChannels: Array<'inApp' | 'email' | 'push'>
+  deliveryChannels: Array<'inApp' | 'email' | 'push' | 'slack'>
   /** Digest/quiet hours を反映した最短 delivery 時刻です。 */
   deliveryAfter: string
   /** Delivery plan の frequency です。 */
@@ -1356,9 +1357,16 @@ export function createNotificationProjectionItem(
     deliveryChannels: deliveryState.deliveryChannels,
     deliveryAfter: deliveryState.deliveryAfter,
     deliveryFrequency: deliveryState.deliveryFrequency,
+    ...(deliveryState.deliveryChannels.includes('slack') ? {
+      slackQueueShard: slackDeliveryShard(recipientKey),
+      slackNextAttemptAt: deliveryState.deliveryAfter,
+      slackDeliveryStatus: 'pending',
+      slackAttempts: 0,
+    } : {}),
     ...(deliveryState.archivedAt ? { archivedAt: deliveryState.archivedAt } : {}),
     occurredAt: event.occurredAt,
     createdAt: event.occurredAt,
+    dueDate: event.dueDate,
     expiresAt,
   }
 }
@@ -1816,6 +1824,39 @@ async function isEligibleRecipient(
   }
 
   return currentSystemAdmin
+}
+
+/**
+ * Rechecks source scope and current recipient access immediately before external delivery.
+ * @param event - Stored notification source and scope.
+ * @param memberKey - Canonical recipient member key.
+ * @param enterpriseIdentity - Authoritative enterprise identity reader.
+ * @returns Whether the notification's recipient still has access.
+ */
+export async function authorizeNotificationDelivery(
+  event: AuditProjectionEvent,
+  memberKey: string,
+  enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>,
+): Promise<boolean> {
+  const currentScope = await readCurrentWorkItemScope(event)
+  if (!currentScope.exists) return false
+  const scoped = refreshScheduledNotificationEvent(
+    currentScope.checked ? overlayCurrentWorkItemNotificationScope(event, currentScope) : event,
+    currentScope,
+  )
+  if (!scoped) return false
+  const planningScope = await readCurrentPlanningUpdateScope(scoped)
+  if (!planningScope.exists) return false
+  const current = planningScope.checked
+    ? { ...scoped, teamId: planningScope.teamId, projectId: planningScope.projectId }
+    : scoped
+  const refreshed = refreshPlanningScheduledNotificationEvent(current, planningScope)
+  if (!refreshed) return false
+  return isEligibleRecipient(
+    refreshed, memberKey,
+    refreshed.projectId || refreshed.teamId ? await readProjectDirectory(event.workspaceId) : [],
+    new Map(), enterpriseIdentity, new Map(),
+  )
 }
 
 /** Reads a supported Workspace role from a notification member row. */

@@ -1,0 +1,110 @@
+import { describe, expect, test } from 'bun:test'
+import { deliverDueSlackNotifications, type SlackDelivery, type SlackDeliveryDependencies, type SlackSendResult } from './slack-delivery'
+import { DEFAULT_NOTIFICATION_PREFERENCES } from '../notifications'
+
+/** Creates an isolated queue fixture with a controllable Slack outcome. */
+function fixture(result: SlackSendResult = { succeeded: true, retryable: false }) {
+  const now = new Date('2026-09-26T12:00:00.000Z')
+  const delivery: SlackDelivery = {
+    workspaceId: 'workspace-1', memberKey: 'member@example.test', recipientKey: 'workspace-1#member@example.test',
+    notificationKey: '2026-09-26T11:00:00.000Z#event-1', attempts: 0, version: 1,
+    nextAttemptAt: now.toISOString(), expiresAt: now.getTime() / 1_000 + 3_600,
+    notification: { id: 'notification-1', eventId: 'event-1', eventType: 'comment.created',
+      reasons: ['mention'], title: 'Review', occurredAt: '2026-09-26T11:00:00.000Z', state: 'unread' },
+  }
+  const finishes: Array<{ status: string; next?: Date; code?: string }> = []
+  let sends = 0
+  let pending = true
+  const dependencies: SlackDeliveryDependencies = {
+    now: () => now, createToken: () => 'lease-1',
+    isAuthorized: async () => true,
+    send: async () => { sends += 1; return result },
+    store: {
+      listDue: async (shard) => shard === 'slack#0' && pending ? [delivery] : [],
+      claim: async () => true,
+      renew: async () => true,
+      getPreferences: async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
+        channels: { inApp: false, email: false, push: false, slack: true } }),
+      finish: async (_delivery, _token, status, next, code) => {
+        finishes.push({ status, next, code }); pending = false
+      },
+    },
+  }
+  return { delivery, dependencies, finishes, sends: () => sends, now }
+}
+
+describe('Slack notification delivery application', () => {
+  test('sends the existing notification with Inbox disabled and does not replay a completed job', async () => {
+    const f = fixture()
+    expect(await deliverDueSlackNotifications(f.dependencies)).toBe(1)
+    expect(await deliverDueSlackNotifications(f.dependencies)).toBe(0)
+    expect(f.sends()).toBe(1)
+    expect(f.finishes[0]?.status).toBe('sent')
+  })
+  test('suppresses disabled, expired, or no-longer-authorized notifications before sending', async () => {
+    for (const reason of ['disabled', 'expired', 'unauthorized']) {
+      const f = fixture()
+      if (reason === 'disabled') f.dependencies.store.getPreferences = async () => DEFAULT_NOTIFICATION_PREFERENCES
+      if (reason === 'expired') f.delivery.expiresAt = 1
+      if (reason === 'unauthorized') f.dependencies.isAuthorized = async () => false
+      expect(await deliverDueSlackNotifications(f.dependencies)).toBe(0)
+      expect(f.sends()).toBe(0)
+      expect(f.finishes[0]?.status).toBe('suppressed')
+    }
+  })
+  test('defers for current quiet hours and snooze instead of sending', async () => {
+    for (const reason of ['quiet', 'snoozed']) {
+      const f = fixture()
+      if (reason === 'quiet') {
+        f.dependencies.store.getPreferences = async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
+          channels: { inApp: true, email: false, push: false, slack: true },
+          quietHours: { enabled: true, start: '11:00', end: '13:00', timeZone: 'UTC' } })
+      } else f.delivery.notification.snoozedUntil = '2026-09-26T13:00:00.000Z'
+      await deliverDueSlackNotifications(f.dependencies)
+      expect(f.sends()).toBe(0)
+      expect(f.finishes).toEqual([{ status: 'pending', next: new Date('2026-09-26T13:00:00.000Z'), code: undefined }])
+    }
+  })
+  test('losing a claim or its lease prevents the HTTP side effect', async () => {
+    for (const method of ['claim', 'renew'] as const) {
+      const f = fixture()
+      f.dependencies.store[method] = async () => false
+      await deliverDueSlackNotifications(f.dependencies)
+      expect(f.sends()).toBe(0)
+    }
+  })
+  test('retains Slack Retry-After and terminates exhausted or permanent failures', async () => {
+    const f = fixture({ succeeded: false, retryable: true, code: 'SlackRateLimited', retryAfterMs: 120_000 })
+    await deliverDueSlackNotifications(f.dependencies)
+    expect(f.finishes[0]?.next?.toISOString()).toBe('2026-09-26T12:02:00.000Z')
+    for (const permanent of [false, true]) {
+      const exhausted = fixture({ succeeded: false, retryable: !permanent, code: 'SlackDeliveryRejected' })
+      exhausted.delivery.attempts = 4
+      await expect(deliverDueSlackNotifications(exhausted.dependencies)).rejects.toThrow('requires attention')
+      expect(exhausted.finishes[0]?.status).toBe('failed')
+    }
+  })
+  test('authorization failures fail closed and keep bounded retry work', async () => {
+    const f = fixture()
+    f.dependencies.isAuthorized = async () => { throw new Error('Temporary read failure') }
+    await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
+    expect(f.sends()).toBe(0)
+    expect(f.finishes[0]?.status).toBe('pending')
+  })
+  test('does not send again after five attempts whose workers lost their acknowledgements', async () => {
+    const f = fixture()
+    f.delivery.attempts = 5
+    await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
+    expect(f.sends()).toBe(0)
+    expect(f.finishes[0]).toEqual({ status: 'failed', next: undefined, code: 'SlackAttemptsExhausted' })
+  })
+  test('an unreadable shard does not prevent delivery from another shard', async () => {
+    const f = fixture()
+    f.dependencies.store.listDue = async (shard) => {
+      if (shard === 'slack#1') throw new Error('Unavailable shard')
+      return shard === 'slack#2' ? [f.delivery] : []
+    }
+    await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
+    expect(f.sends()).toBe(1)
+  })
+})

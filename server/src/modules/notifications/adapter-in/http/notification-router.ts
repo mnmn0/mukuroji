@@ -252,6 +252,9 @@ function readNotificationPreferencesInput(
 ): UpdateNotificationPreferencesInput {
   const channels = isRecord(value.channels) ? value.channels : {}
   const quietHours = isRecord(value.quietHours) ? value.quietHours : {}
+  if (channels.slack !== undefined && typeof channels.slack !== 'boolean') {
+    throw new NotificationError(400, 'InvalidNotificationPreferences', 'Slack preference must be boolean.')
+  }
 
   return {
     version: Number(value.version),
@@ -259,6 +262,7 @@ function readNotificationPreferencesInput(
       inApp: channels.inApp as boolean,
       email: channels.email as boolean,
       push: channels.push as boolean,
+      ...(channels.slack === undefined ? {} : { slack: channels.slack }),
     },
     frequency: value.frequency as UpdateNotificationPreferencesInput['frequency'],
     quietHours: {

@@ -387,18 +387,21 @@ export const workspaceMessages = {
     '画面で使用する表示言語を選択します。変更はこのブラウザに保存されます。',
   'workspace.settings.notificationTitle': '通知設定',
   'workspace.settings.notificationDescription':
-    'アプリ内配信と、接続予定のメール・プッシュ向け配信ルールを設定します。',
+    '受信箱とSlackへの通知、配信頻度、通知しない時間帯を設定します。',
   'workspace.settings.notifications.eyebrow': '配信ルール',
   'workspace.settings.notifications.version': '設定 v{version}',
   'workspace.settings.notifications.channelsTitle': '配信チャネル',
   'workspace.settings.notifications.channelsDescription':
-    'アプリ内は次の通知から反映されます。メールとプッシュは配信基盤接続後に使う事前設定です。',
+    'アプリ内とSlackは次の通知から反映されます。メールとプッシュは配信基盤接続後に使う事前設定です。',
   'workspace.settings.notifications.channel.inApp': 'アプリ内',
   'workspace.settings.notifications.channel.inAppDescription': '受信箱と未読バッジへ表示します。',
   'workspace.settings.notifications.channel.email': 'メール',
   'workspace.settings.notifications.channel.emailDescription':
     'メール配信基盤の接続後に使う受信設定を保存します。',
   'workspace.settings.notifications.channel.push': 'プッシュ',
+  'workspace.settings.notifications.channel.slack': 'Slack',
+  'workspace.settings.notifications.channel.slackDescription':
+    '同じ通知を自分のSlack送信先にも配信します。管理者による接続設定が必要です。',
   'workspace.settings.notifications.channel.pushDescription':
     'PWA の push 購読接続後に使う受信設定を保存します。',
   'workspace.settings.notifications.frequencyTitle': '配信頻度',

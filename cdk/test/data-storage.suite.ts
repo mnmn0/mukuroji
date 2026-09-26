@@ -952,6 +952,14 @@ test('collaboration notifications and realtime sessions use production-safe Dyna
         ],
         Projection: { ProjectionType: 'ALL' },
       }),
+      Match.objectLike({
+        IndexName: 'SlackDeliveryIndex',
+        KeySchema: [
+          { AttributeName: 'slackQueueShard', KeyType: 'HASH' },
+          { AttributeName: 'slackNextAttemptAt', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }),
     ]),
     TimeToLiveSpecification: {
       AttributeName: 'expiresAt',

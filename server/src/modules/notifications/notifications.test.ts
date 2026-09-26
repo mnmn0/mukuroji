@@ -13,6 +13,18 @@ import {
   type NotificationState,
 } from './notifications'
 
+test('Slack preferences preserve legacy opt-out and join the existing frequency and quiet-hour plan', () => {
+  expect(parseStoredNotificationPreferences(undefined).channels.slack ?? false).toBe(false)
+  const preferences = parseStoredNotificationPreferences({
+    itemType: 'preferences', ...DEFAULT_NOTIFICATION_PREFERENCES,
+    channels: { inApp: true, email: false, push: false, slack: true }, frequency: 'hourly',
+  })
+  expect(preferences.channels.slack).toBe(true)
+  expect(createNotificationDeliveryPlan(preferences, '2026-09-26T12:00:00.000Z')).toMatchObject({
+    channels: ['inApp', 'slack'], deliveryAfter: '2026-09-26T13:00:00.000Z',
+  })
+})
+
 function createNotificationRow(overrides: Record<string, unknown> = {}) {
   return {
     recipientKey: 'workspace-1#member@example.com',

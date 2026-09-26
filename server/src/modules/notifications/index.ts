@@ -5,6 +5,7 @@ export {
   createNotificationDeliveryPlan,
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
+  toNotificationItem,
   type CountUnreadNotificationsInput,
   type ListNotificationsInput,
   type MarkAllNotificationsReadInput,
@@ -25,6 +26,10 @@ export {
   type UpdateNotificationInput,
   type UpdateNotificationPreferencesInput,
 } from './notifications'
+export { slackDeliveryShard } from './domain/slack-delivery'
+export { deliverDueSlackNotifications } from './application/slack-delivery'
+export { DynamoDbSlackDeliveryStore } from './adapter-out/dynamodb/slack-delivery-store'
+export { createSlackNotificationSender } from './adapter-out/slack/slack-sender'
 export {
   createNotificationScheduleHandler,
   parsePlanningUpdateTargetScheduleProjection,

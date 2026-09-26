@@ -545,6 +545,13 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  notificationsTable.addGlobalSecondaryIndex({
+    indexName: 'SlackDeliveryIndex',
+    partitionKey: { name: 'slackQueueShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'slackNextAttemptAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
   const focusTable = new dynamodb.Table(stack, 'FocusTable', {
     partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },

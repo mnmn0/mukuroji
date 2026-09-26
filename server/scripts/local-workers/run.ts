@@ -65,6 +65,7 @@ if (!streamArn) throw new Error('Local audit stream is unavailable.')
 const automation = await import('../../src/handlers/automation-schedule-handler')
 const analytics = await import('../../src/handlers/analytics-schedule-handler')
 const notifications = await import('../../src/handlers/notification-schedule-handler')
+const slackNotifications = await import('../../src/handlers/slack-notifications-handler')
 const triage = await import('../../src/handlers/triage-schedule-handler')
 const connectors = await import('../../src/handlers/connector-handler')
 const imports = await import('../../src/handlers/work-item-import.handler')
@@ -77,6 +78,7 @@ const schedules = [
   { name: 'triage', interval: 60_000, run: () => triage.handler({}) },
   { name: 'analytics', interval: 300_000, run: () => analytics.handler({}) },
   { name: 'notifications', interval: 3_600_000, run: () => notifications.handler({}) },
+  { name: 'slack-notifications', interval: 60_000, run: () => slackNotifications.handler() },
   { name: 'connector-poll', interval: 300_000, run: () => connectors.pollHandler({}) },
 ].map((job) => ({ ...job, next: 0 }))
 const queueHandlers = [imports.workItemImportHandler, webhook.deliveryHandler, connectors.queueHandler]

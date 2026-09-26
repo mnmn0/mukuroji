@@ -140,6 +140,20 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('queues only opted-in Slack notifications at the planned delivery time', () => {
+    const event = createProjectionEvent()
+    for (const slack of [true, false]) {
+      const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, {
+        version: 0, channels: { inApp: false, email: false, push: false, slack },
+        frequency: 'hourly', quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      })
+      const item = createNotificationProjectionItem(event, { memberKey: 'member@example.com', reasons: ['mention'] }, state)
+      expect(item.slackNextAttemptAt).toBe(slack ? state.deliveryAfter : undefined)
+      expect(item.slackDeliveryStatus).toBe(slack ? 'pending' : undefined)
+      expect(item.slackQueueShard !== undefined).toBe(slack)
+      expect(item.inAppVisible).toBe(false)
+    }
+  })
   test('deduplicates recipients and excludes actor by Workspace member key', () => {
     const grouped = groupNotificationCandidates(createProjectionEvent({
       notificationCandidates: [
