@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from 'bun:test'
-import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBDocumentClient, GetCommand, PutCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import type { ApprovalNotificationSource } from '../../../files'
@@ -147,6 +147,82 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('retries corrupt projection preferences without receipts and recovers after repair', async () => {
+    const keys = ['PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const valid = { ...DEFAULT_NOTIFICATION_PREFERENCES, itemType: 'preferences', version: 1,
+      channels: { inApp: true, email: false, push: false, slack: true }, slackEnabledAt: '2026-09-26T10:00:00.000Z' }
+    let broken: Record<string, unknown> = valid
+    const notifications: Array<Record<string, unknown>> = []
+    const receipts = new Map<string, Record<string, unknown>>()
+    const errors = spyOn(console, 'error').mockImplementation(() => {})
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        expect(command.input.ConsistentRead).toBe(true)
+        if (command.input.TableName === 'PROCESSED_AUDIT_EVENTS_TABLE_NAME') {
+          return { Item: receipts.get(JSON.stringify(command.input.Key)), $metadata: {} }
+        }
+        if (command.input.TableName === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = command.input.Key?.recordKey
+          if (typeof recordKey !== 'string') throw new Error('Missing membership key')
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        if (command.input.TableName === 'NOTIFICATIONS_TABLE_NAME') {
+          const recipient = command.input.Key?.recipientKey
+          return { Item: recipient === 'workspace-1#broken@example.test' ? broken
+            : recipient === 'workspace-1#healthy@example.test' ? valid : undefined, $metadata: {} }
+        }
+      }
+      const puts = command instanceof TransactWriteCommand ? command.input.TransactItems?.flatMap((item) => item.Put ? [item.Put] : [])
+        : command instanceof PutCommand ? [command.input] : undefined
+      if (!puts) throw new Error('Unexpected projection command')
+      for (const put of puts) {
+        if (!put.Item) throw new Error('Missing projection item')
+        if (put.TableName === 'NOTIFICATIONS_TABLE_NAME') notifications.push(put.Item)
+        else receipts.set(JSON.stringify({ consumerName: put.Item.consumerName, eventId: put.Item.eventId }), put.Item)
+      }
+      return { $metadata: {} }
+    })
+    const batch = { Records: ['broken', 'healthy', 'legacy'].map((recipient) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: recipient, NewImage: {
+        eventId: { S: recipient }, eventType: { S: 'automation.notification.requested' }, workspaceId: { S: 'workspace-1' },
+        occurredAt: { S: '2026-09-26T11:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: { notificationCandidates: { L: [{ M: { memberKey: { S: `${recipient}@example.test` }, reason: { S: 'automation' } } }] } } },
+      } },
+    })) }
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+    }
+    try {
+      for (const corrupt of [
+        { ...valid, frequency: 'invalid' }, { ...valid, quietHours: { ...valid.quietHours, timeZone: 'invalid' } },
+        { ...valid, channels: { ...valid.channels, slack: 'true' } }, { ...valid, version: '1' },
+      ]) {
+        broken = corrupt
+        notifications.length = 0
+        receipts.clear()
+        expect(await processCollaborationProjectionBatch(batch, dependencies)).toEqual({ batchItemFailures: [{ itemIdentifier: 'broken' }] })
+        expect(notifications).toHaveLength(2)
+        expect([...receipts.values()].some((receipt) => receipt.eventId === 'broken')).toBe(false)
+        expect(notifications.find((item) => item.eventId === 'healthy')?.slackQueueShard).toBeDefined()
+        expect(notifications.find((item) => item.eventId === 'legacy')?.slackQueueShard).toBeUndefined()
+        broken = valid
+        expect(await processCollaborationProjectionBatch(batch, dependencies)).toEqual({ batchItemFailures: [] })
+        expect(notifications).toHaveLength(3)
+        expect(notifications.find((item) => item.eventId === 'broken')?.slackQueueShard).toBeDefined()
+        expect(await processCollaborationProjectionBatch(batch, dependencies)).toEqual({ batchItemFailures: [] })
+        expect(notifications).toHaveLength(3)
+      }
+      expect(errors).toHaveBeenCalledTimes(4)
+      expect(errors.mock.calls.every(([, error]) => error instanceof Error && error.message === 'Invalid stored notification preferences.')).toBe(true)
+    } finally {
+      send.mockRestore()
+      errors.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
   test('keeps explicitly selected workspace Automation notifications visible to active guests', async () => {
     const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
     const previous = keys.map((key) => process.env[key])

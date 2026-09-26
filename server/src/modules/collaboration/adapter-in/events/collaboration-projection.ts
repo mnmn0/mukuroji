@@ -1484,6 +1484,12 @@ export function overlayCurrentWorkItemNotificationScope(
   return eventWithoutProject
 }
 
+/**
+ * Reads validated preferences before committing notification and processing receipts.
+ * @param recipientKey - Server-derived Workspace/member partition key.
+ * @returns Stored preferences or defaults for an absent row.
+ * @throws Error when a stored row is corrupt, leaving the stream record retryable.
+ */
 async function readProjectionNotificationPreferences(recipientKey: string) {
   const result = await documentClient.send(new GetCommand({
     TableName: requireEnv('NOTIFICATIONS_TABLE_NAME'),
@@ -1494,7 +1500,7 @@ async function readProjectionNotificationPreferences(recipientKey: string) {
     ConsistentRead: true,
   }))
 
-  return parseStoredNotificationPreferences(result.Item)
+  return parseStoredNotificationPreferences(result.Item, true)
 }
 
 /**

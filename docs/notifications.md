@@ -96,6 +96,8 @@ CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` の�
 
 通知と同一transaction内に保存される配信予定を16 shardのsparse GSIから検索し、毎分最大32件を処理します。`instant` は通常次の実行時に届き、他の頻度は既存のdelivery planが定める遅延後に、通知ごとに送信します（複数通知を1メッセージにまとめるdigestではありません）。現在のquiet hoursとsnoozeは送信直前にも確認します。Slackの無効化、Workspace閉鎖、メンバー削除、閲覧権限の喪失、期限通知の対象変更、retention期限切れは配信を抑止します。
 
+通知を投影する際にも保存済み設定を検証します。設定が破損している場合は通知と処理済みreceiptを確定せず、そのstream recordを失敗として返します。他のrecordは処理を続け、設定の修復後にstreamの再試行または失敗イベントの再処理で配信予定を作成できます。設定が未保存の受信者には従来のdefaultを使用します。
+
 60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
 永続的失敗はnotification rowの `slackDeliveryStatus: failed` と秘密情報を含まない `slackLastCode` に残り、Lambda errorsおよび `SlackNotificationDlq` のアラーム対象になります。失敗rowは同じ `SlackDeliveryIndex` の `slack-failed#<番号>` partitionへ移し、ランダムな `slackFailureReference` を記録します。CloudWatchの `SlackNotificationFailed` ログにある `shard` と `dueAt` でindexをQueryし、返されたkeyをGetして `slackFailureReference` とログの `reference` を照合すれば、テーブル全体をScanせず対象を特定できます。ログは90日保持し、通知本文、メールアドレス、Webhook URLを含めません。
