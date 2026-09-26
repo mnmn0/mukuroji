@@ -117,6 +117,15 @@ describe('agent task lifecycle', () => {
     expect(await service.next({})).toMatchObject({ action: 'none', task: null })
   })
 
+  test('rejects a future revision before a concurrent writer could make its CAS valid', async () => {
+    let writes = 0
+    const { service } = fixture([task('one', { relationIds: ['blockedBy:missing'] })], {
+      async update() { writes += 1; return task('one', { revision: 3, statusCategory: 'started' }) },
+    })
+    await expect(service.transition('one', 2, 'coding', 'start', 'future')).rejects.toMatchObject({ code: 'conflict' })
+    expect(writes).toBe(0)
+  })
+
   test('rejects blockers, inaccessible blockers, wrong assignment, invalid transitions, and Project escapes', async () => {
     const { service, api } = fixture([task('blocked', { relationIds: ['blockedBy:missing'] }), task('other', { assigneeUserId: 'someone-else' })])
     await expect(service.transition('blocked', 1, 'coding', 'start', 'a')).rejects.toMatchObject({ code: 'blocked' })

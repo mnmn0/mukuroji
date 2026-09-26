@@ -1455,6 +1455,7 @@ const paths = {
       ],
       responses: {
         '200': jsonResponse('Canonical discussion page', schemaRef('PublicWorkItemCommentPage')),
+        ...notFoundResponse,
         ...problemResponses,
       },
     },
@@ -1471,6 +1472,7 @@ const paths = {
       requestBody: jsonRequestBody('CreatePublicWorkItemCommentRequest'),
       responses: {
         '201': jsonResponse('Created comment', schemaRef('PublicWorkItemComment'), true),
+        ...notFoundResponse,
         ...problemResponses,
       },
     },

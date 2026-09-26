@@ -101,6 +101,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
   /** Changes state using the caller's explicit revision, never a silently refreshed revision. */
   async function transition(id: string, expectedRevision: number, workflowStatusId: string, action: AgentTransition, key: string) {
     const task = await owned(id)
+    if (expectedRevision > task.revision) {
+      throw new AgentTaskError('conflict', 'The supplied revision has not been observed. Reload the task before choosing a transition.')
+    }
     // A stale revision is forwarded unchanged so the API can replay a successful receipt.
     // Without that exact receipt the canonical CAS rejects it, including concurrent starts.
     if (task.revision === expectedRevision) {
