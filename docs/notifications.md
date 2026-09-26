@@ -87,10 +87,10 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 管理者は受信者ごとに [Slack Incoming Webhook](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) を作成し、そのURLを次のSecrets Manager IDに**プレーンな文字列**で登録します。
 
 ```text
-mukuroji/automation-webhooks/<sha256(workspaceId.trim())>/slack-<sha256(memberKey.trim().toLowerCase())>
+mukuroji/automation-webhooks/<sha256(workspaceId.trim())>/slack/<sha256(memberKey.trim().toLowerCase())>
 ```
 
-既存のAutomation secret namespaceを使用するため、Workspaceの閉鎖時には既存のsecret削除・検証処理の対象になります。送信先は受信者の個人用Slackチャンネルなど、当該通知を開示してよいメンバーだけが参加する場所を選んでください。Webhookは作成時に選んだチャンネルに固定されます。アプリのユーザーが別の受信者の送信先を指定するAPIはありません。URLはソース、環境変数、通知row、API response、ログには保存しません。通常SlackとGovSlackの公式Incoming Webhook URLだけを許可します。
+既存のAutomation secret namespace内の専用サブディレクトリを使用するため、既存のsecret aliasとは衝突せず、Workspaceの閉鎖時には既存のsecret削除・検証処理の対象になります。送信先は受信者の個人用Slackチャンネルなど、当該通知を開示してよいメンバーだけが参加する場所を選んでください。Webhookは作成時に選んだチャンネルに固定されます。アプリのユーザーが別の受信者の送信先を指定するAPIはありません。URLはソース、環境変数、通知row、API response、ログには保存しません。通常SlackとGovSlackの公式Incoming Webhook URLだけを許可します。
 
 CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` のデプロイ後に有効化します。既存テーブルの置換や通知データのbackfillは不要です。ローカルでは `floci:up` がindexを追加し、`workers:dev` が同じworkerを毎分実行します。Secrets Managerの接続には既存の `SECRETS_MANAGER_ENDPOINT` 設定を使用します。
 
@@ -98,7 +98,11 @@ CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` の�
 
 60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
-永続的失敗はnotification rowの `slackDeliveryStatus: failed` と秘密情報を含まない `slackLastCode` に残り、Lambda errorsおよび `SlackNotificationDlq` のアラーム対象になります。送信先を修復した後、運用者は該当rowのversionを条件に `slackAttempts: 0`、`slackDeliveryStatus: pending`、元の `slackQueueShard`、現在時刻の `slackNextAttemptAt` を戻して再試行できます。送信済みrowの再投入は重複投稿になるため、Slack側の着信を先に確認します。`notification-schedule` runtime controlで停止できます。1 shardあたり毎分2件のため、遅延が続く場合はdue indexの最古時刻と件数を調査してください。
+永続的失敗はnotification rowの `slackDeliveryStatus: failed` と秘密情報を含まない `slackLastCode` に残り、Lambda errorsおよび `SlackNotificationDlq` のアラーム対象になります。失敗rowは同じ `SlackDeliveryIndex` の `slack-failed#<番号>` partitionへ移し、ランダムな `slackFailureReference` を記録します。CloudWatchの `SlackNotificationFailed` ログにある `shard` と `dueAt` でindexをQueryし、返されたkeyをGetして `slackFailureReference` とログの `reference` を照合すれば、テーブル全体をScanせず対象を特定できます。ログは90日保持し、通知本文、メールアドレス、Webhook URLを含めません。
+
+送信先を修復した後、運用者は該当rowのversionを条件に `slackAttempts: 0`、`slackDeliveryStatus: pending`、元の `slackQueueShard`（`slack#<番号>`）、現在時刻の `slackNextAttemptAt` を戻して再試行できます。送信済みrowの再投入は重複投稿になるため、Slack側の着信を先に確認します。`notification-schedule` runtime controlで停止できます。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Slack`）が15分以上の状態で3回続くと滞留アラームを出します。破損候補は最大10ページまで越えて後続を処理し、`InvalidQueueCandidates` とworker失敗で検出します。破損した正本は自動で書き換えず、運用者が確認・修復します。
+
+送信前にInboxのversionが変わった場合は、そのclaimを解放して試行回数を戻します。Directory・enterprise・system adminの認可snapshotは同じworker呼び出し内で5秒間だけ共有し、Work Itemやメンバーの現在状態は通知ごとに再取得します。1 shardあたり毎分2件のため、滞留アラームが続く場合はdue indexの最古時刻と件数、破損候補、送信先の制限を調査してください。
 
 ## Due / overdue scan
 

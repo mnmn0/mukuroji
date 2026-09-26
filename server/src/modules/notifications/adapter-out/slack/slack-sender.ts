@@ -10,7 +10,7 @@ import type { SlackDelivery, SlackSendResult } from '../../application/slack-del
 export function slackNotificationSecretId(workspaceId: string, memberKey: string): string {
   const workspaceHash = createHash('sha256').update(workspaceId.trim()).digest('hex')
   const memberHash = createHash('sha256').update(memberKey.trim().toLowerCase()).digest('hex')
-  return `mukuroji/automation-webhooks/${workspaceHash}/slack-${memberHash}`
+  return `mukuroji/automation-webhooks/${workspaceHash}/slack/${memberHash}`
 }
 
 /** HTTP boundary used by the fixed-host Slack transport. */

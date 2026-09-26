@@ -30,6 +30,7 @@ export { slackDeliveryShard } from './domain/slack-delivery'
 export { deliverDueSlackNotifications } from './application/slack-delivery'
 export { DynamoDbSlackDeliveryStore } from './adapter-out/dynamodb/slack-delivery-store'
 export { createSlackNotificationSender } from './adapter-out/slack/slack-sender'
+export { createSlackDeliveryTelemetry } from './adapter-out/slack/slack-delivery-telemetry'
 export {
   createNotificationScheduleHandler,
   parsePlanningUpdateTargetScheduleProjection,

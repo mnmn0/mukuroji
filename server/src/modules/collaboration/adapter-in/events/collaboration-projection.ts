@@ -1826,18 +1826,46 @@ async function isEligibleRecipient(
   return currentSystemAdmin
 }
 
+/** Short-lived authorization snapshots shared only within one delivery invocation. */
+export type NotificationDeliveryAuthorizationCache = {
+  /** Refresh boundary; cached lookups are reused only within a five-second window. */
+  expiresAt: number
+  /** Current directory snapshots, keyed by workspace. */
+  directories: Map<string, Promise<ProjectDirectoryItem[]>>
+  /** Current system administrator lookups, keyed by username. */
+  systemAdmins: Map<string, Promise<boolean>>
+  /** Current enterprise snapshots, keyed by workspace. */
+  enterpriseSnapshots: Map<string, Promise<EnterpriseIdentitySnapshot>>
+}
+
+/**
+ * Creates an invocation-local cache; no authorization result survives a worker invocation.
+ * @returns Empty bounded-lifetime caches.
+ */
+export function createNotificationDeliveryAuthorizationCache(): NotificationDeliveryAuthorizationCache {
+  return { expiresAt: 0, directories: new Map(), systemAdmins: new Map(), enterpriseSnapshots: new Map() }
+}
+
 /**
  * Rechecks source scope and current recipient access immediately before external delivery.
  * @param event - Stored notification source and scope.
  * @param memberKey - Canonical recipient member key.
  * @param enterpriseIdentity - Authoritative enterprise identity reader.
+ * @param cache - Invocation-local, short-lived snapshots; canonical source/member reads are never cached.
  * @returns Whether the notification's recipient still has access.
  */
 export async function authorizeNotificationDelivery(
   event: AuditProjectionEvent,
   memberKey: string,
   enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>,
+  cache: NotificationDeliveryAuthorizationCache = createNotificationDeliveryAuthorizationCache(),
 ): Promise<boolean> {
+  if (cache.expiresAt <= Date.now()) {
+    cache.directories.clear()
+    cache.systemAdmins.clear()
+    cache.enterpriseSnapshots.clear()
+    cache.expiresAt = Date.now() + 5_000
+  }
   const currentScope = await readCurrentWorkItemScope(event)
   if (!currentScope.exists) return false
   const scoped = refreshScheduledNotificationEvent(
@@ -1852,10 +1880,18 @@ export async function authorizeNotificationDelivery(
     : scoped
   const refreshed = refreshPlanningScheduledNotificationEvent(current, planningScope)
   if (!refreshed) return false
+  let directory: ProjectDirectoryItem[] = []
+  if (refreshed.projectId || refreshed.teamId) {
+    let snapshot = cache.directories.get(event.workspaceId)
+    if (!snapshot) {
+      snapshot = readProjectDirectory(event.workspaceId)
+      cache.directories.set(event.workspaceId, snapshot)
+    }
+    directory = await snapshot
+  }
   return isEligibleRecipient(
-    refreshed, memberKey,
-    refreshed.projectId || refreshed.teamId ? await readProjectDirectory(event.workspaceId) : [],
-    new Map(), enterpriseIdentity, new Map(),
+    refreshed, memberKey, directory,
+    cache.systemAdmins, enterpriseIdentity, cache.enterpriseSnapshots,
   )
 }
 

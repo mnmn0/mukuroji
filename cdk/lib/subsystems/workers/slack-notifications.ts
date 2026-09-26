@@ -5,6 +5,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as destinations from 'aws-cdk-lib/aws-lambda-destinations';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
@@ -29,6 +30,9 @@ export function buildSlackNotificationWorker(scope: cdk.Stack, input: ScheduleWo
     depsLockFilePath: input.lambdaBuildPaths.depsLockFilePath,
     projectRoot: input.lambdaBuildPaths.projectRoot,
     timeout: cdk.Duration.minutes(5), memorySize: 512,
+    logGroup: new logs.LogGroup(scope, 'SlackNotificationLogGroup', {
+      retention: logs.RetentionDays.THREE_MONTHS, removalPolicy: cdk.RemovalPolicy.RETAIN,
+    }),
     description: 'Delivers opted-in Inbox notifications to recipient-bound Slack destinations.',
     onFailure: new destinations.SqsDestination(dlq), retryAttempts: 0,
     bundling: { bundleAwsSDK: true, minify: true, sourceMap: true, target: 'node22' },
@@ -58,7 +62,7 @@ export function buildSlackNotificationWorker(scope: cdk.Stack, input: ScheduleWo
   worker.addToRolePolicy(new iam.PolicyStatement({ actions: ['cognito-idp:AdminListGroupsForUser'], resources: [parameters.cognitoUserPoolArn] }));
   worker.addToRolePolicy(new iam.PolicyStatement({
     actions: ['secretsmanager:GetSecretValue'],
-    resources: [scope.formatArn({ service: 'secretsmanager', resource: 'secret', resourceName: 'mukuroji/automation-webhooks/*/slack-*', arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })],
+    resources: [scope.formatArn({ service: 'secretsmanager', resource: 'secret', resourceName: 'mukuroji/automation-webhooks/*/slack/*', arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })],
   }));
   new events.Rule(scope, 'SlackNotificationSchedule', {
     schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
@@ -75,6 +79,16 @@ export function buildSlackNotificationWorker(scope: cdk.Stack, input: ScheduleWo
     alarmDescription: 'Slack notification worker failures, including delivery destination failures.',
     metric: worker.metricErrors({ period: cdk.Duration.minutes(5) }),
     threshold: 1, evaluationPeriods: 1,
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  new cloudwatch.Alarm(scope, 'SlackNotificationBacklogAlarm', {
+    alarmDescription: 'Slack notifications have remained overdue by at least 15 minutes for three consecutive runs; inspect queue capacity and delivery failures.',
+    metric: new cloudwatch.Metric({
+      namespace: 'Mukuroji/Notifications', metricName: 'OldestDueAgeSeconds',
+      dimensionsMap: { Channel: 'Slack' }, statistic: 'Maximum', period: cdk.Duration.minutes(1),
+    }),
+    threshold: 900, evaluationPeriods: 3, datapointsToAlarm: 3,
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });

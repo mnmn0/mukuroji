@@ -19,6 +19,7 @@ describe('Slack transport', () => {
     expect(slackNotificationSecretId('workspace-1', 'a')).not.toBe(slackNotificationSecretId('workspace-2', 'a'))
     expect(slackNotificationSecretId('workspace-1', 'a')).not.toBe(slackNotificationSecretId('workspace-1', 'b'))
     expect(slackNotificationSecretId('workspace-1', 'a')).not.toContain('workspace-1')
+    expect(slackNotificationSecretId('workspace-1', 'a').split('/').slice(-2, -1)).toEqual(['slack'])
   })
   test('sends bounded plain-text notification contents and validates the acknowledgement', async () => {
     secretSpy.mockResolvedValue(url)

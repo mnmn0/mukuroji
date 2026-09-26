@@ -34,7 +34,7 @@ function fixture(item: Record<string, unknown> = row) {
 describe('Slack DynamoDB delivery queue', () => {
   test('rechecks canonical rows strongly and supports Slack without Inbox', async () => {
     const f = fixture()
-    const [delivery] = await f.store.listDue(shard, now, 2)
+    const { deliveries: [delivery] } = await f.store.listDue(shard, now, 2)
     expect(delivery?.notification.eventId).toBe('event-1')
     const query = f.commands[0]
     const get = f.commands[1]
@@ -42,14 +42,16 @@ describe('Slack DynamoDB delivery queue', () => {
     expect(get?.input).toMatchObject({ ConsistentRead: true })
   })
   test('skips removed or leased index candidates and rejects corrupt tenant identity', async () => {
-    expect(await fixture({ ...row, slackQueueShard: undefined }).store.listDue(shard, now, 2)).toEqual([])
-    expect(await fixture({ ...row, slackNextAttemptAt: '2026-09-26T13:00:00.000Z' }).store.listDue(shard, now, 2)).toEqual([])
-    await expect(fixture({ ...row, workspaceId: 'other-workspace' }).store.listDue(shard, now, 2)).rejects.toThrow('Invalid Slack')
-    await expect(fixture({ ...row, slackAttempts: -1 }).store.listDue(shard, now, 2)).rejects.toThrow('Invalid Slack')
+    expect(await fixture({ ...row, slackQueueShard: undefined }).store.listDue(shard, now, 2)).toEqual({ deliveries: [], invalidCount: 0 })
+    expect(await fixture({ ...row, slackNextAttemptAt: '2026-09-26T13:00:00.000Z' }).store.listDue(shard, now, 2)).toEqual({ deliveries: [], invalidCount: 0 })
+    expect(await fixture({ ...row, workspaceId: 'other-workspace' }).store.listDue(shard, now, 2)).toEqual({ deliveries: [], invalidCount: 1 })
+    expect(await fixture({ ...row, slackAttempts: -1 }).store.listDue(shard, now, 2)).toEqual({ deliveries: [], invalidCount: 1 })
+    expect(await fixture({ ...row, slackDeliveryStatus: 'failed' }).store.listDue(shard, now, 2)).toEqual({ deliveries: [], invalidCount: 1 })
+    expect(await fixture({ ...row, slackDeliveryStatus: 'failed', slackQueueShard: shard.replace('slack#', 'slack-failed#') }).store.listDue(shard, now, 2)).toEqual({ deliveries: [], invalidCount: 0 })
   })
   test('fences claim, renewal and acknowledgement while preserving concurrent Inbox fields', async () => {
     const f = fixture()
-    const [delivery] = await f.store.listDue(shard, now, 2)
+    const { deliveries: [delivery] } = await f.store.listDue(shard, now, 2)
     if (!delivery) throw new Error('Expected delivery')
     await f.store.claim(delivery, 'token-1', new Date(now.getTime() + 60_000))
     await f.store.renew(delivery, 'token-1', now)
@@ -68,14 +70,47 @@ describe('Slack DynamoDB delivery queue', () => {
   })
   test('lost claims return false and quiet-hour deferrals do not consume send attempts', async () => {
     const f = fixture()
-    const [delivery] = await f.store.listDue(shard, now, 2)
+    const { deliveries: [delivery] } = await f.store.listDue(shard, now, 2)
     if (!delivery) throw new Error('Expected delivery')
     const competing = new DynamoDbSlackDeliveryStore({ async send() {
       const error = new Error('Conflict'); error.name = 'ConditionalCheckFailedException'; throw error
     } }, 'notifications')
     expect(await competing.claim(delivery, 'token', now)).toBe(false)
     expect(await competing.renew(delivery, 'token', now)).toBe(false)
+    await competing.release(delivery, 'token', now)
     await f.store.finish(delivery, 'token', 'pending', new Date(now.getTime() + 60_000))
     expect(f.commands.at(-1)?.input).toMatchObject({ ExpressionAttributeValues: { ':minusOne': -1 } })
+  })
+  test('pages past a corrupt canonical row and reports it without discarding valid deliveries', async () => {
+    const cursor = { recipientKey, notificationKey: 'corrupt' }
+    let queries = 0
+    const store = new DynamoDbSlackDeliveryStore({ async send(command) {
+      if (command instanceof QueryCommand) {
+        queries += 1
+        if (queries === 1) return { Items: [cursor], LastEvaluatedKey: cursor }
+        expect(command.input.ExclusiveStartKey).toEqual(cursor)
+        return { Items: [row] }
+      }
+      if (command instanceof GetCommand) return {
+        Item: command.input.Key?.notificationKey === 'corrupt' ? { ...row, workspaceId: 'wrong' } : row,
+      }
+      return {}
+    } }, 'notifications')
+    const batch = await store.listDue(shard, now, 2)
+    expect(queries).toBe(2)
+    expect(batch.invalidCount).toBe(1)
+    expect(batch.deliveries.map((item) => item.notification.eventId)).toEqual(['event-1'])
+  })
+  test('failed deliveries remain queryable using safe failure coordinates', async () => {
+    const f = fixture()
+    const { deliveries: [delivery] } = await f.store.listDue(shard, now, 2)
+    if (!delivery) throw new Error('Expected delivery')
+    await f.store.finish(delivery, 'random-reference', 'failed', undefined, 'SlackDeliveryRejected')
+    expect(f.commands.at(-1)?.input).toMatchObject({
+      ExpressionAttributeValues: { ':failedShard': shard.replace('slack#', 'slack-failed#'), ':next': row.slackNextAttemptAt },
+    })
+    const update = f.commands.at(-1)
+    if (!(update instanceof UpdateCommand)) throw new Error('Expected update')
+    expect(update.input.UpdateExpression).toContain('slackFailureReference = :token')
   })
 })

@@ -199,7 +199,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   // The multi-tenant sender reads only server-derived, recipient-hashed Slack destinations.
   // The trailing wildcard also covers the Secrets Manager ARN's generated suffix.
   [
-    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack-*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
     ['SlackNotificationFunction/ServiceRole/DefaultPolicy/Resource'],
   ],
   [
@@ -409,7 +409,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<RequestIntakeTable608708D4.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-inbound-webhooks/*]',
-    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack-*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',

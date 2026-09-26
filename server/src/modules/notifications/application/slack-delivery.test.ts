@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { deliverDueSlackNotifications, type SlackDelivery, type SlackDeliveryDependencies, type SlackSendResult } from './slack-delivery'
+import { deliverDueSlackNotifications, type SlackDelivery, type SlackDeliveryDependencies, type SlackDeliveryFailure, type SlackSendResult } from './slack-delivery'
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '../notifications'
 
 /** Creates an isolated queue fixture with a controllable Slack outcome. */
@@ -14,15 +14,23 @@ function fixture(result: SlackSendResult = { succeeded: true, retryable: false }
   }
   const finishes: Array<{ status: string; next?: Date; code?: string }> = []
   let sends = 0
+  let releases = 0
+  const failures: SlackDeliveryFailure[] = []
+  const health: Array<[number, number]> = []
   let pending = true
   const dependencies: SlackDeliveryDependencies = {
+    telemetry: {
+      reportFailure: (failure) => { failures.push(failure) },
+      reportQueueHealth: (age, invalid) => { health.push([age, invalid]) },
+    },
     now: () => now, createToken: () => 'lease-1',
     isAuthorized: async () => true,
     send: async () => { sends += 1; return result },
     store: {
-      listDue: async (shard) => shard === 'slack#0' && pending ? [delivery] : [],
+      listDue: async (shard) => ({ deliveries: shard === 'slack#0' && pending ? [delivery] : [], invalidCount: 0 }),
       claim: async () => true,
       renew: async () => true,
+      release: async () => { releases += 1 },
       getPreferences: async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
         channels: { inApp: false, email: false, push: false, slack: true } }),
       finish: async (_delivery, _token, status, next, code) => {
@@ -30,7 +38,7 @@ function fixture(result: SlackSendResult = { succeeded: true, retryable: false }
       },
     },
   }
-  return { delivery, dependencies, finishes, sends: () => sends, now }
+  return { delivery, dependencies, finishes, sends: () => sends, releases: () => releases, failures, health, now }
 }
 
 describe('Slack notification delivery application', () => {
@@ -82,6 +90,9 @@ describe('Slack notification delivery application', () => {
       exhausted.delivery.attempts = 4
       await expect(deliverDueSlackNotifications(exhausted.dependencies)).rejects.toThrow('requires attention')
       expect(exhausted.finishes[0]?.status).toBe('failed')
+      expect(exhausted.failures[0]?.reference).toBe('lease-1')
+      expect(exhausted.failures[0]?.shard).toStartWith('slack-failed#')
+      expect(JSON.stringify(exhausted.failures)).not.toContain('member@example.test')
     }
   })
   test('authorization failures fail closed and keep bounded retry work', async () => {
@@ -102,9 +113,27 @@ describe('Slack notification delivery application', () => {
     const f = fixture()
     f.dependencies.store.listDue = async (shard) => {
       if (shard === 'slack#1') throw new Error('Unavailable shard')
-      return shard === 'slack#2' ? [f.delivery] : []
+      return { deliveries: shard === 'slack#2' ? [f.delivery] : [], invalidCount: 0 }
     }
     await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
     expect(f.sends()).toBe(1)
+  })
+  test('releases repeated unsent Inbox conflicts without exhausting delivery attempts', async () => {
+    const f = fixture()
+    f.dependencies.store.renew = async () => false
+    for (let i = 0; i < 6; i += 1) await deliverDueSlackNotifications(f.dependencies)
+    expect(f.releases()).toBe(6)
+    expect(f.sends()).toBe(0)
+    expect(f.failures).toEqual([])
+  })
+  test('reports overdue age and corruption while still delivering valid candidates', async () => {
+    const f = fixture()
+    f.delivery.scheduledAt = '2026-09-26T11:30:00.000Z'
+    f.dependencies.store.listDue = async (shard) => ({
+      deliveries: shard === 'slack#0' ? [f.delivery] : [], invalidCount: shard === 'slack#0' ? 1 : 0,
+    })
+    await expect(deliverDueSlackNotifications(f.dependencies)).rejects.toThrow('requires attention')
+    expect(f.sends()).toBe(1)
+    expect(f.health).toEqual([[1_800, 1]])
   })
 })

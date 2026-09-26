@@ -33,10 +33,21 @@ test('Slack notifications use the sparse due queue with bounded execution and re
   expect(slackPolicies).toHaveLength(1);
   const serialized = JSON.stringify(slackPolicies);
   expect(serialized).toContain('secretsmanager:GetSecretValue');
-  expect(serialized).toContain('mukuroji/automation-webhooks/*/slack-*');
+  expect(serialized).toContain('mukuroji/automation-webhooks/*/slack/*');
   expect(serialized).toContain('/index/SlackDeliveryIndex');
   expect(serialized).not.toContain('secretsmanager:PutSecretValue');
   expect(serialized).not.toContain('dynamodb:Scan');
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'Mukuroji/Notifications', MetricName: 'OldestDueAgeSeconds',
+    Dimensions: [{ Name: 'Channel', Value: 'Slack' }],
+    Threshold: 900, EvaluationPeriods: 3, DatapointsToAlarm: 3,
+  });
+  const slackLogs = Object.entries(template.findResources('AWS::Logs::LogGroup'))
+    .filter(([id]) => id.startsWith('SlackNotificationLogGroup'));
+  expect(slackLogs).toHaveLength(1);
+  expect(slackLogs[0]?.[1]).toMatchObject({
+    Properties: { RetentionInDays: 90 }, DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain',
+  });
 });
 
 test('enterprise identity CONTROL stream runs bounded asynchronous maintenance', () => {

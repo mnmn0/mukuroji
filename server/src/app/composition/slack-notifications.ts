@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { GetSecretValueCommand } from '@aws-sdk/client-secrets-manager'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
-import { authorizeNotificationDelivery } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
+import { authorizeNotificationDelivery, createNotificationDeliveryAuthorizationCache } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
-import { createSlackNotificationSender, deliverDueSlackNotifications, DynamoDbSlackDeliveryStore } from '../../modules/notifications'
+import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications, DynamoDbSlackDeliveryStore } from '../../modules/notifications'
 import { createProductionTenantAvailability } from './tenant-administration'
 
 /**
@@ -25,18 +25,21 @@ export function createProductionSlackNotificationHandler() {
     })
     return response.SecretString
   })
-  return () => deliverDueSlackNotifications({
-    store, send, createToken: randomUUID, now: () => new Date(),
-    async isAuthorized(delivery) {
-      if (!await tenant.isActive(delivery.workspaceId)) return false
-      const notification = delivery.notification
-      return authorizeNotificationDelivery({
-        ...notification,
-        workspaceId: delivery.workspaceId,
-        notificationCandidates: notification.reasons.map((reason) => ({ memberKey: delivery.memberKey, reason })),
-        dueDate: delivery.dueDate,
-        outboxStatus: 'pending',
-      }, delivery.memberKey, enterpriseIdentity)
-    },
-  })
+  return () => {
+    const authorizationCache = createNotificationDeliveryAuthorizationCache()
+    return deliverDueSlackNotifications({
+      store, send, telemetry: createSlackDeliveryTelemetry(), createToken: randomUUID, now: () => new Date(),
+      async isAuthorized(delivery) {
+        if (!await tenant.isActive(delivery.workspaceId)) return false
+        const notification = delivery.notification
+        return authorizeNotificationDelivery({
+          ...notification,
+          workspaceId: delivery.workspaceId,
+          notificationCandidates: notification.reasons.map((reason) => ({ memberKey: delivery.memberKey, reason })),
+          dueDate: delivery.dueDate,
+          outboxStatus: 'pending',
+        }, delivery.memberKey, enterpriseIdentity, authorizationCache)
+      },
+    })
+  }
 }
