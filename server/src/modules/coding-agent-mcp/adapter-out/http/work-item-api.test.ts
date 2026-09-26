@@ -76,6 +76,14 @@ test('carries configured Project and assignee fences on comment requests', async
   await api.comment('task', 'Progress', 'key', 'project', 'agent')
 })
 
+test('requests the catalog with the configured Project fence', async () => {
+  const api = createAgentWorkItemApi(config, async (url) => {
+    expect(url.searchParams.get('assignedProjectId')).toBe('project')
+    return Response.json({ teamId: 'team', configurationRevision: 1, workItemTypes: [] })
+  })
+  await api.catalog('project')
+})
+
 test('restarts oversized queue scans with smaller cursor-bound pages and preserves complete status and selection', async () => {
   const rows = Array.from({ length: 71 }, (_, index) => ({ ...validTask, id: String(index),
     description: index < 50 ? '' : '\u0001'.repeat(100_000),

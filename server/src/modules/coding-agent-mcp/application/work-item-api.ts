@@ -58,7 +58,7 @@ export type AgentTaskFilters = {
 /** Remote canonical task operations; every request authenticates with a scoped credential. */
 export interface AgentWorkItemApi {
   /** Returns current Team configuration. */
-  catalog(): Promise<AgentCatalog>
+  catalog(assignedProjectId?: string): Promise<AgentCatalog>
   /** Returns one authorized task in the configured Team. */
   get(id: string): Promise<AgentTask>
   /** Returns one page without discarding an upstream continuation. */

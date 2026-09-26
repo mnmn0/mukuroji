@@ -42,6 +42,13 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 
 Credential の scope は作成後に変更しない。権限を変える場合は、新しい credential を最小 scope で作成し、利用側を移行してから旧 credential を revoke する。
 
+## Work Item Type catalog
+
+`GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。
+任意query `assignedProjectId` を指定すると、そのProjectへの閲覧権限を確認し、
+全Project共通のfieldと指定Projectに適用されるfieldだけを返します。
+この追加制約は管理者にも適用し、他Projectだけのfield名・選択肢・既定値・必須条件は返しません。
+
 ## Cursor pagination
 
 ### Work Item comments

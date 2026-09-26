@@ -160,8 +160,8 @@ export function createAgentWorkItemApi(
 
   return {
     /** Reads and validates the current Team catalog. */
-    async catalog() {
-      const catalog = await request('work-item-types', catalogSchema)
+    async catalog(assignedProjectId) {
+      const catalog = await request('work-item-types', catalogSchema, 'GET', undefined, undefined, { assignedProjectId })
       if (catalog.teamId !== config.teamId) throw new AgentTaskError('invalid_response', 'The API returned a mismatched catalog scope.')
       return catalog
     },

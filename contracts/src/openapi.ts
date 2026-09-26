@@ -1493,6 +1493,11 @@ const paths = {
         required: true,
         schema: { type: 'string' },
         description: 'schema を取得する Team ID です。',
+      }, {
+        name: 'assignedProjectId',
+        in: 'query',
+        schema: { type: 'string', minLength: 1, maxLength: 256 },
+        description: 'Optional authorized Project restriction for custom-field definitions, options, defaults, and requirements.',
       }],
       responses: {
         '200': jsonResponse('Work Item Type 作成 schema です。', schemaRef('PublicWorkItemTypeCatalog')),

@@ -388,6 +388,22 @@ test('lists active Work Item Type creation schemas without exposing formula expr
     ],
   })
   expect(catalog.workItemTypes[1]?.customFields[1]).not.toHaveProperty('formulaExpression')
+
+  configuration.customFields[0].projectIds = ['refero', 'outside']
+  configuration.customFields.push({
+    id: 'foreign', name: 'Foreign secret field', type: 'select', required: true, sortOrder: 30,
+    projectIds: ['outside'], defaultValue: 'private', options: [{ id: 'private', name: 'Private option', sortOrder: 0 }],
+  })
+  configuration.workItemTypes[0].customFieldIds.push('foreign')
+  const unrestricted = await runWithTestAppDependencies(() => service.listWorkItemTypes(credential, 'core-team'))
+  expect(unrestricted.workItemTypes[1]?.customFields.map((field) => field.id)).toContain('foreign')
+  const scoped = await runWithTestAppDependencies(() => service.listWorkItemTypes(credential, 'core-team', 'refero'))
+  expect(scoped.workItemTypes[1]?.customFields.map((field) => field.id)).toEqual(['severity', 'calculated'])
+  expect(scoped.workItemTypes[1]?.customFields[0]).toMatchObject({ required: true, projectIds: ['refero'], options: [{ id: 'high', name: 'High', sortOrder: 0 }] })
+  expect(JSON.stringify(scoped)).not.toContain('Foreign secret field')
+  expect(JSON.stringify(scoped)).not.toContain('Private option')
+  configureFakeProjectClients(true, { workspaceRole: 'owner' })
+  await expect(runWithTestAppDependencies(() => service.listWorkItemTypes(credential, 'core-team', 'outside'))).rejects.toMatchObject({ status: 403 })
 })
 
 test('projects every Public Work Item service result onto the closed response schema', async () => {

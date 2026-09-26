@@ -6708,6 +6708,16 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "Optional authorized Project restriction for custom-field definitions, options, defaults, and requirements.",
+            "in": "query",
+            "name": "assignedProjectId",
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
           }
         ],
         "responses": {

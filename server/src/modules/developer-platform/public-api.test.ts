@@ -436,6 +436,7 @@ describe('public API router', () => {
 
   test('exposes the authorized Work Item Type creation schema', async () => {
     let requestedTeamId: string | undefined
+    let requestedProjectId: string | undefined
     const catalog = {
       teamId: 'team-1',
       configurationRevision: 7,
@@ -466,8 +467,9 @@ describe('public API router', () => {
     } satisfies PublicWorkItemTypeCatalog
     const { platform, router } = createTestRouter({
       workItems: createDefaultWorkItemService({
-        async listWorkItemTypes(_credential, teamId) {
+        async listWorkItemTypes(_credential, teamId, projectId) {
           requestedTeamId = teamId
+          requestedProjectId = projectId
           return catalog
         },
       }),
@@ -475,13 +477,14 @@ describe('public API router', () => {
     const apiKey = await createApiKey(platform, ['work-items:read'])
 
     const response = await router.request(
-      'http://localhost/v1/work-item-types?teamId=team-1',
+      'http://localhost/v1/work-item-types?teamId=team-1&assignedProjectId=project-1',
       { headers: { Authorization: `Bearer ${apiKey.secret}` } },
     )
 
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual(catalog)
     expect(requestedTeamId).toBe('team-1')
+    expect(requestedProjectId).toBe('project-1')
   })
 
   test('exposes a public Work Item Type change preview', async () => {

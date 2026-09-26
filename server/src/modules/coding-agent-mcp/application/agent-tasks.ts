@@ -120,7 +120,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
     // A stale revision is forwarded unchanged so the API can replay a successful receipt.
     // Without that exact receipt the canonical CAS rejects it, including concurrent starts.
     if (task.revision === expectedRevision) {
-      const catalog = await api.catalog()
+      const catalog = await api.catalog(scope.assignedProjectId)
       const type = catalog.workItemTypes.find((item) => item.id === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID))
       const target = type?.workflow.statuses.find((status) => status.id === workflowStatusId)
       const categories: Record<AgentTransition, WorkflowStatusCategory[]> = {
@@ -146,7 +146,7 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
 
   return {
     /** Returns configured ownership and current workflow/field requirements. */
-    async configuration() { return { ...scope, catalog: await api.catalog() } },
+    async configuration() { return { ...scope, catalog: await api.catalog(scope.assignedProjectId) } },
     /** Returns one page, preserving continuation even when no items are returned. */
     async list(input: AgentTaskFilters, cursor?: string, limit?: number) {
       const page = await api.list(filters(input), cursor, limit)

@@ -54,7 +54,7 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 
 | ツール | 用途 |
 | --- | --- |
-| `get_configuration` | 接続先Team・担当者、利用可能なType、status ID、必須custom fieldを確認 |
+| `get_configuration` | 接続先Team・担当者、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
 | `get_task` | タスク本文・revision・現在状態と、未解決blockerの件数を取得 |
 | `get_next_task` | 設定された担当者の作業中タスクを優先表示し、未着手なら次の候補を選択 |

@@ -42004,18 +42004,19 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       )).detail.issue)
     },
 
-    async listWorkItemTypes(credential, teamId) {
+    async listWorkItemTypes(credential, teamId, assignedProjectId) {
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.read',
         teamId,
         evaluateProjectScopes: true,
       })
       const permission = await requireTeamPermission(principal, teamId, 'viewer')
+      requireAssignedProjectPermission(principal, permission, assignedProjectId, 'viewer')
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
         teamId,
       )
-      const accessibleProjectIds = principal.isSystemAdmin
+      const accessibleProjectIds = assignedProjectId !== undefined ? new Set([assignedProjectId]) : principal.isSystemAdmin
         ? undefined
         : new Set(
             (permission.projectAccesses ?? [])

@@ -170,6 +170,7 @@ export interface PublicWorkItemService {
   listWorkItemTypes(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
+    assignedProjectId?: string,
   ): Promise<PublicWorkItemTypeCatalog>
   /**
    * Calculates the impact of a Work Item Type change after current authorization and revision checks.
@@ -611,6 +612,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     return c.json(await dependencies.workItems.listWorkItemTypes(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId'),
     ))
   })
 

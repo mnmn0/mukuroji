@@ -132,6 +132,7 @@ describe('agent task lifecycle', () => {
     expect(await service.update('one', { expectedRevision: 1, title: 'New' }, 'edit')).toMatchObject({ revision: 2 })
     expect(await service.update('one', { expectedRevision: 1, title: 'New' }, 'edit')).toMatchObject({ revision: 2 })
     const { api } = fixture([task('one', { assignedProjectId: 'project' })], {
+      async catalog(project) { expect(project).toBe('project'); return catalog },
       async comments(_id, _cursor, _limit, project) {
         expect(project).toBe('project')
         return { items: [], hasMore: false }
@@ -143,6 +144,8 @@ describe('agent task lifecycle', () => {
       },
     })
     const scoped = createAgentTasks(api, { agentName: 'test', assigneeUserId: 'agent-member', assignedProjectId: 'project' })
+    await scoped.configuration()
+    await scoped.transition('one', 1, 'coding', 'start', 'claim')
     await scoped.comments('one')
     await scoped.report('one', 'Progress', 'note')
   })
