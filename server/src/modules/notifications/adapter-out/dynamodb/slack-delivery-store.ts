@@ -77,10 +77,14 @@ export class DynamoDbSlackDeliveryStore implements SlackDeliveryStore {
     try {
       await this.#client.send(new UpdateCommand({
         TableName: this.#tableName, Key: key(delivery),
-        ConditionExpression: 'slackLeaseToken = :token AND slackNextAttemptAt > :now',
+        ConditionExpression: 'slackLeaseToken = :token AND slackNextAttemptAt > :now AND #version = :claimedVersion',
         UpdateExpression: 'SET slackNextAttemptAt = :lease ADD #version :one',
         ExpressionAttributeNames: { '#version': 'version' },
-        ExpressionAttributeValues: { ':token': token, ':now': now.toISOString(), ':lease': new Date(now.getTime() + 60_000).toISOString(), ':one': 1 },
+        ExpressionAttributeValues: {
+          ':token': token, ':now': now.toISOString(),
+          ':lease': new Date(now.getTime() + 60_000).toISOString(),
+          ':claimedVersion': delivery.version + 1, ':one': 1,
+        },
       }))
       return true
     } catch (error) {

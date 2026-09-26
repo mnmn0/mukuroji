@@ -57,6 +57,8 @@ describe('Slack DynamoDB delivery queue', () => {
     const updates = f.commands.filter((command): command is UpdateCommand => command instanceof UpdateCommand)
     expect(updates[0]?.input.ConditionExpression).toContain('#version = :version')
     expect(updates[1]?.input.ConditionExpression).toContain('slackNextAttemptAt > :now')
+    expect(updates[1]?.input.ConditionExpression).toContain('#version = :claimedVersion')
+    expect(updates[1]?.input.ExpressionAttributeValues?.[':claimedVersion']).toBe(delivery.version + 1)
     expect(updates[2]?.input.ConditionExpression).toBe('slackLeaseToken = :token')
     expect(updates[2]?.input.UpdateExpression).toContain('slackQueueShard, slackNextAttemptAt')
     for (const update of updates) {
