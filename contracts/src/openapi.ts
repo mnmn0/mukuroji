@@ -614,6 +614,33 @@ const components = {
         },
       },
     },
+    PublicWorkItemComment: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id', 'actorUserId', 'body', 'createdAt'],
+      properties: {
+        id: { type: 'string' },
+        actorUserId: { type: 'string' },
+        body: { type: 'string' },
+        createdAt: { type: 'string', format: 'date-time' },
+      },
+    },
+    CreatePublicWorkItemCommentRequest: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['body'],
+      properties: { body: { type: 'string', minLength: 1, maxLength: 4096 } },
+    },
+    PublicWorkItemCommentPage: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['items', 'hasMore'],
+      properties: {
+        items: { type: 'array', items: schemaRef('PublicWorkItemComment') },
+        hasMore: { type: 'boolean' },
+        nextCursor: { type: 'string' },
+      },
+    },
     PublicWorkItemTypeCatalog: {
       type: 'object',
       additionalProperties: false,
@@ -1415,6 +1442,44 @@ const paths = {
       },
     },
   },
+  '/api/v1/work-items/{workItemId}/comments': {
+    get: {
+      operationId: 'listPublicWorkItemComments',
+      tags: ['Work Items'],
+      summary: 'Read canonical comments and replies, excluding deleted comments',
+      security: publicApiSecurity('work-items:read'),
+      parameters: [
+        idPathParameter('workItemId', 'Work Item ID'),
+        { name: 'teamId', in: 'query', required: true, schema: { type: 'string' } },
+        { name: 'assignedProjectId', in: 'query', description: 'Optional Project fence checked before and after reading comments.', schema: { type: 'string', minLength: 1, maxLength: 256 } },
+        ...publicCursorParameters,
+      ],
+      responses: {
+        '200': jsonResponse('Canonical discussion page', schemaRef('PublicWorkItemCommentPage')),
+        ...notFoundResponse,
+        ...problemResponses,
+      },
+    },
+    post: {
+      operationId: 'createPublicWorkItemComment',
+      tags: ['Work Items'],
+      summary: 'Add an idempotent progress note to the canonical discussion',
+      security: publicApiSecurity('work-items:write'),
+      parameters: [
+        idPathParameter('workItemId', 'Work Item ID'),
+        { name: 'teamId', in: 'query', required: true, schema: { type: 'string' } },
+        { name: 'assignedProjectId', in: 'query', description: 'Optional Project fence enforced by the comment transaction and receipt replay authorization.', schema: { type: 'string', minLength: 1, maxLength: 256 } },
+        { name: 'assigneeUserId', in: 'query', description: 'Optional assignee fence enforced by the comment transaction and receipt replay authorization.', schema: { type: 'string', minLength: 1, maxLength: 256 } },
+        ...idempotencyParameters,
+      ],
+      requestBody: jsonRequestBody('CreatePublicWorkItemCommentRequest'),
+      responses: {
+        '201': jsonResponse('Created comment', schemaRef('PublicWorkItemComment'), true),
+        ...notFoundResponse,
+        ...problemResponses,
+      },
+    },
+  },
   '/api/v1/work-item-types': {
     get: {
       operationId: 'listPublicWorkItemTypes',
@@ -1428,6 +1493,11 @@ const paths = {
         required: true,
         schema: { type: 'string' },
         description: 'schema を取得する Team ID です。',
+      }, {
+        name: 'assignedProjectId',
+        in: 'query',
+        schema: { type: 'string', minLength: 1, maxLength: 256 },
+        description: 'Optional authorized Project restriction for custom-field definitions, options, defaults, and requirements.',
       }],
       responses: {
         '200': jsonResponse('Work Item Type 作成 schema です。', schemaRef('PublicWorkItemTypeCatalog')),

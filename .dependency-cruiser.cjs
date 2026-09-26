@@ -5,6 +5,7 @@ const serverModules = [
   'authentication',
   'automation',
   'collaboration',
+  'coding-agent-mcp',
   'data-integrity',
   'developer-platform',
   'directory',
