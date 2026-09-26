@@ -17,7 +17,9 @@ import {
   S3Client,
   type Tag,
 } from '@aws-sdk/client-s3'
-import type { EnterpriseIdentitySnapshot } from '@mukuroji/contracts'
+import type { EnterpriseIdentitySnapshot, EnterprisePermissionId, TriageEntry } from '@mukuroji/contracts'
+import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
+import { TriageError } from '../../../triage'
 import { isCanonicalWorkItemRecord } from '../../../work-items'
 import {
   evaluateEnterpriseAccess,
@@ -37,10 +39,16 @@ import {
   createNotificationDeliveryPlan,
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
+  slackDeliveryShard,
+  isDocumentDeliveryVisible,
+  resolveDocumentDeliveryAccess,
+  resolveNotificationRecipientBoundary,
+  requiresCurrentWorkItemAssignee,
+  isSlackNotificationEligible,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
 } from '../../../notifications'
-import { isMissingFileObjectVersionError } from '../../../files'
+import { isMissingFileObjectVersionError, type ApprovalNotificationReader } from '../../../files'
 import type {
   BatchItemFailure,
   BatchResponse,
@@ -265,7 +273,7 @@ export type NotificationProjectionDeliveryState = {
   /** In-app 無効時に保存する archive timestamp です。 */
   archivedAt?: string
   /** 有効な delivery channel 一覧です。 */
-  deliveryChannels: Array<'inApp' | 'email' | 'push'>
+  deliveryChannels: Array<'inApp' | 'email' | 'push' | 'slack'>
   /** Digest/quiet hours を反映した最短 delivery 時刻です。 */
   deliveryAfter: string
   /** Delivery plan の frequency です。 */
@@ -1298,7 +1306,7 @@ export function createNotificationProjectionDeliveryState(
     inboxState,
     recipientStatusKey: `${recipientKey}#${inboxState}`,
     ...(inboxState === 'archived' ? { archivedAt: occurredAt } : {}),
-    deliveryChannels: deliveryPlan.channels,
+    deliveryChannels: deliveryPlan.channels.filter((channel) => channel !== 'slack' || isSlackNotificationEligible(preferences, occurredAt)),
     deliveryAfter: deliveryPlan.deliveryAfter,
     deliveryFrequency: deliveryPlan.frequency,
   }
@@ -1338,6 +1346,7 @@ export function createNotificationProjectionItem(
     entityId: event.entityId,
     entityKey: event.scopeKey,
     targetId: event.targetId,
+    fileId: event.fileId,
     issueId: event.issueId,
     triageEntryId: event.triageEntryId,
     commentId: event.commentId,
@@ -1356,9 +1365,16 @@ export function createNotificationProjectionItem(
     deliveryChannels: deliveryState.deliveryChannels,
     deliveryAfter: deliveryState.deliveryAfter,
     deliveryFrequency: deliveryState.deliveryFrequency,
+    ...(deliveryState.deliveryChannels.includes('slack') ? {
+      slackQueueShard: slackDeliveryShard(recipientKey),
+      slackNextAttemptAt: deliveryState.deliveryAfter,
+      slackDeliveryStatus: 'pending',
+      slackAttempts: 0,
+    } : {}),
     ...(deliveryState.archivedAt ? { archivedAt: deliveryState.archivedAt } : {}),
     occurredAt: event.occurredAt,
     createdAt: event.occurredAt,
+    dueDate: event.dueDate,
     expiresAt,
   }
 }
@@ -1403,11 +1419,13 @@ export function refreshScheduledNotificationEvent(
  *
  * @param event - Parsed audit projection event.
  * @param scope - Strongly read current Planning update target scope.
+ * @param currentWatcher - Recipient whose current subscription was independently verified.
  * @returns A current recipient event, or undefined when the scheduled event is stale.
  */
 export function refreshPlanningScheduledNotificationEvent(
   event: AuditProjectionEvent,
   scope: CurrentPlanningUpdateNotificationScope,
+  currentWatcher?: string,
 ): AuditProjectionEvent | undefined {
   const kind = planningNotificationKindFromEventType(event.eventType)
   if (!kind) {
@@ -1433,7 +1451,7 @@ export function refreshPlanningScheduledNotificationEvent(
     !event.planningNextDueAt ||
     event.planningNextDueAt !== scope.nextDueAt ||
     event.planningNotificationKind !== kind ||
-    scheduledRecipient !== currentRecipient
+    (scheduledRecipient !== currentRecipient && !currentWatcher)
   ) {
     return undefined
   }
@@ -1442,7 +1460,9 @@ export function refreshPlanningScheduledNotificationEvent(
     ...event,
     teamId: scope.teamId,
     projectId: scope.projectId,
-    notificationCandidates: [{ memberKey: currentRecipient, reason: kind }],
+    notificationCandidates: currentWatcher
+      ? [{ memberKey: currentWatcher, reason: 'watcher' }]
+      : [{ memberKey: currentRecipient, reason: kind }],
   }
 }
 
@@ -1464,6 +1484,12 @@ export function overlayCurrentWorkItemNotificationScope(
   return eventWithoutProject
 }
 
+/**
+ * Reads validated preferences before committing notification and processing receipts.
+ * @param recipientKey - Server-derived Workspace/member partition key.
+ * @returns Stored preferences or defaults for an absent row.
+ * @throws Error when a stored row is corrupt, leaving the stream record retryable.
+ */
 async function readProjectionNotificationPreferences(recipientKey: string) {
   const result = await documentClient.send(new GetCommand({
     TableName: requireEnv('NOTIFICATIONS_TABLE_NAME'),
@@ -1474,7 +1500,7 @@ async function readProjectionNotificationPreferences(recipientKey: string) {
     ConsistentRead: true,
   }))
 
-  return parseStoredNotificationPreferences(result.Item)
+  return parseStoredNotificationPreferences(result.Item, true)
 }
 
 /**
@@ -1502,7 +1528,7 @@ export type EnterpriseNotificationAuthorization = {
 }
 
 /**
- * Resolves the authoritative Enterprise access required by one cadence notification.
+ * Resolves authoritative Enterprise Work Item access, with write access for cadence recipients.
  *
  * Legacy project-member access remains the fallback path when the current Enterprise snapshot
  * does not make it non-authoritative, matching the cadence configuration path's boundary.
@@ -1512,6 +1538,10 @@ export type EnterpriseNotificationAuthorization = {
  * @param workspaceRole - Current Workspace role from the active member row.
  * @param snapshot - Authoritative Enterprise Identity snapshot.
  * @param projectScopeOwnerTeamId - Uniquely resolved owner Team for a legacy Project scope.
+ * @param cognitoGroupIds - Current recipient Cognito groups for direct group assignments.
+ * @param readOnlyRecipient - A current watcher needs only read access, including reminder deliveries.
+ * @param permissionCeiling - Current external collaborator permission ceiling, when applicable.
+ * @param contentPermission - Independent content permission for non-Planning sources.
  * @returns Whether Enterprise is authoritative and whether the member can perform the action.
  */
 export function resolveEnterpriseNotificationAuthorization(
@@ -1520,14 +1550,19 @@ export function resolveEnterpriseNotificationAuthorization(
   workspaceRole: WorkspaceNotificationRole,
   snapshot: EnterpriseIdentitySnapshot,
   projectScopeOwnerTeamId?: string,
+  cognitoGroupIds: string[] = [],
+  readOnlyRecipient = false,
+  permissionCeiling?: EnterprisePermissionId[],
+  contentPermission: EnterprisePermissionId = 'work-items.read',
 ): EnterpriseNotificationAuthorization {
-  if (snapshot.workspaceId !== event.workspaceId || event.planningNotificationKind === undefined) {
+  if (snapshot.workspaceId !== event.workspaceId) {
     return { authoritative: false, allowed: false }
   }
   const normalizedMemberKey = normalizeMemberKey(memberKey)
   if (!normalizedMemberKey) return { authoritative: false, allowed: false }
 
-  const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, [])
+  const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, cognitoGroupIds)
+  if (directoryPrincipal.deprovisioned) return { authoritative: true, allowed: false }
   const authoritative = directoryPrincipal.directoryManaged ||
     directoryPrincipal.compatibleRoleAssignments.some((assignment) =>
       assignment.principalKind === 'member' &&
@@ -1549,7 +1584,7 @@ export function resolveEnterpriseNotificationAuthorization(
           parentTeamId: event.teamId,
         }
     : event.teamId === undefined
-      ? undefined
+      ? { workspaceId: event.workspaceId, kind: 'workspace' as const }
       : {
           workspaceId: event.workspaceId,
           kind: 'team' as const,
@@ -1557,11 +1592,12 @@ export function resolveEnterpriseNotificationAuthorization(
         }
   if (!resource) return { authoritative: true, allowed: false }
 
-  const permission = event.planningNotificationKind === 'reminder' ||
-    event.planningNotificationKind === 'overdue'
-    ? 'work-items.write'
-    : 'work-items.read'
-  const access = evaluateEnterpriseAccess({
+  const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' ||
+    event.planningNotificationKind === 'overdue')
+  const permissions: EnterprisePermissionId[] = event.planningNotificationKind
+    ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
+    : [contentPermission]
+  const allowed = permissions.some((permission) => evaluateEnterpriseAccess({
     permission,
     principal: {
       kind: 'member',
@@ -1572,14 +1608,15 @@ export function resolveEnterpriseNotificationAuthorization(
       includeWorkspaceRolePermissions: false,
       directPermissions: ['workspace.read'],
       systemAdministrator: false,
+      ...(permissionCeiling ? { permissionCeiling } : {}),
     },
     assignments: directoryPrincipal.compatibleRoleAssignments,
     customRoles: snapshot.customRoles,
     groupMappings: directoryPrincipal.compatibleGroupMappings,
     resource,
     ...(projectScopeOwnerTeamId !== undefined ? { projectScopeOwnerTeamId } : {}),
-  })
-  return { authoritative: true, allowed: access.allowed }
+  }).allowed)
+  return { authoritative: true, allowed }
 }
 
 /**
@@ -1750,6 +1787,18 @@ export async function hasCurrentSystemAdminMembership(
   return false
 }
 
+/**
+ * Rechecks active membership and current scoped content permissions.
+ * @param event - Notification with refreshed canonical resource scope.
+ * @param memberKey - Normalized recipient key.
+ * @param directoryItems - Current active directory and legacy Project memberships.
+ * @param currentSystemAdminCache - Invocation-local Cognito membership reads.
+ * @param enterpriseIdentity - Authoritative Enterprise snapshot reader.
+ * @param enterpriseSnapshotCache - Invocation-local Enterprise snapshots.
+ * @param enforceContentAuthorization - Applies content RBAC and full-Team visibility for external delivery.
+ * @param readApproval - Current approval and file visibility reader for external delivery.
+ * @returns Whether the recipient currently has access to the notification's source.
+ */
 async function isEligibleRecipient(
   event: AuditProjectionEvent,
   memberKey: string,
@@ -1757,6 +1806,8 @@ async function isEligibleRecipient(
   currentSystemAdminCache: Map<string, Promise<boolean>>,
   enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> | undefined,
   enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
+  enforceContentAuthorization = false,
+  readApproval?: ApprovalNotificationReader,
 ) {
   const memberResult = await documentClient.send(
     new GetCommand({
@@ -1778,11 +1829,49 @@ async function isEligibleRecipient(
     return false
   }
 
+  let cognitoGroupIds: string[] = []
+  let permissionCeiling: EnterprisePermissionId[] | undefined
+  const readOnlyRecipient = event.notificationCandidates.length > 0 &&
+    event.notificationCandidates.every((candidate) => candidate.reason === 'watcher')
+  const selectedWorkspaceRecipient = event.eventType === 'automation.notification.requested' &&
+    !event.teamId && !event.projectId && !event.issueId && !event.planningTargetId &&
+    event.notificationCandidates.some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey && candidate.reason === 'automation')
+  const contentPermission = selectedWorkspaceRecipient ? 'workspace.read'
+    : event.eventType.startsWith('approval.') ? 'files.read' : 'work-items.read'
+  if (enforceContentAuthorization) {
+    const role = readWorkspaceNotificationRole(member.role)
+    if (!enterpriseIdentity || !role) return false
+    if (event.eventType.startsWith('approval.')) {
+      if (!readApproval || !event.targetId || !event.teamId || !event.issueId) return false
+      if (!await readApproval({ workspaceId: event.workspaceId, teamId: event.teamId, issueId: event.issueId,
+        approvalId: event.targetId, fileId: event.fileId, guest: role === 'guest' })) return false
+    }
+    let snapshot = enterpriseSnapshotCache.get(event.workspaceId)
+    if (!snapshot) {
+      snapshot = enterpriseIdentity.getSnapshot(event.workspaceId)
+      enterpriseSnapshotCache.set(event.workspaceId, snapshot)
+    }
+    const current = await snapshot
+    if (current.workspaceId !== event.workspaceId) return false
+    const boundary = resolveNotificationRecipientBoundary(current, memberKey, readString(member.email) ?? memberKey, role)
+    permissionCeiling = boundary.permissionCeiling
+    const requiresWrite = !readOnlyRecipient && (event.planningNotificationKind === 'reminder' || event.planningNotificationKind === 'overdue')
+    const permissions: EnterprisePermissionId[] = event.planningNotificationKind
+      ? requiresWrite ? ['planning.write', 'work-items.write'] : ['planning.read', 'work-items.read']
+      : [contentPermission]
+    if (!boundary.allowed || permissionCeiling && !permissions.some((permission) => permissionCeiling?.includes(permission))) return false
+    const username = readString(member.username) ?? readString(member.email) ?? memberKey
+    const currentGroups = await readNotificationCognitoGroups(username)
+    if (currentGroups === undefined) return false
+    cognitoGroupIds = currentGroups
+    currentSystemAdminCache.set(username, Promise.resolve(cognitoGroupIds.some((group) => readSystemAdminGroups().includes(group))))
+  }
+
   let enterpriseAuthorization: EnterpriseNotificationAuthorization | undefined
   if (
     enterpriseIdentity &&
-    event.planningNotificationKind !== undefined &&
-    (event.projectId !== undefined || event.teamId !== undefined)
+    (event.planningNotificationKind !== undefined || enforceContentAuthorization) &&
+    (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)
   ) {
     const role = readWorkspaceNotificationRole(member.role)
     if (role) {
@@ -1791,20 +1880,31 @@ async function isEligibleRecipient(
         snapshotPromise = enterpriseIdentity.getSnapshot(event.workspaceId)
         enterpriseSnapshotCache.set(event.workspaceId, snapshotPromise)
       }
+      const snapshot = await snapshotPromise
+      if (snapshot.workspaceId !== event.workspaceId) return false
       enterpriseAuthorization = resolveEnterpriseNotificationAuthorization(
         event,
         memberKey,
         role,
-        await snapshotPromise,
+        snapshot,
         readUniqueNotificationProjectOwnerTeamId(event, directoryItems),
+        cognitoGroupIds,
+        readOnlyRecipient,
+        permissionCeiling,
+        contentPermission,
       )
     }
   }
 
   if (enterpriseAuthorization?.authoritative) {
     if (enterpriseAuthorization.allowed) return true
-  } else if (hasEligibleProjectAccess(event, memberKey, directoryItems)) {
-    return true
+  } else {
+    const legacyAllowed = hasEligibleProjectAccess(event, memberKey, directoryItems) &&
+      (!enforceContentAuthorization || event.teamId || event.projectId || member.role !== 'guest' || selectedWorkspaceRecipient)
+    const teamProjects = directoryItems.filter((item) => item.entryType === 'project' &&
+      item.teamId === event.teamId && item.projectId && !item.archivedAt)
+    if (legacyAllowed && (!enforceContentAuthorization || event.projectId || !event.teamId ||
+      teamProjects.length > 0 && teamProjects.every((project) => hasEligibleProjectAccess(project, memberKey, directoryItems)))) return true
   }
 
   const username = readString(member.username) ?? readString(member.email) ?? memberKey
@@ -1816,6 +1916,186 @@ async function isEligibleRecipient(
   }
 
   return currentSystemAdmin
+}
+
+/** Authorization snapshots for one delivery; production creates a fresh instance for each notification. */
+export type NotificationDeliveryAuthorizationCache = {
+  /** Refresh boundary; cached lookups are reused only within a five-second window. */
+  expiresAt: number
+  /** Current directory snapshots, keyed by workspace. */
+  directories: Map<string, Promise<ProjectDirectoryItem[]>>
+  /** Current enterprise snapshots, keyed by workspace. */
+  enterpriseSnapshots: Map<string, Promise<EnterpriseIdentitySnapshot>>
+}
+
+/**
+ * Creates an invocation-local cache; no authorization result survives a worker invocation.
+ * @returns Empty bounded-lifetime caches.
+ */
+export function createNotificationDeliveryAuthorizationCache(): NotificationDeliveryAuthorizationCache {
+  return { expiresAt: 0, directories: new Map(), enterpriseSnapshots: new Map() }
+}
+
+/**
+ * Reads all current Cognito groups separately for each external delivery.
+ * @param username - Current membership's Cognito username.
+ * @returns Current group names, or undefined for a deleted user; transient failures propagate for retry.
+ */
+async function readNotificationCognitoGroups(username: string): Promise<string[] | undefined> {
+  try {
+    const names: string[] = []
+    const cursors = new Set<string>()
+    let nextToken: string | undefined
+    do {
+      const response = await cognitoClient.send(new AdminListGroupsForUserCommand({
+        UserPoolId: requireEnv('COGNITO_USER_POOL_ID'), Username: username,
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      }))
+      names.push(...(response.Groups ?? []).flatMap((group) => group.GroupName?.trim() ? [group.GroupName.trim()] : []))
+      nextToken = response.NextToken?.trim() || undefined
+      if (nextToken && cursors.has(nextToken)) throw new Error('Current notification group pagination did not advance.')
+      if (nextToken) cursors.add(nextToken)
+    } while (nextToken)
+    return names
+  } catch (error: unknown) {
+    if (isAwsNamedError(error, 'UserNotFoundException')) return undefined
+    throw error
+  }
+}
+
+/**
+ * Rechecks source scope and current recipient access immediately before external delivery.
+ * @param event - Stored notification source and scope.
+ * @param memberKey - Canonical recipient member key.
+ * @param enterpriseIdentity - Authoritative enterprise identity reader.
+ * @param cache - Snapshots for this delivery only; callers must not reuse them for another notification.
+ * @param readDocument - Permission-filtered Documents reader; missing capability denies document delivery.
+ * @param readTriage - Current permission-safe Triage reader; missing capability denies Triage delivery.
+ * @param readApproval - Current approval/file reader; missing capability denies approval delivery.
+ * @returns Whether the notification's recipient still has access.
+ */
+export async function authorizeNotificationDelivery(
+  event: AuditProjectionEvent,
+  memberKey: string,
+  enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>,
+  cache: NotificationDeliveryAuthorizationCache = createNotificationDeliveryAuthorizationCache(),
+  readDocument?: (request: GetDocumentRequest) => Promise<unknown>,
+  readTriage?: (workspaceId: string, teamId: string, entryId: string) => Promise<Pick<TriageEntry, 'permission' | 'retention' | 'projectId' | 'ownerUserId'>>,
+  readApproval?: ApprovalNotificationReader,
+): Promise<boolean> {
+  if (cache.expiresAt <= Date.now()) {
+    cache.directories.clear()
+    cache.enterpriseSnapshots.clear()
+    cache.expiresAt = Date.now() + 5_000
+  }
+  if (event.eventType.startsWith('document.')) {
+    if (!readDocument || !event.entityId) return false
+    const result = await documentClient.send(new GetCommand({
+      TableName: requireEnv('WORKSPACE_ACCESS_TABLE_NAME'),
+      Key: { workspaceId: event.workspaceId, recordKey: `MEMBER#${memberKey}` }, ConsistentRead: true,
+    }))
+    const member = result.Item
+    if (!isActiveWorkspaceNotificationMember(memberKey, member)) return false
+    const workspaceRole = readWorkspaceNotificationRole(member?.role)
+    if (!workspaceRole) return false
+    let directoryPromise = cache.directories.get(event.workspaceId)
+    if (!directoryPromise) {
+      directoryPromise = readProjectDirectory(event.workspaceId)
+      cache.directories.set(event.workspaceId, directoryPromise)
+    }
+    let enterprisePromise = cache.enterpriseSnapshots.get(event.workspaceId)
+    if (!enterprisePromise) {
+      enterprisePromise = enterpriseIdentity.getSnapshot(event.workspaceId)
+      cache.enterpriseSnapshots.set(event.workspaceId, enterprisePromise)
+    }
+    const directory = await directoryPromise
+    const projects = directory.flatMap((item) => {
+      if (item.entryType !== 'project' || !item.projectId || !item.teamId ||
+        !hasActiveNotificationScope(item, directory) ||
+        readUniqueNotificationProjectOwnerTeamId(item, directory) !== item.teamId) return []
+      return [{ teamId: item.teamId, projectId: item.projectId }]
+    })
+    const projectRoles: Record<string, DocumentProjectRole> = {}
+    for (const item of directory) {
+      if (item.entryType === 'project-member' && normalizeMemberKey(item.memberKey) === memberKey &&
+        item.projectId && (item.role === 'viewer' || item.role === 'member' || item.role === 'manager') &&
+        projects.some((project) => project.projectId === item.projectId && (!item.teamId || project.teamId === item.teamId))) {
+        projectRoles[item.projectId] = item.role
+      }
+    }
+    const username = readString(member?.username) ?? readString(member?.email) ?? memberKey
+    const cognitoGroupIds = await readNotificationCognitoGroups(username)
+    if (cognitoGroupIds === undefined) return false
+    const systemAdmin = cognitoGroupIds.some((group) => readSystemAdminGroups().includes(group))
+    return isDocumentDeliveryVisible(event.workspaceId, event.entityId, resolveDocumentDeliveryAccess({
+      workspaceId: event.workspaceId, memberKey, memberEmail: readString(member?.email) ?? memberKey,
+      workspaceRole, projectRoles, projects, cognitoGroupIds,
+      isSystemAdmin: systemAdmin, snapshot: await enterprisePromise,
+    }), readDocument)
+  }
+  let sourceEvent = event
+  if (event.triageEntryId) {
+    if (!event.teamId || !readTriage) return false
+    try {
+      const entry = await readTriage(event.workspaceId, event.teamId, event.triageEntryId)
+      if (entry.permission.visibility !== 'full' || entry.retention.redactedAt !== undefined) return false
+      const ownerOnly = event.notificationCandidates.length > 0 && event.notificationCandidates.every(({ reason }) =>
+        ['assignee', 'assignment', 'due', 'overdue', 'sla', 'triage-sla', 'escalation', 'triage-assignment'].includes(reason))
+      if (!event.issueId && ownerOnly && normalizeMemberKey(entry.ownerUserId) !== memberKey) return false
+      const { projectId: _historicalProjectId, ...withoutProject } = event
+      sourceEvent = { ...withoutProject, ...(entry.projectId ? { projectId: entry.projectId } : {}) }
+    } catch (error: unknown) {
+      if (error instanceof TriageError && error.status === 404) return false
+      throw error
+    }
+  }
+  const currentScope = await readCurrentWorkItemScope(sourceEvent)
+  if (!currentScope.exists) return false
+  if (currentScope.checked && requiresCurrentWorkItemAssignee({
+    reasons: sourceEvent.notificationCandidates
+      .filter((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey)
+      .map((candidate) => candidate.reason),
+  }) && currentScope.assigneeMemberKey !== memberKey) return false
+  const scoped = refreshScheduledNotificationEvent(
+    currentScope.checked ? overlayCurrentWorkItemNotificationScope(sourceEvent, currentScope) : sourceEvent,
+    currentScope,
+  )
+  if (!scoped) return false
+  const planningScope = await readCurrentPlanningUpdateScope(scoped)
+  if (!planningScope.exists) return false
+  const current = planningScope.checked
+    ? { ...scoped, teamId: planningScope.teamId, projectId: planningScope.projectId }
+    : scoped
+  let currentWatcher: string | undefined
+  if (planningScope.checked && event.notificationCandidates.some((candidate) => candidate.reason === 'watcher')) {
+    for (const { entityKey } of createSubscribedWatcherScopes(current)) {
+      const recordKey = `WATCHER#${memberKey}`
+      const watcher = await documentClient.send(new GetCommand({
+        TableName: requireEnv('COLLABORATION_TABLE_NAME'), Key: { entityKey, recordKey }, ConsistentRead: true,
+      }))
+      if (watcher.Item?.entityKey === entityKey && watcher.Item.recordKey === recordKey &&
+        toSubscribedWatcherCandidates([watcher.Item], 'watcher').some((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey)) {
+        currentWatcher = memberKey
+        break
+      }
+    }
+  }
+  const refreshed = refreshPlanningScheduledNotificationEvent(current, planningScope, currentWatcher)
+  if (!refreshed) return false
+  let directory: ProjectDirectoryItem[] = []
+  if (refreshed.projectId || refreshed.teamId) {
+    let snapshot = cache.directories.get(event.workspaceId)
+    if (!snapshot) {
+      snapshot = readProjectDirectory(event.workspaceId)
+      cache.directories.set(event.workspaceId, snapshot)
+    }
+    directory = await snapshot
+  }
+  return isEligibleRecipient(
+    refreshed, memberKey, directory,
+    new Map<string, Promise<boolean>>(), enterpriseIdentity, cache.enterpriseSnapshots,
+    true, readApproval,
+  )
 }
 
 /** Reads a supported Workspace role from a notification member row. */
@@ -1863,8 +2143,9 @@ async function isCurrentSystemAdmin(username: string) {
   }
 }
 
+/** Reads normalized configured Cognito administrator group names. */
 function readSystemAdminGroups() {
-  return requireEnv('SYSTEM_ADMIN_GROUPS').split(',')
+  return requireEnv('SYSTEM_ADMIN_GROUPS').split(',').map((group) => group.trim()).filter(Boolean)
 }
 
 async function readProjectDirectory(directoryId: string) {

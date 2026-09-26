@@ -13,6 +13,18 @@ import {
   type NotificationState,
 } from './notifications'
 
+test('Slack preferences preserve legacy opt-out and join the existing frequency and quiet-hour plan', () => {
+  expect(parseStoredNotificationPreferences(undefined).channels.slack ?? false).toBe(false)
+  const preferences = parseStoredNotificationPreferences({
+    itemType: 'preferences', ...DEFAULT_NOTIFICATION_PREFERENCES,
+    channels: { inApp: true, email: false, push: false, slack: true }, frequency: 'hourly',
+  })
+  expect(preferences.channels.slack).toBe(true)
+  expect(createNotificationDeliveryPlan(preferences, '2026-09-26T12:00:00.000Z')).toMatchObject({
+    channels: ['inApp', 'slack'], deliveryAfter: '2026-09-26T13:00:00.000Z',
+  })
+})
+
 function createNotificationRow(overrides: Record<string, unknown> = {}) {
   return {
     recipientKey: 'workspace-1#member@example.com',
@@ -826,6 +838,41 @@ describe('notification store', () => {
         },
       },
     })).rejects.toBeInstanceOf(NotificationError)
+  })
+  test('owns the Slack activation boundary across updates, disable, re-enable and response-loss retry', async () => {
+    let stored: Record<string, unknown> | undefined
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name === 'GetCommand') return { Item: stored }
+      if (constructor.name === 'PutCommand') {
+        if (input.ConditionExpression === 'attribute_not_exists(recipientKey) AND attribute_not_exists(notificationKey)' && stored) {
+          throw Object.assign(new Error('Conflict'), { name: 'ConditionalCheckFailedException' })
+        }
+        if (typeof input.Item !== 'object' || input.Item === null || Array.isArray(input.Item)) throw new Error('Missing preference row')
+        stored = { ...input.Item }
+      }
+      return {}
+    })
+    const initial = { ...DEFAULT_NOTIFICATION_PREFERENCES, channels: { inApp: true, email: false, push: false, slack: true } }
+    const recipient = { workspaceId: 'workspace-1', memberKey: 'member@example.com' }
+    const first = await recording.client.savePreferences({ ...recipient, preferences: initial, now: new Date('2026-09-26T10:00:00Z') })
+    expect(first.slackEnabledAt).toBe('2026-09-26T10:00:00.000Z')
+    const retry = await recording.client.savePreferences({ ...recipient, preferences: initial, now: new Date('2026-09-26T10:01:00Z') })
+    expect(retry.slackEnabledAt).toBe(first.slackEnabledAt)
+    const changed = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...first, frequency: 'daily' }, now: new Date('2026-09-26T11:00:00Z') })
+    expect(changed.slackEnabledAt).toBe(first.slackEnabledAt)
+    const disabled = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...changed, channels: { ...changed.channels, slack: false } }, now: new Date('2026-09-26T12:00:00Z') })
+    expect(stored?.slackEnabledAt).toBeUndefined()
+    const enabled = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...disabled, channels: { ...disabled.channels, slack: true } }, now: new Date('2026-09-26T13:00:00Z') })
+    expect(enabled.slackEnabledAt).toBe('2026-09-26T13:00:00.000Z')
+    expect(await recording.client.getPreferences(recipient)).toEqual(enabled)
+    expect(recording.commands.some((command) => command.name === 'GetCommand' && command.input.ConsistentRead === true)).toBe(true)
+    expect(recording.commands.at(-2)?.input).toMatchObject({
+      ConditionExpression: 'attribute_exists(recipientKey) AND attribute_exists(notificationKey) AND #version = :version',
+      ExpressionAttributeValues: { ':version': disabled.version },
+    })
   })
 
   test('returns an identical version-plus-one preference row for a response-loss retry', async () => {

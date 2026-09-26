@@ -370,6 +370,7 @@ import {
 import {
   createNotificationRouter,
 } from '../modules/notifications/adapter-in/http/notification-router'
+import { requiresCurrentWorkItemAssignee } from '../modules/notifications'
 import {
   FocusStateError,
   createFocusCauseFingerprint,
@@ -29513,23 +29514,6 @@ function mapAutomationErrorStatus(category: AutomationErrorCategory) {
     case 'rate-limited': return 429
     case 'unavailable': return 503
   }
-}
-
-const currentAssigneeNotificationReasons = new Set([
-  'assignee',
-  'assignment',
-  'due',
-  'due-date-change',
-  'overdue',
-  'schedule-change',
-  'status-change',
-])
-
-/** Notification が現在の担当者であることだけを配信理由にしているか判定します。 */
-function requiresCurrentWorkItemAssignee(notification: NotificationItem) {
-  return notification.reasons.length > 0 && notification.reasons.every(
-    (reason) => currentAssigneeNotificationReasons.has(reason),
-  )
 }
 
 /**

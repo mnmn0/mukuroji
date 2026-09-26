@@ -8,6 +8,92 @@ import {
   synthesizedTemplate,
 } from './test-support';
 
+test('Slack notifications use the sparse due queue with bounded execution and recipient-secret access', () => {
+  const template = synthesizedTemplate;
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: 'Delivers opted-in Inbox notifications to recipient-bound Slack destinations.',
+    Timeout: 300,
+    TracingConfig: { Mode: 'Active' },
+    Environment: { Variables: Match.objectLike({
+      NOTIFICATIONS_TABLE_NAME: { Ref: 'NotificationsTable76DCFC6C' },
+      DOCUMENTS_TABLE_NAME: { Ref: 'DocumentsTable7E808EE5' },
+      REQUEST_INTAKE_TABLE_NAME: Match.anyValue(),
+      COLLABORATION_TABLE_NAME: Match.anyValue(),
+      FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
+      MUKUROJI_RUNTIME_CONTROL_SCOPE: 'notification-schedule',
+    }) },
+  });
+  template.hasResourceProperties('AWS::Events::Rule', {
+    ScheduleExpression: 'rate(1 minute)',
+    Targets: Match.arrayWith([Match.objectLike({ Arn: { 'Fn::GetAtt': ['SlackNotificationFunctionE618FDB5', 'Arn'] } })]),
+  });
+  template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {
+    FunctionName: { Ref: 'SlackNotificationFunctionE618FDB5' },
+    MaximumRetryAttempts: 0,
+    DestinationConfig: { OnFailure: { Destination: Match.anyValue() } },
+  });
+  const policies = template.findResources('AWS::IAM::Policy');
+  const slackPolicies = Object.entries(policies).filter(([id]) => id.startsWith('SlackNotificationFunction'));
+  expect(slackPolicies).toHaveLength(1);
+  const statements: unknown = slackPolicies[0]?.[1].Properties?.PolicyDocument?.Statement;
+  if (!Array.isArray(statements)) throw new Error('Slack worker policy statements are missing.');
+  const dynamoStatements = statements.filter((statement: unknown) => {
+    if (!statement || typeof statement !== 'object') return false;
+    const action: unknown = Reflect.get(statement, 'Action');
+    const actions: unknown[] = Array.isArray(action) ? action : [action];
+    return actions.some((value) => typeof value === 'string' && (value === '*' || value.startsWith('dynamodb:')));
+  });
+  expect(dynamoStatements).toHaveLength(4);
+  expect(dynamoStatements).toEqual(expect.arrayContaining([
+    {
+      Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      Resource: { 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] },
+    },
+    {
+      Effect: 'Allow', Action: 'dynamodb:Query',
+      Resource: [
+        { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
+        { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] }, '/index/SlackDeliveryIndex']] },
+      ],
+    },
+    {
+      Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+      Resource: [
+        { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
+        { 'Fn::GetAtt': ['EnterpriseIdentityTable7491FB7A', 'Arn'] },
+        { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
+        { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+        { 'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
+      ],
+    },
+    {
+      Effect: 'Allow', Action: 'dynamodb:GetItem',
+      Resource: [
+        { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
+        { 'Fn::GetAtt': ['RequestIntakeTable608708D4', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
+      ],
+    },
+  ]));
+  const serialized = JSON.stringify(slackPolicies);
+  expect(serialized).toContain('secretsmanager:GetSecretValue');
+  expect(serialized).toContain('mukuroji/automation-webhooks/*/slack/*');
+  expect(serialized).not.toContain('secretsmanager:PutSecretValue');
+  expect(serialized).not.toContain('dynamodb:Scan');
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'Mukuroji/Notifications', MetricName: 'OldestDueAgeSeconds',
+    Dimensions: [{ Name: 'Channel', Value: 'Slack' }],
+    Threshold: 900, EvaluationPeriods: 3, DatapointsToAlarm: 3,
+  });
+  const slackLogs = Object.entries(template.findResources('AWS::Logs::LogGroup'))
+    .filter(([id]) => id.startsWith('SlackNotificationLogGroup'));
+  expect(slackLogs).toHaveLength(1);
+  expect(slackLogs[0]?.[1]).toMatchObject({
+    Properties: { RetentionInDays: 90 }, DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain',
+  });
+});
+
 test('enterprise identity CONTROL stream runs bounded asynchronous maintenance', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
@@ -1851,7 +1937,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 25);
+  template.resourceCountIs('AWS::SQS::Queue', 26);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -1951,7 +2037,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 28);
+  }, 29);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',

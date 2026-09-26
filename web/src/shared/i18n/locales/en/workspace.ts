@@ -387,18 +387,21 @@ export const workspaceMessages = {
     'Choose the display language for this browser. Your preference is saved locally.',
   'workspace.settings.notificationTitle': 'Notifications',
   'workspace.settings.notificationDescription':
-    'Configure in-app delivery and delivery plans for email and push transports that will be connected later.',
+    'Choose Inbox and Slack delivery, notification frequency, and quiet hours.',
   'workspace.settings.notifications.eyebrow': 'Delivery rules',
   'workspace.settings.notifications.version': 'Settings v{version}',
   'workspace.settings.notifications.channelsTitle': 'Delivery channels',
   'workspace.settings.notifications.channelsDescription':
-    'In-app changes apply to the next notification. Email and push are saved in advance for their future transports.',
+    'Inbox and Slack changes apply to new notifications. Email and push are saved in advance for their future transports.',
   'workspace.settings.notifications.channel.inApp': 'In-app',
   'workspace.settings.notifications.channel.inAppDescription': 'Show updates in Inbox and the unread badge.',
   'workspace.settings.notifications.channel.email': 'Email',
   'workspace.settings.notifications.channel.emailDescription':
     'Save the setting that will be used after the email transport is connected.',
   'workspace.settings.notifications.channel.push': 'Push',
+  'workspace.settings.notifications.channel.slack': 'Slack',
+  'workspace.settings.notifications.channel.slackDescription':
+    'Send these notifications to your Slack destination. Administrator setup is required.',
   'workspace.settings.notifications.channel.pushDescription':
     'Save the setting that will be used after PWA push subscriptions are connected.',
   'workspace.settings.notifications.frequencyTitle': 'Delivery frequency',

@@ -37,6 +37,8 @@ export type NotificationChannels = {
   email: boolean
   /** Push delivery plan を作成するかどうかです。 */
   push: boolean
+  /** Whether newly created notifications should also be delivered to Slack. */
+  slack?: boolean
 }
 
 /** Notification delivery を止める quiet hours です。 */
@@ -63,6 +65,8 @@ export type NotificationPreferences = {
   quietHours: NotificationQuietHours
   /** 最終保存時刻です。未保存の default では省略します。 */
   updatedAt?: string
+  /** Server-owned start of the current Slack opt-in period; omitted from HTTP preferences. */
+  slackEnabledAt?: string
 }
 
 /** Notification preference を置き換える入力です。 */
@@ -592,10 +596,20 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
     const preferences = normalizeNotificationPreferencesInput(input.preferences)
     const now = normalizeDate(input.now ?? new Date(), 'Notification preference update time')
+    let slackEnabledAt: string | undefined
+    if (preferences.channels.slack) {
+      const current = preferences.version > 0
+        ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
+            TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
+          }))).Item, true)
+        : undefined
+      slackEnabledAt = current?.channels.slack ? current.slackEnabledAt ?? now.toISOString() : now.toISOString()
+    }
     const next: NotificationPreferences = {
       ...preferences,
       version: preferences.version + 1,
       updatedAt: now.toISOString(),
+      ...(slackEnabledAt ? { slackEnabledAt } : {}),
     }
 
     try {
@@ -753,6 +767,8 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           { AttributeName: 'recipientKey', AttributeType: 'S' },
           { AttributeName: 'notificationKey', AttributeType: 'S' },
           { AttributeName: 'recipientStatusKey', AttributeType: 'S' },
+          { AttributeName: 'slackQueueShard', AttributeType: 'S' },
+          { AttributeName: 'slackNextAttemptAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'recipientKey', KeyType: 'HASH' },
@@ -765,6 +781,13 @@ export class DynamoDbNotificationsClient implements NotificationClient {
             { AttributeName: 'notificationKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
+        }, {
+          IndexName: 'SlackDeliveryIndex',
+          KeySchema: [
+            { AttributeName: 'slackQueueShard', KeyType: 'HASH' },
+            { AttributeName: 'slackNextAttemptAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
         }],
         BillingMode: 'PAY_PER_REQUEST',
       }))
@@ -790,33 +813,72 @@ export function getConfiguredNotificationsTableName(
     'mukuroji-notifications-local'
 }
 
+/** Reasons whose sole recipient must still be the current Work Item assignee. */
+const currentAssigneeNotificationReasons = new Set([
+  'assignee', 'assignment', 'due', 'due-date-change', 'overdue', 'schedule-change', 'status-change',
+])
+
+/**
+ * Identifies notifications that depend solely on current Work Item assignment.
+ * @param notification - Recipient-specific reasons shared by Inbox and external delivery.
+ * @returns Whether current assignment must still match the recipient.
+ */
+export function requiresCurrentWorkItemAssignee(notification: Pick<NotificationItem, 'reasons'>): boolean {
+  return notification.reasons.length > 0 && notification.reasons.every(
+    (reason) => currentAssigneeNotificationReasons.has(reason),
+  )
+}
+
 /** Workspace/member を Notifications table の recipient partition key に変換します。 */
 export function createNotificationRecipientKey(workspaceId: string, memberKey: string) {
   return `${requireText(workspaceId, 'Notification workspace ID')}#${normalizeMemberKey(memberKey)}`
 }
 
-/** 保存 row を安全な preference に変換し、invalid row は default へ戻します。 */
+/**
+ * Parses stored preferences, preserving the legacy default fallback unless strict reads are requested.
+ * @param value - Stored row; an absent row always uses legacy defaults.
+ * @param strict - Rejects corrupt existing rows so external delivery can retry and alert.
+ * @returns Validated notification preferences.
+ */
 export function parseStoredNotificationPreferences(
   value: Record<string, unknown> | undefined,
+  strict = false,
 ): NotificationPreferences {
-  if (!value || value.itemType !== 'preferences') {
-    return cloneDefaultPreferences()
-  }
-
+  if (!value) return cloneDefaultPreferences()
   try {
+    if (value.itemType !== 'preferences' || strict && readNonNegativeInteger(value.version) === undefined) {
+      throw new Error('Invalid stored notification preferences.')
+    }
     const normalized = normalizeNotificationPreferencesInput({
       version: readNonNegativeInteger(value.version) ?? 0,
-      channels: value.channels as NotificationChannels,
-      frequency: value.frequency as NotificationFrequency,
-      quietHours: value.quietHours as NotificationQuietHours,
+      channels: value.channels,
+      frequency: value.frequency,
+      quietHours: value.quietHours,
     })
+    if (value.slackEnabledAt !== undefined && !readTimestamp(value.slackEnabledAt)) throw new Error('Invalid Slack activation time.')
+    const slackEnabledAt = normalized.channels.slack
+      ? readTimestamp(value.slackEnabledAt) ?? readTimestamp(value.updatedAt)
+      : undefined
     return {
       ...normalized,
+      ...(slackEnabledAt ? { slackEnabledAt } : {}),
       ...(readTimestamp(value.updatedAt) ? { updatedAt: readTimestamp(value.updatedAt) } : {}),
     }
   } catch {
+    if (strict) throw new Error('Invalid stored notification preferences.')
     return cloneDefaultPreferences()
   }
+}
+
+/**
+ * Binds Slack delivery to the server-recorded opt-in period, including delayed audit projection.
+ * @param preferences - Current stored preferences and activation boundary.
+ * @param occurredAt - Original notification event time, not its projection or retry time.
+ * @returns Whether the event occurred during the current Slack opt-in period.
+ */
+export function isSlackNotificationEligible(preferences: NotificationPreferences, occurredAt: string): boolean {
+  const enabledAt = Date.parse(preferences.slackEnabledAt ?? '')
+  return preferences.channels.slack === true && Number.isFinite(enabledAt) && Date.parse(occurredAt) >= enabledAt
 }
 
 /** Frequency と quiet hours から channel delivery plan を作成します。 */
@@ -829,7 +891,7 @@ export function createNotificationDeliveryPlan(
   if (!Number.isFinite(occurredTime)) {
     throw new TypeError('Notification occurredAt must be an ISO 8601 timestamp.')
   }
-  const channels = (['inApp', 'email', 'push'] as const).filter(
+  const channels = (['inApp', 'email', 'push', 'slack'] as const).filter(
     (channel) => normalized.channels[channel],
   )
   const frequencyDelay = normalized.frequency === 'hourly'
@@ -904,10 +966,19 @@ function applyNotificationAction(
   return next
 }
 
-function toNotificationItem(
+/**
+ * Validates a stored notification for Inbox or external delivery.
+ * @param value - Untrusted stored row.
+ * @param recipientKey - Expected recipient partition.
+ * @param now - State evaluation time.
+ * @param includeExternalOnly - Includes notifications whose Inbox channel is disabled.
+ * @returns Validated notification, or undefined for non-notification rows.
+ */
+export function toNotificationItem(
   value: Record<string, unknown> | undefined,
   recipientKey: string,
   now: Date,
+  includeExternalOnly = false,
 ): NotificationItem | undefined {
   if (!value) {
     return undefined
@@ -999,7 +1070,7 @@ function toNotificationItem(
   if (value.inAppVisible !== undefined && typeof value.inAppVisible !== 'boolean') {
     throw invalidNotificationData()
   }
-  if (value.inAppVisible === false) {
+  if (value.inAppVisible === false && !includeExternalOnly) {
     return undefined
   }
   const deepLink = readText(value.deepLink)
@@ -1093,8 +1164,21 @@ function resolveNotificationState(row: Record<string, unknown>, now: Date): Noti
   return readTimestamp(row.readAt) ? 'read' : 'unread'
 }
 
+/** Untrusted preference fields from API or persistence inputs. */
+type NotificationPreferenceFields = {
+  /** Optimistic revision. */
+  version: unknown
+  /** Channel values. */
+  channels: unknown
+  /** Delivery frequency. */
+  frequency: unknown
+  /** Quiet-hour values. */
+  quietHours: unknown
+}
+
+/** Validates preference values at both API and persistence boundaries. */
 function normalizeNotificationPreferencesInput(
-  value: UpdateNotificationPreferencesInput | NotificationPreferences,
+  value: NotificationPreferenceFields,
 ): UpdateNotificationPreferencesInput {
   const version = readNonNegativeInteger(value.version)
   if (version === undefined) {
@@ -1102,20 +1186,22 @@ function normalizeNotificationPreferencesInput(
   }
   const channels = value.channels
   if (
-    !channels ||
+    !isRecord(channels) ||
     typeof channels.inApp !== 'boolean' ||
     typeof channels.email !== 'boolean' ||
-    typeof channels.push !== 'boolean'
+    typeof channels.push !== 'boolean' ||
+    (channels.slack !== undefined && typeof channels.slack !== 'boolean')
   ) {
     throw new NotificationError(400, 'InvalidNotificationPreferences', 'Notification channels are invalid.')
   }
-  if (!['instant', 'hourly', 'daily', 'weekly'].includes(value.frequency)) {
+  if (value.frequency !== 'instant' && value.frequency !== 'hourly' && value.frequency !== 'daily' && value.frequency !== 'weekly') {
     throw new NotificationError(400, 'InvalidNotificationPreferences', 'Notification frequency is invalid.')
   }
   const quietHours = value.quietHours
   if (
-    !quietHours ||
+    !isRecord(quietHours) ||
     typeof quietHours.enabled !== 'boolean' ||
+    typeof quietHours.start !== 'string' || typeof quietHours.end !== 'string' || typeof quietHours.timeZone !== 'string' ||
     !/^([01]\d|2[0-3]):[0-5]\d$/.test(quietHours.start) ||
     !/^([01]\d|2[0-3]):[0-5]\d$/.test(quietHours.end) ||
     !isValidTimeZone(quietHours.timeZone)
@@ -1124,9 +1210,10 @@ function normalizeNotificationPreferencesInput(
   }
   return {
     version,
-    channels: { ...channels },
+    channels: { inApp: channels.inApp, email: channels.email, push: channels.push,
+      ...(typeof channels.slack === 'boolean' ? { slack: channels.slack } : {}) },
     frequency: value.frequency,
-    quietHours: { ...quietHours },
+    quietHours: { enabled: quietHours.enabled, start: quietHours.start, end: quietHours.end, timeZone: quietHours.timeZone },
   }
 }
 
@@ -1137,6 +1224,7 @@ function notificationPreferencesMatchUpdate(
   return current.channels.inApp === expected.channels.inApp &&
     current.channels.email === expected.channels.email &&
     current.channels.push === expected.channels.push &&
+    Boolean(current.channels.slack) === Boolean(expected.channels.slack) &&
     current.frequency === expected.frequency &&
     current.quietHours.enabled === expected.quietHours.enabled &&
     current.quietHours.start === expected.quietHours.start &&

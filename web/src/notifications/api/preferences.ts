@@ -17,6 +17,8 @@ export type NotificationChannels = {
    * browser push へ配信するかどうかです。
    */
   push: boolean
+  /** Whether new Inbox notifications are also sent to the configured Slack destination. */
+  slack?: boolean
 }
 
 /**
