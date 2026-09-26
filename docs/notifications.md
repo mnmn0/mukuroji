@@ -108,6 +108,8 @@ Document由来の通知は、送信のたびにInboxと同じDocuments取得機�
 
 Triage通知も現在のEntryを取得し、送信時点のProjectと担当者を照合します。`metadata-only` / `denied` またはredactedなsourceは、保存済みの本文を外部に出さないためSlack配信を抑止します。Work Item / TriageのEnterprise権限も現在の `work-items.read` で評価し、Project未所属のTeam通知にはTeam全体の閲覧権限を要求します。
 
+Workspace直下のPlanning通知もWorkspaceリソースで認可します。担当者向けreminder/overdueには更新権限、ウォッチャーには現在の購読と閲覧権限を要求します。Cognitoグループは全ページを取得して再評価し、SCIM無効化・guest許可・外部ドメイン制限・permission ceilingも適用します。
+
 ## Due / overdue scan
 
 EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。

@@ -1,5 +1,6 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
+import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import { S3Client } from '@aws-sdk/client-s3'
 import {
@@ -144,6 +145,83 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('evaluates workspace Planning access and preserves only currently subscribed watcher delivery', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'PLANNING_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const nextDueAt = '2026-07-12T09:00:00.000Z'
+    let subscribed = true
+    let role = 'member'
+    let ownerMemberKey = 'owner@example.com'
+    const event = createProjectionEvent({ eventType: 'planning-update.reminder', entityId: 'initiative/launch',
+      planningTargetType: 'initiative', planningTargetId: 'launch', planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#launch',
+      planningNextDueAt: nextDueAt, planningNotificationKind: 'reminder',
+      notificationCandidates: [{ memberKey, reason: 'watcher' }] })
+    let groupReads = 0
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof AdminListGroupsForUserCommand)) throw new Error('Unexpected Cognito command')
+      groupReads += 1
+      expect(command.input.Username).toBe(memberKey)
+      return command.input.NextToken
+        ? { Groups: [{ GroupName: 'current-group' }], $metadata: {} }
+        : { Groups: [{ GroupName: 'unrelated-group' }], NextToken: 'page-2', $metadata: {} }
+    })
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      expect(command.input.ConsistentRead).toBe(true)
+      const key = command.input.Key
+      if (key?.recordKey === event.planningTargetRecordKey) return { Item: {
+        workspaceId: event.workspaceId, recordKey: event.planningTargetRecordKey, entryType: 'planning-update-target',
+        target: { type: 'initiative', entityId: 'launch' }, latestVersion: 0, updatedAt: event.occurredAt,
+        cadence: { updateOwnerMemberKey: ownerMemberKey, cadence: { unit: 'week', count: 1 },
+          nextDueAt, reminderHoursBefore: 24, timeZone: 'UTC' },
+      }, $metadata: {} }
+      if (key?.recordKey === 'ENTITY#launch') return { Item: { workspaceId: event.workspaceId, recordKey: 'ENTITY#launch',
+        entryType: 'planning-entity', type: 'initiative', id: 'launch' }, $metadata: {} }
+      if (key?.recordKey === `WATCHER#${memberKey}`) return { Item: { ...key, entryType: 'watcher', memberKey,
+        state: subscribed ? 'subscribed' : 'unsubscribed' }, $metadata: {} }
+      return { Item: { entryType: 'workspace-member', memberKey, role, status: 'active' }, $metadata: {} }
+    })
+    try {
+      const snapshot = createRealtimeEnterpriseSnapshot({
+        roleAssignments: [{ workspaceId: event.workspaceId, assignmentId: 'assignment-1', principalKind: 'directory-group',
+          principalId: 'current-group', roleId: 'custom:planning-reader', source: 'direct',
+          scope: { workspaceId: event.workspaceId, kind: 'workspace' } }],
+        customRoles: [{ workspaceId: event.workspaceId, roleId: 'custom:planning-reader', name: 'Reader',
+          permissions: ['planning.read'], guestAssignable: true, revision: 1, createdAt: event.occurredAt, updatedAt: event.occurredAt }],
+      })
+      const cache = createNotificationDeliveryAuthorizationCache()
+      cache.expiresAt = Date.now() + 60_000
+      const identity = { getSnapshot: async () => snapshot }
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
+      subscribed = false
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(false)
+      subscribed = true
+      snapshot.customRoles[0]!.permissions = ['documents.read']
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(false)
+      snapshot.roleAssignments = []
+      role = 'guest'
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(false)
+      role = 'member'
+      ownerMemberKey = memberKey
+      event.notificationCandidates = [{ memberKey, reason: 'reminder' }]
+      snapshot.roleAssignments = [{ workspaceId: event.workspaceId, assignmentId: 'assignment-2', principalKind: 'member',
+        principalId: memberKey, roleId: 'custom:planning-reader', source: 'direct',
+        scope: { workspaceId: event.workspaceId, kind: 'workspace' } }]
+      snapshot.customRoles[0]!.permissions = ['work-items.read']
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(false)
+      snapshot.customRoles[0]!.permissions = ['work-items.write']
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
+      snapshot.customRoles[0]!.permissions = ['planning.write']
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
+      expect(groupReads).toBe(2)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
   test('uses current Triage restrictions, owner and Project before external delivery', async () => {
     const previousTable = process.env.WORKSPACE_ACCESS_TABLE_NAME
     process.env.WORKSPACE_ACCESS_TABLE_NAME = 'workspace-access-test'
@@ -163,6 +241,7 @@ describe('collaboration projection pure helpers', () => {
         { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
       ]))
       cache.systemAdmins.set(memberKey, Promise.resolve(false))
+      cache.cognitoGroups.set(memberKey, Promise.resolve([]))
       const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
       const current = { permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: event.occurredAt },
         retention: { expiresAt: '2099-01-01T00:00:00.000Z' }, projectId: 'platform', ownerUserId: memberKey,
@@ -219,6 +298,7 @@ describe('collaboration projection pure helpers', () => {
       cache.expiresAt = Date.now() + 60_000
       cache.directories.set(event.workspaceId, Promise.resolve([]))
       cache.systemAdmins.set(memberKey, Promise.resolve(false))
+      cache.cognitoGroups.set(memberKey, Promise.resolve([]))
       const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
       expect(await authorizeNotificationDelivery(event, memberKey, identity, cache, async (request) => {
         reads.push(request)

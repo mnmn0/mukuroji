@@ -37,7 +37,7 @@ export { createSlackNotificationSender } from './adapter-out/slack/slack-sender'
 /** Exposes safe Slack delivery logs and backlog metrics. */
 export { createSlackDeliveryTelemetry } from './adapter-out/slack/slack-delivery-telemetry'
 /** Exposes recipient-bound document visibility checks for external notifications. */
-export { isDocumentDeliveryVisible, resolveDocumentDeliveryAccess } from './application/document-delivery'
+export { isDocumentDeliveryVisible, resolveDocumentDeliveryAccess, resolveNotificationRecipientBoundary } from './application/document-delivery'
 export {
   createNotificationScheduleHandler,
   parsePlanningUpdateTargetScheduleProjection,

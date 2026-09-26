@@ -18,6 +18,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
       NOTIFICATIONS_TABLE_NAME: { Ref: 'NotificationsTable76DCFC6C' },
       DOCUMENTS_TABLE_NAME: { Ref: 'DocumentsTable7E808EE5' },
       REQUEST_INTAKE_TABLE_NAME: Match.anyValue(),
+      COLLABORATION_TABLE_NAME: Match.anyValue(),
       MUKUROJI_RUNTIME_CONTROL_SCOPE: 'notification-schedule',
     }) },
   });
@@ -39,6 +40,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
   expect(serialized).toContain('/index/SlackDeliveryIndex');
   expect(serialized).toContain('DocumentsTable');
   expect(serialized).toContain('RequestIntakeTable');
+  expect(serialized).toContain('WorkItemCollaborationTable');
   expect(serialized).not.toContain('secretsmanager:PutSecretValue');
   expect(serialized).not.toContain('dynamodb:Scan');
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
