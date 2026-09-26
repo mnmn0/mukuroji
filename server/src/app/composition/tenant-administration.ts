@@ -81,56 +81,13 @@ export function createProductionTenantAdministrationClient(
 export function createProductionTenantWorkspaceAccess():
   ProductionTenantWorkspaceAccess {
   const tenantAdministration = createProductionTenantAdministrationClient()
-  let workspaceAccess: DynamoDbWorkspaceAccessClient | undefined
   const membershipGuard: WorkspaceMembershipGuard = {
-    /** Initializes legacy tenant state before preparing one atomic membership mutation. */
+    /** Rejects closed tenants and guards membership writes, allowing legacy profiles to be absent. */
     async prepareMembershipMutation(input) {
       try {
         await tenantAdministration.assertActive(input.workspaceId)
         return [tenantAdministration.createActiveWriteCondition(input.workspaceId)]
       } catch (error) {
-        if (
-          error instanceof TenantAdministrationError &&
-          error.code === 'TenantAdministrationNotInitialized'
-        ) {
-          if (!workspaceAccess) {
-            throw new WorkspaceAccessError(
-              503,
-              'TenantLifecycleUnavailable',
-              'Tenant lifecycle enforcement is unavailable.',
-              { cause: error },
-            )
-          }
-          const activeMembers = await workspaceAccess.listActiveMembers(
-            input.workspaceId,
-          )
-          const owner = activeMembers.find((member) => member.role === 'owner')
-          if (!owner) {
-            throw new WorkspaceAccessError(
-              503,
-              'TenantOwnerUnavailable',
-              'The Workspace owner required for tenant initialization is unavailable.',
-            )
-          }
-          await tenantAdministration.ensureSnapshot(
-            input.workspaceId,
-            owner.memberKey,
-          )
-          try {
-            await tenantAdministration.assertActive(input.workspaceId)
-            return [tenantAdministration.createActiveWriteCondition(input.workspaceId)]
-          } catch (retryError) {
-            if (retryError instanceof TenantAdministrationError) {
-              throw new WorkspaceAccessError(
-                retryError.status,
-                retryError.code,
-                retryError.message,
-                { cause: retryError },
-              )
-            }
-            throw retryError
-          }
-        }
         if (error instanceof TenantAdministrationError) {
           throw new WorkspaceAccessError(
             error.status,
@@ -143,7 +100,7 @@ export function createProductionTenantWorkspaceAccess():
       }
     },
   }
-  workspaceAccess = new DynamoDbWorkspaceAccessClient({
+  const workspaceAccess = new DynamoDbWorkspaceAccessClient({
     documentAuthorizationRevisionMutationPort:
       new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
     membershipGuard,
@@ -154,8 +111,7 @@ export function createProductionTenantWorkspaceAccess():
 /**
  * Creates a fail-closed feature gate for a trusted background worker.
  *
- * Inactive tenants return `false`; missing legacy tenant state is initialized
- * from authoritative Workspace membership before the feature is evaluated.
+ * Inactive tenants return `false`; missing legacy profiles remain usable.
  * Persistence and configuration failures remain errors for retry.
  *
  * @returns A tenant-scoped feature availability gate.
@@ -163,10 +119,6 @@ export function createProductionTenantWorkspaceAccess():
 export function createProductionTenantFeatureGate(
 ): ProductionTenantFeatureGate {
   const tenantAdministration = createProductionTenantAdministrationClient()
-  const workspaceAccess = new DynamoDbWorkspaceAccessClient({
-    documentAuthorizationRevisionMutationPort:
-      new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
-  })
 
   return {
     async isEnabled(workspaceId) {
@@ -174,14 +126,6 @@ export function createProductionTenantFeatureGate(
         await tenantAdministration.assertActive(workspaceId)
         return true
       } catch (error) {
-        if (
-          error instanceof TenantAdministrationError &&
-          error.code === 'TenantAdministrationNotInitialized'
-        ) {
-          await initializeLegacyTenant(tenantAdministration, workspaceAccess, workspaceId)
-          await tenantAdministration.assertActive(workspaceId)
-          return true
-        }
         if (
           error instanceof TenantAdministrationError &&
           (
@@ -204,24 +148,12 @@ export function createProductionTenantFeatureGate(
  */
 export function createProductionTenantAvailability(): ProductionTenantAvailability {
   const tenantAdministration = createProductionTenantAdministrationClient()
-  const workspaceAccess = new DynamoDbWorkspaceAccessClient({
-    documentAuthorizationRevisionMutationPort:
-      new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
-  })
   return {
     async isActive(workspaceId) {
       try {
         await tenantAdministration.assertActive(workspaceId)
         return true
       } catch (error) {
-        if (
-          error instanceof TenantAdministrationError &&
-          error.code === 'TenantAdministrationNotInitialized'
-        ) {
-          await initializeLegacyTenant(tenantAdministration, workspaceAccess, workspaceId)
-          await tenantAdministration.assertActive(workspaceId)
-          return true
-        }
         if (
           error instanceof TenantAdministrationError &&
           (error.code === 'TenantClosing' || error.code === 'TenantClosed')
@@ -234,25 +166,4 @@ export function createProductionTenantAvailability(): ProductionTenantAvailabili
     createActiveWriteCondition: (workspaceId) =>
       tenantAdministration.createActiveWriteCondition(workspaceId),
   }
-}
-
-/** Initializes one legacy tenant from the authoritative active membership table. */
-async function initializeLegacyTenant(
-  tenantAdministration: DynamoDbTenantAdministrationClient,
-  workspaceAccess: DynamoDbWorkspaceAccessClient,
-  workspaceId: string,
-): Promise<void> {
-  const activeMembers = await workspaceAccess.listActiveMembers(workspaceId)
-  const owner = activeMembers.find((member) => member.role === 'owner')
-  if (!owner) {
-    throw new TenantAdministrationError(
-      503,
-      'TenantOwnerUnavailable',
-      'The Workspace owner required for tenant initialization is unavailable.',
-    )
-  }
-  await tenantAdministration.ensureSnapshot(
-    workspaceId,
-    owner.memberKey,
-  )
 }

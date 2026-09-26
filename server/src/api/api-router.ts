@@ -16094,7 +16094,7 @@ async function authenticateWorkspacePrincipal(
   )
   const principalKind = breakGlassActivation ? 'break-glass' : 'member'
   let verifiedAuthenticationMethods: string[] | undefined
-  if (isEnterpriseSsoConfigured() && !options.breakGlassCandidate && principalKind !== 'break-glass') {
+  if (!options.breakGlassCandidate && principalKind !== 'break-glass' && isEnterpriseSsoConfigured()) {
     try {
       await assertEnterpriseRuntimeCognitoProviders(
         snapshot,
