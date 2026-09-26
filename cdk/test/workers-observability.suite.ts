@@ -34,13 +34,49 @@ test('Slack notifications use the sparse due queue with bounded execution and re
   const policies = template.findResources('AWS::IAM::Policy');
   const slackPolicies = Object.entries(policies).filter(([id]) => id.startsWith('SlackNotificationFunction'));
   expect(slackPolicies).toHaveLength(1);
+  const statements: unknown = slackPolicies[0]?.[1].Properties?.PolicyDocument?.Statement;
+  if (!Array.isArray(statements)) throw new Error('Slack worker policy statements are missing.');
+  const dynamoStatements = statements.filter((statement: unknown) => {
+    if (!statement || typeof statement !== 'object') return false;
+    const action: unknown = Reflect.get(statement, 'Action');
+    const actions: unknown[] = Array.isArray(action) ? action : [action];
+    return actions.some((value) => typeof value === 'string' && (value === '*' || value.startsWith('dynamodb:')));
+  });
+  expect(dynamoStatements).toHaveLength(4);
+  expect(dynamoStatements).toEqual(expect.arrayContaining([
+    {
+      Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      Resource: { 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] },
+    },
+    {
+      Effect: 'Allow', Action: 'dynamodb:Query',
+      Resource: [
+        { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
+        { 'Fn::Join': ['', [{ 'Fn::GetAtt': ['NotificationsTable76DCFC6C', 'Arn'] }, '/index/SlackDeliveryIndex']] },
+      ],
+    },
+    {
+      Effect: 'Allow', Action: ['dynamodb:GetItem', 'dynamodb:Query'],
+      Resource: [
+        { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
+        { 'Fn::GetAtt': ['EnterpriseIdentityTable7491FB7A', 'Arn'] },
+        { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
+        { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+        { 'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
+      ],
+    },
+    {
+      Effect: 'Allow', Action: 'dynamodb:GetItem',
+      Resource: [
+        { 'Fn::GetAtt': ['RequestIntakeTable608708D4', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
+      ],
+    },
+  ]));
   const serialized = JSON.stringify(slackPolicies);
   expect(serialized).toContain('secretsmanager:GetSecretValue');
   expect(serialized).toContain('mukuroji/automation-webhooks/*/slack/*');
-  expect(serialized).toContain('/index/SlackDeliveryIndex');
-  expect(serialized).toContain('DocumentsTable');
-  expect(serialized).toContain('RequestIntakeTable');
-  expect(serialized).toContain('WorkItemCollaborationTable');
   expect(serialized).not.toContain('secretsmanager:PutSecretValue');
   expect(serialized).not.toContain('dynamodb:Scan');
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
