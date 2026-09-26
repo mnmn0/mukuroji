@@ -10,6 +10,7 @@ const meta = {
   args: { locale: 'ja', controller: notificationPreferencesControllerFixture },
 } satisfies Meta<typeof NotificationSettingsPanel>
 
+/** Registers the notification settings stories in Storybook. */
 export default meta
 /** Story type for notification settings. */
 type Story = StoryObj<typeof meta>

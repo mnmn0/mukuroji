@@ -26,10 +26,15 @@ export {
   type UpdateNotificationInput,
   type UpdateNotificationPreferencesInput,
 } from './notifications'
+/** Exposes the deterministic shard key used when queuing Slack notifications. */
 export { slackDeliveryShard } from './domain/slack-delivery'
+/** Exposes the application workflow that delivers due Slack notifications. */
 export { deliverDueSlackNotifications } from './application/slack-delivery'
+/** Exposes the DynamoDB adapter for Slack delivery claims and outcomes. */
 export { DynamoDbSlackDeliveryStore } from './adapter-out/dynamodb/slack-delivery-store'
+/** Exposes the recipient-scoped Incoming Webhook transport factory. */
 export { createSlackNotificationSender } from './adapter-out/slack/slack-sender'
+/** Exposes safe Slack delivery logs and backlog metrics. */
 export { createSlackDeliveryTelemetry } from './adapter-out/slack/slack-delivery-telemetry'
 export {
   createNotificationScheduleHandler,
