@@ -5,6 +5,7 @@ export {
   createNotificationDeliveryPlan,
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
+  requiresCurrentWorkItemAssignee,
   toNotificationItem,
   type CountUnreadNotificationsInput,
   type ListNotificationsInput,

@@ -138,8 +138,14 @@ export async function deliverDueSlackNotifications(dependencies: SlackDeliveryDe
           failed = true
           continue
         }
+        const initialPreferences = await dependencies.store.getPreferences(delivery)
+        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !initialPreferences.channels.slack || !await dependencies.isAuthorized(delivery)) {
+          await dependencies.store.finish(delivery, token, 'suppressed')
+          continue
+        }
+        // Recheck preferences after potentially slow authorization, before the final lease fence and send.
         const preferences = await dependencies.store.getPreferences(delivery)
-        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !preferences.channels.slack || !await dependencies.isAuthorized(delivery)) {
+        if (delivery.expiresAt <= dependencies.now().getTime() / 1_000 || !preferences.channels.slack) {
           await dependencies.store.finish(delivery, token, 'suppressed')
           continue
         }

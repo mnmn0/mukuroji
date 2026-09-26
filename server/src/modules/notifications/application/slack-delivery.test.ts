@@ -97,6 +97,21 @@ describe('Slack notification delivery application', () => {
       expect(f.sends()).toBe(0)
     }
   })
+  test('honors preferences changed while authorization is in flight', async () => {
+    for (const change of ['disable', 'quiet-hours']) {
+      const f = fixture()
+      let changed = false
+      f.dependencies.store.getPreferences = async () => ({ ...DEFAULT_NOTIFICATION_PREFERENCES,
+        channels: { inApp: true, email: false, push: false, slack: change !== 'disable' || !changed },
+        quietHours: { enabled: change === 'quiet-hours' && changed, start: '11:00', end: '13:00', timeZone: 'UTC' },
+      })
+      f.dependencies.isAuthorized = async () => { changed = true; return true }
+      expect(await deliverDueSlackNotifications(f.dependencies)).toBe(0)
+      expect(f.sends()).toBe(0)
+      expect(f.finishes[0]?.status).toBe(change === 'disable' ? 'suppressed' : 'pending')
+      if (change === 'quiet-hours') expect(f.finishes[0]?.next?.toISOString()).toBe('2026-09-26T13:00:00.000Z')
+    }
+  })
   test('retains Slack Retry-After and terminates exhausted or permanent failures', async () => {
     const f = fixture({ succeeded: false, retryable: true, code: 'SlackRateLimited', retryAfterMs: 120_000 })
     await deliverDueSlackNotifications(f.dependencies)

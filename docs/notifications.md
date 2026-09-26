@@ -110,6 +110,8 @@ Triage通知も現在のEntryを取得し、送信時点のProjectと担当者�
 
 Workspace直下のPlanning通知もWorkspaceリソースで認可します。担当者向けreminder/overdueには更新権限、ウォッチャーには現在の購読と閲覧権限を要求します。Cognitoグループは全ページを取得して再評価し、SCIM無効化・guest許可・外部ドメイン制限・permission ceilingも適用します。
 
+Work Itemの担当者だけに向けた通知は、担当変更・状態変更・日程変更も含め、現在の担当者との一致をInboxと共通の条件で確認します。Cognitoから削除済みの受信者は再試行せず配信を抑止し、一時的なCognito障害のみ再試行します。通知設定は認可処理の後にも読み直し、その間のSlack無効化・quiet hours変更を反映します。
+
 ## Due / overdue scan
 
 EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。

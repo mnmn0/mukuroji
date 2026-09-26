@@ -145,6 +145,115 @@ function createRealtimeEnterpriseSnapshot(
 }
 
 describe('collaboration projection pure helpers', () => {
+  test('rechecks all assignee-only reasons while preserving independent mention delivery', async () => {
+    const keys = ['WORK_ITEMS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const current = createRealtimeWorkItem()
+    const event = createProjectionEvent({ eventType: 'work-item.updated', teamId: 'core', projectId: 'platform', issueId: 'example' })
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    cache.cognitoGroups.set(memberKey, Promise.resolve([]))
+    cache.directories.set(event.workspaceId, Promise.resolve([
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+    ]))
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      expect(command.input.ConsistentRead).toBe(true)
+      return { Item: command.input.TableName === 'WORK_ITEMS_TABLE_NAME' ? current
+        : { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    try {
+      for (const reason of ['assignee', 'assignment', 'due', 'due-date-change', 'overdue', 'schedule-change', 'status-change']) {
+        event.notificationCandidates = [{ memberKey, reason }]
+        current.assigneeUserId = memberKey
+        expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
+        current.assigneeUserId = 'new-owner@example.com'
+        expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(false)
+      }
+      event.notificationCandidates = [{ memberKey, reason: 'assignment' }, { memberKey, reason: 'mention' }]
+      expect(await authorizeNotificationDelivery(event, memberKey, identity, cache)).toBe(true)
+    } finally {
+      send.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('suppresses deleted Cognito recipients in both delivery paths but retries transient provider errors', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    let errorName: string | undefined
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => {
+      if (errorName) throw Object.assign(new Error('Cognito unavailable'), { name: errorName })
+      return { Groups: [], $metadata: {} }
+    })
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {},
+    }))
+    try {
+      for (const eventType of ['comment.created', 'document.comment.created']) {
+        const event = createProjectionEvent({ eventType, entityId: 'source-1' })
+        const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+        /** Starts an independent delivery check with a fresh current-user lookup. */
+        const authorize = () => {
+          const cache = createNotificationDeliveryAuthorizationCache()
+          cache.expiresAt = Date.now() + 60_000
+          cache.directories.set(event.workspaceId, Promise.resolve([]))
+          return authorizeNotificationDelivery(event, memberKey, identity, cache, async () => {
+            if (errorName) throw new Error('Deleted or unavailable recipient reached document access')
+            return {}
+          })
+        }
+        errorName = undefined
+        expect(await authorize()).toBe(true)
+        errorName = 'UserNotFoundException'
+        expect(await authorize()).toBe(false)
+        errorName = 'TooManyRequestsException'
+        await expect(authorize()).rejects.toThrow('Cognito unavailable')
+      }
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('recognizes configured administrator groups with whitespace for scoped and document deliveries', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID', 'SYSTEM_ADMIN_GROUPS']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    process.env.SYSTEM_ADMIN_GROUPS = 'admins, operators , '
+    const memberKey = 'member@example.com'
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({
+      Groups: [{ GroupName: 'operators' }], $metadata: {},
+    }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {},
+    }))
+    try {
+      for (const eventType of ['comment.created', 'document.comment.created']) {
+        const event = createProjectionEvent({ eventType, entityId: 'source-1', teamId: 'core', projectId: 'platform' })
+        const cache = createNotificationDeliveryAuthorizationCache()
+        cache.expiresAt = Date.now() + 60_000
+        cache.directories.set(event.workspaceId, Promise.resolve([
+          { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        ]))
+        expect(await authorizeNotificationDelivery(event, memberKey,
+          { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }, cache, async (request) => {
+            expect(request.access?.isSystemAdmin).toBe(true)
+            return {}
+          })).toBe(true)
+      }
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
   test('evaluates workspace Planning access and preserves only currently subscribed watcher delivery', async () => {
     const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'PLANNING_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID']
     const previous = keys.map((key) => process.env[key])

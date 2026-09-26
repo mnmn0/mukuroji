@@ -801,6 +801,22 @@ export function getConfiguredNotificationsTableName(
     'mukuroji-notifications-local'
 }
 
+/** Reasons whose sole recipient must still be the current Work Item assignee. */
+const currentAssigneeNotificationReasons = new Set([
+  'assignee', 'assignment', 'due', 'due-date-change', 'overdue', 'schedule-change', 'status-change',
+])
+
+/**
+ * Identifies notifications that depend solely on current Work Item assignment.
+ * @param notification - Recipient-specific reasons shared by Inbox and external delivery.
+ * @returns Whether current assignment must still match the recipient.
+ */
+export function requiresCurrentWorkItemAssignee(notification: Pick<NotificationItem, 'reasons'>): boolean {
+  return notification.reasons.length > 0 && notification.reasons.every(
+    (reason) => currentAssigneeNotificationReasons.has(reason),
+  )
+}
+
 /** Workspace/member を Notifications table の recipient partition key に変換します。 */
 export function createNotificationRecipientKey(workspaceId: string, memberKey: string) {
   return `${requireText(workspaceId, 'Notification workspace ID')}#${normalizeMemberKey(memberKey)}`

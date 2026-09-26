@@ -43,6 +43,7 @@ import {
   isDocumentDeliveryVisible,
   resolveDocumentDeliveryAccess,
   resolveNotificationRecipientBoundary,
+  requiresCurrentWorkItemAssignee,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
 } from '../../../notifications'
@@ -1796,7 +1797,7 @@ async function isEligibleRecipient(
   enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> | undefined,
   enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
   enforceContentAuthorization = false,
-  cognitoGroupCache: Map<string, Promise<string[]>> = new Map(),
+  cognitoGroupCache: Map<string, Promise<string[] | undefined>> = new Map(),
 ) {
   const memberResult = await documentClient.send(
     new GetCommand({
@@ -1840,7 +1841,9 @@ async function isEligibleRecipient(
       : ['work-items.read']
     if (!boundary.allowed || permissionCeiling && !permissions.some((permission) => permissionCeiling?.includes(permission))) return false
     const username = readString(member.username) ?? readString(member.email) ?? memberKey
-    cognitoGroupIds = await readNotificationCognitoGroups(username, cognitoGroupCache)
+    const currentGroups = await readNotificationCognitoGroups(username, cognitoGroupCache)
+    if (currentGroups === undefined) return false
+    cognitoGroupIds = currentGroups
     currentSystemAdminCache.set(username, Promise.resolve(cognitoGroupIds.some((group) => readSystemAdminGroups().includes(group))))
   }
 
@@ -1904,8 +1907,8 @@ export type NotificationDeliveryAuthorizationCache = {
   systemAdmins: Map<string, Promise<boolean>>
   /** Current enterprise snapshots, keyed by workspace. */
   enterpriseSnapshots: Map<string, Promise<EnterpriseIdentitySnapshot>>
-  /** Current Cognito group lists, keyed by recipient username. */
-  cognitoGroups: Map<string, Promise<string[]>>
+  /** Current Cognito group lists, or undefined for a deleted recipient, keyed by username. */
+  cognitoGroups: Map<string, Promise<string[] | undefined>>
 }
 
 /**
@@ -1920,9 +1923,9 @@ export function createNotificationDeliveryAuthorizationCache(): NotificationDeli
  * Reads all current Cognito groups, sharing only the invocation-local bounded-lifetime promise.
  * @param username - Current membership's Cognito username.
  * @param cache - Invocation-local group cache cleared at the authorization refresh boundary.
- * @returns Current group names; provider failures propagate so delivery fails closed.
+ * @returns Current group names, or undefined for a deleted user; transient failures propagate for retry.
  */
-async function readNotificationCognitoGroups(username: string, cache: Map<string, Promise<string[]>>): Promise<string[]> {
+async function readNotificationCognitoGroups(username: string, cache: Map<string, Promise<string[] | undefined>>): Promise<string[] | undefined> {
   let groups = cache.get(username)
   if (!groups) {
     groups = (async () => {
@@ -1940,7 +1943,10 @@ async function readNotificationCognitoGroups(username: string, cache: Map<string
         if (nextToken) cursors.add(nextToken)
       } while (nextToken)
       return names
-    })()
+    })().catch((error: unknown) => {
+      if (isAwsNamedError(error, 'UserNotFoundException')) return undefined
+      throw error
+    })
     cache.set(username, groups)
   }
   return groups
@@ -2008,6 +2014,7 @@ export async function authorizeNotificationDelivery(
     }
     const username = readString(member?.username) ?? readString(member?.email) ?? memberKey
     const cognitoGroupIds = await readNotificationCognitoGroups(username, cache.cognitoGroups)
+    if (cognitoGroupIds === undefined) return false
     const systemAdmin = cognitoGroupIds.some((group) => readSystemAdminGroups().includes(group))
     cache.systemAdmins.set(username, Promise.resolve(systemAdmin))
     return isDocumentDeliveryVisible(event.workspaceId, event.entityId, resolveDocumentDeliveryAccess({
@@ -2034,6 +2041,11 @@ export async function authorizeNotificationDelivery(
   }
   const currentScope = await readCurrentWorkItemScope(sourceEvent)
   if (!currentScope.exists) return false
+  if (currentScope.checked && requiresCurrentWorkItemAssignee({
+    reasons: sourceEvent.notificationCandidates
+      .filter((candidate) => normalizeMemberKey(candidate.memberKey) === memberKey)
+      .map((candidate) => candidate.reason),
+  }) && currentScope.assigneeMemberKey !== memberKey) return false
   const scoped = refreshScheduledNotificationEvent(
     currentScope.checked ? overlayCurrentWorkItemNotificationScope(sourceEvent, currentScope) : sourceEvent,
     currentScope,
@@ -2121,8 +2133,9 @@ async function isCurrentSystemAdmin(username: string) {
   }
 }
 
+/** Reads normalized configured Cognito administrator group names. */
 function readSystemAdminGroups() {
-  return requireEnv('SYSTEM_ADMIN_GROUPS').split(',')
+  return requireEnv('SYSTEM_ADMIN_GROUPS').split(',').map((group) => group.trim()).filter(Boolean)
 }
 
 async function readProjectDirectory(directoryId: string) {
