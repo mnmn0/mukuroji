@@ -5,6 +5,9 @@ export {
   type AiAssistanceErrorCode,
 } from './errors'
 
+/** Deployment-disabled AI service without external side effects. */
+export { createDisabledAiAssistanceService } from './application/use-cases/disabled-ai-assistance-service'
+
 /** Strict request, persistence, and model-output validators. */
 export {
   aiAssistanceModelOutputSchema,

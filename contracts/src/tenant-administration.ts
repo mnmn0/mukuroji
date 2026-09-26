@@ -1,28 +1,12 @@
 /**
  * Tenant administration contract schema version.
  */
-export const TENANT_ADMINISTRATION_SCHEMA_VERSION = 2 as const
+export const TENANT_ADMINISTRATION_SCHEMA_VERSION = 3 as const
 
 /**
  * Locales supported by tenant-owned defaults.
  */
 export type TenantLocale = 'ja' | 'en'
-
-/**
- * Plans that can be assigned to a tenant.
- */
-export type TenantPlan = 'starter' | 'growth' | 'enterprise'
-
-/**
- * Features that can be enabled by a tenant entitlement.
- */
-export type TenantFeature =
-  | 'documents'
-  | 'analytics'
-  | 'automation'
-  | 'developer-platform'
-  | 'sso'
-  | 'scim'
 
 /**
  * Tenant defaults applied when new members or resources are created.
@@ -57,70 +41,6 @@ export type TenantProfile = {
   /** Profile creation timestamp. */
   createdAt: string
   /** Profile last-update timestamp. */
-  updatedAt: string
-}
-
-/**
- * Feature and capacity entitlement assigned to a tenant.
- */
-export type TenantEntitlement = {
-  /** Canonical Workspace identifier used as the tenant identifier. */
-  workspaceId: string
-  /** Commercial plan assigned to the tenant. */
-  plan: TenantPlan
-  /** Features enabled for the tenant. */
-  features: TenantFeature[]
-  /** Maximum number of active seats permitted by the plan. */
-  seatLimit: number
-  /** Maximum metered units permitted during one usage period. */
-  usageQuota: number
-  /** Days a quota overage may remain in a grace period. */
-  gracePeriodDays: number
-  /** Optimistic concurrency revision for entitlement changes. */
-  revision: number
-  /** Entitlement last-update timestamp. */
-  updatedAt: string
-}
-
-/**
- * Metered tenant usage for the current period.
- */
-export type TenantUsage = {
-  /** Canonical Workspace identifier used as the tenant identifier. */
-  workspaceId: string
-  /** Number of active seats currently assigned. */
-  activeSeats: number
-  /** Metered units consumed in the current period. */
-  periodUsage: number
-  /** Inclusive start of the current usage period. */
-  periodStart: string
-  /** Exclusive end of the current usage period. */
-  periodEnd: string
-  /** Timestamp until which a quota overage is allowed, when active. */
-  gracePeriodEndsAt?: string
-  /** Optimistic concurrency revision for usage changes. */
-  revision: number
-  /** Usage last-update timestamp. */
-  updatedAt: string
-}
-
-/**
- * Invoice-ready tenant usage aggregate retained for one UTC billing period.
- */
-export type TenantBillingPeriod = {
-  /** Canonical Workspace identifier used as the tenant identifier. */
-  workspaceId: string
-  /** Inclusive start of the UTC billing period. */
-  periodStart: string
-  /** Exclusive end of the UTC billing period. */
-  periodEnd: string
-  /** Metered units accumulated during the period. */
-  meteredUnits: number
-  /** Highest number of concurrently active seats observed during the period. */
-  activeSeatHighWaterMark: number
-  /** Optimistic concurrency revision for billing aggregation. */
-  revision: number
-  /** Billing aggregate last-update timestamp. */
   updatedAt: string
 }
 
@@ -286,12 +206,6 @@ export type TenantAdministrationSnapshot = {
   schemaVersion: typeof TENANT_ADMINISTRATION_SCHEMA_VERSION
   /** Tenant ownership and regional profile. */
   profile: TenantProfile
-  /** Plan, features, and server-side capacity limits. */
-  entitlement: TenantEntitlement
-  /** Current-period usage counters. */
-  usage: TenantUsage
-  /** Recent invoice-ready usage and seat aggregates, newest first. */
-  billingPeriods: TenantBillingPeriod[]
   /** Retention, residency, and encryption policy. */
   governance: TenantGovernancePolicy
   /** Residency and key controls enforced by the deployed data plane. */
@@ -315,24 +229,6 @@ export type UpdateTenantProfileInput = {
   /** Defaults applied to newly created tenant resources. */
   defaultPolicy: TenantDefaultPolicy
   /** Revision read before editing the profile. */
-  expectedRevision: number
-}
-
-/**
- * Mutable entitlement fields accepted by the tenant administration API.
- */
-export type UpdateTenantEntitlementInput = {
-  /** Commercial plan assigned to the tenant. */
-  plan: TenantPlan
-  /** Features enabled for the tenant. */
-  features: TenantFeature[]
-  /** Maximum number of active seats permitted by the plan. */
-  seatLimit: number
-  /** Maximum metered units permitted during one usage period. */
-  usageQuota: number
-  /** Days a quota overage may remain in a grace period. */
-  gracePeriodDays: number
-  /** Revision read before editing the entitlement. */
   expectedRevision: number
 }
 

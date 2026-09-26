@@ -5,7 +5,7 @@ export type AiAssistanceRolloutEnvironment = Record<string, string | boolean | u
 
 /** Saved settings and session state used to gate one AI workflow in the UI. */
 export type AiAssistanceTaskGate = {
-  /** Whether the deployment build has explicitly opted into AI assistance. */
+  /** Whether the deployment build permits server-gated AI assistance controls. */
   rolloutEnabled: boolean
   /** Whether the current route has a verified authenticated Workspace member. */
   authenticated: boolean
@@ -18,11 +18,10 @@ export type AiAssistanceTaskGate = {
 }
 
 /**
- * Resolves the explicit UI rollout flag for AI assistance.
+ * Resolves the optional UI kill switch for AI assistance.
  *
- * The flag defaults to disabled so a UI deployment cannot expose controls that
- * target an API route before the dependent backend deployment is live. The
- * backend-dependent UI is enabled by setting `VITE_AI_ASSISTANCE_ENABLED=true`.
+ * Deployment availability comes from the API preference response. Builds may
+ * additionally hide the UI by setting `VITE_AI_ASSISTANCE_ENABLED=false`.
  *
  * @param environment - Vite environment values available to the current build.
  * @returns Whether route-level AI assistance controls may be rendered.
@@ -30,8 +29,8 @@ export type AiAssistanceTaskGate = {
 export function isAiAssistanceUiEnabled(
   environment: AiAssistanceRolloutEnvironment,
 ): boolean {
-  return environment.VITE_AI_ASSISTANCE_ENABLED === true ||
-    environment.VITE_AI_ASSISTANCE_ENABLED === 'true'
+  return environment.VITE_AI_ASSISTANCE_ENABLED !== false &&
+    environment.VITE_AI_ASSISTANCE_ENABLED !== 'false'
 }
 
 /**
@@ -55,5 +54,5 @@ export function isAiAssistanceTaskEnabled(
   return gate.policy?.enabled === true && gate.policy.enabledTasks.includes(task)
 }
 
-/** Explicit build-time rollout decision consumed by route-level integrations. */
+/** Optional build-time kill switch consumed by route-level integrations. */
 export const aiAssistanceUiEnabled = isAiAssistanceUiEnabled(import.meta.env)

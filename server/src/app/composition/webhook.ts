@@ -39,9 +39,7 @@ export function createProductionWebhookProjectionHandler(
   queue = createProductionWebhookQueue(),
 ) {
   return createWebhookProjectionHandler({
-    featureAvailability: createProductionTenantFeatureGate(
-      'developer-platform',
-    ),
+    featureAvailability: createProductionTenantFeatureGate(),
     queue,
   })
 }
@@ -84,9 +82,7 @@ export function createProductionWebhookDeliveryHandler(
     grantCleanup: new DynamoDbWebhookGrantCleanupStore(),
     queue,
     claims: new DynamoDbWebhookDeliveryClaimStore(),
-    featureAvailability: createProductionTenantFeatureGate(
-      'developer-platform',
-    ),
+    featureAvailability: createProductionTenantFeatureGate(),
     deliver: deliverPreparedWebhook,
     now: () => new Date(),
     random: Math.random,

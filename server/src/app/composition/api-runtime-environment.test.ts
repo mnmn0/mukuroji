@@ -168,6 +168,30 @@ test('loads direct and nested API configuration in deterministic order', async (
   }
 })
 
+test('allows omitted SSO values in a complete immutable runtime envelope', async () => {
+  const configuration = createValidConfigurationGroups()
+  const environment = createPointerEnvironment()
+  const optionalNames = [
+    'COGNITO_SSO_CLIENT_ID',
+    'COGNITO_HOSTED_UI_DOMAIN',
+    'COGNITO_SSO_REDIRECT_URI',
+    'COGNITO_ENTERPRISE_IDP_NAME',
+    'ENTERPRISE_SSO_STATE_SECRET',
+  ]
+  let groups = configuration.secretStrings
+  for (const name of optionalNames) {
+    groups = replaceConfigurationRecord(groups, name, `value:${name}:`)
+  }
+  await hydrateApiRuntimeEnvironment(environment, async () => groups)
+  for (const name of optionalNames) expect(environment[name]).toBe('')
+  expect(environment.COGNITO_CLIENT_ID).toBe(configuration.expectedValues.get('COGNITO_CLIENT_ID'))
+
+  const invalidGroups = replaceConfigurationRecord(groups, 'COGNITO_CLIENT_ID', 'value:COGNITO_CLIENT_ID:')
+  await expect(hydrateApiRuntimeEnvironment(
+    createPointerEnvironment(), async () => invalidGroups,
+  )).rejects.toThrow()
+})
+
 test('loads a direct-only envelope without a second secret request', async () => {
   const configuration = createValidConfigurationGroups()
   const environment = createPointerEnvironment()

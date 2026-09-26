@@ -3,10 +3,6 @@
 Tenant administration is a workspace-scoped control plane. Its durable records are kept in `TenantAdministrationTable` with `workspaceId` as the partition key and a fixed record key for each aggregate component:
 
 - `PROFILE`: owner, region, locale, default invitation role, and lifecycle status
-- `ENTITLEMENT`: plan, features, seat limit, usage quota, and grace period
-- `USAGE`: active seats and the current metering period
-- `USAGE_RECEIPT#<digest>`: expiring request-metering idempotency receipts
-- `BILLING#<period-start>`: invoice-ready metered units and active-seat high-water mark
 - `GOVERNANCE`: audit retention, legal hold, residency, and key ownership policy
 - `RETENTION_JOB`: resumable audit-TTL reconciliation progress
 - `OPERATION#<id>` plus `ACTIVE_OPERATION`: canonical export and closure workflow state
@@ -19,19 +15,15 @@ The administration route resolves the active Workspace owner from membership on 
 
 When a Workspace invitation omits its role, the server initializes or reads the tenant aggregate from authoritative active membership and applies `PROFILE.defaultPolicy.defaultMemberRole`. External-collaborator and MFA controls remain owned by Enterprise Identity policy so the UI does not expose duplicate, inert tenant settings.
 
-## Server-side entitlement and billing enforcement
+## Self-hosted Workspace lifecycle
 
-Commercial entitlement changes are system-administrator-only and are read-only in the Workspace UI. Feature checks are applied after server-side Workspace resolution on Documents, Analytics, Automation, Developer Platform, SSO, and SCIM routes, including SSO discovery/start/exchange and the domain/provider/group-mapping administration paths. Opaque public Document shares are also resolved to their server-owned Workspace before the Documents entitlement is checked. Public API credentials and inbound Automation webhooks are checked after their tenant has been resolved, so omitting the browser UI does not bypass the policy. Inbound webhooks reach metering only after content-type, body, signature, and payload validation.
+Workspaces, Teams, Projects, membership roles, and project-level authorization remain available. The self-hosted distribution has no commercial plans, feature paywalls, seat limits, usage quotas, grace periods, or invoice aggregation. Administration snapshots use schema version 3 and contain profile, governance, retention, and lifecycle operations. The former entitlement update endpoint is removed.
 
-Durable Work Item imports recheck both current management authorization and the Developer Platform tenant entitlement before starting and before every row. Once closure changes the profile to `closing`, queued imports cannot begin and an import already between rows terminates without materializing another row.
+Normal APIs, public Document shares, public API credentials, inbound Automation webhooks, and background workers still resolve the server-owned Workspace and reject access when its profile is closing or closed. Durable Work Item imports recheck lifecycle and current management authorization before starting and before every row. Membership writes include an atomic active-profile condition to prevent racing a closure transition. Operational rate limits, AI provider budgets, idempotency for business mutations, and authorization remain enforced.
 
-Mutating feature requests reserve usage under entitlement and usage revision conditions before entering the feature handler. When an `Idempotency-Key` is supplied, the server scopes it to the concrete method, route, query, conditional header, and payload digest before the same transaction stores a SHA-256-keyed receipt without the raw key; matching retries return the committed usage instead of charging twice, while reuse for another request cannot suppress metering. Request bodies are hashed incrementally with a 10 MiB bound instead of being cloned into unbounded memory. Public API requests are metered only after credential rate-limit admission. Receipts expire logically and through DynamoDB TTL after 35 days. Entitlement updates condition-check current usage, while usage and seat activations condition-check current entitlement, closing concurrent limit-change races in both directions.
+Lazy initialization creates profile and governance records from authoritative Workspace membership. Existing commercial records (ENTITLEMENT, USAGE, BILLING, and USAGE_RECEIPT) are ignored and no longer updated; upgrading does not delete durable data or recreate the table. Existing audit history remains subject to retention and legal hold. No commercial-data backfill is required. Roll out the matching Web and Server versions together because the administration response schema changed. Rolling back to commercial enforcement requires reconciling membership/usage records, which are no longer maintained after this release.
 
-Active-seat changes are prepared by the tenant adapter and committed in the same DynamoDB transaction as invitation acceptance, administrator activation/deactivation, and SCIM provisioning/deprovisioning. A concurrent seat-limit change or membership write therefore fails closed instead of drifting the usage counter. Every usage or seat mutation also updates the tenant's UTC billing-period record. The management snapshot returns the newest 13 invoice aggregates with metered units and the highest concurrent seat count; older records remain tenant-partitioned in the table.
-
-Lazy initialization reads authoritative active Workspace membership and assigns a compatibility `enterprise` entitlement with the existing feature surface enabled. Its initial seat limit is at least the authoritative active-member count, so rollout neither disables an existing module nor creates an already-over-limit aggregate. Later entitlement changes come only from the system control plane, and further seat activation is checked against the resulting limit. A release from a zero seat counter is treated as corrupt state and fails closed instead of hiding membership drift.
-
-Quota and grace-period checks live in the tenant domain. A new grace deadline is created only by the server. Seat release remains available after grace expiry, while feature mutations are rejected once the server-created grace period has ended.
+SSO and AI are independently opt-in at deployment. See [the CDK optional-services configuration](../cdk/README.md#optional-sso-and-ai) for enablement and disablement.
 
 ## Residency and encryption
 
@@ -39,7 +31,7 @@ Tenant residency and encryption settings describe controls that the deployed dat
 
 ## Audit history
 
-Profile, entitlement, governance, usage, billing, seat, retention, and lifecycle transitions append an immutable event to the existing audit table in the same DynamoDB transaction as the tenant state mutation. Audit payloads are diffed through the shared redaction boundary and use the tenant's retention policy for TTL. While legal hold is active, new tenant audit events omit TTL so DynamoDB cannot expire them.
+Profile, governance, retention, and lifecycle transitions append an immutable event to the existing audit table in the same DynamoDB transaction as the tenant state mutation. Audit payloads are diffed through the shared redaction boundary and use the tenant's retention policy for TTL. While legal hold is active, new tenant audit events omit TTL so DynamoDB cannot expire them.
 
 Initial tenant setup and every later retention or legal-hold change create `RETENTION_JOB` with the aggregate transaction. The tenant-operation Lambda processes at most 22 historical audit rows per invocation, removes TTL under legal hold, restores the policy-derived TTL after release, and persists a cursor, processed count, and immutable progress/completion audit event. The same worker consumes new audit-event inserts and applies the current tenant policy under a governance-revision condition, so concurrent policy changes fail and retry instead of leaving a stale TTL. DynamoDB Streams continue each page; retry exhaustion goes to a retained DLQ with an alarm. A second governance change is rejected while reconciliation is active.
 

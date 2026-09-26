@@ -91,9 +91,7 @@ export function createProductionConnectorEventHandlers() {
   const appDependencies = createProductionConnectorAppDependencies()
   const connectors = appDependencies.developerPlatform.connectors
   const externalLinks = appDependencies.developerPlatform.externalLinks
-  const featureAvailability = createProductionTenantFeatureGate(
-    'developer-platform',
-  )
+  const featureAvailability = createProductionTenantFeatureGate()
   const handlers = createConnectorEventHandlers({
     platform: {
       listConnectors: (workspaceId) => connectors.listConnectors(workspaceId),

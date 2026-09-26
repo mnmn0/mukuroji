@@ -11,6 +11,7 @@ import {
   decideAiAssistanceGeneration,
   generateAiAssistance,
   getAiAssistanceGeneration,
+  getAiAssistancePreference,
   revalidateApprovedAiAssistanceGeneration,
   updateAiAssistancePolicy,
   updateAiAssistancePreference,
@@ -37,6 +38,15 @@ beforeEach(() => {
 afterEach(() => {
   setSystemTime()
   globalThis.fetch = originalFetch
+})
+
+test('preserves the server-owned disabled deployment flag and rejects malformed availability', async () => {
+  installFetchRecorder([{ ...aiAssistancePreferenceFixture, enabled: false, deploymentEnabled: false }])
+  expect(await getAiAssistancePreference('access-token')).toMatchObject({
+    enabled: false, deploymentEnabled: false,
+  })
+  installFetchRecorder([{ ...aiAssistancePreferenceFixture, deploymentEnabled: 'false' }])
+  await expect(getAiAssistancePreference('access-token')).rejects.toBeInstanceOf(AiAssistanceApiError)
 })
 
 describe('AI assistance API', () => {

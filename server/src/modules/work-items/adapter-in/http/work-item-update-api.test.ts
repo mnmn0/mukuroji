@@ -1826,6 +1826,8 @@ test('validates the edited root revision independently of cross-Team snapshot or
 
 test('allows an enterprise schedule cascade when every server-derived Project is writable', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
@@ -1899,6 +1901,8 @@ test('allows an enterprise schedule cascade when every server-derived Project is
 
 test('denies an enterprise schedule cascade when one server-derived Project is hidden', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
@@ -1935,6 +1939,8 @@ test('denies an enterprise schedule cascade when one server-derived Project is h
 
 test('qualifies enterprise Planning Project scope by Team before schedule preview', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',

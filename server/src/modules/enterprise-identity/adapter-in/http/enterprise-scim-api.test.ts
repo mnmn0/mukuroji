@@ -39,6 +39,10 @@ afterEach(() => {
 
 test('binds a route-issued SCIM credential to the active Cognito provider', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     configureFakeProjectClients(true)
@@ -112,6 +116,10 @@ test('binds a route-issued SCIM credential to the active Cognito provider', asyn
 
 test('scopes SCIM collection reads to the credential identity provider', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     const calls = configureFakeProjectClients(true)
@@ -268,6 +276,10 @@ test('scopes SCIM collection reads to the credential identity provider', async (
 
 test('rejects oversized or structurally unbounded SCIM inputs before mutation', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     const workspaceId = 'workspace-scim-input-limits'
@@ -436,6 +448,10 @@ test('rejects oversized or structurally unbounded SCIM inputs before mutation', 
 
 test('uses provider-qualified SCIM authority and never grants failed desired state', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     configureFakeProjectClients(true)
@@ -586,6 +602,10 @@ test('uses provider-qualified SCIM authority and never grants failed desired sta
 
 test('reconciles workspace guest roles for SCIM membership and mapping changes', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     const workspaceId = 'user#demo@example.com'
@@ -951,6 +971,10 @@ test('reconciles workspace guest roles for SCIM membership and mapping changes',
 
 test('settles interleaved multi-page SCIM group jobs to the final guest role', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     const workspaceId = 'user#demo@example.com'
@@ -1129,6 +1153,10 @@ test('settles interleaved multi-page SCIM group jobs to the final guest role', a
 
 test('settles a user mutation that races after an early SCIM group page', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     const workspaceId = 'user#demo@example.com'
@@ -1238,6 +1266,10 @@ test('settles a user mutation that races after an early SCIM group page', async 
 
 test('changes group job audit identity when a callback loses its state checkpoint race', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     const workspaceId = 'user#demo@example.com'
@@ -1348,6 +1380,10 @@ test('changes group job audit identity when a callback loses its state checkpoin
 
 test('retries a provisioning plan with desired guest groups before checkpointing them', async () => {
   await withTestEnvironment({
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
   }, async () => {
     const workspaceId = 'user#demo@example.com'

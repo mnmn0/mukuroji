@@ -28,13 +28,13 @@ function createOperation(): TenantOperation {
 /** Creates a complete in-memory tenant application port for router tests. */
 function createClient(
   snapshot: TenantAdministrationSnapshot,
-  ensureCalls: Array<[string, string, number | undefined]>,
+  ensureCalls: Array<[string, string]>,
 ): TenantAdministrationClient {
   const operation = createOperation()
   return {
     async assertActive() {},
-    async ensureSnapshot(workspaceId, ownerMemberKey, activeSeats) {
-      ensureCalls.push([workspaceId, ownerMemberKey, activeSeats])
+    async ensureSnapshot(workspaceId, ownerMemberKey) {
+      ensureCalls.push([workspaceId, ownerMemberKey])
       return snapshot
     },
     async getSnapshot() {
@@ -43,15 +43,8 @@ function createClient(
     async updateProfile() {
       return snapshot.profile
     },
-    async updateEntitlement() {
-      return snapshot.entitlement
-    },
     async updateGovernance() {
       return snapshot.governance
-    },
-    async assertFeature() {},
-    async reserveUsage() {
-      return snapshot.usage
     },
     async requestExport() {
       return operation
@@ -80,15 +73,13 @@ function createClient(
   }
 }
 
-test('initializes tenant state from authoritative owner and active-seat membership', async () => {
+test('initializes tenant state from authoritative Workspace owner', async () => {
   const snapshot = createDefaultTenantAdministrationSnapshot(
     'workspace-1',
     'owner-1',
     '2026-08-02T00:00:00.000Z',
-    undefined,
-    4,
   )
-  const ensureCalls: Array<[string, string, number | undefined]> = []
+  const ensureCalls: Array<[string, string]> = []
   let administrationChecks = 0
   const client = createClient(snapshot, ensureCalls)
   client.getSnapshot = async () => {
@@ -105,7 +96,6 @@ test('initializes tenant state from authoritative owner and active-seat membersh
     requireAdministration() {
       administrationChecks += 1
     },
-    requireEntitlementAdministration() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -113,7 +103,7 @@ test('initializes tenant state from authoritative owner and active-seat membersh
       },
     },
     async resolveInitialization() {
-      return { ownerMemberKey: 'owner-1', activeSeats: 4 }
+      return { ownerMemberKey: 'owner-1' }
     },
     async readJson(request) {
       return await request.json()
@@ -131,10 +121,9 @@ test('initializes tenant state from authoritative owner and active-seat membersh
 
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({
-    schemaVersion: 2,
-    usage: { activeSeats: 4 },
+    schemaVersion: 3,
   })
-  expect(ensureCalls).toEqual([['workspace-1', 'owner-1', 4]])
+  expect(ensureCalls).toEqual([['workspace-1', 'owner-1']])
   expect(administrationChecks).toBe(1)
 })
 
@@ -152,14 +141,13 @@ test('returns a closing tenant snapshot without requiring an active owner', asyn
       revision: activeSnapshot.profile.revision + 1,
     },
   }
-  const ensureCalls: Array<[string, string, number | undefined]> = []
+  const ensureCalls: Array<[string, string]> = []
   let initializationCalls = 0
   const router = createTenantAdministrationRouter({
     async authenticate() {
       return { directoryId: 'workspace-1', userKey: 'admin-1' }
     },
     requireAdministration() {},
-    requireEntitlementAdministration() {},
     client: createClient(snapshot, ensureCalls),
     tenantExportDownload: {
       async createDownload() {
@@ -214,7 +202,6 @@ test('creates export operations without exposing the trusted advance boundary', 
       return { directoryId: 'workspace-1', userKey: 'owner-1' }
     },
     requireAdministration() {},
-    requireEntitlementAdministration() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -222,7 +209,7 @@ test('creates export operations without exposing the trusted advance boundary', 
       },
     },
     async resolveInitialization() {
-      return { ownerMemberKey: 'owner-1', activeSeats: 1 }
+      return { ownerMemberKey: 'owner-1' }
     },
     async readJson(request) {
       return await request.json()
@@ -259,73 +246,6 @@ test('creates export operations without exposing the trusted advance boundary', 
   expect(advanceResponse.status).toBe(404)
 })
 
-test('rejects entitlement changes outside the trusted system control plane', async () => {
-  const snapshot = createDefaultTenantAdministrationSnapshot(
-    'workspace-1',
-    'owner-1',
-    '2026-08-02T00:00:00.000Z',
-  )
-  let updateCalls = 0
-  const client = createClient(snapshot, [])
-  client.updateEntitlement = async () => {
-    updateCalls += 1
-    return snapshot.entitlement
-  }
-  const router = createTenantAdministrationRouter({
-    async authenticate() {
-      return { directoryId: 'workspace-1', userKey: 'owner-1' }
-    },
-    requireAdministration() {},
-    requireEntitlementAdministration() {
-      throw new TenantAdministrationError(
-        403,
-        'TenantEntitlementAdministrationRequired',
-        'System administrator access is required.',
-      )
-    },
-    client,
-    tenantExportDownload: {
-      async createDownload() {
-        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
-      },
-    },
-    async resolveInitialization() {
-      return { ownerMemberKey: 'owner-1', activeSeats: 1 }
-    },
-    async readJson(request) {
-      return await request.json()
-    },
-    mapError(_context, error) {
-      if (error instanceof TenantAdministrationError) {
-        return Response.json({ code: error.code }, { status: error.status })
-      }
-      return Response.json({ code: 'UnknownError' }, { status: 500 })
-    },
-  })
-
-  const response = await router.request('/api/tenant/entitlement', {
-    method: 'PATCH',
-    headers: {
-      Authorization: 'Bearer token-1',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      plan: 'enterprise',
-      features: ['documents'],
-      seatLimit: 1_000,
-      usageQuota: 1_000_000,
-      gracePeriodDays: 30,
-      expectedRevision: 0,
-    }),
-  })
-
-  expect(response.status).toBe(403)
-  expect(await response.json()).toEqual({
-    code: 'TenantEntitlementAdministrationRequired',
-  })
-  expect(updateCalls).toBe(0)
-})
-
 test('returns short-lived download locations for a completed export', async () => {
   const snapshot = createDefaultTenantAdministrationSnapshot(
     'workspace-1',
@@ -342,7 +262,6 @@ test('returns short-lived download locations for a completed export', async () =
       return { directoryId: 'workspace-1', userKey: 'owner-1' }
     },
     requireAdministration() {},
-    requireEntitlementAdministration() {},
     client,
     tenantExportDownload: {
       async createDownload(operation) {
@@ -354,7 +273,7 @@ test('returns short-lived download locations for a completed export', async () =
       },
     },
     async resolveInitialization() {
-      return { ownerMemberKey: 'owner-1', activeSeats: 1 }
+      return { ownerMemberKey: 'owner-1' }
     },
     async readJson(request) {
       return await request.json()

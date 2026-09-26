@@ -473,6 +473,8 @@ export type UpdateAiAssistancePolicyRequest = {
 export type AiAssistancePreference = {
   /** Public schema version. */
   schemaVersion: typeof AI_ASSISTANCE_SCHEMA_VERSION
+  /** Server-owned deployment availability; absent on existing enabled deployments. */
+  deploymentEnabled?: boolean
   /** Whether the member allows AI assistance requests. */
   enabled: boolean
   /** Optimistic-concurrency revision. */

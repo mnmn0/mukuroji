@@ -131,6 +131,10 @@ test('rejects a token from another Cognito pool before calling GetUser', async (
 test('uses an explicit Floci public issuer and rejects other issuers before GetUser', async () => {
   await withTestEnvironment(
     {
+      COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+      COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+      COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+      ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
       AWS_LAMBDA_FUNCTION_NAME: 'mukuroji-api-test',
       COGNITO_CLIENT_ID: 'mukuroji-client',
       COGNITO_ISSUER: '  http://localhost:4567/us-east-1_mukuroji/  ',

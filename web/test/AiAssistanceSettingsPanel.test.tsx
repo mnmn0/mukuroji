@@ -10,6 +10,23 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 const t = createTranslator('en')
 
 describe('AiAssistanceSettingsPanel', () => {
+  test('does not expose enable controls for a disabled deployment with saved enabled settings', () => {
+    const html = renderToStaticMarkup(
+      <AiAssistanceSettingsPanel
+        deploymentEnabled={false}
+        canManagePolicy
+        onPreferenceChange={() => undefined}
+        policy={aiAssistancePolicyFixture}
+        preference={aiAssistancePreferenceFixture}
+        t={t}
+      />,
+    )
+    expect(html).toContain('AI assistance is disabled in this deployment.')
+    expect(html).toContain('role="status"')
+    expect(html).not.toContain('<button')
+    expect(html).not.toContain('<input')
+  })
+
   test('renders personal opt-out for a member without manager policy controls or values', () => {
     const html = renderToStaticMarkup(
       <AiAssistanceSettingsPanel

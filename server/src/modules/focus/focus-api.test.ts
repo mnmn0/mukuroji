@@ -934,6 +934,8 @@ test('hydrates owned Work Items with permission-safe approval summaries', async 
 
 test('supports scoped Enterprise Focus reads while omitting unauthorized source signals', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
@@ -1034,6 +1036,8 @@ test('supports scoped Enterprise Focus reads while omitting unauthorized source 
 
 test('does not mark Enterprise reviewer requests actionable without files approval', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
@@ -1099,6 +1103,8 @@ test('does not mark Enterprise reviewer requests actionable without files approv
 
 test('requires Enterprise Work Item write permission for Focus watch mutations', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
@@ -1183,6 +1189,8 @@ test('requires Enterprise Work Item write permission for Focus watch mutations',
 
 test('does not expose Focus snooze responses to Enterprise write-only grants', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
@@ -1550,6 +1558,8 @@ test('fails closed when personal policy replay loses a stored Team scope', async
 
 test('fails closed when personal policy replay gains a new Team scope', async () => {
   await withTestEnvironment({
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',

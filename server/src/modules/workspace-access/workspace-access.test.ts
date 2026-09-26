@@ -15,8 +15,8 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceMember,
-  type WorkspaceSeatMeter,
-  type WorkspaceSeatMutationInput,
+  type WorkspaceMembershipGuard,
+  type WorkspaceMembershipMutationInput,
 } from './workspace-access'
 
 const workspaceId = 'user#demo@example.com'
@@ -117,7 +117,7 @@ function createDocumentClient(
  * @param auditTableName - Optional Audit table name.
  * @param auditPseudonymKey - Optional audit pseudonym key.
  * @param documentsTableName - Optional Documents table name.
- * @param seatMeter - Optional tenant seat-meter transaction contributor.
+ * @param membershipGuard - Optional tenant lifecycle transaction contributor.
  * @returns Configured Workspace Access adapter.
  */
 function createWorkspaceAccessClientWithDocumentAuthorization(
@@ -130,7 +130,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
   auditTableName?: string | null,
   auditPseudonymKey?: string,
   documentsTableName?: string,
-  seatMeter?: WorkspaceSeatMeter,
+  membershipGuard?: WorkspaceMembershipGuard,
 ): DynamoDbWorkspaceAccessClient {
   return new DynamoDbWorkspaceAccessClient(
     tableName,
@@ -144,7 +144,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
     new DynamoDbDocumentAuthorizationRevisionMutationAdapter(
       documentsTableName,
     ),
-    seatMeter,
+    membershipGuard,
   )
 }
 
@@ -1472,14 +1472,14 @@ test('serializes member deactivation with the Planning graph revision', async ()
   })
 })
 
-test('joins seat release to the authoritative member deactivation transaction', async () => {
+test('joins the lifecycle condition to the authoritative member deactivation transaction', async () => {
   const actor = createWorkspaceMember('demo@example.com')
   const target = createWorkspaceMember('member@example.com', 'member')
   const transactionInputs: Array<Record<string, unknown>> = []
-  const seatInputs: WorkspaceSeatMutationInput[] = []
-  const seatMeter: WorkspaceSeatMeter = {
-    async prepareSeatMutation(input) {
-      seatInputs.push(input)
+  const membershipInputs: WorkspaceMembershipMutationInput[] = []
+  const membershipGuard: WorkspaceMembershipGuard = {
+    async prepareMembershipMutation(input) {
+      membershipInputs.push(input)
       return [{
         Put: {
           TableName: 'TenantAdministrationTable',
@@ -1509,7 +1509,7 @@ test('joins seat release to the authoritative member deactivation transaction', 
     undefined,
     undefined,
     'DocumentsTable',
-    seatMeter,
+    membershipGuard,
   )
 
   await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
@@ -1519,7 +1519,7 @@ test('joins seat release to the authoritative member deactivation transaction', 
     expectedDocumentAuthorizationRevision: 3,
   })
 
-  expect(seatInputs).toEqual([{
+  expect(membershipInputs).toEqual([{
     workspaceId,
     memberKey: target.memberKey,
     direction: 'deactivate',

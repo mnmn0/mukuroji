@@ -842,7 +842,7 @@ export function buildApiRuntime(
   if (!apiFunction.role) {
     throw new Error('API Lambda execution role was not created.');
   }
-  apiFunction.role.attachInlinePolicy(new iam.Policy(
+  const apiBedrockModelInvokePolicy = new iam.Policy(
     scope,
     'ApiBedrockModelInvokePolicy',
     {
@@ -851,7 +851,13 @@ export function buildApiRuntime(
         resources: [aiBedrockModelArn.valueAsString],
       })],
     },
-  ));
+  );
+  apiFunction.role.attachInlinePolicy(apiBedrockModelInvokePolicy);
+  const apiBedrockModelInvokePolicyResource = apiBedrockModelInvokePolicy.node.defaultChild;
+  if (!(apiBedrockModelInvokePolicyResource instanceof iam.CfnPolicy)) {
+    throw new Error('API Bedrock model IAM policy was not created.');
+  }
+  apiBedrockModelInvokePolicyResource.cfnOptions.condition = input.parameters.aiAssistanceConfigured;
   const apiBedrockDestinationModelInvokePolicy = new iam.Policy(
     scope,
     'ApiBedrockDestinationModelInvokePolicy',

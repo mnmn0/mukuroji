@@ -71,7 +71,7 @@ test('does not refresh tenant state after verification removes requester access'
   ])
 })
 
-test('validates invoice-ready tenant billing history at the API boundary', async () => {
+test('validates self-hosted workspace administration without commercial fields', async () => {
   Object.defineProperty(globalThis, 'fetch', {
     configurable: true,
     value: async () => new Response(JSON.stringify(createSnapshot()), {
@@ -82,18 +82,16 @@ test('validates invoice-ready tenant billing history at the API boundary', async
 
   const snapshot = await getTenantAdministration('access-token')
 
-  expect(snapshot.billingPeriods).toEqual([
-    expect.objectContaining({
-      periodStart: '2026-08-01T00:00:00.000Z',
-      meteredUnits: 12,
-      activeSeatHighWaterMark: 3,
-    }),
-  ])
+  expect(snapshot.schemaVersion).toBe(3)
+  expect(snapshot.profile.workspaceId).toBe('workspace-1')
+  expect(snapshot).not.toHaveProperty('entitlement')
+  expect(snapshot).not.toHaveProperty('usage')
+  expect(snapshot).not.toHaveProperty('billingPeriods')
 })
 
-test('rejects a tenant snapshot that omits billing aggregates', async () => {
+test('rejects a tenant snapshot that omits governance', async () => {
   const invalidSnapshot: Record<string, unknown> = { ...createSnapshot() }
-  delete invalidSnapshot.billingPeriods
+  delete invalidSnapshot.governance
   Object.defineProperty(globalThis, 'fetch', {
     configurable: true,
     value: async () => new Response(JSON.stringify(invalidSnapshot), {
@@ -112,7 +110,7 @@ test('rejects a tenant snapshot that omits billing aggregates', async () => {
 /** Creates one complete tenant administration API fixture. */
 function createSnapshot() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     profile: {
       workspaceId: 'workspace-1',
       ownerMemberKey: 'owner-1',
@@ -126,34 +124,6 @@ function createSnapshot() {
       createdAt: '2026-08-01T00:00:00.000Z',
       updatedAt: '2026-08-02T00:00:00.000Z',
     },
-    entitlement: {
-      workspaceId: 'workspace-1',
-      plan: 'starter',
-      features: ['documents'],
-      seatLimit: 5,
-      usageQuota: 10_000,
-      gracePeriodDays: 7,
-      revision: 1,
-      updatedAt: '2026-08-02T00:00:00.000Z',
-    },
-    usage: {
-      workspaceId: 'workspace-1',
-      activeSeats: 2,
-      periodUsage: 12,
-      periodStart: '2026-08-01T00:00:00.000Z',
-      periodEnd: '2026-09-01T00:00:00.000Z',
-      revision: 2,
-      updatedAt: '2026-08-02T00:00:00.000Z',
-    },
-    billingPeriods: [{
-      workspaceId: 'workspace-1',
-      periodStart: '2026-08-01T00:00:00.000Z',
-      periodEnd: '2026-09-01T00:00:00.000Z',
-      meteredUnits: 12,
-      activeSeatHighWaterMark: 3,
-      revision: 2,
-      updatedAt: '2026-08-02T00:00:00.000Z',
-    }],
     recentOperations: [],
     governance: {
       workspaceId: 'workspace-1',

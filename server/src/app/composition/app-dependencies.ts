@@ -61,7 +61,7 @@ import type { WorkspaceAccessClient } from '../../modules/workspace-access/works
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import type {
   TenantAdministrationClient,
-  TenantEntitlementEnforcement,
+  TenantLifecycleEnforcement,
   TenantExportDownloadPort,
 } from '../../modules/tenant-administration'
 import type { TimeTrackingService } from '../../modules/time-tracking'
@@ -131,12 +131,12 @@ export interface WorkspaceDependencies {
   enterpriseSessionActivity: EnterpriseSessionActivityClient
   /** Validates Enterprise Identity provider metadata and connectivity. */
   enterpriseIdentityProviderConnectionTester: EnterpriseIdentityProviderConnectionTester
-  /** Provides tenant profile, entitlement, governance, and lifecycle state. */
+  /** Provides tenant profile, governance, and lifecycle state. */
   tenantAdministration: TenantAdministrationClient
   /** Provides authorized access to completed tenant export artifacts. */
   tenantExportDownload: TenantExportDownloadPort
-  /** Enforces tenant feature and usage policy at authenticated route boundaries. */
-  tenantEntitlementEnforcement: TenantEntitlementEnforcement
+  /** Enforces tenant lifecycle state at authenticated route boundaries. */
+  tenantLifecycleEnforcement: TenantLifecycleEnforcement
 }
 
 /** Triage application surface reserved for trusted cross-domain transaction composition. */

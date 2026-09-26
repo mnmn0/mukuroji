@@ -17,7 +17,7 @@ import {
   createEnterpriseScimGroupJobProcessor,
 } from '../../modules/enterprise-identity/enterprise-scim-group-job-worker'
 import { DynamoDbPlanningClient } from '../../modules/planning/planning'
-import { createProductionTenantMeteredWorkspaceAccess } from './tenant-administration'
+import { createProductionTenantWorkspaceAccess } from './tenant-administration'
 
 /**
  * Enterprise SCIM group job worker の production dependency graph を組み立てます。
@@ -25,7 +25,7 @@ import { createProductionTenantMeteredWorkspaceAccess } from './tenant-administr
 export function createEnterpriseScimGroupJobWorkerProcessor():
   EnterpriseScimGroupJobProcessor {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
-  const { workspaceAccess } = createProductionTenantMeteredWorkspaceAccess()
+  const { workspaceAccess } = createProductionTenantWorkspaceAccess()
   return createEnterpriseScimGroupJobProcessor({
     enterpriseIdentity: Object.freeze({
       processScimGroupJob:

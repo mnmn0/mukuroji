@@ -161,7 +161,6 @@ import {
   type FocusPolicyTarget,
   type FocusQueueResponse,
   type FocusSignalWeightOverrides,
-  type TenantFeature,
   type UpdateFocusPolicyInput,
   type UpdateFocusPolicyResponse,
   type UpdateFocusSnoozeInput,
@@ -1310,8 +1309,8 @@ const workspaceDependencies: WorkspaceDependencies = {
   get tenantExportDownload() {
     return requireAppDependencies().workspace.tenantExportDownload
   },
-  get tenantEntitlementEnforcement() {
-    return requireAppDependencies().workspace.tenantEntitlementEnforcement
+  get tenantLifecycleEnforcement() {
+    return requireAppDependencies().workspace.tenantLifecycleEnforcement
   },
 }
 const workItemDependencies: WorkItemDependencies = {
@@ -2030,15 +2029,13 @@ routeApp.get('/api/auth/sso/discovery', async (c) => {
     return c.json({ code: 'EnterpriseEmailRequired', message: 'Email is required.' }, 400)
   }
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+    const discovery = isEnterpriseSsoConfigured()
+      ? await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+      : undefined
     if (!discovery) {
       return c.json({ ssoRequired: false, loginMode: 'password-or-sso' as const })
     }
-    await enforceTenantFeatureForWorkspace(
-      discovery.provider.workspaceId,
-      'sso',
-      'GET',
-    )
+    await enforceActiveTenantForWorkspace(discovery.provider.workspaceId)
     assertEnterpriseIdentityProviderReady(discovery.provider)
     assertEnterpriseCognitoProviderBinding(
       discovery.provider,
@@ -2066,7 +2063,9 @@ routeApp.post('/api/auth/sso/start', async (c) => {
   try {
     const body = await readJson<Record<string, unknown>>(c.req)
     const email = readWorkspaceEmail(body?.email)
-    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+    const discovery = isEnterpriseSsoConfigured()
+      ? await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+      : undefined
     if (!discovery) {
       throw new EnterpriseSsoError(
         404,
@@ -2074,11 +2073,7 @@ routeApp.post('/api/auth/sso/start', async (c) => {
         'Enterprise SSO is not configured for this email domain.',
       )
     }
-    await enforceTenantFeatureForWorkspace(
-      discovery.provider.workspaceId,
-      'sso',
-      'GET',
-    )
+    await enforceActiveTenantForWorkspace(discovery.provider.workspaceId)
     const configuration = requireEnterpriseSsoFederationConfiguration()
     assertEnterpriseIdentityProviderReady(discovery.provider)
     assertEnterpriseCognitoProviderBinding(
@@ -2141,11 +2136,7 @@ routeApp.post('/api/auth/sso/exchange', async (c) => {
         'Enterprise SSO configuration changed during login. Start again.',
       )
     }
-    await enforceTenantFeatureForWorkspace(
-      discovery.provider.workspaceId,
-      'sso',
-      'GET',
-    )
+    await enforceActiveTenantForWorkspace(discovery.provider.workspaceId)
     assertEnterpriseIdentityProviderReady(discovery.provider)
     assertEnterpriseCognitoProviderBinding(
       discovery.provider,
@@ -2228,7 +2219,7 @@ registerDocumentApiRoutes(routeApp, {
   authenticate: createDocumentApiPrincipal,
   assertPublicShareEntitled: async (workspaceId) => {
     try {
-      await enforceTenantFeatureForWorkspace(workspaceId, 'documents', 'GET')
+      await enforceActiveTenantForWorkspace(workspaceId)
     } catch (error) {
       if (error instanceof WorkspaceAccessError) {
         throw new DocumentError(error.status, error.code, error.message)
@@ -2270,7 +2261,9 @@ routeApp.post('/api/auth/login', async (c) => {
   }
 
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+    const discovery = isEnterpriseSsoConfigured()
+      ? await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+      : undefined
     if (discovery) {
       return c.json({
         code: 'SsoRequired' as const,
@@ -2339,7 +2332,9 @@ routeApp.post('/api/auth/challenge/new-password', async (c) => {
   }
 
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+    const discovery = isEnterpriseSsoConfigured()
+      ? await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+      : undefined
     if (discovery) {
       return c.json({
         code: 'SsoRequired' as const,
@@ -2407,7 +2402,9 @@ routeApp.post('/api/auth/challenge/mfa', async (c) => {
   }
 
   try {
-    const discovery = await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+    const discovery = isEnterpriseSsoConfigured()
+      ? await workspaceDependencies.enterpriseIdentity.ssoDiscovery.discoverSso(email)
+      : undefined
     if (discovery) {
       return c.json({
         code: 'SsoRequired' as const,
@@ -4863,7 +4860,6 @@ routeApp.route('/', createTenantAdministrationRouter({
   authenticate: async (accessToken, context) =>
     await authenticateWorkspacePrincipal(accessToken, undefined, context),
   requireAdministration: requireWorkspaceAdministration,
-  requireEntitlementAdministration: requireTenantEntitlementAdministration,
   get client() {
     return workspaceDependencies.tenantAdministration
   },
@@ -4884,7 +4880,6 @@ routeApp.route('/', createTenantAdministrationRouter({
     }
     return {
       ownerMemberKey: owner.memberKey,
-      activeSeats: activeMembers.length,
     }
   },
   readJson,
@@ -5307,19 +5302,7 @@ routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) =>
       )
     }
     const bodyFingerprint = createHash('sha256').update(rawBody).digest('hex')
-    const meteringScope = createHash('sha256')
-      .update('POST')
-      .update('\0')
-      .update(endpoint.id)
-      .update('\0')
-      .update(idempotencyKey)
-      .digest('hex')
-    await enforceTenantFeatureForWorkspace(
-      endpoint.workspaceId,
-      'automation',
-      c.req.method,
-      `tenant-meter:v1:${meteringScope}:${bodyFingerprint}`,
-    )
+    await enforceActiveTenantForWorkspace(endpoint.workspaceId)
 
     const auditTableName = getConfiguredAuditTableName()
     if (!auditTableName) throw automationInboundWebhookUnavailable()
@@ -15484,6 +15467,30 @@ function readWorkspaceEmail(value: unknown) {
   return email
 }
 
+/**
+ * Reports whether the deployment explicitly configured every SSO dependency.
+ * @returns True only when the dedicated client, federation, and signing settings exist.
+ * @throws EnterpriseIdentityError when configuration is only partially present.
+ */
+function isEnterpriseSsoConfigured(): boolean {
+  const configured = [
+    'COGNITO_SSO_CLIENT_ID',
+    'COGNITO_HOSTED_UI_DOMAIN',
+    'COGNITO_SSO_REDIRECT_URI',
+    'COGNITO_ENTERPRISE_IDP_NAME',
+    'ENTERPRISE_SSO_STATE_SECRET',
+  ].map((name) => Boolean(getEnv(name)?.trim()))
+  if (!configured.some(Boolean)) return false
+  if (!configured.every(Boolean)) {
+    throw new EnterpriseIdentityError(
+      503,
+      'EnterpriseSsoConfigurationIncomplete',
+      'Enterprise SSO deployment configuration is incomplete.',
+    )
+  }
+  return true
+}
+
 function requireEnterpriseCognitoSsoAppClientConfiguration() {
   const mainClientId = getEnv('COGNITO_CLIENT_ID')?.trim()
   const clientId = getEnv('COGNITO_SSO_CLIENT_ID')?.trim()
@@ -15674,7 +15681,6 @@ async function resolveTenantDefaultInvitationRole(
     const snapshot = await workspaceDependencies.tenantAdministration.ensureSnapshot(
       principal.directoryId,
       owner.memberKey,
-      activeMembers.length,
     )
     return snapshot.profile.defaultPolicy.defaultMemberRole
   } catch (error) {
@@ -15998,210 +16004,22 @@ async function getVerifiedEnterpriseAuthenticationMethods(
 }
 
 /**
- * Resolves the commercial tenant feature required by one authenticated route.
- *
- * @param path - Canonical request path.
- * @returns The required feature, or undefined for core product routes.
+ * Enforces current Workspace lifecycle state on public and asynchronous surfaces.
+ * @param workspaceId - Server-resolved Workspace identifier.
+ * @returns Resolves only while normal Workspace access is permitted.
  */
-function resolveTenantFeatureForPath(path: string): TenantFeature | undefined {
-  if (path.startsWith('/api/documents') || path.startsWith('/api/document-backlinks')) {
-    return 'documents'
-  }
-  if (path.startsWith('/api/analytics')) return 'analytics'
-  if (
-    path.startsWith('/api/automation') ||
-    path.startsWith('/api/recurring-work') ||
-    path.startsWith('/api/bulk-operations')
-  ) {
-    return 'automation'
-  }
-  if (path.startsWith('/api/developer')) return 'developer-platform'
-  if (
-    path.startsWith('/api/enterprise/security/identity-provider') ||
-    path.startsWith('/api/enterprise/security/domains') ||
-    path.startsWith('/api/enterprise/security/group-mappings')
-  ) {
-    return 'sso'
-  }
-  if (
-    path.startsWith('/api/scim/') ||
-    path.startsWith('/api/enterprise/security/scim') ||
-    path.startsWith('/api/enterprise/security/provisioning')
-  ) {
-    return 'scim'
-  }
-  return undefined
-}
-
-/** Maximum body retained while binding a metering receipt to one API request. */
-const TENANT_METERING_BODY_MAX_BYTES = 10 * 1024 * 1024
-
-/**
- * Executes one feature check or mutation-unit reservation.
- *
- * @param workspaceId - Canonical Workspace identifier.
- * @param feature - Commercial feature required by the route.
- * @param method - Current HTTP request method.
- * @param idempotencyKey - Optional key used to deduplicate mutation metering.
- */
-async function applyTenantFeaturePolicy(
-  workspaceId: string,
-  feature: TenantFeature,
-  method: string,
-  idempotencyKey?: string,
-): Promise<void> {
-  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
-    await workspaceDependencies.tenantEntitlementEnforcement.assertFeature(
-      workspaceId,
-      feature,
-    )
-    return
-  }
-  await workspaceDependencies.tenantEntitlementEnforcement.reserveUsage(
-    workspaceId,
-    feature,
-    1,
-    idempotencyKey,
-  )
-}
-
-/**
- * Applies feature entitlement and mutation metering for one authenticated request.
- *
- * @param workspaceId - Canonical Workspace identifier.
- * @param context - Current request context, when authentication is route-bound.
- */
-async function enforceTenantFeatureForRequest(
-  workspaceId: string,
-  context?: Context,
-): Promise<void> {
-  if (!context) return
-  const feature = resolveTenantFeatureForPath(context.req.path)
-  if (!feature) return
-  let idempotencyKey: string | undefined
+async function enforceActiveTenantForWorkspace(workspaceId: string): Promise<void> {
   try {
-    idempotencyKey = await createTenantUsageIdempotencyScope(context)
+    await workspaceDependencies.tenantLifecycleEnforcement.assertActive(workspaceId)
   } catch (error) {
-    throw toTenantEntitlementBoundaryError(error)
-  }
-  await enforceTenantFeatureForWorkspace(
-    workspaceId,
-    feature,
-    context.req.method,
-    idempotencyKey,
-  )
-}
-
-/**
- * Binds a caller idempotency key to one concrete metered HTTP request.
- *
- * @param context - Current authenticated request context.
- * @returns A digest safe to persist as a second-stage tenant receipt input.
- */
-async function createTenantUsageIdempotencyScope(
-  context: Context,
-): Promise<string | undefined> {
-  const normalized = context.req.header('Idempotency-Key')?.trim()
-  if (!normalized) return undefined
-  const hasControlCharacter = [...normalized].some((character) => {
-    const codePoint = character.codePointAt(0)
-    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
-  })
-  if (normalized.length > 256 || hasControlCharacter) {
-    throw new TenantAdministrationError(
-      400,
-      'InvalidTenantIdempotencyKey',
-      'Tenant idempotency key is invalid.',
-    )
-  }
-  if (context.req.raw.bodyUsed) {
-    throw new TenantAdministrationError(
-      503,
-      'TenantUsageIdempotencyUnavailable',
-      'Tenant usage idempotency is unavailable for this request.',
-    )
-  }
-  const contentLength = context.req.header('Content-Length')
-  if (
-    contentLength !== undefined &&
-    /^\d+$/u.test(contentLength) &&
-    Number(contentLength) > TENANT_METERING_BODY_MAX_BYTES
-  ) {
-    throw new TenantAdministrationError(
-      413,
-      'TenantMeteringBodyTooLarge',
-      'The metered request body is too large.',
-    )
-  }
-  const requestBodyDigest = createHash('sha256')
-    .update(context.req.header('Content-Type') ?? '')
-    .update('\0')
-  const bodyReader = context.req.raw.clone().body?.getReader()
-  let bodyBytes = 0
-  if (bodyReader) {
-    try {
-      while (true) {
-        const chunk = await bodyReader.read()
-        if (chunk.done) break
-        bodyBytes += chunk.value.byteLength
-        if (bodyBytes > TENANT_METERING_BODY_MAX_BYTES) {
-          await bodyReader.cancel().catch(() => undefined)
-          throw new TenantAdministrationError(
-            413,
-            'TenantMeteringBodyTooLarge',
-            'The metered request body is too large.',
-          )
-        }
-        requestBodyDigest.update(chunk.value)
-      }
-    } finally {
-      bodyReader.releaseLock()
-    }
-  }
-  const url = new URL(context.req.url)
-  const scopeDigest = createHash('sha256')
-    .update(context.req.method.toUpperCase())
-    .update('\0')
-    .update(context.req.path)
-    .update('\0')
-    .update(url.search)
-    .update('\0')
-    .update(context.req.header('If-Match') ?? '')
-    .update('\0')
-    .update(normalized)
-    .digest('hex')
-  const requestDigest = requestBodyDigest.digest('hex')
-  return `tenant-meter:v1:${scopeDigest}:${requestDigest}`
-}
-
-/**
- * Enforces one tenant feature and initializes legacy tenant state when necessary.
- *
- * @param workspaceId - Canonical Workspace identifier.
- * @param feature - Commercial feature required by the operation.
- * @param method - HTTP method used to distinguish reads from metered mutations.
- * @param idempotencyKey - Optional key used to deduplicate mutation metering.
- */
-async function enforceTenantFeatureForWorkspace(
-  workspaceId: string,
-  feature: TenantFeature,
-  method: string,
-  idempotencyKey?: string,
-): Promise<void> {
-  try {
-    await applyTenantFeaturePolicy(workspaceId, feature, method, idempotencyKey)
-  } catch (error) {
-    if (
-      !(error instanceof TenantAdministrationError) ||
-      error.code !== 'TenantAdministrationNotInitialized'
-    ) {
-      throw toTenantEntitlementBoundaryError(error)
+    if (!(error instanceof TenantAdministrationError) || error.code !== 'TenantAdministrationNotInitialized') {
+      throw toTenantLifecycleBoundaryError(error)
     }
     await initializeLegacyTenantAdministration(workspaceId)
     try {
-      await applyTenantFeaturePolicy(workspaceId, feature, method, idempotencyKey)
+      await workspaceDependencies.tenantLifecycleEnforcement.assertActive(workspaceId)
     } catch (retryError) {
-      throw toTenantEntitlementBoundaryError(retryError)
+      throw toTenantLifecycleBoundaryError(retryError)
     }
   }
 }
@@ -16211,7 +16029,7 @@ async function initializeLegacyTenantAdministration(workspaceId: string): Promis
   const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(workspaceId)
   const owner = activeMembers.find((member) => member.role === 'owner')
   if (!owner) {
-    throw toTenantEntitlementBoundaryError(new TenantAdministrationError(
+    throw toTenantLifecycleBoundaryError(new TenantAdministrationError(
       503,
       'TenantOwnerUnavailable',
       'The Workspace owner required for tenant initialization is unavailable.',
@@ -16220,7 +16038,6 @@ async function initializeLegacyTenantAdministration(workspaceId: string): Promis
   await workspaceDependencies.tenantAdministration.ensureSnapshot(
     workspaceId,
     owner.memberKey,
-    activeMembers.length,
   )
 }
 
@@ -16230,7 +16047,7 @@ async function initializeLegacyTenantAdministration(workspaceId: string): Promis
  * @param error - Tenant policy or infrastructure failure.
  * @returns A Workspace boundary error for tenant failures, otherwise the original error.
  */
-function toTenantEntitlementBoundaryError(error: unknown): unknown {
+function toTenantLifecycleBoundaryError(error: unknown): unknown {
   if (!(error instanceof TenantAdministrationError)) return error
   return new WorkspaceAccessError(
     error.status,
@@ -16277,7 +16094,7 @@ async function authenticateWorkspacePrincipal(
   )
   const principalKind = breakGlassActivation ? 'break-glass' : 'member'
   let verifiedAuthenticationMethods: string[] | undefined
-  if (!options.breakGlassCandidate && principalKind !== 'break-glass') {
+  if (isEnterpriseSsoConfigured() && !options.breakGlassCandidate && principalKind !== 'break-glass') {
     try {
       await assertEnterpriseRuntimeCognitoProviders(
         snapshot,
@@ -16545,7 +16362,6 @@ async function authenticateWorkspacePrincipal(
   }
 
   await enforceActiveTenantForRequest(principal.directoryId, context)
-  await enforceTenantFeatureForRequest(principal.directoryId, context)
 
   return {
     ...principal,
@@ -16598,7 +16414,7 @@ async function enforceActiveTenantForRequest(
 ): Promise<void> {
   if (!context || context.req.path.startsWith('/api/tenant/')) return
   try {
-    await workspaceDependencies.tenantEntitlementEnforcement.assertActive(
+    await workspaceDependencies.tenantLifecycleEnforcement.assertActive(
       workspaceId,
     )
   } catch (error) {
@@ -16608,15 +16424,15 @@ async function enforceActiveTenantForRequest(
     ) {
       await initializeLegacyTenantAdministration(workspaceId)
       try {
-        await workspaceDependencies.tenantEntitlementEnforcement.assertActive(
+        await workspaceDependencies.tenantLifecycleEnforcement.assertActive(
           workspaceId,
         )
         return
       } catch (retryError) {
-        throw toTenantEntitlementBoundaryError(retryError)
+        throw toTenantLifecycleBoundaryError(retryError)
       }
     }
-    throw toTenantEntitlementBoundaryError(error)
+    throw toTenantLifecycleBoundaryError(error)
   }
 }
 
@@ -16904,7 +16720,7 @@ async function authenticateEnterpriseServiceAccount(
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
   } satisfies WorkspaceMember
-  await enforceTenantFeatureForRequest(workspaceId, context)
+  await enforceActiveTenantForRequest(workspaceId, context)
   return {
     directoryId: workspaceId,
     userKey: account.accountId,
@@ -18966,7 +18782,7 @@ async function requireEnterpriseScimWorkspace(c: Context) {
     requireEnterpriseCognitoProviderName(),
   )
   await assertEnterpriseCognitoFederationProvider(provider, 'cached')
-  await enforceTenantFeatureForRequest(workspaceId, c)
+  await enforceActiveTenantForRequest(workspaceId, c)
   return { workspaceId, credential }
 }
 
@@ -26068,20 +25884,6 @@ function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
     403,
     'WorkspaceRoleDenied',
     'Workspace owner or admin access is required.',
-  )
-}
-
-/**
- * Restricts commercial entitlement changes to a server-verified system administrator.
- *
- * @param principal - Current authenticated Workspace principal.
- */
-function requireTenantEntitlementAdministration(principal: WorkspacePrincipal) {
-  if (principal.isSystemAdmin) return
-  throw new TenantAdministrationError(
-    403,
-    'TenantEntitlementAdministrationRequired',
-    'System administrator access is required to change tenant entitlements.',
   )
 }
 
@@ -43629,10 +43431,7 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
     authorize: authorizeWorkItemImportExecution,
     async assertTenantEnabled(execution) {
       try {
-        await workspaceDependencies.tenantEntitlementEnforcement.assertFeature(
-          execution.workspaceId,
-          'developer-platform',
-        )
+        await workspaceDependencies.tenantLifecycleEnforcement.assertActive(execution.workspaceId)
       } catch (error) {
         if (
           error instanceof TenantAdministrationError &&
@@ -43640,10 +43439,7 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
         ) {
           await initializeLegacyTenantAdministration(execution.workspaceId)
           try {
-            await workspaceDependencies.tenantEntitlementEnforcement.assertFeature(
-              execution.workspaceId,
-              'developer-platform',
-            )
+            await workspaceDependencies.tenantLifecycleEnforcement.assertActive(execution.workspaceId)
             return
           } catch (retryError) {
             if (
@@ -43659,7 +43455,6 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             if (
               retryError instanceof TenantAdministrationError &&
               (
-                retryError.code === 'TenantFeatureNotEntitled' ||
                 retryError.code === 'TenantClosing' ||
                 retryError.code === 'TenantClosed'
               )
@@ -43675,7 +43470,6 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
         if (
           error instanceof TenantAdministrationError &&
           (
-            error.code === 'TenantFeatureNotEntitled' ||
             error.code === 'TenantClosing' ||
             error.code === 'TenantClosed'
           )
@@ -43980,13 +43774,8 @@ if (!loadServerConfig().runtimeRole) {
       () => developerPlatformDependencies.idempotency,
     ),
     rateLimits: createForwardingClient(() => developerPlatformDependencies.rateLimits),
-    enforceEntitlement: async (workspaceId, method, idempotencyKey) => {
-      await enforceTenantFeatureForWorkspace(
-        workspaceId,
-        'developer-platform',
-        method,
-        idempotencyKey,
-      )
+    enforceActiveWorkspace: async (workspaceId) => {
+      await enforceActiveTenantForWorkspace(workspaceId)
     },
     authenticateManagement: authenticateDeveloperManagement,
     workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),

@@ -65,6 +65,8 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',
@@ -963,6 +965,8 @@ test('denies an ambiguous Project URL even when a qualified assignment matches o
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(true, {
       workspaceRole: 'member',
@@ -1017,6 +1021,8 @@ test('hides Workspace-scoped immutable Planning context after an Initiative move
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(false, {
       workspaceRole: 'member',
@@ -1177,6 +1183,8 @@ test('binds Enterprise Analytics report writes to Team and Workspace visibility 
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(false, {
       workspaceRole: 'member',
@@ -1581,6 +1589,8 @@ test('preserves an empty Team and Team-scoped Planning aggregates for a director
     COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
     COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
     COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+    ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
   }, async () => {
     configureFakeProjectClients(false, {
       workspaceRole: 'member',

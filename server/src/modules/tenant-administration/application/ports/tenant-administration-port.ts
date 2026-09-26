@@ -3,18 +3,14 @@ import type {
   RequestTenantExportInput,
   TenantAdministrationSnapshot,
   TenantExportDownload,
-  TenantEntitlement,
   TenantGovernancePolicy,
   TenantOperation,
   TenantOperationStepProof,
   TenantProfile,
   TenantRetentionReconciliation,
-  TenantUsage,
-  UpdateTenantEntitlementInput,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
 } from '@mukuroji/contracts'
-import type { TenantFeature } from '@mukuroji/contracts'
 
 /** Safe tenant mutation data passed to the append-only audit writer. */
 export type TenantAdministrationAuditEvent = {
@@ -58,43 +54,12 @@ export type TenantAdministrationAuditWriter<TransactionItem = unknown> = {
   ): TransactionItem | undefined
 }
 
-/** Input used to meter one Workspace membership state transition. */
-export type TenantSeatMutationInput = {
-  /** Canonical Workspace identifier. */
-  workspaceId: string
-  /** Stable member key whose active-seat state changed. */
-  memberKey: string
-  /** Direction of the authoritative membership transition. */
-  direction: 'activate' | 'deactivate'
-  /** Timestamp shared with the Workspace membership transaction. */
-  occurredAt: string
-}
-
 /**
- * Server-side feature and quota checks used by authenticated feature routes.
+ * Server-side lifecycle checks used by authenticated Workspace routes.
  */
-export interface TenantEntitlementEnforcement {
+export interface TenantLifecycleEnforcement {
   /** Rejects normal route access while tenant closure is active or complete. */
   assertActive(workspaceId: string): Promise<void>
-  /** Rejects a feature route when the current entitlement does not include it. */
-  assertFeature(workspaceId: string, feature: TenantFeature): Promise<void>
-  /** Reserves metered usage after checking feature entitlement and quota. */
-  reserveUsage(
-    workspaceId: string,
-    feature: TenantFeature,
-    additionalUnits: number,
-    idempotencyKey?: string,
-  ): Promise<unknown>
-}
-
-/**
- * Prepares seat-meter writes that join the authoritative membership transaction.
- */
-export interface TenantSeatMeter<TransactionItem = unknown> {
-  /** Returns conditional usage and audit items for one membership transition. */
-  prepareSeatMutation(
-    input: TenantSeatMutationInput,
-  ): Promise<readonly TransactionItem[]>
 }
 
 /** Capability used by the trusted worker to reconcile audit TTL state. */
@@ -114,14 +79,13 @@ export interface TenantAuditRetentionProcessor {
 /**
  * Application port for tenant administration and data-governance state.
  */
-export interface TenantAdministrationClient extends TenantEntitlementEnforcement {
+export interface TenantAdministrationClient extends TenantLifecycleEnforcement {
   /** Rejects normal access when a verified closure has sealed the tenant. */
   assertActive(workspaceId: string): Promise<void>
   /** Ensures the tenant aggregate exists and reconciles its authoritative owner. */
   ensureSnapshot(
     workspaceId: string,
     ownerMemberKey: string,
-    activeSeats?: number,
   ): Promise<TenantAdministrationSnapshot>
   /** Returns the current tenant aggregate without trusting client-supplied tenant IDs. */
   getSnapshot(workspaceId: string): Promise<TenantAdministrationSnapshot>
@@ -131,25 +95,12 @@ export interface TenantAdministrationClient extends TenantEntitlementEnforcement
     actorMemberKey: string,
     input: UpdateTenantProfileInput,
   ): Promise<TenantProfile>
-  /** Updates plan and capacity fields with an optimistic revision condition. */
-  updateEntitlement(
-    workspaceId: string,
-    actorMemberKey: string,
-    input: UpdateTenantEntitlementInput,
-  ): Promise<TenantEntitlement>
   /** Updates retention, residency, and encryption policy with an optimistic revision condition. */
   updateGovernance(
     workspaceId: string,
     actorMemberKey: string,
     input: UpdateTenantGovernanceInput,
   ): Promise<TenantGovernancePolicy>
-  /** Reserves metered usage and returns the updated current-period counter. */
-  reserveUsage(
-    workspaceId: string,
-    feature: TenantFeature,
-    additionalUnits: number,
-    idempotencyKey?: string,
-  ): Promise<TenantUsage>
   /** Starts a bounded, durable tenant export operation. */
   requestExport(
     workspaceId: string,

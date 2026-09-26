@@ -28,6 +28,7 @@ import type {
 } from './app-dependencies'
 import {
   createAiAssistanceService,
+  createDisabledAiAssistanceService,
   createAiAssistanceEmfObservability,
   createMastraBedrockAiModelGateway,
   DynamoDbAiAssistanceStore,
@@ -143,7 +144,7 @@ import {
 } from '../../modules/directory'
 import {
   createProductionTenantExportDownloadClient,
-  type TenantEntitlementEnforcement,
+  type TenantLifecycleEnforcement,
 } from '../../modules/tenant-administration'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import { createProductionQueueWebhookDeliveryMessage } from './webhook'
@@ -155,7 +156,7 @@ import {
 } from '../../modules/time-tracking'
 import {
   createProductionTenantAvailability,
-  createProductionTenantMeteredWorkspaceAccess,
+  createProductionTenantWorkspaceAccess,
 } from './tenant-administration'
 import {
   CapacityPlanningService,
@@ -495,7 +496,7 @@ export function createProductionAuthenticationDependencies(): AuthenticationDepe
 export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
   const { tenantAdministration, workspaceAccess } =
-    createProductionTenantMeteredWorkspaceAccess()
+    createProductionTenantWorkspaceAccess()
   return {
     customers: new DynamoDbCustomerClient(),
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
@@ -507,7 +508,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
     tenantAdministration,
     tenantExportDownload: createProductionTenantExportDownloadClient(),
-    tenantEntitlementEnforcement: tenantAdministration,
+    tenantLifecycleEnforcement: tenantAdministration,
   }
 }
 
@@ -553,9 +554,6 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
 
 /** Stable prompt template version retained with every production generation. */
 const AI_ASSISTANCE_PROMPT_VERSION = 'ai-assistance-v1'
-
-/** Local-only model default used when CDK has not bound a deployment allowlist. */
-const LOCAL_AI_ASSISTANCE_MODEL_ID = 'jp.anthropic.claude-sonnet-4-6'
 
 /** Default audit retention applied before a Workspace writes an explicit policy. */
 const DEFAULT_AI_ASSISTANCE_RETENTION_DAYS = 30
@@ -811,13 +809,14 @@ function createProductionAiAssistanceService(
   }
   const config = loadServerConfig()
   const environment = config.environment
+  const configuredDefaultModelId = environment.AI_ASSISTANCE_DEFAULT_MODEL_ID?.trim()
+  if (!configuredDefaultModelId) return createDisabledAiAssistanceService()
   if (environment.AWS_BEARER_TOKEN_BEDROCK !== undefined) {
     throw new TypeError(
       'AWS_BEARER_TOKEN_BEDROCK is not supported; use the Lambda execution role or the standard AWS credential chain.',
     )
   }
-  const configuredDefaultModelId = environment.AI_ASSISTANCE_DEFAULT_MODEL_ID?.trim()
-  const defaultModelId = configuredDefaultModelId || LOCAL_AI_ASSISTANCE_MODEL_ID
+  const defaultModelId = configuredDefaultModelId
   const allowedModelIds = readAiAssistanceAllowedModelIds(
     environment.AI_ASSISTANCE_ALLOWED_MODEL_IDS,
     defaultModelId,
@@ -1512,15 +1511,13 @@ function createTestOperationalDependencies(): OperationalDependencies {
 }
 
 /**
- * Creates permissive entitlement enforcement for route tests unrelated to billing policy.
+ * Creates permissive lifecycle enforcement for route tests unrelated to Workspace closure.
  *
  * @returns An isolated no-op enforcement port that never performs network I/O.
  */
-function createTestTenantEntitlementEnforcement(): TenantEntitlementEnforcement {
+function createTestTenantLifecycleEnforcement(): TenantLifecycleEnforcement {
   return {
     async assertActive() {},
-    async assertFeature() {},
-    async reserveUsage() {},
   }
 }
 
@@ -1695,7 +1692,7 @@ export function createTestAppDependencies(): AppDependencies {
     workspace: {
       ...production.workspace,
       customers: new InMemoryCustomerClient(),
-      tenantEntitlementEnforcement: createTestTenantEntitlementEnforcement(),
+      tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },
     workItems: {
       ...production.workItems,
@@ -1782,13 +1779,13 @@ export function overrideAppDependencies(
       ...(overrides.tenantAdministration
         ? { tenantAdministration: overrides.tenantAdministration }
         : {}),
-      ...(overrides.tenantEntitlementEnforcement
+      ...(overrides.tenantLifecycleEnforcement
         ? {
-            tenantEntitlementEnforcement:
-              overrides.tenantEntitlementEnforcement,
+            tenantLifecycleEnforcement:
+              overrides.tenantLifecycleEnforcement,
           }
         : overrides.tenantAdministration
-          ? { tenantEntitlementEnforcement: overrides.tenantAdministration }
+          ? { tenantLifecycleEnforcement: overrides.tenantAdministration }
           : {}),
     },
     workItems: {

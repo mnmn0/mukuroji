@@ -11,6 +11,8 @@ import type { DataStoreResources } from '../data-stores';
 
 /** Inputs required by the durable AI assistance observation worker. */
 export type AiAssistanceObservabilityWorkerInput = {
+  /** Whether this deployment explicitly configured an AI provider. */
+  readonly aiAssistanceConfigured: cdk.CfnCondition;
   /** Full reviewed application commit SHA attached to projected metrics. */
   readonly applicationCommitSha: string;
   /** Shared table whose terminal AI rows drive operational metrics. */
@@ -144,6 +146,13 @@ export function buildAiAssistanceObservabilityWorker(
     }),
   );
   workspaceSearchTable.grantStreamRead(aiAssistanceObservabilityFunction);
+  for (const resource of aiAssistanceObservabilityFunction.node.findAll()) {
+    if (resource instanceof lambda.CfnEventSourceMapping) {
+      resource.enabled = cdk.Fn.conditionIf(
+        input.aiAssistanceConfigured.logicalId, true, false,
+      );
+    }
+  }
 
   new cloudwatch.Alarm(
     scope,

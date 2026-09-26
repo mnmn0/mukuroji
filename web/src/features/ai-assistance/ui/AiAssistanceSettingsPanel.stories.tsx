@@ -35,6 +35,11 @@ const meta = {
 
 export default meta
 
+/** Deployment without a configured provider cannot offer an enable control. */
+export const DeploymentDisabled: StoryObj<typeof meta> = {
+  args: { deploymentEnabled: false },
+}
+
 /** Story type for the AI assistance settings panel. */
 type Story = StoryObj<typeof meta>
 

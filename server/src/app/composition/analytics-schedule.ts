@@ -46,7 +46,7 @@ export function createProductionAnalyticsScheduleHandler() {
     },
   )
   const cognito = new AwsCognitoClient()
-  const tenantFeatureGate = createProductionTenantFeatureGate('analytics')
+  const tenantFeatureGate = createProductionTenantFeatureGate()
   const render = createAnalyticsScheduleRenderer({
     directory: new DynamoDbProjectDirectoryClient(),
     workItems: new DynamoDbTeamIssuesClient(),

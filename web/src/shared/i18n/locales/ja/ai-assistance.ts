@@ -2,6 +2,7 @@
  * AI assistance domain messages in Japanese.
  */
 export const aiAssistanceMessages = {
+  'ai.settings.deploymentDisabled': 'この環境ではAIアシスタントが無効です。',
   'ai.review.title': 'AI draft',
   'ai.review.generated': '生成日時',
   'ai.review.sources': '{count} 件の根拠',
