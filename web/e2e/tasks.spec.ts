@@ -4660,8 +4660,10 @@ test.describe('authenticated task page', () => {
       await taskRequestStarted
 
       const taskMain = page.locator('main.workbench-shell > section.workbench-main')
+      const taskLoadingStatus = page.getByRole('status').filter({ hasText: 'タスク一覧を確認しています。' })
       await expect(taskMain).toHaveAttribute('aria-busy', 'true')
-      await expect(page.getByRole('status')).toHaveText('タスク一覧を確認しています。')
+      await expect(taskLoadingStatus).toHaveText('タスク一覧を確認しています。')
+      await expect(page.getByRole('status', { name: 'AIアクティビティ', exact: true })).toHaveText('待機中')
       await expect(page.getByTestId('task-row-wireframe')).toHaveCount(0)
 
       const searchTrigger = page.getByTestId('sidebar-search-trigger')
@@ -4684,7 +4686,8 @@ test.describe('authenticated task page', () => {
       releaseTaskResponse()
 
       await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
-      await expect(page.getByRole('status')).toHaveCount(0)
+      await expect(taskLoadingStatus).toHaveCount(0)
+      await expect(page.getByRole('status', { name: 'AIアクティビティ', exact: true })).toHaveText('待機中')
       await expect(taskMain).toHaveAttribute('aria-busy', 'false')
       expect(interceptedTaskRequestCount).toBe(1)
       expect(requestCounts.projectIssues.refero).toBe(1)

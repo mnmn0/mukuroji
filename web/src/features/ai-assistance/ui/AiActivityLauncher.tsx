@@ -28,7 +28,7 @@ export function AiActivityLauncher({ t }: AiActivityLauncherProps) {
         {t('ai.activity.title')}
         <ChevronIcon className="size-3.5 -rotate-90 fill-none stroke-current stroke-2" />
       </button>
-      <p className="flex flex-wrap justify-end gap-x-3 text-xs text-[var(--workbench-muted)]" role="status">
+      <p aria-label={t('ai.activity.title')} className="flex flex-wrap justify-end gap-x-3 text-xs text-[var(--workbench-muted)]" role="status">
         {running > 0 ? <span className="text-blue-700">{t('ai.activity.filter.running')} {running}</span> : null}
         {review > 0 ? <span className="font-medium text-amber-800">{t('ai.activity.phase.review')} {review}</span> : null}
         {running === 0 && review === 0 ? t('ai.activity.idle') : null}
