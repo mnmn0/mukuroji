@@ -119,13 +119,10 @@ export function TaskHeader({
               >
                 {projectName}
               </h1>
-              <span className="workbench-badge">
+              <span className="text-xs text-[var(--workbench-muted)]">
                 {t('tasks.count').replace('{count}', String(tasks.length))}
               </span>
-              <span className="workbench-badge">
-                {t('workspace.metric.openTasks')}: {taskSummary.openCount}
-              </span>
-              <span className="workbench-badge-warning">
+              <span className="text-xs font-medium text-blue-700">
                 {t('tasks.metric.inProgress')}: {taskSummary.inProgressCount}
               </span>
             </div>
@@ -211,26 +208,14 @@ export function TaskHeader({
             </button>
           ))}
         </div>
-        <SummaryCard summary={taskSummary} t={t} />
+        <ProjectSummary summary={taskSummary} t={t} />
       </div>
     </header>
   )
 }
 
-/** A metric displayed in the compact project summary. */
-type ProjectMetric = {
-  /** Translation key for the metric label. */
-  labelKey: MessageKey
-  /** Formatted metric value. */
-  value: string
-  /** Percentage used by the progress indicator. */
-  progressPercent: number
-  /** Tailwind class used by the progress indicator. */
-  accentClassName: string
-}
-
 /** Props accepted by the compact project summary. */
-type SummaryCardProps = {
+type ProjectSummaryProps = {
   /** Aggregate counts calculated for the complete Project task collection. */
   summary: TaskSummary
   /** Resolves localized labels. */
@@ -243,56 +228,14 @@ type SummaryCardProps = {
  * @param props - Aggregate task summary and translator.
  * @returns The compact project summary.
  */
-function SummaryCard({ summary, t }: SummaryCardProps) {
-  const projectMetrics: ProjectMetric[] = [
-    {
-      labelKey: 'tasks.metric.inProgress',
-      value: String(summary.inProgressCount),
-      progressPercent: summary.totalCount > 0
-        ? Math.round((summary.inProgressCount / summary.totalCount) * 100)
-        : 0,
-      accentClassName: 'bg-[var(--workbench-primary)]',
-    },
-    {
-      labelKey: 'tasks.metric.done',
-      value: String(summary.doneCount),
-      progressPercent: summary.completionRate,
-      accentClassName: 'bg-emerald-500',
-    },
-  ]
-
+function ProjectSummary({ summary, t }: ProjectSummaryProps) {
   return (
     <section
       aria-label={t('tasks.summary.aria')}
-      className="flex min-w-[390px] items-center gap-3 border-l border-[#e4e7ec] py-2 pl-4 max-[1400px]:hidden"
+      className="flex shrink-0 items-center gap-4 text-xs text-[var(--workbench-muted)] max-[1200px]:hidden"
     >
-      {projectMetrics.map((metric) => (
-        <div className="min-w-[96px]" key={metric.labelKey}>
-          <p className="text-xs font-semibold text-[#5f6874]">{t(metric.labelKey)}</p>
-          <p className="mt-1 text-lg font-semibold leading-none text-[#1c1d1f]">{metric.value}</p>
-          <div className="mt-2 h-1 rounded-full bg-[#e4e7ec]">
-            <div
-              className={`h-1 rounded-full ${metric.accentClassName}`}
-              style={{ width: `${metric.progressPercent}%` }}
-            />
-          </div>
-        </div>
-      ))}
-      <div>
-        <p className="text-xs font-semibold text-[#5f6874]">{t('tasks.metric.completionRate')}</p>
-        <p className="mt-1 text-lg font-semibold leading-none text-[#1c1d1f]">
-          {summary.completionRate}%
-        </p>
-      </div>
-      <div className="relative h-10 w-10">
-        <div
-          className="absolute inset-0 rounded-full"
-          style={{
-            background: `conic-gradient(var(--workbench-primary) 0 ${summary.completionRate}%, var(--workbench-border) ${summary.completionRate}% 100%)`,
-          }}
-        />
-        <div className="absolute inset-[6px] rounded-full bg-white" />
-      </div>
+      <span>{t('tasks.metric.done')} <strong className="font-semibold text-[var(--workbench-text)]">{summary.doneCount} / {summary.totalCount}</strong></span>
+      <span>{t('tasks.metric.completionRate')} <strong className="font-semibold text-emerald-700">{summary.completionRate}%</strong></span>
     </section>
   )
 }

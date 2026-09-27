@@ -375,6 +375,7 @@ export function DocumentContextPanel({
           >
             <AiSummaryAssistant
               accessToken={aiAssistanceAccessToken}
+              activityLabel={document.title}
               key={aiAssistantSessionKey ?? createAiAssistantSessionKey({
                 documentId: document.id,
                 expectedRevision: document.revision,

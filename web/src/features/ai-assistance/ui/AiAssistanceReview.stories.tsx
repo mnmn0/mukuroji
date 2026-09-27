@@ -47,6 +47,18 @@ type Story = StoryObj<typeof meta>
 /** Desktop review with evidence, uncertainty, human decisions, feedback, and audit details. */
 export const Desktop: Story = {}
 
+/** Processing clearly shows the next human review step and a real cancellation action. */
+export const Generating: Story = {
+  args: {
+    generation: undefined,
+    isGenerating: true,
+    locale: 'ja',
+    onCancelGeneration: fn(),
+    generatingLabel: '作業計画を生成しています',
+    t: createTranslator('ja'),
+  },
+}
+
 /**
  * Narrow review that stacks the decision actions into full-width touch targets.
  *

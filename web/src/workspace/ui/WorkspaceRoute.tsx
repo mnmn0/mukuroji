@@ -26,6 +26,8 @@ import {
   type SidebarTeamViewId,
 } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
+import { AiActivityProvider } from '../../features/ai-assistance/ui/AiActivityProvider'
+import { AiActivityLauncher } from '../../features/ai-assistance/ui/AiActivityLauncher'
 
 /** Header and sidebar metadata owned by one authenticated workspace route. */
 export type WorkspaceRouteMetadata = {
@@ -207,6 +209,7 @@ const emptySessionErrors: readonly unknown[] = []
  * @returns The shared Workspace shell used by all authenticated Workspace routes.
  */
 export function WorkspaceRoute() {
+  const workspace = useWorkspaceRouteContext()
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   /**
    * Opens the persistent mobile sidebar drawer.
@@ -230,6 +233,7 @@ export function WorkspaceRoute() {
   )
 
   return (
+    <AiActivityProvider key={workspace.accessToken ?? 'signed-out'} locale={workspace.locale}>
     <WorkspaceSidebarProvider controller={sidebarController}>
       <WorkspaceRouteShell
         closeMobileSidebar={closeMobileSidebar}
@@ -237,6 +241,7 @@ export function WorkspaceRoute() {
         openMobileSidebar={openMobileSidebar}
       />
     </WorkspaceSidebarProvider>
+    </AiActivityProvider>
   )
 }
 
@@ -452,6 +457,7 @@ function WorkspaceRouteShell({
           aria-busy={routeState.isBusy}
           className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden"
         >
+          <AiActivityLauncher t={t} />
           {metadata && !metadata.customHeader ? (
             <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-5">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-3">

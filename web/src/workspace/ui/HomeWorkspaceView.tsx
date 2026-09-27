@@ -73,7 +73,7 @@ export function HomeWorkspaceView({
 
   return (
     <div className="mx-auto grid w-full max-w-[1440px] gap-7">
-      <dl className="grid grid-cols-2 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white min-[760px]:grid-cols-4">
+      <dl className="order-last grid grid-cols-2 border-t border-[var(--workbench-border)] min-[760px]:grid-cols-4">
         {[
           { label: t('workspace.metric.activeProjects'), value: summary.projects },
           { label: t('workspace.metric.openTasks'), value: summary.tasks },
@@ -86,12 +86,12 @@ export function HomeWorkspaceView({
           { label: t('workspace.metric.teams'), value: teams.length },
         ].map((metric) => (
           <div
-            className="min-w-0 border-[var(--workbench-border)] px-5 py-5 even:border-l max-[759px]:nth-[n+3]:border-t min-[760px]:not-first:border-l"
+            className="min-w-0 px-5 py-5"
             data-testid={metric.testId}
             key={metric.label}
           >
             <dt className="text-xs font-medium text-[var(--workbench-muted)]">{metric.label}</dt>
-            <dd className="mt-3 text-3xl font-semibold leading-none tracking-tight text-[var(--workbench-text)] tabular-nums">
+            <dd className="mt-2 text-2xl font-semibold leading-none tracking-tight text-[var(--workbench-text)] tabular-nums">
               {metric.unavailable ? (
                 <>
                   <span aria-hidden="true">{metric.value}</span>
