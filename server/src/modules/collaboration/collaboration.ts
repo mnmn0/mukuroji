@@ -326,6 +326,8 @@ export type GetCollaborationThreadInput = {
   rootCommentId?: string
   /** Whether to read root comments and replies through one bounded page stream. */
   includeReplies?: boolean
+  /** Whether aggregate reads merge all index generations in global newest-first order. */
+  newestFirst?: boolean
   /** Whether a rolling compatibility deployment requires a cursor readable by pre-migration servers. */
   legacyCursorCompatible?: boolean
   /** 一 page の最大件数です。 */
@@ -3502,8 +3504,12 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const viewerMemberKey = normalizeMemberKey(input.viewerMemberKey)
     const plan = createDiscussionReadPlan(input)
     const limit = clampLimit(input.limit)
-    const cursor = decodeDiscussionCursor(input.cursor, entityKey, plan)
-    const page = await this.readDiscussionPage(plan, entityKey, cursor, limit)
+    if (input.newestFirst && (!input.includeReplies || input.rootCommentId || input.legacyCursorCompatible)) {
+      throw new CollaborationError(400, 'InvalidCollaborationScope', 'Ordered discussion reads require an aggregate timeline scope.')
+    }
+    const page = input.newestFirst
+      ? await this.readOrderedDiscussionPage(plan, entityKey, input.cursor, limit)
+      : await this.readDiscussionPage(plan, entityKey, decodeDiscussionCursor(input.cursor, entityKey, plan), limit)
     const commentIds = page.items.flatMap((item) =>
       typeof item.commentId === 'string' ? [item.commentId] : [],
     )
@@ -3540,6 +3546,66 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       presence,
       ...(replyRoot?.resolvedAt ? { threadResolved: true } : {}),
     } satisfies CollaborationThreadPage
+  }
+
+  /**
+   * Merges the chronological index with bounded pre-migration rows in one global order.
+   * Legacy keys group replies by root, so they must be fully read before selecting a page.
+   * A shared chronological boundary also prevents duplicate delivery when a row is migrated.
+   * @param plan - Aggregate current and legacy index ranges.
+   * @param entityKey - Authorized collaboration partition.
+   * @param cursor - Opaque global timeline boundary from the previous page.
+   * @param limit - Maximum number of discussion rows to select.
+   * @returns Globally ordered rows and a scope-bound continuation.
+   */
+  private async readOrderedDiscussionPage(plan: DiscussionReadPlan, entityKey: string, cursor: string | undefined, limit: number) {
+    const before = decodeOrderedDiscussionCursor(cursor, entityKey, limit)
+    const current = await this.queryDiscussionPage(plan, entityKey, 'current', before, limit)
+    if (current.lastRecordKey && (!isDiscussionCursorRecordKey(current.lastRecordKey, 'current', plan) ||
+        (before !== undefined && current.lastRecordKey >= before))) {
+      throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index returned an invalid continuation.')
+    }
+    const rows = new Map<string, Record<string, unknown>>()
+    /** Validates each index row and projects both generations to the same chronological key. */
+    function include(row: Record<string, unknown>, phase: 'current' | 'legacy') {
+      if (row.entityKey !== entityKey || row.entryType !== 'discussion' ||
+          typeof row.commentId !== 'string' || typeof row.rootCommentId !== 'string' ||
+          typeof row.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(row.createdAt) ||
+          !Number.isFinite(Date.parse(row.createdAt))) {
+        throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index is inconsistent.')
+      }
+      const root = row.rootCommentId === row.commentId ? undefined : row.rootCommentId
+      const key = discussionTimelineRecordKey(row.createdAt, row.commentId, root)
+      const expectedKey = phase === 'current' ? key : discussionLegacyRecordKey(row.createdAt, row.commentId, root)
+      if (row.recordKey !== expectedKey) {
+        throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index key does not match its comment.')
+      }
+      if (before === undefined || key < before) rows.set(key, row)
+    }
+    for (const row of current.items) include(row, 'current')
+    let legacyPosition: string | undefined
+    let legacyDone = false
+    for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
+      const page = await this.queryDiscussionPage(plan, entityKey, 'legacy', legacyPosition, 100)
+      for (const row of page.items) include(row, 'legacy')
+      if (!page.lastRecordKey) { legacyDone = true; break }
+      if (page.lastRecordKey === legacyPosition) break
+      legacyPosition = page.lastRecordKey
+    }
+    if (!legacyDone) {
+      throw new CollaborationError(503, 'DiscussionScanLimit', 'The discussion history exceeded the ordered-read scan limit.')
+    }
+    // A byte-limited current query may stop early. Do not emit older legacy rows
+    // before the unread current rows; retain them for the following page instead.
+    const candidates = [...rows.entries()].filter(([key]) => !current.lastRecordKey || key >= current.lastRecordKey)
+      .sort(([first], [second]) => first === second ? 0 : first > second ? -1 : 1)
+    const selected = candidates.slice(0, limit)
+    const boundary = selected.at(-1)?.[0] ?? current.lastRecordKey
+    const hasMore = current.lastRecordKey !== undefined || rows.size > selected.length
+    return {
+      items: selected.map(([, row]) => row),
+      ...(hasMore && boundary ? { nextCursor: Buffer.from(JSON.stringify({ version: 3, entityKey, limit, before: boundary }), 'utf8').toString('base64url') } : {}),
+    }
   }
 
   /**
@@ -7819,6 +7885,23 @@ function clampPresenceTtl(value: number | undefined) {
 /** Encodes a migration-aware discussion cursor. */
 function encodeDiscussionCursor(cursor: DiscussionCursor) {
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/** Decodes a newest-first cursor bound to its entity, page size, and chronological index range. */
+function decodeOrderedDiscussionCursor(value: string | undefined, entityKey: string, limit: number): string | undefined {
+  if (value === undefined) return undefined
+  try {
+    if (value.length > 4096) throw new Error('cursor too large')
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecord(parsed) || parsed.version !== 3 || parsed.entityKey !== entityKey || parsed.limit !== limit ||
+        typeof parsed.before !== 'string' || parsed.before.length > 1024 ||
+        !parsed.before.startsWith(discussionTimelinePrefix)) {
+      throw new Error('cursor mismatch')
+    }
+    return parsed.before
+  } catch (error) {
+    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.', { cause: error })
+  }
 }
 
 /** Encodes a pre-migration discussion cursor for compatibility callers. */

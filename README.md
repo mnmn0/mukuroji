@@ -93,6 +93,10 @@ user が付けた最新 event だけを承認として受け入れます。
 
 ## 開発
 
+コーディングエージェントからタスクの取得・着手・進捗報告・完了を操作する
+[Coding Agent MCP](docs/coding-agent-mcp.md)を利用できます。接続設定後は
+`bun run mcp:start` でstdioサーバーを起動します。
+
 ### ローカルの補助サービスとworker
 
 Bun は `packageManager` / `.bun-version` / CI と同じ **1.3.10** を使います。

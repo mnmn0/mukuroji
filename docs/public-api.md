@@ -42,7 +42,40 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 
 Credential の scope は作成後に変更しない。権限を変える場合は、新しい credential を最小 scope で作成し、利用側を移行してから旧 credential を revoke する。
 
+## Work Item Type catalog
+
+`GET /api/v1/work-item-types?teamId={teamId}` は権限内の作成用schemaを返します。
+任意query `assignedProjectId` を指定すると、そのProjectへの閲覧権限を確認し、
+全Project共通のfieldと指定Projectに適用されるfieldだけを返します。
+この追加制約は管理者にも適用し、他Projectだけのfield名・選択肢・既定値・必須条件は返しません。
+
 ## Cursor pagination
+
+### Work Item comments
+
+`GET /api/v1/work-items/{workItemId}/comments?teamId={teamId}` は、現在の閲覧権限で
+canonicalコメントと返信を新しい順に取得します。`limit`/`cursor` と通常のsigned paginationを使い、
+削除済みコメントは返しません。legacy eventコメントの未移行fallbackは含みません。
+移行前のCollaboration索引が残る場合も、rootとreplyを新しい順に統合します。
+旧索引は日時順ではないため1回の取得で最大20ページ（100行/ページ）を読みます。
+互換用の索引行も読み取り件数に含み、上限を超える履歴では順序を崩して返さず `503` になります。
+継続位置は索引世代をまたぐ共通の日時・コメントkeyで保持します。
+
+同じpathへの `POST` は `work-items:write` と `Idempotency-Key` を要求し、
+`{ "body": "進捗、検証結果、PRリンクなど" }`（1–4096文字）を受け付けます。
+作成者はcredentialから解決し、Team/Projectの現在権限、canonical親row、監査、
+コメントの冪等作成には既存Collaborationのtransactionを使います。
+保存したコメントはWebのタスク詳細にも表示されます。
+
+GET/POSTの任意query `assignedProjectId` は、指定したProjectから移動したタスクへのアクセスを拒否します。
+GETは読み取り前後、POSTは保存transactionとreceipt再送時に検証します。
+POSTは任意query `assigneeUserId` でも担当者を固定できます。これらは権限を付与する値ではなく、
+現在のcredentialの権限に追加する制約です。queryはcursorおよび冪等request fingerprintに含まれます。
+
+一覧要素・作成応答は `{ id, actorUserId, body, createdAt }` です。
+[Coding Agent MCP](coding-agent-mcp.md)はこのAPIで作業報告を保存します。
+
+### Pagination contract
 
 一覧 response は `{ items, hasMore, nextCursor? }` を返す。`nextCursor` は署名された opaque token であり、client は decode、編集、永続的な bookmark としての利用をしない。同じ filter、sort、Workspace scope で次 request の `cursor` にそのまま渡す。
 

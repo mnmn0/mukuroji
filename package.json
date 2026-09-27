@@ -9,6 +9,8 @@
     "cdk"
   ],
   "scripts": {
+    "mcp:start": "bun server/src/handlers/coding-agent-mcp.ts",
+    "mcp:build": "bun build server/src/handlers/coding-agent-mcp.ts --target bun --outfile server/dist/mcp.mjs",
     "floci:up": "sh floci/up.sh",
     "workers:dev": "bun --env-file=.env --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env server/scripts/local-workers/run.ts",
     "workers:once": "bun run workers:dev --once",
