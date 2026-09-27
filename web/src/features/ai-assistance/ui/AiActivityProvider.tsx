@@ -59,11 +59,12 @@ function AiActivityDialog({ locale, onClose, fallbackFocusRef }: AiActivityDialo
   useLayoutEffect(() => {
     const dialog = dialogRef.current
     const previousFocus = document.activeElement
+    const fallbackFocus = fallbackFocusRef.current
     dialog?.showModal()
     return () => {
       dialog?.close()
       if (previousFocus instanceof HTMLElement && previousFocus.isConnected && previousFocus.getClientRects().length > 0) previousFocus.focus()
-      else fallbackFocusRef.current?.focus()
+      else if (fallbackFocus?.isConnected) fallbackFocus.focus()
     }
   }, [fallbackFocusRef])
   return (
