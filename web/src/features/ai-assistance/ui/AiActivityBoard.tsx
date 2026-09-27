@@ -46,12 +46,16 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
   const [selectedId, setSelectedId] = useState<string>()
   const [filter, setFilter] = useState<'all' | 'attention' | 'running'>('all')
   const [query, setQuery] = useState('')
+  const [isCompact, setIsCompact] = useState(false)
   const titleId = useId()
   const detailId = useId()
   const detailRef = useRef<HTMLElement>(null)
+  const boardRef = useRef<HTMLElement>(null)
+  const focusedCardRef = useRef<HTMLButtonElement | null>(null)
   const selectedTriggerRef = useRef<HTMLButtonElement | null>(null)
   const filterRef = useRef<HTMLDivElement>(null)
   const hadPhoneDetailRef = useRef(false)
+  const previousSelectionRef = useRef<string | undefined>(undefined)
   const normalizedQuery = query.trim().toLocaleLowerCase(locale)
   const visible = activities.filter((activity) => {
     const status = getAiActivityStatus(getAiActivityPhase(activity, now))
@@ -65,19 +69,45 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
   const runningCount = activities.filter((activity) => getAiActivityStatus(getAiActivityPhase(activity, now)) === 'running').length
   const reviewCount = activities.filter((activity) => getAiActivityPhase(activity, now) === 'review').length
   const hasHistory = activities.some((activity) => !['running', 'review'].includes(getAiActivityStatus(getAiActivityPhase(activity, now))))
+  useLayoutEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1000px)')
+    /** Keeps focus behavior synchronized with the visible list/detail layout. */
+    const updateLayout = () => setIsCompact(!desktop.matches)
+    updateLayout()
+    desktop.addEventListener('change', updateLayout)
+    return () => desktop.removeEventListener('change', updateLayout)
+  }, [])
   // Move focus with the phone's list/detail transition; selection remains local UI state.
   useLayoutEffect(() => {
-    if (hasMobileSelection && !window.matchMedia('(min-width: 1000px)').matches) {
-      detailRef.current?.focus()
+    const selectionChanged = previousSelectionRef.current !== selectedId
+    previousSelectionRef.current = selectedId
+    if (hasMobileSelection && isCompact) {
+      if (selectionChanged || document.activeElement === document.body ||
+        (document.activeElement instanceof HTMLElement && document.activeElement.getClientRects().length === 0)) detailRef.current?.focus()
       hadPhoneDetailRef.current = true
     } else if (hadPhoneDetailRef.current) {
       hadPhoneDetailRef.current = false
-      if (selectedId !== undefined) filterRef.current?.focus()
+      if (selectedId !== undefined) {
+        if (!hasMobileSelection) filterRef.current?.focus()
+        else if (document.activeElement instanceof HTMLElement && document.activeElement.getClientRects().length === 0) detailRef.current?.focus()
+      }
     }
-  }, [hasMobileSelection, selectedId])
+  }, [hasMobileSelection, isCompact, selectedId])
+
+  // A state change can move a focused card into another lane, replacing its DOM node.
+  useLayoutEffect(() => {
+    const previous = focusedCardRef.current
+    if (!previous || previous.isConnected || document.activeElement !== document.body) return
+    const replacement = Array.from(boardRef.current?.querySelectorAll<HTMLButtonElement>('[data-ai-activity-id]') ?? [])
+      .find((card) => card.dataset.aiActivityId === previous.dataset.aiActivityId)
+    if (replacement && replacement.getClientRects().length > 0) replacement.focus()
+    else filterRef.current?.focus()
+  }, [activities, now])
 
   return (
-    <section aria-labelledby={titleId} className="flex h-full min-h-0 flex-col bg-[var(--workbench-canvas)] text-[var(--workbench-text)]">
+    <section aria-labelledby={titleId} className="flex h-full min-h-0 flex-col bg-[var(--workbench-canvas)] text-[var(--workbench-text)]" onBlurCapture={(event) => {
+      if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) focusedCardRef.current = null
+    }} onFocusCapture={() => { focusedCardRef.current = null }} ref={boardRef}>
       <header className="flex flex-none items-start justify-between gap-2 border-b border-[var(--workbench-border)] bg-white px-5 py-4 min-[760px]:items-center min-[760px]:px-7">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <span aria-hidden="true" className="grid size-10 shrink-0 place-items-center rounded-lg bg-teal-700 text-sm font-bold tracking-tight text-white max-[759px]:size-8">AI</span>
@@ -137,7 +167,8 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
               <button className="mb-4 flex min-h-[44px] items-center gap-1 text-sm font-medium text-teal-700 min-[1000px]:hidden" onClick={() => {
                 setSelectedId(undefined)
                 requestAnimationFrame(() => {
-                  const trigger = selectedTriggerRef.current
+                  const trigger = Array.from(boardRef.current?.querySelectorAll<HTMLButtonElement>('[data-ai-activity-id]') ?? [])
+                    .find((card) => card.dataset.aiActivityId === selectedId) ?? selectedTriggerRef.current
                   if (trigger?.isConnected && trigger.getClientRects().length > 0) trigger.focus()
                   else filterRef.current?.focus()
                 })
@@ -166,11 +197,13 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
                             aria-controls={detailId}
                             aria-pressed={selected?.id === activity.id}
                             className={`min-w-0 rounded-lg border bg-white p-3 text-left transition-colors ${selected?.id === activity.id ? 'border-teal-600 ring-1 ring-teal-600' : 'border-[var(--workbench-border)] hover:border-[var(--workbench-border-strong)]'}`}
+                            data-ai-activity-id={activity.id}
                             key={activity.id}
                             onClick={(event) => {
                               selectedTriggerRef.current = event.currentTarget
                               setSelectedId(activity.id)
                             }}
+                            onFocus={(event) => { focusedCardRef.current = event.currentTarget }}
                             type="button"
                           >
                             <p className={`flex items-center gap-1.5 text-xs font-medium ${statusStyles[status].text}`}>
@@ -195,7 +228,11 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
       )}
       <footer className="flex flex-none flex-wrap items-center justify-between gap-2 border-t border-[var(--workbench-border)] bg-white px-5 py-2 text-xs text-[var(--workbench-muted)]">
         <span>{t('ai.activity.sessionNote')}</span>
-        {onClearHistory && hasHistory ? <button className="min-h-[44px] px-2 font-medium text-[var(--workbench-text)] hover:underline" onClick={onClearHistory} type="button">{t('ai.activity.clearHistory')}</button> : null}
+        {onClearHistory && hasHistory ? <button className="min-h-[44px] px-2 font-medium text-[var(--workbench-text)] hover:underline" onClick={() => {
+          onClearHistory()
+          setSelectedId(undefined)
+          filterRef.current?.focus()
+        }} type="button">{t('ai.activity.clearHistory')}</button> : null}
       </footer>
     </section>
   )

@@ -2,8 +2,10 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from 'react'
 import { matchPath, Outlet, useLocation, useNavigate } from 'react-router'
 import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
@@ -210,6 +212,7 @@ const emptySessionErrors: readonly unknown[] = []
  */
 export function WorkspaceRoute() {
   const workspace = useWorkspaceRouteContext()
+  const activityFallbackFocusRef = useRef<HTMLElement>(null)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   /**
    * Opens the persistent mobile sidebar drawer.
@@ -233,9 +236,10 @@ export function WorkspaceRoute() {
   )
 
   return (
-    <AiActivityProvider key={workspace.accessToken ?? 'signed-out'} locale={workspace.locale}>
+    <AiActivityProvider fallbackFocusRef={activityFallbackFocusRef} key={workspace.accessToken ?? 'signed-out'} locale={workspace.locale}>
     <WorkspaceSidebarProvider controller={sidebarController}>
       <WorkspaceRouteShell
+        activityFallbackFocusRef={activityFallbackFocusRef}
         closeMobileSidebar={closeMobileSidebar}
         isMobileSidebarOpen={isMobileSidebarOpen}
         openMobileSidebar={openMobileSidebar}
@@ -247,6 +251,8 @@ export function WorkspaceRoute() {
 
 /** Props accepted by the persistent Workspace shell implementation. */
 type WorkspaceRouteShellProps = {
+  /** Stable shell focus target if the AI activity launcher is removed. */
+  activityFallbackFocusRef: RefObject<HTMLElement | null>
   /** Closes the shared mobile sidebar drawer. */
   closeMobileSidebar: () => void
   /** Whether the shared mobile sidebar drawer is open. */
@@ -262,6 +268,7 @@ type WorkspaceRouteShellProps = {
  * @returns The persistent sidebar, route header, boundaries, and outlet.
  */
 function WorkspaceRouteShell({
+  activityFallbackFocusRef,
   closeMobileSidebar,
   isMobileSidebarOpen,
   openMobileSidebar,
@@ -402,7 +409,7 @@ function WorkspaceRouteShell({
   ])
 
   return (
-      <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
+      <main className="workbench-shell flex h-svh min-h-0 overflow-hidden" ref={activityFallbackFocusRef} tabIndex={-1}>
         <WorkspaceSidebar
           autoSelectInitialProject={false}
           activeNavId={metadata?.activeNavId}

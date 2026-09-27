@@ -76,3 +76,8 @@ Additional session stories verify that a recorded approval survives a failed
 post-decision read while source metadata and draft content are cleared, and that
 phone focus returns to the filter controls when an asynchronous result leaves
 the selected filter. Live result counts announce the change.
+Responsive focus follows breakpoint changes, clearing history returns focus to
+stable filters, and a dismissed dialog falls back to the workspace when its
+launcher no longer exists. The history-clear session story covers this path.
+State-lane movement retains focus on the corresponding card, including the
+return target when leaving phone details after a state update.

@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 import { createTranslator, type Locale } from '../../../shared/i18n/i18n'
 import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
@@ -14,6 +14,8 @@ export type AiActivityProviderProps = {
   children: ReactNode
   /** Locale for the global board. */
   locale: Locale
+  /** Stable workspace target when the original launcher disappears. */
+  fallbackFocusRef: RefObject<HTMLElement | null>
 }
 
 /**
@@ -21,7 +23,7 @@ export type AiActivityProviderProps = {
  * @param props - Workspace content and display locale.
  * @returns Session-scoped metadata context and an optional native modal.
  */
-export function AiActivityProvider({ children, locale }: AiActivityProviderProps) {
+export function AiActivityProvider({ children, locale, fallbackFocusRef }: AiActivityProviderProps) {
   const [store] = useState(() => createAiActivityStore())
   const [isOpen, setIsOpen] = useState(false)
   const location = useLocation()
@@ -32,7 +34,7 @@ export function AiActivityProvider({ children, locale }: AiActivityProviderProps
   return (
     <AiActivityContext.Provider value={value}>
       {children}
-      {isOpen ? <AiActivityDialog locale={locale} onClose={closeBoard} /> : null}
+      {isOpen ? <AiActivityDialog fallbackFocusRef={fallbackFocusRef} locale={locale} onClose={closeBoard} /> : null}
     </AiActivityContext.Provider>
   )
 }
@@ -43,10 +45,12 @@ type AiActivityDialogProps = {
   locale: Locale
   /** Closes the modal without changing the source view. */
   onClose: () => void
+  /** Stable workspace target when the original launcher disappears. */
+  fallbackFocusRef: RefObject<HTMLElement | null>
 }
 
 /** Presents the board with native focus trapping, Escape, and focus restoration. */
-function AiActivityDialog({ locale, onClose }: AiActivityDialogProps) {
+function AiActivityDialog({ locale, onClose, fallbackFocusRef }: AiActivityDialogProps) {
   const { context, activities } = useAiActivity()
   const now = useAiActivityClock(activities)
   const dialogRef = useRef<HTMLDialogElement>(null)
@@ -58,9 +62,10 @@ function AiActivityDialog({ locale, onClose }: AiActivityDialogProps) {
     dialog?.showModal()
     return () => {
       dialog?.close()
-      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus()
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected && previousFocus.getClientRects().length > 0) previousFocus.focus()
+      else fallbackFocusRef.current?.focus()
     }
-  }, [])
+  }, [fallbackFocusRef])
   return (
     <dialog
       aria-label={t('ai.activity.title')}
