@@ -72,3 +72,7 @@ retaining existing history, and Home's DOM order matches its visual hierarchy.
 Four targeted Chromium E2E cases pass, including preference/policy gates and
 coexisting AI/task/triage live status regions. A lifecycle regression covers
 decisions crossing the review deadline and surviving history cleanup.
+Additional session stories verify that a recorded approval survives a failed
+post-decision read while source metadata and draft content are cleared, and that
+phone focus returns to the filter controls when an asynchronous result leaves
+the selected filter. Live result counts announce the change.

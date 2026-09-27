@@ -40,6 +40,7 @@ export const aiAssistanceMessages = {
   'ai.activity.description.generating': "AI is processing your request. The result will be ready for your review.",
   'ai.activity.description.review': "The generated draft is ready to review. Save any changes in the source screen.",
   'ai.activity.description.deciding': "Your review decision is being recorded.",
+  'ai.activity.description.reviewedUnavailable': "Your decision was recorded. The draft is currently unavailable; check the source screen for applied or saved changes.",
   'ai.activity.description.approved': "The draft was approved. Check the source screen for applied or saved changes.",
   'ai.activity.description.rejected': "You chose not to use this draft.",
   'ai.activity.description.cancelled': "Stopped waiting for the result. Server-side generation may still continue.",

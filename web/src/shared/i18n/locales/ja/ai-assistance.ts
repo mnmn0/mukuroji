@@ -40,6 +40,7 @@ export const aiAssistanceMessages = {
   'ai.activity.description.generating': "AIが依頼を処理しています。結果が届くと確認待ちに移ります。",
   'ai.activity.description.review': "生成した案を確認できます。変更の保存は元の画面で行います。",
   'ai.activity.description.deciding': "確認結果を記録しています。",
+  'ai.activity.description.reviewedUnavailable': "確認結果は記録済みです。現在この案は表示できません。変更の適用・保存状況は元の画面で確認してください。",
   'ai.activity.description.approved': "案を承認しました。タスクへの変更・保存状況は元の画面で確認できます。",
   'ai.activity.description.rejected': "この案の採用を見送りました。",
   'ai.activity.description.cancelled': "結果の取得を停止しました。サーバー側の生成は継続する場合があります。",

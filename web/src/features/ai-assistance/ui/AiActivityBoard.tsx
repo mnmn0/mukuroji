@@ -50,6 +50,8 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
   const detailId = useId()
   const detailRef = useRef<HTMLElement>(null)
   const selectedTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const filterRef = useRef<HTMLDivElement>(null)
+  const hadPhoneDetailRef = useRef(false)
   const normalizedQuery = query.trim().toLocaleLowerCase(locale)
   const visible = activities.filter((activity) => {
     const status = getAiActivityStatus(getAiActivityPhase(activity, now))
@@ -65,7 +67,13 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
   const hasHistory = activities.some((activity) => !['running', 'review'].includes(getAiActivityStatus(getAiActivityPhase(activity, now))))
   // Move focus with the phone's list/detail transition; selection remains local UI state.
   useLayoutEffect(() => {
-    if (hasMobileSelection && !window.matchMedia('(min-width: 1000px)').matches) detailRef.current?.focus()
+    if (hasMobileSelection && !window.matchMedia('(min-width: 1000px)').matches) {
+      detailRef.current?.focus()
+      hadPhoneDetailRef.current = true
+    } else if (hadPhoneDetailRef.current) {
+      hadPhoneDetailRef.current = false
+      if (selectedId !== undefined) filterRef.current?.focus()
+    }
   }, [hasMobileSelection, selectedId])
 
   return (
@@ -78,7 +86,7 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
               <h1 className="text-xl font-semibold tracking-tight max-[759px]:text-base" id={titleId}>{t('ai.activity.title')}</h1>
               <span className="text-xs text-[var(--workbench-muted)]">{t('ai.activity.session')}</span>
             </div>
-            <p className="mt-1 text-xs text-[var(--workbench-muted)]">
+            <p className="mt-1 text-xs text-[var(--workbench-muted)]" role="status">
               {t('ai.activity.summary').replace('{running}', String(runningCount)).replace('{review}', String(reviewCount))}
             </p>
           </div>
@@ -87,7 +95,7 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
       </header>
 
       <div className="flex flex-none flex-wrap items-center gap-3 border-b border-[var(--workbench-border)] bg-white px-5 py-2 min-[760px]:px-7">
-        <div aria-label={t('ai.activity.filter')} className="flex flex-wrap gap-1">
+        <div aria-label={t('ai.activity.filter')} className="flex flex-wrap gap-1" ref={filterRef} role="group" tabIndex={-1}>
           {(['all', 'running', 'attention'] satisfies Array<typeof filter>).map((value) => (
             <button
               aria-pressed={filter === value}
@@ -128,7 +136,11 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
             >
               <button className="mb-4 flex min-h-[44px] items-center gap-1 text-sm font-medium text-teal-700 min-[1000px]:hidden" onClick={() => {
                 setSelectedId(undefined)
-                requestAnimationFrame(() => selectedTriggerRef.current?.focus())
+                requestAnimationFrame(() => {
+                  const trigger = selectedTriggerRef.current
+                  if (trigger?.isConnected && trigger.getClientRects().length > 0) trigger.focus()
+                  else filterRef.current?.focus()
+                })
               }} type="button">
                 <ChevronIcon className="size-4 rotate-90 fill-none stroke-current stroke-2" />{t('ai.activity.back')}
               </button>
@@ -208,7 +220,7 @@ function ActivityDetail({ activity, locale, now, onOpenOrigin, t }: ActivityDeta
         <p className={`flex items-center gap-2 text-sm font-semibold ${statusStyles[status].text}`}>
           <span aria-hidden="true" className={`size-2 rounded-full ${statusStyles[status].dot}`} />{t(`ai.activity.phase.${phase}`)}
         </p>
-        <p className="mt-2 text-sm leading-6 text-[var(--workbench-muted)]">{t(`ai.activity.description.${phase}`)}</p>
+        <p className="mt-2 text-sm leading-6 text-[var(--workbench-muted)]">{t(activity.sourceUnavailable && (phase === 'approved' || phase === 'rejected') ? 'ai.activity.description.reviewedUnavailable' : `ai.activity.description.${phase}`)}</p>
       </div>
       {onOpenOrigin && isSafeApplicationPath(activity.origin) ? (
         <button className="workbench-button-primary mt-5 flex min-h-[44px] w-full items-center justify-center gap-2 px-3" onClick={() => onOpenOrigin(activity.origin)} type="button">

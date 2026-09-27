@@ -94,6 +94,19 @@ describe('session AI activity', () => {
     expect(store.getSnapshot()[0].id).toBe(active)
   })
 
+  test('clearing unavailable source content preserves a validated decision without retaining labels', () => {
+    const store = createAiActivityStore()
+    const id = store.start({ task: 'summary', origin: '/documents/private', label: 'Private title' })
+    store.update(id, 'deciding')
+    store.clearSource(id, 'approved')
+    expect(store.getSnapshot()[0]).toMatchObject({ phase: 'approved', label: undefined, origin: '', sourceUnavailable: true })
+    store.clearSource(id)
+    expect(store.getSnapshot()[0].phase).toBe('approved')
+    const undecided = store.start({ task: 'summary', origin: '/home' })
+    store.clearSource(undecided)
+    expect(store.getSnapshot()[0].phase).toBe('unavailable')
+  })
+
   test('subscribers observe changes and can unsubscribe without losing snapshot stability', () => {
     const store = createAiActivityStore()
     let calls = 0

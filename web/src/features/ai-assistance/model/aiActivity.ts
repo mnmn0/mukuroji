@@ -30,6 +30,8 @@ export type AiActivity = {
   phase: AiActivityPhase
   /** Retention deadline for review availability. */
   expiresAt?: number
+  /** Whether source metadata was removed after disclosure became unavailable. */
+  sourceUnavailable?: boolean
   /** Bounded chronological observations. */
   events: readonly AiActivityEvent[]
 }
@@ -47,6 +49,8 @@ export type AiActivityStore = {
   start: (input: AiActivityStart) => string
   /** Records a phase of the matching operation. */
   update: (id: string | undefined, phase: AiActivityPhase, expiresAt?: number) => void
+  /** Removes source metadata while preserving any validated human decision. */
+  clearSource: (id: string | undefined, recordedDecision?: 'approved' | 'rejected') => void
   /** Closes unfinished local work when its owning assistant goes away. */
   close: (id: string | undefined) => void
   /** Removes only terminal history, preserving work that still needs review. */
@@ -94,11 +98,11 @@ export function createAiActivityStore(now: () => number = Date.now): AiActivityS
     listeners.forEach((listener) => listener())
   }
   /** Records a phase only when the matching activity still exists. */
-  const update: AiActivityStore['update'] = (id, phase, expiresAt) => {
+  const update = (id: string | undefined, phase: AiActivityPhase, expiresAt?: number, redactSource = false): void => {
     if (!id || !activities.some((activity) => activity.id === id)) return
     publish(activities.map((activity) => activity.id !== id ? activity : {
       ...activity,
-      ...(phase === 'unavailable' ? { label: undefined, origin: '' } : {}),
+      ...(phase === 'unavailable' || redactSource ? { label: undefined, origin: '', sourceUnavailable: true } : {}),
       expiresAt: expiresAt ?? activity.expiresAt,
       phase,
       events: activity.phase === phase
@@ -124,6 +128,11 @@ export function createAiActivityStore(now: () => number = Date.now): AiActivityS
       return id
     },
     update,
+    clearSource: (id, recordedDecision) => {
+      const activity = activities.find((entry) => entry.id === id)
+      const previousDecision = activity?.phase === 'approved' || activity?.phase === 'rejected' ? activity.phase : undefined
+      update(id, recordedDecision ?? previousDecision ?? 'unavailable', undefined, true)
+    },
     close: (id) => {
       const activity = activities.find((entry) => entry.id === id)
       if (!activity) return

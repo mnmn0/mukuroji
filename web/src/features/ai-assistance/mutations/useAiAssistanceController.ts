@@ -84,6 +84,8 @@ export type AiAssistanceDecisionAttemptResult =
       error: unknown
       /** Whether the previously visible generation must be removed. */
       clearGeneration: boolean
+      /** Validated server decision observed before follow-up disclosure failed. */
+      recordedDecision?: 'approved' | 'rejected'
     }
   | {
       /** Indicates that the decision and approval revalidation both succeeded. */
@@ -334,6 +336,7 @@ export async function executeAiAssistanceDecisionAttempt(
   options: ExecuteAiAssistanceDecisionAttemptOptions,
 ): Promise<AiAssistanceDecisionAttemptResult> {
   let receivedValidDecisionResponse = false
+  let recordedDecision: 'approved' | 'rejected' | undefined
   try {
     let nextGeneration = await options.decide(options.generation, options.outcome)
     receivedValidDecisionResponse = true
@@ -344,6 +347,7 @@ export async function executeAiAssistanceDecisionAttempt(
         'InvalidAiAssistanceResponse',
       )
     }
+    if (nextGeneration.decision?.outcome === options.outcome) recordedDecision = options.outcome
     if (nextGeneration.content.availability === 'withheld') {
       throw createAiAssistanceWithheldError(nextGeneration.content.reasonCode)
     }
@@ -357,6 +361,7 @@ export async function executeAiAssistanceDecisionAttempt(
         isAiAssistanceDecisionInvalidatingError(error),
       error,
       kind: 'failed',
+      ...(recordedDecision ? { recordedDecision } : {}),
     }
   }
 }
@@ -439,15 +444,16 @@ export function useAiAssistanceController({
    * Clears all locally retained content and citations for the expected visible generation.
    *
    * @param expectedGenerationId - Optional generation that must still own visible state.
+   * @param recordedDecision - Validated server decision preserved without draft content.
    * @returns Whether visible state matched and was cleared.
    */
-  const clearVisibleGeneration = useCallback((expectedGenerationId?: string): boolean => {
+  const clearVisibleGeneration = useCallback((expectedGenerationId?: string, recordedDecision?: 'approved' | 'rejected'): boolean => {
     const operationFence = operationFenceRef.current
     if (
       expectedGenerationId !== undefined &&
       operationFence.visibleGenerationId !== expectedGenerationId
     ) return false
-    if (expectedGenerationId !== undefined) activityStore?.update(activityIdRef.current, 'unavailable')
+    if (expectedGenerationId !== undefined) activityStore?.clearSource(activityIdRef.current, recordedDecision)
     operationFence.visibleGenerationId = undefined
     setGeneration(undefined)
     setFeedbackRating(undefined)
@@ -509,11 +515,13 @@ export function useAiAssistanceController({
 
   /** Records only the review outcome and retention deadline, never draft content. */
   const recordGenerationActivity = useCallback((next: AiAssistanceGeneration) => {
+    if (next.content.availability === 'withheld') {
+      activityStore?.clearSource(activityIdRef.current, next.decision?.outcome)
+      return
+    }
     activityStore?.update(
       activityIdRef.current,
-      next.content.availability === 'withheld'
-        ? 'unavailable'
-        : next.decision?.outcome ?? 'review',
+      next.decision?.outcome ?? 'review',
       Date.parse(next.expiresAt),
     )
   }, [activityStore])
@@ -790,7 +798,7 @@ export function useAiAssistanceController({
       )) return undefined
       if (result.kind === 'failed') {
         onAuthenticatedApiError?.(result.error)
-        if (result.clearGeneration) clearVisibleGeneration(generationId)
+        if (result.clearGeneration) clearVisibleGeneration(generationId, result.recordedDecision)
         else activityStore?.update(activityIdRef.current, 'review')
         setError(classifyAiAssistanceError(result.error))
         return undefined
