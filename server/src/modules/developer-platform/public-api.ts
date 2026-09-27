@@ -34,6 +34,7 @@ import {
   type WorkItemScheduleWeekday,
   type WorkItemSyncConflict,
   type WorkItemTypeChangeResolution,
+  type TeamIssueCommentResponseItem,
 } from '@mukuroji/contracts'
 import { Hono, type Context } from 'hono'
 import type {
@@ -111,6 +112,67 @@ export type PublicImportSourceInput = {
 
 /** Public Work Item API と既存 canonical service の境界です。 */
 export interface PublicWorkItemService {
+  /**
+   * Reads canonical comments after checking current Work Item visibility.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item whose discussion is requested.
+   * @param continuation - Internal continuation unwrapped from the signed public cursor.
+   * @param limit - Maximum number of comments in the page.
+   * @param assignedProjectId - Optional Project restriction for authorization and cursor scope.
+   * @returns Authorized, non-deleted comments and any remaining internal continuation.
+   */
+  listComments(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    continuation: string | undefined,
+    limit: number,
+    assignedProjectId?: string,
+  ): Promise<{
+    /** Authorized, non-deleted comments in this page. */
+    items: TeamIssueCommentResponseItem[]
+    /** Whether the canonical discussion has another page. */
+    hasMore: boolean
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
+  /**
+   * Rechecks current write access before replaying a comment receipt.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item whose comment receipt would be replayed.
+   * @param assignedProjectId - Optional Project restriction rechecked before replay.
+   * @param assigneeUserId - Optional assignee restriction rechecked before replay.
+   * @returns A promise that resolves only when the current scope and write checks pass.
+   */
+  authorizeComment(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    assignedProjectId?: string,
+    assigneeUserId?: string,
+  ): Promise<void>
+  /**
+   * Adds an idempotent, authorization-fenced canonical comment and audit event.
+   * @param credential - Authenticated developer credential used for current RBAC and author identity.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item receiving the comment.
+   * @param body - Validated comment text.
+   * @param context - Request, correlation, and idempotency identifiers for this mutation.
+   * @param assignedProjectId - Optional Project restriction enforced when persisting the comment.
+   * @param assigneeUserId - Optional assignee restriction enforced when persisting the comment.
+   * @returns The created canonical comment response item.
+   */
+  addComment(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    body: string,
+    context: PublicMutationContext,
+    assignedProjectId?: string,
+    assigneeUserId?: string,
+  ): Promise<TeamIssueCommentResponseItem>
   /** Credential owner の current RBAC で Work Items を bounded page 取得します。 */
   list(
     credential: AuthenticatedDeveloperCredential,
@@ -131,10 +193,17 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<CanonicalWorkItem>
-  /** Returns active Work Item Types and creation field schemas after current RBAC checks. */
+  /**
+   * Returns active Work Item Types and creation field schemas after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team whose current configuration is requested.
+   * @param assignedProjectId - Optional authorized Project used to restrict field metadata.
+   * @returns The authorized type catalog with fields projected to the requested Project scope.
+   */
   listWorkItemTypes(
     credential: AuthenticatedDeveloperCredential,
     teamId: string,
+    assignedProjectId?: string,
   ): Promise<PublicWorkItemTypeCatalog>
   /**
    * Calculates the impact of a Work Item Type change after current authorization and revision checks.
@@ -576,6 +645,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     return c.json(await dependencies.workItems.listWorkItemTypes(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId'),
     ))
   })
 
@@ -586,6 +656,38 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.get('/v1/work-items/:workItemId/comments', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const assignedProjectId = c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId')
+    return c.json(await createSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: `/v1/work-items/${encodeURIComponent(workItemId)}/comments`,
+      filters: { teamId, ...(assignedProjectId ? { assignedProjectId } : {}) },
+    }, (continuation, limit) => dependencies.workItems.listComments(
+      credential, teamId, workItemId, continuation, limit, assignedProjectId,
+    ), (comment) => comment.createdAt))
+  })
+
+  router.post('/v1/work-items/:workItemId/comments', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    const assignedProjectId = c.req.query('assignedProjectId') === undefined ? undefined : readRouteId(c.req.query('assignedProjectId') ?? '', 'assignedProjectId')
+    const assigneeUserId = c.req.query('assigneeUserId') === undefined ? undefined : readRouteId(c.req.query('assigneeUserId') ?? '', 'assigneeUserId')
+    const input = requireRecord(await readJson(c), 'Comment body is required.')
+    assertAllowedFields(input, ['body'], 'Comment')
+    const body = readRequiredString(input.body, 'body')
+    return executeIdempotentJson(c, dependencies, credential, { body }, async (context) => ({
+      status: 201,
+      body: await dependencies.workItems.addComment(credential, teamId, workItemId, body, context, assignedProjectId, assigneeUserId),
+    }), {
+      authorizeReplay: () => dependencies.workItems.authorizeComment(credential, teamId, workItemId, assignedProjectId, assigneeUserId),
+    })
   })
 
   router.post('/v1/work-items/:workItemId/work-item-type-preview', async (c) => {

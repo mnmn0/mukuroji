@@ -1186,6 +1186,74 @@ test('emits a version-one discussion cursor for rolling compatibility callers', 
   })
 })
 
+/** Preserves global chronology across both index generations and migration races. */
+test('merges current and legacy roots and replies newest-first across pages and concurrent migration', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  /** Creates one old or current physical discussion index row. */
+  function index(id: string, day: string, current: boolean, root = id) {
+    const createdAt = `2026-07-${day}T00:00:00.000Z`
+    const kind = root === id ? 'ROOT' : `THREAD#${root}`
+    return { entityKey, entryType: 'discussion', commentId: id, rootCommentId: root, createdAt,
+      recordKey: current ? `DISCUSSION#V2#${createdAt}#${kind}#${id}` : `DISCUSSION#${kind}#${createdAt}#${id}` }
+  }
+  const rows = [index('current-new', '05', true), index('legacy-new', '04', false),
+    index('legacy-reply', '03', false, 'legacy-old'), index('current-old', '02', true), index('legacy-old', '01', false)]
+  const notes = new Map(rows.map((row) => [`COMMENT#${row.commentId}`, {
+    entityKey, recordKey: `COMMENT#${row.commentId}`, entryType: 'comment', id: row.commentId,
+    rootCommentId: row.rootCommentId, authorMemberKey: 'author@example.com', bodyMarkdown: row.commentId,
+    version: 1, mentionMemberKeys: [], createdAt: row.createdAt, updatedAt: row.createdAt,
+  }]))
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && typeof input.Key.recordKey === 'string') return { Item: notes.get(input.Key.recordKey) }
+    const values = isTestRecord(input.ExpressionAttributeValues) ? input.ExpressionAttributeValues : {}
+    const current = values[':prefix'] === 'DISCUSSION#V2#'
+    const legacy = values[':legacyLowerBound'] === 'DISCUSSION#'
+    if (!current && !legacy) return { Items: [] }
+    const start = isTestRecord(input.ExclusiveStartKey) && typeof input.ExclusiveStartKey.recordKey === 'string' ? input.ExclusiveStartKey.recordKey : undefined
+    const limit = typeof input.Limit === 'number' ? input.Limit : 100
+    const selected = rows.filter((row) => row.recordKey.startsWith('DISCUSSION#V2#') === current && (!start || row.recordKey < start))
+      .sort((a, b) => a.recordKey > b.recordKey ? -1 : a.recordKey < b.recordKey ? 1 : 0)
+    const items = selected.slice(0, limit)
+    return { Items: items, ...(selected.length > items.length ? { LastEvaluatedKey: { entityKey, recordKey: items.at(-1)?.recordKey } } : {}) }
+  })
+  const input = { entityKey, viewerMemberKey: 'member@example.com', includeReplies: true, newestFirst: true, includeScopeState: false, limit: 1 }
+  const ids: string[] = []
+  let cursor: string | undefined
+  for (let pageNumber = 0; pageNumber < 8; pageNumber += 1) {
+    const page = await client.getThread({ ...input, cursor })
+    ids.push(...page.comments.map((comment) => comment.id))
+    if (pageNumber === 1) rows.push(index('legacy-new', '04', true))
+    if (!page.nextCursor) break
+    cursor = page.nextCursor
+  }
+  expect(ids).toEqual(['current-new', 'legacy-new', 'legacy-reply', 'current-old', 'legacy-old'])
+  await expect(client.getThread({ ...input, limit: 2, cursor })).rejects.toMatchObject({ code: 'InvalidCollaborationCursor' })
+  await expect(client.getThread({ ...input, entityKey: 'other', cursor })).rejects.toMatchObject({ code: 'InvalidCollaborationCursor' })
+  await expect(client.getThread({ ...input, newestFirst: false, cursor })).rejects.toMatchObject({ code: 'InvalidCollaborationCursor' })
+})
+
+/** Ensures filtered legacy pages cannot silently truncate an ordered timeline. */
+test('continues empty filtered legacy pages and fails closed when ordered scanning reaches its bound', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  let reads = 0
+  let endless = false
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    const values = isTestRecord(input.ExpressionAttributeValues) ? input.ExpressionAttributeValues : {}
+    if (values[':legacyLowerBound'] !== 'DISCUSSION#') return { Items: [] }
+    reads += 1
+    return { Items: [], ...(endless || reads === 1 ? { LastEvaluatedKey: { entityKey, recordKey: `DISCUSSION#ROOT#${reads}` } } : {}) }
+  })
+  const input = { entityKey, viewerMemberKey: 'member@example.com', includeReplies: true, newestFirst: true, includeScopeState: false }
+  expect(await client.getThread(input)).toMatchObject({ comments: [] })
+  expect(reads).toBe(2)
+  reads = 0
+  endless = true
+  await expect(client.getThread(input)).rejects.toMatchObject({ status: 503, code: 'DiscussionScanLimit' })
+  expect(reads).toBe(20)
+})
+
 /** Verifies that detail reads can page roots and replies through one bounded stream. */
 test('pages roots and replies through one bounded discussion prefix when requested', async () => {
   const discussionQueries: Array<Record<string, unknown>> = []
@@ -1876,12 +1944,19 @@ test('includes caller authorization guards in comment transactions', async () =>
     workspaceId: 'workspace#one',
     actorMemberKey: 'member@example.com',
     bodyMarkdown: 'Guarded comment',
+    projectId: 'project-a',
+    projectEntityKey: createProjectCollaborationEntityKey('workspace#one', 'project-a'),
+    assigneeMemberKey: 'member@example.com',
   })
 
   expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
     authorizationCheck,
     expect.objectContaining({
-      ConditionCheck: expect.objectContaining({ TableName: 'issue-table' }),
+      ConditionCheck: expect.objectContaining({
+        TableName: 'issue-table',
+        ConditionExpression: expect.stringContaining('assignedProjectId = :assignedProjectId AND assigneeUserId = :assigneeMemberKey'),
+        ExpressionAttributeValues: { ':assignedProjectId': 'project-a', ':assigneeMemberKey': 'member@example.com' },
+      }),
     }),
   ]))
 })
