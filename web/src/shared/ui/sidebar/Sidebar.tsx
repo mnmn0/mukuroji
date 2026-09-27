@@ -533,11 +533,11 @@ const primaryNavItems: MainNavItem[] = [
   { id: 'focus', icon: FocusIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
-  { id: 'requests', icon: PanelIcon },
-  { id: 'customers', icon: BuildingIcon },
 ]
 
 const secondaryNavItems: MainNavItem[] = [
+  { id: 'requests', icon: PanelIcon },
+  { id: 'customers', icon: BuildingIcon },
   { id: 'documents', icon: DocumentIcon },
   { id: 'dashboard', icon: DashboardIcon },
   { id: 'planning', icon: PlanningIcon },

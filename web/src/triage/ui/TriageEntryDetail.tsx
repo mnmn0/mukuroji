@@ -520,6 +520,7 @@ export function TriageEntryDetail({
             ) ? (
               <AiTriageDraftComposer
                 accessToken={accessToken}
+                activityLabel={view.title}
                 adoptLabel={t('ai.triage.adoptTeam')}
                 controller={aiAssistanceController}
                 locale={locale}

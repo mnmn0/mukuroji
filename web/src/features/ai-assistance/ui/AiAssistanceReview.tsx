@@ -132,7 +132,7 @@ export function AiAssistanceReview({
     <section
       aria-busy={isGenerating || isDecisionPending || isFeedbackPending || undefined}
       aria-labelledby={reviewTitleId}
-      className="border-l-2 border-[var(--workbench-primary)] pl-4"
+      className={`border-l-2 pl-4 ${isGenerating ? 'border-blue-600' : content?.availability === 'available' && !decision ? 'border-amber-500' : 'border-[var(--workbench-primary)]'}`}
       data-testid="ai-assistance-review"
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
@@ -140,7 +140,7 @@ export function AiAssistanceReview({
           <div className="flex items-center gap-2 text-[var(--workbench-primary)]">
             <ShieldIcon className="h-5 w-5 fill-none stroke-current stroke-2" />
             <h2 className="text-app-body font-semibold" id={reviewTitleId}>
-              {t('ai.review.title')}
+              {t(isGenerating ? 'ai.activity.status.running' : content?.availability === 'available' && !hasUnsafeCitation && !decision ? 'ai.activity.reviewTitle' : 'ai.review.title')}
             </h2>
           </div>
           {generation ? (
@@ -166,10 +166,10 @@ export function AiAssistanceReview({
             <span className="text-app-body font-semibold text-[var(--workbench-text)]">
               {generatingLabel ?? t('ai.search.generating')}
             </span>
-            <div aria-hidden="true" className="grid gap-2">
-              <span className="h-3 w-4/5 animate-pulse rounded bg-[var(--workbench-border)] motion-reduce:animate-none" />
-              <span className="h-3 w-3/5 animate-pulse rounded bg-[var(--workbench-border)] motion-reduce:animate-none" />
-            </div>
+            <ol className="flex flex-wrap items-center gap-3 text-xs">
+              <li aria-current="step" className="flex items-center gap-2 font-semibold text-blue-700"><span aria-hidden="true" className="size-2 rounded-full bg-blue-600 motion-safe:animate-pulse" />{t('ai.activity.generateStep')}</li>
+              <li className="text-[var(--workbench-muted)]">→ {t('ai.activity.reviewStep')}</li>
+            </ol>
             {onCancelGeneration ? (
               <button
                 className="workbench-button-secondary min-h-[44px] justify-self-start px-4"

@@ -301,7 +301,7 @@ test('deep links, roving keyboard navigation, and Accept confirmation survive re
   await page.getByRole('button', { name: 'Review and apply' }).click()
 
   await expect(firstRow).toBeFocused()
-  await expect(page.getByRole('status')).toHaveText('The triage action was completed.')
+  await expect(page.getByRole('status').filter({ hasText: 'The triage action was completed.' })).toHaveText('The triage action was completed.')
   await expect(page.getByTestId('triage-entry-detail')).toContainText('Accepted')
   await expect(page.getByRole('link', { name: 'Open canonical Work Item' })).toHaveAttribute(
     'href',
@@ -395,6 +395,6 @@ test('settings conflict refreshes the revision before the operator retries', asy
 
   await page.getByLabel('Retention days').fill('445')
   await page.getByRole('button', { name: 'Save settings' }).click()
-  await expect(page.getByRole('status')).toHaveText('Triage settings saved.')
+  await expect(page.getByRole('status').filter({ hasText: 'Triage settings saved.' })).toHaveText('Triage settings saved.')
   expect(state.settingsRequests).toBe(2)
 })

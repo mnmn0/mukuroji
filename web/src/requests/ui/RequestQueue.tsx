@@ -667,6 +667,7 @@ function RequestSubmissionDetail({
         (accessToken || aiAssistanceController) ? (
           <AiTriageDraftComposer
             accessToken={accessToken}
+            activityLabel={submission.formName}
             adoptLabel={t('ai.triage.adoptRequest')}
             controller={aiAssistanceController}
             locale={locale}

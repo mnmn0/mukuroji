@@ -4270,6 +4270,7 @@ function IssueDetailContent({
         ) => (
           <AiSummaryAssistant
             accessToken={accessToken}
+            activityLabel={issue.title}
             adoptLabel={t('ai.summary.adoptContext')}
             key={createAiAssistantSessionKey(aiSummarySource)}
             locale={locale}

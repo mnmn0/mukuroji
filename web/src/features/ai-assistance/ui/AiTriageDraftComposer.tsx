@@ -18,6 +18,8 @@ import { AiDraftEvidenceMeta } from './AiDraftEvidence'
 
 /** Props for an explicit evidence-first triage draft workflow. */
 export type AiTriageDraftComposerProps = {
+  /** Already-visible intake title used by the session activity board. */
+  readonly activityLabel?: string
   /** Bearer token for the active Workspace member. */
   readonly accessToken?: string
   /** Reports authenticated API failures to the owning route session guard. */
@@ -52,6 +54,7 @@ export type AiTriageDraftComposerProps = {
  */
 export function AiTriageDraftComposer({
   accessToken,
+  activityLabel,
   adoptLabel,
   canAdoptDraft: isDraftAdoptable,
   controller,
@@ -64,7 +67,7 @@ export function AiTriageDraftComposer({
   source,
   t,
 }: AiTriageDraftComposerProps) {
-  const liveController = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
+  const liveController = useAiAssistanceController({ accessToken, activityLabel, onAuthenticatedApiError })
   const activeController = controller ?? liveController
   const [generatedForSourceKey, setGeneratedForSourceKey] = useState<string>()
   const [isStale, setIsStale] = useState(false)

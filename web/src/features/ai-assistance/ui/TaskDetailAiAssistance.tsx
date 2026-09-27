@@ -109,6 +109,7 @@ export function createTaskDetailAiAssistanceRenderer(
           ) => (
             <AiSummaryAssistant
               accessToken={context.accessToken}
+              activityLabel={context.resolveWorkItemLabel?.(context.source)}
               adoptLabel={context.t('ai.summary.adoptContext')}
               key={sessionKey}
               locale={context.locale}

@@ -2,8 +2,10 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from 'react'
 import { matchPath, Outlet, useLocation, useNavigate } from 'react-router'
 import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
@@ -26,6 +28,8 @@ import {
   type SidebarTeamViewId,
 } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
+import { AiActivityProvider } from '../../features/ai-assistance/ui/AiActivityProvider'
+import { AiActivityLauncher } from '../../features/ai-assistance/ui/AiActivityLauncher'
 
 /** Header and sidebar metadata owned by one authenticated workspace route. */
 export type WorkspaceRouteMetadata = {
@@ -207,6 +211,8 @@ const emptySessionErrors: readonly unknown[] = []
  * @returns The shared Workspace shell used by all authenticated Workspace routes.
  */
 export function WorkspaceRoute() {
+  const workspace = useWorkspaceRouteContext()
+  const activityFallbackFocusRef = useRef<HTMLElement>(null)
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   /**
    * Opens the persistent mobile sidebar drawer.
@@ -230,18 +236,23 @@ export function WorkspaceRoute() {
   )
 
   return (
+    <AiActivityProvider fallbackFocusRef={activityFallbackFocusRef} key={workspace.accessToken ?? 'signed-out'} locale={workspace.locale}>
     <WorkspaceSidebarProvider controller={sidebarController}>
       <WorkspaceRouteShell
+        activityFallbackFocusRef={activityFallbackFocusRef}
         closeMobileSidebar={closeMobileSidebar}
         isMobileSidebarOpen={isMobileSidebarOpen}
         openMobileSidebar={openMobileSidebar}
       />
     </WorkspaceSidebarProvider>
+    </AiActivityProvider>
   )
 }
 
 /** Props accepted by the persistent Workspace shell implementation. */
 type WorkspaceRouteShellProps = {
+  /** Stable shell focus target if the AI activity launcher is removed. */
+  activityFallbackFocusRef: RefObject<HTMLElement | null>
   /** Closes the shared mobile sidebar drawer. */
   closeMobileSidebar: () => void
   /** Whether the shared mobile sidebar drawer is open. */
@@ -257,6 +268,7 @@ type WorkspaceRouteShellProps = {
  * @returns The persistent sidebar, route header, boundaries, and outlet.
  */
 function WorkspaceRouteShell({
+  activityFallbackFocusRef,
   closeMobileSidebar,
   isMobileSidebarOpen,
   openMobileSidebar,
@@ -397,7 +409,7 @@ function WorkspaceRouteShell({
   ])
 
   return (
-      <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
+      <main className="workbench-shell flex h-svh min-h-0 overflow-hidden" ref={activityFallbackFocusRef} tabIndex={-1}>
         <WorkspaceSidebar
           autoSelectInitialProject={false}
           activeNavId={metadata?.activeNavId}
@@ -452,6 +464,12 @@ function WorkspaceRouteShell({
           aria-busy={routeState.isBusy}
           className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden"
         >
+          <AiActivityLauncher enabled={Boolean(
+            workspace.isAiAssistanceTaskEnabled?.('planning') ||
+            workspace.isAiAssistanceTaskEnabled?.('summary') ||
+            workspace.isAiAssistanceTaskEnabled?.('triage') ||
+            workspace.isAiAssistanceTaskEnabled?.('search'),
+          )} t={t} />
           {metadata && !metadata.customHeader ? (
             <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-5">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-3">

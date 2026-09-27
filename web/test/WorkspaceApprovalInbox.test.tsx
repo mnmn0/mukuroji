@@ -279,6 +279,8 @@ describe('Workspace approval Inbox', () => {
     expect(html).toContain('href="/focus?section=now"')
     expect(html).toContain('href="/focus?section=waiting"')
     expect(html).toContain('Waiting for another member')
+    expect(html.indexOf('data-testid="workspace-home-focus-now"')).toBeLessThan(html.indexOf('<dl'))
+    expect(html.indexOf('data-testid="workspace-home-focus-waiting"')).toBeLessThan(html.indexOf('<dl'))
     expect(html).not.toContain('data-testid="workspace-focus-preview-unavailable"')
   })
 

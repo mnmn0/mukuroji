@@ -35,7 +35,7 @@ export type HomeWorkspaceViewProps = {
   isFocusUnavailable?: boolean
   /** Optional callback that opens a selected Work Item. */
   onOpenTask?: (task: CanonicalWorkItem) => void
-  /** Summary metrics displayed at the top of the view. */
+  /** Summary metrics displayed after the actionable work. */
   summary: WorkspaceSummary
   /** Translator used for Workspace labels. */
   t: (key: MessageKey) => string
@@ -73,35 +73,6 @@ export function HomeWorkspaceView({
 
   return (
     <div className="mx-auto grid w-full max-w-[1440px] gap-7">
-      <dl className="grid grid-cols-2 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white min-[760px]:grid-cols-4">
-        {[
-          { label: t('workspace.metric.activeProjects'), value: summary.projects },
-          { label: t('workspace.metric.openTasks'), value: summary.tasks },
-          {
-            label: t('workspace.metric.blocked'),
-            value: isFocusUnavailable ? '—' : summary.blocked,
-            unavailable: isFocusUnavailable,
-            testId: 'workspace-focus-blocked-metric',
-          },
-          { label: t('workspace.metric.teams'), value: teams.length },
-        ].map((metric) => (
-          <div
-            className="min-w-0 border-[var(--workbench-border)] px-5 py-5 even:border-l max-[759px]:nth-[n+3]:border-t min-[760px]:not-first:border-l"
-            data-testid={metric.testId}
-            key={metric.label}
-          >
-            <dt className="text-xs font-medium text-[var(--workbench-muted)]">{metric.label}</dt>
-            <dd className="mt-3 text-3xl font-semibold leading-none tracking-tight text-[var(--workbench-text)] tabular-nums">
-              {metric.unavailable ? (
-                <>
-                  <span aria-hidden="true">{metric.value}</span>
-                  <span className="sr-only">{t('workspace.focus.previewUnavailable')}</span>
-                </>
-              ) : metric.value}
-            </dd>
-          </div>
-        ))}
-      </dl>
       <div className="grid items-start gap-6 min-[1180px]:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
         <section className="min-w-0 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-5 py-5">
@@ -222,6 +193,35 @@ export function HomeWorkspaceView({
           </div>
         </section>
       </div>
+      <dl className="grid grid-cols-2 border-t border-[var(--workbench-border)] min-[760px]:grid-cols-4">
+        {[
+          { label: t('workspace.metric.activeProjects'), value: summary.projects },
+          { label: t('workspace.metric.openTasks'), value: summary.tasks },
+          {
+            label: t('workspace.metric.blocked'),
+            value: isFocusUnavailable ? '—' : summary.blocked,
+            unavailable: isFocusUnavailable,
+            testId: 'workspace-focus-blocked-metric',
+          },
+          { label: t('workspace.metric.teams'), value: teams.length },
+        ].map((metric) => (
+          <div
+            className="min-w-0 px-5 py-5"
+            data-testid={metric.testId}
+            key={metric.label}
+          >
+            <dt className="text-xs font-medium text-[var(--workbench-muted)]">{metric.label}</dt>
+            <dd className="mt-2 text-2xl font-semibold leading-none tracking-tight text-[var(--workbench-text)] tabular-nums">
+              {metric.unavailable ? (
+                <>
+                  <span aria-hidden="true">{metric.value}</span>
+                  <span className="sr-only">{t('workspace.focus.previewUnavailable')}</span>
+                </>
+              ) : metric.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </div>
   )
 }

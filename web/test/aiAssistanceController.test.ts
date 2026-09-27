@@ -564,6 +564,7 @@ describe('AI assistance controller safety', () => {
       clearGeneration: true,
       error: revalidationFailure,
       kind: 'failed',
+      recordedDecision: 'approved',
     })
   })
 

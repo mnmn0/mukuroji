@@ -22,6 +22,8 @@ import { AiSummaryBrief } from './AiSummaryBrief'
  * can open a human-owned draft but cannot mutate the source directly.
  */
 export type AiSummaryAssistantProps = {
+  /** Already-visible source title used by the session activity board. */
+  activityLabel?: string
   /** Active Workspace member bearer token. */
   accessToken?: string
   /** Reports authenticated AI failures to the owning collaboration session guard. */
@@ -56,6 +58,7 @@ export type AiSummaryAssistantProps = {
  */
 export function AiSummaryAssistant({
   accessToken,
+  activityLabel,
   adoptLabel,
   focus,
   locale,
@@ -65,7 +68,7 @@ export function AiSummaryAssistant({
   sources,
   t,
 }: AiSummaryAssistantProps) {
-  const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
+  const controller = useAiAssistanceController({ accessToken, activityLabel, onAuthenticatedApiError })
 
   return (
     <AiSummaryAssistantView

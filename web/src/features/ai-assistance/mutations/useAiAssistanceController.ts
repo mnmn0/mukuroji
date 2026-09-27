@@ -3,7 +3,7 @@ import type {
   CreateAiAssistanceFeedbackRequest,
   GenerateAiAssistanceRequest,
 } from '@mukuroji/contracts'
-import { useCallback, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useLayoutEffect, useRef, useState } from 'react'
 import {
   createMutationFingerprint,
   createMutationRequestRunner,
@@ -17,6 +17,7 @@ import {
   revalidateApprovedAiAssistanceGeneration,
 } from '../api/generations'
 import { AiAssistanceApiError } from '../api/errors'
+import { AiActivityContext } from '../queries/aiActivityContext'
 
 /** User-facing category for an AI assistance operation failure. */
 export type AiAssistanceErrorKind =
@@ -37,6 +38,8 @@ export type AiAssistanceControllerError = {
 
 /** Inputs required by the route-scoped AI assistance controller. */
 export type UseAiAssistanceControllerOptions = {
+  /** Already-visible source label for session-local activity metadata. */
+  activityLabel?: string
   /** Bearer token for the active Workspace member. */
   accessToken?: string
   /** Reports authenticated transport failures to the owning route session guard. */
@@ -81,6 +84,8 @@ export type AiAssistanceDecisionAttemptResult =
       error: unknown
       /** Whether the previously visible generation must be removed. */
       clearGeneration: boolean
+      /** Validated server decision observed before follow-up disclosure failed. */
+      recordedDecision?: 'approved' | 'rejected'
     }
   | {
       /** Indicates that the decision and approval revalidation both succeeded. */
@@ -331,6 +336,7 @@ export async function executeAiAssistanceDecisionAttempt(
   options: ExecuteAiAssistanceDecisionAttemptOptions,
 ): Promise<AiAssistanceDecisionAttemptResult> {
   let receivedValidDecisionResponse = false
+  let recordedDecision: 'approved' | 'rejected' | undefined
   try {
     let nextGeneration = await options.decide(options.generation, options.outcome)
     receivedValidDecisionResponse = true
@@ -341,6 +347,7 @@ export async function executeAiAssistanceDecisionAttempt(
         'InvalidAiAssistanceResponse',
       )
     }
+    if (nextGeneration.decision?.outcome === options.outcome) recordedDecision = options.outcome
     if (nextGeneration.content.availability === 'withheld') {
       throw createAiAssistanceWithheldError(nextGeneration.content.reasonCode)
     }
@@ -354,6 +361,7 @@ export async function executeAiAssistanceDecisionAttempt(
         isAiAssistanceDecisionInvalidatingError(error),
       error,
       kind: 'failed',
+      ...(recordedDecision ? { recordedDecision } : {}),
     }
   }
 }
@@ -396,8 +404,13 @@ export type AiAssistanceController = {
  */
 export function useAiAssistanceController({
   accessToken,
+  activityLabel,
   onAuthenticatedApiError,
 }: UseAiAssistanceControllerOptions): AiAssistanceController {
+  const activityContext = useContext(AiActivityContext)
+  const activityStore = activityContext?.store
+  const activityOrigin = activityContext?.origin ?? ''
+  const activityIdRef = useRef<string | undefined>(undefined)
   const mutationRunnerRef = useRef<ReturnType<typeof createMutationRequestRunner> | null>(null)
   if (mutationRunnerRef.current === null) {
     mutationRunnerRef.current = createMutationRequestRunner()
@@ -419,35 +432,39 @@ export function useAiAssistanceController({
   const cancelGeneration = useCallback(() => {
     const operationFence = operationFenceRef.current
     if (!isAiAssistanceSessionCurrent(operationFence, accessToken)) return
+    if (generationPendingRef.current) activityStore?.update(activityIdRef.current, 'cancelled')
     operationFence.epoch += 1
     generationAbortRef.current?.abort()
     generationAbortRef.current = undefined
     generationPendingRef.current = false
     setIsGenerating(false)
-  }, [accessToken])
+  }, [accessToken, activityStore])
 
   /**
    * Clears all locally retained content and citations for the expected visible generation.
    *
    * @param expectedGenerationId - Optional generation that must still own visible state.
+   * @param recordedDecision - Validated server decision preserved without draft content.
    * @returns Whether visible state matched and was cleared.
    */
-  const clearVisibleGeneration = useCallback((expectedGenerationId?: string): boolean => {
+  const clearVisibleGeneration = useCallback((expectedGenerationId?: string, recordedDecision?: 'approved' | 'rejected'): boolean => {
     const operationFence = operationFenceRef.current
     if (
       expectedGenerationId !== undefined &&
       operationFence.visibleGenerationId !== expectedGenerationId
     ) return false
+    if (expectedGenerationId !== undefined) activityStore?.clearSource(activityIdRef.current, recordedDecision)
     operationFence.visibleGenerationId = undefined
     setGeneration(undefined)
     setFeedbackRating(undefined)
     return true
-  }, [])
+  }, [activityStore])
 
   const reset = useCallback(() => {
     const operationFence = operationFenceRef.current
     if (!isAiAssistanceSessionCurrent(operationFence, accessToken)) return
     cancelGeneration()
+    activityStore?.close(activityIdRef.current)
     operationFence.decisionOperationId = undefined
     operationFence.feedbackOperationId = undefined
     decisionPendingRef.current = false
@@ -456,7 +473,7 @@ export function useAiAssistanceController({
     setError(undefined)
     setIsDecisionPending(false)
     setIsFeedbackPending(false)
-  }, [accessToken, cancelGeneration, clearVisibleGeneration])
+  }, [accessToken, activityStore, cancelGeneration, clearVisibleGeneration])
 
   if (sessionAccessToken !== accessToken) {
     setSessionAccessToken(accessToken)
@@ -473,14 +490,17 @@ export function useAiAssistanceController({
   useLayoutEffect(() => {
     const operationFence = operationFenceRef.current
     if (!synchronizeAiAssistanceOperationSession(operationFence, accessToken)) return
+    activityStore?.close(activityIdRef.current)
+    activityIdRef.current = undefined
     generationAbortRef.current?.abort()
     generationAbortRef.current = undefined
     generationPendingRef.current = false
     decisionPendingRef.current = false
     feedbackPendingRef.current = false
-  }, [accessToken])
+  }, [accessToken, activityStore])
 
   useLayoutEffect(() => () => {
+    activityStore?.close(activityIdRef.current)
     const operationFence = operationFenceRef.current
     operationFence.epoch += 1
     operationFence.decisionOperationId = undefined
@@ -491,7 +511,20 @@ export function useAiAssistanceController({
     generationPendingRef.current = false
     decisionPendingRef.current = false
     feedbackPendingRef.current = false
-  }, [])
+  }, [activityStore])
+
+  /** Records only the review outcome and retention deadline, never draft content. */
+  const recordGenerationActivity = useCallback((next: AiAssistanceGeneration) => {
+    if (next.content.availability === 'withheld') {
+      activityStore?.clearSource(activityIdRef.current, next.decision?.outcome)
+      return
+    }
+    activityStore?.update(
+      activityIdRef.current,
+      next.decision?.outcome ?? 'review',
+      Date.parse(next.expiresAt),
+    )
+  }, [activityStore])
 
   const generate = useCallback(async (
     input: GenerateAiAssistanceRequest,
@@ -514,6 +547,8 @@ export function useAiAssistanceController({
     generationAbortRef.current?.abort()
     generationAbortRef.current = abortController
     generationPendingRef.current = true
+    activityStore?.close(activityIdRef.current)
+    activityIdRef.current = activityStore?.start({ task: input.task, label: activityLabel, origin: activityOrigin })
     setIsGenerating(true)
     setGeneration(undefined)
     setFeedbackRating(undefined)
@@ -564,6 +599,7 @@ export function useAiAssistanceController({
       ) return undefined
       operationFence.visibleGenerationId = nextGeneration.id
       setGeneration(nextGeneration)
+      recordGenerationActivity(nextGeneration)
       return nextGeneration
     } catch (requestError) {
       const operationIsCurrent =
@@ -574,6 +610,8 @@ export function useAiAssistanceController({
       if (operationIsCurrent) {
         onAuthenticatedApiError?.(requestError)
         setError(classifyAiAssistanceError(requestError))
+        activityStore?.update(activityIdRef.current,
+          classifyAiAssistanceError(requestError).kind === 'permission' ? 'unavailable' : 'failed')
       }
       return undefined
     } finally {
@@ -583,7 +621,7 @@ export function useAiAssistanceController({
         if (operationFence.epoch === operationEpoch) setIsGenerating(false)
       }
     }
-  }, [accessToken, mutationRunner, onAuthenticatedApiError])
+  }, [accessToken, activityLabel, activityOrigin, activityStore, mutationRunner, onAuthenticatedApiError, recordGenerationActivity])
 
   /**
    * Revalidates the exact approved generation while fencing every adjacent AI operation.
@@ -625,6 +663,7 @@ export function useAiAssistanceController({
         generationId,
       )) return undefined
       setGeneration(nextGeneration)
+      recordGenerationActivity(nextGeneration)
       return nextGeneration
     } catch (requestError) {
       if (isAiAssistanceOperationCurrent(operationFence, operationLease, generationId)) {
@@ -644,6 +683,7 @@ export function useAiAssistanceController({
     clearVisibleGeneration,
     generation,
     onAuthenticatedApiError,
+    recordGenerationActivity,
   ])
 
   const decide = useCallback(async (
@@ -683,6 +723,7 @@ export function useAiAssistanceController({
     decisionPendingRef.current = true
     setIsDecisionPending(true)
     setError(undefined)
+    activityStore?.update(activityIdRef.current, 'deciding')
     try {
       const result = await executeAiAssistanceDecisionAttempt({
         decide: async (reviewedGeneration, expectedOutcome) => {
@@ -757,12 +798,14 @@ export function useAiAssistanceController({
       )) return undefined
       if (result.kind === 'failed') {
         onAuthenticatedApiError?.(result.error)
-        if (result.clearGeneration) clearVisibleGeneration(generationId)
+        if (result.clearGeneration) clearVisibleGeneration(generationId, result.recordedDecision)
+        else activityStore?.update(activityIdRef.current, 'review')
         setError(classifyAiAssistanceError(result.error))
         return undefined
       }
       operationFence.visibleGenerationId = result.generation.id
       setGeneration(result.generation)
+      recordGenerationActivity(result.generation)
       return result.generation
     } finally {
       if (releaseAiAssistanceOperation(operationFence, operationLease)) {
@@ -772,11 +815,13 @@ export function useAiAssistanceController({
     }
   }, [
     accessToken,
+    activityStore,
     clearVisibleGeneration,
     generation,
     mutationRunner,
     onAuthenticatedApiError,
     revalidateGeneration,
+    recordGenerationActivity,
   ])
 
   const sendFeedback = useCallback(async (

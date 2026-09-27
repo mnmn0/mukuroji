@@ -70,7 +70,11 @@ export function AiWorkItemPlanningAssistant({
   source,
   t,
 }: AiWorkItemPlanningAssistantProps) {
-  const liveController = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
+  const liveController = useAiAssistanceController({
+    accessToken,
+    activityLabel: resolveWorkItemLabel?.(source),
+    onAuthenticatedApiError,
+  })
   const activeController = controller ?? liveController
 
   return (
