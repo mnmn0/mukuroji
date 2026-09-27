@@ -6,6 +6,8 @@ import { useAiActivityClock } from '../queries/useAiActivityClock'
 
 /** Inputs for the persistent workspace activity entry. */
 export type AiActivityLauncherProps = {
+  /** Whether saved settings and deployment policy allow any AI workflow. */
+  enabled: boolean
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
 }
@@ -15,10 +17,10 @@ export type AiActivityLauncherProps = {
  * @param props - Workspace translator.
  * @returns A compact bar opening the activity board without navigating away.
  */
-export function AiActivityLauncher({ t }: AiActivityLauncherProps) {
+export function AiActivityLauncher({ enabled, t }: AiActivityLauncherProps) {
   const { context, activities } = useAiActivity()
   const now = useAiActivityClock(activities)
-  if (!context) return null
+  if (!context || (!enabled && activities.length === 0)) return null
   const running = activities.filter((activity) => getAiActivityStatus(getAiActivityPhase(activity, now)) === 'running').length
   const review = activities.filter((activity) => getAiActivityPhase(activity, now) === 'review').length
   return (

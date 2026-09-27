@@ -457,7 +457,12 @@ function WorkspaceRouteShell({
           aria-busy={routeState.isBusy}
           className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden"
         >
-          <AiActivityLauncher t={t} />
+          <AiActivityLauncher enabled={Boolean(
+            workspace.isAiAssistanceTaskEnabled?.('planning') ||
+            workspace.isAiAssistanceTaskEnabled?.('summary') ||
+            workspace.isAiAssistanceTaskEnabled?.('triage') ||
+            workspace.isAiAssistanceTaskEnabled?.('search'),
+          )} t={t} />
           {metadata && !metadata.customHeader ? (
             <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-5">
               <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-x-4 gap-y-3">

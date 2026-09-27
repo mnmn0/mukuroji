@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { MemoryRouter } from 'react-router'
+import { useState } from 'react'
 import { expect, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { aiSummaryGenerationFixture } from '../fixtures'
@@ -13,12 +14,14 @@ const t = createTranslator('ja')
 /** Exercises the real controller and session provider against an isolated response fixture. */
 function SessionAssistant() {
   const controller = useAiAssistanceController({ accessToken: 'storybook-token', activityLabel: 'リリースに向けた進捗をまとめる' })
+  const [enabled, setEnabled] = useState(true)
   return (
     <>
-      <AiActivityLauncher t={t} />
+      <AiActivityLauncher enabled={enabled} t={t} />
       <main className="mx-auto grid max-w-3xl gap-6 p-6">
         <h1 className="text-xl font-semibold">リリースに向けた進捗</h1>
-        <button className="workbench-button-primary min-h-[44px] w-fit px-4" disabled={controller.isGenerating} onClick={() => void controller.generate({ task: 'summary', locale: 'ja', sources: [{ type: 'document', documentId: 'doc-1', expectedRevision: 1 }] })} type="button">要約を生成</button>
+        <button className="workbench-button-primary min-h-[44px] w-fit px-4" disabled={!enabled || controller.isGenerating} onClick={() => void controller.generate({ task: 'summary', locale: 'ja', sources: [{ type: 'document', documentId: 'doc-1', expectedRevision: 1 }] })} type="button">要約を生成</button>
+        <button className="min-h-[44px] w-fit" onClick={() => setEnabled(false)} type="button">AIを無効にする</button>
         <AiAssistanceReview generation={controller.generation} isGenerating={controller.isGenerating} locale="ja" onCancelGeneration={controller.cancelGeneration} renderDraft={() => <p>レビュー待ちの課題をまとめました。</p>} t={t} />
       </main>
     </>
@@ -58,5 +61,16 @@ export const GenerationContinuesInBoard: Story = {
     await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
     await expect(launcher).toHaveFocus()
     await expect(canvas.getByRole('heading', { name: 'あなたの確認待ち' })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'AIを無効にする' }))
+    await expect(launcher).toBeVisible()
+  },
+}
+
+/** With no session activity, disabling all AI tasks hides the otherwise empty entry. */
+export const DisabledWithoutHistory: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: 'AIを無効にする' }))
+    await expect(canvas.queryByRole('button', { name: 'AIアクティビティ' })).not.toBeInTheDocument()
   },
 }

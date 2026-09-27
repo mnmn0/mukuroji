@@ -13,8 +13,9 @@ There is no hero or illustrative image on this operational screen.
 
 ## Design
 
-- One AI activity entry remains available throughout the workspace. Opening it
-  overlays the current screen so an active request is not unmounted.
+- One AI activity entry is available throughout the workspace when an AI task is
+  enabled or the session already has history. Opening it overlays the current
+  screen so an active request is not unmounted.
 - Horizontal lanes distinguish processing, human review, stopped work, reviewed
   work, and errors. State names accompany color; counts are derived from actual
   operations. Selecting a tile reveals its observed event history and origin.
@@ -40,6 +41,8 @@ not that a domain task was completed or a proposed edit was saved.
 Empty, filtered-empty, running, decision-pending, review, rejected, approved,
 cancelled, closed, expired, withheld, and failed operations need explicit copy.
 Error classification and existing review/adoption authorization remain intact.
+An in-flight review decision remains active across the draft's review deadline;
+only a draft still awaiting a decision expires locally.
 
 ## Verification
 
@@ -62,3 +65,10 @@ The app development server also starts successfully. Authenticated visual checks
 use the actual workspace shell with Storybook fixtures; no live provider call was
 made. Offline controller integration checks cover late cancellation results,
 permission redaction, session isolation, retention, and bounded history.
+
+Follow-up review verified desktop Tab traversal stays on activity cards, phone
+detail/back transitions restore focus, disabled AI hides an empty launcher while
+retaining existing history, and Home's DOM order matches its visual hierarchy.
+Four targeted Chromium E2E cases pass, including preference/policy gates and
+coexisting AI/task/triage live status regions. A lifecycle regression covers
+decisions crossing the review deadline and surviving history cleanup.

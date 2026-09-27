@@ -63,6 +63,21 @@ describe('session AI activity', () => {
     expect(second.getSnapshot()).toEqual([])
   })
 
+  test('an in-flight decision survives the review deadline and history clearing', () => {
+    let now = 1000
+    const store = createAiActivityStore(() => now)
+    const id = store.start({ task: 'summary', origin: '/home' })
+    store.update(id, 'review', 2000)
+    now = 1999
+    store.update(id, 'deciding')
+    now = 2001
+    expect(getAiActivityPhase(store.getSnapshot()[0], now)).toBe('deciding')
+    store.clearHistory()
+    expect(store.getSnapshot()).toHaveLength(1)
+    store.update(id, 'approved')
+    expect(store.getSnapshot()[0].phase).toBe('approved')
+  })
+
   test('history stays bounded while retaining all active work and cannot resurrect cleared records', () => {
     const store = createAiActivityStore()
     const active = store.start({ task: 'planning', origin: '/home' })

@@ -44,6 +44,7 @@ import {
   analyticsSnapshotFixture,
 } from '../src/analytics/fixtures'
 import { focusQueueResponseFixture } from '../src/features/focus-queue/fixtures'
+import { aiAssistancePolicyFixture, aiAssistancePreferenceFixture } from '../src/features/ai-assistance/fixtures'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
@@ -4635,9 +4636,36 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
   })
 
+  test('AI activity entry follows effective preference and workspace policy', async ({ page }) => {
+    let preferenceEnabled = false
+    let policyEnabled = true
+    await page.route('**/api/ai-assistance/preferences/me', (route) => route.fulfill({
+      json: { ...aiAssistancePreferenceFixture, enabled: preferenceEnabled },
+    }))
+    await page.route('**/api/ai-assistance/policy', (route) => route.fulfill({
+      json: { ...aiAssistancePolicyFixture, enabled: policyEnabled },
+    }))
+    const launcher = page.getByRole('button', { name: 'AIアクティビティ', exact: true })
+    await page.goto('/home')
+    await expect(page.getByTestId('workspace-home-focus-now')).toBeVisible()
+    await expect(launcher).toHaveCount(0)
+    preferenceEnabled = true
+    policyEnabled = false
+    await page.reload()
+    await expect(page.getByTestId('workspace-home-focus-now')).toBeVisible()
+    await expect(launcher).toHaveCount(0)
+    policyEnabled = true
+    await page.reload()
+    await expect(launcher).toBeVisible()
+    await launcher.click()
+    await expect(page.getByRole('dialog', { name: 'AIアクティビティ' })).toBeVisible()
+  })
+
   test('低速なタスクAPIを読み上げて一度だけ取得し、キーボード操作を保ったまま復帰する', async ({
     page,
   }) => {
+    await page.route('**/api/ai-assistance/preferences/me', (route) => route.fulfill({ json: aiAssistancePreferenceFixture }))
+    await page.route('**/api/ai-assistance/policy', (route) => route.fulfill({ json: aiAssistancePolicyFixture }))
     let releaseTaskResponse: () => void = () => undefined
     let markTaskRequestStarted: () => void = () => undefined
     const taskResponseGate = new Promise<void>((resolve) => {

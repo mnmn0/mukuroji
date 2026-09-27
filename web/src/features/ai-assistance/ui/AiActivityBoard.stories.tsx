@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { aiActivityFixtures, aiActivityFixtureNow } from '../activityFixtures'
 import { AiActivityBoard } from './AiActivityBoard'
@@ -44,6 +44,25 @@ export const FilterAndSelect: Story = {
     const result = canvas.getByRole('button', { name: /確認待ち アクセス権限のリクエスト/ })
     await userEvent.click(result)
     await expect(result).toHaveAttribute('aria-pressed', 'true')
-    await expect(canvas.getByRole('complementary')).toHaveFocus()
+    if (result.offsetParent === null) await expect(canvas.getByRole('complementary')).toHaveFocus()
+    else await expect(result).toHaveFocus()
+  },
+}
+
+/** Desktop selection keeps keyboard traversal in the list; phone selection focuses details. */
+export const KeyboardSelection: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const first = canvas.getByRole('button', { name: /生成中 APIの認証フロー/ })
+    await userEvent.click(first)
+    if (first.offsetParent === null) {
+      await expect(canvas.getByRole('complementary')).toHaveFocus()
+      await userEvent.click(canvas.getByRole('button', { name: '一覧に戻る' }))
+      await waitFor(() => expect(first).toHaveFocus())
+    } else {
+      await expect(first).toHaveFocus()
+      await userEvent.tab()
+      await expect(canvas.getByRole('button', { name: /生成中 リリースに向けた/ })).toHaveFocus()
+    }
   },
 }

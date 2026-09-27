@@ -9,7 +9,7 @@ import type { AiActivity } from '../model/aiActivity'
 export function useAiActivityClock(activities: readonly AiActivity[]): number {
   const [now, setNow] = useState(Date.now)
   const nextExpiry = Math.min(...activities
-    .filter((activity) => activity.phase === 'review' || activity.phase === 'deciding')
+    .filter((activity) => activity.phase === 'review')
     .map((activity) => activity.expiresAt ?? Infinity)
     .filter((expiry) => expiry > now))
   useEffect(() => {

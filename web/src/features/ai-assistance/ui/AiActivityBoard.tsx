@@ -65,7 +65,7 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
   const hasHistory = activities.some((activity) => !['running', 'review'].includes(getAiActivityStatus(getAiActivityPhase(activity, now))))
   // Move focus with the phone's list/detail transition; selection remains local UI state.
   useLayoutEffect(() => {
-    if (hasMobileSelection) detailRef.current?.focus()
+    if (hasMobileSelection && !window.matchMedia('(min-width: 1000px)').matches) detailRef.current?.focus()
   }, [hasMobileSelection, selectedId])
 
   return (

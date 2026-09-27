@@ -61,7 +61,7 @@ export type AiActivityStore = {
  */
 export function getAiActivityPhase(activity: AiActivity, now: number): AiActivityPhase {
   return activity.expiresAt !== undefined && activity.expiresAt <= now &&
-    (activity.phase === 'review' || activity.phase === 'deciding')
+    activity.phase === 'review'
     ? 'expired'
     : activity.phase
 }
