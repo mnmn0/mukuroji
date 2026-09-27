@@ -192,11 +192,12 @@ export function AiActivityBoard({ activities, locale, now, onClose, onClearHisto
                     <div className="grid gap-2 min-[640px]:grid-cols-2 min-[1280px]:grid-cols-3">
                       {entries.map((activity) => {
                         const phase = getAiActivityPhase(activity, now)
+                        const isSelected = isCompact ? selectedId === activity.id : selected?.id === activity.id
                         return (
                           <button
                             aria-controls={detailId}
-                            aria-pressed={selected?.id === activity.id}
-                            className={`min-w-0 rounded-lg border bg-white p-3 text-left transition-colors ${selected?.id === activity.id ? 'border-teal-600 ring-1 ring-teal-600' : 'border-[var(--workbench-border)] hover:border-[var(--workbench-border-strong)]'}`}
+                            aria-pressed={isSelected}
+                            className={`min-w-0 rounded-lg border bg-white p-3 text-left transition-colors ${isSelected ? 'border-teal-600 ring-1 ring-teal-600' : 'border-[var(--workbench-border)] hover:border-[var(--workbench-border-strong)]'}`}
                             data-ai-activity-id={activity.id}
                             key={activity.id}
                             onClick={(event) => {

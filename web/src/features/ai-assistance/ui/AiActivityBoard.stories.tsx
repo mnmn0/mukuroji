@@ -54,11 +54,13 @@ export const KeyboardSelection: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     const first = canvas.getByRole('button', { name: /生成中 APIの認証フロー/ })
+    if (!window.matchMedia('(min-width: 1000px)').matches) await expect(first).toHaveAttribute('aria-pressed', 'false')
     await userEvent.click(first)
     if (first.offsetParent === null) {
       await expect(canvas.getByRole('complementary')).toHaveFocus()
       await userEvent.click(canvas.getByRole('button', { name: '一覧に戻る' }))
       await waitFor(() => expect(first).toHaveFocus())
+      await expect(first).toHaveAttribute('aria-pressed', 'false')
     } else {
       await expect(first).toHaveFocus()
       await userEvent.tab()
