@@ -123,10 +123,7 @@ Analytics reader 自体は現在 archived の canonical row も読み、archive 
 `includeArchived` を明示した query でも、caller が現在も Team/Project を参照できる canonical row
 だけが対象です。Archive 前に完了した item は throughput、cycle time、lead time の履歴へ残せます。
 
-Audit backfill は現在状態から作成した snapshot event であり、過去の全 transition を復元するもの
-ではありません。また backfill では assignee、description、custom field value などが redacted
-されています。必要な開始・完了 event がない metric は推測で補完せず、sample size と warning で
-不足を示します。
+必要な開始・完了 event がない metric は推測で補完せず、sample size と warning で不足を示します。
 
 現在 canonical Work Item が存在しない削除済み履歴や、現在 caller が参照できない Project の event
 は集計にも evidence にも含めません。これは過去 snapshot の見かけ上の合計を維持することより、
