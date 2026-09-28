@@ -6,7 +6,6 @@ import type {
   PreviewWorkItemScheduleInput,
   PreviewWorkItemTypeChangeInput,
   ResolvedWorkItemConfiguration,
-  TeamIssueCommentResponseItem,
   UpdateWorkItemInput,
   WorkItemPatch,
   WorkItemRelation,
@@ -41,10 +40,6 @@ export type TeamIssueDetail = {
    * Issue 本体です。
    */
   issue: TeamIssue
-  /**
-   * Canonical Collaboration comments projected into the stable detail shape.
-   */
-  comments: TeamIssueCommentResponseItem[]
   /**
    * Issue 活動履歴一覧です。
    */

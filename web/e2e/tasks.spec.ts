@@ -1963,7 +1963,8 @@ async function mockAuthenticatedTaskPage(
             updatedAt: '2026-06-08T01:00:00.000Z',
             mentionMemberKeys: [],
             reactions: [],
-            capabilities: { canEdit: true, canDelete: true, canResolve: true },
+            acceptedResolutions: [],
+            capabilities: { canEdit: true, canDelete: true, canResolve: true, canReply: true, canReact: true, canAttach: true, canPromote: true },
           },
         ],
         watch: {
@@ -2026,18 +2027,19 @@ async function mockAuthenticatedTaskPage(
     const teamId = decodeURIComponent(pathSegments[3] ?? '')
     const issueId = decodeURIComponent(pathSegments[5] ?? '')
     const collaborationKey = createIssueCollaborationKey(teamId, issueId)
-    const body = route.request().postDataJSON() as { body?: string; bodyMarkdown?: string }
+    const body = route.request().postDataJSON() as { bodyMarkdown?: string }
     const comment = {
       id: `comment-${requestCounts.issueComments + 1}`,
       rootCommentId: `comment-${requestCounts.issueComments + 1}`,
       authorMemberKey: 'demo@example.com',
-      bodyMarkdown: body.bodyMarkdown ?? body.body ?? '追加コメント',
+      bodyMarkdown: body.bodyMarkdown ?? '追加コメント',
       version: 1,
       createdAt: '2026-06-08T02:00:00.000Z',
       updatedAt: '2026-06-08T02:00:00.000Z',
       mentionMemberKeys: [],
       reactions: [],
-      capabilities: { canEdit: true, canDelete: true, canResolve: true },
+      acceptedResolutions: [],
+      capabilities: { canEdit: true, canDelete: true, canResolve: true, canReply: true, canReact: true, canAttach: true, canPromote: true },
     } satisfies TeamIssueComment
     const activity = {
       id: `activity-${requestCounts.issueComments + 1}`,
@@ -6811,8 +6813,9 @@ test.describe('authenticated task page', () => {
     /** Builds the canonical edit fixture returned by the collaboration mock. */
     const canonicalComment = (): TeamIssueComment => ({
       authorMemberKey: 'demo@example.com',
+      acceptedResolutions: [],
       bodyMarkdown: canonicalBody,
-      capabilities: { canEdit: true, canDelete: true, canResolve: true },
+      capabilities: { canEdit: true, canDelete: true, canResolve: true, canReply: true, canReact: true, canAttach: true, canPromote: true },
       createdAt: '2026-06-08T01:00:00.000Z',
       id: 'comment-1',
       mentionMemberKeys: [],
@@ -10149,6 +10152,10 @@ test.describe('authenticated task page', () => {
                   canEdit: true,
                   canDelete: true,
                   canResolve: true,
+                  canReply: true,
+                  canReact: true,
+                  canAttach: true,
+                  canPromote: true,
                 },
               },
               {
@@ -10163,10 +10170,15 @@ test.describe('authenticated task page', () => {
                 updatedAt: '2026-08-09T01:10:00.000Z',
                 mentionMemberKeys: [],
                 reactions: [],
+                acceptedResolutions: [],
                 capabilities: {
                   canEdit: false,
                   canDelete: false,
                   canResolve: false,
+                  canReply: true,
+                  canReact: true,
+                  canAttach: true,
+                  canPromote: true,
                 },
               },
             ],

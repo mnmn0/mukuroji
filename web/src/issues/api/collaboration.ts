@@ -118,12 +118,15 @@ export async function getTeamIssueCollaboration(
     )
   }
 
-  const page = data
-
-  return {
-    ...page,
-    comments: page.comments.map(normalizeAcceptedResolutionHistory),
+  if (!data.comments.every((comment) => comment.acceptedResolutions.every(isAcceptedResolution))) {
+    throw new TeamIssuesApiError(
+      502,
+      'The accepted resolution history response was invalid.',
+      'InvalidAcceptedResolutionResponse',
+    )
   }
+
+  return data
 }
 
 /** Validates the collection boundary returned by the collaboration endpoint. */
@@ -137,14 +140,21 @@ function isTeamIssueCollaborationPage(
   return value.comments.every(isTeamIssueComment)
 }
 
-/** Validates the stable fields required by one collaboration comment. */
+/**
+ * Validates the stable fields required by one collaboration comment.
+ *
+ * Accepted-resolution entries are validated by the caller so malformed audit history keeps
+ * its dedicated error code.
+ *
+ * @param value - Untrusted comment returned by the collaboration endpoint.
+ * @returns Whether the comment carries every canonical field and capability.
+ */
 function isTeamIssueComment(value: unknown): value is TeamIssueComment {
   if (!isRecord(value)) {
     return false
   }
 
   const capabilities = value.capabilities
-  const source = value.source
 
   return (
     typeof value.id === 'string' &&
@@ -168,48 +178,21 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
         reaction.count >= 0 &&
         typeof reaction.reactedByMe === 'boolean',
     ) &&
+    Array.isArray(value.acceptedResolutions) &&
     isRecord(capabilities) &&
     typeof capabilities.canEdit === 'boolean' &&
     typeof capabilities.canDelete === 'boolean' &&
     typeof capabilities.canResolve === 'boolean' &&
-    (capabilities.canReply === undefined || typeof capabilities.canReply === 'boolean') &&
-    (capabilities.canReact === undefined || typeof capabilities.canReact === 'boolean') &&
-    (capabilities.canAttach === undefined || typeof capabilities.canAttach === 'boolean') &&
-    (capabilities.canPromote === undefined || typeof capabilities.canPromote === 'boolean') &&
-    (source === undefined || source === 'collaboration' || source === 'legacy')
+    typeof capabilities.canReply === 'boolean' &&
+    typeof capabilities.canReact === 'boolean' &&
+    typeof capabilities.canAttach === 'boolean' &&
+    typeof capabilities.canPromote === 'boolean'
   )
 }
 
 /** Narrows an untrusted JSON object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
-}
-
-/**
- * Normalizes an absent current accepted-resolution snapshot and rejects malformed audit data.
- *
- * @param comment - Comment returned by the collaboration API.
- * @returns Comment with a runtime-validated current accepted resolution snapshot.
- */
-function normalizeAcceptedResolutionHistory(
-  comment: TeamIssueComment,
-): TeamIssueComment {
-  if (comment.acceptedResolutions === undefined) {
-    return { ...comment, acceptedResolutions: [] }
-  }
-
-  if (
-    !Array.isArray(comment.acceptedResolutions) ||
-    !comment.acceptedResolutions.every(isAcceptedResolution)
-  ) {
-    throw new TeamIssuesApiError(
-      502,
-      'The accepted resolution history response was invalid.',
-      'InvalidAcceptedResolutionResponse',
-    )
-  }
-
-  return comment
 }
 
 /**

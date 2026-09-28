@@ -441,7 +441,7 @@ export function useIssueCollaboration({
 
       const refreshedRootIds = new Set(successfulThreads.map((thread) => thread.rootCommentId))
       const retainedComments = current.comments.filter((comment) =>
-        !refreshedRootIds.has(comment.rootCommentId ?? comment.parentCommentId ?? ''),
+        !refreshedRootIds.has(comment.rootCommentId),
       )
       const cursors = { ...current.cursors }
 
