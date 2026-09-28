@@ -3,27 +3,9 @@ import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import { CdkStack } from '../lib/cdk-stack';
-import {
-  requireTriageIndexDeploymentStage,
-} from '../lib/config/triage-index-deployment';
-import {
-  requireTeamIssueCommentIndexDeploymentStage,
-} from '../lib/config/team-issue-comment-index-deployment';
 
 const app = new cdk.App();
 cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-const triageIndexDeploymentStageContext = app.node.tryGetContext(
-  'triageIndexDeploymentStage',
-);
-const triageIndexDeploymentStage = requireTriageIndexDeploymentStage(
-  triageIndexDeploymentStageContext,
-);
-const teamIssueCommentIndexDeploymentStageContext = app.node.tryGetContext(
-  'teamIssueCommentIndexDeploymentStage',
-);
-const teamIssueCommentIndexDeploymentStage = requireTeamIssueCommentIndexDeploymentStage(
-  teamIssueCommentIndexDeploymentStageContext,
-);
 // oxlint-disable-next-line awscdk/no-construct-stack-suffix -- Existing stack ID is part of the deployed resource identity.
 const stack = new CdkStack(app, 'CdkStack', {
   /* If you don't specify 'env', this stack will be environment-agnostic.
@@ -39,7 +21,5 @@ const stack = new CdkStack(app, 'CdkStack', {
   // env: { account: '123456789012', region: 'us-east-1' },
 
   /* For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html */
-  triageIndexDeploymentStage,
-  teamIssueCommentIndexDeploymentStage,
 });
 acknowledgeKnownNagFindings(stack);

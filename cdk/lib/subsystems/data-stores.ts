@@ -2,14 +2,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import {
-  teamIssueCommentIndexDeploymentIncludes,
-  type TeamIssueCommentIndexDeploymentStage,
-} from '../config/team-issue-comment-index-deployment';
-import {
-  triageIndexDeploymentIncludes,
-  type TriageIndexDeploymentStage,
-} from '../config/triage-index-deployment';
 
 /**
  * Inputs required to create the stack data stores.
@@ -17,10 +9,6 @@ import {
 export interface DataStoreBuilderInput {
   /** Secret JSON configuration persisted for connector runtimes. */
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
-  /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
-  readonly triageIndexDeploymentStage: TriageIndexDeploymentStage;
-  /** Reviewed one-index-at-a-time rollout stage for Team Issue event GSIs. */
-  readonly teamIssueCommentIndexDeploymentStage: TeamIssueCommentIndexDeploymentStage;
 }
 
 /**
@@ -347,29 +335,19 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
-  if (triageIndexDeploymentIncludes(
-    input.triageIndexDeploymentStage,
-    'owner',
-  )) {
-    requestIntakeTable.addGlobalSecondaryIndex({
-      indexName: 'triage-owner-activity-index',
-      partitionKey: { name: 'triageOwnerKey', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-  }
+  requestIntakeTable.addGlobalSecondaryIndex({
+    indexName: 'triage-owner-activity-index',
+    partitionKey: { name: 'triageOwnerKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
 
-  if (triageIndexDeploymentIncludes(
-    input.triageIndexDeploymentStage,
-    'wake',
-  )) {
-    requestIntakeTable.addGlobalSecondaryIndex({
-      indexName: 'triage-wake-index',
-      partitionKey: { name: 'triageWakeShard', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'triageNextWakeAt', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
-    });
-  }
+  requestIntakeTable.addGlobalSecondaryIndex({
+    indexName: 'triage-wake-index',
+    partitionKey: { name: 'triageWakeShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageNextWakeAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
 
   const teamIssueEventsTable = new dynamodb.Table(stack, 'TeamIssueEventsTable', {
     partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
@@ -378,28 +356,6 @@ export function buildDataStores(
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
-  if (teamIssueCommentIndexDeploymentIncludes(
-    input.teamIssueCommentIndexDeploymentStage,
-    'event',
-  )) {
-    teamIssueEventsTable.addGlobalSecondaryIndex({
-      indexName: 'TeamIssueEventCreatedAtIndex',
-      partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-  }
-  if (teamIssueCommentIndexDeploymentIncludes(
-    input.teamIssueCommentIndexDeploymentStage,
-    'comment',
-  )) {
-    teamIssueEventsTable.addGlobalSecondaryIndex({
-      indexName: 'TeamIssueCommentCreatedAtIndex',
-      partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'commentCreatedAtOrder', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-  }
 
   const projectDirectoryTable = new dynamodb.Table(stack, 'ProjectDirectoryTable', {
     partitionKey: { name: 'directoryId', type: dynamodb.AttributeType.STRING },

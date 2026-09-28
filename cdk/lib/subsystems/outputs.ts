@@ -127,9 +127,9 @@ export type StackOutputResources = {
   /** Dead-letter queue for request email ingestion failures. */
   readonly requestEmailIngestionDlq: sqs.IQueue;
   /** Lambda function that processes scheduled Triage wake-ups. */
-  readonly triageScheduleFunction?: lambda.IFunction;
+  readonly triageScheduleFunction: lambda.IFunction;
   /** Dead-letter queue for scheduled Triage wake-up failures. */
-  readonly triageScheduleDlq?: sqs.IQueue;
+  readonly triageScheduleDlq: sqs.IQueue;
   /** Stream-only tenant lifecycle starter and retention worker. */
   readonly tenantOperationFunction: lambda.IFunction;
   /** Queued export artifact resource owner. */
@@ -362,18 +362,12 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
     value: resources.requestEmailIngestionDlq.queueUrl,
   });
-  if (resources.triageScheduleFunction && resources.triageScheduleDlq) {
-    new cdk.CfnOutput(scope, 'TriageScheduleFunctionName', {
-      value: resources.triageScheduleFunction.functionName,
-    });
-    new cdk.CfnOutput(scope, 'TriageScheduleDlqUrl', {
-      value: resources.triageScheduleDlq.queueUrl,
-    });
-  } else if (resources.triageScheduleFunction || resources.triageScheduleDlq) {
-    throw new Error(
-      'Triage schedule outputs require both the Lambda and dead-letter queue.',
-    );
-  }
+  new cdk.CfnOutput(scope, 'TriageScheduleFunctionName', {
+    value: resources.triageScheduleFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TriageScheduleDlqUrl', {
+    value: resources.triageScheduleDlq.queueUrl,
+  });
   new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
     value: resources.tenantOperationFunction.functionName,
   });

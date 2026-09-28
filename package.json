@@ -54,7 +54,7 @@
     "search:backfill": "bun --filter server search:backfill",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
-    "cdk:synth": "bun --filter cdk cdk synth -c triageIndexDeploymentStage=wake -c teamIssueCommentIndexDeploymentStage=comment"
+    "cdk:synth": "bun --filter cdk cdk synth"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb-streams": "3.1057.0"

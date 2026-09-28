@@ -5,15 +5,6 @@ import { configureAlarmRouting } from './aspects/alarm-routing';
 import { buildLambdaBuildPaths } from './config/lambda-build-paths';
 import { buildStackParameters } from './config/stack-parameters';
 import {
-  resolveTeamIssueCommentIndexDeploymentStage,
-  type TeamIssueCommentIndexDeploymentStage,
-} from './config/team-issue-comment-index-deployment';
-import {
-  resolveTriageIndexDeploymentStage,
-  triageIndexDeploymentIncludes,
-  type TriageIndexDeploymentStage,
-} from './config/triage-index-deployment';
-import {
   buildApiRuntime,
   buildApiTransportsAndRealtime,
 } from './subsystems/api-realtime';
@@ -46,14 +37,6 @@ import { buildTriageScheduleWorker } from './subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
 
-/** Stack configuration plus reviewed stateful-index rollout selections. */
-export interface CdkStackProps extends cdk.StackProps {
-  /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
-  readonly triageIndexDeploymentStage?: TriageIndexDeploymentStage;
-  /** Reviewed one-index-at-a-time rollout stage for Team Issue event GSIs. */
-  readonly teamIssueCommentIndexDeploymentStage?: TeamIssueCommentIndexDeploymentStage;
-}
-
 /**
  * Composes the production infrastructure from logical-ID-preserving subsystem builders.
  */
@@ -63,35 +46,16 @@ export class CdkStack extends cdk.Stack {
    *
    * @param scope Parent construct that owns the stack.
    * @param id Stable stack construct identifier.
-   * @param props Optional CDK stack and reviewed index-rollout configuration.
+   * @param props Optional CDK stack configuration.
    */
-  constructor(scope: Construct, id: string, props?: CdkStackProps) {
-    const {
-      triageIndexDeploymentStage: configuredTriageIndexDeploymentStage,
-      teamIssueCommentIndexDeploymentStage: configuredTeamIssueCommentIndexDeploymentStage,
-      ...baseStackProps
-    } = props ?? {};
-    const triageIndexDeploymentStage = resolveTriageIndexDeploymentStage(
-      configuredTriageIndexDeploymentStage,
-    );
-    const teamIssueCommentIndexDeploymentStage = resolveTeamIssueCommentIndexDeploymentStage(
-      configuredTeamIssueCommentIndexDeploymentStage,
-    );
-    super(scope, id, baseStackProps);
-    new cdk.CfnOutput(this, 'TriageIndexDeploymentStage', {
-      value: triageIndexDeploymentStage,
-    });
-    new cdk.CfnOutput(this, 'TeamIssueCommentIndexDeploymentStage', {
-      value: teamIssueCommentIndexDeploymentStage,
-    });
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameters = buildStackParameters(this);
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
-      teamIssueCommentIndexDeploymentStage,
-      triageIndexDeploymentStage,
     });
     const fileStorage = buildFileStorage(this, {
       allowedOrigins: parameters.taskApiAllowedOriginList,
@@ -222,17 +186,12 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
-    const triageScheduleWorker = triageIndexDeploymentIncludes(
-      triageIndexDeploymentStage,
-      'wake',
-    )
-      ? buildTriageScheduleWorker(this, {
-        dataStores,
-        lambdaBuildPaths,
-        parameters,
-        runtimeControls,
-      })
-      : {};
+    const triageScheduleWorker = buildTriageScheduleWorker(this, {
+      dataStores,
+      lambdaBuildPaths,
+      parameters,
+      runtimeControls,
+    });
     const tenantOperationWorker = buildTenantOperationWorker(this, {
       dataStores,
       fileStorage,

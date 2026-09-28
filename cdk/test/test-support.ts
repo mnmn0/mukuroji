@@ -27,10 +27,7 @@ export function createTemplate(): Template {
     },
   });
   cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-  const stack = new CdkStack(app, 'Test', {
-    teamIssueCommentIndexDeploymentStage: 'comment',
-    triageIndexDeploymentStage: 'wake',
-  });
+  const stack = new CdkStack(app, 'Test');
   acknowledgeKnownNagFindings(stack);
 
   return Template.fromStack(stack);

@@ -10,5 +10,3 @@ import './api-environment-budget.suite';
 import './workers-observability.suite';
 import './bootstrap.suite';
 import './runtime-controls.suite';
-import './triage-index-deployment.suite';
-import './team-issue-comment-index-deployment.suite';
