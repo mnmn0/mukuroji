@@ -13275,7 +13275,7 @@ async function saveTemplateApplicationFailureState(
 function isTerminalTemplateApplicationError(
   error: unknown,
 ): error is AutomationError | WorkItemConfigurationError | ProjectDataError {
-  if (error instanceof AutomationError) return error.status < 500 && !error.retryable
+  if (error instanceof AutomationError) return error.category !== 'unavailable' && !error.retryable
   return (error instanceof WorkItemConfigurationError || error instanceof ProjectDataError) &&
     error.status < 500
 }
@@ -29400,9 +29400,8 @@ function toAutomationErrorResponse(c: Context, error: unknown) {
     console.error(error)
     return c.json({ message: 'Automation data is unavailable.' }, 502)
   }
-  if (error.status >= 500) console.error(error)
-  const categoryStatus = mapAutomationErrorStatus(error.category)
-  const status = error.status === categoryStatus ? categoryStatus : 502
+  const status = mapAutomationErrorStatus(error.category)
+  if (status >= 500) console.error(error)
   return c.json({ code: error.code, message: error.message }, status)
 }
 
@@ -40246,7 +40245,9 @@ function createAutomationConfigurationUsageError(
     ? error.message
     : 'Automation references could not be inspected'
   const status = isKnownError
-    ? error.status
+    ? error instanceof AutomationError
+      ? mapAutomationErrorStatus(error.category)
+      : error.status
     : 503
   const unavailable = status >= 500
   return new WorkItemConfigurationError(

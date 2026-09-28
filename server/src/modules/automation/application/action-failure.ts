@@ -1,4 +1,4 @@
-import { AutomationError } from '../domain/automation-error'
+import { AutomationError, type AutomationErrorCategory } from '../domain/automation-error'
 
 const retryableAwsErrorCodes = new Set([
   'InternalServerError',
@@ -40,7 +40,7 @@ export function normalizeAutomationActionFailure(error: unknown): AutomationActi
     return {
       code: error.code,
       message: error.message,
-      retryable: error.retryable || isTransientFailureStatus(error.status),
+      retryable: error.retryable || isTransientAutomationErrorCategory(error.category),
     }
   }
   if (isRecord(error)) {
@@ -74,6 +74,11 @@ export function normalizeAutomationActionFailure(error: unknown): AutomationActi
     message: 'Automation action failed.',
     retryable: false,
   }
+}
+
+/** Tests whether an Automation failure category denotes a transient failure. */
+function isTransientAutomationErrorCategory(category: AutomationErrorCategory): boolean {
+  return category === 'rate-limited' || category === 'unavailable'
 }
 
 /** Tests whether an HTTP-compatible status denotes a transient failure. */

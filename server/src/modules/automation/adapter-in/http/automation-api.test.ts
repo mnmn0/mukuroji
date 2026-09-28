@@ -439,30 +439,6 @@ test('preserves FileProofingError status and code in Automation API responses', 
   })
 })
 
-test('preserves the legacy AutomationError fallback for unsupported numeric statuses', async () => {
-  configureFakeProjectClients(true)
-  setTestAppDependencies({
-    ruleTemplates: createAutomationRuleTemplatePort({
-      async listRules() {
-        throw new AutomationError(
-          418,
-          'UnsupportedLegacyAutomationStatus',
-          'Legacy Automation status is unsupported.',
-        )
-      },
-    }),
-  })
-
-  const response = await app.request('/api/automation/rules', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-  expect(response.status).toBe(502)
-  expect(await response.json()).toEqual({
-    code: 'UnsupportedLegacyAutomationStatus',
-    message: 'Legacy Automation status is unsupported.',
-  })
-})
-
 test('derives stable and item-scoped audit idempotency keys for bulk apply', () => {
   const request = {
     workspaceId: 'workspace-1',
@@ -2307,7 +2283,7 @@ test('rejects a canonical automation comment replay with different input', async
     }, context)
   )).rejects.toMatchObject({
     code: 'AutomationCommentIdempotencyConflict',
-    status: 409,
+    category: 'conflict',
   })
 
   expect(createCalls).toBe(0)
@@ -2499,24 +2475,24 @@ test('recovers a Project template application from atomic receipt success withou
   expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
 })
 
-test('keeps unsupported legacy 4xx template failures terminal', async () => {
+test('keeps non-retryable client-category template failures terminal', async () => {
   const now = '2026-07-16T00:00:00.000Z'
   const template: AutomationTemplate = {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
-    id: 'template-project-legacy-failure',
+    id: 'template-project-terminal-failure',
     workspaceId: 'user#demo@example.com',
     kind: 'project',
-    name: 'Legacy failure Project',
+    name: 'Terminal failure Project',
     enabled: true,
     version: 1,
     revision: 1,
-    payload: { nameJa: '旧エラー', nameEn: 'Legacy failure', tone: 'purple' },
+    payload: { nameJa: '終端エラー', nameEn: 'Terminal failure', tone: 'purple' },
     createdAt: now,
     updatedAt: now,
   }
   let application: AutomationTemplateApplication = {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
-    id: 'application_project_legacy_failure',
+    id: 'application_project_terminal_failure',
     workspaceId: template.workspaceId,
     actorId: 'demo@example.com',
     templateId: template.id,
@@ -2532,9 +2508,9 @@ test('keeps unsupported legacy 4xx template failures terminal', async () => {
   configureFakeProjectClients(true, {
     async projectCreateHook() {
       throw new AutomationError(
-        418,
-        'UnsupportedLegacyTemplateFailure',
-        'Legacy template failure is terminal.',
+        'unprocessable',
+        'TemplateTargetRejected',
+        'Template target was rejected.',
       )
     },
   })
@@ -2583,17 +2559,21 @@ test('keeps unsupported legacy 4xx template failures terminal', async () => {
       headers: {
         Authorization: 'Bearer test-token',
         'Content-Type': 'application/json',
-        'Idempotency-Key': 'apply-project-legacy-failure',
+        'Idempotency-Key': 'apply-project-terminal-failure',
       },
       body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team' } }),
     },
   )
 
-  expect(response.status).toBe(502)
+  expect(response.status).toBe(422)
+  expect(await response.json()).toEqual({
+    code: 'TemplateTargetRejected',
+    message: 'Template target was rejected.',
+  })
   expect(savedApplication).toMatchObject({
     status: 'failed',
-    errorCode: 'UnsupportedLegacyTemplateFailure',
-    errorMessage: 'Legacy template failure is terminal.',
+    errorCode: 'TemplateTargetRejected',
+    errorMessage: 'Template target was rejected.',
   })
 })
 
