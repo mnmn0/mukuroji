@@ -1007,16 +1007,6 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         request.workItemId,
       )
     if (existing === undefined) {
-      const legacyBacklinkCount =
-        await this.countStoredWorkItemBacklinks(
-          request.workspaceId,
-          request.workItemId,
-        )
-      if (legacyBacklinkCount > 0) {
-        throw workItemDocumentBacklinkConflict(
-          legacyBacklinkCount,
-        )
-      }
       return {
         transactWriteItem: {
           Put: {
@@ -4948,70 +4938,32 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       documentId,
       versionId,
     )
-    let metadata:
-      | StoredDocumentVersionItem
-      | undefined
-    if (numericRevision !== undefined) {
-      const metadataResult =
-        await this.client.send(new GetCommand({
-          TableName: this.tableName,
-          Key: {
-            workspaceId,
-            recordKey: versionKey(
-              documentId,
-              numericRevision,
-            ),
-          },
-          ConsistentRead: true,
-        }))
-      metadata =
-        metadataResult.Item as
-          | StoredDocumentVersionItem
-          | undefined
-      if (
-        metadata !== undefined &&
+    if (numericRevision === undefined) {
+      throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
+    }
+    const metadataResult =
+      await this.client.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey: versionKey(
+            documentId,
+            numericRevision,
+          ),
+        },
+        ConsistentRead: true,
+      }))
+    const metadata =
+      metadataResult.Item as
+        | StoredDocumentVersionItem
+        | undefined
+    if (
+      metadata === undefined ||
+      (
         metadata.expiresAtEpoch !== undefined &&
         metadata.expiresAtEpoch <= nowEpoch
-      ) {
-        metadata = undefined
-      }
-    }
-    if (metadata === undefined) {
-      let exclusiveStartKey:
-        | Record<string, unknown>
-        | undefined
-      do {
-        const result = await this.client.send(new QueryCommand({
-          TableName: this.tableName,
-          KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-          ExpressionAttributeValues: {
-            ':workspaceId': workspaceId,
-            ':prefix': `VERSION#${documentId}#`,
-          },
-          ConsistentRead: true,
-          ExclusiveStartKey: exclusiveStartKey,
-        }))
-        metadata = (result.Items ?? [])
-          .map(
-            (item) =>
-              item as StoredDocumentVersionItem,
-          )
-          .find(
-            (item) =>
-              item.version.id === versionId &&
-              (
-                item.expiresAtEpoch === undefined ||
-                item.expiresAtEpoch > nowEpoch
-              ),
-          )
-        exclusiveStartKey =
-          result.LastEvaluatedKey
-      } while (
-        metadata === undefined &&
-        exclusiveStartKey !== undefined
       )
-    }
-    if (metadata === undefined) {
+    ) {
       throw new DocumentError(404, 'DocumentVersionNotFound', 'Document version was not found.')
     }
     const targetRevision = metadata.version.revision
@@ -5246,54 +5198,6 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     )
   }
 
-  /**
-   * Fence 導入前の backlink rows を consistent query で全 page 集計します。
-   *
-   * Fence row が存在しないだけで count 0 とみなさず、同じ fence key の
-   * conditional Put と組み合わせて既存データを fail-closed に移行します。
-   */
-  private async countStoredWorkItemBacklinks(
-    workspaceId: string,
-    workItemId: string,
-  ): Promise<number> {
-    let count = 0
-    let exclusiveStartKey:
-      | Record<string, unknown>
-      | undefined
-    do {
-      const result = await this.client.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          KeyConditionExpression:
-            'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
-          ExpressionAttributeValues: {
-            ':workspaceId': workspaceId,
-            ':prefix': backlinkPrefix(
-              'work-item',
-              workItemId,
-            ),
-          },
-          ExclusiveStartKey: exclusiveStartKey,
-          ConsistentRead: true,
-        }),
-      )
-      for (const item of result.Items ?? []) {
-        readStoredWorkItemBacklinkItem(
-          item,
-          workspaceId,
-          workItemId,
-        )
-        count += 1
-        if (!Number.isSafeInteger(count)) {
-          throw invalidDocumentBacklinkTargetFence()
-        }
-      }
-      exclusiveStartKey =
-        result.LastEvaluatedKey
-    } while (exclusiveStartKey !== undefined)
-    return count
-  }
-
   private async prepareBacklinkMutationActions(
     workspaceId: string,
     documentId: string,
@@ -5342,17 +5246,9 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         workItemId,
       )
     if (existing === undefined) {
-      const legacyBacklinkCount =
-        await this.countStoredWorkItemBacklinks(
-          workspaceId,
-          workItemId,
-        )
-      const nextCount =
-        legacyBacklinkCount + delta
-      if (
-        !Number.isSafeInteger(nextCount) ||
-        nextCount < 0
-      ) {
+      // Every backlink write maintains its target fence in the same transaction,
+      // so a missing fence means the Work Item has no backlinks to remove.
+      if (delta < 0) {
         throw invalidDocumentBacklinkTargetFence()
       }
       return {
@@ -5361,7 +5257,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           Item: createWorkItemBacklinkTargetFenceItem(
             workspaceId,
             workItemId,
-            nextCount,
+            delta,
             1,
           ),
           ConditionExpression:
@@ -7440,37 +7336,6 @@ function readWorkItemBacklinkTargetFenceItem(
   }
   return value as
     StoredDocumentBacklinkTargetFenceItem
-}
-
-function readStoredWorkItemBacklinkItem(
-  value: unknown,
-  workspaceId: string,
-  workItemId: string,
-): void {
-  if (
-    !isRecord(value) ||
-    value.workspaceId !== workspaceId ||
-    typeof value.recordKey !== 'string' ||
-    !value.recordKey.startsWith(
-      backlinkPrefix(
-        'work-item',
-        workItemId,
-      ),
-    ) ||
-    value.entryType !== 'document-backlink' ||
-    typeof value.documentId !== 'string' ||
-    value.targetKind !== 'work-item' ||
-    value.targetId !== workItemId ||
-    !isRecord(value.relation) ||
-    typeof value.relation.id !== 'string' ||
-    !isRecord(value.relation.target) ||
-    value.relation.target.kind !==
-      'work-item' ||
-    value.relation.target.workItemId !==
-      workItemId
-  ) {
-    throw invalidDocumentBacklinkTargetFence()
-  }
 }
 
 function invalidDocumentBacklinkTargetFence(): DocumentError {
