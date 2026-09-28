@@ -469,7 +469,7 @@ export type TaskScreenProps = {
   /** File controller scoped to the selected Work Item. */
   artifacts?: FileArtifactsController
   /** File controller scoped to the current Project. */
-  projectFiles?: FileArtifactsController
+  projectFiles: FileArtifactsController
   /** Workspace members used by mention, actor, and person-field controls. */
   workspaceMembers?: WorkspaceMember[]
   /** Current Workspace member key used by collaboration and file approvals. */
