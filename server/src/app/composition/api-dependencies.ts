@@ -774,23 +774,16 @@ function createAiAssistancePolicyAudit(
     async record(input) {
       await recordEvent(input)
     },
-    async persist(input, expectedRevision, authorizationFence, write) {
-      const auditEvent = createPolicyAuditEvent(input)
-      // The Dynamo adapter owns the cross-table TransactWrite boundary. The
-      // fallback keeps custom test/local adapters compatible with this port.
-      if (store.putPolicyWithAudit) {
-        return await store.putPolicyWithAudit(
-          input.workspaceId,
-          input.memberId,
-          input.nextPolicy,
-          expectedRevision,
-          authorizationFence,
-          auditEvent,
-        )
-      }
-      const storedPolicy = await write()
-      await recordEvent(input)
-      return storedPolicy
+    async persist(input, expectedRevision, authorizationFence) {
+      // The Dynamo adapter owns the cross-table TransactWrite boundary.
+      return await store.putPolicyWithAudit(
+        input.workspaceId,
+        input.memberId,
+        input.nextPolicy,
+        expectedRevision,
+        authorizationFence,
+        createPolicyAuditEvent(input),
+      )
     },
   }
 }

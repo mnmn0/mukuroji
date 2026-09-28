@@ -34877,7 +34877,7 @@ async function readFocusQueue(
     viewerMemberKey: principal.userKey,
     workItems,
     planning,
-    ...(relationGraphs === undefined ? {} : { relationGraphs }),
+    relationGraphs,
     reviewerApprovals,
     notifications,
     teamPolicies: state.teamPolicies,
@@ -34900,19 +34900,17 @@ async function readFocusQueue(
 }
 
 /**
- * Reads one authoritative relation graph per visible Team when the port is available.
+ * Reads one authoritative relation graph per visible Team.
  *
  * @param workspaceId - Workspace that owns the relation graphs.
  * @param workItems - Current ACL-filtered canonical Work Items.
- * @returns Endpoint-filtered Team graphs, or undefined for compatibility clients.
+ * @returns Endpoint-filtered Team graphs.
  */
 async function readFocusRelationGraphs(
   workspaceId: string,
   workItems: readonly CanonicalWorkItem[],
-): Promise<FocusRelationGraphSource[] | undefined> {
+): Promise<FocusRelationGraphSource[]> {
   const configuration = workItemDependencies.workItemConfigurations
-  if (configuration.listRelationGraph === undefined) return undefined
-  const listRelationGraph = configuration.listRelationGraph.bind(configuration)
   const visibleIdsByTeam = new Map<string, Set<string>>()
   for (const workItem of workItems) {
     const visibleIds = visibleIdsByTeam.get(workItem.teamId) ?? new Set<string>()
@@ -34922,7 +34920,7 @@ async function readFocusRelationGraphs(
   return Promise.all([...visibleIdsByTeam.entries()]
     .sort(([leftTeamId], [rightTeamId]) => leftTeamId.localeCompare(rightTeamId))
     .map(async ([teamId, visibleIds]) => {
-      const graph = await listRelationGraph(workspaceId, teamId)
+      const graph = await configuration.listRelationGraph(workspaceId, teamId)
       return {
         teamId,
         graphRevision: graph.graphRevision,
