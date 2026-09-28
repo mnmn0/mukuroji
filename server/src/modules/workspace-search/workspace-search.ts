@@ -4136,29 +4136,13 @@ async function waitForWorkspaceSearchTable(
   throw new Error(`Local DynamoDB table "${tableName}" did not become active.`)
 }
 
-/** Options controlling normalization of Workspace Search filter identifiers. */
-type WorkspaceSearchFilterNormalizationOptions = {
-  /** Whether task-view callers may retain legacy bare Work Item Type identifiers. */
-  allowUnqualifiedWorkItemTypeIds?: boolean
-}
-
-/** Options controlling normalization of a persisted task-view definition. */
-type TaskViewDefinitionNormalizationOptions = {
-  /** Whether read-time migration may temporarily accept legacy bare Work Item Type identifiers. */
-  allowUnqualifiedWorkItemTypeIds?: boolean
-}
-
 /**
  * Validates and normalizes Workspace Search filters.
  *
  * @param filters - Untrusted filter object received from an API or persisted view.
- * @param options - Compatibility options for task-view-specific filter scopes.
  * @returns Canonical filters accepted by the selected search surface.
  */
-function normalizeWorkspaceSearchFilters(
-  filters: unknown,
-  options: WorkspaceSearchFilterNormalizationOptions = {},
-) {
+function normalizeWorkspaceSearchFilters(filters: unknown) {
   if (!isRecordValue(filters)) {
     return invalidFilters('Search filters must be an object.')
   }
@@ -4186,9 +4170,7 @@ function normalizeWorkspaceSearchFilters(
       'Search workItemTypeIds',
       100,
     )
-    if (!options.allowUnqualifiedWorkItemTypeIds && workItemTypeIds.some((value) =>
-      readSearchWorkItemTypeKey(value) === undefined
-    )) {
+    if (workItemTypeIds.some((value) => readSearchWorkItemTypeKey(value) === undefined)) {
       invalidFilters('Search work item type IDs must be Team-qualified.')
     }
     normalized.workItemTypeIds = workItemTypeIds
@@ -5032,10 +5014,7 @@ function createTaskViewCopyName(sourceName: string) {
 }
 
 /** Validates a complete task view definition and returns its canonical representation. */
-function normalizeTaskViewDefinition(
-  definition: unknown,
-  options: TaskViewDefinitionNormalizationOptions = {},
-): TaskViewDefinition {
+function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
   if (!isRecordValue(definition)) {
     return invalidTaskView('Task view definition is required.')
   }
@@ -5045,7 +5024,7 @@ function normalizeTaskViewDefinition(
   return {
     surface,
     scope,
-    filters: normalizeTaskViewFilters(definition.filters, options),
+    filters: normalizeTaskViewFilters(definition.filters),
     layout: normalizeTaskViewLayout(definition.layout),
   }
 }
@@ -5086,14 +5065,11 @@ function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewS
 }
 
 /** Validates filters shared by all task surfaces. */
-function normalizeTaskViewFilters(
-  filters: unknown,
-  options: TaskViewDefinitionNormalizationOptions = {},
-): TaskViewFilters {
+function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
   if (!isRecordValue(filters)) {
     return invalidTaskView('Task view filters are invalid.')
   }
-  const base = normalizeWorkspaceSearchFilters(filters, options)
+  const base = normalizeWorkspaceSearchFilters(filters)
   const workflowStatuses = filters.workflowStatuses === undefined
     ? undefined
     : normalizeTaskViewWorkflowStatuses(filters.workflowStatuses)
@@ -5303,10 +5279,10 @@ function requireSavedTaskViewDefaultSource(value: unknown): SavedTaskViewDefault
 }
 
 /**
- * Reads one strict current or legacy Workspace Search projection.
+ * Reads one strict current Workspace Search projection.
  *
- * Legacy rows may omit `projectionDigest`; when present, the digest must match
- * the complete normalized projection or the read fails closed.
+ * The stored `projectionDigest` must match the complete normalized projection;
+ * a missing or different digest fails closed.
  *
  * @param value - Untrusted persisted projection fields.
  * @returns Fully normalized document with its server-owned current digest.
@@ -5319,10 +5295,7 @@ export function readWorkspaceSearchDocument(
   }
   try {
     const document = createWorkspaceSearchDocument(value as WorkspaceSearchDocument)
-    if (
-      value.projectionDigest !== undefined
-      && value.projectionDigest !== document.projectionDigest
-    ) {
+    if (value.projectionDigest !== document.projectionDigest) {
       throw new WorkspaceSearchProjectionDigestMismatchError(
         503,
         'InvalidSearchDocument',
@@ -5356,19 +5329,11 @@ function readWorkspaceSearchDocumentSafely(value: Record<string, unknown>) {
 }
 
 function readStoredSavedWorkspaceView(value: Record<string, unknown>) {
-  if (
-    value.entryType !== 'saved-view' ||
-    (value.schemaVersion !== undefined && value.schemaVersion !== 0 && value.schemaVersion !== SAVED_VIEW_SCHEMA_VERSION)
-  ) {
+  if (value.entryType !== 'saved-view' || value.schemaVersion !== SAVED_VIEW_SCHEMA_VERSION) {
     throw new WorkspaceSearchError(503, 'InvalidSavedView', 'Saved view data is invalid.')
   }
   try {
     const input = value as StoredSavedWorkspaceView
-    const legacyLayout = input.layout ?? {
-      mode: 'table',
-      sort: [],
-      columns: ['title'],
-    } satisfies SearchViewLayout
     const id = requireIdentifier(input.id, 'Saved view ID')
     const visibility = requireSavedViewVisibility(input.visibility)
     const teamId = optionalText(input.teamId, 'Saved view Team ID', 256)
@@ -5388,9 +5353,9 @@ function readStoredSavedWorkspaceView(value: Record<string, unknown>) {
       visibility,
       ownerUserId: requireText(input.ownerUserId, 'Saved view owner ID'),
       ...(teamId ? { teamId } : {}),
-      filters: normalizeWorkspaceSearchFilters(input.filters ?? {}),
-      layout: normalizeSearchViewLayout(legacyLayout),
-      revision: requirePositiveInteger(input.revision ?? 1, 'Saved view revision'),
+      filters: normalizeWorkspaceSearchFilters(input.filters),
+      layout: normalizeSearchViewLayout(input.layout),
+      revision: requirePositiveInteger(input.revision, 'Saved view revision'),
       createdAt: requireText(input.createdAt, 'Saved view createdAt', 128),
       updatedAt: requireText(input.updatedAt, 'Saved view updatedAt', 128),
     } satisfies StoredSavedWorkspaceView
@@ -5529,9 +5494,7 @@ function readStoredTaskView(value: Record<string, unknown>): StoredTaskView {
       ...(createIdempotencyKeyHash ? { createIdempotencyKeyHash } : {}),
       ...(createRequestFingerprint ? { createRequestFingerprint } : {}),
       ...(teamId ? { teamId } : {}),
-      definition: normalizeTaskViewDefinition(value.definition, {
-        allowUnqualifiedWorkItemTypeIds: true,
-      }),
+      definition: normalizeTaskViewDefinition(value.definition),
       revision: requirePositiveInteger(value.revision, 'Task view revision'),
       createdAt: requireText(value.createdAt, 'Task view createdAt', 128),
       updatedAt: requireText(value.updatedAt, 'Task view updatedAt', 128),

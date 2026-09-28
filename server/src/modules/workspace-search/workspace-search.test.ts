@@ -449,10 +449,10 @@ test('binds live projections to a deterministic server-owned content digest', as
       '\uD800': 'first',
     },
   })
-  const { projectionDigest: legacyProjectionDigest, ...legacyDocument } = first
-  const legacyClient = new DynamoDbWorkspaceSearchClient(
+  const { projectionDigest: _projectionDigest, ...digestlessDocument } = first
+  const digestlessClient = new DynamoDbWorkspaceSearchClient(
     'search-table',
-    createMemoryDocumentClient([legacyDocument]),
+    createMemoryDocumentClient([digestlessDocument]),
     {} as DynamoDBClient,
     false,
   )
@@ -472,7 +472,6 @@ test('binds live projections to a deterministic server-owned content digest', as
     teamIds: new Set(['core']),
   }
 
-  expect(legacyProjectionDigest).toMatch(/^[0-9a-f]{64}$/u)
   expect(first.projectionDigest).toBe(
     '111162f5fe98780edfe8e96adfc1e1ad5981a8cced24b7143264b3f06e62d186',
   )
@@ -481,19 +480,15 @@ test('binds live projections to a deterministic server-owned content digest', as
   expect(replacementEquivalentKeyOrder.projectionDigest).toBe(
     reversedReplacementEquivalentKeyOrder.projectionDigest,
   )
-  expect((await legacyClient.search({
-    workspaceId: 'workspace-1',
-    access,
-  })).results.map((result) => result.id)).toEqual([
-    'team/core/issue/issue-1',
-  ])
-  await expect(corruptClient.search({
-    workspaceId: 'workspace-1',
-    access,
-  })).rejects.toMatchObject({
-    code: 'InvalidSearchDocument',
-    status: 503,
-  })
+  for (const client of [digestlessClient, corruptClient]) {
+    await expect(client.search({
+      workspaceId: 'workspace-1',
+      access,
+    })).rejects.toMatchObject({
+      code: 'InvalidSearchDocument',
+      status: 503,
+    })
+  }
 })
 
 test('normalizes realtime and backfill Work Item and comment projection fields consistently', () => {
