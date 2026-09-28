@@ -1,4 +1,15 @@
-import type { AutomationExecution } from '@mukuroji/contracts'
+import {
+  AUTOMATION_SCHEMA_VERSION,
+  type AutomationActionExecution,
+  type AutomationActionExecutionStatus,
+  type AutomationExecution,
+  type AutomationExecutionStatus,
+} from '@mukuroji/contracts'
+import {
+  isNonnegativeSafeInteger,
+  isOptionalString,
+  isRecord,
+} from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
 
@@ -24,12 +35,32 @@ const automationApiBaseUrl = resolveAutomationApiBaseUrl(import.meta.env)
 
 const defaultAutomationApiErrorMessage = 'Unable to complete the automation request.'
 
+/** Execution statuses accepted from the execution history response. */
+const automationExecutionStatuses: readonly AutomationExecutionStatus[] = [
+  'pending',
+  'running',
+  'succeeded',
+  'failed',
+  'dead-letter',
+  'skipped',
+]
+
+/** Action result statuses accepted from the execution history response. */
+const automationActionExecutionStatuses: readonly AutomationActionExecutionStatus[] = [
+  'pending',
+  'running',
+  'succeeded',
+  'failed',
+  'skipped',
+]
+
 /**
- * Automation execution history を取得します。
+ * Loads one page of automation execution history.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @param query - Rule、status、cursor の filter です。
- * @returns Execution の cursor page です。
+ * @param accessToken - Access token used for the Authorization header.
+ * @param query - Rule, status, and cursor filters.
+ * @returns Validated executions and the optional next-page cursor.
+ * @throws AutomationApiError when the response is not a valid execution page.
  */
 export async function getAutomationExecutions(
   accessToken: string,
@@ -47,19 +78,22 @@ export async function getAutomationExecutions(
     accessToken,
   )
 
-  if (Array.isArray(response)) {
-    return { executions: response as AutomationExecution[] } satisfies AutomationExecutionPage
+  if (
+    !isRecord(response) ||
+    !Array.isArray(response.executions) ||
+    !response.executions.every(isAutomationExecution) ||
+    !isOptionalString(response.nextCursor)
+  ) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
   }
 
-  const record = toRecord(response)
-
   return {
-    executions: Array.isArray(record.executions)
-      ? record.executions as AutomationExecution[]
-      : Array.isArray(record.items)
-        ? record.items as AutomationExecution[]
-        : [],
-    nextCursor: typeof record.nextCursor === 'string' ? record.nextCursor : undefined,
+    executions: response.executions,
+    nextCursor: response.nextCursor,
   } satisfies AutomationExecutionPage
 }
 
@@ -83,6 +117,50 @@ export function retryAutomationExecution(
     undefined,
     mutationContext,
   )
+}
+
+/**
+ * Returns whether a history entry has the execution fields used by the Web client.
+ *
+ * @param value - Unknown entry from the execution history response.
+ * @returns Whether the entry is an automation execution.
+ */
+function isAutomationExecution(value: unknown): value is AutomationExecution {
+  return isRecord(value) &&
+    value.schemaVersion === AUTOMATION_SCHEMA_VERSION &&
+    typeof value.id === 'string' &&
+    typeof value.workspaceId === 'string' &&
+    typeof value.ruleId === 'string' &&
+    isNonnegativeSafeInteger(value.ruleVersion) &&
+    typeof value.triggerEventId === 'string' &&
+    automationExecutionStatuses.some((status) => status === value.status) &&
+    isNonnegativeSafeInteger(value.attempts) &&
+    Array.isArray(value.actions) &&
+    value.actions.every(isAutomationActionExecution) &&
+    typeof value.startedAt === 'string' &&
+    isOptionalString(value.completedAt) &&
+    isOptionalString(value.nextRetryAt) &&
+    isOptionalString(value.errorCode) &&
+    isOptionalString(value.errorMessage) &&
+    typeof value.retryable === 'boolean'
+}
+
+/**
+ * Returns whether an execution entry has the per-action result fields used by the Web client.
+ *
+ * @param value - Unknown action result from an execution entry.
+ * @returns Whether the value is an automation action execution.
+ */
+function isAutomationActionExecution(value: unknown): value is AutomationActionExecution {
+  return isRecord(value) &&
+    isNonnegativeSafeInteger(value.actionIndex) &&
+    typeof value.actionId === 'string' &&
+    automationActionExecutionStatuses.some((status) => status === value.status) &&
+    isNonnegativeSafeInteger(value.attempts) &&
+    isOptionalString(value.startedAt) &&
+    isOptionalString(value.completedAt) &&
+    isOptionalString(value.errorCode) &&
+    isOptionalString(value.errorMessage)
 }
 
 function requestMutation<TResponse>(

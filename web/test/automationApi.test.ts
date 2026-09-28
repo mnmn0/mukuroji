@@ -31,6 +31,15 @@ import {
   updateAutomationInboundWebhookEndpoint,
   updateAutomationTemplate,
 } from '../src/automation/api'
+import {
+  activeAutomationRuleFixture,
+  activeInboundWebhookEndpointFixture,
+  deadLetterAutomationExecutionFixture,
+  dstRecurringWorkFixture,
+  pausedAutomationRuleFixture,
+  workItemAutomationTemplateFixture,
+  workflowAutomationTemplateFixture,
+} from '../src/automation/fixtures'
 
 const originalFetch = globalThis.fetch
 const mutationContext = {
@@ -291,10 +300,74 @@ describe('automation API', () => {
     expect(JSON.parse(String(requests[7]?.init.body))).toEqual({ expectedRevision: 8 })
   })
 
-  test('accepts an empty response body but rejects malformed non-empty JSON', async () => {
-    globalThis.fetch = (async () => new Response(null, { status: 200 })) as typeof fetch
-    await expect(getAutomationRules('access-token')).resolves.toEqual([])
+  test('reads every list from its canonical response property', async () => {
+    installFetchRecorder({
+      endpoints: [activeInboundWebhookEndpointFixture],
+      executions: [deadLetterAutomationExecutionFixture],
+      nextCursor: 'executions/page-2',
+      recurringWorks: [dstRecurringWorkFixture],
+      rules: [activeAutomationRuleFixture, pausedAutomationRuleFixture],
+      templates: [workItemAutomationTemplateFixture, workflowAutomationTemplateFixture],
+    })
 
+    expect(await getAutomationRules('access-token')).toEqual([
+      activeAutomationRuleFixture,
+      pausedAutomationRuleFixture,
+    ])
+    expect(await getAutomationInboundWebhookEndpoints('access-token')).toEqual([
+      activeInboundWebhookEndpointFixture,
+    ])
+    expect(await getAutomationTemplates('access-token')).toEqual([
+      workItemAutomationTemplateFixture,
+      workflowAutomationTemplateFixture,
+    ])
+    expect(await getRecurringWork('access-token')).toEqual([dstRecurringWorkFixture])
+    expect(await getAutomationExecutions('access-token')).toEqual({
+      executions: [deadLetterAutomationExecutionFixture],
+      nextCursor: 'executions/page-2',
+    })
+  })
+
+  test('rejects empty, bare, legacy, and malformed list responses', async () => {
+    const readers = [
+      () => getAutomationRules('access-token'),
+      () => getAutomationInboundWebhookEndpoints('access-token'),
+      () => getAutomationTemplates('access-token'),
+      () => getRecurringWork('access-token'),
+      () => getAutomationExecutions('access-token'),
+    ]
+    const invalidResponses = [
+      {},
+      [activeAutomationRuleFixture],
+      { items: [activeAutomationRuleFixture] },
+      { endpoints: {}, executions: {}, recurringWorks: {}, rules: {}, templates: {} },
+      { endpoints: [{}], executions: [{}], recurringWorks: [{}], rules: [{}], templates: [{}] },
+    ]
+
+    globalThis.fetch = (async () => new Response(null, { status: 200 })) as typeof fetch
+    for (const read of readers) {
+      await expect(read()).rejects.toMatchObject({
+        code: 'InvalidAutomationResponse',
+        status: 502,
+      })
+    }
+    for (const response of invalidResponses) {
+      installFetchRecorder(response)
+      for (const read of readers) {
+        await expect(read()).rejects.toMatchObject({
+          code: 'InvalidAutomationResponse',
+          status: 502,
+        })
+      }
+    }
+    installFetchRecorder({ executions: [], nextCursor: 42 })
+    await expect(getAutomationExecutions('access-token')).rejects.toMatchObject({
+      code: 'InvalidAutomationResponse',
+      status: 502,
+    })
+  })
+
+  test('rejects malformed non-empty JSON', async () => {
     globalThis.fetch = (async () =>
       new Response('{"rules":', {
         headers: { 'Content-Type': 'application/json' },

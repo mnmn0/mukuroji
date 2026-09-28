@@ -1,6 +1,27 @@
-import type { AutomationInboundWebhookEndpoint, AutomationInboundWebhookLifecycleInput, AutomationInboundWebhookSecretResponse, CreateAutomationInboundWebhookEndpointInput, UpdateAutomationInboundWebhookEndpointInput } from '@mukuroji/contracts'
+import {
+  AUTOMATION_SCHEMA_VERSION,
+  type AutomationInboundWebhookEndpoint,
+  type AutomationInboundWebhookEndpointStatus,
+  type AutomationInboundWebhookLifecycleInput,
+  type AutomationInboundWebhookSecretResponse,
+  type CreateAutomationInboundWebhookEndpointInput,
+  type UpdateAutomationInboundWebhookEndpointInput,
+} from '@mukuroji/contracts'
+import {
+  isNonnegativeSafeInteger,
+  isOptionalString,
+  isRecord,
+} from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
+
+/** Endpoint lifecycle statuses accepted from the endpoint collection response. */
+const inboundWebhookEndpointStatuses: readonly AutomationInboundWebhookEndpointStatus[] = [
+  'provisioning',
+  'active',
+  'paused',
+  'revoked',
+]
 
 const automationApiBaseUrl = resolveAutomationApiBaseUrl(import.meta.env)
 
@@ -13,10 +34,11 @@ const defaultAutomationApiErrorMessage = 'Unable to complete the automation requ
  * @returns Secret を含まない endpoint 一覧です。
  */
 export function getAutomationInboundWebhookEndpoints(accessToken: string) {
-  return requestCollection<AutomationInboundWebhookEndpoint>(
+  return requestCollection(
     `${automationApiBaseUrl}/automation/inbound-webhooks`,
     accessToken,
     'endpoints',
+    isAutomationInboundWebhookEndpoint,
   )
 }
 
@@ -171,19 +193,60 @@ function requestInboundWebhookLifecycle<TResponse>(
   )
 }
 
+/**
+ * Loads the canonical collection property returned by an automation list endpoint.
+ *
+ * @param url - Collection endpoint URL.
+ * @param accessToken - Access token used for the Authorization header.
+ * @param collectionKey - Response property that owns the collection.
+ * @param isItem - Runtime guard for one collection entry.
+ * @returns Validated collection entries.
+ * @throws AutomationApiError when the response does not contain a valid collection.
+ */
 async function requestCollection<TItem>(
   url: string,
   accessToken: string,
   collectionKey: string,
-) {
+  isItem: (value: unknown) => value is TItem,
+): Promise<TItem[]> {
   const response = await requestJson<unknown>(url, accessToken)
+  const collection = isRecord(response) ? response[collectionKey] : undefined
 
-  if (Array.isArray(response)) return response as TItem[]
+  if (!Array.isArray(collection) || !collection.every(isItem)) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
 
-  const record = toRecord(response)
-  const collection = record[collectionKey] ?? record.items
+  return collection
+}
 
-  return Array.isArray(collection) ? collection as TItem[] : []
+/**
+ * Returns whether a collection entry has the secret-free endpoint fields used by the Web client.
+ *
+ * @param value - Unknown entry from the endpoint collection response.
+ * @returns Whether the entry is an inbound Webhook endpoint.
+ */
+function isAutomationInboundWebhookEndpoint(
+  value: unknown,
+): value is AutomationInboundWebhookEndpoint {
+  return isRecord(value) &&
+    value.schemaVersion === AUTOMATION_SCHEMA_VERSION &&
+    typeof value.id === 'string' &&
+    typeof value.workspaceId === 'string' &&
+    typeof value.opaqueEndpointId === 'string' &&
+    typeof value.name === 'string' &&
+    inboundWebhookEndpointStatuses.some((status) => status === value.status) &&
+    isNonnegativeSafeInteger(value.version) &&
+    isNonnegativeSafeInteger(value.secretGeneration) &&
+    isNonnegativeSafeInteger(value.revision) &&
+    typeof value.endpointUrl === 'string' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string' &&
+    isOptionalString(value.rotatedAt) &&
+    isOptionalString(value.revokedAt)
 }
 
 function requestMutation<TResponse>(

@@ -1,4 +1,14 @@
-import type { CreateRecurringWorkInput, RecurringWork, UpdateRecurringWorkInput } from '@mukuroji/contracts'
+import {
+  AUTOMATION_SCHEMA_VERSION,
+  type CreateRecurringWorkInput,
+  type RecurringWork,
+  type UpdateRecurringWorkInput,
+} from '@mukuroji/contracts'
+import {
+  isNonnegativeSafeInteger,
+  isOptionalString,
+  isRecord,
+} from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
 
@@ -13,7 +23,12 @@ const defaultAutomationApiErrorMessage = 'Unable to complete the automation requ
  * @returns Recurring Work 一覧です。
  */
 export function getRecurringWork(accessToken: string) {
-  return requestCollection<RecurringWork>(`${automationApiBaseUrl}/recurring-work`, accessToken, 'recurringWorks')
+  return requestCollection(
+    `${automationApiBaseUrl}/recurring-work`,
+    accessToken,
+    'recurringWorks',
+    isRecurringWork,
+  )
 }
 
 /**
@@ -62,19 +77,60 @@ export function updateRecurringWork(
   )
 }
 
+/**
+ * Loads the canonical collection property returned by an automation list endpoint.
+ *
+ * @param url - Collection endpoint URL.
+ * @param accessToken - Access token used for the Authorization header.
+ * @param collectionKey - Response property that owns the collection.
+ * @param isItem - Runtime guard for one collection entry.
+ * @returns Validated collection entries.
+ * @throws AutomationApiError when the response does not contain a valid collection.
+ */
 async function requestCollection<TItem>(
   url: string,
   accessToken: string,
   collectionKey: string,
-) {
+  isItem: (value: unknown) => value is TItem,
+): Promise<TItem[]> {
   const response = await requestJson<unknown>(url, accessToken)
+  const collection = isRecord(response) ? response[collectionKey] : undefined
 
-  if (Array.isArray(response)) return response as TItem[]
+  if (!Array.isArray(collection) || !collection.every(isItem)) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
 
-  const record = toRecord(response)
-  const collection = record[collectionKey] ?? record.items
+  return collection
+}
 
-  return Array.isArray(collection) ? collection as TItem[] : []
+/**
+ * Returns whether a collection entry has the recurring Work fields used by the Web client.
+ *
+ * @param value - Unknown entry from the recurring Work collection response.
+ * @returns Whether the entry is a recurring Work definition.
+ */
+function isRecurringWork(value: unknown): value is RecurringWork {
+  return isRecord(value) &&
+    value.schemaVersion === AUTOMATION_SCHEMA_VERSION &&
+    typeof value.id === 'string' &&
+    typeof value.workspaceId === 'string' &&
+    typeof value.teamId === 'string' &&
+    typeof value.name === 'string' &&
+    typeof value.enabled === 'boolean' &&
+    isNonnegativeSafeInteger(value.version) &&
+    isNonnegativeSafeInteger(value.revision) &&
+    typeof value.templateId === 'string' &&
+    isNonnegativeSafeInteger(value.templateVersion) &&
+    isRecord(value.schedule) &&
+    typeof value.schedule.timeZone === 'string' &&
+    typeof value.nextRunAt === 'string' &&
+    isOptionalString(value.lastRunAt) &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string'
 }
 
 function requestMutation<TResponse>(
