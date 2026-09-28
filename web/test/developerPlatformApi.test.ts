@@ -266,7 +266,7 @@ describe('Developer Platform API', () => {
       'access-token',
       {
         conflictId: 'conflict/29',
-        resolution: 'keep-local',
+        resolution: 'use-local',
       },
       mutationContext,
     )

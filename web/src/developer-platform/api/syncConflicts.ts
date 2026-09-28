@@ -82,15 +82,9 @@ export function resolveDeveloperSyncConflict(
   input: ResolveDeveloperSyncConflictInput,
   mutationContext: MutationRequestContext,
 ) {
-  const resolution: ResolveWorkItemSyncConflictInput['resolution'] =
-    input.resolution === 'keep-local'
-      ? 'use-local'
-      : input.resolution === 'keep-remote'
-        ? 'use-external'
-        : input.resolution
   const requestBody: ResolveWorkItemSyncConflictInput = {
-    resolution,
-    ...(resolution === 'merge'
+    resolution: input.resolution,
+    ...(input.resolution === 'merge'
       ? { mergedValues: input.mergedValues }
       : {}),
   }

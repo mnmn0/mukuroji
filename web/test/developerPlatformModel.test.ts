@@ -122,6 +122,8 @@ describe('Developer Platform connector model', () => {
 
   test('narrows supported conflict resolution values', () => {
     expect(isDeveloperSyncConflictResolution('merge')).toBe(true)
+    expect(isDeveloperSyncConflictResolution('use-external')).toBe(true)
+    expect(isDeveloperSyncConflictResolution('keep-local')).toBe(false)
     expect(isDeveloperSyncConflictResolution('overwrite')).toBe(false)
   })
 })
