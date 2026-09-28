@@ -2569,237 +2569,7 @@ describe('planning persistence', () => {
           ConsistentRead: true,
         }),
       },
-      {
-        name: 'GetCommand',
-        input: expect.objectContaining({
-          TableName: 'PlanningTable',
-          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-          ConsistentRead: true,
-        }),
-      },
     ])
-  })
-
-  test('copies a legacy META row before exposing the isolated revision fence', async () => {
-    const commands: Array<{
-      /** AWS SDK command class name. */
-      name: string
-      /** AWS SDK command input. */
-      input: Record<string, unknown>
-    }> = []
-    let fencedMeta: Record<string, unknown> | undefined
-    const legacyMeta: Record<string, unknown> = {
-      workspaceId: 'workspace-1',
-      recordKey: 'META',
-      entryType: 'planning-meta',
-      schemaVersion: 1,
-      revision: 7,
-      updatedAt: NOW.toISOString(),
-    }
-    const documentClient = {
-      async send(command: {
-        /** AWS SDK command constructor. */
-        constructor: { name: string }
-        /** AWS SDK command input. */
-        input: Record<string, unknown>
-      }) {
-        commands.push({ name: command.constructor.name, input: command.input })
-        if (command.constructor.name === 'GetCommand') {
-          const key = command.input.Key
-          if (
-            typeof key === 'object' && key !== null &&
-            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
-          ) {
-            return { Item: fencedMeta }
-          }
-          return { Item: legacyMeta }
-        }
-        if (command.constructor.name === 'TransactWriteCommand') {
-          const items = command.input.TransactItems
-          if (!Array.isArray(items)) throw new Error('Expected migration transaction items.')
-          const update = items.find((item) =>
-            typeof item === 'object' && item !== null && 'Update' in item
-          )
-          if (
-            typeof update !== 'object' || update === null ||
-            !('Update' in update) || typeof update.Update !== 'object' || update.Update === null
-          ) {
-            throw new Error('Expected fenced META Update.')
-          }
-          const updateInput = update.Update
-          if (
-            !('Key' in updateInput) || typeof updateInput.Key !== 'object' ||
-            updateInput.Key === null || Array.isArray(updateInput.Key) ||
-            !('ExpressionAttributeValues' in updateInput) ||
-            typeof updateInput.ExpressionAttributeValues !== 'object' ||
-            updateInput.ExpressionAttributeValues === null ||
-            Array.isArray(updateInput.ExpressionAttributeValues)
-          ) {
-            throw new Error('Expected fenced META Update input.')
-          }
-          const key = updateInput.Key
-          const values = updateInput.ExpressionAttributeValues
-          fencedMeta = {
-            workspaceId: key.workspaceId,
-            recordKey: key.recordKey,
-            entryType: values[':entryType'],
-            schemaVersion: values[':schemaVersion'],
-            revision: values[':revision'],
-            updatedAt: values[':updatedAt'],
-          }
-        }
-        return {}
-      },
-    } as unknown as DynamoDBDocumentClient
-    const client = new DynamoDbPlanningClient(
-      'PlanningTable',
-      documentClient,
-      {} as DynamoDBClient,
-      false,
-      () => NOW,
-    )
-
-    expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
-    expect(fencedMeta).toMatchObject({
-      workspaceId: 'FENCE#workspace-1',
-      recordKey: 'META',
-      entryType: 'planning-meta',
-      schemaVersion: 1,
-      revision: 7,
-      updatedAt: NOW.toISOString(),
-    })
-    expect(commands.map((command) => command.name)).toEqual([
-      'GetCommand',
-      'GetCommand',
-      'TransactWriteCommand',
-    ])
-    for (const command of commands.filter((entry) => entry.name === 'GetCommand')) {
-      expect(command.input).toMatchObject({ ConsistentRead: true })
-    }
-      expect(commands[2]?.input.TransactItems).toEqual([
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
-          ConditionExpression:
-            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
-        }),
-      }),
-    ])
-  })
-
-  test('raises a source-initialized fence to the legacy revision before returning it', async () => {
-    const commands: Array<{
-      /** AWS SDK command class name. */
-      name: string
-      /** AWS SDK command input. */
-      input: Record<string, unknown>
-    }> = []
-    const fencedMeta = {
-      workspaceId: 'FENCE#workspace-1',
-      recordKey: 'META',
-      entryType: 'planning-meta',
-      schemaVersion: 1,
-      revision: 2,
-      updatedAt: '2026-08-11T00:00:00.000Z',
-    }
-    const legacyMeta = {
-      workspaceId: 'workspace-1',
-      recordKey: 'META',
-      entryType: 'planning-meta',
-      schemaVersion: 1,
-      revision: 7,
-      updatedAt: NOW.toISOString(),
-    }
-    const documentClient = {
-      async send(command: {
-        /** AWS SDK command constructor. */
-        constructor: { name: string }
-        /** AWS SDK command input. */
-        input: Record<string, unknown>
-      }) {
-        commands.push({ name: command.constructor.name, input: command.input })
-        if (command.constructor.name === 'GetCommand') {
-          const key = command.input.Key
-          if (
-            typeof key === 'object' && key !== null &&
-            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
-          ) {
-            return { Item: fencedMeta }
-          }
-          return { Item: legacyMeta }
-        }
-        return {}
-      },
-    } as unknown as DynamoDBDocumentClient
-    const client = new DynamoDbPlanningClient(
-      'PlanningTable',
-      documentClient,
-      {} as DynamoDBClient,
-      false,
-      () => NOW,
-    )
-
-    expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
-    expect(commands.map((command) => command.name)).toEqual([
-      'GetCommand',
-      'GetCommand',
-      'TransactWriteCommand',
-    ])
-    for (const command of commands.filter((entry) => entry.name === 'GetCommand')) {
-      expect(command.input).toMatchObject({ ConsistentRead: true })
-    }
-    expect(commands[2]?.input.TransactItems).toEqual([
-      expect.objectContaining({
-        Update: expect.objectContaining({
-          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
-          UpdateExpression: 'SET #revision = :revision, #updatedAt = :updatedAt',
-          ExpressionAttributeValues: expect.objectContaining({
-            ':fencedRevision': 2,
-            ':revision': 7,
-          }),
-        }),
-      }),
-    ])
-  })
-
-  test('ignores a lower legacy META row when the fenced revision already wins', async () => {
-    let transaction: Record<string, unknown> | undefined
-    const documentClient = {
-      async send(command: {
-        /** AWS SDK command constructor. */
-        constructor: { name: string }
-        /** AWS SDK command input. */
-        input: Record<string, unknown>
-      }) {
-        if (command.constructor.name === 'GetCommand') {
-          const key = command.input.Key
-          const fenced = typeof key === 'object' && key !== null &&
-            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
-          return {
-            Item: {
-              workspaceId: fenced ? 'FENCE#workspace-1' : 'workspace-1',
-              recordKey: 'META',
-              entryType: 'planning-meta',
-              schemaVersion: 1,
-              revision: fenced ? 7 : 3,
-              updatedAt: NOW.toISOString(),
-            },
-          }
-        }
-        transaction = command.input
-        return {}
-      },
-    } as unknown as DynamoDBDocumentClient
-    const client = new DynamoDbPlanningClient(
-      'PlanningTable',
-      documentClient,
-      {} as DynamoDBClient,
-      false,
-      () => NOW,
-    )
-
-    expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
-    expect(transaction).toBeUndefined()
   })
 
   test('reads only bounded graph prefixes between strong META barriers', async () => {
@@ -2884,13 +2654,11 @@ describe('planning persistence', () => {
     expect(snapshot.entities.map((entity) => entity.id)).toEqual(['cycle-1'])
     expect(commands.map((command) => command.name)).toEqual([
       'GetCommand',
-      'GetCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
-      'GetCommand',
       'GetCommand',
     ])
     const fenceBarriers = commands.filter((command) => {
@@ -2983,13 +2751,11 @@ describe('planning persistence', () => {
     expect(response.planning.revision).toBe(1)
     expect(commands.map((command) => command.name)).toEqual([
       'GetCommand',
-      'GetCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
-      'GetCommand',
       'GetCommand',
       'TransactWriteCommand',
     ])
