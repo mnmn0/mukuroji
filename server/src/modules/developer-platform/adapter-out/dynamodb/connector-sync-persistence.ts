@@ -112,10 +112,6 @@ type ExternalLinkRow = {
   value: ExternalWorkItemLink
   /** Storage CAS revision です。 */
   version: number
-  /** Legacy sparse GSI partition key です。replacement時に除去します。 */
-  lookupKey?: string
-  /** Legacy sparse GSI sort key です。replacement時に除去します。 */
-  lookupSortKey?: string
 }
 
 /** DeveloperPlatformTable に connector sync state/conflict を永続化します。 */
@@ -1267,13 +1263,8 @@ function createExternalLinkReplacementRow(
   row: ExternalLinkRow,
   link: ExternalWorkItemLink,
 ): ExternalLinkRow {
-  const {
-    lookupKey: _lookupKey,
-    lookupSortKey: _lookupSortKey,
-    ...baseRow
-  } = row
   return {
-    ...baseRow,
+    ...row,
     value: link,
     version: row.version + 1,
   }

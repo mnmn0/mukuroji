@@ -1947,13 +1947,11 @@ function readTenantProfile(value: unknown): TenantProfile {
   const ownerMemberKey = readRequiredString(value.ownerMemberKey)
   const createdAt = readRequiredString(value.createdAt)
   const updatedAt = readRequiredString(value.updatedAt)
-  const status = value.status === undefined
-    ? 'active'
-    : value.status === 'active' ||
-        value.status === 'closing' ||
-        value.status === 'closed'
-      ? value.status
-      : undefined
+  const status = value.status === 'active' ||
+      value.status === 'closing' ||
+      value.status === 'closed'
+    ? value.status
+    : undefined
   if (!status) throw new Error('invalid tenant status')
   const closedAt = value.closedAt === undefined
     ? undefined

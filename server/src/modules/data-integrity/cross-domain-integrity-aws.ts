@@ -1363,7 +1363,6 @@ function auditTenantBoundaryIsCanonical(
   row: Record<string, unknown>,
   event: AuditEventV1,
 ): boolean {
-  if (row.schemaVersion === undefined || row.schemaVersion === 0) return true
   const expectedEventKey = `${event.occurredAt}#${event.eventId}`
   return row.directoryId === event.workspaceId &&
     row.workspaceId === event.workspaceId &&

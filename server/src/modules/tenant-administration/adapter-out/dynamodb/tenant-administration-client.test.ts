@@ -147,13 +147,13 @@ describe('DynamoDbTenantAdministrationClient', () => {
     })
   })
 
-  test('treats profiles written before lifecycle status as active', async () => {
+  test('fails closed when a stored profile omits its lifecycle status', async () => {
     const items = createAggregateItems()
     const profile = items.get('PROFILE')
     if (!isRecord(profile)) throw new Error('Tenant profile fixture is unavailable.')
-    const legacyProfile = { ...profile }
-    delete legacyProfile.status
-    items.set('PROFILE', legacyProfile)
+    const profileWithoutStatus = { ...profile }
+    delete profileWithoutStatus.status
+    items.set('PROFILE', profileWithoutStatus)
     const client = new DynamoDbTenantAdministrationClient(
       'TenantAdministrationTable',
       createDocumentClient((command) => {
@@ -165,9 +165,10 @@ describe('DynamoDbTenantAdministrationClient', () => {
       }),
     )
 
-    const snapshot = await client.getSnapshot('workspace-1')
-
-    expect(snapshot.profile.status).toBe('active')
+    await expect(client.getSnapshot('workspace-1')).rejects.toMatchObject({
+      code: 'TenantAdministrationCorrupt',
+      status: 503,
+    })
   })
 
   test('fails closed when a serialized tenant payload crosses Workspace scope', async () => {

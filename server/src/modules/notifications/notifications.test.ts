@@ -18,11 +18,26 @@ test('Slack preferences preserve legacy opt-out and join the existing frequency 
   const preferences = parseStoredNotificationPreferences({
     itemType: 'preferences', ...DEFAULT_NOTIFICATION_PREFERENCES,
     channels: { inApp: true, email: false, push: false, slack: true }, frequency: 'hourly',
+    slackEnabledAt: '2026-09-26T10:00:00.000Z',
   })
   expect(preferences.channels.slack).toBe(true)
   expect(createNotificationDeliveryPlan(preferences, '2026-09-26T12:00:00.000Z')).toMatchObject({
     channels: ['inApp', 'slack'], deliveryAfter: '2026-09-26T13:00:00.000Z',
   })
+})
+
+test('rejects stored preferences without a version or a Slack activation time', () => {
+  const stored = {
+    itemType: 'preferences', ...DEFAULT_NOTIFICATION_PREFERENCES, version: 1,
+    channels: { inApp: true, email: false, push: false, slack: true },
+    slackEnabledAt: '2026-09-26T10:00:00.000Z',
+    updatedAt: '2026-09-26T11:00:00.000Z',
+  }
+  expect(parseStoredNotificationPreferences(stored, true).slackEnabledAt).toBe('2026-09-26T10:00:00.000Z')
+  for (const invalid of [{ ...stored, version: undefined }, { ...stored, slackEnabledAt: undefined }]) {
+    expect(() => parseStoredNotificationPreferences(invalid, true)).toThrow('Invalid stored notification preferences.')
+    expect(parseStoredNotificationPreferences(invalid)).toEqual(DEFAULT_NOTIFICATION_PREFERENCES)
+  }
 })
 
 function createNotificationRow(overrides: Record<string, unknown> = {}) {
@@ -129,7 +144,7 @@ describe('notification store', () => {
       createNotificationRow({ version: undefined }),
       createNotificationRow({
         itemType: 'migration',
-        notificationKey: 'not-a-retired-marker',
+        notificationKey: '!MIGRATION#STATUS-V1',
         recipientStatusKey: undefined,
         version: undefined,
       }),
@@ -201,7 +216,7 @@ describe('notification store', () => {
     }
   })
 
-  test('ignores retired notification migration marker rows', async () => {
+  test('ignores the preferences row while listing notifications', async () => {
     const recording = createClient(({ constructor, input }) => {
       if (constructor.name !== 'QueryCommand') {
         return {}
@@ -211,12 +226,6 @@ describe('notification store', () => {
       }
       return {
         Items: [
-          createNotificationRow({
-            notificationKey: '!MIGRATION#STATUS-V1',
-            itemType: 'migration',
-            recipientStatusKey: undefined,
-            version: undefined,
-          }),
           createNotificationRow({
             notificationKey: NOTIFICATION_PREFERENCES_KEY,
             itemType: 'preferences',
@@ -594,10 +603,6 @@ describe('notification store', () => {
       inboxState: 'read',
       recipientStatusKey: 'workspace-1#member@example.com#read',
     })
-    expect(recording.commands.some(({ input, name }) =>
-      name === 'GetCommand' &&
-      isRecord(input.Key) && input.Key.notificationKey === '!MIGRATION#STATUS-V1'
-    )).toBeFalse()
   })
 
   test('wakes an expired snooze back into the unread timeline', async () => {
@@ -980,8 +985,3 @@ describe('notification store', () => {
     })).rejects.toMatchObject({ code: 'InvalidNotificationId', status: 400 })
   })
 })
-
-/** Narrows an unknown command input value to a plain record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
