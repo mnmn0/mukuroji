@@ -1,10 +1,19 @@
 import type {
   TriageEntry,
-  TriageQueueCounts,
-  TriageQueueFilters,
+  TriageQueueSlaFilter,
   TriageRoutingCandidate,
-  TriageSlaFilter,
-} from '../api'
+} from '@mukuroji/contracts'
+import type { TriageQueueFilters } from './queryState'
+
+/** Queue metrics derived from the visible permission-filtered projection. */
+export type TriageQueueCounts = {
+  /** Number of pending visible entries. */
+  readonly pending: number
+  /** Number of visible entries without an owner. */
+  readonly unowned: number
+  /** Number of visible entries with a recorded SLA breach. */
+  readonly breached: number
+}
 
 /** Permission-safe presentation model used by the triage queue and detail pane. */
 export type TriageEntryView = {
@@ -17,7 +26,7 @@ export type TriageEntryView = {
   /** Human-readable source label without provider credentials. */
   readonly sourceLabel: string
   /** Current SLA state derived from server timestamps. */
-  readonly slaState: TriageSlaFilter
+  readonly slaState: TriageQueueSlaFilter
   /** First permitted routing candidate, if one exists. */
   readonly routingCandidate?: TriageRoutingCandidate
 }
@@ -141,7 +150,7 @@ export function resolvePrimaryRoutingCandidate(entry: TriageEntry) {
 export function resolveTriageSlaState(
   entry: TriageEntry,
   now: Date = new Date(),
-): TriageSlaFilter {
+): TriageQueueSlaFilter {
   if (entry.sla?.breachedAt) return 'breached'
   if (entry.state === 'snoozed' || !entry.sla) return 'paused'
 

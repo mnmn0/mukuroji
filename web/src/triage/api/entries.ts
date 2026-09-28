@@ -1,3 +1,9 @@
+import type {
+  TriageBulkActionInput,
+  TriageActionInput,
+  TriageEntryListInput,
+  UpdateTriageConfigurationInput,
+} from '@mukuroji/contracts'
 import {
   createMutationHeaders,
   type MutationRequestContext,
@@ -11,12 +17,6 @@ import {
   readTriageWorkItemSourcePage,
 } from './contractValidation'
 import { TriageApiError } from './errors'
-import type {
-  TriageBulkActionInput,
-  TriageActionInput,
-  TriageEntryListInput,
-  UpdateTriageConfigurationInput,
-} from './types'
 
 const triageApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
 const defaultTriageApiErrorMessage = 'Unable to complete the Team triage operation.'

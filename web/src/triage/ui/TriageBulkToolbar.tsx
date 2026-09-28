@@ -1,11 +1,11 @@
 import { useState, type FormEvent } from 'react'
-import { TRIAGE_BULK_ACTION_LIMIT } from '@mukuroji/contracts'
+import {
+  TRIAGE_BULK_ACTION_LIMIT,
+  type TriageBulkActionInput,
+  type TriageBulkItemResult,
+  type TriageBulkOperation,
+} from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type {
-  TriageBulkActionInput,
-  TriageBulkItemResult,
-  TriageBulkOperation,
-} from '../api'
 import { createTriageBulkInput, type TriageBulkActionMode } from '../model/triageBulk'
 import type { TriageEntryView } from '../model/triageView'
 

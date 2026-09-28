@@ -1,5 +1,4 @@
 import { useState, type FormEvent } from 'react'
-import type { MessageKey } from '../../shared/i18n/i18n'
 import type {
   TriageConfiguration,
   TriageBulkOperation,
@@ -9,7 +8,8 @@ import type {
   TriageSlaPolicy,
   TriageSourceKind,
   UpdateTriageConfigurationInput,
-} from '../api'
+} from '@mukuroji/contracts'
+import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createUniqueTriageConfigurationId,
   parseOwnerStrategy,

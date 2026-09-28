@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react'
-import type { TriageSourceKind } from '../api'
+import type { TriageSourceKind } from '@mukuroji/contracts'
 import {
   ChatIcon,
   FormIcon,

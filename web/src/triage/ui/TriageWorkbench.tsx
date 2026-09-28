@@ -4,24 +4,20 @@ import type {
   Customer,
   CustomerRequest,
   CustomFieldValue,
-  WorkItemConfiguration,
-} from '@mukuroji/contracts'
-import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
-import type { MessageKey } from '../../shared/i18n/i18n'
-import { ShieldIcon } from '../../shared/ui/icons'
-import type {
   TriageActionInput,
   TriageBulkActionInput,
   TriageBulkItemResult,
   TriageBulkOperation,
   TriageConfiguration,
   TriageEntry,
-  TriageQueueCounts,
-  TriageQueueFilters,
   UpdateTriageConfigurationInput,
-} from '../api'
-import type { TriageRouteView } from '../model/queryState'
-import type { TriageEntryView } from '../model/triageView'
+  WorkItemConfiguration,
+} from '@mukuroji/contracts'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import type { MessageKey } from '../../shared/i18n/i18n'
+import { ShieldIcon } from '../../shared/ui/icons'
+import type { TriageQueueFilters, TriageRouteView } from '../model/queryState'
+import type { TriageEntryView, TriageQueueCounts } from '../model/triageView'
 import { TriageBulkToolbar } from './TriageBulkToolbar'
 import { TriageEntryDetail } from './TriageEntryDetail'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
