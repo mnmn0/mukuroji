@@ -29,6 +29,7 @@ import {
 } from '../modules/request-intake'
 import {
   createTriageCapabilities,
+  TriageError,
 } from '../modules/triage'
 import type { AutomationEvent } from '../modules/automation'
 import { redactExpiredTriageEntry } from '../modules/triage/domain/triage-entry'
@@ -334,16 +335,16 @@ const requestForm = {
   },
 } satisfies RequestForm
 
-/** Stable instant used by legacy Request/Triage composition fixtures. */
+/** Stable instant used by Request/Triage composition fixtures. */
 const TRIAGE_NOW = '2026-08-09T00:00:00.000Z'
 
 /**
- * Creates a canonical Request submission for legacy action route tests.
+ * Creates a canonical Request submission for Request action route tests.
  *
  * @param overrides - Submission fields changed for one scenario.
  * @returns A complete Request submission.
  */
-function createLegacySubmission(
+function createRequestSubmission(
   overrides: Partial<RequestSubmission> = {},
 ): RequestSubmission {
   const routingTarget = {
@@ -412,7 +413,7 @@ function createLegacySubmission(
  * @param overrides - Entry fields changed for one scenario.
  * @returns A canonical pending Form Triage Entry.
  */
-function createLegacyTriageEntry(
+function createFormTriageEntry(
   submission: RequestSubmission,
   overrides: Partial<TriageEntry> = {},
 ): TriageEntry {
@@ -467,7 +468,7 @@ function createLegacyTriageEntry(
  * @param overrides - Focused operations changed by the test.
  * @returns A complete Triage composition client.
  */
-function createLegacyTriageClient(
+function createFormTriageClient(
   entry: TriageEntry,
   overrides: Readonly<Partial<TriageCompositionClient>> = {},
 ): TriageCompositionClient {
@@ -491,11 +492,11 @@ function createLegacyTriageClient(
 }
 
 /**
- * Creates the canonical Work Item capabilities required by a legacy duplicate action.
+ * Creates the canonical Work Item capabilities required by a Request duplicate action.
  *
  * @returns A focused Team Issues fake with duplicate-context transaction support.
  */
-function createLegacyDuplicateTeamIssuesClient() {
+function createDuplicateTargetTeamIssuesClient() {
   return createTeamIssuesFake({
     async getTeamIssueDetail() {
       return {
@@ -896,9 +897,9 @@ test('rejects deleting a Work Item Type referenced by a queued Request submissio
     ...currentConfiguration,
     workItemTypes: currentConfiguration.workItemTypes?.filter((type) => type.id !== 'incident'),
   }
-  const submission = createLegacySubmission({
+  const submission = createRequestSubmission({
     routingTarget: {
-      ...createLegacySubmission().routingTarget,
+      ...createRequestSubmission().routingTarget,
       workItemTypeId: 'incident',
     },
   })
@@ -1568,12 +1569,12 @@ test('commits a Request conversion pointer in the same transaction as its canoni
   })
 })
 
-test('does not copy expired Form answers during legacy conversion', async () => {
-  const submission = createLegacySubmission({
+test('does not copy expired Form answers during Request conversion', async () => {
+  const submission = createRequestSubmission({
     answers: { title: 'Expired source answer' },
   })
   const entry = redactExpiredTriageEntry(
-    createLegacyTriageEntry(submission, {
+    createFormTriageEntry(submission, {
       retention: { expiresAt: '2026-08-08T00:00:00.000Z' },
     }),
     TRIAGE_NOW,
@@ -1584,7 +1585,7 @@ test('does not copy expired Form answers during legacy conversion', async () => 
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
   })
   setTestAppDependencies({
-    triage: createLegacyTriageClient(entry),
+    triage: createFormTriageClient(entry),
     requestIntake: createRequestIntakeClient({
       getSubmission: async () => submission,
       completeConversion: async () => ({
@@ -1673,8 +1674,8 @@ test('does not copy expired Form answers during legacy conversion', async () => 
 })
 
 test('uses the selected Work Item Type initial status when routing status is not in its workflow', async () => {
-  const submission = createLegacySubmission()
-  const entry = createLegacyTriageEntry(submission)
+  const submission = createRequestSubmission()
+  const entry = createFormTriageEntry(submission)
   const configuration = createTestWorkItemConfiguration('team', 'core-team')
   configuration.workflows = [{
     id: 'incident-workflow',
@@ -1702,7 +1703,7 @@ test('uses the selected Work Item Type initial status when routing status is not
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
   })
   setTestAppDependencies({
-    triage: createLegacyTriageClient(entry),
+    triage: createFormTriageClient(entry),
     requestIntake: createRequestIntakeClient({
       getSubmission: async () => submission,
       completeConversion: async () => ({
@@ -1842,13 +1843,13 @@ test.each([
     expectedTriageState: 'declined',
     expectedTransactionItems: 3,
   },
-])('commits legacy Request $name and matching Triage transition together', async ({
+])('commits Request $name and matching Triage transition together', async ({
   body,
   expectedTriageState,
   expectedTransactionItems,
 }) => {
-  const submission = createLegacySubmission()
-  const entry = createLegacyTriageEntry(submission)
+  const submission = createRequestSubmission()
+  const entry = createFormTriageEntry(submission)
   let receivedAction: unknown
   let receivedTransactionItems:
     NonNullable<TransactWriteCommandInput['TransactItems']> | undefined
@@ -1857,7 +1858,7 @@ test.each([
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
   })
   setTestAppDependencies({
-    triage: createLegacyTriageClient(entry),
+    triage: createFormTriageClient(entry),
     requestIntake: createRequestIntakeClient({
       getSubmission: async () => submission,
       applyAction: async (
@@ -1943,9 +1944,9 @@ test.each([
   }
 })
 
-test('commits a legacy Request duplicate and canonical Triage source association together', async () => {
-  const submission = createLegacySubmission()
-  const duplicateTarget = createLegacySubmission({
+test('commits a Request duplicate and canonical Triage source association together', async () => {
+  const submission = createRequestSubmission()
+  const duplicateTarget = createRequestSubmission({
     id: 'request-duplicate-target',
     receiptId: 'receipt-duplicate-target',
     status: 'converted',
@@ -1956,7 +1957,7 @@ test('commits a legacy Request duplicate and canonical Triage source association
       projectId: 'refero',
     },
   })
-  const entry = createLegacyTriageEntry(submission)
+  const entry = createFormTriageEntry(submission)
   let receivedTransactionItems:
     NonNullable<TransactWriteCommandInput['TransactItems']> | undefined
   configureFakeProjectClients(true, {
@@ -1964,8 +1965,8 @@ test('commits a legacy Request duplicate and canonical Triage source association
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
   })
   setTestAppDependencies({
-    triage: createLegacyTriageClient(entry),
-    teamIssues: createLegacyDuplicateTeamIssuesClient(),
+    triage: createFormTriageClient(entry),
+    teamIssues: createDuplicateTargetTeamIssuesClient(),
     requestIntake: createRequestIntakeClient({
       getSubmission: async (_workspaceId, submissionId) =>
         submissionId === duplicateTarget.id ? duplicateTarget : submission,
@@ -2029,7 +2030,7 @@ test('commits a legacy Request duplicate and canonical Triage source association
   })
 })
 
-const legacyRequestReplayCases = [
+const requestActionReplayCases = [
   {
     name: 'assign',
     body: {
@@ -2072,12 +2073,12 @@ const legacyRequestReplayCases = [
   resultingTriageState: TriageEntry['state']
 }>
 
-test.each(legacyRequestReplayCases)(
-  'replays legacy Request $name after response loss without a second write',
+test.each(requestActionReplayCases)(
+  'replays Request $name after response loss without a second write',
   async ({ body, resultingTriageState }) => {
-    let currentSubmission = createLegacySubmission()
-    let currentEntry = createLegacyTriageEntry(currentSubmission)
-    const duplicateTarget = createLegacySubmission({
+    let currentSubmission = createRequestSubmission()
+    let currentEntry = createFormTriageEntry(currentSubmission)
+    const duplicateTarget = createRequestSubmission({
       id: 'request-duplicate-target',
       receiptId: 'receipt-duplicate-target',
       status: 'converted',
@@ -2095,7 +2096,7 @@ test.each(legacyRequestReplayCases)(
       projectAccesses: [{ projectId: 'refero', role: 'manager' }],
     })
     setTestAppDependencies({
-      triage: createLegacyTriageClient(currentEntry, {
+      triage: createFormTriageClient(currentEntry, {
         getEntry: async () => currentEntry,
         getEntryForMutation: async () => currentEntry,
         getActionReceipt: async (_workspaceId, _teamId, _entryId, idempotency) => {
@@ -2107,7 +2108,7 @@ test.each(legacyRequestReplayCases)(
           return { entry: currentEntry, replayed: true }
         },
       }),
-      teamIssues: createLegacyDuplicateTeamIssuesClient(),
+      teamIssues: createDuplicateTargetTeamIssuesClient(),
       requestIntake: createRequestIntakeClient({
         getSubmission: async (_workspaceId, submissionId) =>
           submissionId === duplicateTarget.id ? duplicateTarget : currentSubmission,
@@ -2153,9 +2154,9 @@ test.each(legacyRequestReplayCases)(
   },
 )
 
-test('rejects a legacy Request conversion that overrides its Triage owning Team', async () => {
-  const submission = createLegacySubmission()
-  const entry = createLegacyTriageEntry(submission)
+test('rejects a Request conversion that overrides its Triage owning Team', async () => {
+  const submission = createRequestSubmission()
+  const entry = createFormTriageEntry(submission)
   configureFakeProjectClients(true, {
     workspaceRole: 'owner',
     projectAccesses: [
@@ -2173,7 +2174,7 @@ test('rejects a legacy Request conversion that overrides its Triage owning Team'
     }],
   })
   setTestAppDependencies({
-    triage: createLegacyTriageClient(entry),
+    triage: createFormTriageClient(entry),
     requestIntake: createRequestIntakeClient({
       getSubmission: async () => submission,
     }),
@@ -2207,7 +2208,7 @@ test('rejects a legacy Request conversion that overrides its Triage owning Team'
 })
 
 test('returns the converted Request on a response-loss conversion retry without another write', async () => {
-  const converted = createLegacySubmission({
+  const converted = createRequestSubmission({
     status: 'converted',
     revision: 2,
     workItem: {
@@ -2216,8 +2217,8 @@ test('returns the converted Request on a response-loss conversion retry without 
       projectId: 'refero',
     },
   })
-  const pendingEntry = createLegacyTriageEntry(converted)
-  const entry = createLegacyTriageEntry(converted, {
+  const pendingEntry = createFormTriageEntry(converted)
+  const entry = createFormTriageEntry(converted, {
     state: 'accepted',
     revision: 2,
     canonicalWorkItem: converted.workItem,
@@ -2233,7 +2234,7 @@ test('returns the converted Request on a response-loss conversion retry without 
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
   })
   setTestAppDependencies({
-    triage: createLegacyTriageClient(entry, {
+    triage: createFormTriageClient(entry, {
       getEntryForMutation: async () => {
         triageReadCount += 1
         return entry
@@ -2271,13 +2272,76 @@ test('returns the converted Request on a response-loss conversion retry without 
       projectId: 'refero',
     },
   })
-  expect(triageReadCount).toBe(1)
+  expect(triageReadCount).toBe(0)
   expect(triageWriteCount).toBe(0)
 })
 
-test('binds legacy Request conversion idempotency to custom field overrides', async () => {
-  const submission = createLegacySubmission()
-  const entry = createLegacyTriageEntry(submission)
+test.each([
+  {
+    name: 'assign',
+    body: { action: 'assign', expectedRevision: 1, assigneeUserId: null },
+  },
+  {
+    name: 'convert',
+    body: { action: 'convert', expectedRevision: 1 },
+  },
+] satisfies ReadonlyArray<{ name: string; body: RequestSubmissionActionInput }>)(
+  'fails closed when a Request $name has no paired Triage entry',
+  async ({ body }) => {
+    const submission = createRequestSubmission()
+    let requestWriteCount = 0
+    let workItemCreateCount = 0
+    configureFakeProjectClients(true, {
+      workspaceRole: 'owner',
+      projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    })
+    setTestAppDependencies({
+      triage: createFormTriageClient(createFormTriageEntry(submission), {
+        getEntryForMutation: async () => {
+          throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
+        },
+      }),
+      requestIntake: createRequestIntakeClient({
+        getSubmission: async () => submission,
+        applyAction: async () => {
+          requestWriteCount += 1
+          return submission
+        },
+      }),
+      teamIssues: createTeamIssuesFake({
+        async createTeamIssue() {
+          workItemCreateCount += 1
+          throw new Error('A Request without its Triage entry must not create a Work Item.')
+        },
+      }),
+    })
+
+    const response = await app.request(
+      `/api/request-submissions/${submission.id}/actions`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `missing-triage-${body.action}`,
+        },
+        body: JSON.stringify(body),
+      },
+    )
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({
+      code: 'RequestTriageEntryMissing',
+      message: 'Stored request Triage entry is missing.',
+    })
+    expect(requestWriteCount).toBe(0)
+    expect(workItemCreateCount).toBe(0)
+  },
+)
+
+test('binds Request conversion idempotency to custom field overrides', async () => {
+  const submission = createRequestSubmission()
+  const entry = createFormTriageEntry(submission)
   let firstDigest: string | undefined
   let createCount = 0
   configureFakeProjectClients(true, {
@@ -2285,7 +2349,7 @@ test('binds legacy Request conversion idempotency to custom field overrides', as
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
   })
   setTestAppDependencies({
-    triage: createLegacyTriageClient(entry),
+    triage: createFormTriageClient(entry),
     requestIntake: createRequestIntakeClient({
       getSubmission: async () => submission,
       completeConversion: async () => ({

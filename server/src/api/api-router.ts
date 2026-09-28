@@ -6308,41 +6308,29 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         principal.directoryId,
         submissionId,
       )
-      const triageEntry = await readLegacyConversionTriageEntry(
-        principal.directoryId,
-        submission.routingTarget.teamId,
-        createFormTriageEntryId(submissionId),
+      const triageEntry = await readRequestTriageEntry(principal.directoryId, submission)
+      const triageContribution = await createRequestActionTriageContribution(
+        c,
+        principal,
+        submission,
+        triageEntry,
+        body,
       )
-      const triageContribution = triageEntry
-        ? await createLegacyRequestTriageContribution(
-            c,
-            principal,
-            submission,
-            triageEntry,
-            body,
-          )
-        : undefined
-      if (triageContribution?.replayed) return c.json(submission)
+      if (triageContribution.replayed) return c.json(submission)
       return c.json(await workItemDependencies.requestIntake.applyAction(
         principal.directoryId,
         submissionId,
         { id: principal.userKey },
         body,
-        triageContribution?.contribution.transactItems,
+        triageContribution.contribution.transactItems,
       ))
     }
     const submission = await workItemDependencies.requestIntake.getSubmission(principal.directoryId, submissionId)
     if (submission.status === 'converted' && submission.workItem) {
-      await repairConvertedRequestTriageProjection(c, principal, submission)
       return c.json(submission)
     }
-    const triageEntryId = createFormTriageEntryId(submissionId)
-    const triageEntry = await readLegacyConversionTriageEntry(
-      principal.directoryId,
-      submission.routingTarget.teamId,
-      triageEntryId,
-    )
-    const conversion = triageEntry?.retention.redactedAt !== undefined
+    const triageEntry = await readRequestTriageEntry(principal.directoryId, submission)
+    const conversion = triageEntry.retention.redactedAt !== undefined
       ? createRetentionSafeRequestWorkItemInput(submission, body)
       : createRequestWorkItemInput(submission, body)
     const teamContext = await requireTeamPermission(principal, conversion.target.teamId, 'member')
@@ -6357,14 +6345,14 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       conversion.target,
       body.target?.workflowStatusId === undefined ? undefined : body.workItemTypeId,
     )
-    if (triageEntry && conversion.target.teamId !== triageEntry.teamId) {
+    if (conversion.target.teamId !== triageEntry.teamId) {
       throw new RequestIntakeError(
         409,
         'RequestTriageTeamConflict',
         'A Triage-backed Request must be accepted in its current Team.',
       )
     }
-    if (triageEntry && triageEntry.state !== 'pending' && triageEntry.state !== 'needs-information' &&
+    if (triageEntry.state !== 'pending' && triageEntry.state !== 'needs-information' &&
       triageEntry.state !== 'snoozed') {
       throw new RequestIntakeError(
         409,
@@ -6372,46 +6360,36 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         'The corresponding Triage entry is already resolved.',
       )
     }
-    const triageAction: AcceptCreateTriageAction | undefined = triageEntry
-      ? {
-          action: 'accept',
-          mode: 'create',
-          expectedRevision: triageEntry.revision,
-          ...(conversion.input.workItemTypeId
-            ? { workItemTypeId: conversion.input.workItemTypeId }
-            : {}),
-          ...(body.customFieldValues === undefined
-            ? {}
-            : { customFieldValues: body.customFieldValues }),
-        }
-      : undefined
-    const triageIdempotency = triageAction
-      ? {
-          key: c.req.header('Idempotency-Key')?.trim() ||
-            `request-conversion:${submissionId}:${body.expectedRevision}`,
-          fingerprint: createTriageInputFingerprint({
-            workspaceId: principal.directoryId,
-            teamId: conversion.target.teamId,
-            entryId: triageEntryId,
-            action: triageAction,
-          }),
-        }
-      : undefined
-    const deterministicIssueId = triageEntry
-      ? createDeterministicTriageWorkItemId(
-          principal.directoryId,
-          conversion.target.teamId,
-          triageEntry.id,
-        )
-      : undefined
+    const triageAction: AcceptCreateTriageAction = {
+      action: 'accept',
+      mode: 'create',
+      expectedRevision: triageEntry.revision,
+      ...(conversion.input.workItemTypeId
+        ? { workItemTypeId: conversion.input.workItemTypeId }
+        : {}),
+      ...(body.customFieldValues === undefined
+        ? {}
+        : { customFieldValues: body.customFieldValues }),
+    }
+    const triageIdempotency = {
+      key: c.req.header('Idempotency-Key')?.trim() ||
+        `request-conversion:${submissionId}:${body.expectedRevision}`,
+      fingerprint: createTriageInputFingerprint({
+        workspaceId: principal.directoryId,
+        teamId: conversion.target.teamId,
+        entryId: triageEntry.id,
+        action: triageAction,
+      }),
+    }
+    const deterministicIssueId = createDeterministicTriageWorkItemId(
+      principal.directoryId,
+      conversion.target.teamId,
+      triageEntry.id,
+    )
     const normalized = normalizeTeamIssueInput({
       ...conversion.input,
-      ...(deterministicIssueId && triageIdempotency
-        ? {
-            idempotentIssueId: deterministicIssueId,
-            idempotentRequestDigest: triageIdempotency.fingerprint,
-          }
-        : {}),
+      idempotentIssueId: deterministicIssueId,
+      idempotentRequestDigest: triageIdempotency.fingerprint,
     }, teamContext.team)
     const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
       principal.directoryId,
@@ -6433,15 +6411,13 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       resolvedConfiguration,
       { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
     )
-    const authorizationConditionChecks = triageEntry
-      ? await createTriageProjectAuthorizationConditionChecks(
-          principal,
-          teamContext,
-          principal.directoryId,
-          conversion.target.teamId,
-          conversion.target.projectId,
-        )
-      : []
+    const authorizationConditionChecks = await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      conversion.target.teamId,
+      conversion.target.projectId,
+    )
     const guardedConfigured = authorizationConditionChecks.length === 0
       ? configured
       : {
@@ -6455,30 +6431,25 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       principal.directoryId,
       readTeamIssueAssigneeUserId(guardedConfigured),
     )
-    const triageOccurredAt = triageEntry && triageAction && triageIdempotency && deterministicIssueId
-      ? new Date().toISOString()
-      : undefined
-    const triageAcceptance = triageEntry && triageAction && triageIdempotency &&
-      deterministicIssueId && triageOccurredAt
-      ? createTriageAcceptanceTransactionItems({
-          tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
-          entry: triageEntry,
-          action: triageAction,
-          canonicalWorkItem: {
-            teamId: conversion.target.teamId,
-            workItemId: deterministicIssueId,
-            ...(typeof configured.workItemTypeId === 'string'
-              ? { workItemTypeId: configured.workItemTypeId }
-              : {}),
-            ...(conversion.target.projectId
-              ? { projectId: conversion.target.projectId }
-              : {}),
-          },
-          actorId: principal.userKey,
-          now: triageOccurredAt,
-          idempotency: triageIdempotency,
-        })
-      : undefined
+    const triageOccurredAt = new Date().toISOString()
+    const triageAcceptance = createTriageAcceptanceTransactionItems({
+      tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+      entry: triageEntry,
+      action: triageAction,
+      canonicalWorkItem: {
+        teamId: conversion.target.teamId,
+        workItemId: deterministicIssueId,
+        ...(typeof configured.workItemTypeId === 'string'
+          ? { workItemTypeId: configured.workItemTypeId }
+          : {}),
+        ...(conversion.target.projectId
+          ? { projectId: conversion.target.projectId }
+          : {}),
+      },
+      actorId: principal.userKey,
+      now: triageOccurredAt,
+      idempotency: triageIdempotency,
+    })
     const created = await hydrateCreateTeamIssueResponse(await workItemDependencies.teamIssues.createTeamIssue(
       principal.directoryId,
       conversion.target.teamId,
@@ -6498,13 +6469,11 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         submissionId,
         events: submission.events,
       },
-      triageAcceptance && triageOccurredAt
-        ? {
-            entryId: triageAcceptance.entry.id,
-            occurredAt: triageOccurredAt,
-            transactItems: triageAcceptance.transactItems,
-          }
-        : undefined,
+      {
+        entryId: triageAcceptance.entry.id,
+        occurredAt: triageOccurredAt,
+        transactItems: triageAcceptance.transactItems,
+      },
     ))
     await projectWorkItemSearchDocumentBestEffort(
       principal.directoryId,
@@ -25121,99 +25090,42 @@ async function requestTriageInformationFromSource(
 }
 
 /**
- * Reads the deterministic Form Triage Entry when converting through the legacy Request route.
+ * Strongly reads the deterministic Form Triage Entry paired with a Request submission.
  *
- * Submissions created before Team Triage existed retain the previous conversion behavior;
- * every newer submission contributes its Triage acceptance to the Work Item transaction.
+ * Every submission commits this entry in its creation transaction, the entry stays in the
+ * submission's routing Team, and retention redacts entries instead of deleting them. A
+ * missing entry is therefore a data-integrity failure rather than a fallback case.
  *
  * @param workspaceId - Owning Workspace identifier.
- * @param teamId - Work Item destination Team identifier.
- * @param entryId - Deterministic Form Triage Entry identifier.
- * @returns The canonical entry, or undefined for a pre-Triage legacy submission.
+ * @param submission - Strongly read Request submission that owns the entry.
+ * @returns The canonical entry used to build the combined Request and Triage transaction.
+ * @throws RequestIntakeError when the paired Triage Entry is missing.
  */
-async function readLegacyConversionTriageEntry(
+async function readRequestTriageEntry(
   workspaceId: string,
-  teamId: string,
-  entryId: string,
-) {
+  submission: RequestSubmission,
+): Promise<TriageEntry> {
   try {
     return await workItemDependencies.triage.getEntryForMutation(
       workspaceId,
-      teamId,
-      entryId,
+      submission.routingTarget.teamId,
+      createFormTriageEntryId(submission.id),
     )
   } catch (error) {
-    if (error instanceof TriageError && error.status === 404) return undefined
+    if (error instanceof TriageError && error.status === 404) {
+      throw new RequestIntakeError(
+        503,
+        'RequestTriageEntryMissing',
+        'Stored request Triage entry is missing.',
+        { cause: error },
+      )
+    }
     throw error
   }
 }
 
-/**
- * Repairs a legacy response-loss window where the Request pointer committed before Triage.
- *
- * Current combined writes cannot enter this state, but an older converted Request may be
- * retried after deployment. Same-Team pointers are linked idempotently; cross-Team legacy
- * pointers remain readable without fabricating a new association.
- *
- * @param context - Current Request conversion retry context.
- * @param principal - Authenticated Workspace administrator.
- * @param submission - Already converted Request submission.
- */
-async function repairConvertedRequestTriageProjection(
-  context: Context,
-  principal: WorkspacePrincipal,
-  submission: RequestSubmission,
-): Promise<void> {
-  if (!submission.workItem || submission.workItem.teamId !== submission.routingTarget.teamId) {
-    return
-  }
-  const entry = await readLegacyConversionTriageEntry(
-    principal.directoryId,
-    submission.routingTarget.teamId,
-    createFormTriageEntryId(submission.id),
-  )
-  if (!entry || entry.state === 'accepted' || entry.state === 'duplicate') return
-  if (entry.state === 'declined') {
-    throw new RequestIntakeError(
-      409,
-      'RequestTriageStateConflict',
-      'The corresponding Triage entry was declined.',
-    )
-  }
-  const action: TriageActionInput = {
-    action: 'accept',
-    mode: 'link',
-    expectedRevision: entry.revision,
-    workItemId: submission.workItem.workItemId,
-  }
-  const idempotency: TriageIdempotency = {
-    key: context.req.header('Idempotency-Key')?.trim() ||
-      `request-conversion-repair:${submission.id}:${submission.workItem.workItemId}`,
-    fingerprint: createTriageInputFingerprint({
-      workspaceId: principal.directoryId,
-      teamId: entry.teamId,
-      entryId: entry.id,
-      action,
-    }),
-  }
-  await workItemDependencies.triage.applyAction(
-    principal.directoryId,
-    entry.teamId,
-    entry.id,
-    { id: principal.userKey },
-    action,
-    idempotency,
-    createApiMutationContext(
-      context,
-      principal,
-      action,
-      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
-    ),
-  )
-}
-
-/** Atomic Triage contribution paired with one legacy Request action. */
-type LegacyRequestTriageContribution =
+/** Atomic Triage contribution paired with one non-conversion Request action. */
+type RequestActionTriageContribution =
   | {
       /** Indicates that the combined mutation was already committed. */
       replayed: true
@@ -25226,22 +25138,22 @@ type LegacyRequestTriageContribution =
     }
 
 /**
- * Maps one legacy Request action to the canonical Form Triage state atomically.
+ * Maps one non-conversion Request action to the canonical Form Triage state atomically.
  *
  * @param context - Current Request action context and idempotency header.
  * @param principal - Authenticated Workspace administrator.
  * @param submission - Strongly read Request submission.
  * @param entry - Strongly read deterministic Form Triage entry.
- * @param input - Non-conversion legacy Request action.
+ * @param input - Non-conversion Request action submitted through the Request route.
  * @returns A replay marker or unexecuted Triage transaction contribution.
  */
-async function createLegacyRequestTriageContribution(
+async function createRequestActionTriageContribution(
   context: Context,
   principal: WorkspacePrincipal,
   submission: RequestSubmission,
   entry: TriageEntry,
   input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
-): Promise<LegacyRequestTriageContribution> {
+): Promise<RequestActionTriageContribution> {
   let action: TriageActionInput
   let duplicateContext: TriageDuplicateContextTransactionContribution | undefined
   let duplicateMergedAt: string | undefined
@@ -25426,7 +25338,7 @@ function createDeterministicTriageWorkItemId(
 }
 
 /**
- * Creates a retention-safe legacy conversion input without reading source answers.
+ * Creates a retention-safe Request conversion input without reading source answers.
  *
  * Routing metadata and explicit operator overrides remain available, but mapped title,
  * description, and custom fields cannot be copied after the source retention boundary.

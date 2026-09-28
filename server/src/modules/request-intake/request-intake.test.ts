@@ -25,6 +25,7 @@ import {
   type RequestLinkResolution,
   type RequestIntakeTenantAvailability,
 } from './request-intake'
+import { createTriageCapabilities } from '../triage'
 
 const now = new Date('2026-07-16T09:00:00.000Z')
 const sessionToken = 'S'.repeat(43)
@@ -285,6 +286,80 @@ function createStoredSubmissionEventRow(
     recordKey: `SUBMISSION_EVENT#${submissionId}#${event.createdAt}#${event.id}`,
     submissionId,
     ...event,
+  }
+}
+
+/**
+ * Creates the stored Form Triage Entry row committed with the `req-1` submission fixture.
+ *
+ * @param state - Waiting state of the entry when the requester reply arrives.
+ * @returns A DynamoDB row that decodes to the submission's canonical Triage Entry.
+ */
+function createStoredFormTriageEntryRow(
+  state: Extract<TriageEntry['state'], 'pending' | 'needs-information'>,
+) {
+  const permission = {
+    visibility: 'full',
+    canReply: true,
+    guestVisible: false,
+    checkedAt: '2026-07-16T08:30:00.000Z',
+  } satisfies TriageEntry['permission']
+  const entry = {
+    schemaVersion: 1,
+    id: 'triage_req-1',
+    workspaceId: 'workspace-1',
+    source: {
+      kind: 'form',
+      sourceId: 'req-1',
+      formId: 'form-1',
+      submissionId: 'req-1',
+    },
+    sourcePreview: {
+      title: 'Support request',
+      body: 'Alpha outage',
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: false,
+    },
+    requester: {
+      displayName: 'requester@example.com',
+      email: 'requester@example.com',
+      guest: true,
+    },
+    receivedAt: '2026-07-16T08:30:00.000Z',
+    lastActivityAt: '2026-07-16T08:30:00.000Z',
+    state,
+    routing: {
+      reason: 'Published Request Form routing selected this destination.',
+      candidates: [],
+    },
+    teamId: 'team-core',
+    projectId: 'project-urgent',
+    permission,
+    retention: { expiresAt: '2027-07-16T08:30:00.000Z' },
+    capabilities: createTriageCapabilities({ state, permission }),
+    events: state === 'needs-information'
+      ? [{
+          id: 'information-requested-1',
+          type: 'information-requested',
+          actorId: 'triager@example.com',
+          summary: 'More information was requested.',
+          createdAt: '2026-07-16T08:45:00.000Z',
+        }]
+      : [],
+    revision: state === 'needs-information' ? 2 : 1,
+    createdAt: '2026-07-16T08:30:00.000Z',
+    updatedAt: state === 'needs-information'
+      ? '2026-07-16T08:45:00.000Z'
+      : '2026-07-16T08:30:00.000Z',
+  } satisfies TriageEntry
+  return {
+    entryType: 'triage-entry',
+    scopeKey: 'WORKSPACE#workspace-1',
+    recordKey: 'TRIAGE#triage_req-1',
+    entry,
   }
 }
 
@@ -2378,6 +2453,7 @@ test('hashes requester thread tokens and appends a web reply to an open request'
     .digest('hex')
   let stored = createStoredSubmission({ status: 'needs-more-info' })
   let replyReceipt: Record<string, unknown> | undefined
+  let triageUpdate: Record<string, unknown> | undefined
   const commands: FakeCommand[] = []
   const client = createClient(createDocumentClient((command) => {
     commands.push(command)
@@ -2398,8 +2474,13 @@ test('hashes requester thread tokens and appends a web reply to an open request'
       return { Attributes: { count: 1 } }
     }
     if (key?.recordKey === 'SUBMISSION#req-1') return { Item: stored }
-    if (key?.recordKey === 'TRIAGE#triage_req-1') return {}
-    const items = command.input.TransactItems as Array<{ Put?: { Item?: Record<string, unknown> } }> | undefined
+    if (key?.recordKey === 'TRIAGE#triage_req-1') {
+      return { Item: createStoredFormTriageEntryRow('needs-information') }
+    }
+    const items = command.input.TransactItems as Array<{
+      Put?: { Item?: Record<string, unknown> }
+      Update?: { ExpressionAttributeValues?: Record<string, unknown> }
+    }> | undefined
     if (items) {
       stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
       expect(items[1]?.Put?.Item).toMatchObject({
@@ -2407,7 +2488,8 @@ test('hashes requester thread tokens and appends a web reply to an open request'
         submissionId: 'req-1',
         type: 'requester-replied',
       })
-      replyReceipt = items[2]?.Put?.Item
+      triageUpdate = items[2]?.Update?.ExpressionAttributeValues
+      replyReceipt = items.at(-1)?.Put?.Item
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
@@ -2420,6 +2502,13 @@ test('hashes requester thread tokens and appends a web reply to an open request'
   )
   expect(receipt).toMatchObject({ receivedAt: now.toISOString() })
   expect(stored).toMatchObject({ status: 'triaging', revision: 2 })
+  expect(triageUpdate?.[':entry']).toMatchObject({
+    id: 'triage_req-1',
+    state: 'pending',
+    revision: 3,
+    sourcePreview: { commentCount: 1 },
+  })
+  expect(replyReceipt).toMatchObject({ entryType: 'reply-receipt', recordKey: 'RECEIPT' })
   expect((stored.messages as Array<Record<string, unknown>>).at(-1)).toMatchObject({
     direction: 'requester',
     source: 'web',
@@ -2465,7 +2554,9 @@ test('binds email replies to the original sender and deduplicates Message-ID', a
     }
     if (key?.scopeKey?.startsWith('EMAIL#')) return emailReceipt ? { Item: emailReceipt } : {}
     if (key?.recordKey === 'SUBMISSION#req-1') return { Item: stored }
-    if (key?.recordKey === 'TRIAGE#triage_req-1') return {}
+    if (key?.recordKey === 'TRIAGE#triage_req-1') {
+      return { Item: createStoredFormTriageEntryRow('needs-information') }
+    }
     const items = command.input.TransactItems as Array<{ Put?: { Item?: Record<string, unknown> } }> | undefined
     if (items) {
       transactionCount += 1
@@ -2475,7 +2566,7 @@ test('binds email replies to the original sender and deduplicates Message-ID', a
         submissionId: 'req-1',
         type: 'requester-replied',
       })
-      emailReceipt = items[2]!.Put!.Item
+      emailReceipt = items.at(-1)?.Put?.Item
       return {}
     }
     throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
@@ -2502,6 +2593,54 @@ test('binds email replies to the original sender and deduplicates Message-ID', a
     source: 'email',
     body: 'The order number is 12345.',
   })
+})
+
+test('fails closed without writing a requester reply when the Form Triage entry is missing', async () => {
+  const threadDigest = createHmac('sha256', tokenHashSecret)
+    .update(`thread\0${threadToken}`)
+    .digest('hex')
+  const stored = createStoredSubmission({ status: 'needs-more-info' })
+  let transactionCount = 0
+  const client = createClient(createDocumentClient((command) => {
+    const key = command.input.Key as { scopeKey?: string; recordKey?: string } | undefined
+    if (key?.scopeKey === `THREAD#${threadDigest}`) {
+      return { Item: {
+        entryType: 'thread-lookup',
+        scopeKey: key.scopeKey,
+        recordKey: 'LOOKUP',
+        workspaceId: 'workspace-1',
+        submissionId: 'req-1',
+        expiresAt: 1_815_897_600,
+        requesterEmail: 'requester@example.com',
+      } }
+    }
+    if (key?.scopeKey?.startsWith('REPLY#') || key?.scopeKey?.startsWith('EMAIL#')) return {}
+    if (command.input.UpdateExpression && command.input.ReturnValues === 'UPDATED_NEW') {
+      return { Attributes: { count: 1 } }
+    }
+    if (key?.recordKey === 'SUBMISSION#req-1') return { Item: stored }
+    if (key?.recordKey === 'TRIAGE#triage_req-1') return {}
+    if (command.input.TransactItems) {
+      transactionCount += 1
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+
+  await expect(client.replyToThread(
+    threadToken,
+    { body: 'The order number is 12345.' },
+    { clientKey: 'client-1', idempotencyKey: 'reply-attempt-1' },
+  )).rejects.toMatchObject({ status: 503, code: 'RequestTriageEntryMissing' })
+  await expect(client.ingestEmail({
+    threadToken,
+    messageId: '<message-1@example.com>',
+    fromAddress: 'requester@example.com',
+    subject: 'Re: more information',
+    textBody: 'The order number is 12345.',
+    receivedAt: now.toISOString(),
+  })).rejects.toMatchObject({ status: 503, code: 'RequestTriageEntryMissing' })
+  expect(transactionCount).toBe(0)
 })
 
 test('appends signed email activity to terminal Form and Triage records without reopening them', async () => {
