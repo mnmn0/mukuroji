@@ -34022,18 +34022,6 @@ async function prepareFocusPolicyMutation(
     targetIdentity,
     { policy: createFocusPolicyRecoveryEvidence(preview) },
   )
-  const legacyMutationIdentity = createFocusMutationRecoveryIdentity(
-    request,
-    'policy',
-    targetIdentity,
-    {
-      policy: createFocusPolicyRecoveryEvidence(preview),
-      effectivePolicies: effectivePolicies.map((policy) => ({
-        teamId: policy.teamId,
-        fingerprint: policy.fingerprint,
-      })),
-    },
-  )
   const storedPolicy = target.type === 'user'
     ? state.userPolicy
     : state.teamPolicies.find((policy) =>
@@ -34043,8 +34031,7 @@ async function prepareFocusPolicyMutation(
     ? state.userPolicyMutationIdentity
     : state.teamPolicyMutationIdentities[target.teamId]
   const committedPolicy =
-    (storedMutationIdentity === mutationIdentity ||
-      storedMutationIdentity === legacyMutationIdentity) &&
+    storedMutationIdentity === mutationIdentity &&
     storedPolicy !== undefined &&
     stableDigestStringify(createFocusPolicyRecoveryEvidence(storedPolicy)) ===
       stableDigestStringify(createFocusPolicyRecoveryEvidence(preview))
