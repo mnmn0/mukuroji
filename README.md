@@ -189,8 +189,7 @@ Floci 再起動で自動的に再有効化されることはありません。
 
 ready hook は canonical source row と current schema の Workspace Search table を作ります。初期の Team、
 Project、Work Item を current search projection へ投入するときは、generated environment を読み込み、
-bounded で再実行可能な canonical backfill を source ごとに実行します。migration plan、scan evidence、
-target snapshot は作成しません。
+bounded で再実行可能な canonical backfill を source ごとに実行します。
 
 ```sh
 set -a

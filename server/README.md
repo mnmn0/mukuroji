@@ -317,55 +317,11 @@ Work Item は Team partition 100件、1 partition/合計10,000件、対象Work I
 Metric定義、timezone、archive、snapshot、scheduleの詳細は
 [`docs/analytics.md`](../docs/analytics.md) を参照してください。
 
-## Team Issue comment backfill
-
-Team Issue `commented` events are copied to the canonical Collaboration table
-with their stable event IDs. The resumable runner writes a checkpoint after
-each DynamoDB scan page and publishes one completion marker per observed
-workspace only after the source scan reaches its end. An unfiltered run also
-publishes an environment-wide marker for workspaces with no legacy comments.
-Until an applicable marker exists, the API keeps a bounded, read-only legacy
-comment fallback; after the marker it serves canonical comments only.
-
-Preview and run the migration locally with:
-
-```sh
-AWS_ENDPOINT_URL=http://localhost:4566 \
-MUKUROJI_LOCAL_AWS_RUNTIME=floci \
-bun run team-issue-comments:backfill -- --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 \
-MUKUROJI_LOCAL_AWS_RUNTIME=floci \
-bun run team-issue-comments:backfill -- \
-  --checkpoint /tmp/mukuroji-team-issue-comments-v2.json
-```
-
-AWS runs require `TEAM_ISSUE_EVENTS_TABLE_NAME`, `COLLABORATION_TABLE_NAME`,
-`WORK_ITEMS_TABLE_NAME`, `AUDIT_EVENTS_TABLE_NAME`, and
-`WORKSPACE_SEARCH_TABLE_NAME`. The write run projects each current canonical
-comment into Workspace Search and records projected/deleted document counts in
-the checkpoint and completion audit. The checkpoint is owner-only because its continuation key can contain source identifiers. Reusing
-a checkpoint against different tables, region, account, or workspace filters is
-rejected. The write run is idempotent; malformed scope or conflicting canonical
-rows stop the migration without publishing a completion marker. If a legacy
-comment's parent Work Item is strongly confirmed to be deleted, the runner
-writes a scoped reconciliation receipt containing the source fingerprint and
-continues without creating an orphaned canonical comment. The runner obtains
-the account from STS `GetCallerIdentity`; an optional
-`AWS_ACCOUNT_ID` is treated only as an expected value and must match the
-authenticated account. An optional `MUKUROJI_BACKFILL_OPERATOR_ID` is retained as
-an operator label, while AWS audit records use the authenticated STS caller ARN;
-local runs use the `local:backfill` sentinel. Canonical repairs and marker
-publication use the deployment's configured DynamoDB document client.
-Use repeated `--workspace-id <id>` options to scan and mark a selected set of
-workspaces before processing the rest of the environment. An unfiltered run
-marks the environment-wide scope after the complete source scan, including
-workspaces with no matching legacy comments.
-
 ## Workspace search canonical projection bootstrap
 
 Workspace search は `WorkspaceSearchTable` の `workspaceId` / `recordKey` に、検索文書、
-saved view、ユーザーごとの view preference を保存します。初期データは migration planner を介さず、
-current Team、Project、canonical Work Item、comment、Document から canonical projection を直接作成します。
+saved view、ユーザーごとの view preference を保存します。初期データは current Team、Project、
+canonical Work Item、comment、Document から canonical projection を直接作成します。
 まず dry-run で mapping と skip 件数を確認します。
 
 ```sh
@@ -398,9 +354,7 @@ Soft delete 済み comment と archived Team/Project は、再実行時に対応
 同じ `issueId` が複数 Team に存在しても、Work Item と comment の entity ID は Team scope を
 含むため混在しません。
 
-この bootstrap/backfill は source/target scan evidence、planning artifact、sealed authority を
-生成または参照しません。初期作成後は current application event の通常経路が同じ canonical key を
-更新します。
+初期作成後は current application event の通常経路が同じ canonical key を更新します。
 
 `search:backfill` は production migration / cutover の代替ではありません。lease、durable
 checkpoint、lossless preimage journal、独立した verify、rollback を持たないため、新しい schema や
