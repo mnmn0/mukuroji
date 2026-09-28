@@ -8,8 +8,7 @@
     "dist/**",
     "storybook-static/**",
     "web/dist/**",
-    "web/storybook-static/**",
-    "web/src/work-items/index.ts"
+    "web/storybook-static/**"
   ],
   "workspaces": {
     ".": {
