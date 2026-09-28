@@ -2,28 +2,9 @@ import type {
   CreateOAuthAppInput,
   OAuthAppOneTimeSecretOutput,
   OAuthAppSummary,
-  OAuthGrantType,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
-
-/**
- * Compatibility alias for the supported OAuth grant type.
- */
-export type DeveloperOAuthGrantType = Extract<
-  OAuthGrantType,
-  'client_credentials'
->
-
-/**
- * Compatibility alias for the canonical OAuth-app creation contract.
- */
-export type CreateDeveloperOAuthAppInput = CreateOAuthAppInput
-
-/**
- * Compatibility alias for the canonical one-time OAuth response.
- */
-export type IssuedOAuthClientSecret = OAuthAppOneTimeSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
@@ -44,10 +25,10 @@ const defaultDeveloperApiErrorMessage =
  */
 export function createDeveloperOAuthApp(
   accessToken: string,
-  input: CreateDeveloperOAuthAppInput,
+  input: CreateOAuthAppInput,
   mutationContext: MutationRequestContext,
 ) {
-  return requestJson<IssuedOAuthClientSecret>(
+  return requestJson<OAuthAppOneTimeSecretOutput>(
     '/developer/oauth-apps',
     accessToken,
     createJsonMutation('POST', input, mutationContext),
@@ -67,7 +48,7 @@ export function rotateDeveloperOAuthApp(
   oauthAppId: string,
   mutationContext: MutationRequestContext,
 ) {
-  return requestJson<IssuedOAuthClientSecret>(
+  return requestJson<OAuthAppOneTimeSecretOutput>(
     `/developer/oauth-apps/${encodeURIComponent(oauthAppId)}/rotate-secret`,
     accessToken,
     createJsonMutation('POST', undefined, mutationContext),

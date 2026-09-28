@@ -7,28 +7,8 @@ import type {
   WorkItem,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type { DeveloperExportFormat } from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
-
-/**
- * Compatibility alias for an import field mapping.
- */
-export type DeveloperImportFieldMapping =
-  ImportJob['mapping'][number]
-
-/**
- * Compatibility alias for the import source format.
- */
-export type DeveloperImportFormat = ImportJob['format']
-
-/**
- * Compatibility alias for the import dry-run contract.
- */
-export type DryRunDeveloperImportInput = CreateImportDryRunInput
-
-/**
- * Compatibility export format accepted by the Work Item export endpoint.
- */
-export type DeveloperExportFormat = 'csv' | 'json'
 
 /**
  * Work Item export response と download metadata です。
@@ -63,7 +43,7 @@ const defaultDeveloperApiErrorMessage =
  */
 export function dryRunDeveloperImport(
   accessToken: string,
-  input: DryRunDeveloperImportInput,
+  input: CreateImportDryRunInput,
   mutationContext: MutationRequestContext,
 ) {
   return requestJson<ImportDryRunReport>(

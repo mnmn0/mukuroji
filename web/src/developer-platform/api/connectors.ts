@@ -5,21 +5,8 @@ import type {
   CreateConnectorInstallationInput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type { ConnectDeveloperConnectorInput } from '../model/connectors'
 import { DeveloperPlatformApiError } from './errors'
-
-/**
- * Compatibility alias for connector provider identifiers.
- */
-export type DeveloperConnectorProvider = ConnectorProvider
-
-/**
- * Compatibility connector input with the provider supplied as a path argument.
- */
-export type ConnectDeveloperConnectorInput =
-  Omit<CreateConnectorInstallationInput, 'provider' | 'returnUrl'> & {
-    /** Optional application-relative return URL after authorization. */
-    returnUrl?: string
-  }
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
@@ -41,7 +28,7 @@ const defaultDeveloperApiErrorMessage =
  */
 export function connectDeveloperConnector(
   accessToken: string,
-  provider: DeveloperConnectorProvider,
+  provider: ConnectorProvider,
   input: ConnectDeveloperConnectorInput,
   mutationContext: MutationRequestContext,
 ) {

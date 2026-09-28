@@ -3,12 +3,12 @@ import type {
   ImportDryRunReport,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
+import type { DeveloperPlatformResources } from './api'
 import type {
-  DeveloperPlatformResources,
   IssuedApiKeySecret,
   IssuedOAuthClientSecret,
-  IssuedWebhookSigningSecret,
-} from './api'
+} from './model/credentials'
+import type { IssuedWebhookSigningSecret } from './model/webhooks'
 import type { DeveloperPlatformLabels } from './ui/DeveloperPlatformView'
 
 const connectorReauthorizationProblem = {

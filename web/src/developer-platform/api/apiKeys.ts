@@ -6,16 +6,6 @@ import type {
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
 
-/**
- * Compatibility alias for the canonical API-key creation contract.
- */
-export type CreateDeveloperApiKeyInput = CreateApiKeyInput
-
-/**
- * Compatibility alias for the canonical one-time API-key response.
- */
-export type IssuedApiKeySecret = ApiKeyOneTimeSecretOutput
-
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
     import.meta.env.VITE_API_BASE_URL ??
@@ -35,10 +25,10 @@ const defaultDeveloperApiErrorMessage =
  */
 export function createDeveloperApiKey(
   accessToken: string,
-  input: CreateDeveloperApiKeyInput,
+  input: CreateApiKeyInput,
   mutationContext: MutationRequestContext,
 ) {
-  return requestJson<IssuedApiKeySecret>(
+  return requestJson<ApiKeyOneTimeSecretOutput>(
     '/developer/api-keys',
     accessToken,
     createJsonMutation('POST', input, mutationContext),
@@ -58,7 +48,7 @@ export function rotateDeveloperApiKey(
   apiKeyId: string,
   mutationContext: MutationRequestContext,
 ) {
-  return requestJson<IssuedApiKeySecret>(
+  return requestJson<ApiKeyOneTimeSecretOutput>(
     `/developer/api-keys/${encodeURIComponent(apiKeyId)}/rotate`,
     accessToken,
     createJsonMutation('POST', undefined, mutationContext),
