@@ -1,10 +1,10 @@
 import type {
+  CanonicalWorkItem,
   CreateImportDryRunInput,
   CreateImportJobInput,
   CursorPage,
   ImportDryRunReport,
   ImportJob,
-  WorkItem,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { DeveloperExportFormat } from '../model/transfers'
@@ -84,7 +84,7 @@ export async function exportDeveloperWorkItems(
   accessToken: string,
   format: DeveloperExportFormat,
 ) {
-  const workItems: WorkItem[] = []
+  const workItems: CanonicalWorkItem[] = []
   const cursors = new Set<string>()
   let cursor: string | undefined
 
@@ -125,7 +125,7 @@ async function requestDeveloperExportPage(
 ) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await requestJson<CursorPage<WorkItem>>(
+      return await requestJson<CursorPage<CanonicalWorkItem>>(
         `/developer/exports?${query.toString()}`,
         accessToken,
       )
@@ -149,7 +149,7 @@ function waitForDeveloperExportRetry(seconds: number) {
 
 function createDeveloperExportFile(
   format: DeveloperExportFormat,
-  workItems: readonly WorkItem[],
+  workItems: readonly CanonicalWorkItem[],
 ): DeveloperExportFile {
   const suffix = new Date().toISOString().slice(0, 10)
   if (format === 'json') {
@@ -216,7 +216,7 @@ function createDeveloperExportFile(
   }
 }
 
-function toExportWorkItem(workItem: WorkItem) {
+function toExportWorkItem(workItem: CanonicalWorkItem) {
   return {
     id: workItem.id,
     teamId: workItem.teamId,

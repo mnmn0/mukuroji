@@ -1,7 +1,7 @@
 import type {
+  CanonicalWorkItem,
   CreateWorkItemInput,
   CustomFieldValue,
-  WorkItem,
   WorkItemPriority,
   WorkItemSchedule,
 } from '@mukuroji/contracts'
@@ -147,7 +147,7 @@ export function previewWorkItemImport(
 /** Permission-filtered Work Items を CSV または JSON download payload に変換します。 */
 export function createWorkItemExport(
   format: WorkItemTransferFormat,
-  workItems: readonly WorkItem[],
+  workItems: readonly CanonicalWorkItem[],
   exportedAt = new Date(),
 ): WorkItemTransferExport {
   const suffix = exportedAt.toISOString().slice(0, 10)
@@ -201,7 +201,7 @@ export function createWorkItemExport(
   }
 }
 
-function toExportWorkItem(workItem: WorkItem) {
+function toExportWorkItem(workItem: CanonicalWorkItem) {
   return {
     id: workItem.id,
     teamId: workItem.teamId,

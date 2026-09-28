@@ -312,11 +312,6 @@ export type ConfirmedWorkItemSchedule = {
 }
 
 /**
- * Work Item の進捗状態です。
- */
-export type WorkItemStatus = 'in-progress' | 'review' | 'todo' | 'done'
-
-/**
  * Work Item の優先度です。
  */
 export type WorkItemPriority = 'high' | 'medium' | 'low'
@@ -359,10 +354,20 @@ export type ApprovalSummary = {
   updatedAt?: string
 }
 
-/**
- * Canonical Work Item が共有する field です。
- */
-type WorkItemBase = {
+/** Stable comment projection embedded in Work Item detail and comment responses. */
+export type TeamIssueCommentResponseItem = {
+  /** Stable comment identifier. */
+  id: string
+  /** Workspace member key of the comment author. */
+  actorUserId: string
+  /** Markdown comment body. */
+  body: string
+  /** ISO 8601 creation timestamp. */
+  createdAt: string
+}
+
+/** DynamoDB に保存された canonical Work Item の API contract です。 */
+export type CanonicalWorkItem = {
   /**
    * contract の schema version です。
    */
@@ -388,10 +393,6 @@ type WorkItemBase = {
    */
   description?: string
   /**
-   * 担当者を参照する Workspace user ID です。
-   */
-  assigneeUserId?: string
-  /**
    * 担当者のメールアドレスです。
    */
   assigneeEmail?: string
@@ -414,14 +415,6 @@ type WorkItemBase = {
   /** Timestamp of the latest mutation that changed the derived due date. */
   dueDateUpdatedAt?: string
   /**
-   * 作成日時の ISO 8601 timestamp です。
-   */
-  createdAt?: string
-  /**
-   * 最終更新日時の ISO 8601 timestamp です。
-   */
-  updatedAt?: string
-  /**
    * Reversible bulk archive を適用した ISO 8601 timestamp です。
    */
   archivedAt?: string
@@ -433,22 +426,6 @@ type WorkItemBase = {
    * Work Item approval の現在状態を Workspace Inbox / report へ投影する集計です。
    */
   approvalSummary?: ApprovalSummary
-}
-
-/** Stable comment projection embedded in Work Item detail and comment responses. */
-export type TeamIssueCommentResponseItem = {
-  /** Stable comment identifier. */
-  id: string
-  /** Workspace member key of the comment author. */
-  actorUserId: string
-  /** Markdown comment body. */
-  body: string
-  /** ISO 8601 creation timestamp. */
-  createdAt: string
-}
-
-/** DynamoDB に保存された canonical Work Item の API contract です。 */
-export type CanonicalWorkItem = WorkItemBase & {
   /** API から取得した literal のタイトルです。 */
   title: string
   /** Canonical Work Item は表示文言 key を持ちません。 */
@@ -541,9 +518,6 @@ export type WorkItemTriageContextSnapshot = {
   /** ISO 8601 instant when the snapshot and duplicate resolution committed atomically. */
   mergedAt: string
 }
-
-/** Canonical Team/project/Workspace API と画面が共有する Work Item です。 */
-export type WorkItem = CanonicalWorkItem
 
 /**
  * canonical Work Item 作成 API の入力です。

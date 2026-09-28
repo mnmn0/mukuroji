@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
-  type WorkItem,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import {
   WorkItemTransferError,
@@ -156,7 +156,7 @@ describe('Work Item export', () => {
     createdAt: '2026-07-18T00:00:00.000Z',
     updatedAt: '2026-07-18T01:00:00.000Z',
     source: 'dynamodb',
-  } satisfies WorkItem
+  } satisfies CanonicalWorkItem
 
   test('CSV formula injection を neutralize し custom fields を出力する', () => {
     const result = createWorkItemExport('csv', [workItem], new Date('2026-07-18T02:00:00.000Z'))
