@@ -1168,8 +1168,8 @@ export function TaskScreen({
     [selectedBulkItems],
   )
   const visibleBulkItems = useMemo(
-    () => visibleTasks.map((task) => createBulkOperationSelection(task, t)),
-    [t, visibleTasks],
+    () => visibleTasks.map((task) => createBulkOperationSelection(task)),
+    [visibleTasks],
   )
   const visibleActionTargets = useMemo<WorkItemActionTarget[]>(
     () => visibleTasks.map((task) => ({
@@ -1392,7 +1392,7 @@ export function TaskScreen({
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
     const task = tasks.find((candidate) => createTaskKey(candidate) === taskKey)
-    const availableItems = task ? [createBulkOperationSelection(task, t)] : []
+    const availableItems = task ? [createBulkOperationSelection(task)] : []
 
     setBulkSelection((currentSelection) => ({
       items: updateBulkItemSelection(
@@ -2680,7 +2680,7 @@ export function TaskScreen({
       )
       if (!task) return []
       return [{
-        ...createBulkOperationSelection(task, t),
+        ...createBulkOperationSelection(task),
         expectedRevision: target.expectedRevision ?? task.revision,
       }]
     })
@@ -2712,7 +2712,6 @@ export function TaskScreen({
     dismissBulkTaskActionEditor,
     projectId,
     projectTaskActionDisabledReasons.unavailable,
-    t,
     taskActionCompletion,
     visibleTasks,
   ])

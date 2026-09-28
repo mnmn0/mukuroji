@@ -58,6 +58,7 @@ function createMemberAccess(
       name: 'Demo User',
       role,
       updatedAt: '2026-07-20T00:00:00.000Z',
+      workspaceStatus: 'active',
     },
     projectId,
     projectName,

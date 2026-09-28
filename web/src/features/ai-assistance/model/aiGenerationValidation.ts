@@ -175,16 +175,11 @@ export function isCurrentAiAssistanceGeneration(
  * into an invalid response.
  *
  * @param value - Unknown generation value received from the API.
- * @param _now - Client epoch milliseconds retained for deterministic call sites; the server reason is authoritative.
  * @returns Whether the value is a structurally valid, expired retention withholding.
  */
 export function isRetentionExpiredAiAssistanceGeneration(
   value: unknown,
-  _now = Date.now(),
 ): value is AiAssistanceGeneration {
-  // The retention decision is server-authoritative; keep the injectable argument for callers
-  // and tests while deliberately ignoring the potentially skewed browser clock.
-  void _now
   if (!isAiAssistanceGeneration(value) || value.content.availability !== 'withheld' ||
     value.content.reasonCode !== 'retention-expired') return false
   const createdAt = Date.parse(value.createdAt)

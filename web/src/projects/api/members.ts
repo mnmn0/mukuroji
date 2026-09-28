@@ -23,7 +23,7 @@ type ProjectAssignmentCandidateStatus = {
   /**
    * Workspace membership の利用状態です。
    */
-  workspaceStatus?: WorkspaceMemberStatus
+  workspaceStatus: WorkspaceMemberStatus
 }
 
 /**
@@ -55,9 +55,9 @@ export type ProjectMember = {
    */
   status?: string
   /**
-   * Workspace membership の利用状態です。省略された legacy response は割り当て候補に含めません。
+   * Workspace membership の利用状態です。
    */
-  workspaceStatus?: WorkspaceMemberStatus
+  workspaceStatus: WorkspaceMemberStatus
   /**
    * プロジェクト内の権限ロールです。
    */
