@@ -131,6 +131,21 @@ describe('Saved Workspace view pagination', () => {
 
     expect(requestCount).toBe(2)
   })
+
+  test('rejects pages without the canonical views array', async () => {
+    for (const response of [
+      [createSavedView('bare-view')],
+      { items: [createSavedView('legacy-view')] },
+      { views: [], nextCursor: 7 },
+    ]) {
+      globalThis.fetch = (async () => Response.json(response)) as typeof fetch
+
+      await expect(getSavedWorkspaceViews('access-token')).rejects.toMatchObject({
+        code: 'InvalidSavedViewResponse',
+        status: 502,
+      })
+    }
+  })
 })
 
 function createResults(prefix: string, count: number) {
