@@ -59,13 +59,6 @@ const LOCAL_PUBLIC_API_CURSOR_SECRET = 'mukuroji-local-public-api-cursor-signing
 /** Explicit marker accepted for the repository's Floci AWS emulator runtime. */
 const LOCAL_AWS_RUNTIME_MARKER = 'floci'
 
-/** Environment aliases removed by the canonical Work Items configuration contract. */
-const LEGACY_WORK_ITEM_TABLE_ENVIRONMENT_NAMES = [
-  'MUKUROJI_WORK_ITEMS_TABLE',
-  'MUKUROJI_TEAM_ISSUES_TABLE',
-  'TEAM_ISSUES_TABLE_NAME',
-] as const
-
 /**
  * Reads the live runtime environment without copying mutable process state.
  */
@@ -85,7 +78,6 @@ export function loadServerConfig(
       !environment.AWS_EXECUTION_ENV,
   },
 ): ServerConfig {
-  rejectLegacyWorkItemTableEnvironment(environment)
   const production = environment.NODE_ENV === 'production' ||
     Boolean(environment.AWS_LAMBDA_FUNCTION_NAME) ||
     Boolean(environment.AWS_EXECUTION_ENV)
@@ -177,20 +169,6 @@ function resolveApplicationCommitSha(value: string | undefined): string | undefi
     )
   }
   return value
-}
-
-/** Rejects removed Work Items table aliases instead of silently selecting a default table. */
-function rejectLegacyWorkItemTableEnvironment(
-  environment: ServerEnvironment,
-): void {
-  const legacyName = LEGACY_WORK_ITEM_TABLE_ENVIRONMENT_NAMES.find((name) =>
-    environment[name] !== undefined,
-  )
-  if (legacyName !== undefined) {
-    throw new TypeError(
-      `${legacyName} is no longer supported. Use WORK_ITEMS_TABLE_NAME.`,
-    )
-  }
 }
 
 /** Applies the existing production-only Public API cursor secret validation lazily. */

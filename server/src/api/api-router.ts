@@ -15160,8 +15160,7 @@ export async function auditRejectedEnterpriseSecurityMutation(
       actorId = credential.credentialId
       actorKind = 'service'
     } else if (token.startsWith('msa_')) {
-      workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID') ??
-        getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')
+      workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')
       const account = workspaceId
         ? await workspaceDependencies.enterpriseIdentity.serviceAccountAuthentication.authenticateServiceAccountToken(
             workspaceId,
@@ -16459,8 +16458,7 @@ async function authenticateEnterpriseServiceAccount(
   accessToken: string,
   context?: Context,
 ): Promise<WorkspacePrincipal> {
-  const workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID') ??
-    getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')
+  const workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')
   if (!workspaceId) {
     throw new WorkspaceAccessError(
       503,
@@ -40679,11 +40677,7 @@ function readUserAttribute(user: GetUserResponse, name: string) {
 }
 
 function getConfiguredWorkspaceDirectoryId() {
-  return (
-    getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim() ||
-    getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')?.trim() ||
-    undefined
-  )
+  return getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim() || undefined
 }
 
 function readProjectDirectoryId(user: GetUserResponse) {

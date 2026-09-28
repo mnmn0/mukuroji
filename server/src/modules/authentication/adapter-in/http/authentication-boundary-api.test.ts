@@ -64,17 +64,14 @@ test('rejects a Cognito directory that differs from the configured DynamoDB work
   )
 })
 
-test('accepts one Cognito workspace attribute with the legacy directory environment fallback', async () => {
+test('accepts one Cognito workspace attribute that matches the configured workspace partition', async () => {
   await withTestEnvironment(
-    {
-      MUKUROJI_PROJECT_DIRECTORY_ID: 'workspace#legacy',
-      MUKUROJI_WORKSPACE_DIRECTORY_ID: undefined,
-    },
+    { MUKUROJI_WORKSPACE_DIRECTORY_ID: 'workspace#configured' },
     async () => {
       const calls = configureFakeProjectClients(true)
       configureFakeAuthenticatedUser({
         email: 'demo@example.com',
-        'custom:workspace_id': 'workspace#legacy',
+        'custom:workspace_id': 'workspace#configured',
       })
 
       const response = await app.request('/api/teams/projects', {
@@ -85,8 +82,8 @@ test('accepts one Cognito workspace attribute with the legacy directory environm
 
       expect(response.status).toBe(200)
       expect(calls.directoryReads).toEqual([
-        { directoryId: 'workspace#legacy', locale: 'ja' },
-        { consistentRead: true, directoryId: 'workspace#legacy', locale: 'ja' },
+        { directoryId: 'workspace#configured', locale: 'ja' },
+        { consistentRead: true, directoryId: 'workspace#configured', locale: 'ja' },
       ])
     },
   )
