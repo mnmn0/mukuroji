@@ -58,22 +58,6 @@ import { ImportExportSection } from './ImportExportSection'
 import { WebhooksSection } from './WebhooksSection'
 
 /**
- * Compatibility view-type exports retained for existing panel consumers.
- */
-export type {
-  DeveloperImportProjectOption,
-  DeveloperPlatformLabels,
-  DeveloperPlatformOption,
-  DeveloperPlatformSection,
-  SecretDialogKind,
-} from './DeveloperPlatformView'
-
-/**
- * Compatibility connector-catalog export retained for existing panel consumers.
- */
-export type { DeveloperConnectorCatalogItem } from '../model/connectors'
-
-/**
  * Aggregate data and action callbacks accepted by the pure Developer Platform panel.
  */
 export type DeveloperPlatformPanelProps = {

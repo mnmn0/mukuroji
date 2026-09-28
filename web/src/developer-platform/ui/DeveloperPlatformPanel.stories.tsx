@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from 'storybook/test'
-import { DeveloperPlatformPanel } from './DeveloperPlatformPanel'
+import { DeveloperPlatformPanel } from './DeveloperPlatformPanelView'
 import type { ImportDryRunReport } from '@mukuroji/contracts'
 import {
   connectorConflictDeveloperPlatformResourcesFixture,
