@@ -1120,7 +1120,7 @@ export function RecurringWorkEditor({
     .filter((template) => template.enabled && template.kind === 'work-item')
     .map((template) => ({
       label: readResourceName(template, t('automation.common.unnamed')),
-      value: readResourceId(template),
+      value: template.id,
     }))
     .filter((option) => option.value)
   const [name, setName] = useState('')
@@ -1414,23 +1414,15 @@ function readRecurringWeekday(value: number): RecurringWeekday {
   return recurringWeekdays.find((candidate) => candidate === value) ?? 1
 }
 
-function readResourceId(resource: unknown) {
-  const record = toRecord(resource)
-  const value = record.id ?? record.templateId
-
-  return typeof value === 'string' ? value : ''
-}
-
-function readResourceName(resource: unknown, fallback: string) {
-  const value = toRecord(resource).name
-
-  return typeof value === 'string' && value.trim() ? value : fallback
-}
-
-function toRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
-    : {}
+/**
+ * Returns a resource name, or the fallback label when the name is blank.
+ *
+ * @param resource - Named automation resource.
+ * @param fallback - Label shown for a blank name.
+ * @returns The display name.
+ */
+function readResourceName(resource: { name: string }, fallback: string) {
+  return resource.name.trim() ? resource.name : fallback
 }
 
 function createAutomationAction(
