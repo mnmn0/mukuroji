@@ -298,14 +298,20 @@ describe('Canonical Documents API requests', () => {
       correlationId: 'document-correlation',
       idempotencyKey: 'document-idempotency',
     }
-    globalThis.fetch = (async () =>
-      Response.json({ document: documentRecordFixture })) as typeof fetch
+    const requests: Request[] = []
+    let responseBody: unknown = { document: documentRecordFixture }
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      requests.push(createRequest(input, init))
+      return Response.json(responseBody)
+    }) as typeof fetch
 
     expect(await getDocument('access-token', documentRecordFixture.id))
       .toEqual(documentRecordFixture)
 
-    globalThis.fetch = (async () =>
-      Response.json(documentRecordFixture)) as typeof fetch
+    responseBody = documentRecordFixture
 
     await expect(getDocument('access-token', documentRecordFixture.id))
       .rejects.toMatchObject({ code: 'InvalidDocumentResponse', status: 502 })
@@ -322,6 +328,13 @@ describe('Canonical Documents API requests', () => {
       documentRecordFixture.revision,
       mutationContext,
     )).rejects.toMatchObject({ code: 'InvalidDocumentResponse', status: 502 })
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname]))
+      .toEqual([
+        ['GET', `/api/documents/${documentRecordFixture.id}`],
+        ['GET', `/api/documents/${documentRecordFixture.id}`],
+        ['POST', `/api/documents/${documentRecordFixture.id}/archive`],
+        ['POST', `/api/documents/${documentRecordFixture.id}/versions/version-1/restore`],
+      ])
   })
 
   test('revokes shares with the canonical DELETE body', async () => {

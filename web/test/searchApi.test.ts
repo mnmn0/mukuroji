@@ -138,12 +138,17 @@ describe('Saved Workspace view pagination', () => {
       { items: [createSavedView('legacy-view')] },
       { views: [], nextCursor: 7 },
     ]) {
-      globalThis.fetch = (async () => Response.json(response)) as typeof fetch
+      const requestedUrls: string[] = []
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        requestedUrls.push(String(input))
+        return Response.json(response)
+      }) as typeof fetch
 
       await expect(getSavedWorkspaceViews('access-token')).rejects.toMatchObject({
         code: 'InvalidSavedViewResponse',
         status: 502,
       })
+      expect(requestedUrls).toHaveLength(1)
     }
   })
 })
