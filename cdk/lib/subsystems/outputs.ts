@@ -16,7 +16,7 @@ import type { FileBucketIncarnationMarker } from './file-storage';
 export type StackOutputResources = {
   /** Project directory table. */
   readonly projectDirectoryTable: dynamodb.ITable;
-  /** Canonical Work Item table, also exposed through the legacy team issue output. */
+  /** Canonical Work Item table. */
   readonly workItemsTable: dynamodb.ITable;
   /** Work Item workflow and custom field configuration table. */
   readonly workItemConfigurationTable: dynamodb.ITable;
@@ -173,9 +173,6 @@ export function buildStackOutputs(
 ): void {
   new cdk.CfnOutput(scope, 'ProjectDirectoryTableName', {
     value: resources.projectDirectoryTable.tableName,
-  });
-  new cdk.CfnOutput(scope, 'TeamIssuesTableName', {
-    value: resources.workItemsTable.tableName,
   });
   new cdk.CfnOutput(scope, 'WorkItemsTableName', {
     value: resources.workItemsTable.tableName,

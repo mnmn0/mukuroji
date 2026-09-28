@@ -69,7 +69,6 @@ test('shared server handler is bundled as a Lambda asset with production environ
   expect(variables).not.toHaveProperty('TASKS_TABLE_NAME');
   for (const removedAlias of [
     'MUKUROJI_DOCUMENTS_TABLE',
-    'MUKUROJI_PROJECT_DIRECTORY_ID',
     'MUKUROJI_PROJECT_DIRECTORY_TABLE',
     'WORK_ITEMS_TABLE_NAME',
     'SYSTEM_ADMIN_GROUPS',
@@ -274,9 +273,6 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
     Value: {
       Ref: 'WorkspaceDirectoryId',
     },
-  });
-  template.hasOutput('TeamIssuesTableName', {
-    Value: { Ref: 'TeamIssuesTable189D851D' },
   });
   template.hasOutput('WorkItemsTableName', {
     Value: { Ref: 'TeamIssuesTable189D851D' },

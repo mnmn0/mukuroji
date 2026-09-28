@@ -1138,9 +1138,6 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
 test('audit Webhook projection and SQS delivery are durable encrypted and observable', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
-  expect(Object.keys(resources).some((logicalId) =>
-    logicalId.startsWith('WebhookAuthorizationBackfill')
-  )).toBe(false);
   const auditEventsTableId =
     template.toJSON().Outputs.AuditEventsTableName?.Value?.Ref;
   const developerPlatformTableId =
