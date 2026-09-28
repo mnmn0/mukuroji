@@ -391,35 +391,7 @@ environment evidenceに残すまで、上記ack targetは実効性を持ちま�
 6. Error budget が残り、active SEV1/SEV2 がなく、on-call と alarm destination の test が成功
    していることを確認する。
 7. 直前の成功code/configurationを新しい`ApiRuntimeConfigurationRevision`でforward deployする
-   rollback commandと、Function URL consumerの切替手順をreviewする。
-8. Webhook locator bridgeを削除するdeployでは、対象account/region/table identityを固定して
-   旧workerが動作している間に`CollaborationProjectionFunction`のDynamoDB stream event-source mapping
-   UUIDをchange recordへ固定して、そのmappingだけをdisabledにする。AppConfigでproducerとconsumerを同時に
-   止めず、現行`WebhookDeliveryFunction`のSQS mappingはenabledのままproducer invocationの完了を待ち、
-   `WebhookDeliveryQueueUrl`をdrainする。Main queueと`WebhookDeliveryDlqUrl`の全message payloadを対象に
-   cursor version/phaseを検査し、v1 `primary` / `legacy` cursorを含むmessageを1件でも検出した場合は
-   rolloutを停止する。Consumerのdrain完了後はvisible、in-flight、delayed messageがすべて0で、oldest ageも
-   解消したことを連続確認し、queue/DLQごとの検査件数、v1検出件数、0-stateの時刻とmetricをchange recordへ
-   保存する。Raw payloadやcursor自体はevidenceへ複製せず、検出itemはrestricted locatorとkeyed digestで
-   追跡する。Developer Platformのdurable projection receiptである全`webhook-projection-state` rowも検査し、
-   `nextCursor`をcanonical Base64url JSONとして復号した値がv1 `primary` / `legacy` phaseであるrowが1件でも
-   残る場合はrolloutを停止する。Receiptの検査件数、v1検出件数、table identity、完了時刻を同じchange
-   recordへ保存する。新workerはv1 cursorを`DeveloperCursorInvalid`として拒否し、後続subscription pageを
-   配信できない。このdeployはqueue messageやprojection receiptを変換しないため、残存時は別のreview済み
-   drain/repairまたは環境再作成後に再検査する。
-   Deployとcurrent cursor smokeの成功後に同じproducer mappingをDynamoDB Streams retention内で再開し、
-   iterator age、projection DLQ、Webhook queue/DLQが通常値へ戻ることを確認する。
-   Developer Platformの全`webhook-subscription` rowを検査し、retiredな`lookupKey` / `lookupSortKey`、
-   `WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3` / `STATE`、またはWebhook active-locator rollback
-   checkpointが1件でも残る場合はrolloutを停止する。Project Directoryの全active `team` / `project` /
-   `project-member` source rowも検査し、expectedな`webhookAuthorizationKey` /
-   `webhookAuthorizationSortKey`、またはactive Team/Project/member関係に対応するcanonical
-   `webhook-team-grant` rowと`webhook-team-grant-cleanup` locatorが1件でも不足する場合はrolloutを停止する。
-   残存rowがあるとsubscription更新、secret rotation、active subscription取得が
-   `DeveloperPlatformDataInvalid` (503) でfail-closedになる。不足したauthorization projection/grantは
-   authorizationをdenyし、該当resourceのWebhook deliveryを抑止する。このbridge削除deployはone-time
-   cleanupを実行せず、Project Directory authorization backfillも実行しないため、残存dataや不足projectionは
-   別のreview済みcleanup計画で解消してから再検査する。
+   rollback commandをreviewする。
 
 AI assistanceを変更するrelease candidateは、`application-unit-tests`内の明示的offline evaluationに加え、
 [AI assistance protected live-evaluation runbook](./ai-assistance.md#protected-live-evaluation-environment)に従います。
@@ -471,11 +443,9 @@ revision一致、全canonical key、nested ARN/valueを完全検証した後だ�
 API code、またはsecretへ入るparameter/resource値を変えるdeployではrevisionを必ず進めます。旧secretは`Retain`されますが、CloudFormation rollbackが
 自動で再接続・削除するものではないため、evidence inventoryと明示的なretirement判断を必要とします。
 
-初回導入では物理Lambdaを末尾`-api-v2`へ一度だけ置換します。Lambda Function URLと後方互換outputは
-変わるためconsumer cutoverをchange planに含めます。HTTP API endpointは維持され、default routeが
-新しい`live` Aliasへ切り替わります。以後はconfiguration secretとLambda Versionを準備してから
-Aliasを更新し、HTTP API trafficをcode/configurationの揃ったversionへ切り替えます。
-Function URLもAliasに紐づきますが、初回の物理function置換によるURL変更はAliasでは吸収できません。
+HTTP APIのdefault routeとLambda Function URLはどちらも`live` Aliasに紐づきます。Deployでは
+configuration secretとLambda Versionを準備してからAliasを更新し、API trafficを
+code/configurationの揃ったversionへ切り替えます。
 
 ```json
 {
@@ -688,13 +658,7 @@ failure destination error、security regression のいずれかは自動継続�
 1. Incident を宣言し、新しい deploy/migration/write を停止する。
 2. 直前 commit、stack event、alarm、request/event locator、data evidence を固定する。
 3. Data migration がある場合は、その migration contract に従って writer を止めたまま
-   rollback する。Webhook locator bridge削除にはcustom resourceによる逆移行がない。残存v1 cursor、
-   retired locator/state、不足authorization projection/grant/cleanup locatorなどのdata residueを検出した
-   場合はone-time cleanupやcode-only forward-fixを行わず、producer/writeを停止したまま別のreview済み
-   repairまたは環境再作成後にpre-deploy gateを再実行する。Retired locator/stateでは503 fail-closed、
-   不足authorization dataではdelivery suppressionがrepair完了まで継続する。Pre-deploy gateが成功し、
-   canonical dataにresidueがないことを固定済みのcode/infrastructure failureだけを、dataを変更しない
-   review済みcode forward-fixの対象とする。
+   rollback する。
 4. Schema-compatible な code/infrastructure は直前の成功code/configurationを、新しい
    `ApiRuntimeConfigurationRevision`とその他の同じ必須parameterでforward deployする。
    Retained secretの物理名を再作成するために旧revisionを再利用せず、retained resourceを
@@ -981,5 +945,5 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 - [ ] Lambda code canary または同等の段階 rollout gate
 - [ ] Regional DR の要否決定。必要なら replication/failover game day
 
-関連する詳細手順は [Server backfills](../server/README.md#workspace-search-backfill) と
-[CDK upgrade / rollback / PITR](../cdk/README.md#pitr-recovery) を参照してください。
+関連する詳細手順は [Workspace search canonical projection bootstrap](../server/README.md#workspace-search-canonical-projection-bootstrap) と
+[CDK rollback / PITR](../cdk/README.md#pitr-recovery) を参照してください。

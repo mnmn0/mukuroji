@@ -191,43 +191,25 @@ Personal Inbox は Triage state を複製しない。Assignment、SLA、escalati
 Triage Entry へ deep link し、Triage から canonical Work Item と source thread へ、Work Item から
 source association を介して Triage Entry へ戻れるようにする。
 
-## Staged GSI rollout
+## Indexes
 
-`RequestIntakeTable` は既存の retained table である。DynamoDB の `UpdateTable` は1回に1つの GSI
-しか作成できず、CloudFormation は追加した GSI の backfill 完了を待たずに stack update を進める。
-そのため、既存環境へ3つの Triage index を同時追加してはならない。
+`RequestIntakeTable` は `RequestQueueIndex` に加えて、次の3つの Triage GSI を常に持つ。CDK は
+3つの index と Triage schedule worker を同じ stack で作成する。
 
-CDK context `triageIndexDeploymentStage` は次の累積 stage だけを受け付ける。
+- `triage-team-activity-index`（`triageTeamKey` / `triageActivityKey`、`ALL`）: Team queue。
+- `triage-owner-activity-index`（`triageOwnerKey` / `triageActivityKey`、`ALL`）: owner または
+  unowned filter 付きの queue。
+- `triage-wake-index`（`triageWakeShard` / `triageNextWakeAt`、`KEYS_ONLY`）: schedule worker の
+  sparse wake query。
 
-1. `team`（programmatic default）: `triage-team-activity-index` だけを追加する。Schedule worker はまだ作らない。
-2. `owner`: Team index を維持し、`triage-owner-activity-index` だけを追加する。
-3. `wake`: 前2つを維持し、`triage-wake-index` と Triage schedule worker を有効にする。
+Owner filter 付きの queue は常に owner index を query し、Team index へ切り替えない。Queue cursor は
+Workspace、Team、filter、index に束縛され、scope や index が異なる cursor は DynamoDB を読む前に
+拒否する。Schedule worker は wake index の query error を握りつぶさず invocation を失敗させ、
+Lambda の非同期 retry、DLQ、alarm で検知する。Scan へは降格しない。
 
-Production CDK entrypoint は context 省略を fail closed にする。完了済み環境へ誤って `team` template を
-再適用し、owner/wake index を削除しないよう、synth/deploy のたびに現在の stage を明示する。
-
-```sh
-bun --filter cdk cdk deploy -c triageIndexDeploymentStage=team
-# triage-team-activity-index が ACTIVE になったことを確認する
-bun --filter cdk cdk deploy -c triageIndexDeploymentStage=owner
-# triage-owner-activity-index が ACTIVE になったことを確認する
-bun --filter cdk cdk deploy -c triageIndexDeploymentStage=wake
-```
-
-既存環境では各 deploy の後に `DescribeTable` で table と追加 index の `IndexStatus=ACTIVE`
-を確認してから次へ進む。`team` から `wake` へ飛ばさず、backfill 中に別の table/index update を
-行わない。失敗した stack update を rollback する前には実 table の index 状態を確認し、template
-との差分を解消する。Rollout 完了前は owner query が Team index fallback を使い、schedule は Scan
-へ降格せず disabled response を返す。
-
-新規環境は `CreateTable` で複数 GSI を同時作成できるため、初回 deploy から明示的に `wake` を選べる。
-CI の完全形 synth も `wake` を使う。Programmatic `CdkStack` の省略値は単体 test 用に `team` だが、
-production entrypoint は context 未指定の synth/deploy を許可しない。
-
-Local DynamoDB の Request Intake bootstrap は既存環境の CloudFormation update ではなく新規
-`CreateTable` なので、Request queue index と3つの Triage index を一度に作成する。すでに存在する
-local table は4 index の key schema を検証し、不完全な schema を黙って利用しない。Production の
-一段階ずつの rollout gate と `RequestIntakeTable` の logical ID はこの local bootstrap に影響されない。
+Local DynamoDB の Request Intake bootstrap は `CreateTable` で Request queue index と3つの Triage
+index を一度に作成する。すでに存在する local table は4 index の key schema を検証し、不完全な
+schema を黙って利用しない。
 
 ## Verification and operations
 

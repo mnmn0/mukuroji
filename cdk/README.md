@@ -17,7 +17,7 @@
 | `CognitoSsoRedirectUri` | SSO有効時 | App client callback に完全一致で登録した HTTPS SPA callback URI。 |
 | `CognitoEnterpriseIdpName` | SSO有効時 | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
-| `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
+| `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡します。 |
 | `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
 | `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
@@ -42,6 +42,8 @@
 
 `WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
 
+`InitialOwnerEmail` / `InitialOwnerUsername` の変更は通常 deploy と分けて owner rotation として扱います。新 owner の検証後、旧 owner の Cognito attributes、system-admin group、workspace/member/alias row、各 project role を明示的に棚卸ししてください。parameter 変更だけでは旧 owner の row や group membership は削除されません。
+
 ### Optional SSO and AI
 
 SSO と AI は独立したオプションです。新規 stack では、それぞれの関連 parameter をすべて省略すると無効になります。一部だけの指定は CloudFormation rule が拒否します。SSOはruntimeでも不完全な設定を拒否し、password loginへ暗黙に切り替えません。
@@ -52,12 +54,6 @@ SSO と AI は独立したオプションです。新規 stack では、それ�
 既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARNも空にします。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
 
 Workspace、複数Project/Team、権限、監査、backup、export/closureは引き続き利用できます。商用plan、seat quota、月次課金集計はありません。
-
-### Retired Workspace Search migration resources
-
-Fresh deploy は Workspace Search migration state table、journal bucket、access-log bucket、KMS key、operator policy を作成しません。既存 stack では state table、両 bucket、KMS key が `RemovalPolicy.RETAIN` で作成されているため、この更新で物理 resource や保存済み data は削除されず、CloudFormation の管理外に残ります。#39 由来の migration resource が存在する環境では、deploy 前後に logical ID、physical name / ARN、data、Object Lock retention、KMS grant を inventory し、明示的な cleanup は別途 review・承認した手順で実施してください。
-
-`WorkspaceSearchMigrationOperatorPolicy` は retain 対象ではないため、stack update 前に既存 `WorkspaceSearchMigrationOperatorPolicyArn` output と `aws iam list-entities-for-policy --policy-arn <arn>` の全 user / group / role attachment を inventory します。各 principal から policy を detach した後に同じ query を再実行し、`PolicyGroups`、`PolicyUsers`、`PolicyRoles` がすべて空であることを必須条件としてから change set を実行してください。事前・事後 inventory、detach 結果、zero-attachment 検証、change set、stack event を deployment evidence に保存します。Attached policy を CloudFormation が自動削除できるとはみなさず、zero-attachment を確認できない場合は更新を開始しません。
 
 ## API observability
 
@@ -126,8 +122,7 @@ templateとdeployed configurationの両方で照合します。
 
 - `ApiFunctionUrl`: Lambda Function URL
 - `ApiGatewayUrl`: API Gateway HTTP API URL
-- `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
-- `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
+- `WorkItemsTableName`（canonical Work Item store。construct ID は `TeamIssuesTable`）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
 - `DocumentsTableName`（document、whiteboard、share、comment の workspace store）
@@ -168,11 +163,9 @@ templateへ展開させず、revision-boundな個別retained secretの`SecretStr
 Document public-share secretを含む5つのnested secretはAPI roleだけが読みます。Loaderは4 groupの
 identity/revision、全canonical key、nested secretを検証し終えてから環境へ原子的に反映します。
 
-この仕組みを初めてdeployすると、既存の自動命名Lambdaから明示名末尾`-api-v2`のLambdaへ一度だけ
-置換されます。Function URL consumerは`ApiFunctionUrl`へ、API Gateway consumerは
-`ApiGatewayUrl`へ切り替えてください。いずれも同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
-切り替えます。以後は、新しいconfiguration secretとLambda Versionの準備完了後にAliasが新Versionへ
-切り替わるため、HTTP API trafficはcode/configurationが揃ったversion単位で切り替わります。
+Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。新しいconfiguration
+secretとLambda Versionの準備完了後にAliasが新Versionへ切り替わるため、API trafficは
+code/configurationが揃ったversion単位で切り替わります。
 
 ## Bedrock AI assistance boundary
 
@@ -554,7 +547,7 @@ export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 bash scripts/prepare-workspace-cognito.sh
 ```
 
-`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ生成し、64桁の小文字hex値を secret store に保存して、以後の diff/deploy と audit backfill で再利用します。CloudFormation parameter とAPI/backfillのいずれも、この形式以外をfail-closedで拒否します。
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ生成し、64桁の小文字hex値を secret store に保存して、以後の diff/deploy で再利用します。CloudFormation parameter とAPIのいずれも、この形式以外をfail-closedで拒否します。
 `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET` も環境ごとに固定し、CI/CD の secret store から渡します。
 Raw SCIM/service credential は DynamoDB に保存しません。同じ idempotency request の応答消失時だけ
 10分以内は同じ token を決定的に回復でき、期限後は新しい logical rotate が必要です。
@@ -599,16 +592,6 @@ bun run cdk:test
 bun run cdk:synth
 ```
 
-Team Issue event-table GSIs must be deployed in two separate stack updates:
-first use `-c teamIssueCommentIndexDeploymentStage=event` and wait for
-`TeamIssueEventCreatedAtIndex` to become `ACTIVE`; only then use
-`-c teamIssueCommentIndexDeploymentStage=comment` for the second index.
-The diff/deploy examples below show the final `comment` stage.
-
-For the first rollout, run both commands below with the `event` stage, then
-wait for `TeamIssueEventCreatedAtIndex` to report `ACTIVE` before continuing
-to the `comment` stage commands.
-
 ```sh
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 export MUKUROJI_APPLICATION_COMMIT_SHA="$(git rev-parse HEAD)"
@@ -621,8 +604,6 @@ export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=event \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -650,78 +631,6 @@ bun --filter cdk cdk diff CdkStack \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=event \
-  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
-  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
-  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
-  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
-  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
-  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
-  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
-  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
-  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
-  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
-  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
-  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
-  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
-  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
-  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
-  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
-  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
-  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
-  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
-  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
-  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
-  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
-  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
-```
-
-```sh
-export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
-export MUKUROJI_APPLICATION_COMMIT_SHA="$(git rev-parse HEAD)"
-export AWS_REGION=ap-northeast-1
-export MUKUROJI_AI_BEDROCK_MODEL_ARN='arn:aws:bedrock:ap-northeast-1:<account-id>:inference-profile/jp.anthropic.claude-sonnet-4-6'
-export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-price>'
-export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
-export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
-export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
-
-bun --filter cdk cdk diff CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=comment \
-  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
-  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
-  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
-  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
-  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
-  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
-  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
-  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
-  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
-  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
-  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
-  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
-  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
-  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
-  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
-  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
-  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
-  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
-  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
-  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
-  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
-  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
-  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
-
-bun --filter cdk cdk deploy CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=comment \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -757,25 +666,12 @@ outputファイルのSHA-256をアクセス制御されたchange recordへ保存
 outputにはSecret ARNなどのresource metadataが含まれるため、access tokenやsecret値を追記せず、
 照合後のローカルファイルは削除します。
 
-Target templateと新規環境はWebhook authorization backfill custom
-resourceを作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、このdeployのchange setで
-削除します。その存在自体はpre-deploy gateの失敗条件にせず、旧resourceを再実行せずにretired dataと
-canonical authorization dataを全件検査します。このrolloutはlegacy locatorや不足したauthorization
-projectionを変換しません。deploy前に
-`docs/operational-readiness.md`のpre-deploy gateを満たし、retired locator/stateまたはcurrent
-authorization projection/grantの不足がある環境ではrolloutを停止します。旧workerを停止する前に
-`CollaborationProjectionFunction`のDynamoDB stream event-source mappingだけをchange-controlledに停止し、
-現行`WebhookDeliveryFunction` consumerを動かしたまま`WebhookDeliveryQueueUrl`をdrainして、main queue/DLQと
-Developer Platformのprojection stateにv1 primary/legacy cursorが残らないことも確認します。このdeployは
-durable cursorを変換しません。
-
 `MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION`はAPIのcode、またはruntime configuration secretへ
 入るparameter/resource値が変わるdeployごとに新しい値へ進め、`cdk diff`とdeployへ同じ値を渡します。
 同じrevisionのsecret内容を更新するとimmutable rolloutの前提が崩れるため、revisionを再利用しません。
 `MUKUROJI_APPLICATION_COMMIT_SHA`はreview済みcheckoutの`git rev-parse HEAD`と一致させ、deploy後に
 `GET /api/health`が同じ`applicationCommitSha`を返すことをproduction-like evaluationで確認します。
-初回`-api-v2`置換時はFunction URL outputの切替計画をchange recordに含めます。HTTP API endpointは
-維持され、以後のtraffic切替は`live` Alias更新で行われます。
+Trafficの切替は`live` Aliasの更新で行われます。
 
 Bootstrap は次を同一 `WorkspaceDirectoryId` partition に冪等投入します。
 
@@ -785,6 +681,8 @@ Bootstrap は次を同一 `WorkspaceDirectoryId` partition に冪等投入しま
 - seed project 4 件の `PROJECT_MEMBER#<projectId>#<lowercase email>` / `role=manager`
 
 owner が demo member と同じ email でも最後に manager へ収束します。Workspace owner row 自体は既存 RBAC の global system-admin 判定には使いません。
+
+bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
 ### 3. Bootstrap と API を検証する
 
@@ -829,38 +727,6 @@ Web にはどちらか一方を設定します。
 VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 # または VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```
-
-## Existing stack upgrade
-
-既存 data をそのまま利用する upgrade では、現在使われている directory partition ID を `WorkspaceDirectoryId` に指定します。例えば既存 user partition が `user#owner@example.com` なら、その値を初回 upgrade でも維持します。新しい `workspace#...` へ同時に変更しないでください。
-
-1. 現在の stack template、parameters、outputs と table 名を記録する。
-2. stack が管理する全 stateful table で PITR が有効か確認する。未有効なら on-demand backup も取得する。
-3. lowercase owner email と、既存 project で manager 権限を持つ owner を選ぶ。
-4. 既存 partition ID を使って `prepare-workspace-cognito.sh` を実行する。
-5. `cdk diff` で table replacement / deletion がないこと、Lambda / custom resource / Retain / PITR の更新だけであることを確認する。
-6. deploy 後に `validate-workspace-bootstrap.sh` と Function URL / API Gateway の 4 経路を確認する。
-
-Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
-先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
-monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全52 alarmの
-現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
-複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
-2つの必須parameter、相異rule、既存alarmの`AlarmActions`以外にalarm resourceの置換や
-SNS resourceの新設がないことを確認し、そのtopic名を以後の通常deployでも固定して渡します。
-
-bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
-
-Webhook authorizationは新規環境でcurrent transaction writerとprimary subscription locatorを最初から
-使用し、target templateはlocator migrationやauthorization projection backfillのcustom resourceを
-作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、change setでの削除対象として
-inventory化し、その存在だけを異常扱いしません。既存dataを持つ環境では
-`docs/operational-readiness.md`のpre-deploy gateでprojection、grant、cleanup locator、retired locator/state、
-queue payloadとdurable projection receiptのv1 cursorを全件検査し、不一致があればdeployを停止します。
-
-通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
-
-`InitialOwnerEmail` / `InitialOwnerUsername` の変更は通常 deploy と分けて owner rotation として扱います。新 owner の検証後、旧 owner の Cognito attributes、system-admin group、workspace/member/alias row、各 project role を明示的に棚卸ししてください。parameter 変更だけでは旧 owner の row や group membership は削除されません。
 
 ## Workspace partition migration
 
@@ -951,15 +817,17 @@ Deploy前後に次を確認します。
 5. Schedule roleのsource table権限がread-onlyで、write権限がAnalyticsTableだけに限定される。
 6. `AnalyticsScheduleDlqUrl`の滞留とCloudWatch alarmを監視対象に追加する。
 
+## Notification schedule
+
+期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count も監視します。
+
 ## Rollback
 
 code / infrastructure rollback は、原則として直前に成功したrevisionのcode/configurationを、
 review済みの新しい`ApiRuntimeConfigurationRevision`とその他の同じ必須parameters
 （request intake用の2 secretとalarm topic名を含む）でforward deployします。既にretainedされた
 旧API configuration secretは自動では再接続されないため、同じ物理名を再作成する目的で旧revisionを
-再利用しません。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。Alarm routing導入前のtemplateへ戻すと全alarm actionが外れるため、active incident中は使用せず、applicationだけを戻すforward-fixを優先します。
-
-`RequestIntakeTable` または email DLQ を初めて追加した deploy から、それらを知らない旧 template へ直接 rollback しないでください。先に forward-fix revision で API/email ingestion を無効化し、retained resource と output を template に残したまま application code を戻します。どうしても旧 template を使う場合は resource import 用 template と logical ID を準備し、CloudFormation から外れた retained resource を放置した状態で同名 resource を再作成しません。
+再利用しません。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。
 
 Workspace migration の切替後に戻す場合:
 
@@ -1096,8 +964,7 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
   `expiresAtEpochSeconds` TTL も有効です。
 - File bucket は public access を遮断し、TLS / SSE-S3 / versioning / `Retain` / malware tag-based download deny を有効にします。
 - API Lambda は `server/src/handlers/api.handler.ts`、SCIM group worker は
-  `server/src/handlers/enterprise-scim-group-job-worker-handler.ts` を deploy 時に個別bundleします。旧 inline
-  Lambda copy はありません。
+  `server/src/handlers/enterprise-scim-group-job-worker-handler.ts` を deploy 時に個別bundleします。
 
 ## Commands
 
@@ -1105,7 +972,5 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=comment
+bun --filter cdk cdk diff CdkStack
 ```

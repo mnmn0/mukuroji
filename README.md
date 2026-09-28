@@ -417,14 +417,7 @@ bash scripts/prepare-workspace-cognito.sh
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-# 初回の Team Issue event table GSI rollout は2段階です。
-# まず event stage の diff と deploy を実行し、
-# TeamIssueEventCreatedAtIndex が ACTIVE になったことを確認してから、
-# 下記の最終 comment stage を実行します。
-# 既存環境で event stage が完了済みの場合は、下記だけを実行します。
 bun --filter cdk cdk diff CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=event \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -452,37 +445,6 @@ bun --filter cdk cdk diff CdkStack \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=event \
-  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
-  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
-  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
-  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
-  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
-  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
-  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
-  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
-  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
-  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
-  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
-  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
-  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
-  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
-  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
-  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
-  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
-  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters ApplicationCommitSha="$MUKUROJI_APPLICATION_COMMIT_SHA" \
-  --parameters AiBedrockModelId="jp.anthropic.claude-sonnet-4-6" \
-  --parameters AiBedrockModelArn="$MUKUROJI_AI_BEDROCK_MODEL_ARN" \
-  --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
-  --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
-  --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
-  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
-
-bun --filter cdk cdk diff CdkStack \
-  -c triageIndexDeploymentStage=wake \
-  -c teamIssueCommentIndexDeploymentStage=comment \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -510,35 +472,21 @@ bun --filter cdk cdk diff CdkStack \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 ```
 
-`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy と audit backfill で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
 
 `MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION` は1〜32文字のdeploy識別子です。APIの
 code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに
-新しい値へ進め、同じrevisionを異なる内容へ再利用しません。初回導入では物理Lambdaが`-api-v2`へ
-置換されるため、`ApiFunctionUrl`も変わります。
+新しい値へ進め、同じrevisionを異なる内容へ再利用しません。
 `MUKUROJI_APPLICATION_COMMIT_SHA` はreview済みcheckoutのfull SHAに固定し、deploy後の
 `GET /api/health`とproduction-like AI evaluationで同じ値を照合します。
-Function URL利用者は新しいstack outputへの計画的な切替が必要です。
-`ApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけが新しい
-`live` Aliasへ切り替わります。以後のdeployは新しいimmutable configuration secretとLambda
-Versionの準備後に`live` Aliasでtrafficを切り替えます。旧secretは`Retain`されますが、
-CloudFormationが自動で再接続・削除するものではないため、rollback/recovery evidenceとして管理します。
+Function URLとAPI Gatewayのdefault routeはどちらも`live` Aliasを呼び出します。deployは新しい
+immutable configuration secretとLambda Versionの準備後に`live` Aliasでtrafficを切り替えます。
+旧secretは`Retain`されますが、CloudFormationが自動で再接続・削除するものではないため、
+rollback/recovery evidenceとして管理します。
 4分割secretはtransformを使わないv2 line envelopeでgroup identityと同一revisionを保持し、各値は
 canonical Base64として保存します。NoEchoの4値はrevision-boundな個別retained secretへ直接保存し、
 Document public-share secretとともにenvelopeにはARNだけを入れます。APIは4 group、同一revision、
 全canonical key、nested secret ARN/valueをすべて検証してから環境へ原子的に反映します。
-
-Target templateと新規環境はWebhook authorization backfill
-custom resourceを作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、このdeployの
-change setで削除します。その存在自体はpre-deploy gateの失敗条件にせず、旧resourceを再実行せずに
-retired dataとcanonical authorization dataを全件検査します。このrolloutはlegacy locatorや不足した
-authorization projectionを変換しません。deploy前に
-`docs/operational-readiness.md`のpre-deploy gateを満たし、retired locator/stateまたはcurrent
-authorization projection/grantの不足がある環境ではrolloutを停止してください。旧workerを停止する前に
-`CollaborationProjectionFunction`のDynamoDB stream event-source mappingだけをchange-controlledに停止し、
-現行`WebhookDeliveryFunction` consumerを動かしたまま`WebhookDeliveryQueueUrl`をdrainして、main queue/DLQと
-Developer Platformのprojection stateにv1 primary/legacy cursorが残らないことも確認します。このdeployは
-durable cursorを変換しません。
 
 SSO client は password client とは別に作成し、client secret なし、
 `ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、OAuth server 有効、flow は `code` のみ、
@@ -594,22 +542,22 @@ deploy 後は Function URL または API Gateway URL の output を Web に設�
 VITE_API_BASE_URL=<ApiFunctionUrl>
 ```
 
-fresh deploy、既存 stack upgrade、bootstrap 検証、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
+fresh deploy、bootstrap 検証、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
 
 `PROJECT_DIRECTORY_ID` には CDK parameter `WorkspaceDirectoryId` と同じ値を指定します。
 チーム/プロジェクト階層の table 名は CDK output の
 `ProjectDirectoryTableName` で確認できます。
 
 チーム所有 Issue の table と GSI を直接確認する場合は、CDK output の
-`TeamIssuesTableName` と `TeamIssueEventsTableName` を指定して以下を実行します。
-`ISSUE_ID` を指定すると、その Issue のコメント/活動履歴 table も query します。
+`WorkItemsTableName` と `TeamIssueEventsTableName` を指定して以下を実行します。
+`ISSUE_ID` を指定すると、その Issue の活動履歴 table も query します。
 
 ```sh
-WORK_ITEMS_TABLE_NAME=<TeamIssuesTableName> \
+WORK_ITEMS_TABLE_NAME=<WorkItemsTableName> \
 TEAM_ISSUE_EVENTS_TABLE_NAME=<TeamIssueEventsTableName> \
 bun run issues:check-dynamodb
 
-WORK_ITEMS_TABLE_NAME=<TeamIssuesTableName> \
+WORK_ITEMS_TABLE_NAME=<WorkItemsTableName> \
 TEAM_ISSUE_EVENTS_TABLE_NAME=<TeamIssueEventsTableName> \
 ISSUE_ID=<IssueId> \
 bun run issues:check-dynamodb
