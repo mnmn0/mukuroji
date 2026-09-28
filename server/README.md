@@ -267,7 +267,7 @@ Default local table names are:
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
 - `TENANT_ADMINISTRATION_TABLE_NAME=mukuroji-tenant-administration-local`
-- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、API と backfill で共有して通常は rotation しない）
+- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
 - `REQUEST_INTAKE_TABLE_NAME=mukuroji-request-intake-local`
@@ -317,41 +317,6 @@ Work Item は Team partition 100件、1 partition/合計10,000件、対象Work I
 無関係なWorkspace historyはevent合計上限を消費しません。
 Metric定義、timezone、archive、snapshot、scheduleの詳細は
 [`docs/analytics.md`](../docs/analytics.md) を参照してください。
-
-To preview and run the append-only audit backfill against local DynamoDB:
-
-```sh
-set -a
-. .floci/generated/cognito.env
-set +a
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --source workspace-access --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --checkpoint /tmp/mukuroji-audit-backfill-v3.json
-```
-
-`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` はgenerated fileではなくowner-onlyのroot
-`.env`から読み込みます。未設定または形式不正なら、backfillは開始前にfail-closedで停止します。
-
-The write run bootstraps `mukuroji-audit-events` with the production-compatible
-keys, GSIs, and stream when the local table does not exist. Dry runs do not
-create the table or write events/checkpoints. The `workspace-access` source maps
-`workspace-member` and `workspace-invitation` rows to suppressed snapshot events;
-the Workspace metadata row is counted as ignored, while unknown or malformed
-lifecycle rows stop the run. Workspace timestamps must use canonical UTC ISO
-format. Dry-run logs omit entity and target IDs.
-
-AWS runs require `WORKSPACE_ACCESS_TABLE_NAME` in addition to the existing source
-table variables and `AUDIT_EVENTS_TABLE_NAME`. Audit backfill checkpoint v3 contains
-the three current sources and is not compatible with v1/v2 checkpoints. Use a new
-checkpoint path; rescanning sources is safe because event writes are deterministic
-and conditional. The default v3 checkpoint is
-`./audit-event-backfill-v3.checkpoint.json`; it is created with owner-only
-permissions because its `LastEvaluatedKey` can contain source identifiers. Delete
-it after the migration is complete. Checkpoints created with a different table,
-key, or current-schema configuration are rejected by the configuration hash.
-Unknown-timestamp snapshot events omit TTL so they are not immediately deleted.
 
 ## Team Issue comment backfill
 

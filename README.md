@@ -304,7 +304,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `SECRETS_MANAGER_ENDPOINT` / `AWS_ENDPOINT_URL_SECRETS_MANAGER` / `AWS_ENDPOINT_URL_SECRETSMANAGER` / `AWS_ENDPOINT_URL`: API Lambda から見る Secrets Manager endpoint（左から優先）。AWS 接続では `AWS_REGION` と一致する standard/FIPS の HTTPS hostname だけを許可します。ローカル Lambda では Floci 内部 endpoint の `http://floci:4566` を使います。
 - `MUKUROJI_LOCAL_AWS_RUNTIME`: `floci` のときだけ loopback、`localhost`、`floci`、`localstack` の HTTP Secrets Manager endpoint を許可する明示的な local marker。`floci:deploy-backend` が自動設定し、`NODE_ENV=production` では常に無効です。本番環境へ設定しないでください。
 - `MUKUROJI_AUDIT_RETENTION_DAYS` / `AUDIT_RETENTION_DAYS`: audit event の保持日数。未指定時は 2555 日（7年）
-- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、backfill と API で同じ値を使います。
+- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY`: Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。本番では `openssl rand -hex 32` などで生成し、環境ごとに固定します。
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID`: Cognito claim と DynamoDB partition で共有する canonical Workspace ID。未指定時は `workspace#mukuroji-local`
 - `MUKUROJI_PROJECT_DIRECTORY_ID`: 旧 local 設定との互換入力。`MUKUROJI_WORKSPACE_DIRECTORY_ID` が優先されます。
 - `MUKUROJI_INITIAL_OWNER_EMAIL` / `MUKUROJI_INITIAL_OWNER_USERNAME`: 初期 owner の email と Cognito username
@@ -362,20 +362,8 @@ in-flight request で共有します。transport failure 後は結果が不明�
 再取得に成功した時点で破棄します。自動再送は行わず、利用者の続行操作を新しい logical mutation として
 扱います。Web API client の context 引数は必須です。
 
-ローカル backfill は次の command で実行できます。本実行時は共通 bootstrap が未作成の
-`mukuroji-audit-events` table を本番互換 schema で作成します。
-
-```sh
-set -a
-. .floci/generated/cognito.env
-set +a
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --checkpoint /tmp/mukuroji-audit-backfill-v3.json
-```
-
-`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は generated file へ複製せず、API writer と
-backfill の両方が owner-only の root `.env` から同じ値を読み込みます。
+`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は generated file へ複製せず、API writer が
+owner-only の root `.env` から読み込みます。
 `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET` と `ENTERPRISE_SSO_STATE_SECRET` も generated file
 へ複製せず、local backend deploy と `server:dev` が root `.env` の安定値を共有します。
 これら2つの Enterprise secret は ready hook や Floci コンテナへ渡しません。

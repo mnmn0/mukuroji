@@ -47,12 +47,7 @@ export const AUDIT_REDACTED_VALUE = '[REDACTED]'
 /**
  * audit payload に保存できる文字列の最大長です。
  */
-export const AUDIT_MAX_TEXT_LENGTH = 4096
-
-/**
- * 発生時刻を復元できない backfill event にだけ使う sentinel です。
- */
-export const AUDIT_UNKNOWN_OCCURRED_AT = '1970-01-01T00:00:00.000Z'
+const AUDIT_MAX_TEXT_LENGTH = 4096
 
 /**
  * Workspace access の公開 audit ID に使う HMAC key の環境変数名です。
@@ -63,7 +58,7 @@ export const WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV =
 /**
  * Workspace access の公開 audit entity ID contract version です。
  */
-export const WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION = 'v2'
+const WORKSPACE_ACCESS_AUDIT_ENTITY_ID_CONTRACT_VERSION = 'v2'
 
 const workspaceAuditPseudonymKeyPattern = /^[0-9a-f]{64}$/u
 const workspaceAccessEntityIdNamespace =
@@ -328,7 +323,7 @@ export type AuditEventV1 = {
    */
   summary?: string
   /**
-   * DynamoDB TTL に渡す epoch seconds です。時刻不明の backfill event だけ省略できます。
+   * DynamoDB TTL に渡す epoch seconds です。legal hold で retention を停止した event だけ省略できます。
    */
   expiresAt?: number
   /**
@@ -817,7 +812,7 @@ export function createWorkspaceMemberAuditEntityId(
  * @param workspaceId - Canonical Workspace identifier.
  * @param memberId - Private Workspace member identifier.
  * @param pseudonymKey - Exact 32-byte Workspace Audit pseudonym key.
- * @returns The same versioned pseudonym ID used by live writers and backfills.
+ * @returns The same versioned pseudonym ID used by every Audit writer.
  */
 export function createWorkspaceMemberAuditEntityIdFromKeyBytes(
   workspaceId: string,
@@ -897,7 +892,7 @@ function createWorkspaceInvitationAuditEntityIdFromKeyBytes(
  * Workspace access audit pseudonym key を環境変数から読み、64桁小文字hex形式を検証します。
  *
  * @param environment key を読む環境変数 map です。
- * @returns live writer と backfill で固定して共有する32-byte random値のhex表現です。
+ * @returns Audit writer 間で固定して共有する32-byte random値のhex表現です。
  */
 export function readWorkspaceAuditPseudonymKey(
   environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -996,18 +991,8 @@ export function createAuditEvent(input: CreateAuditEventInput): AuditEventV1 {
     throw new TypeError('Audit retention cannot be suspended while expiresAt is set.')
   }
 
-  if (
-    input.expiresAt === undefined &&
-    input.retentionSuspended !== true &&
-    !(
-      input.context.source.kind === 'backfill' &&
-      occurredAt === AUDIT_UNKNOWN_OCCURRED_AT &&
-      outboxStatus === 'suppressed'
-    )
-  ) {
-    throw new TypeError(
-      'Audit expiresAt may be omitted only for a backfill event with an unknown occurredAt.',
-    )
+  if (input.expiresAt === undefined && input.retentionSuspended !== true) {
+    throw new TypeError('Audit expiresAt may be omitted only while retention is suspended.')
   }
 
   return {
@@ -1451,7 +1436,6 @@ export function toAuditEventView(value: unknown) {
 
 const publicAuditMetadataFields = new Set([
   'adapter',
-  'backfilled',
   'acceptedCommentId',
   'commentId',
   'contextItemId',

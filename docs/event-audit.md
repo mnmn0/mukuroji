@@ -45,7 +45,7 @@
 | `source` / `sourceDetails` | yes | `api`、`system`、`migration`、`backfill` と request route 等の発生元 snapshot。 |
 | `summary` | no | activity 表示用の短い説明または変更理由。 |
 | `beforeRevision` / `afterRevision` | no | versioned aggregate の optimistic concurrency 情報。 |
-| `expiresAt` | no | 通常は `AUDIT_RETENTION_DAYS` から計算する DynamoDB TTL epoch 秒。時刻不明の backfill event だけ省略する。 |
+| `expiresAt` | no | `AUDIT_RETENTION_DAYS` から計算する DynamoDB TTL epoch 秒。legal hold で retention を停止した event だけ省略する。 |
 | `outboxStatus` | yes | 通常 mutation は `pending`、backfill は `suppressed`。Stream consumer の配送判定に使う。 |
 | `metadata` | no | adapter、scope、source の診断情報など schema の必須項目に含めない付加情報。 |
 
@@ -165,7 +165,7 @@ cursor v1 は version、index、filter fingerprint、DynamoDB `LastEvaluatedKey`
 - audit event は `AUDIT_RETENTION_DAYS`（default 2,555日、約7年）から `expiresAt` を計算する。値は最低1日とし、policy 変更は新規 event から適用する。
 - 同じ row が outbox を兼ねるため、TTL は consumer の最大再処理期間より十分長くする。consumer checkpoint は別の短い retention を設定できる。
 - field 名が password/token/secret/authorization/cookie/credential/api key/private key/signed URL に該当する値は write-time に `[REDACTED]` へ置換し、文字列は最大4,096文字に制限する。response-time mask だけに依存しない。
-- Workspace/member/invitation の公開識別子は PII を直接または unkeyed digest として含めず、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` を使う HMAC pseudonym に限定する。この key は環境ごとに `openssl rand -hex 32` などで生成した64桁の小文字hex値を固定し、通常の rotation 対象にしない。未設定、長さ不正、非hex文字、uppercase、前後空白はAPI/backfillともfail-closedで拒否する。
+- Workspace/member/invitation の公開識別子は PII を直接または unkeyed digest として含めず、`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` を使う HMAC pseudonym に限定する。この key は環境ごとに `openssl rand -hex 32` などで生成した64桁の小文字hex値を固定し、通常の rotation 対象にしない。未設定、長さ不正、非hex文字、uppercase、前後空白はfail-closedで拒否する。
 - comment body や説明文は対象への閲覧権限がある activity と system-admin audit だけに返す。より細かい export policy が必要になった場合は field allowlist を追加する。
 - 個人情報削除が必要な場合、immutable event を上書きしない。redaction event を append し、query projection で過去値を隠す。強い削除要件がある payload は暗号化した別 table に置き、鍵破棄または payload deletion で消去できるようにする。
 - export は event ID、時刻、actor、target、event type、redact 済み changes、correlation ID を含め、internal DynamoDB key、request fingerprint、保存済み mutation response は含めない。
@@ -184,39 +184,6 @@ consumer の DynamoDB projection と checkpoint は同じ transaction で更新�
 ## Schema migration と backfill
 
 reader は `schemaVersion === 1` の current event だけを正規化し、旧 version や version 欠落 row は明示的に error/quarantine とする。schema を変更するときは古い event を in-place update せず、canonical な migration event または別 version の reader を用意する。
-
-初期 migration は [backfill-audit-events.ts](../server/scripts/backfills/backfill-audit-events.ts) を使用する。対象は次の 3 source である。
-
-- current Team Issue: `work-item.backfilled` snapshot を作る。
-- project directory: team、project、project-member の `*.backfilled` snapshot を作る。
-- Workspace access: Workspace member と invitation の current row から、それぞれ `member.backfilled` と `invitation.backfilled` snapshot を作る。Workspace metadata row は対象外とする。
-
-source item の key から logical idempotency key を決定的に作り、通常 mutation と同じ schema v1 builder で event ID、nested/flat actor/entity/target、4つの GSI key、`idempotencyKeyHash`、`sourceDetails` を生成する。adapter、scope など現在の source 診断情報だけを `metadata` に保存し、source key 自体は保存しない。v3 backfill は新しい HMAC-based event ID を作る前に、v2 の SHA-256 source-key identity に対応する event ID を強整合 read で検出し、既存 event があれば duplicate として新しい row を書かない。`AuditEventsTable` の `directoryId/eventId` へ conditional Put も行うため、同じ script の再実行と v2 から v3 への切り替えで event は増えない。一般 source の current snapshot 時刻は有効な `updatedAt`、有効な `createdAt` の順で採用し、どちらも有効でない row だけ `1970-01-01T00:00:00.000Z` を「unknown historical time」の sentinel として使う。Workspace access row は canonical state contract として `createdAt` / `updatedAt` と必要な lifecycle timestamp を canonical UTC ISO 形式で必須検証し、不正値を sentinel へ緩和しない。通常は event の `occurredAt` から `AUDIT_RETENTION_DAYS` 後に TTL を設定する。unknown sentinel event は即時削除対象になることを避けるため TTL を付けず、運用者が保持期間を確認して別途削除する。snapshot field の sensitive flag は `[REDACTED]` に変換し、通常 mutation と同じく保存するすべての文字列 payload を最大4,096文字に制限する。
-
-```sh
-# まず読み取りだけを最大100件確認する
-AWS_ENDPOINT_URL=http://localhost:4566 \
-AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
-MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-key> \
-bun server/scripts/backfills/backfill-audit-events.ts --dry-run --limit 100
-
-# checkpoint を使って本実行する
-AWS_ENDPOINT_URL=http://localhost:4566 \
-WORK_ITEMS_TABLE_NAME=mukuroji-team-issues-local \
-PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local \
-WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local \
-AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
-MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<same-64-character-lowercase-hex-key-as-api-writer> \
-bun server/scripts/backfills/backfill-audit-events.ts \
-  --checkpoint /tmp/mukuroji-audit-backfill-v3.json \
-  --limit 1000
-```
-
-`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v3 は DynamoDB `LastEvaluatedKey` と累積 counter を 3 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。既存の v1/v2 checkpoint は互換ではないため、新しい checkpoint path で再実行する。既定 path は `./audit-event-backfill-v3.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。既存の 3 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
-
-WorkspaceAccess row は `recordKey=WORKSPACE` / `entryType=workspace-meta` だけを `ignored` とし、member/invitation の record key と identifier の一致、role/status/delivery/ownership enum、version、必須 field、canonical timestamp を検証する。公開 entity/target ID は API writer と同じ固定 HMAC key から導出し、raw Workspace ID や email を保存しない。未知 row または認識できる破損 row は skip せず migration を停止する。backfill は現在値だけを復元するため、過去の招待再送、取消、受諾、role/status 変更の順序や actor は復元せず、`system:backfill` actor の snapshot event として記録する。changes 内の email、member key、表示名、failure message は write-time に redact し、Cognito identity ID/username は snapshot payload に含めない。
-
-Workspace access の rollout は同じ pseudonym key を設定した state/event atomic writer を先に deploy し、その後 `--source workspace-access --dry-run` の member/invitation/ignored 件数と sample projection を保存してから v3 checkpoint で apply する。key は ID contract の一部なので apply 後に rotation しない。apply 後は checkpoint、source 件数、`TargetOccurredAtIndex` の sample、`outboxStatus=suppressed`、audit export の redaction を照合する。backfill event を過去の lifecycle transition として扱ってはならない。
 
 backfill の Put も DynamoDB Stream record を生成するため、`outboxStatus=suppressed` を必ず付ける。consumer はこれを通常通知・自動化へ流さない。過去 event を配送する場合は、対象 event type と期間を明示した別 replay job を用意する。
 
