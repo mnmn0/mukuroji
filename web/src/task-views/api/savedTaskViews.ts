@@ -387,10 +387,9 @@ function intersectSavedTaskViewCapabilities(
 }
 
 /** Reads and validates one saved task view returned across an HTTP boundary. */
-function readSavedTaskView(value: unknown): SavedTaskView {
-  if (!isRecord(value)) throw invalidTaskViewResponse()
-  const candidate = isRecord(value.view) ? value.view : value
+function readSavedTaskView(candidate: unknown): SavedTaskView {
   if (
+    !isRecord(candidate) ||
     candidate.schemaVersion !== TASK_VIEW_SCHEMA_VERSION ||
     typeof candidate.id !== 'string' ||
     typeof candidate.name !== 'string' ||

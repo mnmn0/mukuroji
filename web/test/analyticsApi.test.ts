@@ -73,6 +73,15 @@ describe('Analytics API', () => {
     })
   })
 
+  test('rejects a query response that is not wrapped in a snapshot', async () => {
+    installFetchRecorder(() => analyticsSnapshotFixture)
+
+    await expect(queryAnalytics('access-token', query)).rejects.toMatchObject({
+      code: 'InvalidAnalyticsResponse',
+      status: 502,
+    })
+  })
+
   test('keeps omitted report URL dimensions omitted in the query API body', async () => {
     const requests = installFetchRecorder(() => ({
       snapshot: analyticsSnapshotFixture,

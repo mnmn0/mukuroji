@@ -133,15 +133,19 @@ function readSavedViewsPage(value: unknown) {
   }
 }
 
+/**
+ * Reads the saved view returned by the saved-view create and update endpoints.
+ *
+ * @param value - Parsed response body.
+ * @returns The created or updated saved view.
+ * @throws WorkspaceSearchApiError when the body is not a saved view.
+ */
 function readSavedView(value: unknown) {
-  const record = asRecord(value)
-  const view = record.view ?? value
-
-  if (!view || typeof view !== 'object') {
+  if (typeof asRecord(value).id !== 'string') {
     throw new WorkspaceSearchApiError(502, 'Saved view response was invalid.', 'InvalidSavedViewResponse')
   }
 
-  return view as SavedWorkspaceView
+  return value as SavedWorkspaceView
 }
 
 async function requestJson<TResponse>(

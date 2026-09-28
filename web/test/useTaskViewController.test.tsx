@@ -160,7 +160,7 @@ describe('useTaskViewController resolution', () => {
     globalThis.fetch = Object.assign(
       async () => {
         requestCount += 1
-        return Response.json({ view: selectedView })
+        return Response.json(selectedView)
       },
       { preconnect: originalFetch.preconnect },
     )
@@ -197,7 +197,7 @@ describe('useTaskViewController resolution', () => {
     globalThis.fetch = Object.assign(
       async () => {
         requestCount += 1
-        return Response.json({ view: selectedView })
+        return Response.json(selectedView)
       },
       { preconnect: originalFetch.preconnect },
     )
@@ -320,7 +320,7 @@ describe('useTaskViewController resolution', () => {
           : new Request(new URL(String(input), 'https://example.test'), init)
         requests.push(request.clone())
         return request.method === 'PATCH'
-          ? Response.json({ view: updatedTeamDefault })
+          ? Response.json(updatedTeamDefault)
           : Response.json({
               capabilities: writableTaskViewCapabilities,
               views: [updatedTeamDefault],
@@ -392,14 +392,14 @@ describe('useTaskViewController resolution', () => {
     })
     const mutationCases = [
       {
-        response: { view: createdView },
+        response: createdView,
         run: (controller: TaskViewController) => controller.saveAs({
           name: 'Created view',
           visibility: 'personal',
         }),
       },
       {
-        response: { view: createdView },
+        response: createdView,
         run: (controller: TaskViewController) => controller.duplicateView(selectedView.id),
       },
       {
@@ -407,7 +407,7 @@ describe('useTaskViewController resolution', () => {
         run: (controller: TaskViewController) => controller.deleteView(selectedView.id),
       },
       {
-        response: { view: { ...selectedView, revision: 2 } },
+        response: { ...selectedView, revision: 2 },
         run: (controller: TaskViewController) => controller.updateActiveView(),
       },
     ]
@@ -447,7 +447,7 @@ describe('useTaskViewController resolution', () => {
       identity,
       { viewId: selectedView.id },
     )
-    const deferredResponse = installDeferredMutationResponse({ view: duplicatedView })
+    const deferredResponse = installDeferredMutationResponse(duplicatedView)
     const controller = renderController({
       ...createInput(searchParams),
       onSearchParamsChange: (next) => {
@@ -612,7 +612,7 @@ describe('useTaskViewController resolution', () => {
     globalThis.fetch = Object.assign(
       async () => {
         requestCount += 1
-        return Response.json({ view: createdView })
+        return Response.json(createdView)
       },
       { preconnect: originalFetch.preconnect },
     )
