@@ -58,7 +58,7 @@ export function createAutomationActionId(executionId: string, actionIndex: numbe
  *
  * @param executionId - Parent execution identifier.
  * @param actionIndex - Zero-based action index.
- * @returns A comment identifier compatible with legacy Team Issue comment events.
+ * @returns The deterministic comment identifier for the action.
  */
 export function createAutomationCommentId(executionId: string, actionIndex: number): string {
   if (!Number.isSafeInteger(actionIndex) || actionIndex < 0) {

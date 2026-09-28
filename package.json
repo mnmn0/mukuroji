@@ -49,7 +49,6 @@
     "floci:deploy-backend": "bun --env-file=.env run sh floci/deploy-backend.sh",
     "work-items:seed-dynamodb": "bash scripts/seed-work-items-dynamodb.sh",
     "issues:check-dynamodb": "bash scripts/check-team-issues-dynamodb.sh",
-    "team-issue-comments:backfill": "bun --env-file=.env --filter server team-issue-comments:backfill",
     "search:backfill": "bun --filter server search:backfill",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",

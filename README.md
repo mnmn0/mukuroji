@@ -275,7 +275,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `WORK_ITEMS_TABLE_NAME`: Work Item を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
-- `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
+- `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue の活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
 - `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
