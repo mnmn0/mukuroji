@@ -11,7 +11,7 @@ import {
   sameCrossDomainIntegrityResourceAttestation,
   serializeCrossDomainIntegrityResourceAttestation,
   type CrossDomainIntegrityResourceAttestation,
-} from './cross-domain-integrity'
+} from '../../src/modules/data-integrity'
 
 const ATTESTATION_KEY = new Uint8Array(32).fill(0x4d)
 const ACCOUNT = '123456789012'

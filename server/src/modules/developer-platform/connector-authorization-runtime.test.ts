@@ -11,9 +11,9 @@ import {
   ConnectorRegistry,
 } from './connectors'
 import {
-  InMemoryDeveloperPlatformClient,
+  InMemoryDeveloperPlatformStorage,
   LocalAesGcmSecretProtector,
-} from './developer-platform'
+} from './adapter-out/shared/developer-platform-store'
 import {
   ConfiguredOAuthConnectorAdapter,
   ConnectorRuntimeError,
@@ -151,7 +151,7 @@ function createRuntimeFixture(fixtureOptions: {
         }),
   }
   const protector = new LocalAesGcmSecretProtector(new Uint8Array(32).fill(3))
-  const platform = new InMemoryDeveloperPlatformClient(protector, () => NOW)
+  const platform = new InMemoryDeveloperPlatformStorage(protector, () => NOW)
   const state = new ConnectorOAuthStateManager({
     store: new InMemoryConnectorOAuthStateStore(),
     protector,
@@ -770,7 +770,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const calls: unknown[] = []
     const protector = new LocalAesGcmSecretProtector(new Uint8Array(32).fill(4))
     const runtime = new ConnectorAuthorizationRuntime({
-      platform: new InMemoryDeveloperPlatformClient(protector, () => NOW),
+      platform: new InMemoryDeveloperPlatformStorage(protector, () => NOW),
       registry: new ConnectorRegistry(),
       state: new ConnectorOAuthStateManager({
         store: new InMemoryConnectorOAuthStateStore(),

@@ -23,7 +23,7 @@ import {
   type CrossDomainIntegrityResourceIdentity,
   type CrossDomainIntegrityRole,
   type RunCrossDomainIntegrityCheckInput,
-} from './cross-domain-integrity'
+} from '../../src/modules/data-integrity'
 
 const digestKey = new Uint8Array(32).fill(19)
 const resourceBindingDigest = 'b'.repeat(64)

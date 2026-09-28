@@ -23,7 +23,7 @@ import {
   CrossDomainIntegrityAwsBridgeFailure,
   readCrossDomainIntegrityAwsNormalizedPage,
   runCrossDomainIntegrityAwsCheck,
-} from './cross-domain-integrity-aws'
+} from '../../src/modules/data-integrity/cross-domain-integrity-aws'
 import {
   calculateCrossDomainIntegrityResourceIdentityDigest,
   compareCrossDomainIntegrityResults,
@@ -39,7 +39,7 @@ import {
   type CrossDomainIntegrityResourceIdentity,
   type CrossDomainIntegrityResourceAttestation,
   type CrossDomainIntegrityObservationMode,
-} from './cross-domain-integrity'
+} from '../../src/modules/data-integrity'
 import type {
   CrossDomainIntegrityManagedAwsReadPort,
   CrossDomainIntegrityLiveRuntimeBridge,

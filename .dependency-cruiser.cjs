@@ -199,12 +199,6 @@ module.exports = {
       to: { path: '^server/src/modules/documents/adapter-out/dynamodb/' },
     },
     {
-      name: 'server-handlers-do-not-use-compatibility-index',
-      severity: 'error',
-      from: { path: '^server/src/handlers/' },
-      to: { path: '^server/src/index\\.ts$' },
-    },
-    {
       name: 'server-backfills-do-not-use-http',
       severity: 'error',
       from: { path: '^server/scripts/backfills/' },

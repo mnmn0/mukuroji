@@ -6,20 +6,20 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import type { ApiProblem, WebhookEventEnvelope } from '@mukuroji/contracts'
 import {
-  DeveloperPlatformError,
-  DynamoDbDeveloperPlatformClient,
+  DynamoDbDeveloperPlatformStorage,
   EXTERNAL_LINK_INSTALLATION_LIMIT,
   EXTERNAL_LINK_WORK_ITEM_LIMIT,
   IDEMPOTENCY_MAX_RESPONSE_BYTES,
-  InMemoryDeveloperPlatformClient,
+  InMemoryDeveloperPlatformStorage,
   KmsEnvelopeSecretProtector,
   LocalAesGcmSecretProtector,
   WEBHOOK_DISABLED_SUBSCRIPTION_RETENTION_SECONDS,
   WEBHOOK_DELIVERY_RETENTION_SECONDS,
   WEBHOOK_SUBSCRIPTION_LIMIT,
   createDefaultSecretProtector,
-  createWebhookSignature,
-} from './developer-platform'
+} from './adapter-out/shared/developer-platform-store'
+import { createWebhookSignature } from './domain/webhook-signature'
+import { DeveloperPlatformError } from './errors'
 
 const START = new Date('2026-07-18T00:00:00.000Z')
 
@@ -35,7 +35,7 @@ function createClock() {
 
 function createClient() {
   const clock = createClock()
-  const client = new InMemoryDeveloperPlatformClient(
+  const client = new InMemoryDeveloperPlatformStorage(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
     clock.now,
   )
@@ -43,7 +43,7 @@ function createClient() {
 }
 
 /** Lookup GSI の伝播遅延を再現する memory client です。 */
-class LaggingLookupDeveloperPlatformClient extends InMemoryDeveloperPlatformClient {
+class LaggingLookupDeveloperPlatformClient extends InMemoryDeveloperPlatformStorage {
   /** GSI propagation lag を再現し、authoritative rows だけを保持します。 */
   protected override async queryLookupIndex() {
     return { locators: [] }
@@ -80,7 +80,7 @@ function createWebhookEvent(
   }
 }
 
-function readStoredRows(client: InMemoryDeveloperPlatformClient) {
+function readStoredRows(client: InMemoryDeveloperPlatformStorage) {
   const records = (
     client as unknown as {
       records: Map<string, Record<string, unknown>>
@@ -718,7 +718,7 @@ describe('developer credential lifecycle', () => {
 describe('DynamoDB developer platform persistence', () => {
   test('uses only canonical active locator rows', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(29)),
@@ -774,7 +774,7 @@ describe('DynamoDB developer platform persistence', () => {
       secretCiphertext: 'legacy-ciphertext',
       version: 1,
     })
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(30)),
@@ -794,7 +794,7 @@ describe('DynamoDB developer platform persistence', () => {
   test('uses strongly consistent credential auth rows, ciphertext, and no raw secret', async () => {
     const clock = createClock()
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(5)),
@@ -1107,7 +1107,7 @@ describe('DynamoDB developer platform persistence', () => {
 
   test('prepares an atomic Work Item deletion fence with an empty-link condition', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(6)),
@@ -1149,7 +1149,7 @@ describe('DynamoDB developer platform persistence', () => {
 
   test('replays PATCH and DELETE after response loss from their domain transaction', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(6)),
@@ -1247,7 +1247,7 @@ describe('DynamoDB developer platform persistence', () => {
 
   test('atomically emits external-link and terminal import webhook outbox events', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(6)),
@@ -1635,7 +1635,7 @@ describe('DynamoDB developer platform persistence', () => {
 
   test('uses materialized filters and point reads instead of scanning all external links', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(6)),
@@ -1756,7 +1756,7 @@ describe('webhook subscription and delivery', () => {
 
   test('releases DynamoDB subscription quota exactly once after disablement', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(19)),
@@ -1857,7 +1857,7 @@ describe('webhook subscription and delivery', () => {
 
   test('rejects DynamoDB subscription quota underflow without disabling the record', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(20)),
@@ -1940,7 +1940,7 @@ describe('webhook subscription and delivery', () => {
 
   test('atomically audits connector lifecycle without credential or OAuth state metadata', async () => {
     const memory = createMemoryDocumentClient()
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(16)),
@@ -2884,7 +2884,7 @@ describe('connectors, links, and imports', () => {
 
   test('reclaims expired refresh leases and releases only the current owner', async () => {
     let now = START
-    const client = new InMemoryDeveloperPlatformClient(
+    const client = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(17)),
       () => now,
     )
@@ -2937,7 +2937,7 @@ describe('connectors, links, and imports', () => {
     const protector =
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(18))
     const protect = protector.protect.bind(protector)
-    let client!: InMemoryDeveloperPlatformClient
+    let client!: InMemoryDeveloperPlatformStorage
     let installationId = ''
     let raced = false
     protector.protect = async (plaintext, context) => {
@@ -2952,7 +2952,7 @@ describe('connectors, links, and imports', () => {
       }
       return protect(plaintext, context)
     }
-    client = new InMemoryDeveloperPlatformClient(protector, () => START)
+    client = new InMemoryDeveloperPlatformStorage(protector, () => START)
     const installation = await client.installConnector({
       workspaceId: 'workspace-refresh-status-race',
       installedByUserId: 'user-refresh-status-race',
@@ -3635,7 +3635,7 @@ describe('connectors, links, and imports', () => {
     })
     const linkInput: Omit<
       Parameters<
-        InMemoryDeveloperPlatformClient['createExternalWorkItemLink']
+        InMemoryDeveloperPlatformStorage['createExternalWorkItemLink']
       >[0]['input'],
       'teamId' | 'workItemId'
     > = {
@@ -3867,7 +3867,7 @@ describe('connectors, links, and imports', () => {
         ).send(command)
       },
     } as unknown as DynamoDBDocumentClient
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(8)),
@@ -4209,7 +4209,7 @@ describe('request safety primitives', () => {
     const clock = createClock()
     const delegate = new LocalAesGcmSecretProtector(new Uint8Array(32).fill(5))
     let takeover: (() => Promise<void>) | undefined
-    const client = new InMemoryDeveloperPlatformClient({
+    const client = new InMemoryDeveloperPlatformStorage({
       async protect(plaintext, context) {
         const ciphertext = await delegate.protect(plaintext, context)
         if (context.startsWith('mukuroji:idempotency-response:') && takeover) {
@@ -4335,7 +4335,7 @@ describe('request safety primitives', () => {
   test('bounds idempotency reservation retries after repeated CAS conflicts', async () => {
     const memory = createMemoryDocumentClient(4)
     let now = new Date(START)
-    const client = new DynamoDbDeveloperPlatformClient(
+    const client = new DynamoDbDeveloperPlatformStorage(
       'DeveloperPlatformTable',
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
@@ -4447,7 +4447,7 @@ describe('request safety primitives', () => {
       status: 'reserved',
     })
 
-    const expandingClient = new InMemoryDeveloperPlatformClient({
+    const expandingClient = new InMemoryDeveloperPlatformStorage({
       async protect() {
         return `v1.${'x'.repeat(390 * 1024)}`
       },
@@ -4616,7 +4616,7 @@ describe('request safety primitives', () => {
 
   test('fails fast when production storage and KMS configuration are incomplete', () => {
     const memory = createMemoryDocumentClient()
-    expect(() => new DynamoDbDeveloperPlatformClient(
+    expect(() => new DynamoDbDeveloperPlatformStorage(
       undefined,
       memory.documentClient,
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),

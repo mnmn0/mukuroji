@@ -23,7 +23,6 @@
     },
     "server": {
       "entry": [
-        "src/index.ts",
         "src/handlers/*.ts",
         "src/modules/*/index.ts",
         "scripts/**/*.ts"

@@ -13,8 +13,7 @@ Hono で実装した API を、Bun development server と Node.js 22 Lambda の�
 - `src/handlers/`: CDK と package script が参照する薄い Lambda entrypoint
 - `scripts/backfills/`: HTTP route を経由しない再実行可能な backfill
 
-`src/index.ts` は互換用の公開 re-export だけを持ちます。Bun と Lambda は
-`src/handlers/` を entrypoint とし、`createApp(dependencies)` へ instance ごとの immutable な
+Bun と Lambda は `src/handlers/` を entrypoint とし、`createApp(dependencies)` へ instance ごとの immutable な
 dependency bundle を渡します。Authentication、Workspace/Enterprise、Work Item、Automation、
 Developer Platform の API bundle は `src/app/composition/api-dependencies.ts` が concrete adapter
 へ結び付け、worker は各 composition module が処理に必要な adapter だけを構成します。
