@@ -159,7 +159,7 @@ module.exports = {
         path: '^server/src/modules/',
         pathNot: '\\.test\\.ts$',
       },
-      to: { path: '^server/src/(?:app/|index\\.ts$)' },
+      to: { path: '^server/src/app/' },
     },
     {
       name: 'server-domain-is-pure',
@@ -183,7 +183,7 @@ module.exports = {
       name: 'server-adapter-in-does-not-depend-on-app',
       severity: 'error',
       from: { path: '^server/src/modules/[^/]+/adapter-in/' },
-      to: { path: '^server/src/(?:app/|index\\.ts$)' },
+      to: { path: '^server/src/app/' },
     },
     {
       name: 'server-adapter-out-does-not-depend-on-http',

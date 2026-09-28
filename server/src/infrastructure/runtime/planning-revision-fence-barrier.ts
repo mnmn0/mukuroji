@@ -4,7 +4,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 const planningRevisionFenceBarrierMiddlewareName =
   'mukurojiPlanningRevisionFenceBarrier'
 
-/** Physical Planning META record key shared by the legacy and fenced rows. */
+/** Physical record key of the Planning revision META row. */
 const planningMetaRecordKey = 'META'
 
 /** Prefix identifying the isolated Planning revision-fence partition. */
@@ -15,7 +15,7 @@ export class PlanningRevisionFenceBarrierError extends Error {
   /** Machine-readable raw-value-free failure code. */
   readonly code = 'PLANNING_REVISION_FENCE_BARRIER_REQUIRED'
 
-  /** Creates one fail-closed Planning migration-barrier failure. */
+  /** Creates one fail-closed Planning revision-fence barrier failure. */
   constructor() {
     super('PLANNING_REVISION_FENCE_BARRIER_REQUIRED')
     this.name = 'PlanningRevisionFenceBarrierError'
@@ -25,8 +25,8 @@ export class PlanningRevisionFenceBarrierError extends Error {
 /**
  * Rejects direct writes to isolated FENCE META rows that cannot establish a revision CAS.
  *
- * Legacy META rows are retained as inert compatibility data after fence initialization, so
- * normal transactions no longer need a broad table-wide condition check or delete capability.
+ * Planning writers advance the fence only inside `TransactWriteItems`, so any other write to
+ * the fence row would bypass the revision check.
  *
  * @param client - Document client used by the application writer.
  * @param planningTableName - Exact physical Planning table name.

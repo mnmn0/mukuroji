@@ -608,7 +608,7 @@ export type TaskViewClient = {
 /** DynamoDB に保存する saved view definition row です。 */
 type StoredSavedWorkspaceView = {
   /** 保存時の saved view schema version です。 */
-  schemaVersion?: number
+  schemaVersion: typeof SAVED_VIEW_SCHEMA_VERSION
   /** DynamoDB partition key です。 */
   workspaceId: string
   /** DynamoDB sort key です。 */
