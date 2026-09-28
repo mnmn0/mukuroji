@@ -39,7 +39,7 @@ import type { ProjectDirectoryClient } from '../../modules/directory'
 import type { DocumentClient } from '../../modules/documents'
 import type {
   EnterpriseIdentityCapabilities,
-  EnterpriseIdentityClient,
+  EnterpriseIdentityApplicationCapability,
 } from '../../modules/enterprise-identity'
 import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-identity/enterprise-session-activity'
 import type { FileProofingClient } from '../../modules/files/file-proofing'
@@ -338,5 +338,5 @@ export type AppDependencyOverrides = Partial<
   OperationalDependencies
 > & {
   /** Test-only aggregate client converted to capability-scoped ports at composition. */
-  enterpriseIdentity?: EnterpriseIdentityClient
+  enterpriseIdentity?: EnterpriseIdentityApplicationCapability
 }

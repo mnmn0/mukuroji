@@ -7,7 +7,7 @@ import type {
   EnterpriseSecurityPolicy,
   WebhookSubscription,
 } from '@mukuroji/contracts'
-import type { EnterpriseIdentityReadClient } from '../enterprise-identity/enterprise-identity'
+import type { EnterpriseIdentityReadCapability } from '../enterprise-identity'
 import type { WorkspaceAccessClient, WorkspaceMember } from '../workspace-access/workspace-access'
 import {
   AwsWebhookCognitoGroupsProvider,
@@ -969,7 +969,7 @@ function createAuthorizer(
         ? await options.readSnapshot()
         : createEnterpriseSnapshot()
     },
-  } as unknown as EnterpriseIdentityReadClient
+  } as unknown as EnterpriseIdentityReadCapability
   const cognitoGroups = {
     async getGroups() {
       if (calls?.groupReads !== undefined) calls.groupReads += 1

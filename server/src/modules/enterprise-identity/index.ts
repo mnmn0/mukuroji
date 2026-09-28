@@ -8,8 +8,6 @@ export {
   assertEnterpriseIdentityProviderReady,
   createEnterpriseIdentityClient,
   type EnterpriseCognitoFederationBinding,
-  type EnterpriseIdentityClient,
-  type EnterpriseIdentityReadClient,
 } from './enterprise-identity'
 export {
   canAssignEnterpriseRole,

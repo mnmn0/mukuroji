@@ -34,7 +34,7 @@ import {
   resolveEnterpriseDirectoryPrincipal,
   validateEnterpriseSession,
   type EnterpriseCognitoFederationBinding,
-  type EnterpriseIdentityReadClient,
+  type EnterpriseIdentityReadCapability,
   type EnterprisePrincipalContext,
 } from '../../../enterprise-identity'
 import { createEnterpriseCognitoInspectionCache } from '../../../enterprise-identity'
@@ -266,7 +266,7 @@ const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
   marshallOptions: { removeUndefinedValues: true },
 })
 const managementApiClients = new Map<string, ApiGatewayManagementApiClient>()
-let enterpriseIdentityClient: EnterpriseIdentityReadClient | undefined
+let enterpriseIdentityClient: EnterpriseIdentityReadCapability | undefined
 const defaultExternalPermissionCeiling = [
   'workspace.read',
   'members.read',

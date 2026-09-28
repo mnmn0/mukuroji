@@ -163,12 +163,6 @@ export type {
   EnterpriseScimWorkspaceAuthentication,
 }
 
-/** Internal adapter aggregate retained for composition and test compatibility. */
-export type EnterpriseIdentityClient = EnterpriseIdentityApplicationCapability
-
-/** Credential-free Enterprise Identity read port retained for compatibility. */
-export type EnterpriseIdentityReadClient = EnterpriseIdentityReadCapability
-
 /**
  * Enterprise identity domain の safe API error です。
  */
@@ -457,7 +451,7 @@ type DynamoDbEnterpriseIdentityAdapters = {
 /**
  * Enterprise state persistence を抽象化する基底 service です。
  */
-abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
+abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicationCapability {
   /** Plaintext credential の生成・digest・constant-time 検証 adapter です。 */
   protected readonly credentialProtector: EnterpriseCredentialProtector
   /** Testable wall clock です。 */
@@ -3879,7 +3873,7 @@ const ENTERPRISE_READ_ONLY_PLACEHOLDER_SECRET =
  * Realtime など credential の発行・認証を行わない runtime が、credential HMAC secret を
  * environment に受け取らず current policy と break-glass state だけを参照するために使います。
  */
-export class DynamoDbEnterpriseIdentityReadClient implements EnterpriseIdentityReadClient {
+export class DynamoDbEnterpriseIdentityReadClient implements EnterpriseIdentityReadCapability {
   /** Secretless reader の公開面だけを委譲する persistence client です。 */
   private readonly delegate: DynamoDbEnterpriseIdentityClient
 
