@@ -39,19 +39,6 @@ DASHBOARD_UPDATED_AT="${MUKUROJI_DASHBOARD_UPDATED_AT:-$(date -u +%Y-%m-%dT%H:%M
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
 COGNITO_ENV_FILE="$GENERATED_DIR/cognito.env"
 
-# 旧 ready hook が生成した file には secret が含まれるため、bootstrap が途中で
-# 失敗しても残存しないよう、非secret版を生成する前に legacy file だけ除去します。
-if [ -f "$COGNITO_ENV_FILE" ]; then
-  if grep -Eq '^(COGNITO_TEST_PASSWORD|ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET|ENTERPRISE_SSO_STATE_SECRET|MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY)=' "$COGNITO_ENV_FILE"; then
-    rm -f "$COGNITO_ENV_FILE"
-  else
-    legacy_env_inspection_status=$?
-    if [ "$legacy_env_inspection_status" -gt 1 ]; then
-      rm -f "$COGNITO_ENV_FILE"
-    fi
-  fi
-fi
-
 if [ -z "$WORKSPACE_AUDIT_PSEUDONYM_KEY" ]; then
   echo 'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY is required. Set it to the output of "openssl rand -hex 32".' >&2
   exit 2
@@ -472,20 +459,6 @@ fi
 
 aws_local dynamodb wait table-exists --table-name "$WORK_ITEMS_TABLE"
 
-TEAM_ISSUE_UPDATED_AT_INDEX_COUNT="$(aws_local dynamodb describe-table \
-  --table-name "$WORK_ITEMS_TABLE" \
-  --query "length(Table.GlobalSecondaryIndexes[?IndexName=='TeamIssueUpdatedAtIndex'])" \
-  --output text)"
-if [ "$TEAM_ISSUE_UPDATED_AT_INDEX_COUNT" = "0" ]; then
-  aws_local dynamodb update-table \
-    --table-name "$WORK_ITEMS_TABLE" \
-    --attribute-definitions AttributeName=updatedAt,AttributeType=S \
-    --global-secondary-index-updates \
-      '[{"Create":{"IndexName":"TeamIssueUpdatedAtIndex","KeySchema":[{"AttributeName":"directoryTeamId","KeyType":"HASH"},{"AttributeName":"updatedAt","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]' \
-    >/dev/null
-  aws_local dynamodb wait table-exists --table-name "$WORK_ITEMS_TABLE"
-fi
-
 TEAM_ISSUE_UPDATED_AT_INDEX_STATUS=""
 TEAM_ISSUE_UPDATED_AT_INDEX_WAIT_ATTEMPT=0
 while [ "$TEAM_ISSUE_UPDATED_AT_INDEX_WAIT_ATTEMPT" -lt 60 ]; do
@@ -592,21 +565,6 @@ if ! aws_local dynamodb describe-table --table-name "$PROJECT_DIRECTORY_TABLE" >
     --global-secondary-indexes \
       'IndexName=WebhookAuthorizationIndex,KeySchema=[{AttributeName=webhookAuthorizationKey,KeyType=HASH},{AttributeName=webhookAuthorizationSortKey,KeyType=RANGE}],Projection={ProjectionType=ALL}' \
     --billing-mode PAY_PER_REQUEST \
-    >/dev/null
-fi
-
-WEBHOOK_AUTHORIZATION_INDEX_COUNT="$(aws_local dynamodb describe-table \
-  --table-name "$PROJECT_DIRECTORY_TABLE" \
-  --query "length(Table.GlobalSecondaryIndexes[?IndexName=='WebhookAuthorizationIndex'])" \
-  --output text)"
-if [ "$WEBHOOK_AUTHORIZATION_INDEX_COUNT" = "0" ]; then
-  aws_local dynamodb update-table \
-    --table-name "$PROJECT_DIRECTORY_TABLE" \
-    --attribute-definitions \
-      AttributeName=webhookAuthorizationKey,AttributeType=S \
-      AttributeName=webhookAuthorizationSortKey,AttributeType=S \
-    --global-secondary-index-updates \
-      '[{"Create":{"IndexName":"WebhookAuthorizationIndex","KeySchema":[{"AttributeName":"webhookAuthorizationKey","KeyType":"HASH"},{"AttributeName":"webhookAuthorizationSortKey","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]' \
     >/dev/null
 fi
 aws_local dynamodb wait table-exists --table-name "$PROJECT_DIRECTORY_TABLE"
@@ -850,19 +808,6 @@ if ! aws_local dynamodb describe-table --table-name "$REALTIME_SESSIONS_TABLE" >
 fi
 
 aws_local dynamodb wait table-exists --table-name "$REALTIME_SESSIONS_TABLE"
-
-REALTIME_SCOPE_INDEX_NAME="$(aws_local dynamodb describe-table \
-  --table-name "$REALTIME_SESSIONS_TABLE" \
-  --query "Table.GlobalSecondaryIndexes[?IndexName=='ScopeConnectionsIndex'] | [0].IndexName" \
-  --output text)"
-if [ -z "$REALTIME_SCOPE_INDEX_NAME" ] || [ "$REALTIME_SCOPE_INDEX_NAME" = "None" ]; then
-  aws_local dynamodb update-table \
-    --table-name "$REALTIME_SESSIONS_TABLE" \
-    --attribute-definitions AttributeName=scopeKey,AttributeType=S \
-    --global-secondary-index-updates \
-      '[{"Create":{"IndexName":"ScopeConnectionsIndex","KeySchema":[{"AttributeName":"scopeKey","KeyType":"HASH"},{"AttributeName":"connectionId","KeyType":"RANGE"}],"Projection":{"ProjectionType":"ALL"}}}]' \
-    >/dev/null
-fi
 
 REALTIME_SCOPE_INDEX_STATUS=""
 REALTIME_SCOPE_INDEX_WAIT_ATTEMPT=0
@@ -1276,5 +1221,5 @@ echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPAC
 echo "mukuroji DynamoDB ready: table=$ENTERPRISE_IDENTITY_TABLE enterpriseIdentity=ready"
 echo "mukuroji DynamoDB ready: table=$REALTIME_SESSIONS_TABLE scopeIndex=ScopeConnectionsIndex"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_SEARCH_TABLE searchAndSavedViews=ready"
-echo "mukuroji Workspace Search projection bootstrap: run canonical search:backfill for project-directory and work-items with --limit 100; no migration planning artifact is required"
+echo "mukuroji Workspace Search projection bootstrap: run canonical search:backfill for project-directory and work-items with --limit 100"
 echo "mukuroji DynamoDB ready: table=$ANALYTICS_TABLE scheduleIndex=$ANALYTICS_SCHEDULE_INDEX"
