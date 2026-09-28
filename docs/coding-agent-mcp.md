@@ -106,8 +106,8 @@ Webのタスク一覧・詳細から状態とコメントを確認できます�
 - HTTP応答は2 MiB、各requestは15秒まで。ページ一覧では `hasMore: true` の間、空ページでも同じfilter/limitと `nextCursor` で続けます。
 - `401` はtokenの期限・失効、`403` はscope/RBAC、`429` はrate limitを確認します。`retryAfterSeconds` があればその時間を待ちます。秘密情報を含み得る上流エラー本文はMCPへ転送しません。
 - `report_progress` は最大3900文字です。長い報告は複数コメントへ分けます。`update_task.description` は公開APIの制約に合わせ最大4096文字です。
-- コメントAPIはcanonical Collaboration保存先を読みます。未移行のlegacy eventコメントの互換fallbackは含みません。新しい進捗コメントは常にcanonical保存先に入ります。
-- コメントの日時順を保証するため、旧形式・互換用のCollaboration索引を最大2,000行分走査します。この上限を超える大きな履歴は `503` になり、不完全な順序を成功として返しません。
+- コメントAPIはcanonical Collaboration保存先を読みます。新しい進捗コメントも常にcanonical保存先に入ります。
+- コメントはCollaborationの時系列索引から新しい順に読み、各索引行がコメントと一致することを検証します。不整合な索引行は `503` になり、不完全な順序を成功として返しません。
 - タスク状態を共有する機能です。エージェントの停止・切断監視、heartbeat、作業の自動実行、切断時の状態変更は行いません。不要になった作業は意図を確認して再オープン・取り消しなどで更新します。
 
 ## 検証
