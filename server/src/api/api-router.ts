@@ -394,9 +394,7 @@ import {
   type SavedViewAccessScope,
   type ResolveTaskViewRelationIdsInput,
   type TaskViewAccessScope,
-  type TaskViewClient,
   type WorkspaceSearchAccessScope,
-  type WorkspaceSearchClient,
   type WorkspaceSearchDocument,
 } from '../modules/workspace-search/workspace-search'
 import {
@@ -8703,7 +8701,6 @@ routeApp.get('/api/task-views', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const surface = c.req.query('surface') === undefined
       ? undefined
       : readTaskViewSurface(c.req.query('surface'))
@@ -8717,7 +8714,7 @@ routeApp.get('/api/task-views', async (c) => {
       ? undefined
       : readTaskViewCursor(c.req.query('cursor'))
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.listTaskViews({
+    return c.json(await workItemDependencies.workspaceSearch.listTaskViews({
       workspaceId: principal.directoryId,
       access,
       ...(surface ? { surface } : {}),
@@ -8741,13 +8738,12 @@ routeApp.post('/api/task-views', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const input = readCreateSavedTaskViewInput(await readTaskViewJson(c.req))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.createTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.createTaskView({
       workspaceId: principal.directoryId,
       access,
       input,
@@ -8769,10 +8765,9 @@ routeApp.get('/api/task-views/:viewId', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const viewId = readTaskViewPathId(c.req.param('viewId'))
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.getTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.getTaskView({
       workspaceId: principal.directoryId,
       viewId,
       access,
@@ -8793,14 +8788,13 @@ routeApp.patch('/api/task-views/:viewId', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const viewId = readTaskViewPathId(c.req.param('viewId'))
     const input = readUpdateSavedTaskViewInput(await readTaskViewJson(c.req))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.updateTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.updateTaskView({
       workspaceId: principal.directoryId,
       viewId,
       access,
@@ -8823,14 +8817,13 @@ routeApp.post('/api/task-views/:viewId/duplicate', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const sourceViewId = readTaskViewPathId(c.req.param('viewId'))
     const input = readDuplicateSavedTaskViewInput(await readTaskViewJson(c.req))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.duplicateTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.duplicateTaskView({
       workspaceId: principal.directoryId,
       sourceViewId,
       access,
@@ -8853,14 +8846,13 @@ routeApp.delete('/api/task-views/:viewId', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const viewId = readTaskViewPathId(c.req.param('viewId'))
     const expectedRevision = readTaskViewRevisionQuery(c.req.query('expectedRevision'))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.deleteTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.deleteTaskView({
       workspaceId: principal.directoryId,
       viewId,
       expectedRevision,
@@ -27552,45 +27544,6 @@ function parseSearchCuratedContextItemEntityId(
         contextItemId: match[3],
       }
     : undefined
-}
-
-/**
- * Resolves the optional task-view methods as one fail-closed required port.
- *
- * @param client - Workspace Search client configured by the composition root.
- * @returns Required task-view lifecycle methods bound to the configured client.
- */
-function requireTaskViewClient(client: WorkspaceSearchClient): TaskViewClient {
-  const {
-    listTaskViews,
-    getTaskView,
-    createTaskView,
-    updateTaskView,
-    duplicateTaskView,
-    deleteTaskView,
-  } = client
-  if (
-    typeof listTaskViews !== 'function' ||
-    typeof getTaskView !== 'function' ||
-    typeof createTaskView !== 'function' ||
-    typeof updateTaskView !== 'function' ||
-    typeof duplicateTaskView !== 'function' ||
-    typeof deleteTaskView !== 'function'
-  ) {
-    throw new WorkspaceSearchError(
-      503,
-      'TaskViewUnavailable',
-      'Task view storage is unavailable.',
-    )
-  }
-  return {
-    listTaskViews: listTaskViews.bind(client),
-    getTaskView: getTaskView.bind(client),
-    createTaskView: createTaskView.bind(client),
-    updateTaskView: updateTaskView.bind(client),
-    duplicateTaskView: duplicateTaskView.bind(client),
-    deleteTaskView: deleteTaskView.bind(client),
-  }
 }
 
 /**

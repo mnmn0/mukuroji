@@ -35,7 +35,6 @@ import type {
   GetTaskViewRequest,
   ListTaskViewsInput,
   ResolveTaskViewRelationIdsInput,
-  TaskViewClient,
   UpdateTaskViewRequest,
   WorkspaceSearchClient,
   WorkspaceSearchQueryInput,
@@ -101,24 +100,6 @@ function createWorkspaceSearchFake(
     createSavedView: async () => failUnexpectedWorkspaceSearchOperation(),
     updateSavedView: async () => failUnexpectedWorkspaceSearchOperation(),
     deleteSavedView: async () => failUnexpectedWorkspaceSearchOperation(),
-    ...overrides,
-  }
-}
-
-/** Task-view operation overrides with optional legacy-search fallback behavior. */
-type TaskViewWorkspaceSearchOverrides = Partial<TaskViewClient> &
-  Pick<Partial<WorkspaceSearchClient>, 'search'>
-
-/**
- * Creates a fail-closed Workspace Search fake with every optional task-view method present.
- *
- * @param overrides - Task-view methods exercised by the current test.
- * @returns A Workspace Search port whose unconfigured task-view operations fail.
- */
-function createTaskViewWorkspaceSearchFake(
-  overrides: TaskViewWorkspaceSearchOverrides,
-): WorkspaceSearchClient {
-  return createWorkspaceSearchFake({
     listTaskViews: async () => failUnexpectedWorkspaceSearchOperation(),
     getTaskView: async () => failUnexpectedWorkspaceSearchOperation(),
     createTaskView: async () => failUnexpectedWorkspaceSearchOperation(),
@@ -126,7 +107,7 @@ function createTaskViewWorkspaceSearchFake(
     duplicateTaskView: async () => failUnexpectedWorkspaceSearchOperation(),
     deleteTaskView: async () => failUnexpectedWorkspaceSearchOperation(),
     ...overrides,
-  })
+  }
 }
 
 /**
@@ -1537,7 +1518,7 @@ test('task view endpoints forward the complete lifecycle with current permission
         }
       },
     }),
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async listTaskViews(input) {
         listInput = input
         return {
@@ -1690,7 +1671,7 @@ test('does not promote viewer-only Project roles into Work Item write scopes', a
   })
   let listInput: ListTaskViewsInput | undefined
   setTestAppDependencies({
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async listTaskViews(input) {
         listInput = input
         return { capabilities: noTaskViewCapabilities, views: [] }
@@ -1780,7 +1761,7 @@ test('task view relation resolution strongly authorizes targets with bounded req
         }
       },
     },
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async createTaskView(input) {
         const resolver = input.access.resolveReadableRelationIds
         if (!resolver) throw new Error('Expected a current-source relation resolver.')
@@ -1880,7 +1861,7 @@ test('system administrators can address task views for an active Team without Pr
   })
   let listInput: ListTaskViewsInput | undefined
   setTestAppDependencies({
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async listTaskViews(input) {
         listInput = input
         return { capabilities: noTaskViewCapabilities, views: [] }
@@ -1953,7 +1934,7 @@ test('Project-scoped Enterprise readers see Project and viewer task views withou
   const workspaceView = createView('workspace-view', { kind: 'workspace' }, 'shared')
   setTestAppDependencies({
     enterpriseIdentity: identity,
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async listTaskViews(input) {
         listInput = input
         return {
@@ -2048,7 +2029,7 @@ test('Project-scoped Enterprise writers can mutate Project Work Item views but c
   } satisfies SavedTaskView
   setTestAppDependencies({
     enterpriseIdentity: identity,
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async listTaskViews(input) {
         listInput = input
         return {
@@ -2132,7 +2113,7 @@ test('Enterprise task view mutations stay inside each authoritative writable Pro
   let createAttempts = 0
   setTestAppDependencies({
     enterpriseIdentity: identity,
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async listTaskViews(input) {
         listInput = input
         return { capabilities: noTaskViewCapabilities, views: [] }
@@ -2261,7 +2242,7 @@ test('task view endpoints reject malformed query and JSON contracts before invok
   configureFakeProjectClients(true)
   let operationCount = 0
   setTestAppDependencies({
-    workspaceSearch: createTaskViewWorkspaceSearchFake({
+    workspaceSearch: createWorkspaceSearchFake({
       async listTaskViews() {
         operationCount += 1
         return { capabilities: noTaskViewCapabilities, views: [] }
@@ -2352,21 +2333,6 @@ test('task view endpoints reject malformed query and JSON contracts before invok
   expect(await updateResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(await deleteResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(operationCount).toBe(0)
-})
-
-test('task view endpoints fail closed when the configured Workspace Search port is legacy-only', async () => {
-  configureFakeProjectClients(true)
-  setTestAppDependencies({ workspaceSearch: createWorkspaceSearchFake({}) })
-
-  const response = await app.request('/api/task-views', {
-    headers: { Authorization: 'Bearer test-token' },
-  })
-
-  expect(response.status).toBe(503)
-  expect(await response.json()).toEqual({
-    code: 'TaskViewUnavailable',
-    message: 'Task view storage is unavailable.',
-  })
 })
 
 test('keeps a primary mutation successful when search projection fails', async () => {

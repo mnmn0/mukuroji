@@ -509,86 +509,40 @@ export type WorkspaceSearchClient = {
    * @param input - Workspace, viewer access, filters, and cursor for the requested page.
    * @returns A permission-filtered cursor page of sanitized task views.
    */
-  listTaskViews?(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
+  listTaskViews(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
   /**
    * Reads one task view by ID without disclosing inaccessible definitions.
    *
    * @param input - Workspace, stable view ID, and current viewer access.
    * @returns The sanitized task view with resolved current-viewer preference state.
    */
-  getTaskView?(input: GetTaskViewRequest): Promise<SavedTaskView>
+  getTaskView(input: GetTaskViewRequest): Promise<SavedTaskView>
   /**
    * Creates a task view definition and the current viewer's initial preference.
    *
    * @param input - Authorized create input and optional idempotency key.
    * @returns The newly persisted task view in its current viewer representation.
    */
-  createTaskView?(input: CreateTaskViewRequest): Promise<SavedTaskView>
+  createTaskView(input: CreateTaskViewRequest): Promise<SavedTaskView>
   /**
    * Updates a task view definition or the current viewer's preference.
    *
    * @param input - Revision-guarded definition and preference changes.
    * @returns The updated and read-time-sanitized task view.
    */
-  updateTaskView?(input: UpdateTaskViewRequest): Promise<SavedTaskView>
+  updateTaskView(input: UpdateTaskViewRequest): Promise<SavedTaskView>
   /**
    * Duplicates one accessible task view into an independent lifecycle.
    *
    * @param input - Source view, destination metadata, and optional idempotency key.
    * @returns The independent duplicated task view.
    */
-  duplicateTaskView?(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
+  duplicateTaskView(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
   /**
    * Deletes a task view definition under an optimistic revision guard.
    *
    * @param input - Authorized target ID and expected definition revision.
    * @returns The deleted view identity and acknowledged revision.
-   */
-  deleteTaskView?(input: DeleteTaskViewRequest): Promise<{ id: string; revision: number }>
-}
-
-/** Required application surface for the generic saved task view lifecycle. */
-export type TaskViewClient = {
-  /**
-   * Lists task views visible in an optional surface and scope filter.
-   *
-   * @param input - Permission-aware list request.
-   * @returns Cursor-paginated visible task views.
-   */
-  listTaskViews(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
-  /**
-   * Reads one permission-safe task view by its stable ID.
-   *
-   * @param input - Workspace, view identity, and current access.
-   * @returns The sanitized task view.
-   */
-  getTaskView(input: GetTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Creates one task view and its initial current-viewer preference.
-   *
-   * @param input - Authorized create request.
-   * @returns The created task view.
-   */
-  createTaskView(input: CreateTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Updates one task view definition or current-viewer preference.
-   *
-   * @param input - Revision-guarded update request.
-   * @returns The updated task view.
-   */
-  updateTaskView(input: UpdateTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Duplicates one accessible task view into an independent lifecycle.
-   *
-   * @param input - Source identity and destination metadata.
-   * @returns The independent duplicate.
-   */
-  duplicateTaskView(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Deletes one task view under an optimistic revision guard.
-   *
-   * @param input - Authorized revision-bound delete request.
-   * @returns Deleted view identity and acknowledged revision.
    */
   deleteTaskView(input: DeleteTaskViewRequest): Promise<{ id: string; revision: number }>
 }

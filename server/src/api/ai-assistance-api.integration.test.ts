@@ -320,6 +320,12 @@ function createNonExecutingWorkspaceSearch(
     createSavedView: (input) => client.createSavedView(input),
     updateSavedView: (input) => client.updateSavedView(input),
     deleteSavedView: (input) => client.deleteSavedView(input),
+    listTaskViews: (input) => client.listTaskViews(input),
+    getTaskView: (input) => client.getTaskView(input),
+    createTaskView: (input) => client.createTaskView(input),
+    updateTaskView: (input) => client.updateTaskView(input),
+    duplicateTaskView: (input) => client.duplicateTaskView(input),
+    deleteTaskView: (input) => client.deleteTaskView(input),
   }
 }
 

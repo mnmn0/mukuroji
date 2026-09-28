@@ -74,6 +74,24 @@ function createWorkspaceSearchProjectionClient(
     async deleteSavedView() {
       return failUnexpectedWorkspaceSearchOperation()
     },
+    async listTaskViews() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async getTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async createTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async updateTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async duplicateTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async deleteTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
   }
 }
 
