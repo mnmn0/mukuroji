@@ -421,7 +421,7 @@ export function IssueConversationTab({
       mentionMemberKeys: [...comment.mentionMemberKeys],
       originalBodyMarkdown: bodyMarkdown,
       originalMentionMemberKeys: [...comment.mentionMemberKeys],
-      originalVersion: comment.version ?? 1,
+      originalVersion: comment.version,
     }
     setEditDraft(nextDraft)
     reportDraftDirty(current.root, current.reply, nextDraft)
@@ -1314,7 +1314,7 @@ function CommentCard({
                   try {
                     const succeeded = await controller.updateComment(comment, {
                       bodyMarkdown: input.bodyMarkdown,
-                      expectedVersion: editDraft.originalVersion ?? comment.version ?? 1,
+                      expectedVersion: editDraft.originalVersion ?? comment.version,
                       mentionMemberKeys: input.mentionMemberKeys,
                     })
 
@@ -1351,7 +1351,7 @@ function CommentCard({
 
           {!isEditing ? (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              {(comment.reactions ?? []).map((reaction) => (
+              {comment.reactions.map((reaction) => (
                 <ReactionButton
                   canReact={canReact}
                   comment={comment}

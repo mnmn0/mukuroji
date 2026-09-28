@@ -562,7 +562,7 @@ export function useIssueCollaboration({
       return false
     }
 
-    const expectedVersion = resolveCommentVersion(comment)
+    const expectedVersion = comment.version
 
     return runMutation(
       `issue:comment:delete:${teamId}:${issueId}:${comment.id}`,
@@ -583,7 +583,7 @@ export function useIssueCollaboration({
       return false
     }
 
-    const expectedVersion = resolveCommentVersion(comment)
+    const expectedVersion = comment.version
     const action = resolved ? 'resolve' : 'reopen'
 
     return runMutation(
@@ -886,10 +886,6 @@ export function useIssueCollaboration({
 
 function createPresenceClientId() {
   return globalThis.crypto?.randomUUID?.() ?? `presence-${Date.now()}-${Math.random().toString(16).slice(2)}`
-}
-
-function resolveCommentVersion(comment: TeamIssueComment) {
-  return Number.isInteger(comment.version) && (comment.version ?? 0) > 0 ? comment.version ?? 1 : 1
 }
 
 /** Deduplicates canonical comments loaded from overlapping pages or refreshes. */

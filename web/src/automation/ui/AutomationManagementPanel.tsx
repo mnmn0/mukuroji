@@ -1119,12 +1119,11 @@ type StatusBadgeProps = {
 }
 
 function StatusBadge({ label, status }: StatusBadgeProps) {
-  const normalizedStatus = status.toLowerCase()
-  const className = normalizedStatus === 'active' || normalizedStatus === 'succeeded' || normalizedStatus === 'success'
+  const className = status === 'active' || status === 'succeeded'
     ? 'workbench-badge-success'
-    : normalizedStatus === 'failed' || normalizedStatus === 'dead-letter' || normalizedStatus === 'dead_letter'
+    : status === 'failed' || status === 'dead-letter'
       ? 'workbench-badge-danger'
-      : normalizedStatus === 'running' || normalizedStatus === 'retrying'
+      : status === 'running'
         ? 'workbench-badge-primary'
         : 'workbench-badge-warning'
 

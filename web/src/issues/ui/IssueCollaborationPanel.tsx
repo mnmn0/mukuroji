@@ -522,7 +522,7 @@ export function IssueCollaborationPanel({
                   rootComment.id,
                   {
                     commentId: sourceComment.id,
-                    expectedThreadVersion: rootComment.version ?? 1,
+                    expectedThreadVersion: rootComment.version,
                     summary,
                   },
               )
