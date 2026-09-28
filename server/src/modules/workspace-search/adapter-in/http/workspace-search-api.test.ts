@@ -1747,7 +1747,7 @@ test('task view relation resolution strongly authorizes targets with bounded req
       async getTeamIssueDetail(workspaceId, teamId, issueId, options) {
         const readKey = `${teamId}\0${issueId}`
         directReadCount.set(readKey, (directReadCount.get(readKey) ?? 0) + 1)
-        expect(options).toMatchObject({ consistentIssueRead: true, eventLimit: 0 })
+        expect(options).toMatchObject({ consistentIssueRead: true, includeEvents: false })
         if (issueId === 'deleted-target' || teamId === 'core-team' && issueId === 'other-only-target') {
           throw { status: 404, code: 'TeamIssueNotFound', message: 'Issue was not found.' }
         }

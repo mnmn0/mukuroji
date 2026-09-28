@@ -290,7 +290,7 @@ test('rejects a status-only canonical row instead of upcasting workflow fields',
     'workspace-1',
     'core-team',
     'legacy-shaped-row',
-    { eventLimit: 0 },
+    { includeEvents: false },
   )).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
 })
 
@@ -349,7 +349,7 @@ test('rejects legacy-only display fields on canonical rows', async () => {
       'workspace-1',
       'core-team',
       'strict-row',
-      { eventLimit: 0 },
+      { includeEvents: false },
     )).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
   }
 })

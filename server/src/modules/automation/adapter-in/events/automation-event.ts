@@ -37,8 +37,8 @@ export interface AutomationWorkItemReader {
     options: {
       /** Canonical item を strongly consistent read するかどうかです。 */
       consistentIssueRead: boolean
-      /** Activity events の最大読込件数です。 */
-      eventLimit: number
+      /** Activity events を読むかどうかです。 */
+      includeEvents: boolean
     },
   ): Promise<{
     /** Automation event に添付する canonical Work Item です。 */
@@ -248,7 +248,7 @@ async function hydrateAutomationWorkItem(
       event.workspaceId,
       teamId,
       workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     const workItem = structuredClone(detail.issue) as unknown
     return isRecord(workItem) && isAutomationRecord(workItem)

@@ -336,7 +336,7 @@ test('DynamoDB local bootstrap accepts a Team Issue event table without secondar
       'workspace-1',
       'core',
       'canonical-work-item',
-      { eventLimit: 0 },
+      { includeEvents: false },
     )).resolves.toMatchObject({ activity: [] })
     expect(updateCalls).toBe(0)
   })
@@ -1394,7 +1394,7 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
     'user#demo@example.com',
     'core-team',
     created.issue.id,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )).resolves.toMatchObject({
     issue: {
       dueDate: '2026-08-07',
@@ -1437,7 +1437,7 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
     'user#demo@example.com',
     'core-team',
     created.issue.id,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )).resolves.toMatchObject({
     issue: {
       revision: 2,

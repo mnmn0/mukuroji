@@ -882,7 +882,7 @@ test('updates a team-owned issue after team access is confirmed', async () => {
     directoryId: 'user#demo@example.com',
     teamId: 'core-team',
     issueId: 'onboarding-friction',
-    readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    readOptions: { consistentIssueRead: true, includeEvents: false },
   })
   expect(calls.issueUpdates).toEqual([
     {
@@ -1207,7 +1207,7 @@ test('previews moving a due-date Work Item without mutating it', async () => {
     directoryId: 'user#demo@example.com',
     teamId: 'core-team',
     issueId: 'onboarding-friction',
-    readOptions: { consistentIssueRead: true, eventLimit: 0 },
+    readOptions: { consistentIssueRead: true, includeEvents: false },
   }])
 })
 

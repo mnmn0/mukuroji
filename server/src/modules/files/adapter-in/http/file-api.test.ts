@@ -437,7 +437,7 @@ test('resolves approval completion with workflow metadata and configuration guar
   expect(calls.issueDetails).toHaveLength(2)
   expect(calls.issueDetails[1]?.readOptions).toMatchObject({
     consistentIssueRead: true,
-    eventLimit: 0,
+    includeEvents: false,
   })
 })
 
@@ -845,7 +845,7 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
 
   const detail = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', {
     consistentIssueRead: true,
-    eventLimit: 0,
+    includeEvents: false,
   })
 
   expect(sentInputs).toHaveLength(1)

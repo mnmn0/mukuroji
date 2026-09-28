@@ -978,7 +978,7 @@ function createTriageClient(
           workspaceId,
           teamId,
           workItemId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         )
         return {
           ...(detail.issue.assignedProjectId === undefined
@@ -1008,7 +1008,7 @@ function createTriageClient(
         workspaceId,
         entry.teamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       let duplicateContext: TriageDuplicateContextTransactionContribution | undefined
       if (action.action === 'duplicate') {

@@ -766,7 +766,7 @@ test('rejects archiving a Project assigned to a dependency endpoint', async () =
   expect(calls.projectArchives).toEqual([])
   expect(calls.issueDetails).toHaveLength(2)
   expect(calls.issueDetails.every((call) =>
-    call.readOptions?.consistentIssueRead === true && call.readOptions.eventLimit === 0
+    call.readOptions?.consistentIssueRead === true && call.readOptions.includeEvents === false
   )).toBe(true)
 })
 

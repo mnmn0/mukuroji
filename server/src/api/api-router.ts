@@ -6166,7 +6166,7 @@ routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>
       principal.directoryId,
       teamId,
       workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, minimum)
     const authorizationConditionChecks = minimum === 'member'
@@ -9322,7 +9322,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/preview', async (c) =
         principal.directoryId,
         teamId,
         issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       ),
       workItemDependencies.workItemConfigurations.listRelations(
         principal.directoryId,
@@ -9468,7 +9468,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/work-item-type-preview', async
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     if (detail.issue.revision !== expectedRevision) {
       throw new ProjectDataError(
@@ -9553,7 +9553,7 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
     requireAssignedProjectPermission(
@@ -13036,7 +13036,7 @@ function createApiBulkOperationAdapter(
       principal.directoryId,
       item.teamId,
       item.workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     requireAssignedProjectPermission(
       principal,
@@ -13729,7 +13729,7 @@ async function executeAutomationWorkItemUpdate(
     context.execution.workspaceId,
     target.teamId,
     target.workItemId,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   const unsafeFields = Object.keys(patch).filter((field) => !automationEditableWorkItemFields.has(field))
   if (unsafeFields.length > 0) {
@@ -13807,7 +13807,7 @@ async function executeAutomationWorkItemUpdate(
       context.execution.workspaceId,
       target.teamId,
       target.workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     ).catch(() => undefined)
     const resultingRevision = detail.issue.revision + 1
     if (
@@ -14095,7 +14095,7 @@ async function executeAutomationApproval(
     context.execution.workspaceId,
     target.teamId,
     target.workItemId,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
@@ -14219,7 +14219,7 @@ async function executeAutomationComment(
     context.execution.workspaceId,
     target.teamId,
     target.workItemId,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   if (
     detail.issue.assignedProjectId &&
@@ -16756,7 +16756,7 @@ async function resolveEnterpriseAuthorizationResource(
       workspaceId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     if (detail.issue.assignedProjectId) {
       return {
@@ -16794,7 +16794,7 @@ async function resolveEnterpriseAuthorizationResource(
         workspaceId,
         linkTeamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       if (detail.issue.assignedProjectId) {
         return {
@@ -19443,7 +19443,7 @@ async function validateDocumentRelationTargets(
           principal.workspaceId,
           parsed.teamId,
           parsed.issueId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         )
       } catch (error) {
         if (isTeamIssueNotFoundError(error)) {
@@ -21933,7 +21933,7 @@ async function resolveAiWorkItemSource(
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   if (detail.issue.teamId !== source.teamId || detail.issue.id !== source.workItemId) {
     throw new AiAssistanceError(
@@ -21983,7 +21983,7 @@ async function resolveAiWorkItemSource(
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   requireAiAssistanceSourceRevision(current.detail.issue.revision, source.expectedRevision)
   if (
@@ -25718,7 +25718,7 @@ async function requirePlanningWorkItemEndpointPermission(
       principal.directoryId,
       endpoint.teamId,
       endpoint.workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     const assignedProjectId = detail.issue.assignedProjectId
     if (
@@ -27187,7 +27187,7 @@ async function readAuthorizedTaskViewRelationTarget(
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     ).catch((error) => {
       if (isTeamIssueNotFoundError(error)) return undefined
       throw error
@@ -27377,7 +27377,7 @@ async function resolveCurrentWorkspaceSearchScope(
         workspaceId,
         parsed.teamId,
         parsed.issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       ).catch((error) => {
         if (isTeamIssueNotFoundError(error)) return undefined
         throw error
@@ -27436,7 +27436,7 @@ async function resolveCurrentWorkspaceSearchScope(
         workspaceId,
         parsed.teamId,
         parsed.issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       ).catch((error) => {
         if (isTeamIssueNotFoundError(error)) return undefined
         throw error
@@ -28722,11 +28722,11 @@ async function authorizeRelationMutation(
   const [source, target] = await Promise.all([
     workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, sourceWorkItemId, {
       consistentIssueRead: true,
-      eventLimit: 0,
+      includeEvents: false,
     }),
     workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, targetWorkItemId, {
       consistentIssueRead: true,
-      eventLimit: 0,
+      includeEvents: false,
     }),
   ])
   requireAssignedProjectPermission(principal, context, source.issue.assignedProjectId, 'member')
@@ -28757,7 +28757,7 @@ async function readRelationTargets(
           principal.directoryId,
           teamId,
           targetWorkItemId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         )
         return [targetWorkItemId, detail.issue] as const
       } catch (error) {
@@ -28933,7 +28933,7 @@ async function requirePlanningProjectScopeIsUnused(
           directoryId,
           endpoint.teamId,
           endpoint.workItemId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         )
       } catch (error) {
         if (!isTeamIssueNotFoundError(error)) throw error
@@ -29682,7 +29682,7 @@ async function createNotificationVisibilityFilter(
           principal.directoryId,
           notification.teamId,
           notification.issueId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         ).then((detail) => {
           return {
             assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
@@ -30304,7 +30304,7 @@ async function loadAuthorizedTeamIssue(
   minimumRole: ProjectRole,
   detailReadOptions: TeamIssueDetailReadOptions = {
     consistentIssueRead: true,
-    eventLimit: 0,
+    includeEvents: false,
   },
 ) {
   const context = await requireTeamPermission(principal, teamId, minimumRole)
@@ -32412,7 +32412,7 @@ async function refreshWorkItemSearchDocumentBestEffort(
     const [detail, relationPage] = await Promise.all([
       workItemDependencies.teamIssues.getTeamIssueDetail(workspaceId, teamId, issueId, {
         consistentIssueRead: true,
-        eventLimit: 0,
+        includeEvents: false,
       }),
       workItemDependencies.workItemConfigurations.listRelations(workspaceId, teamId, issueId),
     ])
@@ -35814,7 +35814,7 @@ async function executeConfirmedWorkItemScheduleChange(
           principal.directoryId,
           recomputeCommand.teamId,
           recomputeCommand.workItemId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         ),
         workItemDependencies.workItemConfigurations.listRelations(
           principal.directoryId,
@@ -38760,7 +38760,7 @@ async function createWorkItemTypeRelationConfigurationTransactionItems(
         directoryId,
         teamId,
         relatedWorkItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
     } catch (error) {
       if (isTeamIssueNotFoundError(error)) {
@@ -40992,7 +40992,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal.directoryId,
         teamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       if (detail.issue.revision !== input.expectedRevision) {
         throw new ProjectDataError(
@@ -41133,7 +41133,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal.directoryId,
         teamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       requireAssignedProjectPermission(
         principal,
@@ -41173,7 +41173,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             principal.directoryId,
             teamId,
             workItemId,
-            { consistentIssueRead: true, eventLimit: 0 },
+            { consistentIssueRead: true, includeEvents: false },
           )
           requireAssignedProjectPermission(
             principal,
@@ -41646,7 +41646,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
         workspaceId,
         teamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       return toConnectorWorkItemSnapshot(detail.issue)
     },
@@ -41747,7 +41747,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
               input.workspaceId,
               input.teamId,
               input.workItemId,
-              { consistentIssueRead: true, eventLimit: 0 },
+              { consistentIssueRead: true, includeEvents: false },
             )
             requireAssignedProjectPermission(
               principal,
@@ -41850,7 +41850,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
             input.workspaceId,
             input.teamId,
             input.workItemId,
-            { consistentIssueRead: true, eventLimit: 0 },
+            { consistentIssueRead: true, includeEvents: false },
           )
           return {
             kind: 'conflict',

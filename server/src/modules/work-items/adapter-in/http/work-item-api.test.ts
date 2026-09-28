@@ -1174,7 +1174,7 @@ test('loads team issue detail and creates comments after team access is confirme
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'onboarding-friction',
-      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+      readOptions: { consistentIssueRead: true, includeEvents: false },
     },
   ])
   expect(collaborationCreates).toHaveLength(1)
@@ -1414,7 +1414,7 @@ test('omits relations whose target Project is outside the viewer access scope', 
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'onboarding-friction',
-      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+      readOptions: { consistentIssueRead: true, includeEvents: false },
     },
   ])
 })
@@ -1509,7 +1509,7 @@ test('fails closed when a persisted relation target Work Item is missing', async
     },
     {
       issueId: 'missing-target',
-      readOptions: { consistentIssueRead: true, eventLimit: 0 },
+      readOptions: { consistentIssueRead: true, includeEvents: false },
     },
   ])
 })
@@ -1602,7 +1602,7 @@ test('returns persisted collaboration comments and reply cursors', async () => {
     issueId: 'onboarding-friction',
     readOptions: {
       consistentIssueRead: true,
-      eventLimit: 0,
+      includeEvents: false,
     },
   }])
 })

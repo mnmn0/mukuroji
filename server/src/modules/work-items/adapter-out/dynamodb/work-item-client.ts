@@ -1130,8 +1130,8 @@ export type TeamIssuesClient = {
 export type TeamIssueDetailReadOptions = {
   /** Issue 本体を strongly consistent read で認可へ使う場合は true です。 */
   consistentIssueRead?: boolean
-  /** 0 の場合は event partition を読みません。それ以外では全 event を古い順に読みます。 */
-  eventLimit?: number
+  /** false の場合は event partition を読みません。省略時は全 event を古い順に読みます。 */
+  includeEvents?: boolean
 }
 
 function createRequestConversionTransactionItems(
@@ -1580,7 +1580,7 @@ export class DynamoDbTeamIssuesClient {
         issueId,
         options.consistentIssueRead === true,
       )
-      const events = options.eventLimit === 0
+      const events = options.includeEvents === false
         ? []
         : await this.queryTeamIssueEventItems(directoryId, teamId, issueId)
       const triageContextSnapshots = events
@@ -1911,7 +1911,7 @@ export class DynamoDbTeamIssuesClient {
             directoryId,
             teamId,
             idempotencyResourceId,
-            { consistentIssueRead: true, eventLimit: 0 },
+            { consistentIssueRead: true, includeEvents: false },
           ).catch(() => undefined)
           if (existing && isMatchingIdempotentWorkItemCreate(existing.issue, {
             actorUserId,
