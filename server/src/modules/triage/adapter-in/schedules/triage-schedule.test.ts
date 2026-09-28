@@ -146,7 +146,6 @@ describe('triage schedule adapter', () => {
       })
 
       expect(result).toMatchObject({
-        disabled: false,
         evaluatedCandidates: 1,
         resurfacedEntries: 1,
         conflicts: 0,
@@ -157,35 +156,11 @@ describe('triage schedule adapter', () => {
     }
   })
 
-  test('disables safely instead of scanning while the wake index is unavailable', async () => {
+  test('fails the handler invocation when the wake-index query fails', async () => {
+    const queryFailure = new Error('The table does not have the specified index.')
+    queryFailure.name = 'ValidationException'
     const harness = createHarness(() => {
-      const error = new Error('The table does not have the specified index.')
-      error.name = 'ValidationException'
-      throw error
-    })
-
-    try {
-      await expect(runTriageSchedule({
-        documentClient: harness.documentClient,
-        tableName: 'RequestIntakeTable',
-        auditTableName: 'AuditEventsTable',
-        auditRetentionDays: 365,
-        wakeIndexName: 'triage-wake-index',
-        wakeShardCount: 8,
-        batchSize: 100,
-        now: '2026-08-09T00:10:00.000Z',
-      })).resolves.toMatchObject({ disabled: true, evaluatedCandidates: 0 })
-      expect(harness.calls).toEqual(['QueryCommand'])
-    } finally {
-      harness.restore()
-    }
-  })
-
-  test('fails the configured handler when the wake index is disabled', async () => {
-    const harness = createHarness(() => {
-      const error = new Error('The table does not have the specified index.')
-      error.name = 'ValidationException'
-      throw error
+      throw queryFailure
     })
     const handler = createTriageScheduleHandler(harness.documentClient, {
       tableName: 'RequestIntakeTable',
@@ -194,85 +169,10 @@ describe('triage schedule adapter', () => {
       wakeIndexName: 'triage-wake-index',
       wakeShardCount: 8,
       batchSize: 100,
-      failOnDisabled: true,
     })
 
     try {
-      await expect(handler({ time: '2026-08-09T00:10:00.000Z' })).rejects.toMatchObject({
-        code: 'TriageWakeIndexUnavailable',
-        status: 503,
-      })
-      expect(harness.calls).toEqual(['QueryCommand'])
-    } finally {
-      harness.restore()
-    }
-  })
-
-  test('probes the required base table before disabling on an ambiguous missing resource', async () => {
-    const indexFailure = new Error('Requested resource not found.')
-    indexFailure.name = 'ResourceNotFoundException'
-    const indexHarness = createHarness((commandName) => {
-      if (commandName === 'QueryCommand') throw indexFailure
-      return {}
-    })
-
-    try {
-      await expect(runTriageSchedule({
-        documentClient: indexHarness.documentClient,
-        tableName: 'RequestIntakeTable',
-        auditTableName: 'AuditEventsTable',
-        auditRetentionDays: 365,
-        wakeIndexName: 'triage-wake-index',
-        wakeShardCount: 8,
-        batchSize: 100,
-        now: '2026-08-09T00:10:00.000Z',
-      })).resolves.toMatchObject({ disabled: true, evaluatedCandidates: 0 })
-      expect(indexHarness.calls).toEqual(['QueryCommand', 'GetCommand'])
-    } finally {
-      indexHarness.restore()
-    }
-
-    const tableFailure = new Error('Requested resource not found.')
-    tableFailure.name = 'ResourceNotFoundException'
-    const tableHarness = createHarness(() => {
-      throw tableFailure
-    })
-
-    try {
-      await expect(runTriageSchedule({
-        documentClient: tableHarness.documentClient,
-        tableName: 'RequestIntakeTable',
-        auditTableName: 'AuditEventsTable',
-        auditRetentionDays: 365,
-        wakeIndexName: 'triage-wake-index',
-        wakeShardCount: 8,
-        batchSize: 100,
-        now: '2026-08-09T00:10:00.000Z',
-      })).rejects.toBe(tableFailure)
-      expect(tableHarness.calls).toEqual(['QueryCommand', 'GetCommand'])
-    } finally {
-      tableHarness.restore()
-    }
-  })
-
-  test('bubbles unrelated query validation failures instead of disabling the worker', async () => {
-    const validationFailure = new Error('Invalid KeyConditionExpression.')
-    validationFailure.name = 'ValidationException'
-    const harness = createHarness(() => {
-      throw validationFailure
-    })
-
-    try {
-      await expect(runTriageSchedule({
-        documentClient: harness.documentClient,
-        tableName: 'RequestIntakeTable',
-        auditTableName: 'AuditEventsTable',
-        auditRetentionDays: 365,
-        wakeIndexName: 'triage-wake-index',
-        wakeShardCount: 8,
-        batchSize: 100,
-        now: '2026-08-09T00:10:00.000Z',
-      })).rejects.toBe(validationFailure)
+      await expect(handler({ time: '2026-08-09T00:10:00.000Z' })).rejects.toBe(queryFailure)
       expect(harness.calls).toEqual(['QueryCommand'])
     } finally {
       harness.restore()

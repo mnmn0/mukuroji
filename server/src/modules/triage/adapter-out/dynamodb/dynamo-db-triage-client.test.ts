@@ -1,4 +1,3 @@
-import { createCipheriv, createHash } from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, spyOn, test } from 'bun:test'
@@ -292,50 +291,6 @@ function findTransactionConfiguration(
     }
   }
   return undefined
-}
-
-/** Input used to reproduce an encrypted queue cursor issued by an earlier client instance. */
-type PreviouslyIssuedQueueCursorInput = {
-  /** Workspace bound into the cursor scope. */
-  workspaceId: string
-  /** Team bound into the cursor scope. */
-  teamId: string
-  /** Owner filter bound into the cursor scope. */
-  ownerUserId: string
-  /** Queue index selected for the original pagination chain. */
-  indexKind: 'team' | 'owner'
-  /** DynamoDB continuation key stored by the original cursor. */
-  key: Record<string, unknown>
-}
-
-/** Reproduces the encrypted queue cursor format for compatibility tests.
- *
- * @param input Scope, index, and DynamoDB key issued by an earlier client version.
- * @returns An opaque cursor signed with the test harness secret.
- */
-function createPreviouslyIssuedQueueCursor(input: PreviouslyIssuedQueueCursorInput): string {
-  const scope = createTriageInputFingerprint({
-    workspaceId: input.workspaceId,
-    teamId: input.teamId,
-    indexKind: input.indexKind,
-    state: undefined,
-    sourceKind: undefined,
-    ownerUserId: input.ownerUserId,
-  })
-  const index = input.indexKind === 'owner'
-    ? 'triage-owner-activity-index'
-    : 'triage-team-activity-index'
-  const plaintext = Buffer.from(JSON.stringify({ scope, index, key: input.key }), 'utf8')
-  const key = createHash('sha256').update('test-cursor-secret').digest()
-  const iv = createHash('sha256').update(plaintext).digest().subarray(0, 12)
-  const cipher = createCipheriv('aes-256-gcm', key, iv)
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
-  return [
-    'v1',
-    iv.toString('base64url'),
-    ciphertext.toString('base64url'),
-    cipher.getAuthTag().toString('base64url'),
-  ].join('.')
 }
 
 describe('DynamoDbTriageClient action receipt lookup', () => {
@@ -1778,66 +1733,64 @@ describe('DynamoDbTriageClient queue indexes', () => {
     }
   })
 
-  test('falls back from an unavailable owner index but not from unrelated validation failures', async () => {
-    const missingIndex = new Error('The table does not have the specified index.')
-    missingIndex.name = 'ValidationException'
-    const fallbackHarness = createHarness([{}, missingIndex, { Items: [] }])
-
-    try {
-      await expect(fallbackHarness.client.listEntries('workspace-1', 'support', {
-        ownerUserId: 'owner@example.com',
-        limit: 10,
-      })).resolves.toMatchObject({ entries: [] })
-      expect(fallbackHarness.commands.map(({ name }) => name)).toEqual([
-        'GetCommand',
-        'QueryCommand',
-        'QueryCommand',
-      ])
-    } finally {
-      fallbackHarness.restore()
-    }
-
-    const validationFailure = new Error('Invalid KeyConditionExpression.')
-    validationFailure.name = 'ValidationException'
-    const failingHarness = createHarness([{}, validationFailure])
-
-    try {
-      await expect(failingHarness.client.listEntries('workspace-1', 'support', {
-        ownerUserId: 'owner@example.com',
-        limit: 10,
-      })).rejects.toBe(validationFailure)
-      expect(failingHarness.calls()).toBe(2)
-    } finally {
-      failingHarness.restore()
-    }
-  })
-
-  test('accepts existing queue cursors and rejects cursor scope changes before reading DynamoDB', async () => {
+  test('continues owner queue cursors and rejects cursor scope changes before reading DynamoDB', async () => {
+    const entry = createEntry()
+    entry.ownerUserId = 'owner@example.com'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
     const continuationKey = {
       scopeKey: 'WORKSPACE#workspace-1',
       recordKey: 'TRIAGE#triage-1',
-      triageTeamKey: 'WORKSPACE#workspace-1#TEAM#support',
-      triageActivitySort: `${NOW}#triage-1`,
+      triageOwnerKey: 'WORKSPACE#workspace-1#TEAM#support#OWNER#owner@example.com',
+      triageActivityKey: `${NOW}#triage-1`,
     }
-    const cursor = createPreviouslyIssuedQueueCursor({
-      workspaceId: 'workspace-1',
-      teamId: 'support',
-      ownerUserId: 'owner@example.com',
-      indexKind: 'team',
-      key: continuationKey,
-    })
-    const harness = createHarness([{}, { Items: [] }])
+    const issuingHarness = createHarness([
+      {},
+      {
+        Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }],
+        LastEvaluatedKey: continuationKey,
+      },
+      { Item: storedEntry },
+    ])
 
+    let cursor: string
+    try {
+      const page = await issuingHarness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        limit: 1,
+      })
+      expect(page.entries.map(({ id }) => id)).toEqual(['triage-1'])
+      if (!page.nextCursor) throw new TypeError('Expected an owner queue cursor.')
+      cursor = page.nextCursor
+      expect(issuingHarness.commands[1]).toEqual(expect.objectContaining({
+        name: 'QueryCommand',
+        input: expect.objectContaining({
+          IndexName: 'triage-owner-activity-index',
+          KeyConditionExpression: 'triageOwnerKey = :partitionKey',
+          ExpressionAttributeValues: {
+            ':partitionKey': 'WORKSPACE#workspace-1#TEAM#support#OWNER#owner@example.com',
+          },
+        }),
+      }))
+    } finally {
+      issuingHarness.restore()
+    }
+
+    const harness = createHarness([{}, { Items: [] }])
     try {
       await expect(harness.client.listEntries('workspace-1', 'support', {
         ownerUserId: 'owner@example.com',
         cursor,
-        limit: 10,
+        limit: 1,
       })).resolves.toMatchObject({ entries: [] })
       expect(harness.commands[1]).toEqual(expect.objectContaining({
         name: 'QueryCommand',
         input: expect.objectContaining({
-          IndexName: 'triage-team-activity-index',
+          IndexName: 'triage-owner-activity-index',
           ExclusiveStartKey: continuationKey,
         }),
       }))
@@ -1850,12 +1803,15 @@ describe('DynamoDbTriageClient queue indexes', () => {
         ownerUserId: 'another-owner@example.com',
         cursor,
       })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
+      await expect(harness.client.listEntries('workspace-1', 'support', {
+        cursor,
+      })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
 
       const cursorParts = cursor.split('.')
-      if (cursorParts.length !== 4) throw new TypeError('Expected an encrypted cursor fixture.')
+      if (cursorParts.length !== 4) throw new TypeError('Expected an encrypted cursor.')
       const tamperedPayload = Buffer.from(JSON.stringify({
         scope: 'tampered-scope',
-        index: 'triage-team-activity-index',
+        index: 'triage-owner-activity-index',
         key: continuationKey,
       })).toString('base64url')
       await expect(harness.client.listEntries('workspace-1', 'support', {
@@ -1863,156 +1819,6 @@ describe('DynamoDbTriageClient queue indexes', () => {
         cursor: `${cursorParts[0]}.${cursorParts[1]}.${tamperedPayload}.${cursorParts[3]}`,
       })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
       expect(harness.calls()).toBe(2)
-    } finally {
-      harness.restore()
-    }
-  })
-
-  test('continues a filtered Team fallback cursor across instances when the owner GSI becomes active', async () => {
-    const otherOwnerEntry = createEntry()
-    otherOwnerEntry.id = 'triage-other-owner'
-    otherOwnerEntry.source.sourceId = 'message-other-owner'
-    otherOwnerEntry.ownerUserId = 'another-owner@example.com'
-    const matchingEntry = createEntry()
-    matchingEntry.id = 'triage-matching-owner'
-    matchingEntry.source.sourceId = 'message-matching-owner'
-    matchingEntry.ownerUserId = 'Owner@Example.com'
-    const otherOwnerRow = createTriageEntryTransactionItems({
-      tableName: 'RequestIntakeTable',
-      entry: otherOwnerEntry,
-      inputFingerprint: createTriageInputFingerprint({
-        sourceId: otherOwnerEntry.source.sourceId,
-      }),
-    })[0]?.Put?.Item
-    const matchingRow = createTriageEntryTransactionItems({
-      tableName: 'RequestIntakeTable',
-      entry: matchingEntry,
-      inputFingerprint: createTriageInputFingerprint({
-        sourceId: matchingEntry.source.sourceId,
-      }),
-    })[0]?.Put?.Item
-    if (!otherOwnerRow || !matchingRow) throw new TypeError('Expected stored entry fixtures.')
-    const firstPageKey = {
-      scopeKey: 'WORKSPACE#workspace-1',
-      recordKey: 'TRIAGE#triage-other-owner',
-      triageTeamKey: 'WORKSPACE#workspace-1#TEAM#support',
-      triageActivitySort: `${NOW}#triage-other-owner`,
-    }
-    const secondPageKey = {
-      scopeKey: 'WORKSPACE#workspace-1',
-      recordKey: 'TRIAGE#triage-matching-owner',
-      triageTeamKey: 'WORKSPACE#workspace-1#TEAM#support',
-      triageActivitySort: `${NOW}#triage-matching-owner`,
-    }
-    const missingIndex = new Error('The table does not have the specified index.')
-    missingIndex.name = 'ValidationException'
-    const rolloutHarness = createHarness([
-      {},
-      missingIndex,
-      {
-        Items: [{
-          scopeKey: 'WORKSPACE#workspace-1',
-          recordKey: 'TRIAGE#triage-other-owner',
-        }],
-        LastEvaluatedKey: firstPageKey,
-      },
-      { Item: otherOwnerRow },
-      {
-        Items: [{
-          scopeKey: 'WORKSPACE#workspace-1',
-          recordKey: 'TRIAGE#triage-matching-owner',
-        }],
-        LastEvaluatedKey: secondPageKey,
-      },
-      { Item: matchingRow },
-    ])
-
-    let cursor: string
-    try {
-      const page = await rolloutHarness.client.listEntries('workspace-1', 'support', {
-        ownerUserId: 'owner@example.com',
-        limit: 1,
-      })
-      expect(page.entries.map(({ id }) => id)).toEqual(['triage-matching-owner'])
-      if (!page.nextCursor) throw new TypeError('Expected a Team fallback cursor.')
-      cursor = page.nextCursor
-      expect(rolloutHarness.commands.filter(({ name }) => name === 'QueryCommand').map(
-        ({ input }) => input.IndexName,
-      )).toEqual([
-        'triage-owner-activity-index',
-        'triage-team-activity-index',
-        'triage-team-activity-index',
-      ])
-      expect(rolloutHarness.commands[4]?.input).toEqual(expect.objectContaining({
-        ExclusiveStartKey: firstPageKey,
-      }))
-    } finally {
-      rolloutHarness.restore()
-    }
-
-    const nextInstanceHarness = createHarness([{}, { Items: [] }, {}, { Items: [] }])
-    try {
-      await expect(nextInstanceHarness.client.listEntries('workspace-1', 'support', {
-        ownerUserId: 'owner@example.com',
-        cursor,
-        limit: 1,
-      })).resolves.toMatchObject({ entries: [] })
-      await expect(nextInstanceHarness.client.listEntries('workspace-1', 'support', {
-        ownerUserId: 'owner@example.com',
-        limit: 1,
-      })).resolves.toMatchObject({ entries: [] })
-      const queries = nextInstanceHarness.commands.filter(({ name }) => name === 'QueryCommand')
-      expect(queries).toEqual([
-        expect.objectContaining({
-          input: expect.objectContaining({
-            IndexName: 'triage-team-activity-index',
-            ExclusiveStartKey: secondPageKey,
-          }),
-        }),
-        expect.objectContaining({
-          input: expect.objectContaining({ IndexName: 'triage-owner-activity-index' }),
-        }),
-      ])
-    } finally {
-      nextInstanceHarness.restore()
-    }
-  })
-
-  test('lets an owner cursor override a stale unavailable-index observation', async () => {
-    const ownerContinuationKey = {
-      scopeKey: 'WORKSPACE#workspace-1',
-      recordKey: 'TRIAGE#triage-owner-page',
-      triageOwnerKey: 'WORKSPACE#workspace-1#TEAM#support#OWNER#owner@example.com',
-      triageActivitySort: `${NOW}#triage-owner-page`,
-    }
-    const cursor = createPreviouslyIssuedQueueCursor({
-      workspaceId: 'workspace-1',
-      teamId: 'support',
-      ownerUserId: 'owner@example.com',
-      indexKind: 'owner',
-      key: ownerContinuationKey,
-    })
-    const missingIndex = new Error('The table does not have the specified index.')
-    missingIndex.name = 'ValidationException'
-    const harness = createHarness([{}, missingIndex, { Items: [] }, {}, { Items: [] }])
-
-    try {
-      await harness.client.listEntries('workspace-1', 'support', {
-        ownerUserId: 'owner@example.com',
-      })
-      await expect(harness.client.listEntries('workspace-1', 'support', {
-        ownerUserId: 'owner@example.com',
-        cursor,
-      })).resolves.toMatchObject({ entries: [] })
-      const queries = harness.commands.filter(({ name }) => name === 'QueryCommand')
-      expect(queries.map(({ input }) => input.IndexName)).toEqual([
-        'triage-owner-activity-index',
-        'triage-team-activity-index',
-        'triage-owner-activity-index',
-      ])
-      expect(queries[2]?.input).toEqual(expect.objectContaining({
-        ExclusiveStartKey: ownerContinuationKey,
-      }))
     } finally {
       harness.restore()
     }

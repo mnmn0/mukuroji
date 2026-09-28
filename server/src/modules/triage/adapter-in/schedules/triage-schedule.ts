@@ -59,8 +59,6 @@ export type RunTriageScheduleOptions = {
 
 /** Observable result of one bounded schedule invocation. */
 export type TriageScheduleResult = {
-  /** Whether processing was safely disabled because the wake index is unavailable. */
-  disabled: boolean
   /** Number of KEYS_ONLY candidates strongly read from the base table. */
   evaluatedCandidates: number
   /** Number of entries returned to pending after snooze. */
@@ -109,7 +107,6 @@ export function createProductionTriageScheduleHandler(): (
       128,
     ),
     batchSize: readPositiveIntegerEnvironment('TRIAGE_SCHEDULE_BATCH_SIZE', 100, 1_000),
-    failOnDisabled: true,
   })
 }
 
@@ -127,8 +124,6 @@ export type TriageScheduleHandlerConfiguration = {
   wakeShardCount: number
   /** Maximum candidates evaluated in one invocation. */
   batchSize: number
-  /** Whether an unavailable wake index should fail the invocation for operational alerting. */
-  failOnDisabled?: boolean
 }
 
 /** Creates a schedule handler with injected persistence dependencies.
@@ -141,32 +136,25 @@ export function createTriageScheduleHandler(
   documentClient: TriageScheduleDocumentClient,
   configuration: TriageScheduleHandlerConfiguration,
 ): (event?: TriageScheduleEvent) => Promise<TriageScheduleResult> {
-  return async (event = {}) => {
-    const result = await runTriageSchedule({
-      documentClient,
-      tableName: configuration.tableName,
-      auditTableName: configuration.auditTableName,
-      auditRetentionDays: configuration.auditRetentionDays,
-      wakeIndexName: configuration.wakeIndexName,
-      wakeShardCount: configuration.wakeShardCount,
-      batchSize: configuration.batchSize,
-      now: normalizeScheduleTime(event.time),
-    })
-    if (configuration.failOnDisabled && result.disabled) {
-      throw new TriageError(
-        503,
-        'TriageWakeIndexUnavailable',
-        'The Triage wake index is unavailable; retry the schedule invocation.',
-      )
-    }
-    return result
-  }
+  return async (event = {}) => await runTriageSchedule({
+    documentClient,
+    tableName: configuration.tableName,
+    auditTableName: configuration.auditTableName,
+    auditRetentionDays: configuration.auditRetentionDays,
+    wakeIndexName: configuration.wakeIndexName,
+    wakeShardCount: configuration.wakeShardCount,
+    batchSize: configuration.batchSize,
+    now: normalizeScheduleTime(event.time),
+  })
 }
 
 /** Evaluates due sparse-index candidates without scanning the table.
  *
+ * Wake-index query failures propagate so the invocation fails and follows the Lambda
+ * retry, dead-letter queue, and alarm path.
+ *
  * @param options Explicit schedule dependencies and bounds.
- * @returns Deadline counts and rollout-safe disabled state.
+ * @returns Deadline counts for the bounded invocation.
  */
 export async function runTriageSchedule(
   options: RunTriageScheduleOptions,
@@ -183,7 +171,6 @@ export async function runTriageSchedule(
   const wakeShardCount = requirePositiveInteger(options.wakeShardCount, 'Wake shard count', 128)
   const batchSize = requirePositiveInteger(options.batchSize, 'Schedule batch size', 1_000)
   const result: TriageScheduleResult = {
-    disabled: false,
     evaluatedCandidates: 0,
     resurfacedEntries: 0,
     breachedEntries: 0,
@@ -198,31 +185,18 @@ export async function runTriageSchedule(
       1,
       Math.ceil((batchSize - result.evaluatedCandidates) / remainingShards),
     )
-    let response
-    try {
-      response = await options.documentClient.send(new QueryCommand({
-        TableName: tableName,
-        IndexName: wakeIndexName,
-        KeyConditionExpression:
-          'triageWakeShard = :wakeShard AND triageNextWakeAt <= :nextWakeAt',
-        ExpressionAttributeValues: {
-          ':wakeShard': `WAKE#${shard}`,
-          ':nextWakeAt': `${now}#\uffff`,
-        },
-        Limit: shardLimit,
-        ScanIndexForward: true,
-      }))
-    } catch (error) {
-      if (isUnavailableIndexError(error)) {
-        await requireBaseTableForUnavailableIndex(
-          options.documentClient,
-          tableName,
-          error,
-        )
-        return { ...result, disabled: true }
-      }
-      throw error
-    }
+    const response = await options.documentClient.send(new QueryCommand({
+      TableName: tableName,
+      IndexName: wakeIndexName,
+      KeyConditionExpression:
+        'triageWakeShard = :wakeShard AND triageNextWakeAt <= :nextWakeAt',
+      ExpressionAttributeValues: {
+        ':wakeShard': `WAKE#${shard}`,
+        ':nextWakeAt': `${now}#\uffff`,
+      },
+      Limit: shardLimit,
+      ScanIndexForward: true,
+    }))
 
     for (const item of response.Items ?? []) {
       if (result.evaluatedCandidates >= batchSize) break
@@ -326,37 +300,6 @@ function readPrimaryKey(value: unknown): { scopeKey: string; recordKey: string }
     return undefined
   }
   return { scopeKey: value.scopeKey, recordKey: value.recordKey }
-}
-
-/** Classifies a missing or not-yet-active optional index. */
-function isUnavailableIndexError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  if (error.name === 'ResourceNotFoundException') return true
-  return error.name === 'ValidationException' &&
-    /(?:does not have the specified index|specified index.*(?:does not exist|not found)|index.*(?:not found|backfilling|not active)|backfilling global secondary index)/iu.test(error.message)
-}
-
-/** Distinguishes an unavailable index from a missing required base table.
- *
- * @param documentClient Request Intake DocumentClient used by the schedule.
- * @param tableName Required Request Intake table name.
- * @param error Ambiguous query error returned for either a missing table or index.
- * @returns Completion after the base table is confirmed readable.
- */
-async function requireBaseTableForUnavailableIndex(
-  documentClient: TriageScheduleDocumentClient,
-  tableName: string,
-  error: unknown,
-): Promise<void> {
-  if (!(error instanceof Error) || error.name !== 'ResourceNotFoundException') return
-  await documentClient.send(new GetCommand({
-    TableName: tableName,
-    Key: {
-      scopeKey: 'TRIAGE_INDEX_AVAILABILITY_PROBE',
-      recordKey: 'TRIAGE_INDEX_AVAILABILITY_PROBE',
-    },
-    ConsistentRead: true,
-  }))
 }
 
 /** Classifies a revision race in a DynamoDB transaction. */

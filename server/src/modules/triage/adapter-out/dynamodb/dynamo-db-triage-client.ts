@@ -93,7 +93,7 @@ import type { TriageAuditOutboxConfiguration } from './triage-audit-events'
 /** Default Team activity GSI name. */
 export const TRIAGE_TEAM_ACTIVITY_INDEX_NAME = 'triage-team-activity-index'
 
-/** Default optional owner activity GSI name. */
+/** Default owner activity GSI name. */
 export const TRIAGE_OWNER_ACTIVITY_INDEX_NAME = 'triage-owner-activity-index'
 
 /** Maximum number of GSI pages inspected to fill one filtered queue page. */
@@ -115,7 +115,7 @@ export type DynamoDbTriageClientOptions = {
   tableName?: string
   /** Required Team activity GSI name. */
   teamIndexName?: string
-  /** Optional owner activity GSI name. */
+  /** Required owner activity GSI name. */
   ownerIndexName?: string
   /** Immutable audit event outbox table name. */
   auditTableName?: string
@@ -250,7 +250,7 @@ type TriageCursorPayload = {
   key: Record<string, unknown>
 }
 
-/** Queue query execution result used to retry with the Team index. */
+/** Queue query execution result. */
 type QueueQueryResult = {
   /** Strongly read and filtered entries. */
   entries: TriageEntry[]
@@ -266,7 +266,7 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Required Team activity GSI name. */
   private readonly teamIndexName: string
 
-  /** Optional owner activity GSI name. */
+  /** Required owner activity GSI name. */
   private readonly ownerIndexName: string
 
   /** Immutable assignment audit outbox configuration. */
@@ -304,9 +304,6 @@ export class DynamoDbTriageClient implements TriageClient {
 
   /** Test-replaceable ID generator. */
   private readonly id: () => string
-
-  /** Runtime observation of whether the optional owner GSI is usable. */
-  private ownerIndexAvailable: boolean | undefined
 
   /** Creates a DynamoDB triage client.
    *
@@ -386,6 +383,10 @@ export class DynamoDbTriageClient implements TriageClient {
 
   /** Lists a Team queue through sparse activity indexes.
    *
+   * Owner-filtered queues read the owner activity index and all other queues read the Team
+   * activity index. Cursors are authenticated against that index and the filter scope before
+   * DynamoDB is read.
+   *
    * @param workspaceId The owning Workspace ID.
    * @param teamId The Team queue ID.
    * @param input Validated filters, limit, and opaque cursor.
@@ -402,57 +403,28 @@ export class DynamoDbTriageClient implements TriageClient {
     const owner = input.ownerUserId === 'unowned'
       ? 'UNOWNED'
       : input.ownerUserId?.trim().toLowerCase()
-    const cursorIndexKind = input.cursor !== undefined
-      ? this.decodeQueueCursorIndexKind(input.cursor, workspaceId, teamId, input)
-      : undefined
-    const indexKind = cursorIndexKind ??
-      (owner !== undefined && this.ownerIndexAvailable !== false ? 'owner' : 'team')
+    const indexKind = owner === undefined ? 'team' : 'owner'
+    const indexName = indexKind === 'owner' ? this.ownerIndexName : this.teamIndexName
+    const cursorScope = createQueueCursorScope(workspaceId, teamId, input, indexKind)
+    const startKey = input.cursor === undefined
+      ? undefined
+      : this.decodeCursor(input.cursor, cursorScope, indexName).key
     const configuration = await this.getConfiguration(workspaceId, teamId)
-
-    try {
-      const result = await this.queryQueue(
-        workspaceId,
-        teamId,
-        input,
-        limit,
-        indexKind,
-        owner,
-      )
-      if (indexKind === 'owner') this.ownerIndexAvailable = true
-      return {
-        allowedBulkActions: [...configuration.allowedBulkActions],
-        entries: result.entries,
-        ...(result.lastEvaluatedKey
-          ? {
-              nextCursor: this.encodeCursor(
-                createQueueCursorScope(workspaceId, teamId, input, indexKind),
-                indexKind === 'owner' ? this.ownerIndexName : this.teamIndexName,
-                result.lastEvaluatedKey,
-              ),
-            }
-          : {}),
-      }
-    } catch (error) {
-      if (
-        indexKind !== 'owner' ||
-        cursorIndexKind !== undefined ||
-        !isUnavailableIndexError(error)
-      ) throw error
-      this.ownerIndexAvailable = false
-      const result = await this.queryQueue(workspaceId, teamId, input, limit, 'team', owner)
-      return {
-        allowedBulkActions: [...configuration.allowedBulkActions],
-        entries: result.entries,
-        ...(result.lastEvaluatedKey
-          ? {
-              nextCursor: this.encodeCursor(
-                createQueueCursorScope(workspaceId, teamId, input, 'team'),
-                this.teamIndexName,
-                result.lastEvaluatedKey,
-              ),
-            }
-          : {}),
-      }
+    const result = await this.queryQueue(
+      workspaceId,
+      teamId,
+      input,
+      limit,
+      indexKind,
+      owner,
+      startKey,
+    )
+    return {
+      allowedBulkActions: [...configuration.allowedBulkActions],
+      entries: result.entries,
+      ...(result.lastEvaluatedKey
+        ? { nextCursor: this.encodeCursor(cursorScope, indexName, result.lastEvaluatedKey) }
+        : {}),
     }
   }
 
@@ -1784,7 +1756,17 @@ export class DynamoDbTriageClient implements TriageClient {
     }
   }
 
-  /** Queries an index and strongly reads matching base rows. */
+  /** Queries an activity index and strongly reads matching base rows.
+   *
+   * @param workspaceId The owning Workspace ID.
+   * @param teamId The Team queue ID.
+   * @param input Queue filters applied to each canonical row.
+   * @param limit Maximum number of entries returned for the page.
+   * @param indexKind Activity index selected by the owner filter.
+   * @param ownerUserId Normalized owner filter, when present.
+   * @param startKey Authenticated continuation key decoded from the request cursor.
+   * @returns Filtered canonical entries and the index key that continues the page chain.
+   */
   private async queryQueue(
     workspaceId: string,
     teamId: string,
@@ -1792,16 +1774,14 @@ export class DynamoDbTriageClient implements TriageClient {
     limit: number,
     indexKind: 'team' | 'owner',
     ownerUserId: string | undefined,
+    startKey: Record<string, unknown> | undefined,
   ): Promise<QueueQueryResult> {
     const indexName = indexKind === 'owner' ? this.ownerIndexName : this.teamIndexName
     const partitionAttribute = indexKind === 'owner' ? 'triageOwnerKey' : 'triageTeamKey'
     const partitionValue = indexKind === 'owner'
       ? `WORKSPACE#${workspaceId}#TEAM#${teamId}#OWNER#${ownerUserId}`
       : `WORKSPACE#${workspaceId}#TEAM#${teamId}`
-    const scope = createQueueCursorScope(workspaceId, teamId, input, indexKind)
-    let exclusiveStartKey = input.cursor
-      ? this.decodeCursor(input.cursor, scope, indexName).key
-      : undefined
+    let exclusiveStartKey = startKey
     let pages = 0
     const entries: TriageEntry[] = []
     const now = this.now()
@@ -1942,32 +1922,6 @@ export class DynamoDbTriageClient implements TriageClient {
     ].join('.')
   }
 
-  /** Resolves the queue index selected by a previously issued cursor.
-   *
-   * @param cursor Opaque signed queue cursor.
-   * @param workspaceId Workspace expected to own the queue.
-   * @param teamId Team expected to own the queue.
-   * @param input Current queue filters that must match the original page.
-   * @returns The authenticated index kind that must continue the pagination chain.
-   */
-  private decodeQueueCursorIndexKind(
-    cursor: string,
-    workspaceId: string,
-    teamId: string,
-    input: TriageEntryListInput,
-  ): 'team' | 'owner' {
-    const value = this.decodeCursorPayload(cursor)
-    if (
-      value.index === this.teamIndexName &&
-      value.scope === createQueueCursorScope(workspaceId, teamId, input, 'team')
-    ) return 'team'
-    if (
-      value.index === this.ownerIndexName &&
-      value.scope === createQueueCursorScope(workspaceId, teamId, input, 'owner')
-    ) return 'owner'
-    throw invalidCursor()
-  }
-
   /** Decodes and authenticates a cursor against one expected scope and index.
    *
    * @param cursor Opaque signed cursor.
@@ -1976,17 +1930,6 @@ export class DynamoDbTriageClient implements TriageClient {
    * @returns The authenticated cursor payload.
    */
   private decodeCursor(cursor: string, scope: string, index: string): TriageCursorPayload {
-    const value = this.decodeCursorPayload(cursor)
-    if (value.scope !== scope || value.index !== index) throw invalidCursor()
-    return value
-  }
-
-  /** Decodes and authenticates the shape of one signed cursor payload.
-   *
-   * @param cursor Opaque signed cursor.
-   * @returns The authenticated payload before its semantic scope is selected.
-   */
-  private decodeCursorPayload(cursor: string): TriageCursorPayload {
     const [version, ivText, ciphertextText, tagText, extra] = cursor.split('.')
     if (!version || !ivText || !ciphertextText || !tagText || extra !== undefined || version !== 'v1') {
       throw invalidCursor()
@@ -2011,13 +1954,13 @@ export class DynamoDbTriageClient implements TriageClient {
       const value: unknown = JSON.parse(plaintext.toString('utf8'))
       if (
         !isRecord(value) ||
-        typeof value.scope !== 'string' ||
-        typeof value.index !== 'string' ||
+        value.scope !== scope ||
+        value.index !== index ||
         !isRecord(value.key)
       ) {
         throw invalidCursor()
       }
-      return { scope: value.scope, index: value.index, key: value.key }
+      return { scope, index, key: value.key }
     } catch (error) {
       if (error instanceof TriageError) throw error
       throw new TriageError(400, 'InvalidTriageCursor', 'The triage cursor is invalid.', {
@@ -2079,7 +2022,7 @@ function mergeCanonicalWorkItemProjection(
  * @param workspaceId Requested Workspace scope.
  * @param teamId Requested Team scope.
  * @param input Queue filters applied only after the canonical read.
- * @param ownerUserId Effective owner filter selected by the query strategy.
+ * @param ownerUserId Normalized owner filter re-checked against each canonical row.
  * @param now Shared queue evaluation instant.
  * @param readCanonicalWorkItem Optional reader for current canonical Work Item projections.
  * @returns Canonical entries that survive permission-safe projection and filters, in index order.
@@ -3086,14 +3029,6 @@ function isOnlyConditionalConflictAtAny(
     }
     return code === 'None'
   }) && hasExpectedConditionalFailure
-}
-
-/** Classifies an optional index that is absent or still backfilling. */
-function isUnavailableIndexError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false
-  if (error.name === 'ResourceNotFoundException') return true
-  return error.name === 'ValidationException' &&
-    /(?:does not have the specified index|specified index.*(?:does not exist|not found)|index.*(?:not found|backfilling|not active)|backfilling global secondary index)/iu.test(error.message)
 }
 
 /** Creates a stable invalid-cursor error. */
