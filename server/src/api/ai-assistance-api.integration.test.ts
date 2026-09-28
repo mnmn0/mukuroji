@@ -2722,14 +2722,12 @@ describe('AI assistance API composition', () => {
     let providerCalls = 0
     let collaborationCalls = 0
     const detailEventLimits: Array<number | undefined> = []
-    const detailIncludesComments: Array<boolean | undefined> = []
     const teamIssues = createTeamIssuesFake({
       async getTeamIssues() {
         return { teamId: issue.teamId, issues: [issue] }
       },
       async getTeamIssueDetail(_directoryId, _teamId, _issueId, options) {
         detailEventLimits.push(options?.eventLimit)
-        detailIncludesComments.push(options?.includeComments)
         return {
           issue,
           comments: [{
@@ -2825,7 +2823,6 @@ describe('AI assistance API composition', () => {
     expect(providerCalls).toBe(1)
     expect(collaborationCalls).toBe(0)
     expect(detailEventLimits).toEqual([0, 0, 0, 0])
-    expect(detailIncludesComments).toEqual([false, false, false, false])
     expect(responseText).toContain('source-changed')
     expect(responseText).not.toContain('UNFENCED_LEGACY_COMMENT')
     expect(responseText).not.toContain('UNFENCED_WORK_ITEM_ACTIVITY')

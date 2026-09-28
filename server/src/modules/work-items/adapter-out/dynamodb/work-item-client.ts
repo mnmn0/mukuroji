@@ -49,7 +49,6 @@ import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
-  UpdateTableCommand,
 } from '@aws-sdk/client-dynamodb'
 import type {
   TableDescription,
@@ -80,7 +79,6 @@ import type {
   ResolvedWorkItemConfiguration,
   TriageEntry,
   TriageEntryEvent,
-  TeamIssueCommentResponseItem,
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemRelation,
@@ -572,8 +570,6 @@ type TeamIssueEventItem = {
    * 作成日時の ISO 8601 timestamp です。
    */
   createdAt: string
-  /** Canonical UTC timestamp plus event ID used by the bounded comment index. */
-  commentCreatedAtOrder?: string
 }
 
 /**
@@ -707,18 +703,11 @@ export type TeamIssueDetailResponse = {
    */
   issue: TeamIssueResponseItem
   /**
-   * Canonical Collaboration comments projected into the stable detail shape,
-   * or legacy comments loaded for a marker-gated migration fallback.
-   */
-  comments?: TeamIssueCommentResponseItem[]
-  /**
    * Issue 活動履歴一覧です。
    */
   activity: TeamIssueActivityResponseItem[]
   /** De-identified duplicate-source context committed with this canonical Work Item. */
   triageContextSnapshots?: WorkItemTriageContextSnapshot[]
-  /** Bounded legacy event read の次 page を指す opaque cursor です。 */
-  nextEventCursor?: string
   /** Work Item に適用される解決済み workflow/custom field 定義です。 */
   resolvedConfiguration?: ResolvedWorkItemConfiguration
   /** Work Item から見た reciprocal relation 一覧です。 */
@@ -957,10 +946,6 @@ export type CreateTeamIssueCommentRequestBody = {
    */
   bodyMarkdown?: unknown
   /**
-   * 旧クライアントが送信するコメント本文です。保存時は canonical bodyMarkdown へ変換します。
-   */
-  body?: unknown
-  /**
    * reply 先の comment ID です。
    */
   parentCommentId?: unknown
@@ -1018,20 +1003,6 @@ export type WorkItemScheduleCascadeResponse = {
   issues: TeamIssueResponseItem[]
   /** Compact schedule results safe to persist in the atomic replay receipt. */
   confirmedSchedules: ConfirmedWorkItemSchedule[]
-}
-
-/**
- * チーム Issue コメント作成 API が返す response body です。
- */
-export type CreateTeamIssueCommentResponse = {
-  /**
-   * 作成したコメントです。
-   */
-  comment: TeamIssueCommentResponseItem
-  /**
-   * コメント追加に対応する活動履歴です。
-   */
-  activity: TeamIssueActivityResponseItem
 }
 
 /** Work Item domain write と public response receipt を同じ transaction に追加する境界です。 */
@@ -1093,7 +1064,7 @@ export type TeamIssuesClient = {
     options?: WorkItemListReadOptions,
   ): Promise<ProjectIssuesResponse>
   /**
-   * DynamoDB から Issue 詳細、コメント、活動履歴を取得します。
+   * DynamoDB から Issue 詳細と活動履歴を取得します。
    */
   getTeamIssueDetail(
     directoryId: string,
@@ -1101,25 +1072,6 @@ export type TeamIssuesClient = {
     issueId: string,
     options?: TeamIssueDetailReadOptions,
   ): Promise<TeamIssueDetailResponse>
-  /**
-   * Reads a pre-cutover Automation comment by its deterministic legacy action identity.
-   *
-   * @param directoryId - Workspace directory identifier.
-   * @param teamId - Owning Team identifier.
-   * @param issueId - Team-local Work Item identifier.
-   * @param eventId - Deterministic comment action event identifier.
-   * @param actorUserId - Expected Automation actor identifier.
-   * @param body - Expected comment body.
-   * @returns Whether a matching pre-cutover comment event already exists.
-   */
-  getAutomationCommentReplay?(
-    directoryId: string,
-    teamId: string,
-    issueId: string,
-    eventId: string,
-    actorUserId: string,
-    body: string,
-  ): Promise<boolean>
   /**
    * DynamoDB に team issue を作成します。
    */
@@ -1174,58 +1126,13 @@ export type TeamIssuesClient = {
   ): Promise<{ issue: TeamIssueResponseItem }>
 }
 
-/** Team Issue detail の event 読み込み量と順序を制御します。 */
+/** Team Issue detail の読み込み方法を制御します。 */
 export type TeamIssueDetailReadOptions = {
   /** Issue 本体を strongly consistent read で認可へ使う場合は true です。 */
   consistentIssueRead?: boolean
-  /** Whether to materialize comment events in addition to the complete activity page. */
-  includeComments?: boolean
-  /** 読み込む event の最大件数です。0 の場合は event partition を読みません。 */
+  /** 0 の場合は event partition を読みません。それ以外では全 event を古い順に読みます。 */
   eventLimit?: number
-  /** 移行未完了の環境で新しい event から読み込む場合は true です。 */
-  newestEventsFirst?: boolean
-  /** 移行未完了の環境で指定 event 種別だけを返す DynamoDB filter です。 */
-  eventType?: TeamIssueActivityType
-  /** 移行未完了の環境で前 page が返した event cursor です。 */
-  eventCursor?: string
-  /** Reads the pre-migration comment index without relying on the staged canonical index. */
-  legacyCommentIndexOnly?: boolean
 }
-
-/** Team Issue event page cursor の署名対象 payload です。 */
-type TeamIssueEventCursor =
-  | {
-      /** Cursor schema version です。 */
-      version: 1
-      /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
-      directoryTeamIssueId: string
-      /** DynamoDB event sort key です。 */
-      eventId: string
-    }
-  | {
-      /** Cursor schema version です。 */
-      version: 2
-      /** Cursor が使用する DynamoDB index です。 */
-      index: 'createdAt'
-      /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
-      directoryTeamIssueId: string
-      /** DynamoDB base-table event sort key です。 */
-      eventId: string
-      /** Event timestamp retained as the raw sparse-index continuation key. */
-      createdAt: string
-    }
-  | {
-      /** Cursor schema version. */
-      version: 3
-      /** Cursor が使用する DynamoDB index です。 */
-      index: 'commentCreatedAt'
-      /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
-      directoryTeamIssueId: string
-      /** DynamoDB event sort key です。 */
-      eventId: string
-      /** Canonical timestamp-and-ID index sort key. */
-      commentCreatedAtOrder: string
-    }
 
 function createRequestConversionTransactionItems(
   input: RequestConversionTransactionInput,
@@ -1345,23 +1252,6 @@ function normalizePublicWorkItemPageLimit(value: number) {
     )
   }
   return value
-}
-
-/**
- * Maximum Team Issue event rows the legacy comment fallback may evaluate before requiring migration.
- *
- * The budget counts DynamoDB Query `ScannedCount` rows evaluated before `FilterExpression` removes
- * non-comment events, rather than only the comment rows returned to the application. Keep this
- * conservative cap aligned with observed per-Work-Item event counts before increasing it.
- */
-const MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS = 500
-
-/** Shared read budget for every query required by one legacy comment fallback. */
-type LegacyCommentFallbackReadBudget = {
-  /** Maximum event rows that may be evaluated across the complete fallback. */
-  maxReadItems: number
-  /** Event rows evaluated by all fallback queries issued so far. */
-  evaluatedItems: number
 }
 
 /**
@@ -1673,7 +1563,7 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
-   * DynamoDB から Issue 詳細、コメント、活動履歴を取得します。
+   * DynamoDB から Issue 詳細と活動履歴を取得します。
    */
   async getTeamIssueDetail(
     directoryId: string,
@@ -1690,91 +1580,23 @@ export class DynamoDbTeamIssuesClient {
         issueId,
         options.consistentIssueRead === true,
       )
-      const eventPage = options.eventLimit === 0
-        ? { items: [] as TeamIssueEventItem[] }
-        : await this.queryTeamIssueEventItems(directoryId, teamId, issueId, options)
-      const events = eventPage.items
+      const events = options.eventLimit === 0
+        ? []
+        : await this.queryTeamIssueEventItems(directoryId, teamId, issueId)
       const triageContextSnapshots = events
         .map((event) => event.triageContextSnapshot)
         .filter(isDefined)
 
       return {
         issue: toTeamIssueResponseItem(issue),
-        comments: options.includeComments === false
-          ? []
-          : events
-              .filter((event) => event.eventType === 'commented')
-              .map(toTeamIssueCommentResponseItem),
         activity: events.map(toTeamIssueActivityResponseItem),
         ...(triageContextSnapshots.length > 0 ? { triageContextSnapshots } : {}),
-        ...(eventPage.nextCursor ? { nextEventCursor: eventPage.nextCursor } : {}),
       } satisfies TeamIssueDetailResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
       }
 
-      throw toProjectDataError(error)
-    }
-  }
-
-  /**
-   * Reads one pre-cutover Automation comment event for response-loss replay.
-   *
-   * @param directoryId - Workspace directory identifier.
-   * @param teamId - Owning Team identifier.
-   * @param issueId - Team-local Work Item identifier.
-   * @param eventId - Deterministic comment action event identifier.
-   * @param actorUserId - Expected Automation actor identifier.
-   * @param body - Expected comment body.
-   * @returns Whether the matching event is already durable.
-   */
-  async getAutomationCommentReplay(
-    directoryId: string,
-    teamId: string,
-    issueId: string,
-    eventId: string,
-    actorUserId: string,
-    body: string,
-  ) {
-    await this.ensureLocalTables()
-    const normalizedEventId = readIdempotencyResourceId(eventId)
-    if (!normalizedEventId) {
-      throw new ProjectDataError(
-        400,
-        'InvalidProjectWrite',
-        'Automation comment replay event ID is invalid.',
-      )
-    }
-    try {
-      const response = await this.documentClient.send(new GetCommand({
-        TableName: this.eventTableName,
-        Key: {
-          directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
-          eventId: normalizedEventId,
-        },
-        ConsistentRead: true,
-      }))
-      if (response.Item === undefined) return false
-
-      if (!isTeamIssueEventItem(response.Item) || response.Item.eventType !== 'commented') {
-        throw new ProjectDataError(
-          503,
-          'AutomationCommentReplayUnavailable',
-          'The pre-cutover comment replay record is invalid.',
-        )
-      }
-      if (response.Item.actorUserId !== actorUserId || response.Item.body !== body) {
-        throw new ProjectDataError(
-          409,
-          'AutomationCommentIdempotencyConflict',
-          'The Automation comment action was reused with different input.',
-        )
-      }
-
-      return true
-    } catch (error) {
-      if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
     }
   }
@@ -3115,472 +2937,55 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
-   * Reads Team Issue events with cursor-aware filtering and bounded pagination.
+   * Reads every event in one Team Issue partition in chronological order.
    *
    * @param directoryId - Workspace directory that owns the Team Issue.
    * @param teamId - Team that owns the Team Issue.
    * @param issueId - Team-local Work Item identifier.
-   * @param options - Event type, ordering, limit, and cursor options.
-   * @returns Persisted Team Issue events and the next event cursor, when present.
+   * @returns Validated persisted Team Issue events.
    */
   private async queryTeamIssueEventItems(
     directoryId: string,
     teamId: string,
     issueId: string,
-    options: TeamIssueDetailReadOptions = {},
   ) {
-    const items: unknown[] = []
-    const eventLimit = options.eventLimit === undefined
-      ? undefined
-      : Math.max(1, Math.floor(options.eventLimit))
-    const directoryTeamIssueId = createDirectoryTeamIssueId(directoryId, teamId, issueId)
-    const eventCursor = decodeTeamIssueEventCursor(
-      options.eventCursor,
-      directoryTeamIssueId,
-    )
-    if ((eventCursor?.version === 2 || eventCursor?.version === 3) &&
-        options.eventType !== 'commented') {
-      throw new ProjectDataError(
-        400,
-        'InvalidTeamIssueCursor',
-        'Team Issue event cursor is invalid for this event query.',
-      )
-    }
-    if (options.eventType === 'commented' &&
-        (eventCursor === undefined || eventCursor.version === 2 || eventCursor.version === 3)) {
-      return this.queryCommentEventsWithNormalizedOrdering(
-        directoryTeamIssueId,
-        options,
-        eventCursor,
-      )
-    }
-    let exclusiveStartKey: Record<string, unknown> | undefined = eventCursor
-      ? {
-          directoryTeamIssueId: eventCursor.directoryTeamIssueId,
-          eventId: eventCursor.eventId,
-        }
-      : undefined
+    const items: TeamIssueEventItem[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
 
     do {
-      const remaining = eventLimit === undefined ? undefined : eventLimit - items.length
       const response = await this.documentClient.send(
         new QueryCommand({
           TableName: this.eventTableName,
           KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
           ExpressionAttributeValues: {
-            ':directoryTeamIssueId': directoryTeamIssueId,
-            ...(options.eventType ? { ':eventType': options.eventType } : {}),
+            ':directoryTeamIssueId': createDirectoryTeamIssueId(directoryId, teamId, issueId),
           },
-          ...(options.eventType ? { FilterExpression: 'eventType = :eventType' } : {}),
           ExclusiveStartKey: exclusiveStartKey,
-          ScanIndexForward: options.newestEventsFirst !== true,
-          ...(remaining === undefined ? {} : { Limit: remaining }),
         }),
       )
 
-      items.push(...(response.Items ?? []))
+      items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
       exclusiveStartKey = response.LastEvaluatedKey
-      if (eventLimit !== undefined && items.length >= eventLimit) {
-        break
-      }
     } while (exclusiveStartKey)
 
-    return {
-      items: items.map(toTeamIssueEventItem),
-      ...(exclusiveStartKey
-        ? {
-            nextCursor: encodeTeamIssueEventCursor(
-              directoryTeamIssueId,
-              exclusiveStartKey,
-              false,
-            ),
-          }
-        : {}),
-    }
-  }
-
-  /**
-   * Reads bounded comment pages from the canonical time index and keeps the
-   * full sparse-index validation path for unbounded transitional reads.
-   *
-   * @param directoryTeamIssueId - Work Item event partition key.
-   * @param options - Comment event page options.
-   * @param eventCursor - Previously emitted comment cursor.
-   * @returns A chronologically ordered comment page.
-   */
-  private async queryCommentEventsWithNormalizedOrdering(
-    directoryTeamIssueId: string,
-    options: TeamIssueDetailReadOptions,
-    eventCursor: Extract<TeamIssueEventCursor, { version: 2 | 3 }> | undefined,
-  ) {
-    const eventLimit = options.eventLimit === undefined
-      ? undefined
-      : Math.max(1, Math.floor(options.eventLimit))
-    if (eventCursor?.version === 3) {
-      const chronologicalPage = await this.queryChronologicalCommentEvents(
-        directoryTeamIssueId,
-        eventCursor,
-        eventLimit,
-        options.newestEventsFirst === true,
-      )
-      const chronologicalItems = eventLimit === undefined
-        ? chronologicalPage.items
-        : chronologicalPage.items.slice(0, eventLimit)
-      const lastItem = chronologicalItems.at(-1)
-      const lastCommentCreatedAtOrder = lastItem === undefined
-        ? undefined
-        : requireCommentCreatedAtOrder(lastItem)
-      return {
-        items: chronologicalItems,
-        ...(chronologicalPage.lastEvaluatedKey !== undefined && lastItem && lastCommentCreatedAtOrder
-          ? {
-              nextCursor: encodeTeamIssueCommentCursor(
-                directoryTeamIssueId,
-                {
-                  eventId: lastItem.eventId,
-                  commentCreatedAtOrder: lastCommentCreatedAtOrder,
-                },
-              ),
-            }
-          : {}),
-      }
-    }
-    if (eventLimit !== undefined) {
-      if (eventCursor === undefined && options.legacyCommentIndexOnly !== true) {
-        try {
-          const chronologicalPage = await this.queryChronologicalCommentEvents(
-            directoryTeamIssueId,
-            eventCursor,
-            eventLimit,
-            options.newestEventsFirst === true,
-          )
-          const chronologicalItems = chronologicalPage.items.slice(0, eventLimit)
-          if (chronologicalItems.length > 0) {
-            const lastItem = chronologicalItems.at(-1)
-            const lastCommentCreatedAtOrder = lastItem === undefined
-              ? undefined
-              : requireCommentCreatedAtOrder(lastItem)
-            return {
-              items: chronologicalItems,
-              ...(chronologicalPage.lastEvaluatedKey !== undefined && lastItem && lastCommentCreatedAtOrder
-                ? {
-                    nextCursor: encodeTeamIssueCommentCursor(
-                      directoryTeamIssueId,
-                      {
-                        eventId: lastItem.eventId,
-                        commentCreatedAtOrder: lastCommentCreatedAtOrder,
-                      },
-                    ),
-                  }
-                : {}),
-            }
-          }
-        } catch (error) {
-          if (!isResourceNotFoundError(error)) {
-            throw error
-          }
-        }
-      }
-      const readBudget: LegacyCommentFallbackReadBudget = {
-        maxReadItems: MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
-        evaluatedItems: 0,
-      }
-      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId, readBudget)
-      const baseCommentIds = await this.readCommentEventIndexCoverage(directoryTeamIssueId, readBudget)
-      const indexedCommentIds = new Set(indexedPage.items.map((item) => item.eventId))
-      const items = setsEqual(indexedCommentIds, baseCommentIds)
-        ? indexedPage.items
-        : (await this.queryBaseCommentEvents(directoryTeamIssueId, { readBudget })).items
-      const orderedItems = [...items].sort((left, right) =>
-        compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
-      )
-      const startIndex = findTeamIssueEventCursorStartIndex(
-        orderedItems,
-        eventCursor,
-        options.newestEventsFirst === true,
-      )
-      const pageItems = orderedItems.slice(startIndex, startIndex + eventLimit)
-      const hasMore = startIndex + pageItems.length < orderedItems.length
-      const lastItem = pageItems.at(-1)
-      return {
-        items: pageItems,
-        ...(hasMore && lastItem
-          ? {
-              nextCursor: encodeTeamIssueEventCursor(
-                directoryTeamIssueId,
-                {
-                  eventId: lastItem.eventId,
-                  createdAt: lastItem.createdAt,
-                },
-                true,
-              ),
-            }
-          : {}),
-      }
-    }
-
-    const [indexedItems, baseCommentIds] = await Promise.all([
-      this.queryIndexedCommentEvents(directoryTeamIssueId),
-      this.readCommentEventIndexCoverage(directoryTeamIssueId),
-    ])
-    const indexedCommentIds = new Set(indexedItems.items.map((item) => item.eventId))
-    const items = setsEqual(indexedCommentIds, baseCommentIds)
-      ? indexedItems.items
-      : (await this.queryBaseCommentEvents(directoryTeamIssueId)).items
-    const orderedItems = [...items].sort((left, right) =>
-      compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
-    )
-    const startIndex = findTeamIssueEventCursorStartIndex(
-      orderedItems,
-      eventCursor,
-      options.newestEventsFirst === true,
-    )
-    const pageItems = eventLimit === undefined
-      ? orderedItems.slice(startIndex)
-      : orderedItems.slice(startIndex, startIndex + eventLimit)
-    const lastItem = pageItems.at(-1)
-    const hasMore = lastItem !== undefined && startIndex + pageItems.length < orderedItems.length
-    return {
-      items: pageItems,
-      ...(hasMore && lastItem
-        ? {
-            nextCursor: encodeTeamIssueEventCursor(
-              directoryTeamIssueId,
-              {
-                eventId: lastItem.eventId,
-                createdAt: lastItem.createdAt,
-              },
-              true,
-            ),
-          }
-        : {}),
-    }
-  }
-
-  /** Reads a bounded page from the canonical comment-time index. */
-  private async queryChronologicalCommentEvents(
-    directoryTeamIssueId: string,
-    eventCursor: Extract<TeamIssueEventCursor, { version: 3 }> | undefined,
-    eventLimit: number | undefined,
-    newestEventsFirst: boolean,
-  ) {
-    const items: TeamIssueEventItem[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined = eventCursor
-      ? {
-          directoryTeamIssueId: eventCursor.directoryTeamIssueId,
-          eventId: eventCursor.eventId,
-          commentCreatedAtOrder: eventCursor.commentCreatedAtOrder,
-        }
-      : undefined
-    do {
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.eventTableName,
-        IndexName: 'TeamIssueCommentCreatedAtIndex',
-        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
-        ExpressionAttributeValues: {
-          ':directoryTeamIssueId': directoryTeamIssueId,
-        },
-        ExclusiveStartKey: exclusiveStartKey,
-        ScanIndexForward: !newestEventsFirst,
-        ...(eventLimit === undefined ? {} : { Limit: eventLimit - items.length }),
-      }))
-      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
-      for (const item of pageItems) {
-        if (item.eventType !== 'commented') {
-          throw new ProjectDataError(
-            503,
-            'InvalidTeamIssue',
-            'Team Issue comment index contains a non-comment event.',
-          )
-        }
-        requireCommentCreatedAtOrder(item)
-      }
-      items.push(...pageItems)
-      exclusiveStartKey = response.LastEvaluatedKey
-      if (eventLimit !== undefined && items.length >= eventLimit) break
-    } while (exclusiveStartKey)
-    return { items, lastEvaluatedKey: exclusiveStartKey }
-  }
-
-  /** Reads comment candidates from the sparse createdAt index within an optional shared budget. */
-  private async queryIndexedCommentEvents(
-    directoryTeamIssueId: string,
-    readBudget?: LegacyCommentFallbackReadBudget,
-  ) {
-    const items: TeamIssueEventItem[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined
-    let evaluatedItems = 0
-    do {
-      if (readBudget !== undefined) {
-        ensureLegacyCommentFallbackReadBudgetAvailable(readBudget)
-      }
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.eventTableName,
-        IndexName: 'TeamIssueEventCreatedAtIndex',
-        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
-        ExpressionAttributeValues: {
-          ':directoryTeamIssueId': directoryTeamIssueId,
-          ':eventType': 'commented',
-        },
-        FilterExpression: 'eventType = :eventType',
-        ExclusiveStartKey: exclusiveStartKey,
-        ScanIndexForward: false,
-        ...(readBudget === undefined
-          ? {}
-          : { Limit: readBudget.maxReadItems - readBudget.evaluatedItems }),
-      }))
-      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
-      items.push(...pageItems)
-      const scannedItems = response.ScannedCount ?? pageItems.length
-      const totalEvaluatedItems = readBudget === undefined
-        ? (evaluatedItems += scannedItems)
-        : (readBudget.evaluatedItems += scannedItems)
-      exclusiveStartKey = response.LastEvaluatedKey
-      throwIfLegacyCommentFallbackReadBudgetExceeded(
-        readBudget?.maxReadItems,
-        totalEvaluatedItems,
-        exclusiveStartKey,
-      )
-    } while (exclusiveStartKey)
-    return {
-      items: items.filter((item) => item.eventType === 'commented'),
-      lastEvaluatedKey: exclusiveStartKey,
-    }
-  }
-
-  /**
-   * Validates all comment rows that the sparse createdAt index should contain.
-   *
-   * @param directoryTeamIssueId - Work Item event partition key.
-   * @param readBudget - Shared budget for all queries in one fallback, when bounded.
-   * @returns Event IDs present in the strongly consistent base-table query.
-   */
-  private async readCommentEventIndexCoverage(
-    directoryTeamIssueId: string,
-    readBudget?: LegacyCommentFallbackReadBudget,
-  ) {
-    const eventIds = new Set<string>()
-    let exclusiveStartKey: Record<string, unknown> | undefined
-    let evaluatedItems = 0
-    do {
-      if (readBudget !== undefined) {
-        ensureLegacyCommentFallbackReadBudgetAvailable(readBudget)
-      }
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.eventTableName,
-        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
-        ExpressionAttributeNames: {
-          '#createdAt': 'createdAt',
-          '#eventId': 'eventId',
-          '#eventType': 'eventType',
-        },
-        ExpressionAttributeValues: {
-          ':directoryTeamIssueId': directoryTeamIssueId,
-          ':eventType': 'commented',
-        },
-        FilterExpression: '#eventType = :eventType',
-        ProjectionExpression: '#createdAt, #eventId, #eventType',
-        ExclusiveStartKey: exclusiveStartKey,
-        ConsistentRead: true,
-        ...(readBudget === undefined
-          ? {}
-          : { Limit: readBudget.maxReadItems - readBudget.evaluatedItems }),
-      }))
-      for (const item of response.Items ?? []) {
-        eventIds.add(readCommentEventIndexCoverageId(item))
-      }
-      const scannedItems = response.ScannedCount ?? response.Items?.length ?? 0
-      const totalEvaluatedItems = readBudget === undefined
-        ? (evaluatedItems += scannedItems)
-        : (readBudget.evaluatedItems += scannedItems)
-      exclusiveStartKey = response.LastEvaluatedKey
-      throwIfLegacyCommentFallbackReadBudgetExceeded(
-        readBudget?.maxReadItems,
-        totalEvaluatedItems,
-        exclusiveStartKey,
-      )
-    } while (exclusiveStartKey)
-    return eventIds
-  }
-
-  /** Reads and fully validates comment rows from the base table after index drift. */
-  private async queryBaseCommentEvents(
-    directoryTeamIssueId: string,
-    options: { eventLimit?: number; maxReadItems?: number; readBudget?: LegacyCommentFallbackReadBudget } = {},
-  ) {
-    const items: TeamIssueEventItem[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined
-    let evaluatedItems = 0
-    do {
-      if (options.readBudget !== undefined) {
-        ensureLegacyCommentFallbackReadBudgetAvailable(options.readBudget)
-      }
-      const remainingEventItems = options.eventLimit === undefined
-        ? undefined
-        : Math.max(1, options.eventLimit - items.length)
-      const maxReadItems = options.readBudget?.maxReadItems ?? options.maxReadItems
-      const currentEvaluatedItems = options.readBudget?.evaluatedItems ?? evaluatedItems
-      const remainingReadItems = maxReadItems === undefined
-        ? undefined
-        : Math.max(1, maxReadItems - currentEvaluatedItems)
-      const queryLimit = remainingEventItems === undefined
-        ? remainingReadItems
-        : remainingReadItems === undefined
-          ? remainingEventItems
-          : Math.min(remainingEventItems, remainingReadItems)
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.eventTableName,
-        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
-        ExpressionAttributeValues: {
-          ':directoryTeamIssueId': directoryTeamIssueId,
-          ':eventType': 'commented',
-        },
-        FilterExpression: 'eventType = :eventType',
-        ExclusiveStartKey: exclusiveStartKey,
-        ConsistentRead: true,
-        ...(queryLimit === undefined ? {} : { Limit: queryLimit }),
-      }))
-      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
-      items.push(...pageItems)
-      const scannedItems = response.ScannedCount ?? pageItems.length
-      const totalEvaluatedItems = options.readBudget === undefined
-        ? (evaluatedItems += scannedItems)
-        : (options.readBudget.evaluatedItems += scannedItems)
-      exclusiveStartKey = response.LastEvaluatedKey
-      throwIfLegacyCommentFallbackReadBudgetExceeded(
-        maxReadItems,
-        totalEvaluatedItems,
-        exclusiveStartKey,
-      )
-      if (options.eventLimit !== undefined && items.length >= options.eventLimit) {
-        break
-      }
-    } while (exclusiveStartKey)
-    return {
-      items: items.filter((item) => item.eventType === 'commented'),
-      lastEvaluatedKey: exclusiveStartKey,
-    }
+    return items
   }
 
   /**
    * Builds the canonical DynamoDB representation of one Team Issue event.
    *
-   * @param input - Event fields before physical partition and index keys are added.
+   * @param input - Event fields before the physical partition and sort keys are added.
    * @returns Event row with normalized timestamp and deterministic storage keys.
    */
   private createIssueEventItem(
     input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'> & { eventId?: string },
   ) {
     const createdAt = normalizeTeamIssueEventTimestamp(input.createdAt)
-    const eventId = input.eventId ?? createTeamIssueEventId(createdAt, input.eventType)
     return {
       ...input,
       directoryTeamIssueId: createDirectoryTeamIssueId(input.directoryId, input.teamId, input.issueId),
-      eventId,
+      eventId: input.eventId ?? createTeamIssueEventId(createdAt, input.eventType),
       createdAt,
-      ...(input.eventType === 'commented'
-        ? { commentCreatedAtOrder: createTeamIssueCommentEventOrder(createdAt, eventId) }
-        : {}),
     } satisfies TeamIssueEventItem
   }
 
@@ -3692,86 +3097,14 @@ async function ensureLocalTeamIssueEventsTable(
         AttributeDefinitions: [
           { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
           { AttributeName: 'eventId', AttributeType: 'S' },
-          { AttributeName: 'createdAt', AttributeType: 'S' },
-          { AttributeName: 'commentCreatedAtOrder', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
           { AttributeName: 'eventId', KeyType: 'RANGE' },
         ],
-        GlobalSecondaryIndexes: [
-          {
-            IndexName: 'TeamIssueEventCreatedAtIndex',
-            KeySchema: [
-              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
-              { AttributeName: 'createdAt', KeyType: 'RANGE' },
-            ],
-            Projection: { ProjectionType: 'ALL' },
-          },
-          {
-            IndexName: 'TeamIssueCommentCreatedAtIndex',
-            KeySchema: [
-              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
-              { AttributeName: 'commentCreatedAtOrder', KeyType: 'RANGE' },
-            ],
-            Projection: { ProjectionType: 'ALL' },
-          },
-        ],
         BillingMode: 'PAY_PER_REQUEST',
       }),
     isTeamIssueEventsTableDescription,
-    async (table) => {
-      if (!hasKeySchema(table, [
-        ['directoryTeamIssueId', 'HASH'],
-        ['eventId', 'RANGE'],
-      ])) {
-        throw new Error(`Local DynamoDB table "${tableName}" does not match the expected schema.`)
-      }
-      const hasCreatedAtIndex = table?.GlobalSecondaryIndexes?.some((index) =>
-        index.IndexName === 'TeamIssueEventCreatedAtIndex') ?? false
-      const hasCommentCreatedAtIndex = table?.GlobalSecondaryIndexes?.some((index) =>
-        index.IndexName === 'TeamIssueCommentCreatedAtIndex') ?? false
-      if (hasCreatedAtIndex && hasCommentCreatedAtIndex) {
-        return
-      }
-      if (!hasCreatedAtIndex) {
-        await dynamoDbClient.send(new UpdateTableCommand({
-          TableName: tableName,
-          AttributeDefinitions: [
-            { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
-            { AttributeName: 'createdAt', AttributeType: 'S' },
-          ],
-          GlobalSecondaryIndexUpdates: [{
-            Create: {
-              IndexName: 'TeamIssueEventCreatedAtIndex',
-              KeySchema: [
-                { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
-                { AttributeName: 'createdAt', KeyType: 'RANGE' },
-              ],
-              Projection: { ProjectionType: 'ALL' },
-            },
-          }],
-        }))
-        return
-      }
-      await dynamoDbClient.send(new UpdateTableCommand({
-        TableName: tableName,
-        AttributeDefinitions: [
-          { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
-          { AttributeName: 'commentCreatedAtOrder', AttributeType: 'S' },
-        ],
-        GlobalSecondaryIndexUpdates: [{
-          Create: {
-            IndexName: 'TeamIssueCommentCreatedAtIndex',
-            KeySchema: [
-              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
-              { AttributeName: 'commentCreatedAtOrder', KeyType: 'RANGE' },
-            ],
-            Projection: { ProjectionType: 'ALL' },
-          },
-        }],
-      }))
-    },
   )
 }
 
@@ -3780,7 +3113,6 @@ async function ensureLocalDynamoDbTable(
   dynamoDbClient: DynamoDBClient,
   createCommand: () => CreateTableCommand,
   validateTable: (table: TableDescription | undefined) => boolean,
-  migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
   if (!shouldBootstrapLocalDynamoDb()) {
     return false
@@ -3799,7 +3131,6 @@ async function ensureLocalDynamoDbTable(
     dynamoDbClient,
     createCommand,
     validateTable,
-    migrateTable,
   )
     .finally(() => {
       localDynamoDbTableInitializers.delete(initializerKey)
@@ -3816,7 +3147,6 @@ async function createLocalDynamoDbTable(
   dynamoDbClient: DynamoDBClient,
   createCommand: () => CreateTableCommand,
   validateTable: (table: TableDescription | undefined) => boolean,
-  migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
   try {
     await dynamoDbClient.send(createCommand())
@@ -3826,16 +3156,14 @@ async function createLocalDynamoDbTable(
     }
   }
 
-  await waitForLocalDynamoDbTable(tableName, dynamoDbClient, validateTable, migrateTable)
+  await waitForLocalDynamoDbTable(tableName, dynamoDbClient, validateTable)
 }
 
 async function waitForLocalDynamoDbTable(
   tableName: string,
   dynamoDbClient: DynamoDBClient,
   validateTable: (table: TableDescription | undefined) => boolean,
-  migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
-  let migrationAttempts = 0
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const response = await dynamoDbClient.send(
       new DescribeTableCommand({
@@ -3848,11 +3176,6 @@ async function waitForLocalDynamoDbTable(
     }
 
     if (response.Table?.TableStatus === 'ACTIVE') {
-      if (migrateTable && migrationAttempts < 2) {
-        migrationAttempts += 1
-        await migrateTable(response.Table)
-        continue
-      }
       throw new Error(`Local DynamoDB table "${tableName}" does not match the expected schema.`)
     }
 
@@ -3902,23 +3225,7 @@ function isTeamIssueEventsTableDescription(table: TableDescription | undefined) 
   return hasKeySchema(table, [
     ['directoryTeamIssueId', 'HASH'],
     ['eventId', 'RANGE'],
-  ]) && Boolean(
-    table?.GlobalSecondaryIndexes?.some((index) =>
-      index.IndexName === 'TeamIssueEventCreatedAtIndex' &&
-      hasKeySchema(index, [
-        ['directoryTeamIssueId', 'HASH'],
-        ['createdAt', 'RANGE'],
-      ]),
-    ),
-  ) && Boolean(
-    table?.GlobalSecondaryIndexes?.some((index) =>
-      index.IndexName === 'TeamIssueCommentCreatedAtIndex' &&
-      hasKeySchema(index, [
-        ['directoryTeamIssueId', 'HASH'],
-        ['commentCreatedAtOrder', 'RANGE'],
-      ]),
-    ),
-  )
+  ])
 }
 
 function hasKeySchema(
@@ -3934,11 +3241,6 @@ function hasKeySchema(
 
 function shouldBootstrapLocalDynamoDb() {
   return shouldBootstrapConfiguredLocalDynamoDb()
-}
-
-/** Returns whether an unknown AWS error indicates a missing resource. */
-function isResourceNotFoundError(error: unknown) {
-  return isAwsNamedError(error, 'ResourceNotFoundException')
 }
 
 function isResourceInUseError(error: unknown) {
@@ -4265,16 +3567,6 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
   }
 }
 
-/** Projects a legacy commented event into the stable Work Item detail comment shape. */
-function toTeamIssueCommentResponseItem(value: TeamIssueEventItem): TeamIssueCommentResponseItem {
-  return {
-    id: value.eventId,
-    actorUserId: value.actorUserId,
-    body: value.body ?? '',
-    createdAt: value.createdAt,
-  }
-}
-
 function toTeamIssueItem(value: unknown): TeamIssueItem {
   if (!isCanonicalWorkItemRecord(value)) {
     throw new ProjectDataError(
@@ -4317,18 +3609,14 @@ function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
     isTeamIssueActivityType(value.eventType) &&
     typeof value.actorUserId === 'string' &&
     (value.body === undefined || typeof value.body === 'string') &&
-    (value.eventType !== 'commented' ||
-      (typeof value.body === 'string' && value.body.trim().length > 0)) &&
     hasCanonicalTriageContextSnapshot(value.eventType, value.triageContextSnapshot) &&
     typeof value.summary === 'string' &&
     typeof value.createdAt === 'string' &&
-    Number.isFinite(Date.parse(value.createdAt)) &&
-    (value.commentCreatedAtOrder === undefined ||
-      value.commentCreatedAtOrder === createTeamIssueCommentEventOrder(value.createdAt, value.eventId))
+    Number.isFinite(Date.parse(value.createdAt))
   )
 }
 
-/** Normalizes one newly stored Team Issue event timestamp for indexed ordering. */
+/** Normalizes one newly stored Team Issue event timestamp to canonical UTC. */
 function normalizeTeamIssueEventTimestamp(value: string): string {
   const parsed = Date.parse(value)
   if (!Number.isFinite(parsed)) {
@@ -4339,128 +3627,6 @@ function normalizeTeamIssueEventTimestamp(value: string): string {
     )
   }
   return new Date(parsed).toISOString()
-}
-
-/** Validates a persisted event timestamp without changing its index key representation. */
-function validateTeamIssueEventTimestamp(value: string): string {
-  if (!Number.isFinite(Date.parse(value))) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue event timestamp is invalid.',
-    )
-  }
-  return value
-}
-
-/** Requires the canonical sort key projected by the bounded comment index. */
-function requireCommentCreatedAtOrder(value: TeamIssueEventItem): string {
-  if (typeof value.commentCreatedAtOrder !== 'string' || value.commentCreatedAtOrder.length === 0) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue comment event item is missing its canonical index key.',
-    )
-  }
-  return value.commentCreatedAtOrder
-}
-
-/** Validates one strongly read row that should be present in the sparse comment index. */
-function readCommentEventIndexCoverageId(value: unknown): string {
-  if (!isRecord(value) ||
-      value.eventType !== 'commented' ||
-      typeof value.eventId !== 'string' ||
-      value.eventId.length === 0 ||
-      typeof value.createdAt !== 'string' ||
-      !Number.isFinite(Date.parse(value.createdAt))) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue comment event item is missing or invalid.',
-    )
-  }
-  return value.eventId
-}
-
-/** Fails closed before a shared legacy comment budget can issue another query. */
-function ensureLegacyCommentFallbackReadBudgetAvailable(
-  readBudget: LegacyCommentFallbackReadBudget,
-): void {
-  if (readBudget.evaluatedItems >= readBudget.maxReadItems) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue comment history requires migration before it can be read.',
-    )
-  }
-}
-
-/** Fails closed when a transitional comment fallback would exceed its read budget. */
-function throwIfLegacyCommentFallbackReadBudgetExceeded(
-  maxReadItems: number | undefined,
-  evaluatedItems: number,
-  lastEvaluatedKey: Record<string, unknown> | undefined,
-): void {
-  if (maxReadItems !== undefined && (
-    evaluatedItems > maxReadItems ||
-    (evaluatedItems >= maxReadItems && lastEvaluatedKey !== undefined)
-  )) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue comment history requires migration before it can be read.',
-    )
-  }
-}
-
-/** Compares two validated events by their actual timestamp and stable ID. */
-function compareTeamIssueEvents(
-  left: TeamIssueEventItem,
-  right: TeamIssueEventItem,
-  newestFirst: boolean,
-): number {
-  const leftTime = Date.parse(left.createdAt)
-  const rightTime = Date.parse(right.createdAt)
-  if (leftTime !== rightTime) {
-    return newestFirst ? rightTime - leftTime : leftTime - rightTime
-  }
-  return newestFirst
-    ? right.eventId.localeCompare(left.eventId)
-    : left.eventId.localeCompare(right.eventId)
-}
-
-/** Compares two event ID sets without depending on their insertion order. */
-function setsEqual(left: Set<string>, right: Set<string>): boolean {
-  if (left.size !== right.size) return false
-  for (const value of left) {
-    if (!right.has(value)) return false
-  }
-  return true
-}
-
-/** Finds the first item after a canonical-time event cursor. */
-function findTeamIssueEventCursorStartIndex(
-  items: TeamIssueEventItem[],
-  cursor: Extract<TeamIssueEventCursor, { version: 2 }> | undefined,
-  newestFirst: boolean,
-): number {
-  if (!cursor) return 0
-  const exactIndex = items.findIndex((item) => item.eventId === cursor.eventId)
-  if (exactIndex >= 0) return exactIndex + 1
-
-  const cursorTime = Date.parse(cursor.createdAt)
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index]
-    if (!item) continue
-    const itemTime = Date.parse(item.createdAt)
-    const isAfterCursor = newestFirst
-      ? itemTime < cursorTime ||
-        (itemTime === cursorTime && item.eventId < cursor.eventId)
-      : itemTime > cursorTime ||
-        (itemTime === cursorTime && item.eventId > cursor.eventId)
-    if (isAfterCursor) return index
-  }
-  return items.length
 }
 
 /**
@@ -5108,117 +4274,6 @@ function decodePublicWorkItemPageCursor(
   }
 }
 
-/** Team Issue event の DynamoDB key を scope-bound opaque cursor に変換します。 */
-function encodeTeamIssueEventCursor(
-  directoryTeamIssueId: string,
-  key: Record<string, unknown>,
-  useCreatedAtIndex: boolean,
-) {
-  const eventId = typeof key.eventId === 'string' ? key.eventId : undefined
-  if (!eventId) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue event page did not include a valid continuation key.',
-    )
-  }
-
-  const createdAt = typeof key.createdAt === 'string'
-    ? validateTeamIssueEventTimestamp(key.createdAt)
-    : undefined
-  let cursor: TeamIssueEventCursor
-  if (useCreatedAtIndex) {
-    if (createdAt === undefined) {
-      throw new ProjectDataError(
-        503,
-        'InvalidTeamIssue',
-        'Team Issue event createdAt index page did not include a valid continuation key.',
-      )
-    }
-    cursor = {
-      version: 2,
-      index: 'createdAt',
-      directoryTeamIssueId,
-      eventId,
-      createdAt,
-    }
-  } else {
-    cursor = {
-      version: 1,
-      directoryTeamIssueId,
-      eventId,
-    }
-  }
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
-}
-
-/** Encodes a scope-bound cursor for the canonical comment-time index. */
-function encodeTeamIssueCommentCursor(
-  directoryTeamIssueId: string,
-  key: { eventId: string; commentCreatedAtOrder: string },
-) {
-  if (!key.eventId || !key.commentCreatedAtOrder) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue comment index page did not include a valid continuation key.',
-    )
-  }
-  const cursor: Extract<TeamIssueEventCursor, { version: 3 }> = {
-    version: 3,
-    index: 'commentCreatedAt',
-    directoryTeamIssueId,
-    eventId: key.eventId,
-    commentCreatedAtOrder: key.commentCreatedAtOrder,
-  }
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
-}
-
-/** Team Issue event cursor を検証し DynamoDB key に戻します。 */
-function decodeTeamIssueEventCursor(
-  value: string | undefined,
-  directoryTeamIssueId: string,
-) {
-  if (!value) return undefined
-
-  try {
-    const parsed: unknown = JSON.parse(
-      Buffer.from(value, 'base64url').toString('utf8'),
-    )
-    if (!isTeamIssueEventCursor(parsed) || parsed.directoryTeamIssueId !== directoryTeamIssueId) {
-      throw new TypeError('Invalid cursor payload.')
-    }
-    return parsed
-  } catch {
-    throw new ProjectDataError(
-      400,
-      'InvalidTeamIssueCursor',
-      'Team Issue event cursor is invalid.',
-    )
-  }
-}
-
-/** Validates the untrusted payload embedded in a Team Issue event cursor. */
-function isTeamIssueEventCursor(value: unknown): value is TeamIssueEventCursor {
-  if (!isRecord(value) ||
-    typeof value.directoryTeamIssueId !== 'string' ||
-    typeof value.eventId !== 'string' ||
-    value.eventId.length === 0) {
-    return false
-  }
-  if (value.version === 1) {
-    return true
-  }
-  if (value.version === 2) {
-    return value.index === 'createdAt' &&
-      typeof value.createdAt === 'string' &&
-      Number.isFinite(Date.parse(value.createdAt))
-  }
-  return value.version === 3 &&
-    value.index === 'commentCreatedAt' &&
-    typeof value.commentCreatedAtOrder === 'string' &&
-    value.commentCreatedAtOrder.length > 0
-}
 /**
  * Team-local Issue ID を Workspace 内で一意な audit Work Item ID に変換します。
  */
@@ -5286,41 +4341,6 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {
   return `${createdAt}#${eventType}#${Math.random().toString(36).slice(2, 10)}`
-}
-
-/**
- * Creates the canonical chronological sort key for one legacy or new comment event.
- *
- * @param createdAt - Event timestamp accepted by the Work Item event schema.
- * @param eventId - Stable event identifier used to break timestamp ties.
- * @returns UTC timestamp and event ID in lexicographically chronological order.
- */
-export function createTeamIssueCommentEventOrder(createdAt: string, eventId: string): string {
-  return `${normalizeTeamIssueEventTimestamp(createdAt)}#${eventId}`
-}
-
-/**
- * Creates a v2 cursor after one legacy comment event.
- *
- * @param directoryId - Workspace directory identifier.
- * @param teamId - Owning Team identifier.
- * @param issueId - Team-local Work Item identifier.
- * @param eventId - Stable legacy event identifier.
- * @param createdAt - Event timestamp used for chronological continuation.
- * @returns Scope-bound opaque comment cursor.
- */
-export function createTeamIssueCommentEventCursor(
-  directoryId: string,
-  teamId: string,
-  issueId: string,
-  eventId: string,
-  createdAt: string,
-) {
-  return encodeTeamIssueEventCursor(
-    createDirectoryTeamIssueId(directoryId, teamId, issueId),
-    { eventId, createdAt },
-    true,
-  )
 }
 
 function getDynamoDbEndpoint() {

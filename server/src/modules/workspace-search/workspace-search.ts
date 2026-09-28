@@ -474,18 +474,6 @@ export type WorkspaceSearchProjectionWriteOptions = {
   sourceRevision?: number
 }
 
-/** Canonical comment row used to fence one asynchronous Search projection. */
-export type WorkspaceSearchCommentProjectionFence = {
-  /** Collaboration table containing the canonical comment row. */
-  sourceTableName: string
-  /** Collaboration entity partition key containing the comment. */
-  sourceEntityKey: string
-  /** Canonical comment identifier used to derive the source sort key. */
-  sourceCommentId: string
-  /** Canonical comment version observed before the projection transaction. */
-  sourceRevision: number
-}
-
 /** Marks persisted projection content that disagrees with its server-owned digest. */
 class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
 
@@ -1540,123 +1528,6 @@ export class DynamoDbWorkspaceSearchClient {
       }
     }
     return document
-  }
-
-  /**
-   * Upserts a comment projection while atomically fencing it to the current
-   * non-deleted canonical comment version.
-   *
-   * @param input - Search document to persist.
-   * @param fence - Canonical Collaboration row and version observed by the caller.
-   * @returns Whether the projection was written, source changed, or an existing projection was retained.
-   */
-  async upsertDocumentWithCommentSourceFence(
-    input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
-    fence: WorkspaceSearchCommentProjectionFence,
-  ): Promise<'projected' | 'source-changed' | 'unchanged'> {
-    await this.ensureLocalTable()
-    const document = createWorkspaceSearchDocument(input)
-    const sourceRevision = normalizeProjectionSourceRevision(fence.sourceRevision)
-    if (document.sourceRevision !== sourceRevision) {
-      throw new WorkspaceSearchError(
-        409,
-        'InvalidSearchProjectionRevision',
-        'Search comment projection revision does not match its source fence.',
-      )
-    }
-
-    const existingResponse = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: requireText(document.workspaceId, 'Search Workspace ID'),
-        recordKey: document.recordKey,
-      },
-      ConsistentRead: true,
-    }))
-    if (isRecordValue(existingResponse.Item) &&
-        existingResponse.Item.sourceRevision === sourceRevision &&
-        existingResponse.Item.projectionDigest === document.projectionDigest) {
-      return 'unchanged'
-    }
-
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          {
-            ConditionCheck: {
-              TableName: requireText(fence.sourceTableName, 'Search projection source table name'),
-              Key: {
-                entityKey: requireText(fence.sourceEntityKey, 'Search projection source entity key'),
-                recordKey: `COMMENT#${requireText(fence.sourceCommentId, 'Search projection source comment ID')}`,
-              },
-              ConditionExpression:
-                'attribute_exists(entityKey) AND attribute_exists(recordKey) AND ' +
-                'attribute_not_exists(deletedAt) AND #version = :sourceRevision',
-              ExpressionAttributeNames: { '#version': 'version' },
-              ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
-            },
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: document,
-              ConditionExpression:
-                'attribute_not_exists(#recordKey) OR attribute_not_exists(#sourceRevision) OR ' +
-                '#sourceRevision <= :sourceRevision',
-              ExpressionAttributeNames: {
-                '#recordKey': 'recordKey',
-                '#sourceRevision': 'sourceRevision',
-              },
-              ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
-            },
-          },
-        ],
-      }))
-      return 'projected'
-    } catch (error) {
-      if (isTransactionConditionalCheckFailedAt(error, 0)) {
-        return 'source-changed'
-      }
-      if (isTransactionConditionalCheckFailedAt(error, 1)) {
-        return 'unchanged'
-      }
-      throw error
-    }
-  }
-
-  /**
-   * Deletes a comment projection and reports whether a stored row was removed.
-   *
-   * @param workspaceId - Workspace owning the projection.
-   * @param entityType - Search entity discriminator.
-   * @param entityId - Stable search entity identifier.
-   * @param options - Optional source revision fence.
-   * @returns Whether this invocation deleted an existing projection.
-   */
-  async deleteDocumentWithResult(
-    workspaceId: string,
-    entityType: SearchEntityType,
-    entityId: string,
-    options?: WorkspaceSearchProjectionWriteOptions,
-  ): Promise<boolean> {
-    await this.ensureLocalTable()
-    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: requireText(workspaceId, 'Search Workspace ID'),
-        recordKey: createWorkspaceSearchDocumentRecordKey(entityType, entityId),
-      },
-      ConsistentRead: true,
-    }))
-    if (!response.Item) return false
-    if (sourceRevision !== undefined &&
-        isRecordValue(response.Item) &&
-        typeof response.Item.sourceRevision === 'number' &&
-        response.Item.sourceRevision > sourceRevision) {
-      return false
-    }
-    return this.deleteDocument(workspaceId, entityType, entityId, options)
   }
 
   /** Search document を entity key で削除します。 */
@@ -6811,18 +6682,6 @@ function isTransactionConditionalCheckFailed(error: unknown) {
   }).CancellationReasons
   return reasons?.some((reason) => reason.Code === 'ConditionalCheckFailed') ??
     error.message.includes('ConditionalCheckFailed')
-}
-
-/** Returns whether one transaction item failed its conditional guard. */
-function isTransactionConditionalCheckFailedAt(error: unknown, index: number) {
-  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') {
-    return false
-  }
-  if (!isRecordValue(error)) return false
-  const reasons = error.CancellationReasons
-  if (!Array.isArray(reasons)) return false
-  const reason = reasons[index]
-  return isRecordValue(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 function isResourceNotFound(error: unknown) {

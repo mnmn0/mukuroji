@@ -22,7 +22,10 @@ import type {
 } from '../../../collaboration/collaboration'
 import {
   CollaborationError,
+  DynamoDbCollaborationClient,
 } from '../../../collaboration/collaboration'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   type CanonicalWorkItem,
   createDefaultDueDateWorkItemSchedule,
@@ -1068,16 +1071,12 @@ test('loads team issue detail and creates comments after team access is confirme
   const calls = configureFakeProjectClients(true)
   const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
-  const collaborationReadOrder: string[] = []
+  const collaborationReads: Parameters<CollaborationClient['getThread']>[0][] = []
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        collaborationReadOrder.push('marker')
-        return true
-      },
       /** Returns canonical root comments and no reply preview for this detail test. */
       async getThread(input) {
-        collaborationReadOrder.push('comments')
+        collaborationReads.push(input)
         return {
           comments: input.rootCommentId ? [] : collaborationComments,
           watch: {
@@ -1118,8 +1117,8 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 
   expect(detailResponse.status).toBe(200)
-  expect(collaborationReadOrder.slice(0, 2)).toEqual(['marker', 'comments'])
-  expect(await detailResponse.json()).toMatchObject({
+  const detailBody = await detailResponse.json()
+  expect(detailBody).toMatchObject({
     issue: {
       id: 'onboarding-friction',
       assigneeEmail: 'sato@example.com',
@@ -1131,6 +1130,8 @@ test('loads team issue detail and creates comments after team access is confirme
       },
     ],
   })
+  expect(detailBody).not.toHaveProperty('comments')
+  expect(collaborationReads).toEqual([])
 
   const commentResponse = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
     method: 'POST',
@@ -1167,10 +1168,7 @@ test('loads team issue detail and creates comments after team access is confirme
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'onboarding-friction',
-      readOptions: {
-        consistentIssueRead: true,
-        includeComments: false,
-      },
+      readOptions: { consistentIssueRead: true },
     },
     {
       directoryId: 'user#demo@example.com',
@@ -1216,20 +1214,6 @@ test('loads team issue detail and creates comments after team access is confirme
     ]),
   })
 
-  const refreshedDetailResponse = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-  expect(refreshedDetailResponse.status).toBe(200)
-  expect(await refreshedDetailResponse.json()).toMatchObject({
-    comments: [{
-      id: 'comment-2',
-      actorUserId: 'demo@example.com',
-      body: '追加コメント',
-      createdAt: '2026-06-08T02:00:00.000Z',
-    }],
-  })
-
   const collaborationResponse = await app.request(
     '/api/teams/core-team/issues/onboarding-friction/collaboration',
     { headers: { Authorization: 'Bearer test-token' } },
@@ -1242,7 +1226,7 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 })
 
-test('keeps complete Team Issue activity while reading legacy comments separately', async () => {
+test('returns the complete Team Issue activity without reading collaboration comments', async () => {
   const calls = configureFakeProjectClients(true)
   const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
   const completeActivity = Array.from({ length: 60 }, (_, index) => ({
@@ -1253,24 +1237,6 @@ test('keeps complete Team Issue activity while reading legacy comments separatel
     createdAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
   }))
   setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getThread() {
-        return {
-          comments: [],
-          watch: {
-            subscribed: false,
-            explicit: false,
-            automatic: false,
-            reasons: [],
-            watcherCount: 0,
-          },
-          presence: [],
-        }
-      },
-    }),
     teamIssues: {
       ...defaultTeamIssues,
       async getTeamIssueDetail(directoryId, teamId, issueId, options) {
@@ -1280,17 +1246,7 @@ test('keeps complete Team Issue activity while reading legacy comments separatel
           issueId,
           options,
         )
-        return options?.includeComments === false
-          ? { ...detail, activity: completeActivity, comments: [] }
-          : {
-              ...detail,
-              comments: [{
-                id: 'legacy-comment',
-                actorUserId: 'departed@example.com',
-                body: 'Legacy comment',
-                createdAt: '2026-06-08T00:00:00.000Z',
-              }],
-            }
+        return { ...detail, activity: completeActivity }
       },
     },
   })
@@ -1303,477 +1259,10 @@ test('keeps complete Team Issue activity while reading legacy comments separatel
   expect(response.status).toBe(200)
   const responseBody = await response.json()
   expect(responseBody.activity).toHaveLength(60)
-  expect(responseBody.comments).toEqual([{
-    id: 'legacy-comment',
-    actorUserId: 'departed@example.com',
-    body: 'Legacy comment',
-    createdAt: '2026-06-08T00:00:00.000Z',
-  }])
+  expect(responseBody).not.toHaveProperty('comments')
   expect(calls.issueDetails.map(({ readOptions }) => readOptions)).toEqual([
-    { consistentIssueRead: true, includeComments: false },
-    {
-      consistentIssueRead: true,
-      eventLimit: 50,
-      newestEventsFirst: true,
-      eventType: 'commented',
-      legacyCommentIndexOnly: true,
-    },
+    { consistentIssueRead: true },
   ])
-})
-
-test('does not rehydrate a deleted canonical comment from the legacy detail fallback', async () => {
-  configureFakeProjectClients(true)
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getThread() {
-        return {
-          comments: [{
-            id: 'deleted-comment',
-            rootCommentId: 'deleted-comment',
-            authorMemberKey: 'author@example.com',
-            bodyMarkdown: '',
-            version: 2,
-            mentionMemberKeys: [],
-            createdAt: '2026-07-12T00:00:00.000Z',
-            updatedAt: '2026-07-12T01:00:00.000Z',
-            deletedAt: '2026-07-12T01:00:00.000Z',
-            acceptedResolutions: [],
-            reactions: [],
-          }],
-          watch: {
-            subscribed: false,
-            explicit: false,
-            automatic: false,
-            reasons: [],
-            watcherCount: 0,
-          },
-          presence: [],
-        }
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return {
-          ...detail,
-          comments: [{
-            id: 'deleted-comment',
-            actorUserId: 'author@example.com',
-            body: 'Legacy body must stay hidden.',
-            createdAt: '2026-07-12T00:00:00.000Z',
-          }],
-        }
-      },
-    },
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  expect((await response.json()).comments).toEqual([])
-})
-
-/** Verifies that team issue detail loads every canonical root and reply page. */
-test('loads every canonical comment page for team issue detail', async () => {
-  configureFakeProjectClients(true)
-  const rootComment = {
-    id: 'root-comment',
-    rootCommentId: 'root-comment',
-    authorMemberKey: 'author@example.com',
-    bodyMarkdown: 'Root comment',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-06-08T01:00:00.000Z',
-    updatedAt: '2026-06-08T01:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
-  const replyComment = {
-    id: 'reply-comment',
-    rootCommentId: 'root-comment',
-    parentCommentId: 'root-comment',
-    authorMemberKey: 'reply-author@example.com',
-    bodyMarkdown: 'Reply comment',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-06-08T02:00:00.000Z',
-    updatedAt: '2026-06-08T02:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
-  const secondReplyComment = {
-    id: 'second-reply-comment',
-    rootCommentId: 'root-comment',
-    parentCommentId: 'root-comment',
-    authorMemberKey: 'second-reply-author@example.com',
-    bodyMarkdown: 'Second reply comment',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-06-08T03:00:00.000Z',
-    updatedAt: '2026-06-08T03:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
-  const secondRootComment = {
-    id: 'second-root-comment',
-    rootCommentId: 'second-root-comment',
-    authorMemberKey: 'second-author@example.com',
-    bodyMarkdown: 'Second root comment',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-06-08T04:00:00.000Z',
-    updatedAt: '2026-06-08T04:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
-  const threadState = {
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      /** Returns deterministic canonical pages containing roots and replies in one stream. */
-      async getThread(input) {
-        if (input.includeReplies && input.cursor === undefined) {
-          return {
-            ...threadState,
-            comments: [rootComment, replyComment],
-            nextCursor: 'comments-page-2',
-          }
-        }
-        if (input.includeReplies && input.cursor === 'comments-page-2') {
-          return { ...threadState, comments: [secondReplyComment, secondRootComment] }
-        }
-        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
-      },
-    }),
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.comments.map((comment: { id: string }) => comment.id)).toEqual([
-    'root-comment',
-    'reply-comment',
-    'second-reply-comment',
-    'second-root-comment',
-  ])
-})
-
-/** Verifies that a large root page does not trigger one empty reply probe per root. */
-test('loads a large canonical comment stream without per-root reply probes', async () => {
-  configureFakeProjectClients(true)
-  const rootComments = Array.from({ length: 50 }, (_, index) => ({
-    id: `root-comment-${index}`,
-    rootCommentId: `root-comment-${index}`,
-    authorMemberKey: 'demo@example.com',
-    bodyMarkdown: `Root comment ${index}`,
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
-    updatedAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
-    acceptedResolutions: [],
-    reactions: [],
-  }))
-  let pageReads = 0
-  const threadState = {
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      /** Returns the single bounded root-and-reply page for the detail request. */
-      async getThread(input) {
-        pageReads += 1
-        expect(input.includeReplies).toBe(true)
-        expect(input.rootCommentId).toBeUndefined()
-        return { ...threadState, comments: rootComments }
-      },
-    }),
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  expect((await response.json()).comments).toHaveLength(50)
-  expect(pageReads).toBe(1)
-})
-
-/** Verifies that an oversized aggregate comment read fails closed after its page budget. */
-test('rejects team issue detail when canonical comment pages exceed the aggregate read budget', async () => {
-  configureFakeProjectClients(true)
-  const rootComment = {
-    id: 'budget-root-comment',
-    rootCommentId: 'budget-root-comment',
-    authorMemberKey: 'author@example.com',
-    bodyMarkdown: 'Budget root comment',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-06-08T01:00:00.000Z',
-    updatedAt: '2026-06-08T01:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
-  let pageReads = 0
-  const threadState = {
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      /** Returns all-comment pages until the aggregate read budget is exhausted. */
-      async getThread(input) {
-        pageReads += 1
-        if (input.includeReplies && input.cursor === undefined) {
-          return {
-            ...threadState,
-            comments: [rootComment],
-            nextCursor: 'comments-page-2',
-          }
-        }
-        if (input.includeReplies) {
-          return {
-            ...threadState,
-            comments: [],
-            nextCursor: `comments-page-${pageReads + 1}`,
-          }
-        }
-        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
-      },
-    }),
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(413)
-  expect(await response.json()).toEqual({
-    code: 'CollaborationThreadReadLimitExceeded',
-    message: 'Collaboration thread exceeds the supported read window.',
-  })
-  expect(pageReads).toBe(50)
-})
-
-/** Verifies that a large canonical comments projection fails before transport serialization. */
-test('rejects team issue detail when canonical comments exceed the payload budget', async () => {
-  configureFakeProjectClients(true)
-  const bodyMarkdown = 'x'.repeat(20_000)
-  const oversizedComments = Array.from({ length: 220 }, (_, index) => ({
-    id: `payload-comment-${index}`,
-    rootCommentId: `payload-comment-${index}`,
-    authorMemberKey: 'author@example.com',
-    bodyMarkdown,
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
-    updatedAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
-    acceptedResolutions: [],
-    reactions: [],
-  })) satisfies Awaited<ReturnType<CollaborationClient['createComment']>>[]
-  const threadState = {
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-  let pageReads = 0
-
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      /** Returns one oversized canonical page to exercise the serialized projection bound. */
-      async getThread(input) {
-        pageReads += 1
-        expect(input.includeReplies).toBe(true)
-        expect(input.cursor).toBeUndefined()
-        return { ...threadState, comments: oversizedComments }
-      },
-    }),
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(413)
-  expect(await response.json()).toEqual({
-    code: 'CollaborationThreadPayloadTooLarge',
-    message: 'Collaboration comments exceed the supported response size.',
-  })
-  expect(pageReads).toBe(1)
-})
-
-/** Verifies that the transitional legacy detail projection shares the response payload bound. */
-test('rejects team issue detail when legacy comments exceed the payload budget', async () => {
-  configureFakeProjectClients(true)
-  const body = 'x'.repeat(20_000)
-  const oversizedComments = Array.from({ length: 220 }, (_, index) => ({
-    id: `legacy-payload-comment-${index}`,
-    actorUserId: 'departed@example.com',
-    body,
-    createdAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
-  }))
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  let pageReads = 0
-
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getThread() {
-        pageReads += 1
-        return {
-          comments: [],
-          watch: {
-            subscribed: false,
-            explicit: false,
-            automatic: false,
-            reasons: [],
-            watcherCount: 0,
-          },
-          presence: [],
-        }
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return options?.includeComments === false
-          ? { ...detail, comments: [] }
-          : { ...detail, comments: oversizedComments }
-      },
-    },
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(413)
-  expect(await response.json()).toEqual({
-    code: 'CollaborationThreadPayloadTooLarge',
-    message: 'Collaboration comments exceed the supported response size.',
-  })
-  expect(pageReads).toBe(1)
-})
-
-/** Verifies that a stalled canonical cursor is reported as an unavailable read. */
-test('rejects team issue detail when canonical comment pagination stalls', async () => {
-  configureFakeProjectClients(true)
-  const rootComment = {
-    id: 'stalled-root-comment',
-    rootCommentId: 'stalled-root-comment',
-    authorMemberKey: 'author@example.com',
-    bodyMarkdown: 'Stalled root comment',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-06-08T01:00:00.000Z',
-    updatedAt: '2026-06-08T01:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
-  let pageReads = 0
-  const threadState = {
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      /** Returns the same cursor in the aggregate stream to simulate non-advancing pagination. */
-      async getThread(input) {
-        pageReads += 1
-        if (input.includeReplies && input.cursor === undefined) {
-          return {
-            ...threadState,
-            comments: [rootComment],
-            nextCursor: 'stalled-cursor',
-          }
-        }
-        if (input.includeReplies) {
-          return {
-            ...threadState,
-            comments: [],
-            nextCursor: 'stalled-cursor',
-          }
-        }
-        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
-      },
-    }),
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(503)
-  expect(await response.json()).toEqual({
-    code: 'CollaborationThreadPaginationStalled',
-    message: 'Collaboration thread pagination did not advance.',
-  })
-  expect(pageReads).toBe(2)
 })
 
 test('returns the canonical comment response for bodyMarkdown requests', async () => {
@@ -1820,23 +1309,14 @@ test('returns the canonical comment response for bodyMarkdown requests', async (
   expect(responseBody.comment).not.toHaveProperty('body')
 })
 
-test('preserves the legacy comment response for body requests', async () => {
+test('requires bodyMarkdown when creating a comment', async () => {
   configureFakeProjectClients(true)
+  let writes = 0
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      async createComment(input) {
-        return {
-          id: 'legacy-comment',
-          rootCommentId: 'legacy-comment',
-          authorMemberKey: input.actorMemberKey,
-          bodyMarkdown: input.bodyMarkdown,
-          version: 1,
-          mentionMemberKeys: [],
-          createdAt: '2026-06-08T03:00:00.000Z',
-          updatedAt: '2026-06-08T03:00:00.000Z',
-          acceptedResolutions: [],
-          reactions: [],
-        }
+      async createComment() {
+        writes += 1
+        throw new Error('A comment without bodyMarkdown must not be written.')
       },
     }),
   })
@@ -1847,18 +1327,12 @@ test('preserves the legacy comment response for body requests', async () => {
       Authorization: 'Bearer test-token',
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ body: 'Legacy comment' }),
+    body: JSON.stringify({ body: 'Plain body field' }),
   })
 
-  expect(response.status).toBe(201)
-  expect(await response.json()).toMatchObject({
-    comment: {
-      id: 'legacy-comment',
-      actorUserId: 'demo@example.com',
-      body: 'Legacy comment',
-      createdAt: '2026-06-08T03:00:00.000Z',
-    },
-  })
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({ message: 'Issue comment body is required.' })
+  expect(writes).toBe(0)
 })
 
 /** Verifies that comment creation fails closed when authorization fencing is empty. */
@@ -1934,7 +1408,7 @@ test('omits relations whose target Project is outside the viewer access scope', 
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'work-item-1',
-      readOptions: { consistentIssueRead: true, includeComments: false },
+      readOptions: { consistentIssueRead: true },
     },
     {
       directoryId: 'user#demo@example.com',
@@ -2031,7 +1505,7 @@ test('fails closed when a persisted relation target Work Item is missing', async
   expect(calls.issueDetails.map(({ issueId, readOptions }) => ({ issueId, readOptions }))).toEqual([
     {
       issueId: 'work-item-1',
-      readOptions: { consistentIssueRead: true, includeComments: false },
+      readOptions: { consistentIssueRead: true },
     },
     {
       issueId: 'missing-target',
@@ -2117,12 +1591,10 @@ test('returns persisted collaboration comments and reply cursors', async () => {
   expect(threadInputs).toHaveLength(2)
   expect(threadInputs[0]?.rootCommentId).toBeUndefined()
   expect(threadInputs[0]?.limit).toBe(10)
-  expect(threadInputs[0]?.legacyCursorCompatible).toBe(true)
   expect(threadInputs[1]).toMatchObject({
     rootCommentId: 'stored-root',
     limit: 5,
     includeScopeState: false,
-    legacyCursorCompatible: true,
   })
   expect(calls.issueDetails).toEqual([{
     directoryId: 'user#demo@example.com',
@@ -2180,370 +1652,7 @@ test('rejects a collaboration page whose canonical comments exceed the byte budg
   })
 })
 
-test('marks legacy collaboration fallback comments as read-only legacy responses', async () => {
-  configureFakeProjectClients(true)
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getThread() {
-        return {
-          comments: [],
-          watch: {
-            subscribed: false,
-            explicit: false,
-            automatic: false,
-            reasons: [],
-            watcherCount: 0,
-          },
-          presence: [],
-        }
-      },
-      async getCommentSnapshot() {
-        return undefined
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return {
-          ...detail,
-          comments: [{
-            id: 'legacy-comment',
-            actorUserId: 'departed@example.com',
-            body: 'Legacy comment',
-            createdAt: '2026-07-12T00:00:00.000Z',
-          }],
-        }
-      },
-    },
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
-    comments: [{
-      id: 'legacy-comment',
-      source: 'legacy',
-      capabilities: {
-        canEdit: false,
-        canDelete: false,
-        canResolve: false,
-        canReply: false,
-        canReact: false,
-        canAttach: false,
-        canPromote: false,
-      },
-    }],
-  })
-})
-
-test('merges canonical and legacy root pages by creation time during backfill', async () => {
-  configureFakeProjectClients(true)
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  const detailInputs: Array<Record<string, unknown>> = []
-  let commentBackfillComplete = false
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return commentBackfillComplete
-      },
-      async getCommentSnapshot() {
-        return undefined
-      },
-      async getThread(input) {
-        return {
-          comments: input.rootCommentId
-            ? []
-            : [{
-                id: 'canonical-root',
-                rootCommentId: 'canonical-root',
-                authorMemberKey: 'author@example.com',
-                bodyMarkdown: 'Canonical root',
-                version: 1,
-                mentionMemberKeys: [],
-                createdAt: '2026-07-12T00:00:00.000Z',
-                updatedAt: '2026-07-12T00:00:00.000Z',
-                acceptedResolutions: [],
-                reactions: [],
-              }],
-          watch: {
-            subscribed: false,
-            explicit: false,
-            automatic: false,
-            reasons: [],
-            watcherCount: 0,
-          },
-          presence: [],
-        }
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        detailInputs.push(options ?? {})
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return options?.eventLimit === 0
-          ? detail
-          : {
-              ...detail,
-              comments: [{
-                id: 'legacy-comment',
-                actorUserId: 'departed@example.com',
-                body: 'Legacy comment',
-                createdAt: '2026-07-12T00:01:00.000Z',
-              }],
-            }
-      },
-    },
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  const responseBody = await response.json()
-  expect(responseBody.comments).toEqual([
-    expect.objectContaining({ id: 'legacy-comment', source: 'legacy' }),
-  ])
-  expect(responseBody.nextCursor).toMatch(/^mixed\./)
-  commentBackfillComplete = true
-
-  const legacyResponse = await app.request(
-    `/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1&cursor=${responseBody.nextCursor}`,
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(legacyResponse.status).toBe(200)
-  expect((await legacyResponse.json()).comments).toEqual([
-    expect.objectContaining({ id: 'canonical-root' }),
-  ])
-  expect(detailInputs).toEqual([
-    { consistentIssueRead: true, eventLimit: 0 },
-    {
-      consistentIssueRead: true,
-      eventLimit: 1,
-      newestEventsFirst: true,
-      eventType: 'commented',
-      legacyCommentIndexOnly: true,
-    },
-    { consistentIssueRead: true, eventLimit: 0 },
-  ])
-})
-
-test('does not duplicate a legacy root when backfill inserts it into the canonical stream', async () => {
-  configureFakeProjectClients(true)
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  const canonicalOlder = {
-    id: 'canonical-older',
-    rootCommentId: 'canonical-older',
-    authorMemberKey: 'author@example.com',
-    bodyMarkdown: 'Canonical older root',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-07-12T00:00:00.000Z',
-    updatedAt: '2026-07-12T00:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  }
-  const backfilledLegacy = {
-    id: 'legacy-newer',
-    rootCommentId: 'legacy-newer',
-    authorMemberKey: 'author@example.com',
-    bodyMarkdown: 'Backfilled legacy root',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-07-12T01:00:00.000Z',
-    updatedAt: '2026-07-12T01:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  }
-  const threadState = {
-    comments: [],
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-  let canonicalReadCount = 0
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getCommentSnapshot() {
-        return undefined
-      },
-      async getThread(input) {
-        if (input.rootCommentId) return threadState
-        canonicalReadCount += 1
-        if (input.cursor === 'canonical-after-backfill') {
-          return { ...threadState, comments: [canonicalOlder] }
-        }
-        return canonicalReadCount === 1
-          ? { ...threadState, comments: [canonicalOlder] }
-          : {
-              ...threadState,
-              comments: [backfilledLegacy],
-              nextCursor: 'canonical-after-backfill',
-            }
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return options?.eventType === 'commented'
-          ? {
-              ...detail,
-              comments: [{
-                id: 'legacy-newer',
-                actorUserId: 'departed@example.com',
-                body: 'Backfilled legacy root',
-                createdAt: '2026-07-12T01:00:00.000Z',
-              }],
-            }
-          : detail
-      },
-    },
-  })
-
-  const firstResponse = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(firstResponse.status).toBe(200)
-  const firstBody = await firstResponse.json()
-  expect(firstBody.comments).toEqual([
-    expect.objectContaining({ id: 'legacy-newer', source: 'legacy' }),
-  ])
-  expect(firstBody.nextCursor).toBeString()
-
-  const secondResponse = await app.request(
-    `/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1&cursor=${encodeURIComponent(firstBody.nextCursor)}`,
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(secondResponse.status).toBe(200)
-  const secondBody = await secondResponse.json()
-  expect(secondBody.comments.map((comment: { id: string }) => comment.id)).toEqual([
-    'canonical-older',
-  ])
-  expect(secondBody.comments).not.toContainEqual(
-    expect.objectContaining({ id: 'legacy-newer' }),
-  )
-})
-
-test('does not let canonicalized legacy roots consume migration page capacity', async () => {
-  configureFakeProjectClients(true)
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getThread(input) {
-        return {
-          comments: input.rootCommentId ? [] : [],
-          watch: {
-            subscribed: false,
-            explicit: false,
-            automatic: false,
-            reasons: [],
-            watcherCount: 0,
-          },
-          presence: [],
-        }
-      },
-      async getCommentSnapshot(input) {
-        if (input.commentId !== 'canonicalized-legacy') return undefined
-        return {
-          id: input.commentId,
-          rootCommentId: input.commentId,
-          authorMemberKey: 'author@example.com',
-          bodyMarkdown: 'Canonical copy',
-          version: 1,
-          mentionMemberKeys: [],
-          createdAt: '2026-07-12T00:00:00.000Z',
-          updatedAt: '2026-07-12T00:00:00.000Z',
-          acceptedResolutions: [],
-          reactions: [],
-        }
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return options?.eventLimit === 0
-          ? detail
-          : {
-              ...detail,
-              comments: [
-                {
-                  id: 'canonicalized-legacy',
-                  actorUserId: 'departed@example.com',
-                  body: 'Canonicalized legacy comment',
-                  createdAt: '2026-07-12T00:01:00.000Z',
-                },
-                {
-                  id: 'legacy-visible',
-                  actorUserId: 'departed@example.com',
-                  body: 'Still legacy comment',
-                  createdAt: '2026-07-12T00:00:00.000Z',
-                },
-              ],
-            }
-      },
-    },
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  expect((await response.json()).comments).toEqual([
-    expect.objectContaining({ id: 'legacy-visible', source: 'legacy' }),
-  ])
-})
-
-test('rejects a non-finite collaboration page limit before migration pagination', async () => {
+test('rejects a non-finite collaboration page limit', async () => {
   configureFakeProjectClients(true)
 
   const response = await app.request(
@@ -2558,7 +1667,7 @@ test('rejects a non-finite collaboration page limit before migration pagination'
   })
 })
 
-test('rejects a fractional collaboration page limit before migration pagination', async () => {
+test('rejects a fractional collaboration page limit', async () => {
   configureFakeProjectClients(true)
 
   const response = await app.request(
@@ -2573,7 +1682,7 @@ test('rejects a fractional collaboration page limit before migration pagination'
   })
 })
 
-test('rejects non-positive collaboration page limits before migration pagination', async () => {
+test('rejects non-positive collaboration page limits', async () => {
   configureFakeProjectClients(true)
 
   for (const limit of ['0', '-1']) {
@@ -2588,170 +1697,6 @@ test('rejects non-positive collaboration page limits before migration pagination
       message: 'Page limit is invalid.',
     })
   }
-})
-
-test('preserves merged root ordering when canonical and legacy comments share a page', async () => {
-  configureFakeProjectClients(true)
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  const canonicalRoot = {
-    id: 'canonical-root',
-    rootCommentId: 'canonical-root',
-    authorMemberKey: 'author@example.com',
-    bodyMarkdown: 'Canonical root',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-07-12T01:00:00.000Z',
-    updatedAt: '2026-07-12T01:00:00.000Z',
-    acceptedResolutions: [],
-    reactions: [],
-  }
-  const threadState = {
-    comments: [],
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getCommentSnapshot() {
-        return undefined
-      },
-      async getThread(input) {
-        return input.rootCommentId
-          ? threadState
-          : { ...threadState, comments: [canonicalRoot] }
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return options?.eventLimit === 2
-          ? {
-              ...detail,
-              comments: [{
-                id: 'legacy-root',
-                actorUserId: 'departed@example.com',
-                body: 'Legacy root',
-                createdAt: '2026-07-12T09:30:00+09:00',
-              }],
-            }
-          : detail
-      },
-    },
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=2',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  const responseBody = await response.json()
-  expect(responseBody.comments.map((comment: { id: string }) => comment.id)).toEqual([
-    'canonical-root',
-    'legacy-root',
-  ])
-})
-
-test('keeps legacy event cursors out of the canonical collaboration reader', async () => {
-  configureFakeProjectClients(true)
-  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
-  const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
-  const detailInputs: Array<Record<string, unknown>> = []
-  setTestAppDependencies({
-    collaboration: createCollaborationStub({
-      async isTeamIssueCommentBackfillComplete() {
-        return false
-      },
-      async getThread(input) {
-        threadInputs.push(input)
-        return {
-          comments: [{
-            id: 'canonical-already-seen',
-            rootCommentId: 'canonical-already-seen',
-            authorMemberKey: 'author@example.com',
-            bodyMarkdown: 'Canonical comment from the previous page.',
-            version: 1,
-            mentionMemberKeys: [],
-            createdAt: '2026-07-11T00:00:00.000Z',
-            updatedAt: '2026-07-11T00:00:00.000Z',
-            acceptedResolutions: [],
-            reactions: [],
-          }],
-          watch: {
-            subscribed: false,
-            explicit: false,
-            automatic: false,
-            reasons: [],
-            watcherCount: 0,
-          },
-          presence: [],
-        }
-      },
-      async getCommentSnapshot() {
-        return undefined
-      },
-    }),
-    teamIssues: {
-      ...defaultTeamIssues,
-      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
-        detailInputs.push(options ?? {})
-        const detail = await defaultTeamIssues.getTeamIssueDetail(
-          directoryId,
-          teamId,
-          issueId,
-          options,
-        )
-        return {
-          ...detail,
-          comments: [{
-            id: 'legacy-next-page-comment',
-            actorUserId: 'departed@example.com',
-            body: 'Legacy next page comment',
-            createdAt: '2026-07-12T00:00:00.000Z',
-          }],
-        }
-      },
-    },
-  })
-
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=legacy.older-event',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
-
-  expect(response.status).toBe(200)
-  const responseBody = await response.json()
-  expect(responseBody).toMatchObject({
-    comments: [{ id: 'legacy-next-page-comment', source: 'legacy' }],
-  })
-  expect(responseBody.comments).toHaveLength(1)
-  expect(threadInputs[0]?.cursor).toBeUndefined()
-  expect(detailInputs).toEqual([
-    { consistentIssueRead: true, eventLimit: 0 },
-    {
-      consistentIssueRead: true,
-      eventLimit: 50,
-      newestEventsFirst: true,
-      eventType: 'commented',
-      eventCursor: 'older-event',
-      legacyCommentIndexOnly: true,
-    },
-  ])
 })
 
 test('serves one requested reply page without refetching reply roots', async () => {
@@ -2805,20 +1750,31 @@ test('serves one requested reply page without refetching reply roots', async () 
     rootCommentId: 'stored-root',
     cursor: 'reply-cursor',
     limit: 20,
-    legacyCursorCompatible: true,
   })
 })
 
-test('rejects a legacy collaboration cursor instead of reading it as a current page', async () => {
+test('rejects retired collaboration cursors through the canonical discussion reader', async () => {
   configureFakeProjectClients(true)
+  setTestAppDependencies({
+    collaboration: new DynamoDbCollaborationClient(
+      'collaboration-table',
+      'issue-table',
+      undefined,
+      DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'us-east-1' })),
+      new DynamoDBClient({ region: 'us-east-1' }),
+      false,
+    ),
+  })
 
-  const response = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=legacy.old',
-    { headers: { Authorization: 'Bearer test-token' } },
-  )
+  for (const cursor of ['legacy.old', 'legacy.initial', 'mixed.eyJ2ZXJzaW9uIjoxfQ']) {
+    const response = await app.request(
+      `/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=${cursor}`,
+      { headers: { Authorization: 'Bearer test-token' } },
+    )
 
-  expect(response.status).toBe(400)
-  expect(await response.json()).toMatchObject({ code: 'InvalidCollaborationCursor' })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'InvalidCollaborationCursor' })
+  }
 })
 
 test('keeps a departed author in history while blocking deactivated member mutations', async () => {
