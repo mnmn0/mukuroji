@@ -31,7 +31,6 @@ import {
   type PlanningCriticalPath,
   type PlanningCadence,
   type PlanningDependency,
-  type PlanningDependencyType,
   type PlanningEntity,
   type PlanningEntityStatus,
   type PlanningEntityType,
@@ -63,6 +62,7 @@ import {
   type PlanningWorkItemDependencySummary,
   type PlanningWorkItemSummary,
   type ScheduleDependencyConstraint,
+  type ScheduleDependencyType,
   type PublishPlanningUpdateInput,
   type UpdatePlanningEntityInput,
   type UpdateWorkItemScheduleDependencyInput,
@@ -4774,7 +4774,7 @@ function workItemScheduleSpanDays(schedule: WorkItemSchedule) {
  * @returns Successor earliest-start lower bound.
  */
 function workItemDependencyStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   predecessorStart: number,
   predecessorSpan: number,
   successorSpan: number,
@@ -4801,7 +4801,7 @@ function workItemDependencyStartConstraint(
  * @returns Predecessor latest-start upper bound.
  */
 function workItemDependencyLatestStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   successorLatestStart: number,
   predecessorSpan: number,
   successorSpan: number,
@@ -4828,7 +4828,7 @@ function workItemDependencyLatestStartConstraint(
  * @returns Successor earliest-start lower bound.
  */
 function dependencyStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   predecessorStart: number,
   predecessorDuration: number,
   successorDuration: number,
@@ -4855,7 +4855,7 @@ function dependencyStartConstraint(
  * @returns Predecessor latest-start upper bound.
  */
 function dependencyLatestStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   successorLatestStart: number,
   predecessorDuration: number,
   successorDuration: number,
@@ -6837,7 +6837,7 @@ function readProgressMode(value: unknown): PlanningEntity['progressMode'] {
   throw invalid('PlanningProgressModeInvalid', 'Planning progress mode is invalid.')
 }
 
-function readDependencyType(value: unknown): PlanningDependencyType {
+function readDependencyType(value: unknown): ScheduleDependencyType {
   if (
     value === 'finish-to-start' ||
     value === 'start-to-start' ||
