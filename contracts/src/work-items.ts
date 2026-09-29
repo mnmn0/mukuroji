@@ -354,7 +354,7 @@ export type ApprovalSummary = {
   updatedAt?: string
 }
 
-/** Stable comment projection embedded in Work Item detail and comment responses. */
+/** Stable comment projection returned by the Work Item comment list and create responses. */
 export type TeamIssueCommentResponseItem = {
   /** Stable comment identifier. */
   id: string
