@@ -3,20 +3,17 @@ import {
   DEFAULT_WORK_ITEM_TYPE,
   DEFAULT_WORK_ITEM_TYPE_ID,
   TRIAGE_BULK_ACTION_LIMIT,
+  type TriageBulkOperation,
+  type TriageEntryState,
+  type TriageQueueSlaFilter,
+  type TriageSourceKind,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ClockIcon, ShieldIcon } from '../../shared/ui/icons'
-import type {
-  TriageEntryState,
-  TriageBulkOperation,
-  TriageQueueCounts,
-  TriageQueueFilters,
-  TriageSlaFilter,
-  TriageSourceKind,
-} from '../api'
 import { resolveTriageNavigationIndex } from '../model/keyboard'
-import type { TriageEntryView } from '../model/triageView'
+import type { TriageQueueFilters } from '../model/queryState'
+import type { TriageEntryView, TriageQueueCounts } from '../model/triageView'
 import { TriageSourceIcon } from './TriageSourceIcon'
 import { resolveWorkItemTypes } from '../../work-items/model/workItemDisplay'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
@@ -80,7 +77,7 @@ const sourceKinds: readonly TriageSourceKind[] = [
   'webhook',
   'manual-handoff',
 ]
-const slaFilters: readonly TriageSlaFilter[] = [
+const slaFilters: readonly TriageQueueSlaFilter[] = [
   'breached',
   'due-soon',
   'on-track',
@@ -101,7 +98,7 @@ const sourceLabelKeys: Record<TriageSourceKind, MessageKey> = {
   'manual-handoff': 'triage.source.manualHandoff',
   webhook: 'triage.source.webhook',
 }
-const slaLabelKeys: Record<TriageSlaFilter, MessageKey> = {
+const slaLabelKeys: Record<TriageQueueSlaFilter, MessageKey> = {
   breached: 'triage.sla.breached',
   'due-soon': 'triage.sla.dueSoon',
   'on-track': 'triage.sla.onTrack',
@@ -516,7 +513,7 @@ function TriageStateBadge({ state, t }: {
 
 /** Renders a localized SLA label with semantic urgency. */
 function SlaLabel({ state, t }: {
-  state: TriageSlaFilter
+  state: TriageQueueSlaFilter
   t: (key: MessageKey) => string
 }) {
   return (
@@ -603,7 +600,7 @@ function readSourceKind(value: string): TriageSourceKind | undefined {
 }
 
 /** Narrows a select value to a supported SLA filter. */
-function readSlaFilter(value: string): TriageSlaFilter | undefined {
+function readSlaFilter(value: string): TriageQueueSlaFilter | undefined {
   return slaFilters.find((sla) => sla === value)
 }
 

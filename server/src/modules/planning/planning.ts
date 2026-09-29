@@ -31,7 +31,6 @@ import {
   type PlanningCriticalPath,
   type PlanningCadence,
   type PlanningDependency,
-  type PlanningDependencyType,
   type PlanningEntity,
   type PlanningEntityStatus,
   type PlanningEntityType,
@@ -63,6 +62,7 @@ import {
   type PlanningWorkItemDependencySummary,
   type PlanningWorkItemSummary,
   type ScheduleDependencyConstraint,
+  type ScheduleDependencyType,
   type PublishPlanningUpdateInput,
   type UpdatePlanningEntityInput,
   type UpdateWorkItemScheduleDependencyInput,
@@ -2760,140 +2760,26 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   }
 
   /**
-   * Strongly reads the fenced META row and reconciles one valid legacy META row when needed.
-   *
-   * Existing Planning graph rows remain under the workspace partition.  A conditional
-   * transaction copies the legacy revision into the isolated fence without deleting the
-   * legacy row, so migration does not require a table-wide DeleteItem permission.  Once the
-   * fence exists it is authoritative; the legacy row is retained as inert compatibility data.
+   * Strongly reads the META row in the isolated `FENCE#` revision partition.
    *
    * @param workspaceId - Workspace identifier whose revision is requested.
-   * @returns The current Planning revision metadata.
+   * @returns The current Planning revision metadata, or revision 0 before the first write.
    */
   private async readMeta(workspaceId: string): Promise<PlanningMeta> {
     try {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        const fenced = await this.readMetaRow(
-          `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
-        )
-        const legacy = await this.readMetaRow(workspaceId)
-
-        if (fenced) {
-          if (!legacy) return fenced
-
-          if (legacy.revision <= fenced.revision) return fenced
-
-          try {
-            await this.documentClient.send(new TransactWriteCommand({
-              TransactItems: [
-                {
-                  Update: {
-                    TableName: this.tableName,
-                    Key: {
-                      workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
-                      recordKey: META_RECORD_KEY,
-                    },
-                    UpdateExpression: legacy.updatedAt === undefined
-                      ? 'SET #revision = :revision REMOVE #updatedAt'
-                      : 'SET #revision = :revision, #updatedAt = :updatedAt',
-                    ConditionExpression:
-                      '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
-                      '#revision = :fencedRevision',
-                    ExpressionAttributeNames: {
-                      '#entryType': 'entryType',
-                      '#revision': 'revision',
-                      '#schemaVersion': 'schemaVersion',
-                      '#updatedAt': 'updatedAt',
-                    },
-                    ExpressionAttributeValues: {
-                      ':entryType': 'planning-meta',
-                      ':fencedRevision': fenced.revision,
-                      ':revision': legacy.revision,
-                      ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
-                      ...(legacy.updatedAt === undefined
-                        ? {}
-                        : { ':updatedAt': legacy.updatedAt }),
-                    },
-                  },
-                },
-              ],
-            }))
-            return legacy
-          } catch (error) {
-            if (!isPlanningTransactionConditionalFailureAt(error, 0)) {
-              throw error
-            }
-            continue
-          }
-        }
-
-        if (!legacy) return { revision: 0 }
-
-        try {
-          await this.documentClient.send(new TransactWriteCommand({
-            TransactItems: [
-              {
-                Update: {
-                  TableName: this.tableName,
-                  Key: {
-                    workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
-                    recordKey: META_RECORD_KEY,
-                  },
-                  UpdateExpression: legacy.updatedAt === undefined
-                    ? 'SET #entryType = :entryType, #schemaVersion = :schemaVersion, ' +
-                      '#revision = :revision REMOVE #updatedAt'
-                    : 'SET #entryType = :entryType, #schemaVersion = :schemaVersion, ' +
-                      '#revision = :revision, #updatedAt = :updatedAt',
-                  ConditionExpression:
-                    'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
-                  ExpressionAttributeNames: {
-                    '#entryType': 'entryType',
-                    '#revision': 'revision',
-                    '#schemaVersion': 'schemaVersion',
-                    '#updatedAt': 'updatedAt',
-                  },
-                  ExpressionAttributeValues: {
-                    ':entryType': 'planning-meta',
-                    ':revision': legacy.revision,
-                    ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
-                    ...(legacy.updatedAt === undefined
-                      ? {}
-                      : { ':updatedAt': legacy.updatedAt }),
-                  },
-                },
-              },
-            ],
-          }))
-          return legacy
-        } catch (error) {
-          if (!isPlanningTransactionConditionalFailureAt(error, 0)) {
-            throw error
-          }
-        }
-      }
-      throw conflict(
-        'PlanningRevisionConflict',
-        'Planning metadata changed while the revision fence was being initialized.',
-      )
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
+          recordKey: META_RECORD_KEY,
+        },
+        ConsistentRead: true,
+      }))
+      return readPlanningMetaItem(response.Item) ?? { revision: 0 }
     } catch (error) {
       if (error instanceof PlanningError) throw error
       throw toPersistenceError(error)
     }
-  }
-
-  /**
-   * Strongly reads and validates one physical Planning META row.
-   *
-   * @param workspaceId - Physical partition key of the META row.
-   * @returns Validated metadata, or undefined when the row does not exist.
-   */
-  private async readMetaRow(workspaceId: string): Promise<PlanningMeta | undefined> {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: { workspaceId, recordKey: META_RECORD_KEY },
-      ConsistentRead: true,
-    }))
-    return readPlanningMetaItem(response.Item)
   }
 }
 
@@ -4888,7 +4774,7 @@ function workItemScheduleSpanDays(schedule: WorkItemSchedule) {
  * @returns Successor earliest-start lower bound.
  */
 function workItemDependencyStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   predecessorStart: number,
   predecessorSpan: number,
   successorSpan: number,
@@ -4915,7 +4801,7 @@ function workItemDependencyStartConstraint(
  * @returns Predecessor latest-start upper bound.
  */
 function workItemDependencyLatestStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   successorLatestStart: number,
   predecessorSpan: number,
   successorSpan: number,
@@ -4942,7 +4828,7 @@ function workItemDependencyLatestStartConstraint(
  * @returns Successor earliest-start lower bound.
  */
 function dependencyStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   predecessorStart: number,
   predecessorDuration: number,
   successorDuration: number,
@@ -4969,7 +4855,7 @@ function dependencyStartConstraint(
  * @returns Predecessor latest-start upper bound.
  */
 function dependencyLatestStartConstraint(
-  type: PlanningDependencyType,
+  type: ScheduleDependencyType,
   successorLatestStart: number,
   predecessorDuration: number,
   successorDuration: number,
@@ -6951,7 +6837,7 @@ function readProgressMode(value: unknown): PlanningEntity['progressMode'] {
   throw invalid('PlanningProgressModeInvalid', 'Planning progress mode is invalid.')
 }
 
-function readDependencyType(value: unknown): PlanningDependencyType {
+function readDependencyType(value: unknown): ScheduleDependencyType {
   if (
     value === 'finish-to-start' ||
     value === 'start-to-start' ||

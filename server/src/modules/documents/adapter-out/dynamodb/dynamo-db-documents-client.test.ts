@@ -1488,7 +1488,7 @@ test('reconstructs retained version deltas across paginated Query results', asyn
   })
 })
 
-test('finds a legacy version ID beyond the first Query page', async () => {
+test('rejects a version ID that does not name a stored revision', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
   const created = await client.create({
@@ -1496,75 +1496,28 @@ test('finds a legacy version ID beyond the first Query page', async () => {
     access: ownerAccess,
     kind: 'page',
     scope: { type: 'workspace' },
-    title: 'Legacy version lookup',
+    title: 'Version lookup',
     blocks: [{
       id: 'block-a',
       type: 'paragraph',
       text: 'revision 1',
     }],
   })
-  await client.applyOperations({
-    workspaceId: 'workspace-1',
-    documentId: created.id,
-    access: ownerAccess,
-    input: {
-      baseRevision: 1,
-      clientId: 'editor-1',
-      operations: [{
-        type: 'update-block',
-        operationId: 'operation-1',
-        blockId: 'block-a',
-        block: {
-          id: 'block-a',
-          type: 'paragraph',
-          text: 'revision 2',
-        },
-      }],
-    },
-  })
-  const targetMetadata = memory.items().find(
-    ({ entryType, recordKey }) =>
-      entryType === 'document-version' &&
-      typeof recordKey === 'string' &&
-      recordKey.endsWith('#000000000002'),
-  )
-  if (targetMetadata === undefined) {
-    throw new Error('Expected revision 2 version metadata.')
-  }
-  const targetVersion = targetMetadata.version
-  if (
-    typeof targetVersion !== 'object' ||
-    targetVersion === null ||
-    Array.isArray(targetVersion)
-  ) {
-    throw new Error('Expected stored version metadata.')
-  }
-  memory.put({
-    ...targetMetadata,
-    version: {
-      ...targetVersion,
-      id: 'legacy-version-2',
-    },
-  })
 
-  memory.setQueryPageSize(1)
-  const restored = await client.restoreVersion({
-    workspaceId: 'workspace-1',
-    documentId: created.id,
-    access: ownerAccess,
-    versionId: 'legacy-version-2',
-    expectedRevision: 2,
-    validateRelationTargets:
-      async () => undefined,
-  })
-
-  expect(restored).toMatchObject({
-    revision: 3,
-    blocks: [{
-      id: 'block-a',
-      text: 'revision 2',
-    }],
-  })
+  for (const versionId of ['random-version-id', `${created.id}:2`]) {
+    await expect(client.restoreVersion({
+      workspaceId: 'workspace-1',
+      documentId: created.id,
+      access: ownerAccess,
+      versionId,
+      expectedRevision: 1,
+      validateRelationTargets:
+        async () => undefined,
+    })).rejects.toMatchObject({
+      status: 404,
+      code: 'DocumentVersionNotFound',
+    })
+  }
 })
 
 test('revalidates relation and Whiteboard Work Item targets before restoring a snapshot', async () => {
@@ -2812,106 +2765,7 @@ test('classifies a deletion tombstone that wins a version restore backlink fence
   })
 })
 
-test('fails closed for legacy backlinks without a fence and bootstraps the exact count while unlinking', async () => {
-  const memory = createMemoryDocumentClient()
-  const client = createClient(memory)
-  const workItemId =
-    'team/team-a/issue/legacy-backlink'
-  const created = await client.create({
-    workspaceId: 'workspace-1',
-    access: ownerAccess,
-    kind: 'page',
-    scope: { type: 'workspace' },
-    title: 'Legacy backlink',
-    blocks: [],
-    relations: [
-      createWorkItemRelation(
-        'legacy-relation-a',
-        workItemId,
-      ),
-      createWorkItemRelation(
-        'legacy-relation-b',
-        workItemId,
-      ),
-      createWorkItemRelation(
-        'legacy-relation-c',
-        workItemId,
-      ),
-    ],
-  })
-  const fence =
-    findWorkItemBacklinkTargetFence(
-      memory,
-      workItemId,
-    )
-  expect(fence).toBeDefined()
-  memory.remove(
-    'workspace-1',
-    String(fence?.recordKey),
-  )
-  memory.setQueryPageSize(1)
-
-  await expect(
-    client
-      .prepareWorkItemDeletionFenceTransactWrite({
-        workspaceId: 'workspace-1',
-        workItemId,
-      }),
-  ).rejects.toMatchObject({
-    status: 409,
-    code: 'WorkItemDocumentBacklinkConflict',
-    details: {
-      activeBacklinkCount: 3,
-    },
-  })
-
-  await client.applyOperations({
-    workspaceId: 'workspace-1',
-    documentId: created.id,
-    access: ownerAccess,
-    input: {
-      baseRevision: created.revision,
-      clientId: 'editor-1',
-      operations: [
-        {
-          type: 'delete-relation',
-          operationId: 'unlink-legacy-a',
-          relationId: 'legacy-relation-a',
-        },
-        {
-          type: 'delete-relation',
-          operationId: 'unlink-legacy-b',
-          relationId: 'legacy-relation-b',
-        },
-        {
-          type: 'delete-relation',
-          operationId: 'unlink-legacy-c',
-          relationId: 'legacy-relation-c',
-        },
-      ],
-    },
-  })
-  expect(
-    findWorkItemBacklinkTargetFence(
-      memory,
-      workItemId,
-    ),
-  ).toMatchObject({
-    activeBacklinkCount: 0,
-    version: 1,
-  })
-  await expect(
-    client
-      .prepareWorkItemDeletionFenceTransactWrite({
-        workspaceId: 'workspace-1',
-        workItemId,
-      }),
-  ).resolves.toHaveProperty(
-    'transactWriteItem.Put',
-  )
-})
-
-test('serializes concurrent legacy bootstrap puts and reports the losing deletion as a backlink conflict on retry', async () => {
+test('serializes the first backlink fence against a stale deletion fence and reports the conflict on retry', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
   const workItemId =

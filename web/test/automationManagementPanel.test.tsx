@@ -704,7 +704,7 @@ describe('AutomationManagementPanel', () => {
       requestedUrls.push(url)
       const body = url.endsWith('/work-item-configuration')
         ? { configuration: { revision: 1, scopeId: 'workspace-demo' } }
-        : {}
+        : { endpoints: [], executions: [], recurringWorks: [], rules: [], templates: [] }
       return new Response(JSON.stringify(body), {
         headers: { 'Content-Type': 'application/json' },
         status: 200,

@@ -1,4 +1,4 @@
-import type { TriageOwnerRotation, TriageOwnerStrategy } from '../api/types'
+import type { TriageOwnerRotation, TriageOwnerStrategy } from '@mukuroji/contracts'
 
 /** Parses compact owner-strategy text without accepting malformed non-empty input.
  *

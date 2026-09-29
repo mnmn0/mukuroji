@@ -1143,48 +1143,35 @@ describe('automation execution safety', () => {
       .toMatchObject({ status: 'dead-letter', nextRetryAt: undefined })
   })
 
-  test('preserves legacy Automation error status while classifying transport-neutral categories', () => {
-    const mappings: Array<[AutomationErrorCategory, number]> = [
-      ['invalid-input', 400],
-      ['unauthenticated', 401],
-      ['forbidden', 403],
-      ['not-found', 404],
-      ['conflict', 409],
-      ['payload-too-large', 413],
-      ['unsupported-media-type', 415],
-      ['unprocessable', 422],
-      ['locked', 423],
-      ['rate-limited', 429],
-      ['unavailable', 503],
+  test('classifies only transient Automation error categories as retryable action failures', () => {
+    const classifications: Array<[AutomationErrorCategory, boolean]> = [
+      ['invalid-input', false],
+      ['unauthenticated', false],
+      ['forbidden', false],
+      ['not-found', false],
+      ['conflict', false],
+      ['payload-too-large', false],
+      ['unsupported-media-type', false],
+      ['unprocessable', false],
+      ['locked', false],
+      ['rate-limited', true],
+      ['unavailable', true],
     ]
 
-    for (const [category, status] of mappings) {
+    for (const [category, retryable] of classifications) {
       expect(new AutomationError(category, 'MappedFailure', 'Mapped failure.'))
-        .toMatchObject({ category, status, retryable: false })
-      expect(new AutomationError(status, 'LegacyFailure', 'Legacy failure.'))
-        .toMatchObject({ category, status, retryable: false })
-    }
-
-    expect(new AutomationError(418, 'UnknownLegacyFailure', 'Unknown legacy failure.'))
-      .toMatchObject({
-        category: 'unavailable',
-        status: 418,
-        retryable: false,
+        .toMatchObject({ category, retryable: false })
+      expect(normalizeAutomationActionFailure(
+        new AutomationError(category, 'MappedFailure', 'Mapped failure.'),
+      )).toEqual({
+        code: 'MappedFailure',
+        message: 'Mapped failure.',
+        retryable,
       })
+    }
     expect(normalizeAutomationActionFailure(
-      new AutomationError(418, 'UnknownLegacyFailure', 'Unknown legacy failure.'),
-    )).toEqual({
-      code: 'UnknownLegacyFailure',
-      message: 'Unknown legacy failure.',
-      retryable: false,
-    })
-    expect(normalizeAutomationActionFailure(
-      new AutomationError(503, 'LegacyTransientFailure', 'Legacy transient failure.'),
-    )).toEqual({
-      code: 'LegacyTransientFailure',
-      message: 'Legacy transient failure.',
-      retryable: true,
-    })
+      new AutomationError('conflict', 'RetryableConflict', 'Retryable conflict.', true),
+    )).toMatchObject({ retryable: true })
   })
 
   test('redacts untrusted action failure details before they reach durable history', () => {

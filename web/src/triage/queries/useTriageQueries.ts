@@ -1,15 +1,17 @@
 import { useEffect, useRef } from 'react'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
+import type {
+  TriageEntryPage,
+  TriageWorkItemSourcePage,
+} from '@mukuroji/contracts'
 import {
   getTriageEntries,
   getTriageEntry,
   getTriageSettings,
   getTriageWorkItemSources,
-  type TriageEntryPage,
-  type TriageWorkItemSourcePage,
-  type TriageQueueFilters,
 } from '../api'
+import type { TriageQueueFilters } from '../model/queryState'
 
 const triageQueryConfig = {
   dedupingInterval: 5_000,

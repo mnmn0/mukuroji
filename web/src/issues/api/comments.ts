@@ -64,7 +64,7 @@ export type TeamIssueComment = {
   /**
    * Current accepted resolution snapshot; append-only history is loaded independently.
    */
-  acceptedResolutions?: AcceptedResolution[]
+  acceptedResolutions: AcceptedResolution[]
   /**
    * Deduplicated Workspace member keys mentioned in the body.
    */
@@ -77,10 +77,6 @@ export type TeamIssueComment = {
    * Operations available to the current user for this comment.
    */
   capabilities: TeamIssueCommentCapabilities
-  /**
-   * Optional source discriminator retained while older readers are drained.
-   */
-  source?: 'collaboration' | 'legacy'
 }
 
 /**
@@ -120,19 +116,19 @@ export type TeamIssueCommentCapabilities = {
   /**
    * このコメントへ返信できるかどうかです。
    */
-  canReply?: boolean
+  canReply: boolean
   /**
    * このコメントの reaction を変更できるかどうかです。
    */
-  canReact?: boolean
+  canReact: boolean
   /**
    * このコメントに file を添付できるかどうかです。
    */
-  canAttach?: boolean
+  canAttach: boolean
   /**
    * このコメントを context item の source 候補にできるかどうかです。
    */
-  canPromote?: boolean
+  canPromote: boolean
 }
 
 /**

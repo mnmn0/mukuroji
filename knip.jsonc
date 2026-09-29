@@ -8,8 +8,7 @@
     "dist/**",
     "storybook-static/**",
     "web/dist/**",
-    "web/storybook-static/**",
-    "web/src/work-items/index.ts"
+    "web/storybook-static/**"
   ],
   "workspaces": {
     ".": {
@@ -23,14 +22,13 @@
     },
     "server": {
       "entry": [
-        "src/index.ts",
         "src/handlers/*.ts",
         "src/modules/*/index.ts",
         "scripts/**/*.ts"
       ]
     },
     "cdk": {
-      "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "test/**/*.test.ts", "lib/cdk-stack.ts"],
+      "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "test/**/*.test.ts", "lib/stacks/mukuroji-stack.ts"],
       "ignoreDependencies": ["esbuild"]
     }
   }

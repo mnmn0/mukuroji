@@ -104,7 +104,15 @@ export const teamIssueCommentFixtures = [
       { emoji: '👍', count: 2, reactedByMe: true },
       { emoji: '👀', count: 1, reactedByMe: false },
     ],
-    capabilities: { canEdit: true, canDelete: true, canResolve: true },
+    capabilities: {
+      canEdit: true,
+      canDelete: true,
+      canResolve: true,
+      canReply: true,
+      canReact: true,
+      canAttach: true,
+      canPromote: true,
+    },
   },
   {
     id: 'comment-2',
@@ -115,9 +123,18 @@ export const teamIssueCommentFixtures = [
     version: 1,
     createdAt: '2026-06-08T01:20:00.000Z',
     updatedAt: '2026-06-08T01:20:00.000Z',
+    acceptedResolutions: [],
     mentionMemberKeys: [],
     reactions: [],
-    capabilities: { canEdit: false, canDelete: false, canResolve: false },
+    capabilities: {
+      canEdit: false,
+      canDelete: false,
+      canResolve: false,
+      canReply: true,
+      canReact: true,
+      canAttach: true,
+      canPromote: true,
+    },
   },
 ] satisfies TeamIssueComment[]
 

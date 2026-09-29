@@ -337,7 +337,7 @@ function bindApiRuntimeConfiguration(
     requestRateLimitPerHour,
     requestTokenHashSecret,
     systemAdminGroups,
-    taskApiAllowedOrigins,
+    apiAllowedOrigins,
     workspaceAuditPseudonymKey,
     workspaceDirectoryId,
   } = input.parameters;
@@ -399,7 +399,7 @@ function bindApiRuntimeConfiguration(
     apiRuntimeConfigurationRevision.valueAsString,
     'Versioned core, identity, transport, and runtime-control configuration for the API.',
     {
-      ALLOWED_ORIGINS: taskApiAllowedOrigins.valueAsString,
+      ALLOWED_ORIGINS: apiAllowedOrigins.valueAsString,
       AUTOMATION_INBOUND_WEBHOOK_BASE_URL: httpApi.apiEndpoint,
       MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID:
         input.runtimeControls.applicationId,
@@ -609,7 +609,7 @@ export function buildApiRuntime(
   } = input.lambdaBuildPaths;
   const apiFunction = new lambdaNodejs.NodejsFunction(
     scope,
-    'ListProjectTasksFunction',
+    'ApiFunction',
     {
       entry: resolveLambdaHandlerEntry(input.lambdaBuildPaths, 'api.handler.ts'),
       handler: 'handler',
@@ -619,7 +619,7 @@ export function buildApiRuntime(
         allowedSpecialCharacters: '-',
         maxLength: 56,
         separator: '-',
-      })}-api-v2`,
+      })}-api`,
       depsLockFilePath,
       projectRoot,
       timeout: cdk.Duration.seconds(20),
@@ -1301,18 +1301,18 @@ export function buildApiTransportsAndRealtime(
     cognitoUserPoolArn,
     cognitoUserPoolId,
     systemAdminGroups,
-    taskApiAllowedOriginList,
-    taskApiExposedHeaders,
+    apiAllowedOriginList,
+    apiExposedHeaders,
   } = input.parameters;
   const {
     depsLockFilePath,
     projectRoot,
   } = input.lambdaBuildPaths;
 
-  const httpApi = new apigatewayv2.HttpApi(scope, 'ProjectTasksHttpApi', {
+  const httpApi = new apigatewayv2.HttpApi(scope, 'HttpApi', {
     description: 'HTTP API backed by the same bundled Hono Lambda as the Function URL.',
     corsPreflight: {
-      allowOrigins: taskApiAllowedOriginList,
+      allowOrigins: apiAllowedOriginList,
       allowMethods: [
         apigatewayv2.CorsHttpMethod.GET,
         apigatewayv2.CorsHttpMethod.POST,
@@ -1328,7 +1328,7 @@ export function buildApiTransportsAndRealtime(
         'x-correlation-id',
         'x-request-id',
       ],
-      exposeHeaders: taskApiExposedHeaders,
+      exposeHeaders: apiExposedHeaders,
     },
   });
   new cloudwatch.Alarm(scope, 'ApiGatewayServerErrorAlarm', {
@@ -1447,7 +1447,7 @@ export function buildApiTransportsAndRealtime(
   const functionUrl = apiLiveAlias.addFunctionUrl({
     authType: lambda.FunctionUrlAuthType.NONE,
     cors: {
-      allowedOrigins: taskApiAllowedOriginList,
+      allowedOrigins: apiAllowedOriginList,
       allowedMethods: [
         lambda.HttpMethod.GET,
         lambda.HttpMethod.POST,
@@ -1462,7 +1462,7 @@ export function buildApiTransportsAndRealtime(
         'x-correlation-id',
         'x-request-id',
       ],
-      exposedHeaders: taskApiExposedHeaders,
+      exposedHeaders: apiExposedHeaders,
     },
   });
 

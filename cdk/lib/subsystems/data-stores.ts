@@ -2,14 +2,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import {
-  teamIssueCommentIndexDeploymentIncludes,
-  type TeamIssueCommentIndexDeploymentStage,
-} from '../config/team-issue-comment-index-deployment';
-import {
-  triageIndexDeploymentIncludes,
-  type TriageIndexDeploymentStage,
-} from '../config/triage-index-deployment';
 
 /**
  * Inputs required to create the stack data stores.
@@ -17,18 +9,12 @@ import {
 export interface DataStoreBuilderInput {
   /** Secret JSON configuration persisted for connector runtimes. */
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
-  /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
-  readonly triageIndexDeploymentStage: TriageIndexDeploymentStage;
-  /** Reviewed one-index-at-a-time rollout stage for Team Issue event GSIs. */
-  readonly teamIssueCommentIndexDeploymentStage: TeamIssueCommentIndexDeploymentStage;
 }
 
 /**
  * Stateful resources shared by API, worker, storage, bootstrap, and output subsystems.
  */
 export type DataStoreResources = {
-  /** Legacy Project Task table retained only for tenant decommission cleanup. */
-  readonly legacyTasksTable: dynamodb.Table;
   /** Canonical team-owned Work Item table. */
   readonly workItemsTable: dynamodb.Table;
   /** Work Item field and workflow configuration table. */
@@ -90,7 +76,7 @@ export type DataStoreResources = {
 };
 
 /**
- * Creates all shared stateful stores with their existing stack scope and construct identifiers.
+ * Creates all shared stateful stores directly in the stack scope.
  *
  * @param stack - Stack that directly owns every data resource.
  * @param input - Parameter values needed by encrypted data resources.
@@ -100,16 +86,7 @@ export function buildDataStores(
   stack: cdk.Stack,
   input: DataStoreBuilderInput,
 ): DataStoreResources {
-  const legacyTasksTable = new dynamodb.Table(stack, 'ProjectTasksTable', {
-    partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
-    sortKey: { name: 'taskId', type: dynamodb.AttributeType.STRING },
-    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-    encryption: dynamodb.TableEncryption.AWS_MANAGED,
-    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    removalPolicy: cdk.RemovalPolicy.RETAIN,
-  });
-
-  const workItemsTable = new dynamodb.Table(stack, 'TeamIssuesTable', {
+  const workItemsTable = new dynamodb.Table(stack, 'WorkItemsTable', {
     partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'issueId', type: dynamodb.AttributeType.STRING },
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -347,29 +324,19 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
-  if (triageIndexDeploymentIncludes(
-    input.triageIndexDeploymentStage,
-    'owner',
-  )) {
-    requestIntakeTable.addGlobalSecondaryIndex({
-      indexName: 'triage-owner-activity-index',
-      partitionKey: { name: 'triageOwnerKey', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-  }
+  requestIntakeTable.addGlobalSecondaryIndex({
+    indexName: 'triage-owner-activity-index',
+    partitionKey: { name: 'triageOwnerKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
 
-  if (triageIndexDeploymentIncludes(
-    input.triageIndexDeploymentStage,
-    'wake',
-  )) {
-    requestIntakeTable.addGlobalSecondaryIndex({
-      indexName: 'triage-wake-index',
-      partitionKey: { name: 'triageWakeShard', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'triageNextWakeAt', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
-    });
-  }
+  requestIntakeTable.addGlobalSecondaryIndex({
+    indexName: 'triage-wake-index',
+    partitionKey: { name: 'triageWakeShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageNextWakeAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
 
   const teamIssueEventsTable = new dynamodb.Table(stack, 'TeamIssueEventsTable', {
     partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
@@ -378,28 +345,6 @@ export function buildDataStores(
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
-  if (teamIssueCommentIndexDeploymentIncludes(
-    input.teamIssueCommentIndexDeploymentStage,
-    'event',
-  )) {
-    teamIssueEventsTable.addGlobalSecondaryIndex({
-      indexName: 'TeamIssueEventCreatedAtIndex',
-      partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-  }
-  if (teamIssueCommentIndexDeploymentIncludes(
-    input.teamIssueCommentIndexDeploymentStage,
-    'comment',
-  )) {
-    teamIssueEventsTable.addGlobalSecondaryIndex({
-      indexName: 'TeamIssueCommentCreatedAtIndex',
-      partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'commentCreatedAtOrder', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.ALL,
-    });
-  }
 
   const projectDirectoryTable = new dynamodb.Table(stack, 'ProjectDirectoryTable', {
     partitionKey: { name: 'directoryId', type: dynamodb.AttributeType.STRING },
@@ -569,6 +514,12 @@ export function buildDataStores(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     timeToLiveAttribute: 'expiresAt',
   });
+  realtimeSessionsTable.addGlobalSecondaryIndex({
+    indexName: 'ScopeConnectionsIndex',
+    partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
 
   const fileProofingTable = new dynamodb.Table(stack, 'FileProofingTable', {
     partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
@@ -586,7 +537,6 @@ export function buildDataStores(
   });
 
   return {
-    legacyTasksTable,
     workItemsTable,
     workItemConfigurationTable,
     automationTable,
@@ -617,18 +567,4 @@ export function buildDataStores(
     realtimeSessionsTable,
     fileProofingTable,
   };
-}
-
-/**
- * Adds the realtime session lookup index at its original point in stack composition.
- *
- * @param resources Data stores containing the realtime session table.
- */
-export function configureRealtimeSessionIndexes(resources: DataStoreResources): void {
-  resources.realtimeSessionsTable.addGlobalSecondaryIndex({
-    indexName: 'ScopeConnectionsIndex',
-    partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
-    sortKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
-    projectionType: dynamodb.ProjectionType.ALL,
-  });
 }

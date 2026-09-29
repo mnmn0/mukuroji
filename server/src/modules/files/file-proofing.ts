@@ -2984,9 +2984,21 @@ function readFileApprovalSubject(item: StoredApprovalItem) {
   )
 }
 
-/** Legacy approval rows を member requester として安全に読みます。 */
+/**
+ * Reads the requester kind of a stored approval, failing closed for an unknown or missing value.
+ *
+ * @param item - Stored approval row.
+ * @returns Whether a Workspace member or a service requested the approval.
+ */
 function readApprovalRequesterKind(item: StoredApprovalItem) {
-  return item.requestedByKind === 'service' ? 'service' as const : 'member' as const
+  if (item.requestedByKind === 'member' || item.requestedByKind === 'service') {
+    return item.requestedByKind
+  }
+  throw new FileProofingError(
+    503,
+    'InvalidApprovalState',
+    'Approval requester metadata is invalid.',
+  )
 }
 
 /** Stored approval を actor capability 付き response へ変換します。 */

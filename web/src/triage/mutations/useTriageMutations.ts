@@ -2,6 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   CreateCustomerRequestFromTriageInput,
   CustomerRequest,
+  TriageActionInput,
+  TriageBulkActionInput,
+  TriageBulkItemResult,
+  TriageConfiguration,
+  TriageEntry,
+  UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 import {
   createCustomerRequestFromTriage,
@@ -16,12 +22,6 @@ import {
   applyTriageEntryAction,
   TriageApiError,
   updateTriageSettings,
-  type TriageActionInput,
-  type TriageBulkActionInput,
-  type TriageBulkItemResult,
-  type TriageConfiguration,
-  type TriageEntry,
-  type UpdateTriageConfigurationInput,
 } from '../api'
 
 /** Cache refresh callbacks used by the triage mutation controller. */

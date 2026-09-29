@@ -2,7 +2,7 @@
 
 ## 目的
 
-Mukuroji の task / issue は、`TeamIssuesTable` を正本とする Team-owned Work Item に統合する。
+Mukuroji の task / issue は、`WorkItemsTable` を正本とする Team-owned Work Item に統合する。
 canonical Work Item は Workspace / Team の Work Item configuration で定義された workflow と custom field を必ず使用する。
 
 ```text

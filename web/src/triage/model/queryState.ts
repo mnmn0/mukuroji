@@ -1,9 +1,24 @@
 import type {
   TriageEntryState,
-  TriageQueueFilters,
-  TriageSlaFilter,
+  TriageQueueSlaFilter,
   TriageSourceKind,
-} from '../api'
+} from '@mukuroji/contracts'
+
+/** URL-backed filters supported by the Team triage workbench. */
+export type TriageQueueFilters = {
+  /** Free-text query applied to the bounded visible projection. */
+  readonly query?: string
+  /** Exact lifecycle state sent to the queue API. */
+  readonly state?: TriageEntryState
+  /** Exact source channel sent to the queue API. */
+  readonly source?: TriageSourceKind
+  /** Ownership scope applied to the queue. */
+  readonly owner?: 'all' | 'mine' | 'unowned'
+  /** SLA condition applied to the visible queue projection. */
+  readonly sla?: TriageQueueSlaFilter
+  /** Canonical Work Item Type used to filter accepted or duplicate entries. */
+  readonly workItemTypeId?: string
+}
 
 /** Top-level surface selected inside the Team triage route. */
 export type TriageRouteView = 'queue' | 'settings'
@@ -95,7 +110,7 @@ function readOwnerFilter(value: string | null): TriageQueueFilters['owner'] {
 }
 
 /** Narrows a URL value to a supported SLA filter. */
-function readSlaFilter(value: string | null): TriageSlaFilter | undefined {
+function readSlaFilter(value: string | null): TriageQueueSlaFilter | undefined {
   return value === 'on-track' || value === 'due-soon' || value === 'breached' || value === 'paused'
     ? value
     : undefined

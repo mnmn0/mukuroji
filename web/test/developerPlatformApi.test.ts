@@ -4,7 +4,7 @@ import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
-  type WorkItem,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import {
   DeveloperPlatformApiError,
@@ -266,7 +266,7 @@ describe('Developer Platform API', () => {
       'access-token',
       {
         conflictId: 'conflict/29',
-        resolution: 'keep-local',
+        resolution: 'use-local',
       },
       mutationContext,
     )
@@ -822,8 +822,8 @@ function installFetchRecorder(responseBody: unknown) {
 }
 
 function createExportWorkItem(
-  overrides: Partial<WorkItem>,
-): WorkItem {
+  overrides: Partial<CanonicalWorkItem>,
+): CanonicalWorkItem {
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 3,

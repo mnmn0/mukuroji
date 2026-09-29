@@ -141,9 +141,24 @@ async function throwAnalyticsResponseError(response: Response): Promise<never> {
   )
 }
 
+/**
+ * Reads the resource that an Analytics endpoint wraps under its response key.
+ *
+ * @param value - Parsed response body.
+ * @param key - Response property that wraps the resource.
+ * @returns The wrapped resource.
+ * @throws AnalyticsApiError when the body does not wrap an object under the key.
+ */
 function unwrapRecord<T>(value: unknown, key: string) {
-  const record = asRecord(value)
-  return (record[key] ?? value) as T
+  const wrapped = asRecord(value)[key]
+  if (typeof wrapped !== 'object' || wrapped === null) {
+    throw new AnalyticsApiError(
+      502,
+      'Analytics API returned an invalid response.',
+      'InvalidAnalyticsResponse',
+    )
+  }
+  return wrapped as T
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

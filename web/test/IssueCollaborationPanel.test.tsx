@@ -7,7 +7,6 @@ import {
 } from '../src/issues/ui/IssueCollaborationPanel'
 import { IssueActivityTab } from '../src/issues/ui/IssueActivityTab'
 import { mergeIssueComments } from '../src/issues/mutations/useIssueCollaboration'
-import type { TeamIssueComment } from '../src/issues/api'
 import {
   acceptedResolutionHistoryFixtures,
   collaborationWorkspaceMemberFixtures,
@@ -215,8 +214,10 @@ describe('IssueCollaborationPanel', () => {
       ...issueCollaborationControllerFixture.comments[0],
       acceptedResolutions: [],
       capabilities: {
+        canAttach: true,
         canDelete: true,
         canEdit: true,
+        canPromote: true,
         canReact: true,
         canReply: true,
         canResolve: true,
@@ -248,8 +249,10 @@ describe('IssueCollaborationPanel', () => {
       ...issueCollaborationControllerFixture.comments[0],
       acceptedResolutions: [],
       capabilities: {
+        canAttach: true,
         canDelete: true,
         canEdit: true,
+        canPromote: true,
         canReact: true,
         canReply: true,
         canResolve: true,
@@ -333,16 +336,30 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('data-testid="comment-file-input-comment-1"')
   })
 
-  test('keeps legacy comments read-only for attachments and context promotion', () => {
-    const html = renderToStaticMarkup(
+  test('gates reply, attachment, and context promotion on comment capabilities', () => {
+    const rootComment = {
+      ...issueCollaborationControllerFixture.comments[0],
+      acceptedResolutions: [],
+      resolvedAt: undefined,
+      resolvedByMemberKey: undefined,
+    }
+    /** Renders the unresolved root with reply, attachment, and promotion enabled or disabled. */
+    const renderRoot = (enabled: boolean) => renderToStaticMarkup(
       <IssueCollaborationPanel
         artifacts={fileArtifactsControllerFixture}
         controller={{
           ...issueCollaborationControllerFixture,
-          comments: issueCollaborationControllerFixture.comments.map((comment) => {
-            const legacyComment: TeamIssueComment = { ...comment, source: 'legacy' }
-            return legacyComment
-          }),
+          comments: [{
+            ...rootComment,
+            capabilities: {
+              ...rootComment.capabilities,
+              canAttach: enabled,
+              canPromote: enabled,
+              canReply: enabled,
+            },
+          }],
+          hasMore: false,
+          replyPagination: {},
         }}
         currentMemberKey="demo@example.com"
         locale="en"
@@ -350,10 +367,15 @@ describe('IssueCollaborationPanel', () => {
       />,
     )
 
-    expect(html).not.toContain('Attach file')
-    expect(html).not.toContain('data-testid="comment-file-input-comment-1"')
-    expect(html).not.toContain('>Reply</button>')
-    expect(html).not.toContain('>Promote</button>')
+    const enabledHtml = renderRoot(true)
+    const disabledHtml = renderRoot(false)
+
+    expect(enabledHtml).toContain('>Reply<')
+    expect(enabledHtml).toContain('Attach file')
+    expect(enabledHtml).toContain('Add to context')
+    expect(disabledHtml).not.toContain('>Reply<')
+    expect(disabledHtml).not.toContain('Attach file')
+    expect(disabledHtml).not.toContain('Add to context')
   })
 
   test('hides the comment guest-sharing option without manager capability', () => {

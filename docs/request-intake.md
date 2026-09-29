@@ -6,6 +6,9 @@ Form submission は保存時に Team-scoped `TriageEntry` も同じ transaction 
 `/api/request-queue` は Form の公開・回答・attachment を管理する互換面として残し、
 Team の受入判断、owner、SLA、snooze、複数 source の一覧は
 `/teams/{teamId}/triage` を正本とする。個人の Inbox に Triage state を複製しない。
+Request action と requester reply は対応する Triage Entry を同じ transaction で更新する。
+Entry が存在しない submission は data-integrity error（`503 RequestTriageEntryMissing`）として
+fail closed にし、Triage を更新しない fallback は持たない。
 
 ## Domain model
 

@@ -5,6 +5,9 @@ import type {
   CustomerRequest,
   CustomerRequestImportance,
   CustomFieldValue,
+  TriageActionInput,
+  TriageEntry,
+  TriageEntryState,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
@@ -20,11 +23,6 @@ import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageD
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { ShieldIcon } from '../../shared/ui/icons'
-import type {
-  TriageActionInput,
-  TriageEntry,
-  TriageEntryState,
-} from '../api'
 import {
   resolveTriageActionShortcut,
   type TriageActionMode,

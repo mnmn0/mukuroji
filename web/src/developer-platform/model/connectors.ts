@@ -2,6 +2,7 @@ import type {
   ConnectorInstallation,
   CursorPage,
   CreateConnectorInstallationInput,
+  SyncConflictResolution,
   WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import { formatConnectorProviderName } from './displayFormatting'
@@ -42,11 +43,11 @@ export type ConnectDeveloperConnectorInput =
  * Ordered supported resolutions for a work-item synchronization conflict.
  */
 export const developerSyncConflictResolutionOptions = [
-  'keep-local',
-  'keep-remote',
+  'use-local',
+  'use-external',
   'merge',
   'ignore',
-] as const
+] as const satisfies readonly SyncConflictResolution[]
 
 /**
  * Supported resolution for a work-item synchronization conflict.

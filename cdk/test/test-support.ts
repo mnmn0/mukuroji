@@ -3,7 +3,7 @@ import { Template } from 'aws-cdk-lib/assertions';
 import { expect } from '@jest/globals';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import { CdkStack } from '../lib/cdk-stack';
+import { MukurojiStack } from '../lib/stacks/mukuroji-stack';
 
 /** Stable logical ID of the core API runtime-configuration secret. */
 export const API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
@@ -27,10 +27,7 @@ export function createTemplate(): Template {
     },
   });
   cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-  const stack = new CdkStack(app, 'Test', {
-    teamIssueCommentIndexDeploymentStage: 'comment',
-    triageIndexDeploymentStage: 'wake',
-  });
+  const stack = new MukurojiStack(app, 'Test');
   acknowledgeKnownNagFindings(stack);
 
   return Template.fromStack(stack);

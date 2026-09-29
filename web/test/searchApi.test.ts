@@ -6,6 +6,7 @@ import {
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
 import {
+  createSavedWorkspaceView,
   getSavedWorkspaceViews,
   resolveSearchApiBaseUrl,
   searchWorkspaceAcrossCursors,
@@ -130,6 +131,64 @@ describe('Saved Workspace view pagination', () => {
     await getSavedWorkspaceViews('access-token')
 
     expect(requestCount).toBe(2)
+  })
+
+  test('rejects pages without the canonical views array', async () => {
+    for (const response of [
+      [createSavedView('bare-view')],
+      { items: [createSavedView('legacy-view')] },
+      { views: [], nextCursor: 7 },
+    ]) {
+      const requestedUrls: string[] = []
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        requestedUrls.push(String(input))
+        return Response.json(response)
+      }) as typeof fetch
+
+      await expect(getSavedWorkspaceViews('access-token')).rejects.toMatchObject({
+        code: 'InvalidSavedViewResponse',
+        status: 502,
+      })
+      expect(requestedUrls).toHaveLength(1)
+    }
+  })
+})
+
+describe('Saved Workspace view mutations', () => {
+  const createInput = {
+    filters: {},
+    layout: {
+      columns: ['title'],
+      mode: 'table',
+      sort: [],
+    },
+    name: 'Launch view',
+    visibility: 'personal',
+  } satisfies Parameters<typeof createSavedWorkspaceView>[1]
+  const mutationContext = {
+    correlationId: 'saved-view-correlation',
+    idempotencyKey: 'saved-view-idempotency',
+  }
+
+  test('reads the bare saved view returned by the API', async () => {
+    const view = createSavedView('created-view')
+    globalThis.fetch = (async () => Response.json(view, { status: 201 })) as typeof fetch
+
+    await expect(createSavedWorkspaceView('access-token', createInput, mutationContext))
+      .resolves.toEqual(view)
+  })
+
+  test('rejects a saved view wrapped in a view envelope', async () => {
+    globalThis.fetch = (async () => Response.json(
+      { view: createSavedView('wrapped-view') },
+      { status: 201 },
+    )) as typeof fetch
+
+    await expect(createSavedWorkspaceView('access-token', createInput, mutationContext))
+      .rejects.toMatchObject({
+        code: 'InvalidSavedViewResponse',
+        status: 502,
+      })
   })
 })
 

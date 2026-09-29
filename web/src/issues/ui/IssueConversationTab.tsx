@@ -412,7 +412,7 @@ export function IssueConversationTab({
     }
     const comment = controller.comments.find((candidate) => candidate.id === commentId)
     if (!comment) return
-    const bodyMarkdown = resolveCommentBody(comment)
+    const bodyMarkdown = comment.bodyMarkdown
     const nextDraft: TargetedCommentComposerDraft = {
       bodyMarkdown,
       commentId,
@@ -421,7 +421,7 @@ export function IssueConversationTab({
       mentionMemberKeys: [...comment.mentionMemberKeys],
       originalBodyMarkdown: bodyMarkdown,
       originalMentionMemberKeys: [...comment.mentionMemberKeys],
-      originalVersion: comment.version ?? 1,
+      originalVersion: comment.version,
     }
     setEditDraft(nextDraft)
     reportDraftDirty(current.root, current.reply, nextDraft)
@@ -436,7 +436,7 @@ export function IssueConversationTab({
 
     const nextDraftBaseline: TargetedCommentComposerDraft = {
       ...current,
-      originalBodyMarkdown: resolveCommentBody(canonical),
+      originalBodyMarkdown: canonical.bodyMarkdown,
       originalMentionMemberKeys: [...canonical.mentionMemberKeys],
       originalVersion: canonical.version,
     }
@@ -753,7 +753,7 @@ export function IssueConversationTab({
               (canAcceptResolution ||
                 (currentMemberKey !== undefined &&
                   thread.root.authorMemberKey === currentMemberKey &&
-                  thread.root.capabilities?.canResolve === true))
+                  thread.root.capabilities.canResolve))
             const threadDetailsOpen =
               !thread.root.resolvedAt ||
               focusedCommentTargetId === thread.root.id ||
@@ -1217,26 +1217,23 @@ function CommentCard({
   rootComment,
   t,
 }: CommentCardProps) {
-  const authorMemberKey = resolveCommentAuthorKey(comment)
+  const authorMemberKey = comment.authorMemberKey
   const author = findWorkspaceMember(authorMemberKey, members)
   const capabilities = comment.capabilities
   const isEditing = editingId === comment.id
   const isReplying = replyingToId === comment.id
   const isConfirmingDelete = deleteConfirmationId === comment.id
   const isReactionMenuOpen = reactionMenuId === comment.id
-  const isLegacyComment = comment.source === 'legacy'
   const canReply = controller.capabilities.canComment &&
     !readOnlyMessage &&
-    !isLegacyComment
-    && (capabilities?.canReply ?? true)
-    && !rootComment.resolvedAt
-    && !comment.deletedAt
+    capabilities.canReply &&
+    !rootComment.resolvedAt &&
+    !comment.deletedAt
   const canReact = controller.capabilities.canReact &&
     !readOnlyMessage &&
-    !isLegacyComment
-    && (capabilities?.canReact ?? true)
-    && !comment.deletedAt
-  const bodyMarkdown = resolveCommentBody(comment)
+    capabilities.canReact &&
+    !comment.deletedAt
+  const bodyMarkdown = comment.bodyMarkdown
   const acceptedResolution = resolveCurrentAcceptedResolution(rootComment)
   const isAcceptedResolution =
     acceptedResolution?.sourceCommentId === comment.id
@@ -1317,7 +1314,7 @@ function CommentCard({
                   try {
                     const succeeded = await controller.updateComment(comment, {
                       bodyMarkdown: input.bodyMarkdown,
-                      expectedVersion: editDraft.originalVersion ?? comment.version ?? 1,
+                      expectedVersion: editDraft.originalVersion ?? comment.version,
                       mentionMemberKeys: input.mentionMemberKeys,
                     })
 
@@ -1354,7 +1351,7 @@ function CommentCard({
 
           {!isEditing ? (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
-              {(comment.reactions ?? []).map((reaction) => (
+              {comment.reactions.map((reaction) => (
                 <ReactionButton
                   canReact={canReact}
                   comment={comment}
@@ -1410,7 +1407,7 @@ function CommentCard({
                   onClick={() => onReplyingChange(isReplying ? undefined : comment.id)}
                 />
               ) : null}
-              {onPromote && !readOnlyMessage && !comment.deletedAt && !isLegacyComment && (capabilities?.canPromote ?? true) ? (
+              {onPromote && !readOnlyMessage && !comment.deletedAt && capabilities.canPromote ? (
                 <CommentActionButton
                   label={t('collaboration.comment.promote')}
                   onClick={() => onPromote(comment)}
@@ -1428,21 +1425,21 @@ function CommentCard({
                   tone="primary"
                 />
               ) : null}
-              {capabilities?.canEdit && !comment.deletedAt ? (
+              {capabilities.canEdit && !comment.deletedAt ? (
                 <CommentActionButton
                   disabled={Boolean(readOnlyMessage)}
                   label={t('collaboration.comment.edit')}
                   onClick={() => onEditingChange(comment.id)}
                 />
               ) : null}
-              {capabilities?.canDelete && !comment.deletedAt ? (
+              {capabilities.canDelete && !comment.deletedAt ? (
                 <CommentActionButton
                   disabled={Boolean(readOnlyMessage)}
                   label={t('collaboration.comment.delete')}
                   onClick={() => onDeleteConfirmationChange(comment.id)}
                 />
               ) : null}
-              {!isReply && capabilities?.canResolve && !comment.deletedAt ? (
+              {!isReply && capabilities.canResolve && !comment.deletedAt ? (
                 <CommentActionButton
                   disabled={Boolean(readOnlyMessage)}
                   label={t(comment.resolvedAt ? 'collaboration.thread.reopen' : 'collaboration.thread.resolve')}
@@ -1851,8 +1848,7 @@ function CommentFileAttachments({
   )
   const canAttach = !readOnlyMessage &&
     artifacts.capabilities.canUpload &&
-    comment.source !== 'legacy' &&
-    (comment.capabilities?.canAttach ?? true)
+    comment.capabilities.canAttach
   const canGrantGuestAccess = canAttach && artifacts.capabilities.canGrantGuestAccess
 
   return files.length > 0 || canAttach ? (
@@ -2400,16 +2396,15 @@ function isReplyDraftWritable(
 ) {
   const comment = controller.comments.find((candidate) => candidate.id === draft.commentId)
   const rootComment = comment?.parentCommentId
-    ? controller.comments.find((candidate) => candidate.id === (comment.rootCommentId ?? comment.parentCommentId))
+    ? controller.comments.find((candidate) => candidate.id === comment.rootCommentId)
     : comment
   return Boolean(
     comment &&
     !comment.deletedAt &&
-    comment.source !== 'legacy' &&
     !rootComment?.resolvedAt &&
     !readOnlyMessage &&
     controller.capabilities.canComment &&
-    (comment.capabilities?.canReply ?? true),
+    comment.capabilities.canReply,
   )
 }
 
@@ -2423,9 +2418,8 @@ function isEditDraftWritable(
   return Boolean(
     comment &&
     !comment.deletedAt &&
-    comment.source !== 'legacy' &&
     !readOnlyMessage &&
-    comment.capabilities?.canEdit,
+    comment.capabilities.canEdit,
   )
 }
 
@@ -2439,7 +2433,7 @@ function createCommentThreads(comments: TeamIssueComment[]) {
   const rootComments = comments.filter((comment) => !comment.parentCommentId)
   const knownRootIds = new Set(rootComments.map((comment) => comment.id))
   const orphanReplies = comments.filter((comment) =>
-    comment.parentCommentId && !knownRootIds.has(comment.rootCommentId ?? ''),
+    comment.parentCommentId && !knownRootIds.has(comment.rootCommentId),
   )
   const roots = [...rootComments, ...orphanReplies].sort((first, second) =>
     second.createdAt.localeCompare(first.createdAt) || first.id.localeCompare(second.id),
@@ -2448,7 +2442,7 @@ function createCommentThreads(comments: TeamIssueComment[]) {
   return roots.map((root) => ({
     root,
     replies: comments
-      .filter((comment) => comment.parentCommentId && (comment.rootCommentId ?? comment.parentCommentId) === root.id)
+      .filter((comment) => comment.parentCommentId && comment.rootCommentId === root.id)
       .sort((first, second) => first.createdAt.localeCompare(second.createdAt)),
   })) satisfies CommentThread[]
 }
@@ -2456,16 +2450,6 @@ function createCommentThreads(comments: TeamIssueComment[]) {
 /** Creates the DOM anchor ID for one comment. */
 function createCommentAnchorId(commentId: string) {
   return `comment-${encodeURIComponent(commentId)}`
-}
-
-/** Resolves the stable author key for a canonical collaboration comment. */
-function resolveCommentAuthorKey(comment: TeamIssueComment) {
-  return comment.authorMemberKey
-}
-
-/** Resolves the Markdown body for a canonical collaboration comment. */
-function resolveCommentBody(comment: TeamIssueComment) {
-  return comment.bodyMarkdown
 }
 
 /**
@@ -2477,7 +2461,7 @@ function resolveCommentBody(comment: TeamIssueComment) {
 function resolveCurrentAcceptedResolution(
   rootComment: TeamIssueComment,
 ): AcceptedResolution | undefined {
-  return rootComment.acceptedResolutions?.find(
+  return rootComment.acceptedResolutions.find(
     (resolution) => resolution.state === 'accepted',
   )
 }
@@ -2495,11 +2479,16 @@ function createCapturedResolutionSourceComment(
   resolution: AcceptedResolution,
 ): TeamIssueComment {
   return {
+    acceptedResolutions: [],
     authorMemberKey: resolution.capturedCommentAuthorMemberKey ?? '',
     bodyMarkdown: resolution.capturedCommentBody,
     capabilities: {
+      canAttach: false,
       canDelete: false,
       canEdit: false,
+      canPromote: false,
+      canReact: false,
+      canReply: false,
       canResolve: false,
     },
     createdAt: resolution.acceptedAt,

@@ -1,4 +1,4 @@
-import type { DocumentDetail, DocumentDetailResponse, DocumentVersionsResponse } from '@mukuroji/contracts'
+import type { DocumentDetail, DocumentVersionsResponse } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 
@@ -107,11 +107,15 @@ function createApiErrorFromBody(status: number, value: unknown) {
   )
 }
 
+/**
+ * Reads the `{ document }` detail returned by the version restore endpoint.
+ *
+ * @param value - Parsed response body.
+ * @returns The restored Document detail.
+ * @throws DocumentsApiError when the body does not wrap a Document detail.
+ */
 function readDocumentRecord(value: unknown): DocumentDetail {
-  const record = asRecord(value)
-  const document = asRecord(
-    (record as DocumentDetailResponse).document ?? value,
-  )
+  const document = asRecord(asRecord(value).document)
 
   if (typeof document.id !== 'string' || typeof document.title !== 'string') {
     throw new DocumentsApiError(

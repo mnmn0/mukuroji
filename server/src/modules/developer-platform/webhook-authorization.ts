@@ -16,7 +16,7 @@ import type {
 import {
   evaluateEnterpriseAccess,
   resolveEnterpriseDirectoryPrincipal,
-  type EnterpriseIdentityReadClient,
+  type EnterpriseIdentityReadCapability,
   type EnterprisePrincipalContext,
 } from '../enterprise-identity'
 import {
@@ -63,7 +63,7 @@ export type DynamoDbWebhookSubscriptionAuthorizerOptions = {
   /** Workspace membership を強整合確認する client です。 */
   workspaceAccess: WorkspaceAccessClient
   /** Current Enterprise CONTROL snapshot を読む client です。 */
-  enterpriseIdentity: EnterpriseIdentityReadClient
+  enterpriseIdentity: EnterpriseIdentityReadCapability
   /** Team / Project membership を読む DocumentClient です。 */
   documentClient?: DynamoDBDocumentClient
   /** Project directory table 名です。 */
@@ -313,7 +313,7 @@ type WebhookAuthorizationBatchCache = {
   /** Workspace user ごとの active membership snapshot です。 */
   activeMembers: Map<string, ReturnType<WorkspaceAccessClient['getActiveMember']>>
   /** Workspace ごとの current Enterprise CONTROL snapshot です。 */
-  enterpriseSnapshots: Map<string, ReturnType<EnterpriseIdentityReadClient['getSnapshot']>>
+  enterpriseSnapshots: Map<string, ReturnType<EnterpriseIdentityReadCapability['getSnapshot']>>
   /** Workspace member ごとの current Cognito group names です。 */
   cognitoGroups: Map<string, ReturnType<WebhookCognitoGroupsProvider['getGroups']>>
   /** Team/Project ごとの active authoritative resource 判定です。 */
@@ -358,7 +358,7 @@ implements WebhookSubscriptionAuthorizer {
   /** Project directory table 名です。 */
   private readonly projectDirectoryTableName: string
   /** Current Enterprise CONTROL snapshot を読む client です。 */
-  private readonly enterpriseIdentity: EnterpriseIdentityReadClient
+  private readonly enterpriseIdentity: EnterpriseIdentityReadCapability
   /** Current Cognito groups を全ページ取得する provider です。 */
   private readonly cognitoGroups: WebhookCognitoGroupsProvider
   /** Project directory resource locator GSI 名です。 */

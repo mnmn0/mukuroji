@@ -2,16 +2,19 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import {
   applyDocumentOperations,
   applyDocumentOperationsWithConflictAwareness,
+  archiveDocument,
   deleteDocumentShare,
   getDocumentBacklinksBatch,
   getDocumentCollection,
   getNextDocumentCollectionPage,
   getDocumentShares,
+  getDocument,
   getDocumentVersions,
   getDocuments,
   getPublicDocument,
   resolvePublicDocumentUrl,
   resolveDocumentsApiBaseUrl,
+  restoreDocumentVersion,
   DocumentRevisionConflictError,
   DocumentsApiError,
 } from '../src/documents/api'
@@ -288,6 +291,50 @@ describe('Canonical Documents API requests', () => {
     expect(
       (conflict as DocumentRevisionConflictError).latestDocument.revision,
     ).toBe(11)
+  })
+
+  test('reads Document detail and node responses only from the document wrapper', async () => {
+    const mutationContext = {
+      correlationId: 'document-correlation',
+      idempotencyKey: 'document-idempotency',
+    }
+    const requests: Request[] = []
+    let responseBody: unknown = { document: documentRecordFixture }
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      requests.push(createRequest(input, init))
+      return Response.json(responseBody)
+    }) as typeof fetch
+
+    expect(await getDocument('access-token', documentRecordFixture.id))
+      .toEqual(documentRecordFixture)
+
+    responseBody = documentRecordFixture
+
+    await expect(getDocument('access-token', documentRecordFixture.id))
+      .rejects.toMatchObject({ code: 'InvalidDocumentResponse', status: 502 })
+    await expect(archiveDocument(
+      'access-token',
+      documentRecordFixture.id,
+      documentRecordFixture.revision,
+      mutationContext,
+    )).rejects.toMatchObject({ code: 'InvalidDocumentResponse', status: 502 })
+    await expect(restoreDocumentVersion(
+      'access-token',
+      documentRecordFixture.id,
+      'version-1',
+      documentRecordFixture.revision,
+      mutationContext,
+    )).rejects.toMatchObject({ code: 'InvalidDocumentResponse', status: 502 })
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname]))
+      .toEqual([
+        ['GET', `/api/documents/${documentRecordFixture.id}`],
+        ['GET', `/api/documents/${documentRecordFixture.id}`],
+        ['POST', `/api/documents/${documentRecordFixture.id}/archive`],
+        ['POST', `/api/documents/${documentRecordFixture.id}/versions/version-1/restore`],
+      ])
   })
 
   test('revokes shares with the canonical DELETE body', async () => {

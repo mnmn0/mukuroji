@@ -270,16 +270,13 @@ export function IssueCollaborationPanel({
         ? t('collaboration.sources.commentDeletedReason')
         : undefined,
       capturedRevision: comment.version,
-      containerId:
-        comment.rootCommentId ?? comment.parentCommentId ?? comment.id,
+      containerId: comment.rootCommentId,
       kind: 'comment',
       occurredAt: comment.createdAt,
       originalBody,
       permalink: `?commentId=${encodeURIComponent(
         comment.id,
-      )}&rootCommentId=${encodeURIComponent(
-        comment.rootCommentId ?? comment.id,
-      )}`,
+      )}&rootCommentId=${encodeURIComponent(comment.rootCommentId)}`,
       quote: originalBody
         ? {
             endOffset: originalBody.length,
@@ -525,7 +522,7 @@ export function IssueCollaborationPanel({
                   rootComment.id,
                   {
                     commentId: sourceComment.id,
-                    expectedThreadVersion: rootComment.version ?? 1,
+                    expectedThreadVersion: rootComment.version,
                     summary,
                   },
               )

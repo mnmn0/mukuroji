@@ -74,6 +74,24 @@ function createWorkspaceSearchProjectionClient(
     async deleteSavedView() {
       return failUnexpectedWorkspaceSearchOperation()
     },
+    async listTaskViews() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async getTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async createTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async updateTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async duplicateTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
+    async deleteTaskView() {
+      return failUnexpectedWorkspaceSearchOperation()
+    },
   }
 }
 
@@ -1103,10 +1121,10 @@ test('reprojects both Work Item relation endpoints after relation creation and d
   ]))
   expect(calls.issueDetails).toHaveLength(8)
   expect([2, 3, 6, 7].map((index) => calls.issueDetails[index]?.readOptions)).toEqual([
-    { consistentIssueRead: true, eventLimit: 0 },
-    { consistentIssueRead: true, eventLimit: 0 },
-    { consistentIssueRead: true, eventLimit: 0 },
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
+    { consistentIssueRead: true, includeEvents: false },
+    { consistentIssueRead: true, includeEvents: false },
+    { consistentIssueRead: true, includeEvents: false },
   ])
 })
 

@@ -273,7 +273,6 @@ import {
 } from '../modules/audit/audit'
 import {
   createTeamIssueAuditEntityId,
-  createTeamIssueCommentEventCursor,
   createTeamIssueDeepLink,
   confirmWorkItemScheduleChange,
   collectWorkItemScheduleEvaluationEndpoints,
@@ -303,7 +302,6 @@ import {
   type PublicUpdateTeamIssueRequestBody,
   type TeamIssueDetailReadOptions,
   type TeamIssueDetailResponse,
-  type TeamIssueCommentResponseItem,
   type TeamIssueResponseItem,
   type TeamIssuesResponse,
   type TriageDuplicateContextTransactionContribution,
@@ -338,12 +336,9 @@ import {
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
   type CollaborationAuthorizationConditionCheck,
-  type CollaborationClient,
   type CollaborationComment,
-  type CollaborationThreadPage,
   type CuratedContextActivitySourceAuthorizationSnapshot,
   type CuratedContextDocumentSourceAuthorizationSnapshot,
-  type GetCollaborationThreadInput,
 } from '../modules/collaboration/collaboration'
 import {
   FILE_APPROVAL_MAX_REVIEWERS,
@@ -399,9 +394,7 @@ import {
   type SavedViewAccessScope,
   type ResolveTaskViewRelationIdsInput,
   type TaskViewAccessScope,
-  type TaskViewClient,
   type WorkspaceSearchAccessScope,
-  type WorkspaceSearchClient,
   type WorkspaceSearchDocument,
 } from '../modules/workspace-search/workspace-search'
 import {
@@ -1101,10 +1094,8 @@ const ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT = 1_000
 const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
-/** Issue detail の canonical comment read に許容する合計 page 数です。 */
-const TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES = 50
-/** Maximum UTF-8 bytes allowed for the compatibility comments projection in an issue detail. */
-const TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES = 4_000_000
+/** Maximum serialized UTF-8 bytes allowed for the comments in one collaboration response. */
+const COLLABORATION_COMMENT_RESPONSE_MAX_BYTES = 4_000_000
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
 const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
 
@@ -6173,7 +6164,7 @@ routeApp.route('/', createCustomerRouter<WorkspacePrincipal & CustomerPrincipal>
       principal.directoryId,
       teamId,
       workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, minimum)
     const authorizationConditionChecks = minimum === 'member'
@@ -6308,41 +6299,29 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         principal.directoryId,
         submissionId,
       )
-      const triageEntry = await readLegacyConversionTriageEntry(
-        principal.directoryId,
-        submission.routingTarget.teamId,
-        createFormTriageEntryId(submissionId),
+      const triageEntry = await readRequestTriageEntry(principal.directoryId, submission)
+      const triageContribution = await createRequestActionTriageContribution(
+        c,
+        principal,
+        submission,
+        triageEntry,
+        body,
       )
-      const triageContribution = triageEntry
-        ? await createLegacyRequestTriageContribution(
-            c,
-            principal,
-            submission,
-            triageEntry,
-            body,
-          )
-        : undefined
-      if (triageContribution?.replayed) return c.json(submission)
+      if (triageContribution.replayed) return c.json(submission)
       return c.json(await workItemDependencies.requestIntake.applyAction(
         principal.directoryId,
         submissionId,
         { id: principal.userKey },
         body,
-        triageContribution?.contribution.transactItems,
+        triageContribution.contribution.transactItems,
       ))
     }
     const submission = await workItemDependencies.requestIntake.getSubmission(principal.directoryId, submissionId)
     if (submission.status === 'converted' && submission.workItem) {
-      await repairConvertedRequestTriageProjection(c, principal, submission)
       return c.json(submission)
     }
-    const triageEntryId = createFormTriageEntryId(submissionId)
-    const triageEntry = await readLegacyConversionTriageEntry(
-      principal.directoryId,
-      submission.routingTarget.teamId,
-      triageEntryId,
-    )
-    const conversion = triageEntry?.retention.redactedAt !== undefined
+    const triageEntry = await readRequestTriageEntry(principal.directoryId, submission)
+    const conversion = triageEntry.retention.redactedAt !== undefined
       ? createRetentionSafeRequestWorkItemInput(submission, body)
       : createRequestWorkItemInput(submission, body)
     const teamContext = await requireTeamPermission(principal, conversion.target.teamId, 'member')
@@ -6357,14 +6336,14 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       conversion.target,
       body.target?.workflowStatusId === undefined ? undefined : body.workItemTypeId,
     )
-    if (triageEntry && conversion.target.teamId !== triageEntry.teamId) {
+    if (conversion.target.teamId !== triageEntry.teamId) {
       throw new RequestIntakeError(
         409,
         'RequestTriageTeamConflict',
         'A Triage-backed Request must be accepted in its current Team.',
       )
     }
-    if (triageEntry && triageEntry.state !== 'pending' && triageEntry.state !== 'needs-information' &&
+    if (triageEntry.state !== 'pending' && triageEntry.state !== 'needs-information' &&
       triageEntry.state !== 'snoozed') {
       throw new RequestIntakeError(
         409,
@@ -6372,46 +6351,36 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         'The corresponding Triage entry is already resolved.',
       )
     }
-    const triageAction: AcceptCreateTriageAction | undefined = triageEntry
-      ? {
-          action: 'accept',
-          mode: 'create',
-          expectedRevision: triageEntry.revision,
-          ...(conversion.input.workItemTypeId
-            ? { workItemTypeId: conversion.input.workItemTypeId }
-            : {}),
-          ...(body.customFieldValues === undefined
-            ? {}
-            : { customFieldValues: body.customFieldValues }),
-        }
-      : undefined
-    const triageIdempotency = triageAction
-      ? {
-          key: c.req.header('Idempotency-Key')?.trim() ||
-            `request-conversion:${submissionId}:${body.expectedRevision}`,
-          fingerprint: createTriageInputFingerprint({
-            workspaceId: principal.directoryId,
-            teamId: conversion.target.teamId,
-            entryId: triageEntryId,
-            action: triageAction,
-          }),
-        }
-      : undefined
-    const deterministicIssueId = triageEntry
-      ? createDeterministicTriageWorkItemId(
-          principal.directoryId,
-          conversion.target.teamId,
-          triageEntry.id,
-        )
-      : undefined
+    const triageAction: AcceptCreateTriageAction = {
+      action: 'accept',
+      mode: 'create',
+      expectedRevision: triageEntry.revision,
+      ...(conversion.input.workItemTypeId
+        ? { workItemTypeId: conversion.input.workItemTypeId }
+        : {}),
+      ...(body.customFieldValues === undefined
+        ? {}
+        : { customFieldValues: body.customFieldValues }),
+    }
+    const triageIdempotency = {
+      key: c.req.header('Idempotency-Key')?.trim() ||
+        `request-conversion:${submissionId}:${body.expectedRevision}`,
+      fingerprint: createTriageInputFingerprint({
+        workspaceId: principal.directoryId,
+        teamId: conversion.target.teamId,
+        entryId: triageEntry.id,
+        action: triageAction,
+      }),
+    }
+    const deterministicIssueId = createDeterministicTriageWorkItemId(
+      principal.directoryId,
+      conversion.target.teamId,
+      triageEntry.id,
+    )
     const normalized = normalizeTeamIssueInput({
       ...conversion.input,
-      ...(deterministicIssueId && triageIdempotency
-        ? {
-            idempotentIssueId: deterministicIssueId,
-            idempotentRequestDigest: triageIdempotency.fingerprint,
-          }
-        : {}),
+      idempotentIssueId: deterministicIssueId,
+      idempotentRequestDigest: triageIdempotency.fingerprint,
     }, teamContext.team)
     const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
       principal.directoryId,
@@ -6433,15 +6402,13 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       resolvedConfiguration,
       { fallbackToTypeInitialStatus: body.target?.workflowStatusId === undefined },
     )
-    const authorizationConditionChecks = triageEntry
-      ? await createTriageProjectAuthorizationConditionChecks(
-          principal,
-          teamContext,
-          principal.directoryId,
-          conversion.target.teamId,
-          conversion.target.projectId,
-        )
-      : []
+    const authorizationConditionChecks = await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      conversion.target.teamId,
+      conversion.target.projectId,
+    )
     const guardedConfigured = authorizationConditionChecks.length === 0
       ? configured
       : {
@@ -6455,30 +6422,25 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       principal.directoryId,
       readTeamIssueAssigneeUserId(guardedConfigured),
     )
-    const triageOccurredAt = triageEntry && triageAction && triageIdempotency && deterministicIssueId
-      ? new Date().toISOString()
-      : undefined
-    const triageAcceptance = triageEntry && triageAction && triageIdempotency &&
-      deterministicIssueId && triageOccurredAt
-      ? createTriageAcceptanceTransactionItems({
-          tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
-          entry: triageEntry,
-          action: triageAction,
-          canonicalWorkItem: {
-            teamId: conversion.target.teamId,
-            workItemId: deterministicIssueId,
-            ...(typeof configured.workItemTypeId === 'string'
-              ? { workItemTypeId: configured.workItemTypeId }
-              : {}),
-            ...(conversion.target.projectId
-              ? { projectId: conversion.target.projectId }
-              : {}),
-          },
-          actorId: principal.userKey,
-          now: triageOccurredAt,
-          idempotency: triageIdempotency,
-        })
-      : undefined
+    const triageOccurredAt = new Date().toISOString()
+    const triageAcceptance = createTriageAcceptanceTransactionItems({
+      tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+      entry: triageEntry,
+      action: triageAction,
+      canonicalWorkItem: {
+        teamId: conversion.target.teamId,
+        workItemId: deterministicIssueId,
+        ...(typeof configured.workItemTypeId === 'string'
+          ? { workItemTypeId: configured.workItemTypeId }
+          : {}),
+        ...(conversion.target.projectId
+          ? { projectId: conversion.target.projectId }
+          : {}),
+      },
+      actorId: principal.userKey,
+      now: triageOccurredAt,
+      idempotency: triageIdempotency,
+    })
     const created = await hydrateCreateTeamIssueResponse(await workItemDependencies.teamIssues.createTeamIssue(
       principal.directoryId,
       conversion.target.teamId,
@@ -6498,13 +6460,11 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         submissionId,
         events: submission.events,
       },
-      triageAcceptance && triageOccurredAt
-        ? {
-            entryId: triageAcceptance.entry.id,
-            occurredAt: triageOccurredAt,
-            transactItems: triageAcceptance.transactItems,
-          }
-        : undefined,
+      {
+        entryId: triageAcceptance.entry.id,
+        occurredAt: triageOccurredAt,
+        transactItems: triageAcceptance.transactItems,
+      },
     ))
     await projectWorkItemSearchDocumentBestEffort(
       principal.directoryId,
@@ -8741,7 +8701,6 @@ routeApp.get('/api/task-views', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const surface = c.req.query('surface') === undefined
       ? undefined
       : readTaskViewSurface(c.req.query('surface'))
@@ -8755,7 +8714,7 @@ routeApp.get('/api/task-views', async (c) => {
       ? undefined
       : readTaskViewCursor(c.req.query('cursor'))
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.listTaskViews({
+    return c.json(await workItemDependencies.workspaceSearch.listTaskViews({
       workspaceId: principal.directoryId,
       access,
       ...(surface ? { surface } : {}),
@@ -8779,13 +8738,12 @@ routeApp.post('/api/task-views', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const input = readCreateSavedTaskViewInput(await readTaskViewJson(c.req))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.createTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.createTaskView({
       workspaceId: principal.directoryId,
       access,
       input,
@@ -8807,10 +8765,9 @@ routeApp.get('/api/task-views/:viewId', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const viewId = readTaskViewPathId(c.req.param('viewId'))
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.getTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.getTaskView({
       workspaceId: principal.directoryId,
       viewId,
       access,
@@ -8831,14 +8788,13 @@ routeApp.patch('/api/task-views/:viewId', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const viewId = readTaskViewPathId(c.req.param('viewId'))
     const input = readUpdateSavedTaskViewInput(await readTaskViewJson(c.req))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.updateTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.updateTaskView({
       workspaceId: principal.directoryId,
       viewId,
       access,
@@ -8861,14 +8817,13 @@ routeApp.post('/api/task-views/:viewId/duplicate', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const sourceViewId = readTaskViewPathId(c.req.param('viewId'))
     const input = readDuplicateSavedTaskViewInput(await readTaskViewJson(c.req))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.duplicateTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.duplicateTaskView({
       workspaceId: principal.directoryId,
       sourceViewId,
       access,
@@ -8891,14 +8846,13 @@ routeApp.delete('/api/task-views/:viewId', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await createWorkspaceSearchContext(principal)
-    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
     const viewId = readTaskViewPathId(c.req.param('viewId'))
     const expectedRevision = readTaskViewRevisionQuery(c.req.query('expectedRevision'))
     const idempotencyKey = readOptionalTaskViewIdempotencyKey(
       c.req.header('Idempotency-Key'),
     )
     const access = await createTaskViewAccessScope(principal, context)
-    return c.json(await taskViews.deleteTaskView({
+    return c.json(await workItemDependencies.workspaceSearch.deleteTaskView({
       workspaceId: principal.directoryId,
       viewId,
       expectedRevision,
@@ -9283,63 +9237,10 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       principal.directoryId,
       teamId,
       issueId,
-      {
-        consistentIssueRead: true,
-        includeComments: false,
-      },
+      { consistentIssueRead: true },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
-    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
-    const projectEntityKey = detail.issue.assignedProjectId
-      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
-      : undefined
-    const collaborationReadBudget: CollaborationThreadReadBudget = {
-      maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
-      maxBytes: TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES,
-      bytesRead: 2,
-      pagesRead: 0,
-    }
-    const commentBackfillComplete = await workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(
-      principal.directoryId,
-    )
-    const legacyCommentDetail = commentBackfillComplete
-      ? undefined
-      : await workItemDependencies.teamIssues.getTeamIssueDetail(
-          principal.directoryId,
-          teamId,
-          issueId,
-          {
-            consistentIssueRead: true,
-            eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
-            newestEventsFirst: true,
-            eventType: 'commented',
-            legacyCommentIndexOnly: true,
-          },
-        )
-    if (legacyCommentDetail) {
-      requireAssignedProjectPermission(
-        principal,
-        context,
-        legacyCommentDetail.issue.assignedProjectId,
-        'viewer',
-      )
-      if (legacyCommentDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
-        throw new ProjectDataError(
-          409,
-          'WorkItemAuthorizationChanged',
-          'Work Item assignment changed while comments were loading.',
-        )
-      }
-    }
-    const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
-      readAllCollaborationThreadComments(workItemDependencies.collaboration, {
-        entityKey,
-        viewerMemberKey: principal.userKey,
-        projectEntityKey,
-        limit: 100,
-        includeReplies: true,
-        includeScopeState: false,
-      }, collaborationReadBudget),
+    const [resolvedConfiguration, relationPage] = await Promise.all([
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
@@ -9363,9 +9264,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         })
       }
     }
-    const allCollaborationComments = collaborationComments.sort(
-      compareMigrationAwareComments,
-    )
     const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
       context,
@@ -9373,31 +9271,16 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       relationPage.relations,
     )
 
-    const canonicalCommentIds = new Set(allCollaborationComments.map((comment) => comment.id))
-    const canonicalComments = allCollaborationComments
-      .filter((comment) => !comment.deletedAt)
-      .map(toTeamIssueDetailCommentResponse)
-    const legacyComments = commentBackfillComplete
-      ? []
-      : (legacyCommentDetail?.comments ?? []).filter((comment) => !canonicalCommentIds.has(comment.id))
-    const responseComments = mergeLegacyTeamIssueDetailComments(legacyComments, canonicalComments)
-    enforceTeamIssueDetailCommentResponseBudget(responseComments)
-    const hydratedDetail = await hydrateTeamIssueDetailResponse(
+    return c.json(await hydrateTeamIssueDetailResponse(
       {
         ...detail,
-        comments: [],
         resolvedConfiguration,
         relations: visibleRelations,
         relationGraphRevision: relationPage.graphRevision,
         customerImpact,
       },
       principal.directoryId,
-    )
-
-    return c.json({
-      ...hydratedDetail,
-      comments: responseComments,
-    })
+    ))
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
@@ -9431,7 +9314,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/preview', async (c) =
         principal.directoryId,
         teamId,
         issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       ),
       workItemDependencies.workItemConfigurations.listRelations(
         principal.directoryId,
@@ -9577,7 +9460,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/work-item-type-preview', async
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     if (detail.issue.revision !== expectedRevision) {
       throw new ProjectDataError(
@@ -9662,7 +9545,7 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
     requireAssignedProjectPermission(
@@ -9757,17 +9640,8 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 })
 
-/** Maximum legacy event rows evaluated in one request before migration completes. */
-const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
-/** Prefix that keeps legacy event cursors distinct from canonical cursors. */
-const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
-/** Legacy cursor token accepted for already-issued transitional cursors. */
-const LEGACY_COLLABORATION_INITIAL_CURSOR = 'initial'
-/** Prefix for a cursor that merges canonical and legacy root-comment streams. */
-const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
-
 /**
- * Parses the collaboration endpoint page limit before selecting a migration reader.
+ * Parses the collaboration endpoint page limit before it is clamped for root or reply pages.
  *
  * @param value - Raw query-string page limit.
  * @returns A safe integer page limit, or undefined when omitted.
@@ -9779,30 +9653,6 @@ function readCollaborationPageLimit(value: string | undefined): number | undefin
     throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
   }
   return limit
-}
-
-/** Cursor state used to merge canonical and legacy root-comment streams. */
-type MigrationAwareCollaborationCursor = {
-  /** Cursor schema version. */
-  version: 1
-  /** Workspace directory bound to the cursor. */
-  directoryId: string
-  /** Team bound to the cursor. */
-  teamId: string
-  /** Issue bound to the cursor. */
-  issueId: string
-  /** Canonical Collaboration cursor before the next unread root, when applicable. */
-  canonicalCursor?: string
-  /** Legacy Team Issue event cursor before the next unread root, when applicable. */
-  legacyEventCursor?: string
-  /** Whether the canonical stream has been exhausted. */
-  canonicalExhausted: boolean
-  /** Whether the legacy stream has been exhausted. */
-  legacyExhausted: boolean
-  /** Creation timestamp of the last root emitted by the merged page. */
-  lastEmittedCreatedAt?: string
-  /** Stable ID of the last root emitted by the merged page. */
-  lastEmittedCommentId?: string
 }
 
 /**
@@ -9828,41 +9678,15 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
     const projectEntityKey = detail.issue.assignedProjectId
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
-    const limitValue = c.req.query('limit')
-    const limit = readCollaborationPageLimit(limitValue)
+    const limit = readCollaborationPageLimit(c.req.query('limit'))
     const requestedRootCommentId = c.req.query('rootCommentId')
     const requestedCursor = c.req.query('cursor')
-    const commentBackfillComplete = await workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(
-      principal.directoryId,
-    )
-    const migrationCursor = decodeMigrationAwareCollaborationCursor(
-      requestedCursor,
-      principal.directoryId,
-      teamId,
-      issueId,
-    )
-    const isLegacyPage = !requestedRootCommentId &&
-      requestedCursor?.startsWith(LEGACY_COLLABORATION_CURSOR_PREFIX) === true
-    const legacyEventCursorToken = isLegacyPage
-      ? requestedCursor.slice(LEGACY_COLLABORATION_CURSOR_PREFIX.length)
-      : undefined
-    const legacyEventCursor = legacyEventCursorToken === LEGACY_COLLABORATION_INITIAL_CURSOR
-      ? undefined
-      : legacyEventCursorToken
-    if (isLegacyPage && commentBackfillComplete) {
-      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
-    }
-    if (migrationCursor && requestedRootCommentId !== undefined) {
-      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
-    }
-    if (
-      isLegacyPage &&
-      legacyEventCursorToken !== LEGACY_COLLABORATION_INITIAL_CURSOR &&
-      !legacyEventCursor
-    ) {
-      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Legacy comment cursor is invalid.')
-    }
     const canWrite = canWriteTeamIssue(principal, context, detail.issue.assignedProjectId)
+    const capabilities = {
+      canComment: canWrite,
+      canReact: canWrite,
+      canWatch: principal.workspaceRole !== 'guest',
+    }
 
     if (requestedRootCommentId) {
       const replies = await workItemDependencies.collaboration.getThread({
@@ -9871,7 +9695,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         projectEntityKey,
         rootCommentId: readOptionalCommentId(requestedRootCommentId, 'Root comment ID'),
         cursor: requestedCursor,
-        legacyCursorCompatible: true,
         limit: limit === undefined ? 20 : Math.min(limit, 20),
       })
       const responseComments = [...replies.comments].reverse().map((comment) =>
@@ -9891,201 +9714,40 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         replyRootCommentId: requestedRootCommentId,
         watch: replies.watch,
         presence: replies.presence,
-        capabilities: {
-          canComment: canWrite,
-          canReact: canWrite,
-          canWatch: principal.workspaceRole !== 'guest',
-        },
+        capabilities,
       })
     }
 
-    const rootLimit = limit === undefined ? 10 : Math.min(Math.max(limit, 1), 20)
-    const retainMixedCursorLegacyComments = migrationCursor?.legacyEventCursor !== undefined
-    const migrationPage = (!commentBackfillComplete || migrationCursor !== undefined) && !isLegacyPage
-      ? await readMigrationAwareRootPage({
-          collaboration: workItemDependencies.collaboration,
-          teamIssues: workItemDependencies.teamIssues,
-          directoryId: principal.directoryId,
-          teamId,
-          issueId,
-          entityKey,
-          viewerMemberKey: principal.userKey,
-          projectEntityKey,
-          limit: rootLimit,
-          cursor: migrationCursor ?? (requestedCursor === undefined
-            ? undefined
-            : {
-                version: 1,
-                directoryId: principal.directoryId,
-                teamId,
-                issueId,
-                canonicalCursor: requestedCursor,
-                canonicalExhausted: false,
-                legacyExhausted: false,
-              }),
-          validateLegacyDetail: (legacyDetail) => {
-            requireAssignedProjectPermission(
-              principal,
-              context,
-              legacyDetail.issue.assignedProjectId,
-              'viewer',
-            )
-            if (legacyDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
-              throw new CollaborationError(
-                409,
-                'CollaborationConflict',
-                'Work Item assignment changed while comments were loading.',
-              )
-            }
-          },
-          shouldIncludeLegacyComment: async (comment) => {
-            const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
-              entityKey,
-              commentId: comment.id,
-            })
-            return !storedComment?.deletedAt && (!storedComment || retainMixedCursorLegacyComments)
-          },
-        })
-      : undefined
-    const roots = migrationPage
-      ? {
-          comments: migrationPage.canonicalComments,
-          ...(migrationPage.nextCursor ? { nextCursor: migrationPage.nextCursor } : {}),
-          watch: migrationPage.watch,
-          presence: migrationPage.presence,
-        }
-      : await workItemDependencies.collaboration.getThread({
-          entityKey,
-          viewerMemberKey: principal.userKey,
-          projectEntityKey,
-          // The legacy.<event-cursor> namespace belongs to the Team Issue event
-          // fallback below, not to the Collaboration discussion reader.
-          cursor: isLegacyPage ? undefined : migrationCursor?.canonicalCursor ?? requestedCursor,
-          legacyCursorCompatible: true,
-          limit: rootLimit,
-        })
-    const replyPages = isLegacyPage
-      ? []
-      : await Promise.all(
-          roots.comments.map((root) => workItemDependencies.collaboration.getThread({
-            entityKey,
-            viewerMemberKey: principal.userKey,
-            projectEntityKey,
-            rootCommentId: root.id,
-            legacyCursorCompatible: true,
-            limit: 5,
-            includeScopeState: false,
-          })),
-        )
-    const comments = isLegacyPage
-      ? []
-      : roots.comments.flatMap((root, index) => [
-          root,
-          ...[...(replyPages[index]?.comments ?? [])].reverse(),
-        ])
-    const replyPagesByRootId = new Map(
-      roots.comments.map((root, index) => [root.id, replyPages[index]] as const),
+    const roots = await workItemDependencies.collaboration.getThread({
+      entityKey,
+      viewerMemberKey: principal.userKey,
+      projectEntityKey,
+      cursor: requestedCursor,
+      limit: limit === undefined ? 10 : Math.min(limit, 20),
+    })
+    const replyPages = await Promise.all(
+      roots.comments.map((root) => workItemDependencies.collaboration.getThread({
+        entityKey,
+        viewerMemberKey: principal.userKey,
+        projectEntityKey,
+        rootCommentId: root.id,
+        limit: 5,
+        includeScopeState: false,
+      })),
     )
-    // Keep canonical IDs from the probe page for legacy deduplication even
-    // though that page has already been consumed before the legacy cursor.
-    const storedCommentIds = new Set([
-      ...roots.comments.map((comment) => comment.id),
-      ...comments.map((comment) => comment.id),
-    ])
-    const legacyEventLimit = limit === undefined
-      ? LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT
-      : Math.min(
-          Math.max(limit - (isLegacyPage ? 0 : roots.comments.length), 0),
-          LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+    const comments = roots.comments.flatMap((root, index) => {
+      const replyPage = replyPages[index]
+      return [root, ...[...(replyPage?.comments ?? [])].reverse()].map((comment) =>
+        toCollaborationCommentResponse(
+          comment,
+          principal,
+          context,
+          detail.issue,
+          replyPage?.threadResolved === true,
         )
-    const legacyDetail = !migrationPage && !commentBackfillComplete &&
-      legacyEventLimit > 0 &&
-      (isLegacyPage || !roots.nextCursor)
-      ? await workItemDependencies.teamIssues.getTeamIssueDetail(
-          principal.directoryId,
-          teamId,
-          issueId,
-          {
-            consistentIssueRead: true,
-            eventLimit: legacyEventLimit,
-            newestEventsFirst: true,
-            eventType: 'commented',
-            eventCursor: legacyEventCursor,
-            legacyCommentIndexOnly: true,
-          },
-        )
-      : undefined
-    if (legacyDetail) {
-      requireAssignedProjectPermission(
-        principal,
-        context,
-        legacyDetail.issue.assignedProjectId,
-        'viewer',
       )
-      if (legacyDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
-        throw new CollaborationError(
-          409,
-          'CollaborationConflict',
-          'Work Item assignment changed while comments were loading.',
-        )
-      }
-    }
-    const legacyComments = migrationPage
-      ? migrationPage.legacyComments.map(toLegacyCollaborationCommentResponse)
-      : (await Promise.all(
-          (legacyDetail?.comments ?? [])
-            .filter((comment) => !storedCommentIds.has(comment.id))
-            .map(async (comment) => {
-              const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
-                entityKey,
-                commentId: comment.id,
-              })
-              return storedComment
-                ? undefined
-                : toLegacyCollaborationCommentResponse(comment)
-            }),
-        )).flatMap((comment) => comment ? [comment] : [])
-    const collaborationComments = migrationPage
-      ? migrationPage.orderedComments.flatMap((root) => {
-          if (root.source === 'legacy') {
-            const legacyComment = legacyComments.find((comment) => comment.id === root.comment.id)
-            return legacyComment ? [legacyComment] : []
-          }
-          const replyPage = replyPagesByRootId.get(root.comment.id)
-          return [
-            toCollaborationCommentResponse(
-              root.comment,
-              principal,
-              context,
-              detail.issue,
-              replyPage?.threadResolved === true,
-            ),
-            ...(replyPage?.comments ?? []).reverse().map((comment) =>
-              toCollaborationCommentResponse(
-                comment,
-                principal,
-                context,
-                detail.issue,
-                replyPage?.threadResolved === true,
-              ),
-            ),
-          ]
-        })
-      : comments.map((comment) =>
-          toCollaborationCommentResponse(
-            comment,
-            principal,
-            context,
-            detail.issue,
-            replyPages.some((page, index) =>
-              roots.comments[index]?.id === comment.rootCommentId && page.threadResolved === true
-            ),
-          ),
-        )
-    if (!migrationPage) {
-      collaborationComments.push(...legacyComments)
-    }
-    enforceCollaborationCommentResponseBudget(collaborationComments)
+    })
+    enforceCollaborationCommentResponseBudget(comments)
     const replyNextCursors = Object.fromEntries(
       roots.comments.flatMap((root, index) => {
         const cursor = replyPages[index]?.nextCursor
@@ -10093,24 +9755,12 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       }),
     )
     return c.json({
-      comments: collaborationComments,
-      ...(isLegacyPage
-        ? legacyDetail?.nextEventCursor
-          ? { nextCursor: `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}` }
-          : {}
-        : roots.nextCursor
-          ? { nextCursor: roots.nextCursor }
-          : legacyDetail?.nextEventCursor
-            ? { nextCursor: `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}` }
-            : {}),
+      comments,
+      ...(roots.nextCursor ? { nextCursor: roots.nextCursor } : {}),
       ...(Object.keys(replyNextCursors).length > 0 ? { replyNextCursors } : {}),
       watch: roots.watch,
       presence: roots.presence,
-      capabilities: {
-        canComment: canWrite,
-        canReact: canWrite,
-        canWatch: principal.workspaceRole !== 'guest',
-      },
+      capabilities,
     })
   } catch (error) {
     return toCollaborationErrorResponse(c, error)
@@ -10630,7 +10280,6 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceBusinessWrite(principal)
     const body = await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {}
-    const modernContract = body.bodyMarkdown !== undefined
     const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
     const mentionMemberKeys = readCommentMentionMemberKeys(body.mentionMemberKeys)
     await requireValidCommentMentions(
@@ -10661,7 +10310,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       projectEntityKey,
       assigneeMemberKey: detail.issue.assigneeUserId,
       actorMemberKey: principal.userKey,
-      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown ?? body.body),
+      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
@@ -10686,20 +10335,10 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       'comment creation',
     )
 
-    return modernContract
-      ? c.json({
-          comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
-          activity,
-        }, 201)
-      : c.json({
-          comment: {
-            id: comment.id,
-            actorUserId: comment.authorMemberKey,
-            body: comment.bodyMarkdown,
-            createdAt: comment.createdAt,
-          },
-          activity,
-        }, 201)
+    return c.json({
+      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+      activity,
+    }, 201)
   } catch (error) {
     return toCollaborationErrorResponse(c, error)
   }
@@ -13306,7 +12945,7 @@ async function saveTemplateApplicationFailureState(
 function isTerminalTemplateApplicationError(
   error: unknown,
 ): error is AutomationError | WorkItemConfigurationError | ProjectDataError {
-  if (error instanceof AutomationError) return error.status < 500 && !error.retryable
+  if (error instanceof AutomationError) return error.category !== 'unavailable' && !error.retryable
   return (error instanceof WorkItemConfigurationError || error instanceof ProjectDataError) &&
     error.status < 500
 }
@@ -13389,7 +13028,7 @@ function createApiBulkOperationAdapter(
       principal.directoryId,
       item.teamId,
       item.workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     requireAssignedProjectPermission(
       principal,
@@ -14082,7 +13721,7 @@ async function executeAutomationWorkItemUpdate(
     context.execution.workspaceId,
     target.teamId,
     target.workItemId,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   const unsafeFields = Object.keys(patch).filter((field) => !automationEditableWorkItemFields.has(field))
   if (unsafeFields.length > 0) {
@@ -14160,7 +13799,7 @@ async function executeAutomationWorkItemUpdate(
       context.execution.workspaceId,
       target.teamId,
       target.workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     ).catch(() => undefined)
     const resultingRevision = detail.issue.revision + 1
     if (
@@ -14448,7 +14087,7 @@ async function executeAutomationApproval(
     context.execution.workspaceId,
     target.teamId,
     target.workItemId,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
@@ -14542,7 +14181,7 @@ async function executeAutomationComment(
     target.workItemId,
   )
   const auditContext = createAutomationMutationContext(context, { body })
-  const commentId = createAutomationCommentEventId(context)
+  const commentId = createAutomationCommentId(context.execution.id, context.actionIndex)
   const replay = await dependencies.collaboration.getCommentMutationReplay({
     entityKey,
     auditContext,
@@ -14562,19 +14201,6 @@ async function executeAutomationComment(
     }
     return
   }
-  if (
-    dependencies.teamIssues.getAutomationCommentReplay &&
-    await dependencies.teamIssues.getAutomationCommentReplay(
-      context.execution.workspaceId,
-      target.teamId,
-      target.workItemId,
-      createAutomationCommentEventId(context),
-      `automation:${context.execution.ruleId}`,
-      body,
-    )
-  ) {
-    return
-  }
 
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
@@ -14585,7 +14211,7 @@ async function executeAutomationComment(
     context.execution.workspaceId,
     target.teamId,
     target.workItemId,
-    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   if (
     detail.issue.assignedProjectId &&
@@ -14744,11 +14370,6 @@ function createAutomationMutationContext(
       route: `automation-lineage:${createAutomationRuleLineage(context).join(',')}`,
     },
   })
-}
-
-/** Creates the deterministic pre-cutover Automation comment event identity. */
-function createAutomationCommentEventId(context: AutomationActionExecutionContext) {
-  return createAutomationCommentId(context.execution.id, context.actionIndex)
 }
 
 function createAutomationRuleLineage(context: AutomationActionExecutionContext) {
@@ -15191,8 +14812,7 @@ export async function auditRejectedEnterpriseSecurityMutation(
       actorId = credential.credentialId
       actorKind = 'service'
     } else if (token.startsWith('msa_')) {
-      workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID') ??
-        getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')
+      workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')
       const account = workspaceId
         ? await workspaceDependencies.enterpriseIdentity.serviceAccountAuthentication.authenticateServiceAccountToken(
             workspaceId,
@@ -16490,8 +16110,7 @@ async function authenticateEnterpriseServiceAccount(
   accessToken: string,
   context?: Context,
 ): Promise<WorkspacePrincipal> {
-  const workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID') ??
-    getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')
+  const workspaceId = getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')
   if (!workspaceId) {
     throw new WorkspaceAccessError(
       503,
@@ -17129,7 +16748,7 @@ async function resolveEnterpriseAuthorizationResource(
       workspaceId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     if (detail.issue.assignedProjectId) {
       return {
@@ -17167,7 +16786,7 @@ async function resolveEnterpriseAuthorizationResource(
         workspaceId,
         linkTeamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       if (detail.issue.assignedProjectId) {
         return {
@@ -19816,7 +19435,7 @@ async function validateDocumentRelationTargets(
           principal.workspaceId,
           parsed.teamId,
           parsed.issueId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         )
       } catch (error) {
         if (isTeamIssueNotFoundError(error)) {
@@ -22306,7 +21925,7 @@ async function resolveAiWorkItemSource(
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, includeComments: false, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   if (detail.issue.teamId !== source.teamId || detail.issue.id !== source.workItemId) {
     throw new AiAssistanceError(
@@ -22356,7 +21975,7 @@ async function resolveAiWorkItemSource(
     source.teamId,
     source.workItemId,
     'viewer',
-    { consistentIssueRead: true, includeComments: false, eventLimit: 0 },
+    { consistentIssueRead: true, includeEvents: false },
   )
   requireAiAssistanceSourceRevision(current.detail.issue.revision, source.expectedRevision)
   if (
@@ -25121,99 +24740,42 @@ async function requestTriageInformationFromSource(
 }
 
 /**
- * Reads the deterministic Form Triage Entry when converting through the legacy Request route.
+ * Strongly reads the deterministic Form Triage Entry paired with a Request submission.
  *
- * Submissions created before Team Triage existed retain the previous conversion behavior;
- * every newer submission contributes its Triage acceptance to the Work Item transaction.
+ * Every submission commits this entry in its creation transaction, the entry stays in the
+ * submission's routing Team, and retention redacts entries instead of deleting them. A
+ * missing entry is therefore a data-integrity failure rather than a fallback case.
  *
  * @param workspaceId - Owning Workspace identifier.
- * @param teamId - Work Item destination Team identifier.
- * @param entryId - Deterministic Form Triage Entry identifier.
- * @returns The canonical entry, or undefined for a pre-Triage legacy submission.
+ * @param submission - Strongly read Request submission that owns the entry.
+ * @returns The canonical entry used to build the combined Request and Triage transaction.
+ * @throws RequestIntakeError when the paired Triage Entry is missing.
  */
-async function readLegacyConversionTriageEntry(
+async function readRequestTriageEntry(
   workspaceId: string,
-  teamId: string,
-  entryId: string,
-) {
+  submission: RequestSubmission,
+): Promise<TriageEntry> {
   try {
     return await workItemDependencies.triage.getEntryForMutation(
       workspaceId,
-      teamId,
-      entryId,
+      submission.routingTarget.teamId,
+      createFormTriageEntryId(submission.id),
     )
   } catch (error) {
-    if (error instanceof TriageError && error.status === 404) return undefined
+    if (error instanceof TriageError && error.status === 404) {
+      throw new RequestIntakeError(
+        503,
+        'RequestTriageEntryMissing',
+        'Stored request Triage entry is missing.',
+        { cause: error },
+      )
+    }
     throw error
   }
 }
 
-/**
- * Repairs a legacy response-loss window where the Request pointer committed before Triage.
- *
- * Current combined writes cannot enter this state, but an older converted Request may be
- * retried after deployment. Same-Team pointers are linked idempotently; cross-Team legacy
- * pointers remain readable without fabricating a new association.
- *
- * @param context - Current Request conversion retry context.
- * @param principal - Authenticated Workspace administrator.
- * @param submission - Already converted Request submission.
- */
-async function repairConvertedRequestTriageProjection(
-  context: Context,
-  principal: WorkspacePrincipal,
-  submission: RequestSubmission,
-): Promise<void> {
-  if (!submission.workItem || submission.workItem.teamId !== submission.routingTarget.teamId) {
-    return
-  }
-  const entry = await readLegacyConversionTriageEntry(
-    principal.directoryId,
-    submission.routingTarget.teamId,
-    createFormTriageEntryId(submission.id),
-  )
-  if (!entry || entry.state === 'accepted' || entry.state === 'duplicate') return
-  if (entry.state === 'declined') {
-    throw new RequestIntakeError(
-      409,
-      'RequestTriageStateConflict',
-      'The corresponding Triage entry was declined.',
-    )
-  }
-  const action: TriageActionInput = {
-    action: 'accept',
-    mode: 'link',
-    expectedRevision: entry.revision,
-    workItemId: submission.workItem.workItemId,
-  }
-  const idempotency: TriageIdempotency = {
-    key: context.req.header('Idempotency-Key')?.trim() ||
-      `request-conversion-repair:${submission.id}:${submission.workItem.workItemId}`,
-    fingerprint: createTriageInputFingerprint({
-      workspaceId: principal.directoryId,
-      teamId: entry.teamId,
-      entryId: entry.id,
-      action,
-    }),
-  }
-  await workItemDependencies.triage.applyAction(
-    principal.directoryId,
-    entry.teamId,
-    entry.id,
-    { id: principal.userKey },
-    action,
-    idempotency,
-    createApiMutationContext(
-      context,
-      principal,
-      action,
-      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
-    ),
-  )
-}
-
-/** Atomic Triage contribution paired with one legacy Request action. */
-type LegacyRequestTriageContribution =
+/** Atomic Triage contribution paired with one non-conversion Request action. */
+type RequestActionTriageContribution =
   | {
       /** Indicates that the combined mutation was already committed. */
       replayed: true
@@ -25226,22 +24788,22 @@ type LegacyRequestTriageContribution =
     }
 
 /**
- * Maps one legacy Request action to the canonical Form Triage state atomically.
+ * Maps one non-conversion Request action to the canonical Form Triage state atomically.
  *
  * @param context - Current Request action context and idempotency header.
  * @param principal - Authenticated Workspace administrator.
  * @param submission - Strongly read Request submission.
  * @param entry - Strongly read deterministic Form Triage entry.
- * @param input - Non-conversion legacy Request action.
+ * @param input - Non-conversion Request action submitted through the Request route.
  * @returns A replay marker or unexecuted Triage transaction contribution.
  */
-async function createLegacyRequestTriageContribution(
+async function createRequestActionTriageContribution(
   context: Context,
   principal: WorkspacePrincipal,
   submission: RequestSubmission,
   entry: TriageEntry,
   input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
-): Promise<LegacyRequestTriageContribution> {
+): Promise<RequestActionTriageContribution> {
   let action: TriageActionInput
   let duplicateContext: TriageDuplicateContextTransactionContribution | undefined
   let duplicateMergedAt: string | undefined
@@ -25426,7 +24988,7 @@ function createDeterministicTriageWorkItemId(
 }
 
 /**
- * Creates a retention-safe legacy conversion input without reading source answers.
+ * Creates a retention-safe Request conversion input without reading source answers.
  *
  * Routing metadata and explicit operator overrides remain available, but mapped title,
  * description, and custom fields cannot be copied after the source retention boundary.
@@ -26148,7 +25710,7 @@ async function requirePlanningWorkItemEndpointPermission(
       principal.directoryId,
       endpoint.teamId,
       endpoint.workItemId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     )
     const assignedProjectId = detail.issue.assignedProjectId
     if (
@@ -27617,7 +27179,7 @@ async function readAuthorizedTaskViewRelationTarget(
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true, eventLimit: 0 },
+      { consistentIssueRead: true, includeEvents: false },
     ).catch((error) => {
       if (isTeamIssueNotFoundError(error)) return undefined
       throw error
@@ -27807,7 +27369,7 @@ async function resolveCurrentWorkspaceSearchScope(
         workspaceId,
         parsed.teamId,
         parsed.issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       ).catch((error) => {
         if (isTeamIssueNotFoundError(error)) return undefined
         throw error
@@ -27866,7 +27428,7 @@ async function resolveCurrentWorkspaceSearchScope(
         workspaceId,
         parsed.teamId,
         parsed.issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       ).catch((error) => {
         if (isTeamIssueNotFoundError(error)) return undefined
         throw error
@@ -27982,45 +27544,6 @@ function parseSearchCuratedContextItemEntityId(
         contextItemId: match[3],
       }
     : undefined
-}
-
-/**
- * Resolves the optional task-view methods as one fail-closed required port.
- *
- * @param client - Workspace Search client configured by the composition root.
- * @returns Required task-view lifecycle methods bound to the configured client.
- */
-function requireTaskViewClient(client: WorkspaceSearchClient): TaskViewClient {
-  const {
-    listTaskViews,
-    getTaskView,
-    createTaskView,
-    updateTaskView,
-    duplicateTaskView,
-    deleteTaskView,
-  } = client
-  if (
-    typeof listTaskViews !== 'function' ||
-    typeof getTaskView !== 'function' ||
-    typeof createTaskView !== 'function' ||
-    typeof updateTaskView !== 'function' ||
-    typeof duplicateTaskView !== 'function' ||
-    typeof deleteTaskView !== 'function'
-  ) {
-    throw new WorkspaceSearchError(
-      503,
-      'TaskViewUnavailable',
-      'Task view storage is unavailable.',
-    )
-  }
-  return {
-    listTaskViews: listTaskViews.bind(client),
-    getTaskView: getTaskView.bind(client),
-    createTaskView: createTaskView.bind(client),
-    updateTaskView: updateTaskView.bind(client),
-    duplicateTaskView: duplicateTaskView.bind(client),
-    deleteTaskView: deleteTaskView.bind(client),
-  }
 }
 
 /**
@@ -29152,11 +28675,11 @@ async function authorizeRelationMutation(
   const [source, target] = await Promise.all([
     workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, sourceWorkItemId, {
       consistentIssueRead: true,
-      eventLimit: 0,
+      includeEvents: false,
     }),
     workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, targetWorkItemId, {
       consistentIssueRead: true,
-      eventLimit: 0,
+      includeEvents: false,
     }),
   ])
   requireAssignedProjectPermission(principal, context, source.issue.assignedProjectId, 'member')
@@ -29187,7 +28710,7 @@ async function readRelationTargets(
           principal.directoryId,
           teamId,
           targetWorkItemId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         )
         return [targetWorkItemId, detail.issue] as const
       } catch (error) {
@@ -29363,7 +28886,7 @@ async function requirePlanningProjectScopeIsUnused(
           directoryId,
           endpoint.teamId,
           endpoint.workItemId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         )
       } catch (error) {
         if (!isTeamIssueNotFoundError(error)) throw error
@@ -29488,9 +29011,8 @@ function toAutomationErrorResponse(c: Context, error: unknown) {
     console.error(error)
     return c.json({ message: 'Automation data is unavailable.' }, 502)
   }
-  if (error.status >= 500) console.error(error)
-  const categoryStatus = mapAutomationErrorStatus(error.category)
-  const status = error.status === categoryStatus ? categoryStatus : 502
+  const status = mapAutomationErrorStatus(error.category)
+  if (status >= 500) console.error(error)
   return c.json({ code: error.code, message: error.message }, status)
 }
 
@@ -30113,7 +29635,7 @@ async function createNotificationVisibilityFilter(
           principal.directoryId,
           notification.teamId,
           notification.issueId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         ).then((detail) => {
           return {
             assigneeMemberKey: detail.issue.assigneeUserId.trim().toLowerCase(),
@@ -30735,7 +30257,7 @@ async function loadAuthorizedTeamIssue(
   minimumRole: ProjectRole,
   detailReadOptions: TeamIssueDetailReadOptions = {
     consistentIssueRead: true,
-    eventLimit: 0,
+    includeEvents: false,
   },
 ) {
   const context = await requireTeamPermission(principal, teamId, minimumRole)
@@ -32341,102 +31863,6 @@ function readCollaborationAuthorizationConditionChecks(
   return checks
 }
 
-/** Tracks the finite page budget shared by one aggregate Collaboration read. */
-type CollaborationThreadReadBudget = {
-  /** Maximum number of Collaboration pages allowed for one aggregate read. */
-  maxPages: number
-  /** Maximum serialized UTF-8 bytes allowed for the compatibility comments projection. */
-  maxBytes: number
-  /** Serialized UTF-8 bytes reserved by comments already collected. */
-  bytesRead: number
-  /** Number of Collaboration pages already reserved by the aggregate read. */
-  pagesRead: number
-}
-
-/**
- * Reads every page in one Collaboration comment scope.
- *
- * @param collaboration - Canonical Collaboration client to query.
- * @param input - Thread scope and page settings without a cursor.
- * @param budget - Shared page budget for the aggregate detail read.
- * @returns All comments returned by the thread pages in store order.
- */
-async function readAllCollaborationThreadComments(
-  collaboration: CollaborationClient,
-  input: Omit<GetCollaborationThreadInput, 'cursor'>,
-  budget: CollaborationThreadReadBudget = {
-    maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
-    maxBytes: TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES,
-    bytesRead: 2,
-    pagesRead: 0,
-  },
-): Promise<CollaborationComment[]> {
-  const comments: CollaborationComment[] = []
-  const seenCursors = new Set<string>()
-  let cursor: string | undefined
-
-  while (true) {
-    if (budget.pagesRead >= budget.maxPages) {
-      throw new CollaborationError(
-        413,
-        'CollaborationThreadReadLimitExceeded',
-        'Collaboration thread exceeds the supported read window.',
-      )
-    }
-    budget.pagesRead += 1
-    const page = await collaboration.getThread({
-      ...input,
-      ...(cursor === undefined ? {} : { cursor }),
-    })
-    for (const comment of page.comments) {
-      const commentBytes = Buffer.byteLength(
-        JSON.stringify(toTeamIssueDetailCommentResponse(comment)),
-        'utf8',
-      ) + 1
-      if (budget.bytesRead + commentBytes > budget.maxBytes) {
-        throw new CollaborationError(
-          413,
-          'CollaborationThreadPayloadTooLarge',
-          'Collaboration comments exceed the supported response size.',
-        )
-      }
-      budget.bytesRead += commentBytes
-      comments.push(comment)
-    }
-
-    if (page.nextCursor === undefined) {
-      return comments
-    }
-    if (seenCursors.has(page.nextCursor)) {
-      throw new CollaborationError(
-        503,
-        'CollaborationThreadPaginationStalled',
-        'Collaboration thread pagination did not advance.',
-      )
-    }
-    seenCursors.add(page.nextCursor)
-    cursor = page.nextCursor
-  }
-}
-
-/**
- * Projects a canonical Collaboration comment into the stable Work Item detail
- * response shape retained for older clients.
- *
- * @param comment - Canonical comment loaded from the Collaboration store.
- * @returns The compatibility response representation.
- */
-function toTeamIssueDetailCommentResponse(
-  comment: CollaborationComment,
-): TeamIssueCommentResponseItem {
-  return {
-    id: comment.id,
-    actorUserId: comment.authorMemberKey,
-    body: comment.bodyMarkdown,
-    createdAt: comment.createdAt,
-  }
-}
-
 function toCollaborationCommentResponse(
   comment: CollaborationComment,
   principal: WorkspacePrincipal,
@@ -32485,11 +31911,8 @@ function toCollaborationCommentResponse(
   }
 }
 
-/** HTTP response shape shared by canonical and transitional comment projections. */
-type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResponse> & {
-  /** Identifies the canonical store or the temporary read-only legacy projection. */
-  source?: 'collaboration' | 'legacy'
-}
+/** HTTP response shape of one canonical collaboration comment. */
+type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResponse>
 
 /**
  * Enforces the serialized comment budget shared by collaboration page responses.
@@ -32502,7 +31925,7 @@ function enforceCollaborationCommentResponseBudget(
   let bytesRead = 2
   for (const comment of comments) {
     const commentBytes = Buffer.byteLength(JSON.stringify(comment), 'utf8') + 1
-    if (bytesRead + commentBytes > TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES) {
+    if (bytesRead + commentBytes > COLLABORATION_COMMENT_RESPONSE_MAX_BYTES) {
       throw new CollaborationError(
         413,
         'CollaborationThreadPayloadTooLarge',
@@ -32511,502 +31934,6 @@ function enforceCollaborationCommentResponseBudget(
     }
     bytesRead += commentBytes
   }
-}
-
-/**
- * Enforces the serialized comment budget for the legacy-compatible detail response.
- *
- * @param comments - Comments that would be returned by the detail endpoint.
- */
-function enforceTeamIssueDetailCommentResponseBudget(
-  comments: readonly TeamIssueCommentResponseItem[],
-): void {
-  let bytesRead = 2
-  for (const comment of comments) {
-    const commentBytes = Buffer.byteLength(JSON.stringify(comment), 'utf8') + 1
-    if (bytesRead + commentBytes > TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES) {
-      throw new CollaborationError(
-        413,
-        'CollaborationThreadPayloadTooLarge',
-        'Collaboration comments exceed the supported response size.',
-      )
-    }
-    bytesRead += commentBytes
-  }
-}
-
-/**
- * Projects a legacy event into the read-only collaboration shape used during migration.
- *
- * @param comment - Legacy Team Issue event comment.
- * @returns A read-only comment response with every mutation capability disabled.
- */
-function toLegacyCollaborationCommentResponse(
-  comment: TeamIssueCommentResponseItem,
-): CollaborationCommentResponse {
-  return {
-    id: comment.id,
-    rootCommentId: comment.id,
-    source: 'legacy',
-    authorMemberKey: comment.actorUserId,
-    bodyMarkdown: comment.body,
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: comment.createdAt,
-    updatedAt: comment.createdAt,
-    acceptedResolutions: [],
-    reactions: [],
-    capabilities: {
-      canEdit: false,
-      canDelete: false,
-      canResolve: false,
-      canReply: false,
-      canReact: false,
-      canAttach: false,
-      canPromote: false,
-    },
-  }
-}
-
-/** One root-comment candidate read from either migration source. */
-type MigrationAwareRootCandidate =
-  | {
-      /** Identifies a canonical Collaboration candidate. */
-      source: 'canonical'
-      /** Canonical comment payload. */
-      comment: CollaborationComment
-      /** Cursor after this candidate, when another canonical page exists. */
-      nextCursor?: string
-    }
-  | {
-      /** Identifies a legacy Team Issue candidate. */
-      source: 'legacy'
-      /** Legacy comment payload. */
-      comment: TeamIssueCommentResponseItem
-      /** Cursor after this candidate, when another legacy page exists. */
-      nextCursor?: string
-    }
-
-/** Root comment selected from the merged migration-aware page. */
-type MigrationAwareRootComment =
-  | {
-      /** Identifies a canonical Collaboration root. */
-      source: 'canonical'
-      /** Canonical root comment payload. */
-      comment: CollaborationComment
-    }
-  | {
-      /** Identifies a legacy Team Issue root. */
-      source: 'legacy'
-      /** Legacy root comment payload. */
-      comment: TeamIssueCommentResponseItem
-    }
-
-/** Mutable state for one source in the migration-aware root merge. */
-type MigrationAwareRootStreamState = {
-  /** Cursor before the next unread candidate. */
-  cursor?: string
-  /** Whether this source has no more candidates. */
-  exhausted: boolean
-  /** Candidate fetched but not yet emitted. */
-  candidate?: MigrationAwareRootCandidate
-  /** Additional candidates already fetched from the current legacy page. */
-  queuedCandidates?: MigrationAwareRootCandidate[]
-}
-
-/** Result of one migration-aware root-comment page. */
-type MigrationAwareRootPage = {
-  /** Canonical root comments selected for this page. */
-  canonicalComments: CollaborationComment[]
-  /** Legacy root comments selected for this page. */
-  legacyComments: TeamIssueCommentResponseItem[]
-  /** All selected root comments in their merged newest-first order. */
-  orderedComments: MigrationAwareRootComment[]
-  /** Cursor for the next merged page, when either source has remaining rows. */
-  nextCursor?: string
-  /** Watcher state returned by the canonical reader. */
-  watch: CollaborationThreadPage['watch']
-  /** Presence rows returned by the canonical reader. */
-  presence: CollaborationThreadPage['presence']
-}
-
-/** Inputs required to read and merge one migration-aware root-comment page. */
-type MigrationAwareRootPageInput = {
-  /** Canonical Collaboration reader. */
-  collaboration: Pick<CollaborationClient, 'getThread'>
-  /** Legacy Team Issue reader. */
-  teamIssues: WorkItemDependencies['teamIssues']
-  /** Workspace directory that owns the Team Issue. */
-  directoryId: string
-  /** Team that owns the Team Issue. */
-  teamId: string
-  /** Issue that owns the Team Issue. */
-  issueId: string
-  /** Collaboration entity key for canonical root comments. */
-  entityKey: string
-  /** Viewer member key used by the canonical reader. */
-  viewerMemberKey: string
-  /** Assigned Project collaboration scope, when present. */
-  projectEntityKey?: string
-  /** Maximum number of merged root comments to return. */
-  limit: number
-  /** Cursor state from a previous merged page. */
-  cursor?: MigrationAwareCollaborationCursor
-  /** Assignment and authorization validation for every legacy detail read. */
-  validateLegacyDetail: (detail: TeamIssueDetailResponse) => void
-  /** Determines whether a legacy candidate still belongs in the merged page. */
-  shouldIncludeLegacyComment: (comment: TeamIssueCommentResponseItem) => Promise<boolean>
-}
-
-/**
- * Encodes one scope-bound cursor for the merged root-comment streams.
- *
- * @param cursor - Validated canonical and legacy stream positions.
- * @returns Opaque cursor sent to the collaboration API client.
- */
-function encodeMigrationAwareCollaborationCursor(
-  cursor: MigrationAwareCollaborationCursor,
-): string {
-  return `${MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX}${Buffer.from(
-    JSON.stringify(cursor),
-    'utf8',
-  ).toString('base64url')}`
-}
-
-/**
- * Decodes a merged root-comment cursor and binds it to the current Team Issue.
- *
- * @param value - Untrusted request cursor.
- * @param directoryId - Expected Workspace directory scope.
- * @param teamId - Expected Team scope.
- * @param issueId - Expected Issue scope.
- * @returns A validated cursor, or undefined for a non-merged cursor namespace.
- */
-function decodeMigrationAwareCollaborationCursor(
-  value: string | undefined,
-  directoryId: string,
-  teamId: string,
-  issueId: string,
-): MigrationAwareCollaborationCursor | undefined {
-  if (value === undefined || !value.startsWith(MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX)) {
-    return undefined
-  }
-
-  try {
-    const encoded = value.slice(MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX.length)
-    const parsed: unknown = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'))
-    if (!isRecord(parsed) ||
-      parsed.version !== 1 ||
-      parsed.directoryId !== directoryId ||
-      parsed.teamId !== teamId ||
-      parsed.issueId !== issueId ||
-      typeof parsed.canonicalExhausted !== 'boolean' ||
-      typeof parsed.legacyExhausted !== 'boolean' ||
-      (parsed.canonicalCursor !== undefined &&
-        (typeof parsed.canonicalCursor !== 'string' || parsed.canonicalCursor.length === 0)) ||
-      (parsed.legacyEventCursor !== undefined &&
-        (typeof parsed.legacyEventCursor !== 'string' || parsed.legacyEventCursor.length === 0)) ||
-      (parsed.lastEmittedCreatedAt === undefined) !== (parsed.lastEmittedCommentId === undefined) ||
-      (parsed.lastEmittedCreatedAt !== undefined &&
-        (typeof parsed.lastEmittedCreatedAt !== 'string' ||
-          !Number.isFinite(Date.parse(parsed.lastEmittedCreatedAt)))) ||
-      (parsed.lastEmittedCommentId !== undefined &&
-        (typeof parsed.lastEmittedCommentId !== 'string' || parsed.lastEmittedCommentId.length === 0))) {
-      throw new TypeError('Invalid merged collaboration cursor payload.')
-    }
-    return {
-      version: 1,
-      directoryId,
-      teamId,
-      issueId,
-      ...(typeof parsed.canonicalCursor === 'string'
-        ? { canonicalCursor: parsed.canonicalCursor }
-        : {}),
-      ...(typeof parsed.legacyEventCursor === 'string'
-        ? { legacyEventCursor: parsed.legacyEventCursor }
-        : {}),
-      ...(typeof parsed.lastEmittedCreatedAt === 'string'
-        ? { lastEmittedCreatedAt: parsed.lastEmittedCreatedAt }
-        : {}),
-      ...(typeof parsed.lastEmittedCommentId === 'string'
-        ? { lastEmittedCommentId: parsed.lastEmittedCommentId }
-        : {}),
-      canonicalExhausted: parsed.canonicalExhausted,
-      legacyExhausted: parsed.legacyExhausted,
-    }
-  } catch {
-    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
-  }
-}
-
-/**
- * Returns whether the first comment is newer than the second comment.
- *
- * @param left - First comment candidate.
- * @param right - Second comment candidate.
- * @returns Whether the first candidate sorts before the second candidate.
- */
-function isMigrationAwareCommentNewer(
-  left: { id: string; createdAt: string },
-  right: { id: string; createdAt: string },
-): boolean {
-  return compareMigrationAwareComments(left, right) > 0
-}
-
-/** Compares two comments by their actual instant and stable identifier. */
-function compareMigrationAwareComments(
-  left: { id: string; createdAt: string },
-  right: { id: string; createdAt: string },
-): number {
-  const leftTime = Date.parse(left.createdAt)
-  const rightTime = Date.parse(right.createdAt)
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-    return leftTime - rightTime
-  }
-  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
-}
-
-/**
- * Advances one stream after its current candidate has been emitted.
- *
- * @param state - Mutable stream state to advance.
- */
-function consumeMigrationAwareCandidate(state: MigrationAwareRootStreamState): void {
-  const candidate = state.candidate
-  if (candidate === undefined) return
-  state.candidate = undefined
-  if (candidate.nextCursor !== undefined) {
-    state.cursor = candidate.nextCursor
-  }
-  const queuedCandidate = state.queuedCandidates?.shift()
-  if (queuedCandidate !== undefined) {
-    state.candidate = queuedCandidate
-    return
-  }
-  state.queuedCandidates = undefined
-  if (candidate.nextCursor === undefined) {
-    state.exhausted = true
-  }
-}
-
-/**
- * Reads and merges canonical and legacy root comments in newest-first order.
- *
- * @param input - Readers, scope, and cursor state for the merged page.
- * @returns Merged roots, stream continuation, and canonical scope state.
- */
-async function readMigrationAwareRootPage(
-  input: MigrationAwareRootPageInput,
-): Promise<MigrationAwareRootPage> {
-  const canonicalState: MigrationAwareRootStreamState = {
-    ...(input.cursor?.canonicalCursor ? { cursor: input.cursor.canonicalCursor } : {}),
-    exhausted: input.cursor?.canonicalExhausted === true,
-  }
-  const legacyState: MigrationAwareRootStreamState = {
-    ...(input.cursor?.legacyEventCursor ? { cursor: input.cursor.legacyEventCursor } : {}),
-    exhausted: input.cursor?.legacyExhausted === true,
-  }
-  const lastEmittedComment = input.cursor?.lastEmittedCreatedAt && input.cursor.lastEmittedCommentId
-    ? {
-        createdAt: input.cursor.lastEmittedCreatedAt,
-        id: input.cursor.lastEmittedCommentId,
-      }
-    : undefined
-  let scopeState: Pick<CollaborationThreadPage, 'watch' | 'presence'> | undefined
-
-  /** Loads the next unread canonical root comment candidate. */
-  const readCanonicalCandidate = async () => {
-    while (!canonicalState.exhausted && canonicalState.candidate === undefined) {
-      const page = await input.collaboration.getThread({
-        entityKey: input.entityKey,
-        viewerMemberKey: input.viewerMemberKey,
-        ...(input.projectEntityKey ? { projectEntityKey: input.projectEntityKey } : {}),
-        ...(canonicalState.cursor ? { cursor: canonicalState.cursor } : {}),
-        legacyCursorCompatible: true,
-        limit: 1,
-      })
-      scopeState = { watch: page.watch, presence: page.presence }
-      const comment = page.comments[0]
-      if (comment !== undefined && lastEmittedComment !== undefined &&
-        compareMigrationAwareComments(comment, lastEmittedComment) >= 0) {
-        if (page.nextCursor === undefined) {
-          canonicalState.exhausted = true
-        } else {
-          canonicalState.cursor = page.nextCursor
-        }
-        continue
-      }
-      if (comment !== undefined) {
-        canonicalState.candidate = {
-          source: 'canonical',
-          comment,
-          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-        }
-        return
-      }
-      if (page.nextCursor === undefined) {
-        canonicalState.exhausted = true
-      } else {
-        canonicalState.cursor = page.nextCursor
-      }
-    }
-  }
-
-  /** Loads the next unread legacy root comment candidate. */
-  const readLegacyCandidate = async () => {
-    while (!legacyState.exhausted && legacyState.candidate === undefined) {
-      const detail = await input.teamIssues.getTeamIssueDetail(
-        input.directoryId,
-        input.teamId,
-        input.issueId,
-        {
-          consistentIssueRead: true,
-          eventLimit: input.limit,
-          newestEventsFirst: true,
-          eventType: 'commented',
-          legacyCommentIndexOnly: true,
-          ...(legacyState.cursor ? { eventCursor: legacyState.cursor } : {}),
-        },
-      )
-      input.validateLegacyDetail(detail)
-      const comments = detail.comments ?? []
-      const candidates = (await Promise.all(comments.map(async (comment, index) => {
-        if (!(await input.shouldIncludeLegacyComment(comment))) {
-          return undefined
-        }
-        if (lastEmittedComment !== undefined &&
-          compareMigrationAwareComments(comment, lastEmittedComment) >= 0) {
-          return undefined
-        }
-        const nextComment = comments[index + 1]
-        const nextCursor = nextComment
-          ? createTeamIssueCommentEventCursor(
-              input.directoryId,
-              input.teamId,
-              input.issueId,
-              comment.id,
-              comment.createdAt,
-            )
-          : detail.nextEventCursor
-        return {
-          source: 'legacy' as const,
-          comment,
-          ...(nextCursor ? { nextCursor } : {}),
-        }
-      }))).filter(isDefined)
-      const [candidate, ...queuedCandidates] = candidates
-      if (candidate !== undefined) {
-        legacyState.candidate = candidate
-        legacyState.queuedCandidates = queuedCandidates
-        return
-      }
-      if (detail.nextEventCursor === undefined) {
-        legacyState.exhausted = true
-      } else {
-        legacyState.cursor = detail.nextEventCursor
-      }
-    }
-  }
-
-  if (canonicalState.exhausted) {
-    const page = await input.collaboration.getThread({
-      entityKey: input.entityKey,
-      viewerMemberKey: input.viewerMemberKey,
-      ...(input.projectEntityKey ? { projectEntityKey: input.projectEntityKey } : {}),
-      legacyCursorCompatible: true,
-      limit: 1,
-    })
-    scopeState = { watch: page.watch, presence: page.presence }
-  }
-
-  const canonicalComments: CollaborationComment[] = []
-  const legacyComments: TeamIssueCommentResponseItem[] = []
-  const orderedComments: MigrationAwareRootComment[] = []
-  while (canonicalComments.length + legacyComments.length < input.limit) {
-    await Promise.all([readCanonicalCandidate(), readLegacyCandidate()])
-    const canonicalCandidate = canonicalState.candidate
-    const legacyCandidate = legacyState.candidate
-    if (canonicalCandidate === undefined && legacyCandidate === undefined) break
-
-    if (canonicalCandidate?.source === 'canonical' && legacyCandidate?.source === 'legacy' &&
-      canonicalCandidate.comment.id === legacyCandidate.comment.id) {
-      canonicalComments.push(canonicalCandidate.comment)
-      orderedComments.push({ source: 'canonical', comment: canonicalCandidate.comment })
-      consumeMigrationAwareCandidate(canonicalState)
-      consumeMigrationAwareCandidate(legacyState)
-    } else if (canonicalCandidate?.source === 'canonical' &&
-      (legacyCandidate === undefined ||
-        isMigrationAwareCommentNewer(canonicalCandidate.comment, legacyCandidate.comment))) {
-      canonicalComments.push(canonicalCandidate.comment)
-      orderedComments.push({ source: 'canonical', comment: canonicalCandidate.comment })
-      consumeMigrationAwareCandidate(canonicalState)
-    } else if (legacyCandidate?.source === 'legacy') {
-      legacyComments.push(legacyCandidate.comment)
-      orderedComments.push({ source: 'legacy', comment: legacyCandidate.comment })
-      consumeMigrationAwareCandidate(legacyState)
-    } else {
-      throw new CollaborationError(503, 'CollaborationThreadReadFailed', 'Comment streams are invalid.')
-    }
-  }
-
-  const hasRemaining = !canonicalState.exhausted || canonicalState.candidate !== undefined ||
-    !legacyState.exhausted || legacyState.candidate !== undefined
-  const defaultScopeState: Pick<CollaborationThreadPage, 'watch' | 'presence'> = scopeState ?? {
-    watch: {
-      subscribed: false,
-      explicit: false,
-      automatic: false,
-      reasons: [],
-      watcherCount: 0,
-    },
-    presence: [],
-  }
-  const lastComment = orderedComments.at(-1)?.comment
-  return {
-    canonicalComments,
-    legacyComments,
-    orderedComments,
-    ...(hasRemaining
-      ? {
-          nextCursor: encodeMigrationAwareCollaborationCursor({
-            version: 1,
-            directoryId: input.directoryId,
-            teamId: input.teamId,
-            issueId: input.issueId,
-            ...(canonicalState.cursor ? { canonicalCursor: canonicalState.cursor } : {}),
-            ...(legacyState.cursor ? { legacyEventCursor: legacyState.cursor } : {}),
-            canonicalExhausted: canonicalState.exhausted,
-            legacyExhausted: legacyState.exhausted,
-            ...(lastComment
-              ? {
-                  lastEmittedCreatedAt: lastComment.createdAt,
-                  lastEmittedCommentId: lastComment.id,
-                }
-              : {}),
-          }),
-        }
-      : {}),
-    watch: defaultScopeState.watch,
-    presence: defaultScopeState.presence,
-  }
-}
-
-/**
- * Merges legacy detail comments with canonical comments during the marker-gated cutover.
- *
- * @param legacyComments - Comments read from the legacy Work Item detail projection.
- * @param canonicalComments - Comments read from the Collaboration store.
- * @returns De-duplicated detail comments ordered by creation time and identifier.
- */
-function mergeLegacyTeamIssueDetailComments(
-  legacyComments: TeamIssueCommentResponseItem[],
-  canonicalComments: TeamIssueCommentResponseItem[],
-) {
-  const commentsById = new Map(legacyComments.map((comment) => [comment.id, comment]))
-  for (const comment of canonicalComments) {
-    commentsById.set(comment.id, comment)
-  }
-  return [...commentsById.values()].sort(compareMigrationAwareComments)
 }
 
 async function requireValidCommentMentions(
@@ -33438,7 +32365,7 @@ async function refreshWorkItemSearchDocumentBestEffort(
     const [detail, relationPage] = await Promise.all([
       workItemDependencies.teamIssues.getTeamIssueDetail(workspaceId, teamId, issueId, {
         consistentIssueRead: true,
-        eventLimit: 0,
+        includeEvents: false,
       }),
       workItemDependencies.workItemConfigurations.listRelations(workspaceId, teamId, issueId),
     ])
@@ -34113,18 +33040,6 @@ async function prepareFocusPolicyMutation(
     targetIdentity,
     { policy: createFocusPolicyRecoveryEvidence(preview) },
   )
-  const legacyMutationIdentity = createFocusMutationRecoveryIdentity(
-    request,
-    'policy',
-    targetIdentity,
-    {
-      policy: createFocusPolicyRecoveryEvidence(preview),
-      effectivePolicies: effectivePolicies.map((policy) => ({
-        teamId: policy.teamId,
-        fingerprint: policy.fingerprint,
-      })),
-    },
-  )
   const storedPolicy = target.type === 'user'
     ? state.userPolicy
     : state.teamPolicies.find((policy) =>
@@ -34134,8 +33049,7 @@ async function prepareFocusPolicyMutation(
     ? state.userPolicyMutationIdentity
     : state.teamPolicyMutationIdentities[target.teamId]
   const committedPolicy =
-    (storedMutationIdentity === mutationIdentity ||
-      storedMutationIdentity === legacyMutationIdentity) &&
+    storedMutationIdentity === mutationIdentity &&
     storedPolicy !== undefined &&
     stableDigestStringify(createFocusPolicyRecoveryEvidence(storedPolicy)) ===
       stableDigestStringify(createFocusPolicyRecoveryEvidence(preview))
@@ -34981,7 +33895,7 @@ async function readFocusQueue(
     viewerMemberKey: principal.userKey,
     workItems,
     planning,
-    ...(relationGraphs === undefined ? {} : { relationGraphs }),
+    relationGraphs,
     reviewerApprovals,
     notifications,
     teamPolicies: state.teamPolicies,
@@ -35004,19 +33918,17 @@ async function readFocusQueue(
 }
 
 /**
- * Reads one authoritative relation graph per visible Team when the port is available.
+ * Reads one authoritative relation graph per visible Team.
  *
  * @param workspaceId - Workspace that owns the relation graphs.
  * @param workItems - Current ACL-filtered canonical Work Items.
- * @returns Endpoint-filtered Team graphs, or undefined for compatibility clients.
+ * @returns Endpoint-filtered Team graphs.
  */
 async function readFocusRelationGraphs(
   workspaceId: string,
   workItems: readonly CanonicalWorkItem[],
-): Promise<FocusRelationGraphSource[] | undefined> {
+): Promise<FocusRelationGraphSource[]> {
   const configuration = workItemDependencies.workItemConfigurations
-  if (configuration.listRelationGraph === undefined) return undefined
-  const listRelationGraph = configuration.listRelationGraph.bind(configuration)
   const visibleIdsByTeam = new Map<string, Set<string>>()
   for (const workItem of workItems) {
     const visibleIds = visibleIdsByTeam.get(workItem.teamId) ?? new Set<string>()
@@ -35026,7 +33938,7 @@ async function readFocusRelationGraphs(
   return Promise.all([...visibleIdsByTeam.entries()]
     .sort(([leftTeamId], [rightTeamId]) => leftTeamId.localeCompare(rightTeamId))
     .map(async ([teamId, visibleIds]) => {
-      const graph = await listRelationGraph(workspaceId, teamId)
+      const graph = await configuration.listRelationGraph(workspaceId, teamId)
       return {
         teamId,
         graphRevision: graph.graphRevision,
@@ -36855,7 +35767,7 @@ async function executeConfirmedWorkItemScheduleChange(
           principal.directoryId,
           recomputeCommand.teamId,
           recomputeCommand.workItemId,
-          { consistentIssueRead: true, eventLimit: 0 },
+          { consistentIssueRead: true, includeEvents: false },
         ),
         workItemDependencies.workItemConfigurations.listRelations(
           principal.directoryId,
@@ -39801,7 +38713,7 @@ async function createWorkItemTypeRelationConfigurationTransactionItems(
         directoryId,
         teamId,
         relatedWorkItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
     } catch (error) {
       if (isTeamIssueNotFoundError(error)) {
@@ -40334,7 +39246,9 @@ function createAutomationConfigurationUsageError(
     ? error.message
     : 'Automation references could not be inspected'
   const status = isKnownError
-    ? error.status
+    ? error instanceof AutomationError
+      ? mapAutomationErrorStatus(error.category)
+      : error.status
     : 503
   const unavailable = status >= 500
   return new WorkItemConfigurationError(
@@ -40766,11 +39680,7 @@ function readUserAttribute(user: GetUserResponse, name: string) {
 }
 
 function getConfiguredWorkspaceDirectoryId() {
-  return (
-    getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim() ||
-    getEnv('MUKUROJI_PROJECT_DIRECTORY_ID')?.trim() ||
-    undefined
-  )
+  return getEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID')?.trim() || undefined
 }
 
 function readProjectDirectoryId(user: GetUserResponse) {
@@ -42035,7 +40945,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal.directoryId,
         teamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       if (detail.issue.revision !== input.expectedRevision) {
         throw new ProjectDataError(
@@ -42176,7 +41086,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         principal.directoryId,
         teamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       requireAssignedProjectPermission(
         principal,
@@ -42216,7 +41126,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             principal.directoryId,
             teamId,
             workItemId,
-            { consistentIssueRead: true, eventLimit: 0 },
+            { consistentIssueRead: true, includeEvents: false },
           )
           requireAssignedProjectPermission(
             principal,
@@ -42689,7 +41599,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
         workspaceId,
         teamId,
         workItemId,
-        { consistentIssueRead: true, eventLimit: 0 },
+        { consistentIssueRead: true, includeEvents: false },
       )
       return toConnectorWorkItemSnapshot(detail.issue)
     },
@@ -42790,7 +41700,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
               input.workspaceId,
               input.teamId,
               input.workItemId,
-              { consistentIssueRead: true, eventLimit: 0 },
+              { consistentIssueRead: true, includeEvents: false },
             )
             requireAssignedProjectPermission(
               principal,
@@ -42893,7 +41803,7 @@ function createCanonicalConnectorWorkItemGateway(): ConnectorWorkItemGateway {
             input.workspaceId,
             input.teamId,
             input.workItemId,
-            { consistentIssueRead: true, eventLimit: 0 },
+            { consistentIssueRead: true, includeEvents: false },
           )
           return {
             kind: 'conflict',

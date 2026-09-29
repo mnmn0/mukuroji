@@ -117,16 +117,16 @@ import {
   resolvePendingTaskActionContext,
 } from '../../task-views/model/taskActionCompletion'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
+import { useProjectTaskActions } from '../../task-views/mutations/useProjectTaskActions'
 import {
-  resolveProjectTaskActionTarget,
-  resolveProjectTaskActionTargets,
-  useProjectTaskActions,
-  type ProjectTaskActionDisabledReasons,
-  type ProjectTaskActionHandlers,
-  type ProjectTaskActionLabels,
-  type ProjectTaskActionPermissions,
-} from '../../task-views/mutations/useProjectTaskActions'
-import { createTaskSurfaceActionBaseContext } from '../../task-views/mutations/useTaskSurfaceActions'
+  createTaskSurfaceActionBaseContext,
+  resolveTaskSurfaceActionTarget,
+  resolveTaskSurfaceActionTargets,
+  type TaskSurfaceActionDisabledReasons,
+  type TaskSurfaceActionHandlers,
+  type TaskSurfaceActionLabels,
+  type TaskSurfaceActionPermissions,
+} from '../../task-views/mutations/useTaskSurfaceActions'
 import { TaskActionContextMenu } from '../../task-views/ui/TaskActionContextMenu'
 import {
   createTaskSurfaceKeyboardInput,
@@ -469,7 +469,7 @@ export type TaskScreenProps = {
   /** File controller scoped to the selected Work Item. */
   artifacts?: FileArtifactsController
   /** File controller scoped to the current Project. */
-  projectFiles?: FileArtifactsController
+  projectFiles: FileArtifactsController
   /** Workspace members used by mention, actor, and person-field controls. */
   workspaceMembers?: WorkspaceMember[]
   /** Current Workspace member key used by collaboration and file approvals. */
@@ -1168,8 +1168,8 @@ export function TaskScreen({
     [selectedBulkItems],
   )
   const visibleBulkItems = useMemo(
-    () => visibleTasks.map((task) => createBulkOperationSelection(task, t)),
-    [t, visibleTasks],
+    () => visibleTasks.map((task) => createBulkOperationSelection(task)),
+    [visibleTasks],
   )
   const visibleActionTargets = useMemo<WorkItemActionTarget[]>(
     () => visibleTasks.map((task) => ({
@@ -1392,7 +1392,7 @@ export function TaskScreen({
   /** Updates one task's Project-scoped bulk selection snapshot. */
   const updateTaskSelection = (taskKey: string, selected: boolean) => {
     const task = tasks.find((candidate) => createTaskKey(candidate) === taskKey)
-    const availableItems = task ? [createBulkOperationSelection(task, t)] : []
+    const availableItems = task ? [createBulkOperationSelection(task)] : []
 
     setBulkSelection((currentSelection) => ({
       items: updateBulkItemSelection(
@@ -2163,7 +2163,7 @@ export function TaskScreen({
           taskActionCompletion.cancelContext(pendingCandidate)
         }
         const target = pendingContext
-          ? resolveProjectTaskActionTarget(pendingContext)
+          ? resolveTaskSurfaceActionTarget(pendingContext)
           : undefined
         const claimedContext = pendingContext && !input.schedule && target &&
             taskActionCompletion.claim(pendingContext)
@@ -2254,7 +2254,7 @@ export function TaskScreen({
   const canEditTaskAction = onUpdateTask !== undefined || onUpdateIssue !== undefined
   const canManageTaskRelationAction = onAddRelation !== undefined
 
-  const projectTaskActionLabels = useMemo<ProjectTaskActionLabels>(() => ({
+  const projectTaskActionLabels = useMemo<TaskSurfaceActionLabels>(() => ({
     archive: t('taskViews.action.archive'),
     assign: t('taskViews.action.assign'),
     create: t('taskViews.action.create'),
@@ -2265,7 +2265,7 @@ export function TaskScreen({
     schedule: t('taskViews.action.schedule'),
     watch: t('taskViews.action.watch'),
   }), [t])
-  const projectTaskActionDisabledReasons = useMemo<ProjectTaskActionDisabledReasons>(
+  const projectTaskActionDisabledReasons = useMemo<TaskSurfaceActionDisabledReasons>(
     () => ({
       selectionRequired: t('taskViews.action.selectionRequired'),
       singleSelectionRequired: t('taskViews.action.singleSelectionRequired'),
@@ -2289,7 +2289,7 @@ export function TaskScreen({
     controlSelector?: string,
     waitForMutation = false,
   ): Promise<WorkItemActionResult> | WorkItemActionResult => {
-    const target = resolveProjectTaskActionTarget(context)
+    const target = resolveTaskSurfaceActionTarget(context)
     const task = target
       ? tasks.find((candidate) =>
           candidate.teamId === target.teamId && candidate.id === target.workItemId
@@ -2625,7 +2625,7 @@ export function TaskScreen({
     requiresConfiguration: boolean,
     requiresMutation = true,
   ) => {
-    const targets = resolveProjectTaskActionTargets(context)
+    const targets = resolveTaskSurfaceActionTargets(context)
     if (targets.length === 0) return allowTaskAction()
     const allowed = targets.every((target) => visibleTasks.some((task) =>
       task.teamId === target.teamId &&
@@ -2669,18 +2669,18 @@ export function TaskScreen({
     if (!confirmCreateTaskDiscard()) {
       return createCancelledTaskActionResult(
         context.actionId,
-        resolveProjectTaskActionTargets(context),
+        resolveTaskSurfaceActionTargets(context),
       )
     }
     cancelAwaitingDirectTaskScheduleActions()
-    const targets = resolveProjectTaskActionTargets(context)
+    const targets = resolveTaskSurfaceActionTargets(context)
     const requestedItems = targets.flatMap((target) => {
       const task = visibleTasks.find((candidate) =>
         candidate.teamId === target.teamId && candidate.id === target.workItemId
       )
       if (!task) return []
       return [{
-        ...createBulkOperationSelection(task, t),
+        ...createBulkOperationSelection(task),
         expectedRevision: target.expectedRevision ?? task.revision,
       }]
     })
@@ -2712,7 +2712,6 @@ export function TaskScreen({
     dismissBulkTaskActionEditor,
     projectId,
     projectTaskActionDisabledReasons.unavailable,
-    t,
     taskActionCompletion,
     visibleTasks,
   ])
@@ -2772,7 +2771,7 @@ export function TaskScreen({
     }
     taskActionCompletion.settle(pendingContext, createFailedTaskActionResults(
       pendingContext.actionId,
-      resolveProjectTaskActionTargets(pendingContext),
+      resolveTaskSurfaceActionTargets(pendingContext),
       'ProjectBulkTaskActionFailed',
       'unknown',
       t('taskViews.action.failed'),
@@ -2790,7 +2789,7 @@ export function TaskScreen({
     if (bulkTaskActionsAvailable) return executeBulkTaskActionEntrance(context)
     return createFailedTaskActionResult(
       context.actionId,
-      resolveProjectTaskActionTarget(context),
+      resolveTaskSurfaceActionTarget(context),
       'ProjectTaskActionUnavailable',
       'unavailable',
       projectTaskActionDisabledReasons.unavailable,
@@ -2802,7 +2801,7 @@ export function TaskScreen({
     projectTaskActionDisabledReasons.unavailable,
   ])
 
-  const projectTaskActionHandlers = useMemo<ProjectTaskActionHandlers>(() => ({
+  const projectTaskActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
     ...(canCreateTaskAction
       ? {
           create: (context) => {
@@ -2856,7 +2855,7 @@ export function TaskScreen({
       ? {
           watch: async (context) => {
             cancelAwaitingDirectTaskScheduleActions()
-            const target = resolveProjectTaskActionTarget(context)
+            const target = resolveTaskSurfaceActionTarget(context)
             if (
               !target ||
               !detailTask ||
@@ -2920,7 +2919,7 @@ export function TaskScreen({
     projectTaskActionDisabledReasons.unavailable,
   ])
 
-  const projectTaskActionPermissions = useMemo<ProjectTaskActionPermissions>(() => ({
+  const projectTaskActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
     archive: (context) => evaluateProjectTaskTargetPermission(context, false),
     assign: evaluateProjectTaskParameterizedPermission,
     edit: (context) => evaluateProjectTaskTargetPermission(context, true),
@@ -2929,7 +2928,7 @@ export function TaskScreen({
     relation: (context) => evaluateProjectTaskTargetPermission(context, true),
     schedule: (context) => evaluateProjectTaskTargetPermission(context, true),
     watch: (context) => {
-      const target = resolveProjectTaskActionTarget(context)
+      const target = resolveTaskSurfaceActionTarget(context)
       return target && detailTask && toggleTaskWatch &&
           detailTask.teamId === target.teamId && detailTask.id === target.workItemId
         ? allowTaskAction()
@@ -3125,7 +3124,7 @@ export function TaskScreen({
       taskActionCompletion.cancelContext(pendingCandidate)
     }
     const target = pendingContext
-      ? resolveProjectTaskActionTarget(pendingContext)
+      ? resolveTaskSurfaceActionTarget(pendingContext)
       : undefined
     const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
       ? pendingContext

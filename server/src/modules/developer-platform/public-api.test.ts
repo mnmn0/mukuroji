@@ -12,10 +12,10 @@ import {
   type WorkItemSyncConflict,
 } from '@mukuroji/contracts'
 import {
-  DeveloperPlatformError,
-  InMemoryDeveloperPlatformClient,
+  InMemoryDeveloperPlatformStorage,
   LocalAesGcmSecretProtector,
-} from './developer-platform'
+} from './adapter-out/shared/developer-platform-store'
+import { DeveloperPlatformError } from './errors'
 import type { DeveloperPlatformPorts } from './application/developer-platform-ports'
 import {
   ConnectorAdapter,
@@ -194,7 +194,7 @@ function createDefaultWorkItemService(
 
 /** Binds the compatibility test store to the same focused ports used in production. */
 function createFocusedTestPlatform(
-  platform: InMemoryDeveloperPlatformClient,
+  platform: InMemoryDeveloperPlatformStorage,
 ): DeveloperPlatformPorts {
   return {
     apiKeys: new ApiKeyAdapter(platform),
@@ -219,11 +219,11 @@ function createTestRouter(input: {
   enforceActiveWorkspace?: PublicApiDependencies['enforceActiveWorkspace']
   /** Credential request limiter used by admission-order tests. */
   rateLimits?: PublicApiDependencies['rateLimits']
-  platform?: InMemoryDeveloperPlatformClient
+  platform?: InMemoryDeveloperPlatformStorage
   now?: () => Date
   queueWebhookDelivery?: (workspaceId: string, deliveryId: string) => Promise<void>
 } = {}) {
-  const platform = input.platform ?? new InMemoryDeveloperPlatformClient(
+  const platform = input.platform ?? new InMemoryDeveloperPlatformStorage(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
     () => new Date(NOW),
   )
@@ -249,7 +249,7 @@ function createTestRouter(input: {
 }
 
 async function createApiKey(
-  platform: InMemoryDeveloperPlatformClient,
+  platform: InMemoryDeveloperPlatformStorage,
   scopes: ApiScope[],
 ) {
   return platform.createApiKey({
@@ -1195,7 +1195,7 @@ describe('public API router', () => {
   })
 
   test('classifies an in-progress reservation as an idempotency conflict', async () => {
-    const platform = new InMemoryDeveloperPlatformClient(
+    const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
       () => new Date(NOW),
     )
@@ -1223,7 +1223,7 @@ describe('public API router', () => {
   })
 
   test('recovers the one-time secret after handler completion fails', async () => {
-    const platform = new InMemoryDeveloperPlatformClient(
+    const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
       () => new Date(NOW),
     )
@@ -1715,7 +1715,7 @@ describe('public API router', () => {
   })
 
   test('retries a side-effect-free import dry-run after response receipt persistence fails', async () => {
-    const platform = new InMemoryDeveloperPlatformClient(
+    const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
       () => new Date(NOW),
     )
@@ -1780,7 +1780,7 @@ describe('public API router', () => {
   })
 
   test('retries import cancellation deterministically after response receipt persistence fails', async () => {
-    const platform = new InMemoryDeveloperPlatformClient(
+    const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
       () => new Date(NOW),
     )
@@ -1965,7 +1965,7 @@ describe('public API router', () => {
 
   test('retains the local connector credential when provider disconnect fails', async () => {
     let disconnectAttempts = 0
-    let disconnectPlatform: InMemoryDeveloperPlatformClient | undefined
+    let disconnectPlatform: InMemoryDeveloperPlatformStorage | undefined
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin() {
         throw new Error('not used')
@@ -2052,7 +2052,7 @@ describe('public API router', () => {
   })
 
   test('recovers when the disconnect response is lost after durable local commit', async () => {
-    let platform: InMemoryDeveloperPlatformClient | undefined
+    let platform: InMemoryDeveloperPlatformStorage | undefined
     let disconnectCalls = 0
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin() {
@@ -2167,7 +2167,7 @@ describe('public API router', () => {
   })
 
   test('passes the exact DELETE receipt into the atomic webhook disable mutation', async () => {
-    const platform = new InMemoryDeveloperPlatformClient(
+    const platform = new InMemoryDeveloperPlatformStorage(
       new LocalAesGcmSecretProtector(new Uint8Array(32).fill(21)),
       () => new Date(NOW),
     )

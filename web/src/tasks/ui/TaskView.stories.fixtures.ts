@@ -167,7 +167,6 @@ export const taskViewStoryPlanningSnapshot = {
 /** Matching detail response used by the independent selected-task story. */
 export const taskViewStorySelectedIssueDetail = {
   activity: [],
-  comments: [],
   issue: {
     ...taskViewStorySelectedTask,
     assigneeEmail: 'sato@example.com',

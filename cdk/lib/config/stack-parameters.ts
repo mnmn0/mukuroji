@@ -88,11 +88,11 @@ export interface StackParameters {
   /** Primary and secondary same-environment SNS topic ARNs for alarm actions. */
   readonly alarmNotificationTopicArns: readonly [string, string];
   /** Origins accepted by the public API and file storage CORS policies. */
-  readonly taskApiAllowedOrigins: cdk.CfnParameter;
+  readonly apiAllowedOrigins: cdk.CfnParameter;
   /** Tokenized list derived from the allowed origins parameter. */
-  readonly taskApiAllowedOriginList: string[];
+  readonly apiAllowedOriginList: string[];
   /** Response headers exposed by both HTTP transports. */
-  readonly taskApiExposedHeaders: string[];
+  readonly apiExposedHeaders: string[];
   /** Secrets Manager prefix for outbound automation Webhook secrets. */
   readonly automationWebhookSecretPrefix: string;
   /** ARN pattern covering outbound automation Webhook secrets. */
@@ -222,16 +222,16 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
       resource: alarmSecondaryTopicName.valueAsString,
     }),
   ];
-  const taskApiAllowedOrigins = new cdk.CfnParameter(stack, 'TaskApiAllowedOrigins', {
+  const apiAllowedOrigins = new cdk.CfnParameter(stack, 'ApiAllowedOrigins', {
     type: 'String',
     default: 'http://localhost:5173,http://127.0.0.1:5173',
     allowedPattern: '^https?://[^,\\s]+(,https?://[^,\\s]+)*$',
     constraintDescription:
-      'TaskApiAllowedOrigins must be a comma-separated list of HTTP(S) origins without whitespace.',
+      'ApiAllowedOrigins must be a comma-separated list of HTTP(S) origins without whitespace.',
     description: 'Comma-separated CORS origins allowed to call the mukuroji API.',
   });
-  const taskApiAllowedOriginList = cdk.Fn.split(',', taskApiAllowedOrigins.valueAsString);
-  const taskApiExposedHeaders = [
+  const apiAllowedOriginList = cdk.Fn.split(',', apiAllowedOrigins.valueAsString);
+  const apiExposedHeaders = [
     'content-disposition',
     'idempotency-replayed',
     'ratelimit-limit',
@@ -676,9 +676,9 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
 
   return {
     alarmNotificationTopicArns,
-    taskApiAllowedOrigins,
-    taskApiAllowedOriginList,
-    taskApiExposedHeaders,
+    apiAllowedOrigins,
+    apiAllowedOriginList,
+    apiExposedHeaders,
     automationWebhookSecretPrefix,
     automationWebhookSecretArn,
     automationInboundWebhookSecretPrefix,

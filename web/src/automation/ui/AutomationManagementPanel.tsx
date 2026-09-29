@@ -409,10 +409,10 @@ function RulesTab({
         emptyMessage={t('automation.rule.empty')}
         items={rules}
         renderItem={(rule) => {
-          const id = readResourceId(rule)
-          const status = readStatus(rule, 'paused')
-          const trigger = readNestedType(rule, 'trigger')
-          const actions = readArray(rule, 'actions').map((action) => readType(action)).filter(Boolean)
+          const id = rule.id
+          const status = rule.enabled ? 'active' : 'paused'
+          const trigger = rule.trigger.type
+          const actions = rule.actions.map((action) => action.type)
 
           return (
             <ResourceCard
@@ -429,8 +429,8 @@ function RulesTab({
               ].filter(Boolean).join(' · ')}
               locale={locale}
               name={readResourceName(rule, t('automation.common.unnamed'))}
-              resource={rule}
               status={status}
+              version={rule.version}
             >
               {!readOnly && onToggle ? (
                 <button
@@ -518,9 +518,8 @@ function TemplatesTab({
         emptyMessage={t('automation.template.empty')}
         items={templates}
         renderItem={(template) => {
-          const id = readResourceId(template)
+          const id = template.id
           const status = template.enabled ? 'active' : 'archived'
-          const kind = readText(template, 'kind')
 
           const isEditing = editingTemplateId === id
           const isApplying = applyingTemplateId === id
@@ -528,11 +527,11 @@ function TemplatesTab({
           return (
             <div className="grid gap-3" key={id}>
               <ResourceCard
-                description={kind ? `${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}` : undefined}
+                description={`${t('automation.template.kind')}: ${t(templateKindLabelKeys[template.kind])}`}
                 locale={locale}
                 name={readResourceName(template, t('automation.common.unnamed'))}
-                resource={template}
                 status={status}
+                version={template.version}
               >
                 {!readOnly && onUpdate ? (
                   <button
@@ -907,10 +906,10 @@ function RecurringTab({
         emptyMessage={t('automation.recurring.empty')}
         items={recurringWork}
         renderItem={(definition) => {
-          const id = readResourceId(definition)
-          const status = readStatus(definition, 'paused')
-          const timeZone = readNestedText(definition, 'schedule', 'timeZone')
-          const nextRunAt = readText(definition, 'nextRunAt')
+          const id = definition.id
+          const status = definition.enabled ? 'active' : 'paused'
+          const timeZone = definition.schedule.timeZone
+          const nextRunAt = definition.nextRunAt
 
           return (
             <ResourceCard
@@ -923,8 +922,8 @@ function RecurringTab({
               ].filter(Boolean).join(' · ')}
               locale={locale}
               name={readResourceName(definition, t('automation.common.unnamed'))}
-              resource={definition}
               status={status}
+              version={definition.version}
             >
               {!readOnly && onToggle ? (
                 <button
@@ -968,12 +967,12 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
   return (
     <div className="grid gap-3">
       {executions.map((execution) => {
-        const id = readResourceId(execution)
-        const status = readStatus(execution, 'unknown')
-        const failureReason = readText(execution, 'failureReason') || readText(execution, 'errorMessage')
-        const startedAt = readText(execution, 'startedAt') || readText(execution, 'createdAt')
+        const id = execution.id
+        const status = execution.status
+        const failureReason = execution.errorMessage
+        const startedAt = execution.startedAt
         const retryable = execution.retryable
-        const actionResults = readArray(execution, 'actions')
+        const actionResults = execution.actions
 
         return (
           <article className="rounded-lg border border-[var(--workbench-border)] bg-white p-4" key={id}>
@@ -981,7 +980,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
               <div className="min-w-0">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <h3 className="break-all text-sm font-semibold text-[var(--workbench-text)]">
-                    {readText(execution, 'ruleName') || `${t('automation.runs.execution')} ${id}`}
+                    {`${t('automation.runs.execution')} ${id}`}
                   </h3>
                   <StatusBadge
                     label={formatType(status, t, 'status')}
@@ -1015,16 +1014,14 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
                   {t('automation.runs.actionResults')}
                 </p>
                 {actionResults.map((result, index) => {
-                  const actionStatus = readStatus(result, 'unknown')
-                  const actionFailure = readText(result, 'failureReason') || readText(result, 'errorMessage')
+                  const actionStatus = result.status
+                  const actionFailure = result.errorMessage
 
                   return (
                     <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--workbench-surface-muted)] px-3 py-2" key={`${id}-action-${index}`}>
                       <span className="text-xs font-semibold text-[var(--workbench-text)]">
                         {formatType(
-                          readType(result) ||
-                            readText(result, 'actionId') ||
-                            `${t('automation.rule.action')} ${index + 1}`,
+                          result.actionId || `${t('automation.rule.action')} ${index + 1}`,
                           t,
                           'action',
                         )}
@@ -1070,8 +1067,8 @@ type ResourceCardProps = {
   name: string
   /** Resource status です。 */
   status: string
-  /** Resource metadata の取得元です。 */
-  resource: unknown
+  /** Immutable resource definition version shown as a badge. */
+  version: number
   /** 表示 locale です。 */
   locale: Locale
   /** Resource の補足説明です。 */
@@ -1080,9 +1077,14 @@ type ResourceCardProps = {
   children?: React.ReactNode
 }
 
-function ResourceCard({ children, description, locale, name, resource, status }: ResourceCardProps) {
+/**
+ * Renders one automation resource with its status, version, description, and actions.
+ *
+ * @param props - Resource display values and action controls.
+ * @returns The resource card.
+ */
+function ResourceCard({ children, description, locale, name, status, version }: ResourceCardProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const version = readNumber(resource, 'version') ?? readNumber(resource, 'revision')
 
   return (
     <article className="flex min-w-0 flex-wrap items-center justify-between gap-4 rounded-lg border border-[var(--workbench-border)] bg-white p-4">
@@ -1093,11 +1095,9 @@ function ResourceCard({ children, description, locale, name, resource, status }:
             label={formatType(status, t, 'status')}
             status={status}
           />
-          {version !== undefined ? (
-            <span className="workbench-badge">
-              {t('automation.version').replace('{version}', String(version))}
-            </span>
-          ) : null}
+          <span className="workbench-badge">
+            {t('automation.version').replace('{version}', String(version))}
+          </span>
         </div>
         {description ? (
           <p className="mt-2 break-words text-xs font-medium leading-5 text-[var(--workbench-muted)]">
@@ -1119,12 +1119,11 @@ type StatusBadgeProps = {
 }
 
 function StatusBadge({ label, status }: StatusBadgeProps) {
-  const normalizedStatus = status.toLowerCase()
-  const className = normalizedStatus === 'active' || normalizedStatus === 'succeeded' || normalizedStatus === 'success'
+  const className = status === 'active' || status === 'succeeded'
     ? 'workbench-badge-success'
-    : normalizedStatus === 'failed' || normalizedStatus === 'dead-letter' || normalizedStatus === 'dead_letter'
+    : status === 'failed' || status === 'dead-letter'
       ? 'workbench-badge-danger'
-      : normalizedStatus === 'running' || normalizedStatus === 'retrying'
+      : status === 'running'
         ? 'workbench-badge-primary'
         : 'workbench-badge-warning'
 
@@ -1161,66 +1160,15 @@ function AutomationLoadingState({ locale }: { /** 表示 locale です。 */ loc
   )
 }
 
-function readResourceId(resource: unknown) {
-  const record = toRecord(resource)
-  const id = record.id ?? record.ruleId ?? record.templateId ?? record.executionId
-
-  return typeof id === 'string' ? id : ''
-}
-
-function readResourceName(resource: unknown, fallback: string) {
-  const name = toRecord(resource).name
-
-  return typeof name === 'string' && name.trim() ? name : fallback
-}
-
-function readStatus(resource: unknown, fallback: string) {
-  const record = toRecord(resource)
-  const status = record.status
-
-  if (typeof status === 'string' && status) return status
-  if (typeof record.enabled === 'boolean') return record.enabled ? 'active' : 'paused'
-
-  return fallback
-}
-
-function readText(resource: unknown, key: string) {
-  const value = toRecord(resource)[key]
-
-  return typeof value === 'string' ? value : ''
-}
-
-function readNumber(resource: unknown, key: string) {
-  const value = toRecord(resource)[key]
-
-  return typeof value === 'number' ? value : undefined
-}
-
-function readArray(resource: unknown, key: string): unknown[] {
-  const value = toRecord(resource)[key]
-
-  return Array.isArray(value) ? value : []
-}
-
-function readNestedType(resource: unknown, key: string) {
-  return readType(toRecord(resource)[key])
-}
-
-function readNestedText(resource: unknown, key: string, nestedKey: string) {
-  return readText(toRecord(resource)[key], nestedKey)
-}
-
-function readType(resource: unknown) {
-  const record = toRecord(resource)
-  const type = record.type ?? record.actionType ?? record.triggerType
-
-  return typeof type === 'string' ? type : ''
-}
-
-function toRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
-    : {}
+/**
+ * Returns a resource name, or the fallback label when the name is blank.
+ *
+ * @param resource - Named automation resource.
+ * @param fallback - Label shown for a blank name.
+ * @returns The display name.
+ */
+function readResourceName(resource: { name: string }, fallback: string) {
+  return resource.name.trim() ? resource.name : fallback
 }
 
 function formatType(

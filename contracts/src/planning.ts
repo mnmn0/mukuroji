@@ -139,7 +139,7 @@ export type PlanningUpdateDependencySnapshot = {
   /** 後続 Planning entity ID です。 */
   successorId: string
   /** Dependency の scheduling constraint 種別です。 */
-  type: PlanningDependencyType
+  type: ScheduleDependencyType
   /** Signed calendar-day lead / lag です。 */
   lagDays: number
 }
@@ -428,9 +428,6 @@ export type PlanningEntity = {
   updatedAt: string
 }
 
-/** Backwards-compatible name for a planning-entity dependency type. */
-export type PlanningDependencyType = ScheduleDependencyType
-
 /** Planning entity 間の directed dependency です。 */
 export type PlanningDependency = {
   /** Workspace 内で dependency を識別する ID です。 */
@@ -440,7 +437,7 @@ export type PlanningDependency = {
   /** Dependency の後続 entity ID です。 */
   successorId: string
   /** Scheduling 制約の種別です。 */
-  type: PlanningDependencyType
+  type: ScheduleDependencyType
   /** Signed calendar-day offset; positive values are lag and negative values are lead. */
   lagDays: number
   /** Optional explicit date constraint on the successor planning entity. */
@@ -616,7 +613,7 @@ export type CreatePlanningDependencyInput = {
   /** 後続 entity ID です。 */
   successorId: string
   /** Scheduling 制約の種別です。 */
-  type: PlanningDependencyType
+  type: ScheduleDependencyType
   /** Signed calendar-day lead or lag. */
   lagDays: number
   /** Optional explicit date constraint on the successor planning entity. */

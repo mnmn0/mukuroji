@@ -634,33 +634,18 @@ describe('independent task views', () => {
     expect(html).toContain(t('tasks.calendar.empty'))
   })
 
-  test('renders both project-file and compatibility fallback branches', () => {
+  test('renders the project-file panel', () => {
     const projectFilesHtml = renderToStaticMarkup(
       <TaskFileView
-        configuration={teamWorkItemConfigurationFixture}
-        configurationsByTeam={taskViewStoryConfigurationsByTeam}
         currentWorkspaceMemberKey="demo@example.com"
         locale="ja"
         projectFiles={taskViewStoryProjectFiles}
         t={t}
-        tasks={taskViewStoryTasks}
-        workspaceMembers={collaborationWorkspaceMemberFixtures}
-      />,
-    )
-    const fallbackHtml = renderToStaticMarkup(
-      <TaskFileView
-        configuration={teamWorkItemConfigurationFixture}
-        configurationsByTeam={taskViewStoryConfigurationsByTeam}
-        locale="ja"
-        t={t}
-        tasks={taskViewStoryTasks}
         workspaceMembers={collaborationWorkspaceMemberFixtures}
       />,
     )
 
     expect(projectFilesHtml).toContain('data-testid="project-files-panel"')
-    expect(fallbackHtml).toContain('aria-label="ファイルビュー"')
-    expect(fallbackHtml).toContain('ワイヤーフレームを確認する')
   })
 
   test('adapts the active project to the existing permissions panel', () => {

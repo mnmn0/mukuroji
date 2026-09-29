@@ -1,4 +1,4 @@
-import type { TriageEntryCapabilities } from '../api'
+import type { TriageEntryCapabilities } from '@mukuroji/contracts'
 
 /** Action form that may be opened by a keyboard shortcut. */
 export type TriageActionMode =

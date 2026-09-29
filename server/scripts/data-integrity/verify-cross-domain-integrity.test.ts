@@ -56,7 +56,7 @@ import {
   type CrossDomainIntegrityResourceAttestation,
   type CrossDomainIntegrityTableResourceTarget,
   type CrossDomainIntegrityResult,
-} from './cross-domain-integrity'
+} from '../../src/modules/data-integrity'
 import {
   AwsCrossDomainIntegrityReader,
   createCrossDomainIntegrityAwsSdkTransport,

@@ -2,7 +2,6 @@ import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
-  AUDIT_UNKNOWN_OCCURRED_AT,
   AUDIT_TARGET_INDEX_NAME,
   auditEventsToNdjson,
   calculateAuditExpiresAt,
@@ -67,7 +66,7 @@ test('treats blank audit retention environment values as unset', () => {
   }
 })
 
-test('allows an omitted expiry only for an unknown-time backfill event', () => {
+test('requires an audit expiry unless retention is suspended', () => {
   const apiContext = createMutationAuditContext({
     workspaceId: 'workspace-1',
     actor: { id: 'actor-1', kind: 'user' },
@@ -76,51 +75,26 @@ test('allows an omitted expiry only for an unknown-time backfill event', () => {
     request: { method: 'PATCH', path: '/api/work-items/item-1' },
     source: { kind: 'api' },
   })
+  const systemContext = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'system:worker', kind: 'system' },
+    idempotencyKey: 'system-request',
+    occurredAt: '1970-01-01T00:00:00.000Z',
+    request: { method: 'POST', path: '/system/work-items/item-1' },
+    source: { kind: 'system' },
+  })
 
   expect(() => createAuditEvent({
     context: apiContext,
     eventType: 'work-item.updated',
     entity: { type: 'work-item', id: 'item-1' },
-  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
-
-  const backfillContext = createMutationAuditContext({
-    workspaceId: 'workspace-1',
-    actor: { id: 'system:backfill', kind: 'system' },
-    idempotencyKey: 'backfill-request',
-    occurredAt: AUDIT_UNKNOWN_OCCURRED_AT,
-    request: { method: 'BACKFILL', path: '/audit/backfill/team-issues' },
-    source: { kind: 'backfill' },
-  })
-  const knownTimeBackfillContext = createMutationAuditContext({
-    workspaceId: 'workspace-1',
-    actor: { id: 'system:backfill', kind: 'system' },
-    idempotencyKey: 'known-time-backfill-request',
-    occurredAt: '2026-07-11T12:00:00.000Z',
-    request: { method: 'BACKFILL', path: '/audit/backfill/team-issues' },
-    source: { kind: 'backfill' },
-  })
-
+  })).toThrow('Audit expiresAt may be omitted only while retention is suspended.')
   expect(() => createAuditEvent({
-    context: knownTimeBackfillContext,
-    eventType: 'work-item.backfilled',
+    context: systemContext,
+    eventType: 'work-item.updated',
     entity: { type: 'work-item', id: 'item-1' },
     outboxStatus: 'suppressed',
-  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
-  expect(() => createAuditEvent({
-    context: backfillContext,
-    eventType: 'work-item.backfilled',
-    entity: { type: 'work-item', id: 'item-1' },
-  })).toThrow('Audit expiresAt may be omitted only for a backfill event')
-
-  const event = createAuditEvent({
-    context: backfillContext,
-    eventType: 'work-item.backfilled',
-    entity: { type: 'work-item', id: 'item-1' },
-    outboxStatus: 'suppressed',
-  })
-
-  expect(event.occurredAt).toBe(AUDIT_UNKNOWN_OCCURRED_AT)
-  expect(event.expiresAt).toBeUndefined()
+  })).toThrow('Audit expiresAt may be omitted only while retention is suspended.')
 })
 
 test('omits audit expiry while retention is suspended by legal hold', () => {

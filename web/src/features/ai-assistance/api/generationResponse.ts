@@ -37,7 +37,7 @@ export function parseAiAssistanceGenerationResponse(
   now = Date.now(),
 ): AiAssistanceGeneration {
   if ((isCurrentAiAssistanceGeneration(value, now) ||
-    isRetentionExpiredAiAssistanceGeneration(value, now)) &&
+    isRetentionExpiredAiAssistanceGeneration(value)) &&
     (expectedTask === undefined || value.task === expectedTask) &&
     hasKnownGenerationFields(value)) return value
   throw new AiAssistanceApiError(

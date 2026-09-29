@@ -140,7 +140,7 @@ async function mockAuthenticatedSearchPage(page: Page) {
       savedViewMutations.push(input)
       const view = createSavedView('saved-launch-view', input)
       savedViews.push(view)
-      await route.fulfill({ status: 201, json: { view } })
+      await route.fulfill({ status: 201, json: view })
       return
     }
 
@@ -158,7 +158,7 @@ async function mockAuthenticatedSearchPage(page: Page) {
         pinned: input.pinned ?? view.pinned,
         updatedAt: '2026-07-12T10:00:00.000Z',
       })
-      await route.fulfill({ json: { view } })
+      await route.fulfill({ json: view })
       return
     }
 

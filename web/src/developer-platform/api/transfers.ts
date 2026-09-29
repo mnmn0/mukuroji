@@ -1,34 +1,14 @@
 import type {
+  CanonicalWorkItem,
   CreateImportDryRunInput,
   CreateImportJobInput,
   CursorPage,
   ImportDryRunReport,
   ImportJob,
-  WorkItem,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type { DeveloperExportFormat } from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
-
-/**
- * Compatibility alias for an import field mapping.
- */
-export type DeveloperImportFieldMapping =
-  ImportJob['mapping'][number]
-
-/**
- * Compatibility alias for the import source format.
- */
-export type DeveloperImportFormat = ImportJob['format']
-
-/**
- * Compatibility alias for the import dry-run contract.
- */
-export type DryRunDeveloperImportInput = CreateImportDryRunInput
-
-/**
- * Compatibility export format accepted by the Work Item export endpoint.
- */
-export type DeveloperExportFormat = 'csv' | 'json'
 
 /**
  * Work Item export response と download metadata です。
@@ -63,7 +43,7 @@ const defaultDeveloperApiErrorMessage =
  */
 export function dryRunDeveloperImport(
   accessToken: string,
-  input: DryRunDeveloperImportInput,
+  input: CreateImportDryRunInput,
   mutationContext: MutationRequestContext,
 ) {
   return requestJson<ImportDryRunReport>(
@@ -104,7 +84,7 @@ export async function exportDeveloperWorkItems(
   accessToken: string,
   format: DeveloperExportFormat,
 ) {
-  const workItems: WorkItem[] = []
+  const workItems: CanonicalWorkItem[] = []
   const cursors = new Set<string>()
   let cursor: string | undefined
 
@@ -145,7 +125,7 @@ async function requestDeveloperExportPage(
 ) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await requestJson<CursorPage<WorkItem>>(
+      return await requestJson<CursorPage<CanonicalWorkItem>>(
         `/developer/exports?${query.toString()}`,
         accessToken,
       )
@@ -169,7 +149,7 @@ function waitForDeveloperExportRetry(seconds: number) {
 
 function createDeveloperExportFile(
   format: DeveloperExportFormat,
-  workItems: readonly WorkItem[],
+  workItems: readonly CanonicalWorkItem[],
 ): DeveloperExportFile {
   const suffix = new Date().toISOString().slice(0, 10)
   if (format === 'json') {
@@ -236,7 +216,7 @@ function createDeveloperExportFile(
   }
 }
 
-function toExportWorkItem(workItem: WorkItem) {
+function toExportWorkItem(workItem: CanonicalWorkItem) {
   return {
     id: workItem.id,
     teamId: workItem.teamId,

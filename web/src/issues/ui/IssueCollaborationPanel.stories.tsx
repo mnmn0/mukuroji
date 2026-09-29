@@ -579,7 +579,15 @@ export const ReadOnly: Story = {
       capabilities: { canComment: false, canReact: false, canWatch: false },
       comments: issueCollaborationControllerFixture.comments.map((comment) => ({
         ...comment,
-        capabilities: { canEdit: false, canDelete: false, canResolve: false },
+        capabilities: {
+          canEdit: false,
+          canDelete: false,
+          canResolve: false,
+          canReply: false,
+          canReact: false,
+          canAttach: false,
+          canPromote: false,
+        },
       })),
     },
     readOnlyMessage: 'この Work Item のディスカッションは参照専用です。',

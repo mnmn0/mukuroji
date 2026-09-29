@@ -603,7 +603,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
             TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
           }))).Item, true)
         : undefined
-      slackEnabledAt = current?.channels.slack ? current.slackEnabledAt ?? now.toISOString() : now.toISOString()
+      slackEnabledAt = current?.channels.slack ? current.slackEnabledAt : now.toISOString()
     }
     const next: NotificationPreferences = {
       ...preferences,
@@ -835,8 +835,8 @@ export function createNotificationRecipientKey(workspaceId: string, memberKey: s
 }
 
 /**
- * Parses stored preferences, preserving the legacy default fallback unless strict reads are requested.
- * @param value - Stored row; an absent row always uses legacy defaults.
+ * Parses stored preferences, falling back to defaults for an invalid row unless strict reads are requested.
+ * @param value - Stored row; an absent row uses the default preferences.
  * @param strict - Rejects corrupt existing rows so external delivery can retry and alert.
  * @returns Validated notification preferences.
  */
@@ -846,19 +846,20 @@ export function parseStoredNotificationPreferences(
 ): NotificationPreferences {
   if (!value) return cloneDefaultPreferences()
   try {
-    if (value.itemType !== 'preferences' || strict && readNonNegativeInteger(value.version) === undefined) {
+    if (value.itemType !== 'preferences') {
       throw new Error('Invalid stored notification preferences.')
     }
     const normalized = normalizeNotificationPreferencesInput({
-      version: readNonNegativeInteger(value.version) ?? 0,
+      version: value.version,
       channels: value.channels,
       frequency: value.frequency,
       quietHours: value.quietHours,
     })
     if (value.slackEnabledAt !== undefined && !readTimestamp(value.slackEnabledAt)) throw new Error('Invalid Slack activation time.')
     const slackEnabledAt = normalized.channels.slack
-      ? readTimestamp(value.slackEnabledAt) ?? readTimestamp(value.updatedAt)
+      ? readTimestamp(value.slackEnabledAt)
       : undefined
+    if (normalized.channels.slack && !slackEnabledAt) throw new Error('Missing Slack activation time.')
     return {
       ...normalized,
       ...(slackEnabledAt ? { slackEnabledAt } : {}),
@@ -988,12 +989,6 @@ export function toNotificationItem(
   }
   if (value.itemType === 'preferences') {
     if (value.notificationKey === NOTIFICATION_PREFERENCES_KEY) {
-      return undefined
-    }
-    throw invalidNotificationData()
-  }
-  if (value.itemType === 'migration') {
-    if (value.notificationKey === '!MIGRATION#STATUS-V1') {
       return undefined
     }
     throw invalidNotificationData()

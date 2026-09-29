@@ -474,18 +474,6 @@ export type WorkspaceSearchProjectionWriteOptions = {
   sourceRevision?: number
 }
 
-/** Canonical comment row used to fence one asynchronous Search projection. */
-export type WorkspaceSearchCommentProjectionFence = {
-  /** Collaboration table containing the canonical comment row. */
-  sourceTableName: string
-  /** Collaboration entity partition key containing the comment. */
-  sourceEntityKey: string
-  /** Canonical comment identifier used to derive the source sort key. */
-  sourceCommentId: string
-  /** Canonical comment version observed before the projection transaction. */
-  sourceRevision: number
-}
-
 /** Marks persisted projection content that disagrees with its server-owned digest. */
 class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
 
@@ -521,86 +509,40 @@ export type WorkspaceSearchClient = {
    * @param input - Workspace, viewer access, filters, and cursor for the requested page.
    * @returns A permission-filtered cursor page of sanitized task views.
    */
-  listTaskViews?(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
+  listTaskViews(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
   /**
    * Reads one task view by ID without disclosing inaccessible definitions.
    *
    * @param input - Workspace, stable view ID, and current viewer access.
    * @returns The sanitized task view with resolved current-viewer preference state.
    */
-  getTaskView?(input: GetTaskViewRequest): Promise<SavedTaskView>
+  getTaskView(input: GetTaskViewRequest): Promise<SavedTaskView>
   /**
    * Creates a task view definition and the current viewer's initial preference.
    *
    * @param input - Authorized create input and optional idempotency key.
    * @returns The newly persisted task view in its current viewer representation.
    */
-  createTaskView?(input: CreateTaskViewRequest): Promise<SavedTaskView>
+  createTaskView(input: CreateTaskViewRequest): Promise<SavedTaskView>
   /**
    * Updates a task view definition or the current viewer's preference.
    *
    * @param input - Revision-guarded definition and preference changes.
    * @returns The updated and read-time-sanitized task view.
    */
-  updateTaskView?(input: UpdateTaskViewRequest): Promise<SavedTaskView>
+  updateTaskView(input: UpdateTaskViewRequest): Promise<SavedTaskView>
   /**
    * Duplicates one accessible task view into an independent lifecycle.
    *
    * @param input - Source view, destination metadata, and optional idempotency key.
    * @returns The independent duplicated task view.
    */
-  duplicateTaskView?(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
+  duplicateTaskView(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
   /**
    * Deletes a task view definition under an optimistic revision guard.
    *
    * @param input - Authorized target ID and expected definition revision.
    * @returns The deleted view identity and acknowledged revision.
-   */
-  deleteTaskView?(input: DeleteTaskViewRequest): Promise<{ id: string; revision: number }>
-}
-
-/** Required application surface for the generic saved task view lifecycle. */
-export type TaskViewClient = {
-  /**
-   * Lists task views visible in an optional surface and scope filter.
-   *
-   * @param input - Permission-aware list request.
-   * @returns Cursor-paginated visible task views.
-   */
-  listTaskViews(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
-  /**
-   * Reads one permission-safe task view by its stable ID.
-   *
-   * @param input - Workspace, view identity, and current access.
-   * @returns The sanitized task view.
-   */
-  getTaskView(input: GetTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Creates one task view and its initial current-viewer preference.
-   *
-   * @param input - Authorized create request.
-   * @returns The created task view.
-   */
-  createTaskView(input: CreateTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Updates one task view definition or current-viewer preference.
-   *
-   * @param input - Revision-guarded update request.
-   * @returns The updated task view.
-   */
-  updateTaskView(input: UpdateTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Duplicates one accessible task view into an independent lifecycle.
-   *
-   * @param input - Source identity and destination metadata.
-   * @returns The independent duplicate.
-   */
-  duplicateTaskView(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
-  /**
-   * Deletes one task view under an optimistic revision guard.
-   *
-   * @param input - Authorized revision-bound delete request.
-   * @returns Deleted view identity and acknowledged revision.
    */
   deleteTaskView(input: DeleteTaskViewRequest): Promise<{ id: string; revision: number }>
 }
@@ -608,7 +550,7 @@ export type TaskViewClient = {
 /** DynamoDB に保存する saved view definition row です。 */
 type StoredSavedWorkspaceView = {
   /** 保存時の saved view schema version です。 */
-  schemaVersion?: number
+  schemaVersion: typeof SAVED_VIEW_SCHEMA_VERSION
   /** DynamoDB partition key です。 */
   workspaceId: string
   /** DynamoDB sort key です。 */
@@ -1540,123 +1482,6 @@ export class DynamoDbWorkspaceSearchClient {
       }
     }
     return document
-  }
-
-  /**
-   * Upserts a comment projection while atomically fencing it to the current
-   * non-deleted canonical comment version.
-   *
-   * @param input - Search document to persist.
-   * @param fence - Canonical Collaboration row and version observed by the caller.
-   * @returns Whether the projection was written, source changed, or an existing projection was retained.
-   */
-  async upsertDocumentWithCommentSourceFence(
-    input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
-    fence: WorkspaceSearchCommentProjectionFence,
-  ): Promise<'projected' | 'source-changed' | 'unchanged'> {
-    await this.ensureLocalTable()
-    const document = createWorkspaceSearchDocument(input)
-    const sourceRevision = normalizeProjectionSourceRevision(fence.sourceRevision)
-    if (document.sourceRevision !== sourceRevision) {
-      throw new WorkspaceSearchError(
-        409,
-        'InvalidSearchProjectionRevision',
-        'Search comment projection revision does not match its source fence.',
-      )
-    }
-
-    const existingResponse = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: requireText(document.workspaceId, 'Search Workspace ID'),
-        recordKey: document.recordKey,
-      },
-      ConsistentRead: true,
-    }))
-    if (isRecordValue(existingResponse.Item) &&
-        existingResponse.Item.sourceRevision === sourceRevision &&
-        existingResponse.Item.projectionDigest === document.projectionDigest) {
-      return 'unchanged'
-    }
-
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          {
-            ConditionCheck: {
-              TableName: requireText(fence.sourceTableName, 'Search projection source table name'),
-              Key: {
-                entityKey: requireText(fence.sourceEntityKey, 'Search projection source entity key'),
-                recordKey: `COMMENT#${requireText(fence.sourceCommentId, 'Search projection source comment ID')}`,
-              },
-              ConditionExpression:
-                'attribute_exists(entityKey) AND attribute_exists(recordKey) AND ' +
-                'attribute_not_exists(deletedAt) AND #version = :sourceRevision',
-              ExpressionAttributeNames: { '#version': 'version' },
-              ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
-            },
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: document,
-              ConditionExpression:
-                'attribute_not_exists(#recordKey) OR attribute_not_exists(#sourceRevision) OR ' +
-                '#sourceRevision <= :sourceRevision',
-              ExpressionAttributeNames: {
-                '#recordKey': 'recordKey',
-                '#sourceRevision': 'sourceRevision',
-              },
-              ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
-            },
-          },
-        ],
-      }))
-      return 'projected'
-    } catch (error) {
-      if (isTransactionConditionalCheckFailedAt(error, 0)) {
-        return 'source-changed'
-      }
-      if (isTransactionConditionalCheckFailedAt(error, 1)) {
-        return 'unchanged'
-      }
-      throw error
-    }
-  }
-
-  /**
-   * Deletes a comment projection and reports whether a stored row was removed.
-   *
-   * @param workspaceId - Workspace owning the projection.
-   * @param entityType - Search entity discriminator.
-   * @param entityId - Stable search entity identifier.
-   * @param options - Optional source revision fence.
-   * @returns Whether this invocation deleted an existing projection.
-   */
-  async deleteDocumentWithResult(
-    workspaceId: string,
-    entityType: SearchEntityType,
-    entityId: string,
-    options?: WorkspaceSearchProjectionWriteOptions,
-  ): Promise<boolean> {
-    await this.ensureLocalTable()
-    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: requireText(workspaceId, 'Search Workspace ID'),
-        recordKey: createWorkspaceSearchDocumentRecordKey(entityType, entityId),
-      },
-      ConsistentRead: true,
-    }))
-    if (!response.Item) return false
-    if (sourceRevision !== undefined &&
-        isRecordValue(response.Item) &&
-        typeof response.Item.sourceRevision === 'number' &&
-        response.Item.sourceRevision > sourceRevision) {
-      return false
-    }
-    return this.deleteDocument(workspaceId, entityType, entityId, options)
   }
 
   /** Search document を entity key で削除します。 */
@@ -4136,29 +3961,13 @@ async function waitForWorkspaceSearchTable(
   throw new Error(`Local DynamoDB table "${tableName}" did not become active.`)
 }
 
-/** Options controlling normalization of Workspace Search filter identifiers. */
-type WorkspaceSearchFilterNormalizationOptions = {
-  /** Whether task-view callers may retain legacy bare Work Item Type identifiers. */
-  allowUnqualifiedWorkItemTypeIds?: boolean
-}
-
-/** Options controlling normalization of a persisted task-view definition. */
-type TaskViewDefinitionNormalizationOptions = {
-  /** Whether read-time migration may temporarily accept legacy bare Work Item Type identifiers. */
-  allowUnqualifiedWorkItemTypeIds?: boolean
-}
-
 /**
  * Validates and normalizes Workspace Search filters.
  *
  * @param filters - Untrusted filter object received from an API or persisted view.
- * @param options - Compatibility options for task-view-specific filter scopes.
  * @returns Canonical filters accepted by the selected search surface.
  */
-function normalizeWorkspaceSearchFilters(
-  filters: unknown,
-  options: WorkspaceSearchFilterNormalizationOptions = {},
-) {
+function normalizeWorkspaceSearchFilters(filters: unknown) {
   if (!isRecordValue(filters)) {
     return invalidFilters('Search filters must be an object.')
   }
@@ -4186,9 +3995,7 @@ function normalizeWorkspaceSearchFilters(
       'Search workItemTypeIds',
       100,
     )
-    if (!options.allowUnqualifiedWorkItemTypeIds && workItemTypeIds.some((value) =>
-      readSearchWorkItemTypeKey(value) === undefined
-    )) {
+    if (workItemTypeIds.some((value) => readSearchWorkItemTypeKey(value) === undefined)) {
       invalidFilters('Search work item type IDs must be Team-qualified.')
     }
     normalized.workItemTypeIds = workItemTypeIds
@@ -5032,10 +4839,7 @@ function createTaskViewCopyName(sourceName: string) {
 }
 
 /** Validates a complete task view definition and returns its canonical representation. */
-function normalizeTaskViewDefinition(
-  definition: unknown,
-  options: TaskViewDefinitionNormalizationOptions = {},
-): TaskViewDefinition {
+function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
   if (!isRecordValue(definition)) {
     return invalidTaskView('Task view definition is required.')
   }
@@ -5045,7 +4849,7 @@ function normalizeTaskViewDefinition(
   return {
     surface,
     scope,
-    filters: normalizeTaskViewFilters(definition.filters, options),
+    filters: normalizeTaskViewFilters(definition.filters),
     layout: normalizeTaskViewLayout(definition.layout),
   }
 }
@@ -5086,14 +4890,11 @@ function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewS
 }
 
 /** Validates filters shared by all task surfaces. */
-function normalizeTaskViewFilters(
-  filters: unknown,
-  options: TaskViewDefinitionNormalizationOptions = {},
-): TaskViewFilters {
+function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
   if (!isRecordValue(filters)) {
     return invalidTaskView('Task view filters are invalid.')
   }
-  const base = normalizeWorkspaceSearchFilters(filters, options)
+  const base = normalizeWorkspaceSearchFilters(filters)
   const workflowStatuses = filters.workflowStatuses === undefined
     ? undefined
     : normalizeTaskViewWorkflowStatuses(filters.workflowStatuses)
@@ -5303,10 +5104,10 @@ function requireSavedTaskViewDefaultSource(value: unknown): SavedTaskViewDefault
 }
 
 /**
- * Reads one strict current or legacy Workspace Search projection.
+ * Reads one strict current Workspace Search projection.
  *
- * Legacy rows may omit `projectionDigest`; when present, the digest must match
- * the complete normalized projection or the read fails closed.
+ * The stored `projectionDigest` must match the complete normalized projection;
+ * a missing or different digest fails closed.
  *
  * @param value - Untrusted persisted projection fields.
  * @returns Fully normalized document with its server-owned current digest.
@@ -5319,10 +5120,7 @@ export function readWorkspaceSearchDocument(
   }
   try {
     const document = createWorkspaceSearchDocument(value as WorkspaceSearchDocument)
-    if (
-      value.projectionDigest !== undefined
-      && value.projectionDigest !== document.projectionDigest
-    ) {
+    if (value.projectionDigest !== document.projectionDigest) {
       throw new WorkspaceSearchProjectionDigestMismatchError(
         503,
         'InvalidSearchDocument',
@@ -5356,19 +5154,11 @@ function readWorkspaceSearchDocumentSafely(value: Record<string, unknown>) {
 }
 
 function readStoredSavedWorkspaceView(value: Record<string, unknown>) {
-  if (
-    value.entryType !== 'saved-view' ||
-    (value.schemaVersion !== undefined && value.schemaVersion !== 0 && value.schemaVersion !== SAVED_VIEW_SCHEMA_VERSION)
-  ) {
+  if (value.entryType !== 'saved-view' || value.schemaVersion !== SAVED_VIEW_SCHEMA_VERSION) {
     throw new WorkspaceSearchError(503, 'InvalidSavedView', 'Saved view data is invalid.')
   }
   try {
     const input = value as StoredSavedWorkspaceView
-    const legacyLayout = input.layout ?? {
-      mode: 'table',
-      sort: [],
-      columns: ['title'],
-    } satisfies SearchViewLayout
     const id = requireIdentifier(input.id, 'Saved view ID')
     const visibility = requireSavedViewVisibility(input.visibility)
     const teamId = optionalText(input.teamId, 'Saved view Team ID', 256)
@@ -5388,9 +5178,9 @@ function readStoredSavedWorkspaceView(value: Record<string, unknown>) {
       visibility,
       ownerUserId: requireText(input.ownerUserId, 'Saved view owner ID'),
       ...(teamId ? { teamId } : {}),
-      filters: normalizeWorkspaceSearchFilters(input.filters ?? {}),
-      layout: normalizeSearchViewLayout(legacyLayout),
-      revision: requirePositiveInteger(input.revision ?? 1, 'Saved view revision'),
+      filters: normalizeWorkspaceSearchFilters(input.filters),
+      layout: normalizeSearchViewLayout(input.layout),
+      revision: requirePositiveInteger(input.revision, 'Saved view revision'),
       createdAt: requireText(input.createdAt, 'Saved view createdAt', 128),
       updatedAt: requireText(input.updatedAt, 'Saved view updatedAt', 128),
     } satisfies StoredSavedWorkspaceView
@@ -5529,9 +5319,7 @@ function readStoredTaskView(value: Record<string, unknown>): StoredTaskView {
       ...(createIdempotencyKeyHash ? { createIdempotencyKeyHash } : {}),
       ...(createRequestFingerprint ? { createRequestFingerprint } : {}),
       ...(teamId ? { teamId } : {}),
-      definition: normalizeTaskViewDefinition(value.definition, {
-        allowUnqualifiedWorkItemTypeIds: true,
-      }),
+      definition: normalizeTaskViewDefinition(value.definition),
       revision: requirePositiveInteger(value.revision, 'Task view revision'),
       createdAt: requireText(value.createdAt, 'Task view createdAt', 128),
       updatedAt: requireText(value.updatedAt, 'Task view updatedAt', 128),
@@ -6848,18 +6636,6 @@ function isTransactionConditionalCheckFailed(error: unknown) {
   }).CancellationReasons
   return reasons?.some((reason) => reason.Code === 'ConditionalCheckFailed') ??
     error.message.includes('ConditionalCheckFailed')
-}
-
-/** Returns whether one transaction item failed its conditional guard. */
-function isTransactionConditionalCheckFailedAt(error: unknown, index: number) {
-  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') {
-    return false
-  }
-  if (!isRecordValue(error)) return false
-  const reasons = error.CancellationReasons
-  if (!Array.isArray(reasons)) return false
-  const reason = reasons[index]
-  return isRecordValue(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 function isResourceNotFound(error: unknown) {

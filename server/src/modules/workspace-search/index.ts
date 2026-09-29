@@ -31,7 +31,6 @@ export {
   type ResolveTaskViewRelationIdsInput,
   type SavedViewAccessScope,
   type TaskViewAccessScope,
-  type TaskViewClient,
   type UpdateTaskViewRequest,
   type UpdateSavedWorkspaceViewRequest,
   type WorkspaceSearchAccessScope,

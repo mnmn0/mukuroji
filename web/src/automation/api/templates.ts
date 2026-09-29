@@ -1,6 +1,18 @@
-import type { ApplyAutomationTemplateInput, AutomationTemplate, AutomationTemplateApplication, CreateAutomationTemplateInput, UpdateAutomationTemplateInput } from '@mukuroji/contracts'
+import {
+  AUTOMATION_SCHEMA_VERSION,
+  type ApplyAutomationTemplateInput,
+  type AutomationTemplate,
+  type AutomationTemplateApplication,
+  type AutomationTemplateKind,
+  type CreateAutomationTemplateInput,
+  type UpdateAutomationTemplateInput,
+} from '@mukuroji/contracts'
+import { isNonnegativeSafeInteger, isRecord } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AutomationApiError, resolveAutomationApiBaseUrl } from './errors'
+
+/** Template kinds accepted from the template collection response. */
+const automationTemplateKinds: readonly AutomationTemplateKind[] = ['work-item', 'project', 'workflow']
 
 const automationApiBaseUrl = resolveAutomationApiBaseUrl(import.meta.env)
 
@@ -13,10 +25,11 @@ const defaultAutomationApiErrorMessage = 'Unable to complete the automation requ
  * @returns Template 一覧です。
  */
 export function getAutomationTemplates(accessToken: string) {
-  return requestCollection<AutomationTemplate>(
+  return requestCollection(
     `${automationApiBaseUrl}/automation/templates`,
     accessToken,
     'templates',
+    isAutomationTemplate,
   )
 }
 
@@ -129,19 +142,55 @@ export function getAutomationTemplateApplication(
   )
 }
 
+/**
+ * Loads the canonical collection property returned by an automation list endpoint.
+ *
+ * @param url - Collection endpoint URL.
+ * @param accessToken - Access token used for the Authorization header.
+ * @param collectionKey - Response property that owns the collection.
+ * @param isItem - Runtime guard for one collection entry.
+ * @returns Validated collection entries.
+ * @throws AutomationApiError when the response does not contain a valid collection.
+ */
 async function requestCollection<TItem>(
   url: string,
   accessToken: string,
   collectionKey: string,
-) {
+  isItem: (value: unknown) => value is TItem,
+): Promise<TItem[]> {
   const response = await requestJson<unknown>(url, accessToken)
+  const collection = isRecord(response) ? response[collectionKey] : undefined
 
-  if (Array.isArray(response)) return response as TItem[]
+  if (!Array.isArray(collection) || !collection.every(isItem)) {
+    throw new AutomationApiError(
+      502,
+      'Automation API returned an invalid response.',
+      'InvalidAutomationResponse',
+    )
+  }
 
-  const record = toRecord(response)
-  const collection = record[collectionKey] ?? record.items
+  return collection
+}
 
-  return Array.isArray(collection) ? collection as TItem[] : []
+/**
+ * Returns whether a collection entry has the automation template fields used by the Web client.
+ *
+ * @param value - Unknown entry from the template collection response.
+ * @returns Whether the entry is a versioned automation template.
+ */
+function isAutomationTemplate(value: unknown): value is AutomationTemplate {
+  return isRecord(value) &&
+    value.schemaVersion === AUTOMATION_SCHEMA_VERSION &&
+    typeof value.id === 'string' &&
+    typeof value.workspaceId === 'string' &&
+    automationTemplateKinds.some((kind) => kind === value.kind) &&
+    typeof value.name === 'string' &&
+    typeof value.enabled === 'boolean' &&
+    isNonnegativeSafeInteger(value.version) &&
+    isNonnegativeSafeInteger(value.revision) &&
+    isRecord(value.payload) &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string'
 }
 
 function requestMutation<TResponse>(

@@ -163,12 +163,6 @@ export type {
   EnterpriseScimWorkspaceAuthentication,
 }
 
-/** Internal adapter aggregate retained for composition and test compatibility. */
-export type EnterpriseIdentityClient = EnterpriseIdentityApplicationCapability
-
-/** Credential-free Enterprise Identity read port retained for compatibility. */
-export type EnterpriseIdentityReadClient = EnterpriseIdentityReadCapability
-
 /**
  * Enterprise identity domain の safe API error です。
  */
@@ -430,9 +424,6 @@ type CommittedEnterpriseIdentityRecords = {
 
 const SCIM_IDEMPOTENCY_RECEIPT_TTL_MS = 24 * 60 * 60_000
 
-/** SCIM resource 本体に membership array を埋め込む record format version です。 */
-const ENTERPRISE_SCIM_EMBEDDED_MEMBERSHIP_VERSION = 2
-
 /**
  * State mutation と同じ transaction に保存する audit descriptor です。
  */
@@ -460,7 +451,7 @@ type DynamoDbEnterpriseIdentityAdapters = {
 /**
  * Enterprise state persistence を抽象化する基底 service です。
  */
-abstract class EnterpriseIdentityService implements EnterpriseIdentityClient {
+abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicationCapability {
   /** Plaintext credential の生成・digest・constant-time 検証 adapter です。 */
   protected readonly credentialProtector: EnterpriseCredentialProtector
   /** Testable wall clock です。 */
@@ -3882,7 +3873,7 @@ const ENTERPRISE_READ_ONLY_PLACEHOLDER_SECRET =
  * Realtime など credential の発行・認証を行わない runtime が、credential HMAC secret を
  * environment に受け取らず current policy と break-glass state だけを参照するために使います。
  */
-export class DynamoDbEnterpriseIdentityReadClient implements EnterpriseIdentityReadClient {
+export class DynamoDbEnterpriseIdentityReadClient implements EnterpriseIdentityReadCapability {
   /** Secretless reader の公開面だけを委譲する persistence client です。 */
   private readonly delegate: DynamoDbEnterpriseIdentityClient
 
@@ -5057,18 +5048,8 @@ function serializeEnterpriseIdentityRecords(state: EnterpriseIdentityState) {
   for (const value of state.customRoles) put('CUSTOM_ROLE', value.roleId, value)
   for (const value of state.groupMappings) put('GROUP_MAPPING', value.mappingId, value)
   for (const value of state.roleAssignments) put('ROLE_ASSIGNMENT', value.assignmentId, value)
-  for (const value of state.scimUsers) {
-    put('SCIM_USER', value.userId, {
-      ...value,
-      membershipStorageVersion: ENTERPRISE_SCIM_EMBEDDED_MEMBERSHIP_VERSION,
-    })
-  }
-  for (const value of state.scimGroups) {
-    put('SCIM_GROUP', value.groupId, {
-      ...value,
-      membershipStorageVersion: ENTERPRISE_SCIM_EMBEDDED_MEMBERSHIP_VERSION,
-    })
-  }
+  for (const value of state.scimUsers) put('SCIM_USER', value.userId, value)
+  for (const value of state.scimGroups) put('SCIM_GROUP', value.groupId, value)
   for (const value of state.scimCredentials) {
     put('SCIM_CREDENTIAL', value.credentialId, value)
   }
@@ -5143,10 +5124,6 @@ function readEnterpriseIdentityRecords(
   state.storageGeneration = committed.storageGeneration
   state.storageGenerationChain = committed.storageGenerationChain
   state.storageRetiredGenerations = committed.storageRetiredGenerations
-  const usersWithEmbeddedMemberships = new Set<string>()
-  const groupsWithEmbeddedMemberships = new Set<string>()
-  const userGroupRelations: Array<{ userId: string; groupId: string }> = []
-  const groupMemberRelations: Array<{ groupId: string; userId: string }> = []
   const previewChanges: Array<{
     previewId: string
     change: EnterpriseProvisioningPreview['changes'][number]
@@ -5181,35 +5158,9 @@ function readEnterpriseIdentityRecords(
     } else if (item.recordType === 'ROLE_ASSIGNMENT') {
       state.roleAssignments.push(payload as EnterpriseRoleAssignment)
     } else if (item.recordType === 'SCIM_USER') {
-      const user = payload as EnterpriseScimUser & {
-        /** Embedded membership storage marker. */
-        membershipStorageVersion?: number
-      }
-      if (
-        user.membershipStorageVersion ===
-          ENTERPRISE_SCIM_EMBEDDED_MEMBERSHIP_VERSION
-      ) {
-        usersWithEmbeddedMemberships.add(user.userId)
-      }
-      delete user.membershipStorageVersion
-      state.scimUsers.push(user)
-    } else if (item.recordType === 'SCIM_USER_GROUP') {
-      userGroupRelations.push(readScimRelation(payload))
+      state.scimUsers.push(payload as EnterpriseScimUser)
     } else if (item.recordType === 'SCIM_GROUP') {
-      const group = payload as EnterpriseScimGroup & {
-        /** Embedded membership storage marker. */
-        membershipStorageVersion?: number
-      }
-      if (
-        group.membershipStorageVersion ===
-          ENTERPRISE_SCIM_EMBEDDED_MEMBERSHIP_VERSION
-      ) {
-        groupsWithEmbeddedMemberships.add(group.groupId)
-      }
-      delete group.membershipStorageVersion
-      state.scimGroups.push(group)
-    } else if (item.recordType === 'SCIM_GROUP_MEMBER') {
-      groupMemberRelations.push(readScimRelation(payload))
+      state.scimGroups.push(payload as EnterpriseScimGroup)
     } else if (item.recordType === 'SCIM_CREDENTIAL') {
       state.scimCredentials.push(payload as EnterpriseIssuedCredential['credential'])
     } else if (item.recordType === 'SERVICE_ACCOUNT') {
@@ -5257,20 +5208,6 @@ function readEnterpriseIdentityRecords(
       readIdempotencyRecord(state, payload)
     } else {
       throw invalidEnterpriseIdentityState()
-    }
-  }
-  for (const relation of userGroupRelations) {
-    if (usersWithEmbeddedMemberships.has(relation.userId)) continue
-    const user = state.scimUsers.find((candidate) => candidate.userId === relation.userId)
-    if (!user) throw invalidEnterpriseIdentityState()
-    if (!user.groupIds.includes(relation.groupId)) user.groupIds.push(relation.groupId)
-  }
-  for (const relation of groupMemberRelations) {
-    if (groupsWithEmbeddedMemberships.has(relation.groupId)) continue
-    const group = state.scimGroups.find((candidate) => candidate.groupId === relation.groupId)
-    if (!group) throw invalidEnterpriseIdentityState()
-    if (!group.memberUserIds.includes(relation.userId)) {
-      group.memberUserIds.push(relation.userId)
     }
   }
   for (const entry of previewChanges) {
@@ -5616,18 +5553,6 @@ function isExpiredEnterpriseIdentityRecord(
     throw invalidEnterpriseIdentityState()
   }
   return Number(item.logicalExpiresAt) <= Math.floor(now.getTime() / 1_000)
-}
-
-function readScimRelation(value: unknown) {
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('userId' in value) ||
-    typeof value.userId !== 'string' ||
-    !('groupId' in value) ||
-    typeof value.groupId !== 'string'
-  ) throw invalidEnterpriseIdentityState()
-  return { userId: value.userId, groupId: value.groupId }
 }
 
 function readIdempotencyRecord(state: EnterpriseIdentityState, value: unknown) {

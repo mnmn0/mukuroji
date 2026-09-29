@@ -316,8 +316,8 @@ export type FilterAndSortProjectTasksOptions = {
   personLabels: Readonly<Record<string, string>>
   /** Priority to retain, or all priorities. */
   priorityFilter: PriorityFilter
-  /** Work Item Type to retain, or all types; omitted for legacy callers. */
-  workItemTypeFilter?: WorkItemTypeFilter
+  /** Work Item Type to retain, or all types. */
+  workItemTypeFilter: WorkItemTypeFilter
   /** Free-text query matched against task display fields. */
   searchQuery: string
   /** Due-date order applied after filtering. */
@@ -398,15 +398,11 @@ export function resolveLatestTaskSnapshot(
  * Converts a task into the revision snapshot required by bulk operations.
  *
  * @param task - Task selected for a bulk operation.
- * @param t - Current translator retained for compatibility with task view call sites.
  * @returns Bulk operation identity, label, and expected revision.
  */
 export function createBulkOperationSelection(
   task: CanonicalWorkItem,
-  t: TaskTranslator,
 ): BulkOperationSelection {
-  void t
-
   return {
     expectedRevision: task.revision,
     label: task.title,
@@ -974,8 +970,7 @@ export function filterAndSortProjectTasks(
       resolveTaskAssigneeFilterValue(task, options.t) === options.assigneeFilter
     const matchesPriority = options.priorityFilter === 'all' ||
       task.priority === options.priorityFilter
-    const matchesWorkItemType = options.workItemTypeFilter === undefined ||
-      options.workItemTypeFilter === 'all' ||
+    const matchesWorkItemType = options.workItemTypeFilter === 'all' ||
       createSearchWorkItemTypeKey(
         task.teamId,
         task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,

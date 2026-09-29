@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import type { ExternalWorkItemLink } from '@mukuroji/contracts'
 import {
-  InMemoryDeveloperPlatformClient,
+  InMemoryDeveloperPlatformStorage,
   LocalAesGcmSecretProtector,
-} from './developer-platform'
+} from './adapter-out/shared/developer-platform-store'
 import {
   BUILT_IN_CONNECTOR_CATALOG,
   ConnectorRegistry,
@@ -71,7 +71,7 @@ async function createRuntimeFixture(
   previousOriginSigningSecrets: readonly string[] = [],
 ) {
   let currentTime = NOW
-  const platform = new InMemoryDeveloperPlatformClient(
+  const platform = new InMemoryDeveloperPlatformStorage(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
     () => currentTime,
   )

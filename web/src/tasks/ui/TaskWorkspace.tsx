@@ -135,7 +135,7 @@ export type TaskWorkspaceProps = {
   /** Authoritative canonical Work Item dependency graph. */
   planningSnapshot?: PlanningSnapshot
   /** File controller scoped to the current project and Team. */
-  projectFiles?: FileArtifactsController
+  projectFiles: FileArtifactsController
   /** Current project members. */
   projectMembers: ProjectMember[]
   /** Project member query error shown by the permissions view. */
@@ -464,13 +464,10 @@ export function TaskWorkspace({
   if (activeTab === 'file') {
     return (
       <TaskFileView
-        configuration={configuration}
-        configurationsByTeam={configurationsByTeam}
         currentWorkspaceMemberKey={currentWorkspaceMemberKey}
         locale={locale}
         projectFiles={projectFiles}
         t={t}
-        tasks={tasks}
         workspaceMembers={workspaceMembers}
       />
     )

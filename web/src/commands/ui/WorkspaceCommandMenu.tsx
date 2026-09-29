@@ -118,7 +118,7 @@ export type WorkspaceCommandMenuProps = {
 }
 
 const commandListId = 'workspace-command-menu-list'
-const recentCommandStorageKey = 'mukuroji.command-menu.recent'
+const recentCommandStorageKeyPrefix = 'mukuroji.command-menu.recent'
 const searchEntityLabelKeys: Record<SearchEntityType, MessageKey> = {
   'work-item': 'search.entity.work-item',
   project: 'search.entity.project',
@@ -741,7 +741,6 @@ function EntityGlyph({ entityType }: { entityType: SearchEntityType }) {
 
 function readRecentCommandItems(storageKey: string | undefined) {
   try {
-    window.localStorage.removeItem(recentCommandStorageKey)
     if (!storageKey) return []
     const stored: unknown = JSON.parse(window.localStorage.getItem(storageKey) ?? '[]')
     if (!Array.isArray(stored)) {
@@ -775,7 +774,6 @@ function saveRecentCommandItems(
   try {
     if (!storageKey) return
     window.localStorage.setItem(storageKey, JSON.stringify(items.slice(0, 6)))
-    window.localStorage.removeItem(recentCommandStorageKey)
   } catch {
     // Search navigation must keep working when browser storage is unavailable.
   }
@@ -783,12 +781,12 @@ function saveRecentCommandItems(
 
 function createRecentCommandStorageKey(accessToken?: string) {
   if (!accessToken) {
-    return `${recentCommandStorageKey}.preview`
+    return `${recentCommandStorageKeyPrefix}.preview`
   }
 
   const identityScope = readTokenIdentityScope(accessToken)
   return identityScope
-    ? `${recentCommandStorageKey}.${encodeURIComponent(identityScope)}`
+    ? `${recentCommandStorageKeyPrefix}.${encodeURIComponent(identityScope)}`
     : undefined
 }
 

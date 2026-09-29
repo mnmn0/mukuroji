@@ -2932,36 +2932,34 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         event,
       ),
     ]
-    if (triageEntry) {
-      const retentionSafeEntry = redactExpiredTriageEntry(triageEntry, now)
-      const triageEntryWithMessageCount = {
-        ...retentionSafeEntry,
-        sourcePreview: {
-          ...retentionSafeEntry.sourcePreview,
-          commentCount: retentionSafeEntry.sourcePreview.commentCount + 1,
-        },
-      }
-      const triageContribution = createTriageSourceActivityTransactionItems({
-        tableName: this.tableName,
-        entry: triageEntryWithMessageCount,
-        activity: {
-          activityId: event.id,
-          occurredAt: now,
-          summary: event.summary,
-          actorId: 'requester',
-        },
-        idempotency: {
-          key: dedupe?.digest ?? replyId,
-          fingerprint: dedupe?.inputFingerprint ?? stableHash({
-            workspaceId: lookup.workspaceId,
-            submissionId: lookup.submissionId,
-            source,
-            body,
-          }),
-        },
-      })
-      transactItems.push(...triageContribution.transactItems)
+    const retentionSafeEntry = redactExpiredTriageEntry(triageEntry, now)
+    const triageEntryWithMessageCount = {
+      ...retentionSafeEntry,
+      sourcePreview: {
+        ...retentionSafeEntry.sourcePreview,
+        commentCount: retentionSafeEntry.sourcePreview.commentCount + 1,
+      },
     }
+    const triageContribution = createTriageSourceActivityTransactionItems({
+      tableName: this.tableName,
+      entry: triageEntryWithMessageCount,
+      activity: {
+        activityId: event.id,
+        occurredAt: now,
+        summary: event.summary,
+        actorId: 'requester',
+      },
+      idempotency: {
+        key: dedupe?.digest ?? replyId,
+        fingerprint: dedupe?.inputFingerprint ?? stableHash({
+          workspaceId: lookup.workspaceId,
+          submissionId: lookup.submissionId,
+          source,
+          body,
+        }),
+      },
+    })
+    transactItems.push(...triageContribution.transactItems)
     if (dedupe) {
       const replyReceipt: StoredReplyReceipt = {
         entryType: dedupe.entryType,
@@ -3008,23 +3006,33 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   }
 
   /**
-   * Reads the deterministic Triage projection for a Form submission when it exists.
+   * Strongly reads the deterministic Triage projection committed with a Form submission.
+   *
+   * Every submission writes this entry in its creation transaction and retention redacts it
+   * instead of deleting it, so a missing or malformed row is a data-integrity failure.
    *
    * @param workspaceId - Workspace that owns the Form submission.
    * @param submissionId - Canonical Request submission identifier.
-   * @returns The canonical Triage Entry, or undefined for a pre-Triage legacy submission.
+   * @returns The canonical Triage Entry.
+   * @throws RequestIntakeError when the stored entry is missing or invalid.
    */
   private async getFormTriageEntry(
     workspaceId: string,
     submissionId: string,
-  ): Promise<TriageEntry | undefined> {
+  ): Promise<TriageEntry> {
     const key = createTriageEntryKey(workspaceId, createFormTriageEntryId(submissionId))
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: key,
       ConsistentRead: true,
     }))
-    if (response.Item === undefined) return undefined
+    if (response.Item === undefined) {
+      throw new RequestIntakeError(
+        503,
+        'RequestTriageEntryMissing',
+        'Stored request Triage entry is missing.',
+      )
+    }
     const entry = decodeTriageEntryRow(response.Item, key)
     if (!entry) {
       throw new RequestIntakeError(
@@ -3790,7 +3798,7 @@ function createFormTriageEntry(
 }
 
 /**
- * Removes a legacy queue assignee without retaining an undefined DynamoDB attribute.
+ * Removes the Request queue assignee without retaining an undefined DynamoDB attribute.
  *
  * @param submission - Stored Request submission to copy.
  * @returns A copy with no Triage assignee projection.

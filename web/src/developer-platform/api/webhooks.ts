@@ -1,32 +1,10 @@
 import type {
-  ApiScope,
   CreateWebhookSubscriptionInput,
   WebhookDelivery,
-  WebhookEventType,
   WebhookSubscriptionSecretOutput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DeveloperPlatformApiError } from './errors'
-
-/**
- * Compatibility alias for webhook event identifiers.
- */
-export type DeveloperWebhookEventType = WebhookEventType
-
-/**
- * Compatibility webhook input that keeps the previously required scope field.
- */
-export type CreateDeveloperWebhookInput =
-  Omit<CreateWebhookSubscriptionInput, 'scopes'> & {
-    /** Payload scopes granted to the subscription. */
-    scopes: ApiScope[]
-  }
-
-/**
- * Compatibility alias for the canonical one-time webhook response.
- */
-export type IssuedWebhookSigningSecret =
-  WebhookSubscriptionSecretOutput
 
 const developerApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_WORKSPACE_API_BASE_URL ??
@@ -70,7 +48,7 @@ export function rotateDeveloperWebhook(
   subscriptionId: string,
   mutationContext: MutationRequestContext,
 ) {
-  return requestJson<IssuedWebhookSigningSecret>(
+  return requestJson<WebhookSubscriptionSecretOutput>(
     `/developer/webhook-subscriptions/${encodeURIComponent(subscriptionId)}/rotate-secret`,
     accessToken,
     createJsonMutation('POST', undefined, mutationContext),

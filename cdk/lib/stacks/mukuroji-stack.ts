@@ -1,100 +1,61 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
-import { configureAlarmRouting } from './aspects/alarm-routing';
-import { buildLambdaBuildPaths } from './config/lambda-build-paths';
-import { buildStackParameters } from './config/stack-parameters';
-import {
-  resolveTeamIssueCommentIndexDeploymentStage,
-  type TeamIssueCommentIndexDeploymentStage,
-} from './config/team-issue-comment-index-deployment';
-import {
-  resolveTriageIndexDeploymentStage,
-  triageIndexDeploymentIncludes,
-  type TriageIndexDeploymentStage,
-} from './config/triage-index-deployment';
+import { configureAlarmRouting } from '../aspects/alarm-routing';
+import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
+import { buildStackParameters } from '../config/stack-parameters';
 import {
   buildApiRuntime,
   buildApiTransportsAndRealtime,
-} from './subsystems/api-realtime';
-import { buildBootstrapResources } from './subsystems/bootstrap-resources';
-import { buildCrossDomainIntegrityAccess } from './subsystems/cross-domain-integrity';
-import {
-  buildDataStores,
-  configureRealtimeSessionIndexes,
-} from './subsystems/data-stores';
+} from '../subsystems/api-realtime';
+import { buildBootstrapResources } from '../subsystems/bootstrap-resources';
+import { buildCrossDomainIntegrityAccess } from '../subsystems/cross-domain-integrity';
+import { buildDataStores } from '../subsystems/data-stores';
 import {
   buildFileStorage,
   configureFileStorageApiBoundary,
-} from './subsystems/file-storage';
-import { buildStackOutputs } from './subsystems/outputs';
-import { buildRestoreDrill } from './subsystems/restore-drill';
-import { buildRuntimeControls } from './subsystems/runtime-controls';
+} from '../subsystems/file-storage';
+import { buildStackOutputs } from '../subsystems/outputs';
+import { buildRestoreDrill } from '../subsystems/restore-drill';
+import { buildRuntimeControls } from '../subsystems/runtime-controls';
 import {
   buildAiAssistanceObservabilityWorker,
-} from './subsystems/workers/ai-assistance-observability';
-import { buildAuditProjectionWorker } from './subsystems/workers/audit-projection';
-import { buildAutomationWorkers } from './subsystems/workers/automation';
-import { buildWorkerChannels } from './subsystems/workers/channels';
-import { buildConnectorWorkers } from './subsystems/workers/connectors';
-import { buildEnterpriseIdentityWorkers } from './subsystems/workers/enterprise-identity';
-import { buildRequestEmailWorker } from './subsystems/workers/request-email';
-import { buildScheduleWorkers } from './subsystems/workers/schedules';
-import { buildSlackNotificationWorker } from './subsystems/workers/slack-notifications';
-import { buildTenantOperationWorker } from './subsystems/workers/tenant-operation';
-import { buildTriageScheduleWorker } from './subsystems/workers/triage';
-import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
-import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
-
-/** Stack configuration plus reviewed stateful-index rollout selections. */
-export interface CdkStackProps extends cdk.StackProps {
-  /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
-  readonly triageIndexDeploymentStage?: TriageIndexDeploymentStage;
-  /** Reviewed one-index-at-a-time rollout stage for Team Issue event GSIs. */
-  readonly teamIssueCommentIndexDeploymentStage?: TeamIssueCommentIndexDeploymentStage;
-}
+} from '../subsystems/workers/ai-assistance-observability';
+import { buildAuditProjectionWorker } from '../subsystems/workers/audit-projection';
+import { buildAutomationWorkers } from '../subsystems/workers/automation';
+import { buildWorkerChannels } from '../subsystems/workers/channels';
+import { buildConnectorWorkers } from '../subsystems/workers/connectors';
+import { buildEnterpriseIdentityWorkers } from '../subsystems/workers/enterprise-identity';
+import { buildRequestEmailWorker } from '../subsystems/workers/request-email';
+import { buildScheduleWorkers } from '../subsystems/workers/schedules';
+import { buildSlackNotificationWorker } from '../subsystems/workers/slack-notifications';
+import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operation';
+import { buildTriageScheduleWorker } from '../subsystems/workers/triage';
+import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
+import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
 
 /**
- * Composes the production infrastructure from logical-ID-preserving subsystem builders.
+ * Composes the Mukuroji application infrastructure from subsystem builders.
  */
-export class CdkStack extends cdk.Stack {
+export class MukurojiStack extends cdk.Stack {
   /**
    * Creates the application stack without introducing additional construct scopes.
    *
    * @param scope Parent construct that owns the stack.
    * @param id Stable stack construct identifier.
-   * @param props Optional CDK stack and reviewed index-rollout configuration.
+   * @param props Optional CDK stack configuration.
    */
-  constructor(scope: Construct, id: string, props?: CdkStackProps) {
-    const {
-      triageIndexDeploymentStage: configuredTriageIndexDeploymentStage,
-      teamIssueCommentIndexDeploymentStage: configuredTeamIssueCommentIndexDeploymentStage,
-      ...baseStackProps
-    } = props ?? {};
-    const triageIndexDeploymentStage = resolveTriageIndexDeploymentStage(
-      configuredTriageIndexDeploymentStage,
-    );
-    const teamIssueCommentIndexDeploymentStage = resolveTeamIssueCommentIndexDeploymentStage(
-      configuredTeamIssueCommentIndexDeploymentStage,
-    );
-    super(scope, id, baseStackProps);
-    new cdk.CfnOutput(this, 'TriageIndexDeploymentStage', {
-      value: triageIndexDeploymentStage,
-    });
-    new cdk.CfnOutput(this, 'TeamIssueCommentIndexDeploymentStage', {
-      value: teamIssueCommentIndexDeploymentStage,
-    });
+  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameters = buildStackParameters(this);
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
-      teamIssueCommentIndexDeploymentStage,
-      triageIndexDeploymentStage,
     });
     const fileStorage = buildFileStorage(this, {
-      allowedOrigins: parameters.taskApiAllowedOriginList,
+      allowedOrigins: parameters.apiAllowedOriginList,
       fileProofingTable: dataStores.fileProofingTable,
       lambdaBuildPaths,
       retentionDays: parameters.fileRetentionDays,
@@ -124,7 +85,6 @@ export class CdkStack extends cdk.Stack {
         parameters.restoreDrillCleanupApproverRoleArn,
       workspaceAuditPseudonymKey: parameters.workspaceAuditPseudonymKey,
     });
-    configureRealtimeSessionIndexes(dataStores);
 
     const workerChannels = buildWorkerChannels(this);
     const apiRuntime = buildApiRuntime(this, {
@@ -222,17 +182,12 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
-    const triageScheduleWorker = triageIndexDeploymentIncludes(
-      triageIndexDeploymentStage,
-      'wake',
-    )
-      ? buildTriageScheduleWorker(this, {
-        dataStores,
-        lambdaBuildPaths,
-        parameters,
-        runtimeControls,
-      })
-      : {};
+    const triageScheduleWorker = buildTriageScheduleWorker(this, {
+      dataStores,
+      lambdaBuildPaths,
+      parameters,
+      runtimeControls,
+    });
     const tenantOperationWorker = buildTenantOperationWorker(this, {
       dataStores,
       fileStorage,

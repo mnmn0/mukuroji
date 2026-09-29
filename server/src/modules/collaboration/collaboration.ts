@@ -14,8 +14,6 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   COLLABORATION_CONTEXT_SCHEMA_VERSION,
-  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-  WORK_ITEM_SCHEMA_VERSION,
   type AcceptedResolution,
   type AcceptedResolutionPage,
   type CreateCuratedContextItemRequest,
@@ -44,10 +42,6 @@ import {
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from '../audit'
-import {
-  isCanonicalWorkItemRecord,
-  type CanonicalWorkItemRecord,
-} from '../work-items'
 
 /** Comment 本文に保存できる文字数です。 */
 export const COLLABORATION_COMMENT_MAX_LENGTH = 20_000
@@ -60,16 +54,6 @@ export const COLLABORATION_CONTEXT_TITLE_MAX_LENGTH = 200
 
 /** Curated context body と accepted resolution summary に保存できる文字数です。 */
 export const COLLABORATION_CONTEXT_BODY_MAX_LENGTH = 20_000
-
-/** Version of the Team Issue legacy-comment migration contract. */
-export const TEAM_ISSUE_COMMENT_BACKFILL_VERSION = 1
-
-/** Record key for a completed Team Issue comment backfill marker. */
-export const TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY =
-  `TEAM_ISSUE_COMMENTS#v${TEAM_ISSUE_COMMENT_BACKFILL_VERSION}`
-
-/** Scope identifier for an environment-wide completed Team Issue comment backfill marker. */
-export const TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES = '__all-workspaces__'
 
 /** Record key for the per-entity curated-context pagination generation. */
 const CURATED_CONTEXT_LEDGER_RECORD_KEY = 'CONTEXT_LEDGER'
@@ -285,29 +269,6 @@ export type WorkItemCollaborationScope = {
   authorizationSnapshot?: CuratedContextAuthorizationSnapshot
 }
 
-/** Input used to copy one legacy Team Issue comment into Collaboration. */
-export type BackfillCollaborationCommentInput = WorkItemCollaborationScope & {
-  /** Stable event identifier reused as the canonical comment identifier. */
-  commentId: string
-  /** Legacy event actor preserved as the canonical comment author. */
-  actorMemberKey: string
-  /** Legacy Markdown/plain-text body. */
-  bodyMarkdown: string
-  /** Original legacy event timestamp. */
-  occurredAt: string
-}
-
-/** Result of validating one legacy comment's canonical parent during backfill. */
-export type BackfillTeamIssueCommentValidation = 'canonical' | 'parent-deleted'
-
-/** Result of one idempotent legacy-comment write. */
-export type BackfillTeamIssueCommentWriteResult = {
-  /** Canonical comment snapshot after the write or idempotent replay. */
-  comment: CollaborationComment
-  /** Whether this invocation created the canonical comment transaction. */
-  created: boolean
-}
-
 /** Read-only authorization row guard appended to a watcher mutation transaction. */
 export type CollaborationAuthorizationConditionCheck = {
   /** Condition check against one current authorization source-of-truth row. */
@@ -326,10 +287,8 @@ export type GetCollaborationThreadInput = {
   rootCommentId?: string
   /** Whether to read root comments and replies through one bounded page stream. */
   includeReplies?: boolean
-  /** Whether aggregate reads merge all index generations in global newest-first order. */
+  /** Whether an aggregate read returns the validated global timeline with a limit-bound cursor. */
   newestFirst?: boolean
-  /** Whether a rolling compatibility deployment requires a cursor readable by pre-migration servers. */
-  legacyCursorCompatible?: boolean
   /** 一 page の最大件数です。 */
   limit?: number
   /** 前 page が返した opaque cursor です。 */
@@ -354,7 +313,7 @@ export type GetCollaborationCommentMutationReplayInput = {
   entityKey: string
   /** Request identity used to derive the committed comment identifier. */
   auditContext: MutationAuditContext
-  /** Optional explicit identifier used by trusted service mutations with legacy IDs. */
+  /** Optional explicit identifier used by trusted service mutations with deterministic IDs. */
   commentId?: string
 }
 
@@ -622,12 +581,6 @@ export type PresenceLeaveInput = {
 
 /** Collaboration data store の公開契約です。 */
 export interface CollaborationClient {
-  /** Returns whether the environment marker allows canonical-only Team Issue comment reads. */
-  isTeamIssueCommentBackfillComplete(workspaceId: string): Promise<boolean>
-  /** Validates one legacy Team Issue comment without writing migration state. */
-  validateBackfillTeamIssueComment(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<BackfillTeamIssueCommentValidation>
   /** Root comments または replies を page 取得します。 */
   getThread(input: GetCollaborationThreadInput): Promise<CollaborationThreadPage>
   /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
@@ -2393,50 +2346,6 @@ type StoredComment = CollaborationComment & {
   legacyAcceptedResolutions: AcceptedResolution[]
 }
 
-/** Durable provenance receipt for one successfully copied legacy comment. */
-type StoredBackfillReceipt = {
-  /** DynamoDB partition key shared with the copied comment. */
-  entityKey: string
-  /** DynamoDB sort key for the immutable migration receipt. */
-  recordKey: string
-  /** Row discriminator. */
-  entryType: 'team-issue-comment-backfill-receipt'
-  /** Stable legacy event identifier. */
-  commentId: string
-  /** Normalized actor copied from the legacy event. */
-  sourceActorMemberKey: string
-  /** Normalized timestamp copied from the legacy event. */
-  sourceOccurredAt: string
-  /** Digest of the legacy source identity and body. */
-  sourceBodyFingerprint: string
-}
-
-/** Durable reconciliation receipt for a comment whose parent Work Item was deleted. */
-type StoredDeletedBackfillReconciliation = {
-  /** DynamoDB partition key shared with the Work Item collaboration scope. */
-  entityKey: string
-  /** DynamoDB sort key for the immutable reconciliation receipt. */
-  recordKey: string
-  /** Row discriminator. */
-  entryType: 'team-issue-comment-backfill-reconciliation'
-  /** Stable legacy event identifier. */
-  commentId: string
-  /** Workspace that owned the deleted parent. */
-  workspaceId: string
-  /** Team that owned the deleted parent. */
-  teamId: string
-  /** Work Item identifier whose parent row is absent. */
-  issueId: string
-  /** Auditable reason for skipping canonical comment creation. */
-  reason: 'parent-deleted'
-  /** Normalized actor from the legacy event. */
-  sourceActorMemberKey: string
-  /** Normalized timestamp from the legacy event. */
-  sourceOccurredAt: string
-  /** Digest of the source identity and body without retaining the body again. */
-  sourceBodyFingerprint: string
-}
-
 /** Accepted resolution history の append-only row です。 */
 type StoredAcceptedResolution = {
   /** DynamoDB partition key です。 */
@@ -2599,35 +2508,7 @@ type StoredPresence = {
   expiresAt: number
 }
 
-/** Cursor used to continue reading the migration-aware discussion indexes. */
-type DiscussionCursor = {
-  /** Cursor schema version. */
-  version: 2
-  /** Entity key that owns the cursor. */
-  entityKey: string
-  /** Current discussion index prefix bound to the cursor. */
-  currentPrefix: string
-  /** Legacy discussion index prefix bound to the cursor. */
-  legacyPrefix: string
-  /** Index phase used by the next page. */
-  phase: 'current' | 'legacy'
-  /** DynamoDB last evaluated sort key for the current phase. */
-  recordKey?: string
-}
-
-/** Cursor shape emitted by the pre-timeline discussion index. */
-type LegacyDiscussionCursor = {
-  /** Cursor schema version. */
-  version: 1
-  /** Entity key that owns the cursor. */
-  entityKey: string
-  /** Legacy discussion prefix bound to the cursor. */
-  prefix: string
-  /** DynamoDB last evaluated sort key. */
-  recordKey: string
-}
-
-/** Generic version-one cursor used by older single-prefix Collaboration readers. */
+/** Scope-bound cursor used by single-prefix Collaboration readers. */
 type PrefixCursor = {
   /** Cursor schema version. */
   version: 1
@@ -2638,35 +2519,6 @@ type PrefixCursor = {
   /** DynamoDB last evaluated sort key. */
   recordKey: string
 }
-
-/** Two physical discussion indexes that make a read migration-safe. */
-type DiscussionReadPlan = {
-  /** Chronologically ordered index prefix introduced by the migration. */
-  currentPrefix: string
-  /** Pre-migration discussion index prefix. */
-  legacyPrefix: string
-  /** Exclusive upper bound that keeps a legacy aggregate query before the current index. */
-  legacyUpperBound?: string
-  /** Whether compatibility callers should read the pre-migration index before the current index. */
-  legacyFirst: boolean
-}
-
-/** Decoded cursor variant used by the discussion page reader. */
-type DecodedDiscussionCursor =
-  | {
-      /** Identifies the pre-migration cursor shape. */
-      kind: 'legacy'
-      /** Last legacy sort key. */
-      recordKey: string
-    }
-  | {
-      /** Identifies the current migration-aware cursor shape. */
-      kind: 'current'
-      /** Index phase used by the next page. */
-      phase: DiscussionCursor['phase']
-      /** Last sort key in the current phase, when pagination has started. */
-      recordKey?: string
-    }
 
 /** One query page returned by the discussion index reader. */
 type DiscussionQueryPage = {
@@ -2702,9 +2554,6 @@ const acceptedResolutionHistoryMaxLimit = 10
 const curatedContextPageLimit = 10
 const discussionTimelinePrefix = 'DISCUSSION#V2#'
 const discussionScopedPrefix = 'DISCUSSION#V2S#'
-const discussionLegacyUpperBound = discussionTimelinePrefix
-/** Marker used to exclude new compatibility rows from migration fallback reads. */
-const discussionLegacyIndexVersion = 2
 const localTableInitializers = new WeakMap<DynamoDBClient, Map<string, Promise<void>>>()
 
 /** Work Item scope の canonical collaboration entity key を作成します。 */
@@ -2714,16 +2563,6 @@ export function createWorkItemCollaborationEntityKey(
   issueId: string,
 ) {
   return `${requireText(workspaceId, 'Workspace ID')}#work-item#team/${requireText(teamId, 'Team ID')}/issue/${requireText(issueId, 'Issue ID')}`
-}
-
-/**
- * Creates the environment/workspace scope used by the legacy comment migration marker.
- *
- * @param workspaceId - Workspace whose legacy comment rows were backfilled.
- * @returns Stable migration-marker entity key.
- */
-export function createTeamIssueCommentBackfillMarkerEntityKey(workspaceId: string) {
-  return `${requireText(workspaceId, 'Workspace ID')}#collaboration-migration`
 }
 
 /** Project scope の canonical collaboration entity key を作成します。 */
@@ -2777,35 +2616,18 @@ export function createPlanningUpdatePublicTargetKey(
 }
 
 /**
- * Builds the current and pre-migration discussion prefixes for one read scope.
+ * Selects the discussion index prefix that serves one thread read scope.
  *
- * @param input - Thread read input whose scope determines the prefixes.
- * @returns Prefixes used to read the current and legacy discussion indexes.
+ * @param input - Thread read input whose scope determines the prefix.
+ * @returns The reply, aggregate timeline, or root discussion index prefix.
  */
-function createDiscussionReadPlan(input: GetCollaborationThreadInput): DiscussionReadPlan {
+function createDiscussionReadPrefix(input: GetCollaborationThreadInput): string {
   if (input.rootCommentId) {
-    const rootCommentId = requireIdentifier(input.rootCommentId, 'Root comment ID')
-    return {
-      currentPrefix: `${discussionScopedPrefix}THREAD#${rootCommentId}#`,
-      legacyPrefix: `DISCUSSION#THREAD#${rootCommentId}#`,
-      legacyFirst: input.legacyCursorCompatible === true,
-    }
+    return `${discussionScopedPrefix}THREAD#${requireIdentifier(input.rootCommentId, 'Root comment ID')}#`
   }
-
-  if (input.includeReplies === true) {
-    return {
-      currentPrefix: discussionTimelinePrefix,
-      legacyPrefix: 'DISCUSSION#',
-      legacyUpperBound: discussionLegacyUpperBound,
-      legacyFirst: false,
-    }
-  }
-
-  return {
-    currentPrefix: `${discussionScopedPrefix}ROOT#`,
-    legacyPrefix: 'DISCUSSION#ROOT#',
-    legacyFirst: input.legacyCursorCompatible === true,
-  }
+  return input.includeReplies === true
+    ? discussionTimelinePrefix
+    : `${discussionScopedPrefix}ROOT#`
 }
 
 /** DynamoDB collaboration table を操作する client です。 */
@@ -2822,8 +2644,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   private readonly dynamoDbClient: DynamoDBClient
   /** Local table がない場合に自動作成するかどうかです。 */
   private readonly bootstrapLocalTable: boolean
-  /** Legacy Team Issue event table bound into the migration marker. */
-  private readonly teamIssueEventsTableName: string
 
   constructor(
     tableName = readEnvironment('MUKUROJI_COLLABORATION_TABLE') ??
@@ -2835,9 +2655,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createDynamoDbClient(),
     bootstrapLocalTable = documentClient === undefined && shouldBootstrapLocalTable(),
-    teamIssueEventsTableName = readEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE') ??
-      readEnvironment('TEAM_ISSUE_EVENTS_TABLE_NAME') ??
-      'mukuroji-team-issue-events-local',
   ) {
     this.tableName = requireText(tableName, 'Collaboration table name')
     this.parentIssueTableName = requireText(parentIssueTableName, 'Team issues table name')
@@ -2846,655 +2663,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     this.documentClient = documentClient ??
       createDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
-    this.teamIssueEventsTableName = requireText(
-      teamIssueEventsTableName,
-      'Team issue events table name',
-    )
-  }
-
-  /** Returns whether the environment marker allows canonical-only Team Issue comment reads. */
-  async isTeamIssueCommentBackfillComplete(workspaceId: string): Promise<boolean> {
-    await this.ensureLocalTable()
-    const workspaceMarker = await this.readTeamIssueCommentBackfillMarker(workspaceId)
-    if (isCompletedTeamIssueCommentBackfillMarker(
-      workspaceMarker,
-      this.tableName,
-      this.teamIssueEventsTableName,
-    )) {
-      return true
-    }
-    if (workspaceId === TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES) {
-      return false
-    }
-    const environmentMarker = await this.readTeamIssueCommentBackfillMarker(
-      TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
-    )
-    return isCompletedTeamIssueCommentBackfillMarker(
-      environmentMarker,
-      this.tableName,
-      this.teamIssueEventsTableName,
-    )
-  }
-
-  /** Reads one migration marker with strong consistency. */
-  private async readTeamIssueCommentBackfillMarker(workspaceId: string) {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        entityKey: createTeamIssueCommentBackfillMarkerEntityKey(workspaceId),
-        recordKey: TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY,
-      },
-      ConsistentRead: true,
-    }))
-    return response.Item
-  }
-
-  /**
-   * Validates one legacy comment and its parent Work Item without writing data.
-   *
-   * @param input - Legacy comment and Work Item scope to validate.
-   */
-  async validateBackfillTeamIssueComment(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<BackfillTeamIssueCommentValidation> {
-    await this.ensureLocalTable()
-    const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
-    const parent = await this.readCanonicalBackfillParent(normalizedInput)
-    if (!parent) return 'parent-deleted'
-    await this.validateBackfillTarget(normalizedInput)
-    return 'canonical'
-  }
-
-  /**
-   * Checks existing canonical backfill rows without changing any target state.
-   *
-   * @param input - Normalized legacy comment and Work Item scope.
-   */
-  private async validateBackfillTarget(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<void> {
-    const existingComment = await this.getStoredComment(input.entityKey, input.commentId)
-    const existingReceipt = await this.getBackfillReceipt(input.entityKey, input.commentId)
-
-    if (existingComment && !isBackfilledCommentIdentity(existingComment, input)) {
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The canonical comment target already contains a different comment.',
-      )
-    }
-    if (
-      existingComment &&
-      !existingReceipt &&
-      (existingComment.bodyMarkdown !== input.bodyMarkdown ||
-        existingComment.version !== 1 ||
-        existingComment.updatedAt !== input.occurredAt)
-    ) {
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The canonical comment target has no matching backfill receipt for its current state.',
-      )
-    }
-    if (existingReceipt && !isSameBackfillReceipt(existingReceipt, input)) {
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The legacy comment provenance receipt conflicts with the source event.',
-      )
-    }
-    if (existingReceipt && !existingComment) {
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The legacy comment provenance receipt exists without its canonical comment.',
-      )
-    }
-
-    const discussionRecords = [
-      createBackfillDiscussionRecord(
-        input.entityKey,
-        discussionTimelineRecordKey(input.occurredAt, input.commentId, undefined),
-        input.commentId,
-        input.occurredAt,
-      ),
-      createBackfillDiscussionRecord(
-        input.entityKey,
-        discussionScopedRecordKey(input.occurredAt, input.commentId, undefined),
-        input.commentId,
-        input.occurredAt,
-      ),
-      createBackfillDiscussionRecord(
-        input.entityKey,
-        discussionLegacyRecordKey(input.occurredAt, input.commentId, undefined),
-        input.commentId,
-        input.occurredAt,
-        discussionLegacyIndexVersion,
-      ),
-    ]
-    for (const expected of discussionRecords) {
-      const response = await this.documentClient.send(new GetCommand({
-        TableName: this.tableName,
-        Key: { entityKey: input.entityKey, recordKey: expected.recordKey },
-        ConsistentRead: true,
-      }))
-      if (!response.Item) continue
-
-      const exact = isSameBackfilledDiscussion(
-        response.Item,
-        input.entityKey,
-        expected.recordKey,
-        input.commentId,
-        input.occurredAt,
-        expected.discussionIndexVersion,
-      )
-      const legacyCompatible = expected.discussionIndexVersion === discussionLegacyIndexVersion &&
-        isSameBackfilledDiscussion(
-          response.Item,
-          input.entityKey,
-          expected.recordKey,
-          input.commentId,
-          input.occurredAt,
-        )
-      if (!exact && !legacyCompatible) {
-        throw new CollaborationError(
-          409,
-          'CollaborationBackfillConflict',
-          'A discussion projection target already contains different data.',
-        )
-      }
-      if (!existingComment) {
-        throw new CollaborationError(
-          409,
-          'CollaborationBackfillConflict',
-          'A discussion projection exists without its canonical comment.',
-        )
-      }
-    }
-  }
-
-  /**
-   * Copies one legacy comment into Collaboration without notifications or audit delivery.
-   *
-   * @param input - Validated legacy comment and Work Item scope.
-   * @returns The idempotently persisted canonical comment.
-   */
-  async backfillTeamIssueComment(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<CollaborationComment> {
-    return (await this.backfillTeamIssueCommentWithResult(input)).comment
-  }
-
-  /**
-   * Copies one legacy comment and reports whether this invocation created it.
-   *
-   * @param input - Validated legacy comment and Work Item scope.
-   * @returns The canonical comment and transaction creation status.
-   */
-  async backfillTeamIssueCommentWithResult(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<BackfillTeamIssueCommentWriteResult> {
-    await this.ensureLocalTable()
-    const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
-    const parent = await this.assertCanonicalBackfillParent(normalizedInput)
-    const commentId = normalizedInput.commentId
-    const actorMemberKey = normalizedInput.actorMemberKey
-    const bodyMarkdown = normalizedInput.bodyMarkdown
-    const occurredAt = normalizedInput.occurredAt
-    const comment: StoredComment = {
-      entityKey: normalizedInput.entityKey,
-      recordKey: commentRecordKey(commentId),
-      entryType: 'comment',
-      id: commentId,
-      rootCommentId: commentId,
-      authorMemberKey: actorMemberKey,
-      bodyMarkdown,
-      version: 1,
-      mentionMemberKeys: [],
-      createdAt: occurredAt,
-      updatedAt: occurredAt,
-      reactions: [],
-      acceptedResolutions: [],
-      legacyAcceptedResolutions: [],
-    }
-    const discussionRecords = [
-      createBackfillDiscussionRecord(
-        normalizedInput.entityKey,
-        discussionTimelineRecordKey(occurredAt, commentId, undefined),
-        commentId,
-        occurredAt,
-      ),
-      createBackfillDiscussionRecord(
-        normalizedInput.entityKey,
-        discussionScopedRecordKey(occurredAt, commentId, undefined),
-        commentId,
-        occurredAt,
-      ),
-      createBackfillDiscussionRecord(
-        normalizedInput.entityKey,
-        discussionLegacyRecordKey(occurredAt, commentId, undefined),
-        commentId,
-        occurredAt,
-        discussionLegacyIndexVersion,
-      ),
-    ]
-
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          parentIssueBackfillCondition(
-            this.parentIssueTableName,
-            normalizedInput,
-            parent.revision,
-          ),
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: toStoredCommentStorageItem(comment),
-              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-            },
-          },
-          ...discussionRecords.map((Item) => ({
-            Put: {
-              TableName: this.tableName,
-              Item,
-              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-            },
-          })),
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: createBackfillReceiptRecord(normalizedInput),
-              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-            },
-          },
-        ],
-      }))
-      return { comment, created: true }
-    } catch (error) {
-      if (!isBackfillConditionalFailure(error)) {
-        throw toCollaborationStoreError(error)
-      }
-      if (isTransactionConditionalFailureAt(error, 0)) {
-        let currentParent: CanonicalWorkItemRecord | undefined
-        try {
-          currentParent = await this.readCanonicalBackfillParent(normalizedInput)
-        } catch (readError) {
-          if (readError instanceof CollaborationError) throw readError
-          throw toCollaborationStoreError(readError)
-        }
-        if (!currentParent) {
-          throw new CollaborationError(
-            409,
-            'CollaborationBackfillParentDeleted',
-            'The parent Work Item was deleted while the legacy comment was being migrated.',
-            { cause: error },
-          )
-        }
-      }
-      const existing = await this.getStoredComment(normalizedInput.entityKey, commentId)
-      const receipt = await this.getBackfillReceipt(normalizedInput.entityKey, commentId)
-      if (
-        existing &&
-        receipt &&
-        isSameBackfillReceipt(receipt, normalizedInput) &&
-        isBackfilledCommentIdentity(existing, normalizedInput)
-      ) {
-        await this.repairBackfilledDiscussion(normalizedInput, existing)
-        return { comment: existing, created: false }
-      }
-      if (isTransactionConditionalFailureAt(error, 1) &&
-          existing &&
-          isSameBackfilledComment(existing, comment)) {
-        await this.ensureBackfillReceipt(normalizedInput)
-        await this.repairBackfilledDiscussion(normalizedInput, existing)
-        return { comment: existing, created: false }
-      }
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The legacy comment could not be copied into Collaboration.',
-        { cause: error },
-      )
-    }
-  }
-
-  /**
-   * Records an idempotent reconciliation when a legacy comment's parent was deleted.
-   *
-   * The transaction proves that the canonical parent is still absent while writing
-   * a scoped receipt. A concurrent recreation therefore becomes a conflict instead
-   * of silently classifying a live Work Item as deleted.
-   *
-   * @param input - Legacy comment and deleted Work Item scope.
-   * @returns Whether this invocation created the reconciliation receipt.
-   */
-  async reconcileDeletedBackfillTeamIssueComment(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<boolean> {
-    await this.ensureLocalTable()
-    const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
-    const expected = createDeletedBackfillReconciliationRecord(normalizedInput)
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          deletedParentBackfillCondition(this.parentIssueTableName, normalizedInput),
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: expected,
-              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-            },
-          },
-        ],
-      }))
-      return true
-    } catch (error) {
-      if (!isBackfillConditionalFailure(error)) {
-        throw toCollaborationStoreError(error)
-      }
-      if (isTransactionConditionalFailureAt(error, 0)) {
-        throw new CollaborationError(
-          409,
-          'CollaborationBackfillConflict',
-          'The deleted Work Item parent was recreated while reconciliation was running.',
-          { cause: error },
-        )
-      }
-      const existing = await this.getDeletedBackfillReconciliation(
-        normalizedInput.entityKey,
-        normalizedInput.commentId,
-      )
-      if (existing && isSameDeletedBackfillReconciliation(existing, normalizedInput)) {
-        return false
-      }
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The deleted comment reconciliation receipt already exists with different data.',
-        { cause: error },
-      )
-    }
-  }
-
-  /** Reads and validates the canonical parent before a backfill is planned or written. */
-  private async assertCanonicalBackfillParent(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<CanonicalWorkItemRecord> {
-    const parent = await this.readCanonicalBackfillParent(input)
-    if (!parent) {
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillParentDeleted',
-        'The parent Work Item was deleted before the legacy comment was migrated.',
-      )
-    }
-    return parent
-  }
-
-  /** Reads one canonical parent and distinguishes deletion from malformed data. */
-  private async readCanonicalBackfillParent(
-    input: BackfillCollaborationCommentInput,
-  ): Promise<CanonicalWorkItemRecord | undefined> {
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.parentIssueTableName,
-      Key: {
-        directoryTeamId: `${input.workspaceId}#team#${input.teamId}`,
-        issueId: input.issueId,
-      },
-      ConsistentRead: true,
-    }))
-    if (response.Item === undefined) {
-      return undefined
-    }
-    if (!isCanonicalBackfillParent(response.Item, input)) {
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The parent Work Item is invalid for the legacy comment scope.',
-      )
-    }
-    return response.Item
-  }
-
-  /** Reads one immutable deleted-parent reconciliation receipt with strong consistency. */
-  private async getDeletedBackfillReconciliation(
-    entityKey: string,
-    commentId: string,
-  ) {
-    const recordKey = deletedBackfillReconciliationRecordKey(commentId)
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: { entityKey, recordKey },
-      ConsistentRead: true,
-    }))
-    return response.Item
-      ? toStoredDeletedBackfillReconciliation(response.Item, entityKey, recordKey)
-      : undefined
-  }
-
-  /** Reads one immutable backfill provenance receipt with strong consistency. */
-  private async getBackfillReceipt(entityKey: string, commentId: string) {
-    const recordKey = backfillReceiptRecordKey(commentId)
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: { entityKey, recordKey },
-      ConsistentRead: true,
-    }))
-    return response.Item
-      ? toStoredBackfillReceipt(response.Item, entityKey, recordKey)
-      : undefined
-  }
-
-  /** Persists one immutable backfill provenance receipt idempotently. */
-  private async ensureBackfillReceipt(input: BackfillCollaborationCommentInput): Promise<void> {
-    const expected = createBackfillReceiptRecord(input)
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [{
-          Put: {
-            TableName: this.tableName,
-            Item: expected,
-            ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-          },
-        }],
-      }))
-    } catch (error) {
-      if (!isBackfillConditionalFailure(error)) {
-        throw toCollaborationStoreError(error)
-      }
-      const existing = await this.getBackfillReceipt(input.entityKey, input.commentId)
-      if (!existing || !isSameBackfillReceipt(existing, input)) {
-        throw new CollaborationError(
-          409,
-          'CollaborationBackfillConflict',
-          'The legacy comment backfill receipt already exists with different data.',
-          { cause: error },
-        )
-      }
-    }
-  }
-
-  /** Repairs all discussion projections for an already copied comment. */
-  private async repairBackfilledDiscussion(
-    input: BackfillCollaborationCommentInput,
-    existing: StoredComment,
-  ): Promise<void> {
-    const existingDiscussionRecords = [
-      createBackfillDiscussionRecord(
-        input.entityKey,
-        discussionTimelineRecordKey(existing.createdAt, input.commentId, undefined),
-        input.commentId,
-        existing.createdAt,
-      ),
-      createBackfillDiscussionRecord(
-        input.entityKey,
-        discussionScopedRecordKey(existing.createdAt, input.commentId, undefined),
-        input.commentId,
-        existing.createdAt,
-      ),
-      createBackfillDiscussionRecord(
-        input.entityKey,
-        discussionLegacyRecordKey(existing.createdAt, input.commentId, undefined),
-        input.commentId,
-        existing.createdAt,
-        discussionLegacyIndexVersion,
-      ),
-    ]
-    for (const record of existingDiscussionRecords) {
-      await this.ensureBackfilledDiscussionRecord(
-        input.entityKey,
-        record.recordKey,
-        input.commentId,
-        existing.createdAt,
-        record.discussionIndexVersion,
-      )
-    }
-  }
-
-  /** Repairs the discussion projection when a backfill comment already exists. */
-  private async ensureBackfilledDiscussionRecord(
-    entityKey: string,
-    recordKey: string,
-    commentId: string,
-    occurredAt: string,
-    discussionIndexVersion?: number,
-  ): Promise<void> {
-    const expected = createBackfillDiscussionRecord(
-      entityKey,
-      recordKey,
-      commentId,
-      occurredAt,
-      discussionIndexVersion,
-    )
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [{
-          Put: {
-            TableName: this.tableName,
-            Item: expected,
-            ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-          },
-        }],
-      }))
-    } catch (error) {
-      if (!isTransactionConditionalFailureAt(error, 0)) {
-        throw toCollaborationStoreError(error)
-      }
-      const existing = await this.documentClient.send(new GetCommand({
-        TableName: this.tableName,
-        Key: { entityKey, recordKey },
-        ConsistentRead: true,
-      }))
-      if (isSameBackfilledDiscussion(
-        existing.Item,
-        entityKey,
-        recordKey,
-        commentId,
-        occurredAt,
-        discussionIndexVersion,
-      )) {
-        return
-      }
-      if (
-        discussionIndexVersion === discussionLegacyIndexVersion &&
-        isSameBackfilledDiscussion(existing.Item, entityKey, recordKey, commentId, occurredAt)
-      ) {
-        try {
-          await this.documentClient.send(new TransactWriteCommand({
-            TransactItems: [{
-              Put: {
-                TableName: this.tableName,
-                Item: expected,
-                ConditionExpression:
-                  'entryType = :entryType AND commentId = :commentId AND rootCommentId = :rootCommentId AND createdAt = :createdAt AND attribute_not_exists(discussionIndexVersion)',
-                ExpressionAttributeValues: {
-                  ':entryType': 'discussion',
-                  ':commentId': commentId,
-                  ':rootCommentId': commentId,
-                  ':createdAt': occurredAt,
-                },
-              },
-            }],
-          }))
-          return
-        } catch (upgradeError) {
-          if (!isTransactionConditionalFailureAt(upgradeError, 0)) {
-            throw toCollaborationStoreError(upgradeError)
-          }
-          const upgraded = await this.documentClient.send(new GetCommand({
-            TableName: this.tableName,
-            Key: { entityKey, recordKey },
-            ConsistentRead: true,
-          }))
-          if (isSameBackfilledDiscussion(
-            upgraded.Item,
-            entityKey,
-            recordKey,
-            commentId,
-            occurredAt,
-            discussionIndexVersion,
-          )) {
-            return
-          }
-        }
-      }
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The discussion projection already exists with different data.',
-        { cause: error },
-      )
-    }
-  }
-
-  /**
-   * Publishes the completion marker after the legacy source scan reaches its end.
-   *
-   * @param workspaceId - Workspace whose source rows were fully processed.
-   * @param completedAt - Completion timestamp, primarily supplied by a checkpointed runner.
-   */
-  async markTeamIssueCommentBackfillComplete(
-    workspaceId: string,
-    completedAt = new Date().toISOString(),
-  ): Promise<void> {
-    await this.ensureLocalTable()
-    const entityKey = createTeamIssueCommentBackfillMarkerEntityKey(workspaceId)
-    const marker = {
-      entityKey,
-      recordKey: TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY,
-      entryType: 'migration-marker',
-      migration: 'team-issue-comments',
-      version: TEAM_ISSUE_COMMENT_BACKFILL_VERSION,
-      state: 'complete',
-      sourceTableName: this.teamIssueEventsTableName,
-      targetTableName: this.tableName,
-      completedAt: normalizeBackfillTimestamp(completedAt),
-    }
-    try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [{
-          Put: {
-            TableName: this.tableName,
-            Item: marker,
-            ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-          },
-        }],
-      }))
-    } catch (error) {
-      if (!isTransactionConditionalFailureAt(error, 0)) {
-        throw toCollaborationStoreError(error)
-      }
-      if (await this.isTeamIssueCommentBackfillComplete(workspaceId)) {
-        return
-      }
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillMarkerConflict',
-        'The Team Issue comment backfill marker already exists with different data.',
-        { cause: error },
-      )
-    }
   }
 
   /** Root comments または replies を page 取得します。 */
@@ -3502,14 +2670,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     await this.ensureLocalTable()
     const entityKey = requireText(input.entityKey, 'Collaboration entity key')
     const viewerMemberKey = normalizeMemberKey(input.viewerMemberKey)
-    const plan = createDiscussionReadPlan(input)
+    const prefix = createDiscussionReadPrefix(input)
     const limit = clampLimit(input.limit)
-    if (input.newestFirst && (!input.includeReplies || input.rootCommentId || input.legacyCursorCompatible)) {
+    if (input.newestFirst && (!input.includeReplies || input.rootCommentId)) {
       throw new CollaborationError(400, 'InvalidCollaborationScope', 'Ordered discussion reads require an aggregate timeline scope.')
     }
     const page = input.newestFirst
-      ? await this.readOrderedDiscussionPage(plan, entityKey, input.cursor, limit)
-      : await this.readDiscussionPage(plan, entityKey, decodeDiscussionCursor(input.cursor, entityKey, plan), limit)
+      ? await this.readOrderedDiscussionPage(entityKey, input.cursor, limit)
+      : await this.readDiscussionPage(entityKey, prefix, input.cursor, limit)
     const commentIds = page.items.flatMap((item) =>
       typeof item.commentId === 'string' ? [item.commentId] : [],
     )
@@ -3549,258 +2717,80 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   }
 
   /**
-   * Merges the chronological index with bounded pre-migration rows in one global order.
-   * Legacy keys group replies by root, so they must be fully read before selecting a page.
-   * A shared chronological boundary also prevents duplicate delivery when a row is migrated.
-   * @param plan - Aggregate current and legacy index ranges.
+   * Reads one validated page of the aggregate timeline in global newest-first order.
+   * The continuation is the last emitted timeline key, bound to the entity and page size.
+   *
    * @param entityKey - Authorized collaboration partition.
    * @param cursor - Opaque global timeline boundary from the previous page.
-   * @param limit - Maximum number of discussion rows to select.
-   * @returns Globally ordered rows and a scope-bound continuation.
+   * @param limit - Maximum number of discussion rows to return.
+   * @returns Validated timeline rows and a scope-bound continuation.
    */
-  private async readOrderedDiscussionPage(plan: DiscussionReadPlan, entityKey: string, cursor: string | undefined, limit: number) {
+  private async readOrderedDiscussionPage(entityKey: string, cursor: string | undefined, limit: number) {
     const before = decodeOrderedDiscussionCursor(cursor, entityKey, limit)
-    const current = await this.queryDiscussionPage(plan, entityKey, 'current', before, limit)
-    if (current.lastRecordKey && (!isDiscussionCursorRecordKey(current.lastRecordKey, 'current', plan) ||
-        (before !== undefined && current.lastRecordKey >= before))) {
+    const page = await this.queryDiscussionPage(entityKey, discussionTimelinePrefix, before, limit)
+    if (page.lastRecordKey && (!page.lastRecordKey.startsWith(discussionTimelinePrefix) ||
+        (before !== undefined && page.lastRecordKey >= before))) {
       throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index returned an invalid continuation.')
     }
-    const rows = new Map<string, Record<string, unknown>>()
-    /** Validates each index row and projects both generations to the same chronological key. */
-    function include(row: Record<string, unknown>, phase: 'current' | 'legacy') {
-      if (row.entityKey !== entityKey || row.entryType !== 'discussion' ||
-          typeof row.commentId !== 'string' || typeof row.rootCommentId !== 'string' ||
-          typeof row.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(row.createdAt) ||
-          !Number.isFinite(Date.parse(row.createdAt))) {
-        throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index is inconsistent.')
-      }
-      const root = row.rootCommentId === row.commentId ? undefined : row.rootCommentId
-      const key = discussionTimelineRecordKey(row.createdAt, row.commentId, root)
-      const expectedKey = phase === 'current' ? key : discussionLegacyRecordKey(row.createdAt, row.commentId, root)
-      if (row.recordKey !== expectedKey) {
-        throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index key does not match its comment.')
-      }
-      if (before === undefined || key < before) rows.set(key, row)
-    }
-    for (const row of current.items) include(row, 'current')
-    let legacyPosition: string | undefined
-    let legacyDone = false
-    for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
-      const page = await this.queryDiscussionPage(plan, entityKey, 'legacy', legacyPosition, 100)
-      for (const row of page.items) include(row, 'legacy')
-      if (!page.lastRecordKey) { legacyDone = true; break }
-      if (page.lastRecordKey === legacyPosition) break
-      legacyPosition = page.lastRecordKey
-    }
-    if (!legacyDone) {
-      throw new CollaborationError(503, 'DiscussionScanLimit', 'The discussion history exceeded the ordered-read scan limit.')
-    }
-    // A byte-limited current query may stop early. Do not emit older legacy rows
-    // before the unread current rows; retain them for the following page instead.
-    const candidates = [...rows.entries()].filter(([key]) => !current.lastRecordKey || key >= current.lastRecordKey)
-      .sort(([first], [second]) => first === second ? 0 : first > second ? -1 : 1)
-    const selected = candidates.slice(0, limit)
-    const boundary = selected.at(-1)?.[0] ?? current.lastRecordKey
-    const hasMore = current.lastRecordKey !== undefined || rows.size > selected.length
+    for (const row of page.items) assertDiscussionTimelineRow(row, entityKey, before)
     return {
-      items: selected.map(([, row]) => row),
-      ...(hasMore && boundary ? { nextCursor: Buffer.from(JSON.stringify({ version: 3, entityKey, limit, before: boundary }), 'utf8').toString('base64url') } : {}),
+      items: page.items,
+      ...(page.lastRecordKey ? { nextCursor: Buffer.from(JSON.stringify({ version: 3, entityKey, limit, before: page.lastRecordKey }), 'utf8').toString('base64url') } : {}),
     }
   }
 
   /**
-   * Reads one bounded page from the current discussion index and then the legacy index.
-   * Compatibility callers start at the legacy index so their first cursor remains readable by
-   * pre-migration servers during a rolling deployment.
+   * Reads one newest-first page from a single discussion index prefix.
    *
-   * @param plan - Current and legacy prefixes for the requested scope.
    * @param entityKey - Collaboration entity key being read.
-   * @param cursor - Validated cursor from the previous page, when supplied.
+   * @param prefix - Root, reply, or aggregate timeline prefix for the requested scope.
+   * @param cursor - Opaque cursor from the previous page, when supplied.
    * @param limit - Maximum number of index rows to return.
    * @returns Discussion rows and an opaque cursor when another page exists.
    */
   private async readDiscussionPage(
-    plan: DiscussionReadPlan,
     entityKey: string,
-    cursor: DecodedDiscussionCursor | undefined,
+    prefix: string,
+    cursor: string | undefined,
     limit: number,
   ) {
-    if (cursor?.kind === 'legacy') {
-      const legacyPage = await this.queryDiscussionPage(
-        plan,
-        entityKey,
-        'legacy',
-        cursor.recordKey,
-        limit,
-      )
-      return {
-        items: legacyPage.items,
-        ...(legacyPage.lastRecordKey
-          ? {
-              nextCursor: encodeLegacyDiscussionCursor({
-                version: 1,
-                entityKey,
-                prefix: plan.legacyPrefix,
-                recordKey: legacyPage.lastRecordKey,
-              }),
-            }
-          : {}),
-      }
-    }
-
-    if (plan.legacyFirst && cursor === undefined) {
-      const legacyPage = await this.queryDiscussionPage(
-        plan,
-        entityKey,
-        'legacy',
-        undefined,
-        limit,
-      )
-      if (legacyPage.items.length > 0 || legacyPage.lastRecordKey) {
-        return {
-          items: legacyPage.items,
-          ...(legacyPage.lastRecordKey
-            ? {
-                nextCursor: encodeLegacyDiscussionCursor({
-                  version: 1,
-                  entityKey,
-                  prefix: plan.legacyPrefix,
-                  recordKey: legacyPage.lastRecordKey,
-                }),
-              }
-            : {}),
-        }
-      }
-    }
-
-    const phase = cursor?.kind === 'current' ? cursor.phase : 'current'
-    if (phase === 'legacy') {
-      const legacyPage = await this.queryDiscussionPage(
-        plan,
-        entityKey,
-        'legacy',
-        cursor?.kind === 'current' ? cursor.recordKey : undefined,
-        limit,
-      )
-      return {
-        items: legacyPage.items,
-        ...(legacyPage.lastRecordKey
-          ? {
-              nextCursor: encodeDiscussionCursor({
-                version: 2,
-                entityKey,
-                currentPrefix: plan.currentPrefix,
-                legacyPrefix: plan.legacyPrefix,
-                phase: 'legacy',
-                recordKey: legacyPage.lastRecordKey,
-              }),
-            }
-          : {}),
-      }
-    }
-
-    const currentPage = await this.queryDiscussionPage(
-      plan,
+    const page = await this.queryDiscussionPage(
       entityKey,
-      'current',
-      cursor?.kind === 'current' ? cursor.recordKey : undefined,
+      prefix,
+      decodeCursor(cursor, entityKey, prefix)?.recordKey,
       limit,
     )
-    if (currentPage.lastRecordKey) {
-      return {
-        items: currentPage.items,
-        nextCursor: encodeDiscussionCursor({
-          version: 2,
-          entityKey,
-          currentPrefix: plan.currentPrefix,
-          legacyPrefix: plan.legacyPrefix,
-          phase: 'current',
-          recordKey: currentPage.lastRecordKey,
-        }),
-      }
-    }
-
-    if (currentPage.items.length >= limit) {
-      const legacyProbe = await this.queryDiscussionPage(plan, entityKey, 'legacy', undefined, 1)
-      return {
-        items: currentPage.items,
-        ...(legacyProbe.items.length > 0 || legacyProbe.lastRecordKey
-          ? {
-              nextCursor: encodeDiscussionCursor({
-                version: 2,
-                entityKey,
-                currentPrefix: plan.currentPrefix,
-                legacyPrefix: plan.legacyPrefix,
-                phase: 'legacy',
-              }),
-            }
-          : {}),
-      }
-    }
-
-    const legacyPage = await this.queryDiscussionPage(
-      plan,
-      entityKey,
-      'legacy',
-      undefined,
-      limit - currentPage.items.length,
-    )
     return {
-      items: [...currentPage.items, ...legacyPage.items],
-      ...(legacyPage.lastRecordKey
-        ? {
-            nextCursor: encodeDiscussionCursor({
-              version: 2,
-              entityKey,
-              currentPrefix: plan.currentPrefix,
-              legacyPrefix: plan.legacyPrefix,
-              phase: 'legacy',
-              recordKey: legacyPage.lastRecordKey,
-            }),
-          }
+      items: page.items,
+      ...(page.lastRecordKey
+        ? { nextCursor: encodeCursor({ version: 1, entityKey, prefix, recordKey: page.lastRecordKey }) }
         : {}),
     }
   }
 
   /**
-   * Queries one physical discussion index within its migration-safe key range.
+   * Queries one discussion index prefix in newest-first key order.
    *
-   * @param plan - Current and legacy prefixes for the requested scope.
    * @param entityKey - Collaboration entity key being read.
-   * @param phase - Physical index phase to query.
+   * @param prefix - Discussion index prefix to query.
    * @param recordKey - Exclusive start key from the previous query page.
    * @param limit - Maximum number of matching rows to return.
    * @returns Matching rows and the last evaluated sort key.
    */
   private async queryDiscussionPage(
-    plan: DiscussionReadPlan,
     entityKey: string,
-    phase: DiscussionCursor['phase'],
+    prefix: string,
     recordKey: string | undefined,
     limit: number,
   ): Promise<DiscussionQueryPage> {
-    const prefix = phase === 'current' ? plan.currentPrefix : plan.legacyPrefix
-    const expressionAttributeValues: Record<string, string> = { ':entityKey': entityKey }
-    let keyConditionExpression = 'entityKey = :entityKey AND begins_with(recordKey, :prefix)'
-    if (phase === 'legacy' && plan.legacyUpperBound !== undefined) {
-      expressionAttributeValues[':legacyLowerBound'] = plan.legacyPrefix
-      expressionAttributeValues[':legacyUpperBound'] = plan.legacyUpperBound
-      keyConditionExpression =
-        'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound'
-    } else {
-      expressionAttributeValues[':prefix'] = prefix
-    }
     const response = await this.documentClient.send(new QueryCommand({
       TableName: this.tableName,
-      KeyConditionExpression: keyConditionExpression,
-      ExpressionAttributeValues: expressionAttributeValues,
+      KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+      ExpressionAttributeValues: { ':entityKey': entityKey, ':prefix': prefix },
       ExclusiveStartKey: recordKey ? { entityKey, recordKey } : undefined,
       ConsistentRead: true,
       ScanIndexForward: false,
       Limit: limit,
-      ...(phase === 'legacy' && !plan.legacyFirst
-        ? { FilterExpression: 'attribute_not_exists(discussionIndexVersion)' }
-        : {}),
     }))
     const lastRecordKey = readDiscussionLastRecordKey(response.LastEvaluatedKey)
     return {
@@ -4840,11 +3830,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       commentId,
       parent ? rootCommentId : undefined,
     )
-    const discussionLegacyKey = discussionLegacyRecordKey(
-      occurredAt,
-      commentId,
-      parent ? rootCommentId : undefined,
-    )
     const notificationCandidates = await this.buildNotificationCandidates(input, parent)
     const automaticWatchers = buildAutomaticWatcherCandidates(
       actorMemberKey,
@@ -4902,22 +3887,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
             entityKey: input.entityKey,
             recordKey: discussionScopedKey,
             entryType: 'discussion',
-            commentId,
-            rootCommentId,
-            ...(parent ? { parentCommentId: parent.id } : {}),
-            createdAt: occurredAt,
-          },
-          ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
-        },
-      },
-      {
-        Put: {
-          TableName: this.tableName,
-          Item: {
-            entityKey: input.entityKey,
-            recordKey: discussionLegacyKey,
-            entryType: 'discussion',
-            discussionIndexVersion: discussionLegacyIndexVersion,
             commentId,
             rootCommentId,
             ...(parent ? { parentCommentId: parent.id } : {}),
@@ -6314,315 +5283,6 @@ function parentIssueCondition(tableName: string, input: WorkItemCollaborationSco
 }
 
 /**
- * Builds the canonical parent condition used while copying a legacy comment.
- *
- * Legacy events do not retain the assigned-project snapshot required by a live
- * collaboration mutation, so migration fences the immutable Work Item identity
- * and schema plus the observed revision while leaving mutable assignment values
- * unconstrained.
- *
- * @param tableName - Canonical Work Item table name.
- * @param input - Legacy comment scope.
- * @param parentRevision - Revision observed by the preceding canonical read.
- * @returns A DynamoDB condition check for the parent Work Item.
- */
-function parentIssueBackfillCondition(
-  tableName: string,
-  input: WorkItemCollaborationScope,
-  parentRevision: number,
-) {
-  const directoryTeamId = `${input.workspaceId}#team#${input.teamId}`
-  const requiredAttributes = [
-    'schemaVersion',
-    'revision',
-    'workflowSchemaVersion',
-    'directoryId',
-    'directoryTeamId',
-    'teamId',
-    'issueId',
-    'sortOrder',
-    'title',
-    'assigneeUserId',
-    'creatorMemberKey',
-    'workflowStatusId',
-    'statusCategory',
-    'customFieldValues',
-    'relationIds',
-    'dueDate',
-    'schedule',
-    'priority',
-    'createdAt',
-    'updatedAt',
-  ]
-  return {
-    ConditionCheck: {
-      TableName: tableName,
-      Key: {
-        directoryTeamId,
-        issueId: input.issueId,
-      },
-      ConditionExpression: [
-        ...requiredAttributes.map((attribute) => `attribute_exists(${attribute})`),
-        'schemaVersion = :schemaVersion',
-        'revision = :revision',
-        'workflowSchemaVersion = :workflowSchemaVersion',
-        'directoryId = :directoryId',
-        'directoryTeamId = :directoryTeamId',
-        'teamId = :teamId',
-        'issueId = :issueId',
-      ].join(' AND '),
-      ExpressionAttributeValues: {
-        ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
-        ':revision': parentRevision,
-        ':workflowSchemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-        ':directoryId': input.workspaceId,
-        ':directoryTeamId': directoryTeamId,
-        ':teamId': input.teamId,
-        ':issueId': input.issueId,
-      },
-    },
-  }
-}
-
-/** Builds the parent-absence guard used by deleted-parent reconciliation. */
-function deletedParentBackfillCondition(
-  tableName: string,
-  input: Pick<WorkItemCollaborationScope, 'workspaceId' | 'teamId' | 'issueId'>,
-) {
-  return {
-    ConditionCheck: {
-      TableName: tableName,
-      Key: {
-        directoryTeamId: `${input.workspaceId}#team#${input.teamId}`,
-        issueId: input.issueId,
-      },
-      ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
-    },
-  }
-}
-
-/** Checks that a parent row is the canonical Work Item for the requested scope. */
-function isCanonicalBackfillParent(
-  value: unknown,
-  input: Pick<WorkItemCollaborationScope, 'workspaceId' | 'teamId' | 'issueId'>,
-): value is CanonicalWorkItemRecord {
-  return isCanonicalWorkItemRecord(value) &&
-    value.directoryId === input.workspaceId &&
-    value.teamId === input.teamId &&
-    value.issueId === input.issueId
-}
-
-/** Validates the immutable timestamp copied from a legacy event. */
-function normalizeBackfillTimestamp(value: string) {
-  const normalized = requireText(value, 'Backfill timestamp')
-  const parsed = Date.parse(normalized)
-  if (!Number.isFinite(parsed)) {
-    throw new CollaborationError(400, 'InvalidCollaborationInput', 'Backfill timestamp is invalid.')
-  }
-  return new Date(parsed).toISOString()
-}
-
-/**
- * Normalizes and validates one legacy comment before dry-run or write processing.
- *
- * @param input - Untrusted legacy comment and Work Item scope.
- * @returns The input with canonical identifier, body, and timestamp values.
- */
-function normalizeBackfillCollaborationCommentInput(
-  input: BackfillCollaborationCommentInput,
-): BackfillCollaborationCommentInput {
-  assertWorkItemScope(input)
-  return {
-    ...input,
-    commentId: requireIdentifier(input.commentId, 'Comment ID'),
-    actorMemberKey: normalizeMemberKey(input.actorMemberKey),
-    bodyMarkdown: normalizeBackfillCommentBody(input.bodyMarkdown),
-    occurredAt: normalizeBackfillTimestamp(input.occurredAt),
-  }
-}
-
-/** Creates the stable record key for one immutable backfill provenance receipt. */
-function backfillReceiptRecordKey(commentId: string) {
-  return `BACKFILL#${requireIdentifier(commentId, 'Comment ID')}`
-}
-
-/** Creates the stable record key for one deleted-parent reconciliation receipt. */
-function deletedBackfillReconciliationRecordKey(commentId: string) {
-  return `BACKFILL_RECONCILIATION#${requireIdentifier(commentId, 'Comment ID')}`
-}
-
-/** Creates a digest that binds a receipt to the original legacy comment payload. */
-function createBackfillSourceBodyFingerprint(input: BackfillCollaborationCommentInput) {
-  return createHash('sha256')
-    .update(`${input.commentId}\0${input.actorMemberKey}\0${input.occurredAt}\0${input.bodyMarkdown}`)
-    .digest('hex')
-}
-
-/** Creates the immutable provenance row written with a canonical backfill comment. */
-function createBackfillReceiptRecord(
-  input: BackfillCollaborationCommentInput,
-): StoredBackfillReceipt {
-  return {
-    entityKey: input.entityKey,
-    recordKey: backfillReceiptRecordKey(input.commentId),
-    entryType: 'team-issue-comment-backfill-receipt',
-    commentId: input.commentId,
-    sourceActorMemberKey: input.actorMemberKey,
-    sourceOccurredAt: input.occurredAt,
-    sourceBodyFingerprint: createBackfillSourceBodyFingerprint(input),
-  }
-}
-
-/** Creates an auditable receipt for a legacy comment whose parent was deleted. */
-function createDeletedBackfillReconciliationRecord(
-  input: BackfillCollaborationCommentInput,
-): StoredDeletedBackfillReconciliation {
-  return {
-    entityKey: input.entityKey,
-    recordKey: deletedBackfillReconciliationRecordKey(input.commentId),
-    entryType: 'team-issue-comment-backfill-reconciliation',
-    commentId: input.commentId,
-    workspaceId: input.workspaceId,
-    teamId: input.teamId,
-    issueId: input.issueId,
-    reason: 'parent-deleted',
-    sourceActorMemberKey: input.actorMemberKey,
-    sourceOccurredAt: input.occurredAt,
-    sourceBodyFingerprint: createBackfillSourceBodyFingerprint(input),
-  }
-}
-
-/** Validates one immutable backfill provenance row read from DynamoDB. */
-function toStoredBackfillReceipt(
-  value: Record<string, unknown>,
-  entityKey: string,
-  recordKey: string,
-): StoredBackfillReceipt {
-  if (
-    value.entryType !== 'team-issue-comment-backfill-receipt' ||
-    value.entityKey !== entityKey ||
-    value.recordKey !== recordKey ||
-    typeof value.commentId !== 'string' ||
-    typeof value.sourceActorMemberKey !== 'string' ||
-    typeof value.sourceOccurredAt !== 'string' ||
-    typeof value.sourceBodyFingerprint !== 'string'
-  ) {
-    throw new CollaborationError(
-      503,
-      'InvalidCollaborationRecord',
-      'Backfill provenance receipt is invalid.',
-    )
-  }
-  return {
-    entityKey,
-    recordKey,
-    entryType: 'team-issue-comment-backfill-receipt',
-    commentId: requireIdentifier(value.commentId, 'Backfill receipt comment ID'),
-    sourceActorMemberKey: normalizeMemberKey(value.sourceActorMemberKey),
-    sourceOccurredAt: normalizeBackfillTimestamp(value.sourceOccurredAt),
-    sourceBodyFingerprint: value.sourceBodyFingerprint,
-  }
-}
-
-/** Validates one immutable deleted-parent reconciliation receipt read from DynamoDB. */
-function toStoredDeletedBackfillReconciliation(
-  value: Record<string, unknown>,
-  entityKey: string,
-  recordKey: string,
-): StoredDeletedBackfillReconciliation {
-  if (
-    value.entryType !== 'team-issue-comment-backfill-reconciliation' ||
-    value.entityKey !== entityKey ||
-    value.recordKey !== recordKey ||
-    typeof value.commentId !== 'string' ||
-    typeof value.workspaceId !== 'string' ||
-    typeof value.teamId !== 'string' ||
-    typeof value.issueId !== 'string' ||
-    value.reason !== 'parent-deleted' ||
-    typeof value.sourceActorMemberKey !== 'string' ||
-    typeof value.sourceOccurredAt !== 'string' ||
-    typeof value.sourceBodyFingerprint !== 'string'
-  ) {
-    throw new CollaborationError(
-      503,
-      'InvalidCollaborationRecord',
-      'Deleted-parent backfill reconciliation is invalid.',
-    )
-  }
-  return {
-    entityKey,
-    recordKey,
-    entryType: 'team-issue-comment-backfill-reconciliation',
-    commentId: requireIdentifier(value.commentId, 'Reconciliation comment ID'),
-    workspaceId: requireText(value.workspaceId, 'Reconciliation workspace ID'),
-    teamId: requireIdentifier(value.teamId, 'Reconciliation team ID'),
-    issueId: requireIdentifier(value.issueId, 'Reconciliation issue ID'),
-    reason: 'parent-deleted',
-    sourceActorMemberKey: normalizeMemberKey(value.sourceActorMemberKey),
-    sourceOccurredAt: normalizeBackfillTimestamp(value.sourceOccurredAt),
-    sourceBodyFingerprint: value.sourceBodyFingerprint,
-  }
-}
-
-/** Checks whether a receipt belongs to the currently scanned legacy comment. */
-function isSameBackfillReceipt(
-  receipt: StoredBackfillReceipt,
-  input: BackfillCollaborationCommentInput,
-) {
-  return receipt.entityKey === input.entityKey &&
-    receipt.recordKey === backfillReceiptRecordKey(input.commentId) &&
-    receipt.commentId === input.commentId &&
-    receipt.sourceActorMemberKey === input.actorMemberKey &&
-    receipt.sourceOccurredAt === input.occurredAt &&
-    receipt.sourceBodyFingerprint === createBackfillSourceBodyFingerprint(input)
-}
-
-/** Checks whether a deleted-parent reconciliation matches the current source event. */
-function isSameDeletedBackfillReconciliation(
-  reconciliation: StoredDeletedBackfillReconciliation,
-  input: BackfillCollaborationCommentInput,
-) {
-  return reconciliation.entityKey === input.entityKey &&
-    reconciliation.recordKey === deletedBackfillReconciliationRecordKey(input.commentId) &&
-    reconciliation.commentId === input.commentId &&
-    reconciliation.workspaceId === input.workspaceId &&
-    reconciliation.teamId === input.teamId &&
-    reconciliation.issueId === input.issueId &&
-    reconciliation.reason === 'parent-deleted' &&
-    reconciliation.sourceActorMemberKey === input.actorMemberKey &&
-    reconciliation.sourceOccurredAt === input.occurredAt &&
-    reconciliation.sourceBodyFingerprint === createBackfillSourceBodyFingerprint(input)
-}
-
-/** Checks immutable comment identity while allowing later body and lifecycle mutations. */
-function isBackfilledCommentIdentity(
-  existing: StoredComment,
-  input: BackfillCollaborationCommentInput,
-) {
-  return existing.id === input.commentId &&
-    existing.rootCommentId === input.commentId &&
-    existing.authorMemberKey === input.actorMemberKey &&
-    existing.createdAt === input.occurredAt
-}
-
-/** Validates one persisted Team Issue comment backfill marker. */
-function isCompletedTeamIssueCommentBackfillMarker(
-  value: unknown,
-  targetTableName: string,
-  sourceTableName: string,
-): boolean {
-  return isRecord(value) &&
-    value.entryType === 'migration-marker' &&
-    value.migration === 'team-issue-comments' &&
-    value.version === TEAM_ISSUE_COMMENT_BACKFILL_VERSION &&
-    value.state === 'complete' &&
-    value.targetTableName === targetTableName &&
-    value.sourceTableName === sourceTableName &&
-    typeof value.completedAt === 'string' &&
-    Number.isFinite(Date.parse(value.completedAt))
-}
-
-/**
  * Validates the caller authorization generation carried into a context mutation.
  *
  * @param input - Context mutation scope and actor.
@@ -7306,10 +5966,9 @@ function dedupeNotificationCandidates(
  * Normalizes a comment body for a user-facing Collaboration mutation.
  *
  * @param value - Untrusted comment body.
- * @param maxLength - Maximum normalized body length, or null for migration input.
  * @returns A trimmed, newline-normalized comment body.
  */
-function normalizeCommentBody(value: string, maxLength: number | null = COLLABORATION_COMMENT_MAX_LENGTH) {
+function normalizeCommentBody(value: string) {
   if (typeof value !== 'string') {
     throw new CollaborationError(400, 'InvalidCommentBody', 'Comment body must be text.')
   }
@@ -7319,7 +5978,7 @@ function normalizeCommentBody(value: string, maxLength: number | null = COLLABOR
     throw new CollaborationError(400, 'InvalidCommentBody', 'Comment body is required.')
   }
 
-  if (maxLength !== null && normalized.length > maxLength) {
+  if (normalized.length > COLLABORATION_COMMENT_MAX_LENGTH) {
     throw new CollaborationError(400, 'InvalidCommentBody', 'Comment body is too long.')
   }
 
@@ -7328,16 +5987,6 @@ function normalizeCommentBody(value: string, maxLength: number | null = COLLABOR
   }
 
   return normalized
-}
-
-/**
- * Normalizes a historical comment body without applying the current composer limit.
- *
- * @param value - Legacy comment body copied during migration.
- * @returns A trimmed body that preserves historically accepted length and characters.
- */
-function normalizeBackfillCommentBody(value: string) {
-  return requireText(value, 'Backfill comment body')
 }
 
 /**
@@ -7566,55 +6215,6 @@ function isSameCreatedComment(existing: StoredComment, expected: StoredComment) 
 }
 
 /**
- * Tests whether a canonical comment is the exact result expected from a legacy row.
- *
- * @param existing - Current canonical comment.
- * @param expected - Comment reconstructed from the legacy event.
- * @returns Whether the existing row can be treated as an idempotent replay.
- */
-function isSameBackfilledComment(existing: StoredComment, expected: StoredComment) {
-  return existing.id === expected.id &&
-    existing.rootCommentId === expected.rootCommentId &&
-    existing.authorMemberKey === expected.authorMemberKey &&
-    existing.bodyMarkdown === expected.bodyMarkdown &&
-    existing.version === expected.version &&
-    existing.parentCommentId === expected.parentCommentId &&
-    existing.createdAt === expected.createdAt &&
-    existing.updatedAt === expected.updatedAt
-}
-
-/**
- * Validates an existing discussion projection after an idempotent repair conflict.
- *
- * @param value - Untrusted persisted discussion row.
- * @param entityKey - Expected collaboration partition key.
- * @param recordKey - Expected discussion record key.
- * @param commentId - Expected canonical comment identifier.
- * @param occurredAt - Expected comment creation timestamp.
- * @param discussionIndexVersion - Expected compatibility-index version, when applicable.
- * @returns Whether the persisted row is the exact repair target.
- */
-function isSameBackfilledDiscussion(
-  value: unknown,
-  entityKey: string,
-  recordKey: string,
-  commentId: string,
-  occurredAt: string,
-  discussionIndexVersion?: number,
-) {
-  return isRecord(value) &&
-    value.entityKey === entityKey &&
-    value.recordKey === recordKey &&
-    value.entryType === 'discussion' &&
-    value.commentId === commentId &&
-    value.rootCommentId === commentId &&
-    value.createdAt === occurredAt &&
-    (discussionIndexVersion === undefined
-      ? value.discussionIndexVersion === undefined
-      : value.discussionIndexVersion === discussionIndexVersion)
-}
-
-/**
  * Tests whether a bounded root response matches an accepted-resolution retry.
  *
  * @param response - Current or receipt-backed root response.
@@ -7642,34 +6242,6 @@ function workItemEntityId(teamId: string, issueId: string) {
 
 function commentRecordKey(commentId: string) {
   return `COMMENT#${requireIdentifier(commentId, 'Comment ID')}`
-}
-
-/**
- * Creates one deterministic discussion projection row for a legacy comment.
- *
- * @param entityKey - Collaboration partition key.
- * @param recordKey - Physical discussion index key.
- * @param commentId - Canonical comment identifier.
- * @param occurredAt - Canonical comment creation timestamp.
- * @param discussionIndexVersion - Compatibility-index version, when applicable.
- * @returns A discussion row suitable for a guarded DynamoDB transaction.
- */
-function createBackfillDiscussionRecord(
-  entityKey: string,
-  recordKey: string,
-  commentId: string,
-  occurredAt: string,
-  discussionIndexVersion?: number,
-) {
-  return {
-    entityKey,
-    recordKey,
-    entryType: 'discussion',
-    commentId,
-    rootCommentId: commentId,
-    createdAt: occurredAt,
-    ...(discussionIndexVersion === undefined ? {} : { discussionIndexVersion }),
-  }
 }
 
 /**
@@ -7706,25 +6278,6 @@ function discussionScopedRecordKey(
     ? `THREAD#${requireIdentifier(rootCommentId, 'Root comment ID')}#`
     : 'ROOT#'
   return `${discussionScopedPrefix}${scope}${occurredAt}#${requireIdentifier(commentId, 'Comment ID')}`
-}
-
-/**
- * Creates the pre-migration discussion index key retained for rollback compatibility.
- *
- * @param occurredAt - Canonical comment creation timestamp.
- * @param commentId - Comment identifier.
- * @param rootCommentId - Root identifier for a reply, or undefined for a root.
- * @returns Legacy discussion record key understood by the previous reader.
- */
-function discussionLegacyRecordKey(
-  occurredAt: string,
-  commentId: string,
-  rootCommentId: string | undefined,
-) {
-  const scope = rootCommentId
-    ? `THREAD#${requireIdentifier(rootCommentId, 'Root comment ID')}#`
-    : 'ROOT#'
-  return `DISCUSSION#${scope}${occurredAt}#${requireIdentifier(commentId, 'Comment ID')}`
 }
 
 function watcherRecordKey(memberKey: string) {
@@ -7882,11 +6435,6 @@ function clampPresenceTtl(value: number | undefined) {
   return value
 }
 
-/** Encodes a migration-aware discussion cursor. */
-function encodeDiscussionCursor(cursor: DiscussionCursor) {
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
-}
-
 /** Decodes a newest-first cursor bound to its entity, page size, and chronological index range. */
 function decodeOrderedDiscussionCursor(value: string | undefined, entityKey: string, limit: number): string | undefined {
   if (value === undefined) return undefined
@@ -7904,17 +6452,12 @@ function decodeOrderedDiscussionCursor(value: string | undefined, entityKey: str
   }
 }
 
-/** Encodes a pre-migration discussion cursor for compatibility callers. */
-function encodeLegacyDiscussionCursor(cursor: LegacyDiscussionCursor) {
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
-}
-
-/** Encodes a version-one cursor used by other single-prefix Collaboration readers. */
+/** Encodes a scope-bound cursor used by single-prefix Collaboration readers. */
 function encodeCursor(cursor: PrefixCursor) {
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
 }
 
-/** Decodes a version-one cursor used by other single-prefix Collaboration readers. */
+/** Decodes a scope-bound cursor used by single-prefix Collaboration readers. */
 function decodeCursor(value: string | undefined, entityKey: string, prefix: string) {
   if (!value) {
     return undefined
@@ -7944,74 +6487,28 @@ function readDiscussionLastRecordKey(value: unknown) {
   return value.recordKey
 }
 
-/** Validates that a discussion cursor key belongs to the requested physical range. */
-function isDiscussionCursorRecordKey(
-  recordKey: string,
-  phase: DiscussionCursor['phase'],
-  plan: DiscussionReadPlan,
-) {
-  const prefix = phase === 'current' ? plan.currentPrefix : plan.legacyPrefix
-  return recordKey.startsWith(prefix) &&
-    (phase !== 'legacy' || plan.legacyUpperBound === undefined || recordKey < plan.legacyUpperBound)
-}
-
 /**
- * Decodes a discussion cursor and accepts both the current and pre-migration shapes.
+ * Validates one aggregate timeline row before its comment is hydrated.
  *
- * @param value - Opaque cursor supplied by the caller.
- * @param entityKey - Expected collaboration entity key.
- * @param plan - Prefix plan for the requested scope.
- * @returns Validated cursor, or undefined for the first page.
+ * @param row - Untrusted discussion index row.
+ * @param entityKey - Collaboration partition that was queried.
+ * @param before - Exclusive timeline key bound from the page cursor, when present.
  */
-function decodeDiscussionCursor(
-  value: string | undefined,
+function assertDiscussionTimelineRow(
+  row: Record<string, unknown>,
   entityKey: string,
-  plan: DiscussionReadPlan,
-): DecodedDiscussionCursor | undefined {
-  if (!value) {
-    return undefined
+  before: string | undefined,
+): void {
+  if (row.entityKey !== entityKey || row.entryType !== 'discussion' ||
+      typeof row.commentId !== 'string' || typeof row.rootCommentId !== 'string' ||
+      typeof row.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(row.createdAt) ||
+      !Number.isFinite(Date.parse(row.createdAt))) {
+    throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index is inconsistent.')
   }
-
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
-    if (!isRecord(parsed) || parsed.entityKey !== entityKey) {
-      throw new Error('cursor mismatch')
-    }
-
-    if (parsed.version === 1) {
-      if (
-        parsed.prefix !== plan.legacyPrefix ||
-        typeof parsed.recordKey !== 'string' ||
-        !isDiscussionCursorRecordKey(parsed.recordKey, 'legacy', plan)
-      ) {
-        throw new Error('legacy cursor mismatch')
-      }
-      return { kind: 'legacy', recordKey: parsed.recordKey }
-    }
-
-    if (
-      parsed.version !== 2 ||
-      parsed.currentPrefix !== plan.currentPrefix ||
-      parsed.legacyPrefix !== plan.legacyPrefix ||
-      (parsed.phase !== 'current' && parsed.phase !== 'legacy')
-    ) {
-      throw new Error('cursor mismatch')
-    }
-    if (parsed.recordKey !== undefined) {
-      if (
-        typeof parsed.recordKey !== 'string' ||
-        !isDiscussionCursorRecordKey(parsed.recordKey, parsed.phase, plan)
-      ) {
-        throw new Error('record key mismatch')
-      }
-    }
-    return {
-      kind: 'current',
-      phase: parsed.phase,
-      ...(typeof parsed.recordKey === 'string' ? { recordKey: parsed.recordKey } : {}),
-    }
-  } catch (error) {
-    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.', { cause: error })
+  const rootCommentId = row.rootCommentId === row.commentId ? undefined : row.rootCommentId
+  if (row.recordKey !== discussionTimelineRecordKey(row.createdAt, row.commentId, rootCommentId) ||
+      (before !== undefined && row.recordKey >= before)) {
+    throw new CollaborationError(503, 'InvalidDiscussionIndex', 'The discussion index key does not match its comment.')
   }
 }
 
@@ -8025,34 +6522,6 @@ function isConditionalFailure(error: unknown) {
 
   const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons
   return Array.isArray(reasons) && reasons.some((reason) => reason.Code === 'ConditionalCheckFailed')
-}
-
-/** Returns whether a transaction failed only because of conditional guards. */
-function isBackfillConditionalFailure(error: unknown) {
-  if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
-    return true
-  }
-  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
-    return false
-  }
-  const reasons = error.CancellationReasons
-  if (!Array.isArray(reasons) || reasons.length === 0) {
-    return false
-  }
-  const codes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
-  return codes.includes('ConditionalCheckFailed') &&
-    codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')
-}
-
-/** Returns whether a transaction cancellation failed at one known item index. */
-function isTransactionConditionalFailureAt(error: unknown, index: number) {
-  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
-    return false
-  }
-  const reasons = error.CancellationReasons
-  if (!Array.isArray(reasons)) return false
-  const reason = reasons[index]
-  return isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 /**

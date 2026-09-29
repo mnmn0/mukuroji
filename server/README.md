@@ -13,8 +13,7 @@ Hono で実装した API を、Bun development server と Node.js 22 Lambda の�
 - `src/handlers/`: CDK と package script が参照する薄い Lambda entrypoint
 - `scripts/backfills/`: HTTP route を経由しない再実行可能な backfill
 
-`src/index.ts` は互換用の公開 re-export だけを持ちます。Bun と Lambda は
-`src/handlers/` を entrypoint とし、`createApp(dependencies)` へ instance ごとの immutable な
+Bun と Lambda は `src/handlers/` を entrypoint とし、`createApp(dependencies)` へ instance ごとの immutable な
 dependency bundle を渡します。Authentication、Workspace/Enterprise、Work Item、Automation、
 Developer Platform の API bundle は `src/app/composition/api-dependencies.ts` が concrete adapter
 へ結び付け、worker は各 composition module が処理に必要な adapter だけを構成します。
@@ -267,7 +266,7 @@ Default local table names are:
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`（未指定時は `mukuroji-workspace-search-local`）
 - `MUKUROJI_AUDIT_RETENTION_DAYS=2555`
 - `TENANT_ADMINISTRATION_TABLE_NAME=mukuroji-tenant-administration-local`
-- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、API と backfill で共有して通常は rotation しない）
+- `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64桁の小文字hex固定key>`（`openssl rand -hex 32` などで生成し、通常は rotation しない）
 - `MUKUROJI_WORKSPACE_DIRECTORY_ID=workspace#mukuroji-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE=mukuroji-workspace-access-local`
 - `REQUEST_INTAKE_TABLE_NAME=mukuroji-request-intake-local`
@@ -318,90 +317,11 @@ Work Item は Team partition 100件、1 partition/合計10,000件、対象Work I
 Metric定義、timezone、archive、snapshot、scheduleの詳細は
 [`docs/analytics.md`](../docs/analytics.md) を参照してください。
 
-To preview and run the append-only audit backfill against local DynamoDB:
-
-```sh
-set -a
-. .floci/generated/cognito.env
-set +a
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --source workspace-access --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --checkpoint /tmp/mukuroji-audit-backfill-v3.json
-```
-
-`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` はgenerated fileではなくowner-onlyのroot
-`.env`から読み込みます。未設定または形式不正なら、backfillは開始前にfail-closedで停止します。
-
-The write run bootstraps `mukuroji-audit-events` with the production-compatible
-keys, GSIs, and stream when the local table does not exist. Dry runs do not
-create the table or write events/checkpoints. The `workspace-access` source maps
-`workspace-member` and `workspace-invitation` rows to suppressed snapshot events;
-the Workspace metadata row is counted as ignored, while unknown or malformed
-lifecycle rows stop the run. Workspace timestamps must use canonical UTC ISO
-format. Dry-run logs omit entity and target IDs.
-
-AWS runs require `WORKSPACE_ACCESS_TABLE_NAME` in addition to the existing source
-table variables and `AUDIT_EVENTS_TABLE_NAME`. Audit backfill checkpoint v3 contains
-the three current sources and is not compatible with v1/v2 checkpoints. Use a new
-checkpoint path; rescanning sources is safe because event writes are deterministic
-and conditional. The default v3 checkpoint is
-`./audit-event-backfill-v3.checkpoint.json`; it is created with owner-only
-permissions because its `LastEvaluatedKey` can contain source identifiers. Delete
-it after the migration is complete. Checkpoints created with a different table,
-key, or current-schema configuration are rejected by the configuration hash.
-Unknown-timestamp snapshot events omit TTL so they are not immediately deleted.
-
-## Team Issue comment backfill
-
-Team Issue `commented` events are copied to the canonical Collaboration table
-with their stable event IDs. The resumable runner writes a checkpoint after
-each DynamoDB scan page and publishes one completion marker per observed
-workspace only after the source scan reaches its end. An unfiltered run also
-publishes an environment-wide marker for workspaces with no legacy comments.
-Until an applicable marker exists, the API keeps a bounded, read-only legacy
-comment fallback; after the marker it serves canonical comments only.
-
-Preview and run the migration locally with:
-
-```sh
-AWS_ENDPOINT_URL=http://localhost:4566 \
-MUKUROJI_LOCAL_AWS_RUNTIME=floci \
-bun run team-issue-comments:backfill -- --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 \
-MUKUROJI_LOCAL_AWS_RUNTIME=floci \
-bun run team-issue-comments:backfill -- \
-  --checkpoint /tmp/mukuroji-team-issue-comments-v2.json
-```
-
-AWS runs require `TEAM_ISSUE_EVENTS_TABLE_NAME`, `COLLABORATION_TABLE_NAME`,
-`WORK_ITEMS_TABLE_NAME`, `AUDIT_EVENTS_TABLE_NAME`, and
-`WORKSPACE_SEARCH_TABLE_NAME`. The write run projects each current canonical
-comment into Workspace Search and records projected/deleted document counts in
-the checkpoint and completion audit. The checkpoint is owner-only because its continuation key can contain source identifiers. Reusing
-a checkpoint against different tables, region, account, or workspace filters is
-rejected. The write run is idempotent; malformed scope or conflicting canonical
-rows stop the migration without publishing a completion marker. If a legacy
-comment's parent Work Item is strongly confirmed to be deleted, the runner
-writes a scoped reconciliation receipt containing the source fingerprint and
-continues without creating an orphaned canonical comment. The runner obtains
-the account from STS `GetCallerIdentity`; an optional
-`AWS_ACCOUNT_ID` is treated only as an expected value and must match the
-authenticated account. An optional `MUKUROJI_BACKFILL_OPERATOR_ID` is retained as
-an operator label, while AWS audit records use the authenticated STS caller ARN;
-local runs use the `local:backfill` sentinel. Canonical repairs and marker
-publication use the deployment's configured DynamoDB document client.
-Use repeated `--workspace-id <id>` options to scan and mark a selected set of
-workspaces before processing the rest of the environment. An unfiltered run
-marks the environment-wide scope after the complete source scan, including
-workspaces with no matching legacy comments.
-
 ## Workspace search canonical projection bootstrap
 
 Workspace search は `WorkspaceSearchTable` の `workspaceId` / `recordKey` に、検索文書、
-saved view、ユーザーごとの view preference を保存します。初期データは migration planner を介さず、
-current Team、Project、canonical Work Item、comment、Document から canonical projection を直接作成します。
+saved view、ユーザーごとの view preference を保存します。初期データは current Team、Project、
+canonical Work Item、comment、Document から canonical projection を直接作成します。
 まず dry-run で mapping と skip 件数を確認します。
 
 ```sh
@@ -434,9 +354,7 @@ Soft delete 済み comment と archived Team/Project は、再実行時に対応
 同じ `issueId` が複数 Team に存在しても、Work Item と comment の entity ID は Team scope を
 含むため混在しません。
 
-この bootstrap/backfill は source/target scan evidence、planning artifact、sealed authority を
-生成または参照しません。初期作成後は current application event の通常経路が同じ canonical key を
-更新します。
+初期作成後は current application event の通常経路が同じ canonical key を更新します。
 
 `search:backfill` は production migration / cutover の代替ではありません。lease、durable
 checkpoint、lossless preimage journal、独立した verify、rollback を持たないため、新しい schema や

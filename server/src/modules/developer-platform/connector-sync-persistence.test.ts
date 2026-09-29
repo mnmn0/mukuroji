@@ -7,7 +7,7 @@ import {
 } from './connector-poll-projection'
 import {
   DynamoDbConnectorSyncPersistence,
-} from './connector-sync-persistence'
+} from './adapter-out/dynamodb/connector-sync-persistence'
 import type { StoredConnectorSyncConflict } from './connector-sync-runtime'
 
 const NOW = '2026-07-18T00:00:00.000Z'

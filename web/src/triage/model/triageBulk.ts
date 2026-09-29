@@ -1,4 +1,4 @@
-import type { TriageBulkActionInput } from '../api'
+import type { TriageBulkActionInput } from '@mukuroji/contracts'
 import type { TriageEntryView } from './triageView'
 
 /** Bulk operation whose confirmation form is currently open. */

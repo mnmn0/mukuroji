@@ -5,10 +5,27 @@ import {
   type WorkItemActionContext,
 } from '@mukuroji/contracts'
 import { executeTaskAction } from '../src/task-views/model/taskActionRegistry'
+import { projectTaskBulkActionIds } from '../src/task-views/mutations/useProjectTaskActions'
 import {
-  createProjectTaskActionRegistry,
-  resolveProjectTaskActionTarget,
-} from '../src/task-views/mutations/useProjectTaskActions'
+  createTaskSurfaceActionRegistry,
+  resolveTaskSurfaceActionTarget,
+  type CreateTaskSurfaceActionRegistryOptions,
+} from '../src/task-views/mutations/useTaskSurfaceActions'
+
+/**
+ * Creates the action registry that the Project task surface registers.
+ *
+ * @param options - Safe handlers, permissions, and localized disabled reasons.
+ * @returns Registry restricted to the Project bulk action set.
+ */
+function createProjectTaskActionRegistry(
+  options: Omit<CreateTaskSurfaceActionRegistryOptions, 'bulkActionIds'>,
+) {
+  return createTaskSurfaceActionRegistry({
+    ...options,
+    bulkActionIds: projectTaskBulkActionIds,
+  })
+}
 
 const disabledReasons = {
   selectionRequired: 'Select one item.',
@@ -85,7 +102,7 @@ describe('Project task action registry', () => {
       status: 'invalid',
     })
     expect((await executeTaskAction(registry, focusedContext)).status).toBe('executed')
-    expect(resolveProjectTaskActionTarget(focusedContext)).toEqual({
+    expect(resolveTaskSurfaceActionTarget(focusedContext)).toEqual({
       expectedRevision: 3,
       teamId: 'core-team',
       workItemId: 'wireframe',

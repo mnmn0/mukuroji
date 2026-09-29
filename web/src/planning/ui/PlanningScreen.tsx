@@ -1,7 +1,6 @@
 import type {
   CreatePlanningEntityInput,
   PlanningDependency,
-  PlanningDependencyType,
   PlanningEntity,
   PlanningEntityStatus,
   PlanningEntityType,
@@ -10,6 +9,7 @@ import type {
   PlanningRisk,
   PlanningSnapshot,
   ScheduleDependencyConstraint,
+  ScheduleDependencyType,
   WorkItemDependencyEndpoint,
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
@@ -247,7 +247,7 @@ export type PlanningLabels = PlanningUpdateLabels & {
   /** Planning risk ごとの文言です。 */
   riskValues: Record<PlanningRisk, string>
   /** Dependency type ごとの文言です。 */
-  dependencyTypes: Record<PlanningDependencyType, string>
+  dependencyTypes: Record<ScheduleDependencyType, string>
   /** Work Item dependency editor の locale 済み文言を解決します。 */
   workItemDependencyT: (key: MessageKey) => string
   /** Goal / OKR framework ごとの文言です。 */
@@ -328,7 +328,7 @@ export type PlanningScreenProps = {
   onCreateDependency?: (
     predecessorId: string,
     successorId: string,
-    type: PlanningDependencyType,
+    type: ScheduleDependencyType,
     lagDays: number,
     constraint?: ScheduleDependencyConstraint,
   ) => void | Promise<void>
@@ -1041,7 +1041,7 @@ function DependencyEditor({
       <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
         {labels.dependencyType}
         <select className="workbench-input h-10 px-3" name="dependencyType">
-          {(Object.keys(labels.dependencyTypes) as PlanningDependencyType[]).map((type) => (
+          {(Object.keys(labels.dependencyTypes) as ScheduleDependencyType[]).map((type) => (
             <option key={type} value={type}>{labels.dependencyTypes[type]}</option>
           ))}
         </select>
@@ -2018,7 +2018,7 @@ function formatRange(range: PlanningEntity['forecast']) {
 }
 
 /** Narrows a dependency type while retaining all four start/finish relationships. */
-function readDependencyType(value: FormDataEntryValue | null): PlanningDependencyType {
+function readDependencyType(value: FormDataEntryValue | null): ScheduleDependencyType {
   return value === 'start-to-start' ||
     value === 'finish-to-finish' ||
     value === 'start-to-finish'

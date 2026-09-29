@@ -88,10 +88,6 @@ export type UseFileArtifactsOptions = {
    * file を読み書きする resource scope です。
    */
   scope?: FileArtifactScope
-  /**
-   * legacy row などで file API を停止するかどうかです。
-   */
-  enabled?: boolean
 }
 
 /**
@@ -210,14 +206,13 @@ export type FileArtifactsController = {
  */
 export function useFileArtifacts({
   accessToken,
-  enabled = true,
   scope,
 }: UseFileArtifactsOptions): FileArtifactsController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const scopeKey = scope ? JSON.stringify(scope) : ''
   const operationToken = useMemo(
-    () => Symbol(`file-artifact-operation:${enabled}:${scopeKey}:${accessToken ? 'authenticated' : 'anonymous'}`),
-    [accessToken, enabled, scopeKey],
+    () => Symbol(`file-artifact-operation:${scopeKey}:${accessToken ? 'authenticated' : 'anonymous'}`),
+    [accessToken, scopeKey],
   )
   const currentOperationTokenRef = useRef(operationToken)
 
@@ -234,7 +229,7 @@ export function useFileArtifacts({
   const currentMutationError = mutationError?.token === operationToken
     ? mutationError
     : undefined
-  const isConfigured = Boolean(enabled && accessToken && scope)
+  const isConfigured = Boolean(accessToken && scope)
   const {
     data,
     error,

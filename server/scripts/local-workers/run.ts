@@ -1,4 +1,4 @@
-import { DynamoDBClient, DescribeTableCommand, UpdateTableCommand } from '@aws-sdk/client-dynamodb'
+import { DynamoDBClient, DescribeTableCommand } from '@aws-sdk/client-dynamodb'
 import { DynamoDBStreamsClient, DescribeStreamCommand, GetShardIteratorCommand, GetRecordsCommand } from '@aws-sdk/client-dynamodb-streams'
 import { SQSClient } from '@aws-sdk/client-sqs'
 import { deliverStreamBatch, pollQueue, requireLocalOrigin } from './transport'
@@ -54,11 +54,7 @@ const { createProductionWorkItemDependencies } = await import('../../src/app/com
 const workspaceId = process.env.MUKUROJI_WORKSPACE_DIRECTORY_ID
 if (!workspaceId) throw new Error('Local workspace ID is missing.')
 await createProductionWorkItemDependencies().requestIntake.listForms(workspaceId)
-let table = await dynamo.send(new DescribeTableCommand({ TableName: auditTable }))
-if (!table.Table?.StreamSpecification?.StreamEnabled) {
-  await dynamo.send(new UpdateTableCommand({ TableName: auditTable, StreamSpecification: { StreamEnabled: true, StreamViewType: 'NEW_IMAGE' } }))
-  table = await dynamo.send(new DescribeTableCommand({ TableName: auditTable }))
-}
+const table = await dynamo.send(new DescribeTableCommand({ TableName: auditTable }))
 const streamArn = table.Table?.LatestStreamArn
 if (!streamArn) throw new Error('Local audit stream is unavailable.')
 

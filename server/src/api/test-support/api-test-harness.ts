@@ -581,10 +581,6 @@ function createCollaborationStub(
     throw new Error('Unexpected collaboration client call.')
   }
   return {
-    async isTeamIssueCommentBackfillComplete() {
-      return true
-    },
-    validateBackfillTeamIssueComment: unsupported,
     getThread: unsupported,
     hasAttachableComment: unsupported,
     getCommentSnapshot: unsupported,
@@ -726,7 +722,6 @@ function createTeamIssuesFake(
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,
     getTeamIssueDetail: unsupported,
-    getAutomationCommentReplay: async () => false,
     createTeamIssue: unsupported,
     updateTeamIssue: unsupported,
     updateTeamIssueSchedules: unsupported,
@@ -2499,7 +2494,6 @@ function configureFakeProjectClients(
               '2026-06-08T00:00:00.000Z',
             source: 'dynamodb',
           },
-          comments: [],
           activity: [
             {
               id: 'activity-1',

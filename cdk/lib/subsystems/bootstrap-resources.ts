@@ -66,7 +66,7 @@ export function buildBootstrapResources(
       ClientId: cognitoUserPoolClientId.valueAsString,
     },
     logging: customResources.Logging.withDataHidden(),
-    physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-cognito-client-validation-v1'),
+    physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-cognito-client-validation'),
   };
   const validateCognitoClient = new customResources.AwsCustomResource(
     scope,
@@ -91,7 +91,7 @@ export function buildBootstrapResources(
       ],
     },
     logging: customResources.Logging.withDataHidden(),
-    physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-initial-owner-attributes-v1'),
+    physicalResourceId: customResources.PhysicalResourceId.of('mukuroji-initial-owner-attributes'),
   };
   const updateInitialOwnerAttributes = new customResources.AwsCustomResource(
     scope,
@@ -110,11 +110,11 @@ export function buildBootstrapResources(
         workspaceDirectoryId.valueAsString,
       ),
     },
-    physicalResourceId: customResources.PhysicalResourceId.of('canonical-work-items-seed-v1'),
+    physicalResourceId: customResources.PhysicalResourceId.of('canonical-work-items-seed'),
   };
   const seedCanonicalWorkItems = new customResources.AwsCustomResource(
     scope,
-    'SeedProjectTasks',
+    'SeedWorkItems',
     createCreateOnlyBootstrapAwsCustomResourceProps(
       seedCanonicalWorkItemsCall,
       customResources.AwsCustomResourcePolicy.fromStatements([
@@ -142,7 +142,7 @@ export function buildBootstrapResources(
         workspaceDirectoryId.valueAsString,
       ),
     },
-    physicalResourceId: customResources.PhysicalResourceId.of('project-directory-seed-v3'),
+    physicalResourceId: customResources.PhysicalResourceId.of('project-directory-seed'),
   };
   const seedProjectDirectory = new customResources.AwsCustomResource(
     scope,
@@ -176,7 +176,7 @@ export function buildBootstrapResources(
         initialOwnerEmail.valueAsString,
       ),
     },
-    physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed-v2'),
+    physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-seed'),
   };
   const seedWorkspaceAccess = new customResources.AwsCustomResource(
     scope,
@@ -209,7 +209,7 @@ export function buildBootstrapResources(
         initialOwnerUsername.valueAsString,
       ),
     },
-    physicalResourceId: customResources.PhysicalResourceId.of('workspace-bootstrap-v2'),
+    physicalResourceId: customResources.PhysicalResourceId.of('workspace-bootstrap'),
   };
   const bootstrapWorkspace = new customResources.AwsCustomResource(
     scope,
@@ -251,9 +251,7 @@ export function buildBootstrapResources(
         workspaceDirectoryId.valueAsString,
       ),
     },
-    physicalResourceId: customResources.PhysicalResourceId.of(
-      'workspace-access-demo-members-seed-v2',
-    ),
+    physicalResourceId: customResources.PhysicalResourceId.of('workspace-access-demo-members-seed'),
   };
   const seedWorkspaceDemoMembers = new customResources.AwsCustomResource(
     scope,

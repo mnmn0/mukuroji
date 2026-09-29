@@ -8,7 +8,7 @@ import {
   synthesizedTemplate,
 } from './test-support';
 
-const API_FUNCTION_LOGICAL_ID = 'ListProjectTasksFunction2134AF4A';
+const API_FUNCTION_LOGICAL_ID = 'ApiFunctionCE271BD4';
 const API_IDENTITY_SECRET_LOGICAL_ID =
   'ApiIdentityRuntimeConfigurationSecret9BDC16DA';
 const API_WORKFLOW_SECRET_LOGICAL_ID =
@@ -159,9 +159,9 @@ function join(
 }
 
 const expectedCoreConfiguration = {
-  ALLOWED_ORIGINS: base64(ref('TaskApiAllowedOrigins')),
+  ALLOWED_ORIGINS: base64(ref('ApiAllowedOrigins')),
   AUTOMATION_INBOUND_WEBHOOK_BASE_URL: base64(
-    getAtt('ProjectTasksHttpApi4BD7BB44', 'ApiEndpoint'),
+    getAtt('HttpApiF5A9A8A7', 'ApiEndpoint'),
   ),
   MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID: base64(
     ref('RuntimeControlApplication'),
@@ -246,7 +246,7 @@ const expectedDataConfiguration = {
   WORKSPACE_SEARCH_TABLE_NAME: base64(
     ref('WorkspaceSearchTable2575AD6B'),
   ),
-  WORK_ITEMS_TABLE_NAME: base64(ref('TeamIssuesTable189D851D')),
+  WORK_ITEMS_TABLE_NAME: base64(ref('WorkItemsTableD3F1672B')),
 };
 
 const expectedWorkflowConfiguration = {
@@ -702,7 +702,7 @@ describe('API runtime configuration externalization', () => {
       resources,
     )).toHaveLength(32);
     expect(resolveMaximumString(
-      ref('TaskApiAllowedOrigins'),
+      ref('ApiAllowedOrigins'),
       parameters,
       resources,
     )).toHaveLength(CLOUDFORMATION_PARAMETER_LIMIT_BYTES);
@@ -768,7 +768,7 @@ describe('API runtime configuration externalization', () => {
     }
 
     const apiPolicy = requireRecord(
-      resources.ListProjectTasksFunctionServiceRoleDefaultPolicy5F0F81CE,
+      resources.ApiFunctionServiceRoleDefaultPolicy20A32B8D,
       'API default role policy',
     );
     const policyProperties = requireRecordProperty(apiPolicy, 'Properties');
@@ -813,7 +813,7 @@ describe('API runtime configuration externalization', () => {
       API_FUNCTION_LOGICAL_ID,
     );
     const functionProperties = requireRecordProperty(apiFunction, 'Properties');
-    expect(functionProperties.FunctionName).toBe('Test-api-v2');
+    expect(functionProperties.FunctionName).toBe('Test-api');
     const environment = requireRecordProperty(functionProperties, 'Environment');
     const variables = requireRecordProperty(environment, 'Variables');
     expect(variables).toEqual({

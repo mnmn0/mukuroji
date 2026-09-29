@@ -1,48 +1,21 @@
 import type {
   ProjectTaskViewScope,
-  WorkItemActionContext,
   WorkItemActionId,
   WorkItemActionSelection,
-  WorkItemActionTarget,
 } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import {
-  createTaskSurfaceActionRegistry,
-  resolveTaskSurfaceActionTarget,
-  resolveTaskSurfaceActionTargets,
   useTaskSurfaceActions,
-  type CreateTaskSurfaceActionRegistryOptions,
   type TaskSurfaceActionController,
   type TaskSurfaceActionDisabledReasons,
-  type TaskSurfaceActionHandler,
   type TaskSurfaceActionHandlers,
   type TaskSurfaceActionLabels,
-  type TaskSurfaceActionPermission,
   type TaskSurfaceActionPermissions,
 } from './useTaskSurfaceActions'
 import type { TaskActionExecutionResult } from '../model/taskActionRegistry'
-import type { TaskActionRegistry } from '../model/taskActionRegistry'
 
 /** Canonical Project actions backed by the existing bulk mutation toolbar. */
-const projectTaskBulkActionIds: readonly WorkItemActionId[] = ['move', 'assign', 'archive']
-
-/** Executes one Project-surface action after the shared permission and validation pipeline. */
-export type ProjectTaskActionHandler = TaskSurfaceActionHandler
-
-/** Evaluates Project action access against the concrete target snapshot. */
-export type ProjectTaskActionPermission = TaskSurfaceActionPermission
-
-/** Optional target-aware permission evaluators indexed by canonical action ID. */
-export type ProjectTaskActionPermissions = TaskSurfaceActionPermissions
-
-/** Existing Project task entrances available to the canonical action registry. */
-export type ProjectTaskActionHandlers = TaskSurfaceActionHandlers
-
-/** Localized labels shown for every canonical Project task action. */
-export type ProjectTaskActionLabels = TaskSurfaceActionLabels
-
-/** Localized disabled reasons shared by Project action entrances. */
-export type ProjectTaskActionDisabledReasons = TaskSurfaceActionDisabledReasons
+export const projectTaskBulkActionIds: readonly WorkItemActionId[] = ['move', 'assign', 'archive']
 
 /** Input used to register and execute Project task actions. */
 export type UseProjectTaskActionsOptions = {
@@ -55,22 +28,16 @@ export type UseProjectTaskActionsOptions = {
   /** Permission-pruned focus and selection snapshot. */
   selection: WorkItemActionSelection
   /** Localized action labels. */
-  labels: ProjectTaskActionLabels
+  labels: TaskSurfaceActionLabels
   /** Localized reasons used for unavailable or invalid actions. */
-  disabledReasons: ProjectTaskActionDisabledReasons
+  disabledReasons: TaskSurfaceActionDisabledReasons
   /** Existing safe UI or mutation entrances for canonical actions. */
-  handlers: ProjectTaskActionHandlers
+  handlers: TaskSurfaceActionHandlers
   /** Target-aware permission checks evaluated before action-specific validation. */
-  permissions?: ProjectTaskActionPermissions
+  permissions?: TaskSurfaceActionPermissions
   /** Receives every normalized pipeline result regardless of invocation path. */
   onExecutionResult?: (result: TaskActionExecutionResult) => void
 }
-
-/** Project action operations consumed by the task screen interaction adapter. */
-export type ProjectTaskActionController = TaskSurfaceActionController
-
-/** Options used by the pure Project action registry compatibility factory. */
-export type CreateProjectTaskActionRegistryOptions = CreateTaskSurfaceActionRegistryOptions
 
 /**
  * Adapts the Project route to the surface-neutral task action controller.
@@ -80,7 +47,7 @@ export type CreateProjectTaskActionRegistryOptions = CreateTaskSurfaceActionRegi
  */
 export function useProjectTaskActions(
   options: UseProjectTaskActionsOptions,
-): ProjectTaskActionController {
+): TaskSurfaceActionController {
   const scope = useMemo<ProjectTaskViewScope>(() => ({
     kind: 'project',
     projectId: options.projectId,
@@ -102,43 +69,4 @@ export function useProjectTaskActions(
     selection: options.selection,
     surface: 'project',
   })
-}
-
-/**
- * Creates all nine canonical Project action definitions in contract order.
- *
- * @param options - Safe handlers and localized disabled reasons.
- * @returns Deterministic registry containing every canonical action identifier.
- */
-export function createProjectTaskActionRegistry(
-  options: CreateProjectTaskActionRegistryOptions,
-): TaskActionRegistry {
-  return createTaskSurfaceActionRegistry({
-    ...options,
-    bulkActionIds: projectTaskBulkActionIds,
-  })
-}
-
-/**
- * Resolves the sole selected Project target, or its focused target when nothing is selected.
- *
- * @param context - Canonical Project action invocation context.
- * @returns One actionable target, or undefined for an empty or multiple selection.
- */
-export function resolveProjectTaskActionTarget(
-  context: WorkItemActionContext,
-): WorkItemActionTarget | undefined {
-  return resolveTaskSurfaceActionTarget(context)
-}
-
-/**
- * Resolves selected Project targets, or the focused target when the selection is empty.
- *
- * @param context - Canonical Project action invocation context.
- * @returns Ordered actionable targets, including multiple bulk targets.
- */
-export function resolveProjectTaskActionTargets(
-  context: WorkItemActionContext,
-): readonly WorkItemActionTarget[] {
-  return resolveTaskSurfaceActionTargets(context)
 }

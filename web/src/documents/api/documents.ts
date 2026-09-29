@@ -1,4 +1,4 @@
-import type { CreateDocumentInput, DocumentDetail, DocumentDetailResponse, DocumentNode, DocumentTreeResponse, PublicDocumentResponse, RecentDocumentsResponse, UpdateDocumentInput } from '@mukuroji/contracts'
+import type { CreateDocumentInput, DocumentDetail, DocumentNode, DocumentTreeResponse, PublicDocumentResponse, RecentDocumentsResponse, UpdateDocumentInput } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 
@@ -452,9 +452,15 @@ function createApiErrorFromBody(status: number, value: unknown) {
   )
 }
 
+/**
+ * Reads the `{ document }` node returned by the archive endpoint.
+ *
+ * @param value - Parsed response body.
+ * @returns The archived Document node.
+ * @throws DocumentsApiError when the body does not wrap a Document node.
+ */
 function readDocumentNode(value: unknown): DocumentNode {
-  const record = asRecord(value)
-  const document = asRecord(record.document ?? value)
+  const document = asRecord(asRecord(value).document)
 
   if (typeof document.id !== 'string' || typeof document.title !== 'string') {
     throw new DocumentsApiError(
@@ -467,11 +473,16 @@ function readDocumentNode(value: unknown): DocumentNode {
   return document as unknown as DocumentNode
 }
 
+/**
+ * Reads the `{ document }` detail returned by the Document create, read, update, and
+ * instantiate endpoints.
+ *
+ * @param value - Parsed response body.
+ * @returns The Document detail.
+ * @throws DocumentsApiError when the body does not wrap a Document detail.
+ */
 function readDocumentRecord(value: unknown): DocumentDetail {
-  const record = asRecord(value)
-  const document = asRecord(
-    (record as DocumentDetailResponse).document ?? value,
-  )
+  const document = asRecord(asRecord(value).document)
 
   if (typeof document.id !== 'string' || typeof document.title !== 'string') {
     throw new DocumentsApiError(

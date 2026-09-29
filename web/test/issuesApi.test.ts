@@ -155,27 +155,40 @@ describe('team issue collaboration API', () => {
     })
   })
 
+  test('accepts canonical collaboration comments with every capability and resolution snapshot', async () => {
+    installFetchRecorder(createCollaborationPagePayload([createCommentPayload()]))
+
+    const page = await getTeamIssueCollaboration('core', 'issue-1', 'token')
+
+    expect(page.comments).toEqual([createCommentPayload()])
+  })
+
+  test('rejects collaboration comments without every capability or resolution snapshot', async () => {
+    const incompleteComments = [
+      createCommentPayload({
+        capabilities: { ...createCommentPayload().capabilities, canPromote: undefined },
+      }),
+      createCommentPayload({ acceptedResolutions: undefined }),
+    ]
+
+    for (const comment of incompleteComments) {
+      installFetchRecorder(createCollaborationPagePayload([comment]))
+
+      await expect(
+        getTeamIssueCollaboration('core', 'issue-1', 'token'),
+      ).rejects.toMatchObject({
+        code: 'InvalidIssueCollaborationResponse',
+        status: 502,
+      })
+    }
+  })
+
   test('rejects collaboration comments with malformed reactions at the API boundary', async () => {
-    installFetchRecorder({
-      comments: [
-        {
-          authorMemberKey: 'member-1',
-          bodyMarkdown: 'Comment body',
-          capabilities: {
-            canDelete: false,
-            canEdit: false,
-            canResolve: false,
-          },
-          createdAt: '2026-08-09T00:00:00.000Z',
-          id: 'comment-1',
-          mentionMemberKeys: [],
-          reactions: [{ count: '1', emoji: '👍', reactedByMe: false }],
-          rootCommentId: 'comment-1',
-          updatedAt: '2026-08-09T00:00:00.000Z',
-          version: 1,
-        },
-      ],
-    })
+    installFetchRecorder(createCollaborationPagePayload([
+      createCommentPayload({
+        reactions: [{ count: '1', emoji: '👍', reactedByMe: false }],
+      }),
+    ]))
 
     await expect(
       getTeamIssueCollaboration('core', 'issue-1', 'token'),
@@ -186,24 +199,11 @@ describe('team issue collaboration API', () => {
   })
 
   test('rejects collaboration comments with non-integral reaction counts', async () => {
-    installFetchRecorder({
-      comments: [{
-        authorMemberKey: 'member-1',
-        bodyMarkdown: 'Comment body',
-        capabilities: {
-          canDelete: false,
-          canEdit: false,
-          canResolve: false,
-        },
-        createdAt: '2026-08-09T00:00:00.000Z',
-        id: 'comment-1',
-        mentionMemberKeys: [],
+    installFetchRecorder(createCollaborationPagePayload([
+      createCommentPayload({
         reactions: [{ count: 1.5, emoji: '👍', reactedByMe: false }],
-        rootCommentId: 'comment-1',
-        updatedAt: '2026-08-09T00:00:00.000Z',
-        version: 1,
-      }],
-    })
+      }),
+    ]))
 
     await expect(
       getTeamIssueCollaboration('core', 'issue-1', 'token'),
@@ -214,24 +214,11 @@ describe('team issue collaboration API', () => {
   })
 
   test('rejects collaboration comments with negative reaction counts', async () => {
-    installFetchRecorder({
-      comments: [{
-        authorMemberKey: 'member-1',
-        bodyMarkdown: 'Comment body',
-        capabilities: {
-          canDelete: false,
-          canEdit: false,
-          canResolve: false,
-        },
-        createdAt: '2026-08-09T00:00:00.000Z',
-        id: 'comment-1',
-        mentionMemberKeys: [],
+    installFetchRecorder(createCollaborationPagePayload([
+      createCommentPayload({
         reactions: [{ count: -1, emoji: '👍', reactedByMe: false }],
-        rootCommentId: 'comment-1',
-        updatedAt: '2026-08-09T00:00:00.000Z',
-        version: 1,
-      }],
-    })
+      }),
+    ]))
 
     await expect(
       getTeamIssueCollaboration('core', 'issue-1', 'token'),
@@ -242,25 +229,14 @@ describe('team issue collaboration API', () => {
   })
 
   test('rejects non-boolean per-comment capabilities at the API boundary', async () => {
-    installFetchRecorder({
-      comments: [{
-        id: 'comment-1',
-        rootCommentId: 'comment-1',
-        authorMemberKey: 'demo@example.com',
-        bodyMarkdown: 'Comment',
-        version: 1,
-        createdAt: '2026-08-09T00:00:00.000Z',
-        updatedAt: '2026-08-09T00:00:00.000Z',
-        mentionMemberKeys: [],
-        reactions: [],
+    installFetchRecorder(createCollaborationPagePayload([
+      createCommentPayload({
         capabilities: {
-          canEdit: true,
-          canDelete: true,
-          canResolve: false,
+          ...createCommentPayload().capabilities,
           canAttach: 'yes',
         },
-      }],
-    })
+      }),
+    ]))
 
     await expect(
       getTeamIssueCollaboration('core', 'issue-1', 'token'),
@@ -435,48 +411,27 @@ describe('team issue collaboration API', () => {
   })
 
   test('rejects malformed accepted resolution audit history instead of hiding it', async () => {
-    installFetchRecorder({
-      comments: [
-        {
-          acceptedResolutions: [
-            {
-              acceptedAt: '2026-08-09T00:00:00.000Z',
-              acceptedBy: { displayName: 'Demo User', id: 'demo@example.com' },
-              capturedCommentBody: 'Old conclusion',
-              capturedCommentRevision: 1,
-              id: 'resolution-corrupt',
-              sourceCommentId: 'reply-1',
-              sourceRootCommentId: 'root-1',
-              state: 'superseded',
-              summary: 'Old summary',
-            },
-          ],
-          authorMemberKey: 'demo@example.com',
-          bodyMarkdown: 'Current conclusion',
-          capabilities: {
-            canDelete: true,
-            canEdit: true,
-            canResolve: true,
+    installFetchRecorder(createCollaborationPagePayload([
+      createCommentPayload({
+        acceptedResolutions: [
+          {
+            acceptedAt: '2026-08-09T00:00:00.000Z',
+            acceptedBy: { displayName: 'Demo User', id: 'demo@example.com' },
+            capturedCommentBody: 'Old conclusion',
+            capturedCommentRevision: 1,
+            id: 'resolution-corrupt',
+            sourceCommentId: 'reply-1',
+            sourceRootCommentId: 'root-1',
+            state: 'superseded',
+            summary: 'Old summary',
           },
-          createdAt: '2026-08-09T00:00:00.000Z',
-          id: 'root-1',
-          mentionMemberKeys: [],
-          reactions: [],
-          rootCommentId: 'root-1',
-          updatedAt: '2026-08-09T00:00:00.000Z',
-          version: 1,
-        },
-      ],
-      watch: {
-        subscribed: false,
-        explicit: false,
-        automatic: false,
-        reasons: [],
-        watcherCount: 0,
-      },
-      presence: [],
-      capabilities: { canComment: true, canReact: true, canWatch: true },
-    })
+        ],
+        authorMemberKey: 'demo@example.com',
+        bodyMarkdown: 'Current conclusion',
+        id: 'root-1',
+        rootCommentId: 'root-1',
+      }),
+    ]))
 
     await expect(
       getTeamIssueCollaboration('core', 'issue-1', 'token'),
@@ -486,6 +441,58 @@ describe('team issue collaboration API', () => {
     })
   })
 })
+
+/**
+ * Creates one complete collaboration comment payload for API boundary tests.
+ *
+ * @param overrides - Fields replaced to exercise one validation rule.
+ * @returns A canonical comment payload that is valid unless an override breaks it.
+ */
+function createCommentPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    acceptedResolutions: [],
+    authorMemberKey: 'member-1',
+    bodyMarkdown: 'Comment body',
+    capabilities: {
+      canAttach: false,
+      canDelete: false,
+      canEdit: false,
+      canPromote: false,
+      canReact: false,
+      canReply: false,
+      canResolve: false,
+    },
+    createdAt: '2026-08-09T00:00:00.000Z',
+    id: 'comment-1',
+    mentionMemberKeys: [],
+    reactions: [],
+    rootCommentId: 'comment-1',
+    updatedAt: '2026-08-09T00:00:00.000Z',
+    version: 1,
+    ...overrides,
+  }
+}
+
+/**
+ * Wraps comment payloads in a complete collaboration page response.
+ *
+ * @param comments - Comment payloads returned by the fake endpoint.
+ * @returns A collaboration page with idle watch, presence, and capability state.
+ */
+function createCollaborationPagePayload(comments: unknown[]) {
+  return {
+    comments,
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+    capabilities: { canComment: true, canReact: true, canWatch: true },
+  }
+}
 
 function installFetchRecorder(responseBody: unknown) {
   const requests: Array<{ url: string; init: RequestInit }> = []

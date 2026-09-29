@@ -52,7 +52,7 @@ export type AuditProjectionWorkerResources = {
  *
  * @param scope Stack scope used directly to preserve existing construct paths.
  * @param input Shared storage, transport, queue, and authorization inputs.
- * @returns Projection worker resources consumed by webhook migration and outputs.
+ * @returns Projection worker resources published through stack outputs.
  */
 export function buildAuditProjectionWorker(
   scope: cdk.Stack,

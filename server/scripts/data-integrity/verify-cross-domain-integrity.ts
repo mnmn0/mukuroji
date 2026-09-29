@@ -60,8 +60,8 @@ import {
   type CrossDomainIntegrityResourceIdentity,
   type CrossDomainIntegrityResourceTarget,
   type CrossDomainIntegrityResult,
-} from './cross-domain-integrity'
-import { runCrossDomainIntegrityAwsCheck } from './cross-domain-integrity-aws'
+} from '../../src/modules/data-integrity'
+import { runCrossDomainIntegrityAwsCheck } from '../../src/modules/data-integrity/cross-domain-integrity-aws'
 import type {
   CrossDomainIntegrityAwsReaderConfiguration,
   CrossDomainIntegrityBucketNames,
@@ -73,7 +73,7 @@ import type {
   CrossDomainIntegrityRole,
   CrossDomainIntegrityTableNames,
   CrossDomainIntegrityTableTarget,
-} from './cross-domain-integrity-aws-types'
+} from '../../src/modules/data-integrity/cross-domain-integrity-aws-types'
 
 export type {
   CrossDomainIntegrityAwsReaderConfiguration,
@@ -86,7 +86,7 @@ export type {
   CrossDomainIntegrityRole,
   CrossDomainIntegrityTableNames,
   CrossDomainIntegrityTableTarget,
-} from './cross-domain-integrity-aws-types'
+} from '../../src/modules/data-integrity/cross-domain-integrity-aws-types'
 
 const DIGEST_KEY_HEX_LENGTH = 64
 const MAX_EVIDENCE_BYTES = 1024 * 1024

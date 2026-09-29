@@ -6,7 +6,7 @@ import {
   PlanningRevisionFenceBarrierError,
 } from './planning-revision-fence-barrier'
 
-/** Creates a deterministic client harness for the Planning migration barrier. */
+/** Creates a deterministic client harness for the Planning revision-fence barrier. */
 function createMiddlewareHarness() {
   const lowLevelClient = new DynamoDBClient({
     credentials: {
@@ -25,7 +25,7 @@ function createMiddlewareHarness() {
   addSpy.mockRestore()
 
   if (typeof registeredMiddleware !== 'function') {
-    throw new Error('Expected the Planning migration barrier middleware.')
+    throw new Error('Expected the Planning revision-fence barrier middleware.')
   }
   const middleware = registeredMiddleware
 
@@ -48,7 +48,7 @@ function createMiddlewareHarness() {
       [next, { commandName }],
     )
     if (typeof initialized !== 'function') {
-      throw new Error('Expected an initialized Planning migration barrier.')
+      throw new Error('Expected an initialized Planning revision-fence barrier.')
     }
     await Reflect.apply(initialized, undefined, [{ input }])
     return forwardedInputs
@@ -119,7 +119,7 @@ test('leaves fence initialization transactions untouched', async () => {
   }
 })
 
-test('rejects direct fenced META writes that cannot carry the migration barrier', async () => {
+test('rejects direct fenced META writes that cannot carry the revision fence', async () => {
   const harness = createMiddlewareHarness()
   try {
     await expect(harness.invoke({

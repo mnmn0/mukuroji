@@ -125,7 +125,7 @@ describe('task selection model', () => {
     expect(findTaskBySelection([coreTask, designTask], 'same-local-id', 'design-team'))
       .toBe(designTask)
     expect(findTaskBySelection([coreTask, designTask], undefined, 'core-team')).toBeUndefined()
-    expect(createBulkOperationSelection(designTask, translateTaskLabel)).toEqual({
+    expect(createBulkOperationSelection(designTask)).toEqual({
       expectedRevision: 7,
       label: designTask.title,
       selectionKey: createTaskKey(designTask),
@@ -662,6 +662,7 @@ describe('task custom-field display, filters, and sorting', () => {
         statusFilter: 'core-team\u0000default\u0000todo',
         t: translateTaskLabel,
         today: new Date(2026, 6, 23, 12),
+        workItemTypeFilter: 'all',
       },
     )
 

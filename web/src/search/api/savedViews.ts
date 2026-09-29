@@ -1,4 +1,5 @@
 import { type CreateSavedWorkspaceViewInput, type SavedWorkspaceView, type UpdateSavedWorkspaceViewInput } from '@mukuroji/contracts'
+import { isOptionalString } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceSearchApiError, resolveSearchApiBaseUrl } from './errors'
 
@@ -112,27 +113,39 @@ export async function deleteSavedWorkspaceView(
   )
 }
 
+/**
+ * Reads the `{ views, nextCursor }` page returned by the saved-view list endpoint.
+ *
+ * @param value - Parsed response body.
+ * @returns Saved views and the optional next-page cursor.
+ * @throws WorkspaceSearchApiError when the body is not a saved-view page.
+ */
 function readSavedViewsPage(value: unknown) {
-  if (Array.isArray(value)) {
-    return { views: value as SavedWorkspaceView[] }
-  }
-
   const record = asRecord(value)
-  return {
-    views: Array.isArray(record.views) ? record.views as SavedWorkspaceView[] : [],
-    nextCursor: typeof record.nextCursor === 'string' ? record.nextCursor : undefined,
-  }
-}
 
-function readSavedView(value: unknown) {
-  const record = asRecord(value)
-  const view = record.view ?? value
-
-  if (!view || typeof view !== 'object') {
+  if (!Array.isArray(record.views) || !isOptionalString(record.nextCursor)) {
     throw new WorkspaceSearchApiError(502, 'Saved view response was invalid.', 'InvalidSavedViewResponse')
   }
 
-  return view as SavedWorkspaceView
+  return {
+    views: record.views as SavedWorkspaceView[],
+    nextCursor: record.nextCursor,
+  }
+}
+
+/**
+ * Reads the saved view returned by the saved-view create and update endpoints.
+ *
+ * @param value - Parsed response body.
+ * @returns The created or updated saved view.
+ * @throws WorkspaceSearchApiError when the body is not a saved view.
+ */
+function readSavedView(value: unknown) {
+  if (typeof asRecord(value).id !== 'string') {
+    throw new WorkspaceSearchApiError(502, 'Saved view response was invalid.', 'InvalidSavedViewResponse')
+  }
+
+  return value as SavedWorkspaceView
 }
 
 async function requestJson<TResponse>(

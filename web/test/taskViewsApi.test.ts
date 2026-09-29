@@ -87,7 +87,7 @@ describe('saved task-view API', () => {
     expect(new URL(requests[1]?.url ?? '').searchParams.get('cursor')).toBe('opaque/page-2')
   })
 
-  test('validates a wrapped saved view including safe migration warnings', async () => {
+  test('validates a saved view including safe migration warnings', async () => {
     const view = {
       ...createSavedTaskViewFixture('migrated-view'),
       migrationWarnings: [{
@@ -96,7 +96,7 @@ describe('saved task-view API', () => {
         section: 'filter',
       }],
     } satisfies SavedTaskView
-    const requests = installJsonResponses([{ view }])
+    const requests = installJsonResponses([view])
 
     await expect(getSavedTaskView('access-token', 'view/with slash')).resolves.toEqual(view)
 
@@ -104,12 +104,20 @@ describe('saved task-view API', () => {
       .toBe('/api/task-views/view%2Fwith%20slash')
   })
 
+  test('rejects a saved view wrapped in a view envelope', async () => {
+    installJsonResponses([{ view: createSavedTaskViewFixture('wrapped-view') }])
+
+    await expect(getSavedTaskView('access-token', 'wrapped-view')).rejects.toMatchObject({
+      code: 'InvalidTaskViewResponse',
+    })
+  })
+
   test('sends canonical lifecycle methods, encoded paths, bodies, and mutation headers', async () => {
     const responseView = createSavedTaskViewFixture('saved-view')
     const requests = installJsonResponses([
       responseView,
-      { view: { ...responseView, revision: 2 } },
-      { view: { ...responseView, id: 'saved-view-copy' } },
+      { ...responseView, revision: 2 },
+      { ...responseView, id: 'saved-view-copy' },
       undefined,
     ])
     const createInput = {

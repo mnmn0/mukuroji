@@ -49,12 +49,10 @@
     "floci:deploy-backend": "bun --env-file=.env run sh floci/deploy-backend.sh",
     "work-items:seed-dynamodb": "bash scripts/seed-work-items-dynamodb.sh",
     "issues:check-dynamodb": "bash scripts/check-team-issues-dynamodb.sh",
-    "audit:backfill": "bun --env-file=.env --filter server audit:backfill",
-    "team-issue-comments:backfill": "bun --env-file=.env --filter server team-issue-comments:backfill",
     "search:backfill": "bun --filter server search:backfill",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
-    "cdk:synth": "bun --filter cdk cdk synth -c triageIndexDeploymentStage=wake -c teamIssueCommentIndexDeploymentStage=comment"
+    "cdk:synth": "bun --filter cdk cdk synth"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb-streams": "3.1057.0"

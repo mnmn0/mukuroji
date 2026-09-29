@@ -5,9 +5,9 @@ import {
   createMutationAuditContext,
 } from '../../../audit/audit'
 import {
-  InMemoryDeveloperPlatformClient,
+  InMemoryDeveloperPlatformStorage,
   LocalAesGcmSecretProtector,
-} from '../../developer-platform'
+} from '../../adapter-out/shared/developer-platform-store'
 import {
   DynamoDbWebhookAuditEventReader,
   DynamoDbWebhookDeliveryClaimStore,
@@ -931,14 +931,14 @@ test('records terminal rejection and isolates an invalid queue message', async (
 })
 
 function createPlatform(clock: () => Date) {
-  return new InMemoryDeveloperPlatformClient(
+  return new InMemoryDeveloperPlatformStorage(
     new LocalAesGcmSecretProtector('webhook-handler-test-key-with-at-least-32-bytes'),
     clock,
   )
 }
 
 async function createSubscription(
-  platform: InMemoryDeveloperPlatformClient,
+  platform: InMemoryDeveloperPlatformStorage,
   options: {
     name?: string
     teamIds?: string[]
