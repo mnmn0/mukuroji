@@ -2603,6 +2603,47 @@ test('fails closed when a stored task view status filter is not Team and Type-qu
   }
 })
 
+test('fails closed when a stored task view default marker has no generation', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = createQualifiedStatusTaskViewAccess()
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Personal default',
+      visibility: 'personal',
+      defaultSource: 'personal',
+      definition: createQualifiedStatusTaskViewDefinition(),
+    },
+  })
+
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+  })).toMatchObject({ preference: { isDefault: true, isPersonalDefault: true } })
+  control.beforeGet = (items, workspaceId, recordKey) => {
+    const itemKey = `${workspaceId}\0${recordKey}`
+    const row = items.get(itemKey)
+    if (row?.entryType !== 'task-view-default') return
+    const marker = structuredClone(row)
+    delete marker.generation
+    items.set(itemKey, marker)
+  }
+
+  await expect(client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+  })).rejects.toMatchObject({ code: 'InvalidTaskView', status: 503 })
+})
+
 /**
  * Creates owner access for the `core` Team with one active Type-qualified workflow status.
  *

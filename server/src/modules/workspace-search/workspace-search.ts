@@ -732,7 +732,7 @@ type StoredTaskViewDefault = {
   /** Default に指定した task view ID です。 */
   viewId: string
   /** Marker generation used to guard same-timestamp replacement races. */
-  generation?: string
+  generation: string
   /** Default marker 最終更新日時です。 */
   updatedAt: string
 }
@@ -5346,9 +5346,7 @@ function readStoredTaskViewDefault(value: Record<string, unknown>): StoredTaskVi
     const scope = readStoredTaskViewScope(value.scope)
     const userId = optionalStoredText(value.userId)
     const teamId = optionalStoredText(value.teamId)
-    const generation = value.generation === undefined
-      ? undefined
-      : requireIdentifier(value.generation, 'Task view default generation')
+    const generation = requireIdentifier(value.generation, 'Task view default generation')
     const viewId = requireIdentifier(value.viewId, 'Task view default view ID')
     if (
       (value.ownerType === 'personal' && (!userId || teamId)) ||
@@ -5374,7 +5372,7 @@ function readStoredTaskViewDefault(value: Record<string, unknown>): StoredTaskVi
       surface,
       scope,
       viewId,
-      ...(generation ? { generation } : {}),
+      generation,
       updatedAt: requireText(value.updatedAt, 'Task view default updatedAt', 128),
     }
   } catch (error) {
@@ -5909,20 +5907,15 @@ function createTaskViewDefaultGuardTransactionItem(
 }
 
 /**
- * Creates a marker-generation condition with a legacy timestamp fallback.
+ * Creates the condition that binds a marker mutation to the observed marker generation.
  *
  * @param marker - Persisted marker generation observed by the current operation.
  * @returns DynamoDB condition fragments that reject a replacement marker.
  */
 function createTaskViewDefaultGenerationCondition(marker: StoredTaskViewDefault) {
-  if (marker.generation) {
-    const names: Record<string, string> = { '#generation': 'generation' }
-    const values: Record<string, unknown> = { ':generation': marker.generation }
-    return { expression: '#generation = :generation', names, values }
-  }
-  const names: Record<string, string> = { '#updatedAt': 'updatedAt' }
-  const values: Record<string, unknown> = { ':updatedAt': marker.updatedAt }
-  return { expression: '#updatedAt = :updatedAt', names, values }
+  const names: Record<string, string> = { '#generation': 'generation' }
+  const values: Record<string, unknown> = { ':generation': marker.generation }
+  return { expression: '#generation = :generation', names, values }
 }
 
 function createSavedViewIdempotencyHash(

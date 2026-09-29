@@ -70,7 +70,7 @@ idempotency key or orphaned preference from attaching to a new lifecycle.
 Personal and Team default markers include a generation value. Definition scope or
 visibility changes remove obsolete markers in the same transaction, and lazy cleanup
 conditions include the observed generation so a stale reader cannot delete a newer
-default.
+default. A marker without a generation is malformed and fails closed.
 
 ## Authorization boundary
 
