@@ -639,7 +639,7 @@ export interface CollaborationClient {
   subscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves a watcher while preserving scope-wide counts for compatibility callers. */
+  /** Saves a watcher without compare-and-set and returns the scope-wide state with watcher counts. */
   subscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -651,7 +651,7 @@ export interface CollaborationClient {
   unsubscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves an unsubscribe tombstone while preserving counts for compatibility callers. */
+  /** Saves an unsubscribe tombstone without compare-and-set and returns the scope-wide state. */
   unsubscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -3959,7 +3959,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   async subscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves a watcher while preserving scope-wide counts for compatibility callers. */
+  /** Saves a watcher without compare-and-set and returns the scope-wide state with watcher counts. */
   async subscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -4064,7 +4064,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   async unsubscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves an unsubscribe tombstone while preserving counts for compatibility callers. */
+  /** Saves an unsubscribe tombstone without compare-and-set and returns the scope-wide state. */
   async unsubscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -4651,7 +4651,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
    * Reads the current curated-context ledger generation consistently.
    *
    * @param entityKey - Work Item collaboration entity key.
-   * @returns The current generation, or zero for a legacy scope without a ledger row.
+   * @returns The current generation, or zero before the first context mutation creates the ledger row.
    */
   private async getCuratedContextLedgerGeneration(entityKey: string): Promise<number> {
     try {
