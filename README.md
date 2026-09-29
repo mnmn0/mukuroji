@@ -397,13 +397,13 @@ export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-p
 export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
 export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
-export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
+export MUKUROJI_API_ALLOWED_ORIGINS=https://app.example.com
 
 bash scripts/prepare-workspace-cognito.sh
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff CdkStack \
+bun --filter cdk cdk diff Mukuroji \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -428,9 +428,9 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
-  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
+  --parameters ApiAllowedOrigins="$MUKUROJI_API_ALLOWED_ORIGINS"
 
-bun --filter cdk cdk deploy CdkStack \
+bun --filter cdk cdk deploy Mukuroji \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -455,7 +455,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
-  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
+  --parameters ApiAllowedOrigins="$MUKUROJI_API_ALLOWED_ORIGINS"
 ```
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
@@ -482,7 +482,7 @@ scope は `openid email profile` のみ、callback は `COGNITO_SSO_REDIRECT_URI
 で得た code を SSO exchange へ持ち込めるため、この構成は fail-closed で拒否されます。
 
 Lambda Function URL の CORS 許可 origin は CDK parameter
-`TaskApiAllowedOrigins` で指定します。未指定時は
+`ApiAllowedOrigins` で指定します。未指定時は
 `http://localhost:5173,http://127.0.0.1:5173` です。
 認証に使う Cognito user pool は CDK parameter `CognitoUserPoolId` で固定し、
 Lambda は access token の issuer がその user pool と一致する場合だけ処理します。

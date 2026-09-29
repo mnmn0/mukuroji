@@ -7,12 +7,11 @@ import {
   synthesizedTemplate,
 } from './test-support';
 
-test('upgrade keeps stateful resource logical IDs and enables retain with PITR', () => {
+test('stateful resources keep pinned logical IDs and enable retain with PITR', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
   const stableResourceIds = [
-    'ProjectTasksTableE21F6637',
-    'TeamIssuesTable189D851D',
+    'WorkItemsTableD3F1672B',
     'WorkItemConfigurationTable35E94558',
     'AutomationTableE3D67F0D',
     'PlanningTable2A0D4CC5',
@@ -21,7 +20,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
     'TenantAdministrationTable621D59EB',
-    'ListProjectTasksFunction2134AF4A',
+    'ApiFunctionCE271BD4',
     'DocumentsTable7E808EE5',
     'WorkItemCollaborationTableFDECF217',
     'WorkspaceSearchTable2575AD6B',
@@ -36,7 +35,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(25);
+  expect(Object.keys(tables)).toHaveLength(24);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -50,21 +49,6 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
       }),
     }));
   }
-
-  expect(resources.ProjectTasksTableE21F6637.Properties).toEqual(expect.objectContaining({
-    AttributeDefinitions: [
-      { AttributeName: 'directoryProjectId', AttributeType: 'S' },
-      { AttributeName: 'taskId', AttributeType: 'S' },
-    ],
-    KeySchema: [
-      { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
-      { AttributeName: 'taskId', KeyType: 'RANGE' },
-    ],
-    SSESpecification: {
-      SSEEnabled: true,
-    },
-  }));
-  expect(resources.ProjectTasksTableE21F6637.Properties.GlobalSecondaryIndexes).toBeUndefined();
 
   expect(resources.CustomersTableB554B793.Properties).toEqual(expect.objectContaining({
     AttributeDefinitions: expect.arrayContaining([
@@ -123,7 +107,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
         Enabled: true,
       },
     }));
-  expect(resources.TeamIssuesTable189D851D.Properties)
+  expect(resources.WorkItemsTableD3F1672B.Properties)
     .toEqual(expect.objectContaining({
       AttributeDefinitions: expect.arrayContaining([
         { AttributeName: 'directoryTeamId', AttributeType: 'S' },
@@ -370,7 +354,7 @@ test('analytics state is retained with a due-delivery index and scoped API acces
     'Fn::Base64': { Ref: analyticsTableLogicalId },
   });
   expect(
-    resources.ListProjectTasksFunction2134AF4A
+    resources.ApiFunctionCE271BD4
       .Properties.Environment.Variables,
   ).toEqual(expect.objectContaining({
     MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
@@ -629,7 +613,7 @@ test('file bucket is private durable and scoped for direct browser transfers', (
     'Fn::Split': [
       ',',
       {
-        Ref: 'TaskApiAllowedOrigins',
+        Ref: 'ApiAllowedOrigins',
       },
     ],
   };

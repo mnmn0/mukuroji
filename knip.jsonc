@@ -28,7 +28,7 @@
       ]
     },
     "cdk": {
-      "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "test/**/*.test.ts", "lib/cdk-stack.ts"],
+      "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "test/**/*.test.ts", "lib/stacks/mukuroji-stack.ts"],
       "ignoreDependencies": ["esbuild"]
     }
   }

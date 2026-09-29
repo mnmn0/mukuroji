@@ -1,46 +1,43 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
-import { configureAlarmRouting } from './aspects/alarm-routing';
-import { buildLambdaBuildPaths } from './config/lambda-build-paths';
-import { buildStackParameters } from './config/stack-parameters';
+import { configureAlarmRouting } from '../aspects/alarm-routing';
+import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
+import { buildStackParameters } from '../config/stack-parameters';
 import {
   buildApiRuntime,
   buildApiTransportsAndRealtime,
-} from './subsystems/api-realtime';
-import { buildBootstrapResources } from './subsystems/bootstrap-resources';
-import { buildCrossDomainIntegrityAccess } from './subsystems/cross-domain-integrity';
-import {
-  buildDataStores,
-  configureRealtimeSessionIndexes,
-} from './subsystems/data-stores';
+} from '../subsystems/api-realtime';
+import { buildBootstrapResources } from '../subsystems/bootstrap-resources';
+import { buildCrossDomainIntegrityAccess } from '../subsystems/cross-domain-integrity';
+import { buildDataStores } from '../subsystems/data-stores';
 import {
   buildFileStorage,
   configureFileStorageApiBoundary,
-} from './subsystems/file-storage';
-import { buildStackOutputs } from './subsystems/outputs';
-import { buildRestoreDrill } from './subsystems/restore-drill';
-import { buildRuntimeControls } from './subsystems/runtime-controls';
+} from '../subsystems/file-storage';
+import { buildStackOutputs } from '../subsystems/outputs';
+import { buildRestoreDrill } from '../subsystems/restore-drill';
+import { buildRuntimeControls } from '../subsystems/runtime-controls';
 import {
   buildAiAssistanceObservabilityWorker,
-} from './subsystems/workers/ai-assistance-observability';
-import { buildAuditProjectionWorker } from './subsystems/workers/audit-projection';
-import { buildAutomationWorkers } from './subsystems/workers/automation';
-import { buildWorkerChannels } from './subsystems/workers/channels';
-import { buildConnectorWorkers } from './subsystems/workers/connectors';
-import { buildEnterpriseIdentityWorkers } from './subsystems/workers/enterprise-identity';
-import { buildRequestEmailWorker } from './subsystems/workers/request-email';
-import { buildScheduleWorkers } from './subsystems/workers/schedules';
-import { buildSlackNotificationWorker } from './subsystems/workers/slack-notifications';
-import { buildTenantOperationWorker } from './subsystems/workers/tenant-operation';
-import { buildTriageScheduleWorker } from './subsystems/workers/triage';
-import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
-import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
+} from '../subsystems/workers/ai-assistance-observability';
+import { buildAuditProjectionWorker } from '../subsystems/workers/audit-projection';
+import { buildAutomationWorkers } from '../subsystems/workers/automation';
+import { buildWorkerChannels } from '../subsystems/workers/channels';
+import { buildConnectorWorkers } from '../subsystems/workers/connectors';
+import { buildEnterpriseIdentityWorkers } from '../subsystems/workers/enterprise-identity';
+import { buildRequestEmailWorker } from '../subsystems/workers/request-email';
+import { buildScheduleWorkers } from '../subsystems/workers/schedules';
+import { buildSlackNotificationWorker } from '../subsystems/workers/slack-notifications';
+import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operation';
+import { buildTriageScheduleWorker } from '../subsystems/workers/triage';
+import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
+import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
 
 /**
- * Composes the production infrastructure from logical-ID-preserving subsystem builders.
+ * Composes the Mukuroji application infrastructure from subsystem builders.
  */
-export class CdkStack extends cdk.Stack {
+export class MukurojiStack extends cdk.Stack {
   /**
    * Creates the application stack without introducing additional construct scopes.
    *
@@ -58,7 +55,7 @@ export class CdkStack extends cdk.Stack {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
     });
     const fileStorage = buildFileStorage(this, {
-      allowedOrigins: parameters.taskApiAllowedOriginList,
+      allowedOrigins: parameters.apiAllowedOriginList,
       fileProofingTable: dataStores.fileProofingTable,
       lambdaBuildPaths,
       retentionDays: parameters.fileRetentionDays,
@@ -88,7 +85,6 @@ export class CdkStack extends cdk.Stack {
         parameters.restoreDrillCleanupApproverRoleArn,
       workspaceAuditPseudonymKey: parameters.workspaceAuditPseudonymKey,
     });
-    configureRealtimeSessionIndexes(dataStores);
 
     const workerChannels = buildWorkerChannels(this);
     const apiRuntime = buildApiRuntime(this, {

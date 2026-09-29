@@ -28,7 +28,7 @@
 | `AiBedrockDestinationModelArns` | AI有効時のJP profileではyes | Cross-Region inference profileの全destination foundation-model ARNを空白なしcomma-separatedで指定します。Direct model invocationでは空にします。指定時だけprofile ARN一致condition付きIAM statementを作ります。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
-| `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
+| `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
@@ -122,7 +122,7 @@ templateとdeployed configurationの両方で照合します。
 
 - `ApiFunctionUrl`: Lambda Function URL
 - `ApiGatewayUrl`: API Gateway HTTP API URL
-- `WorkItemsTableName`（canonical Work Item store。construct ID は `TeamIssuesTable`）
+- `WorkItemsTableName`（canonical Work Item store）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
 - `PlanningTableName`（cycle、goal、milestone、roadmap、portfolio の計画 store）
 - `DocumentsTableName`（document、whiteboard、share、comment の workspace store）
@@ -195,7 +195,7 @@ Production credential を CloudFormation parameter、Lambda environment、reposi
 ```sh
 export CONNECTOR_RUNTIME_SECRET_ARN="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
-  --stack-name CdkStack \
+  --stack-name Mukuroji \
   --query "Stacks[0].Outputs[?OutputKey=='ConnectorRuntimeSecretArn'].OutputValue | [0]" \
   --output text)"
 
@@ -308,7 +308,7 @@ stream batch を共有 projection へ再投入します。
 ```sh
 set -euo pipefail
 
-export STACK_NAME=CdkStack
+export STACK_NAME=Mukuroji
 export COLLABORATION_PROJECTION_DLQ_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --stack-name "$STACK_NAME" \
@@ -487,7 +487,7 @@ File body は API request body に通さず、認証・認可済み API が発�
 
 - S3 bucket は Block Public Access、Bucket owner enforced、SSE-S3、TLS 強制、versioning、`Retain` を有効にします。
 - `system/data-integrity/file-bucket-incarnation/v1.json` は bucket policy と TLS 強制の適用後、custom provider が事前 GET を行わず `If-None-Match: *` の条件付き PUT を最初に1回だけ試みます。Policy は同 key の delete / version delete を全 principal に拒否し、provider role 以外の PUT と `If-None-Match: *` を欠く PUT を拒否します。条件不成立または Create response を失った再試行だけ current marker の checksum / size を照合して同じ VersionId を返し、新しい version を作りません。Provider に bucket-wide `ListBucket` は付与しません。Object Lock は有効化しません。
-- browser CORS は `TaskApiAllowedOrigins` と揃え、direct `PUT` / `GET` / `HEAD` と checksum / metadata header だけを許可します。
+- browser CORS は `ApiAllowedOrigins` と揃え、direct `PUT` / `GET` / `HEAD` と checksum / metadata header だけを許可します。
 - GuardDuty Malware Protection for S3 は `workspaces/` prefix を scan し、`GuardDutyMalwareScanStatus` tag を付けます。
 - bucket policy は GuardDuty 以外による scan status tag の追加・変更・削除を拒否し、API と cleanup consumer は既存 status を同値のまま保持する tag 更新だけを行います。
 - bucket policy は GuardDuty scan role と metadata/scan 検証を行う API execution role を除き、`NO_THREATS_FOUND` tag がない object の `GetObject` / `GetObjectVersion` を拒否します。API は clean scan を確認した immutable S3 VersionId だけを署名するため、別 version へ URL が付け替わることはありません。
@@ -601,9 +601,9 @@ export MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-input-p
 export MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD='<reviewed-output-price>'
 export MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS='arn:aws:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6,arn:aws:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6'
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
-export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
+export MUKUROJI_API_ALLOWED_ORIGINS=https://app.example.com
 
-bun --filter cdk cdk diff CdkStack \
+bun --filter cdk cdk diff Mukuroji \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -628,9 +628,9 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
-  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
+  --parameters ApiAllowedOrigins="$MUKUROJI_API_ALLOWED_ORIGINS"
 
-bun --filter cdk cdk deploy CdkStack \
+bun --filter cdk cdk deploy Mukuroji \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -655,7 +655,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AiBedrockInputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockOutputPricePerMillionTokensUsd="$MUKUROJI_AI_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD" \
   --parameters AiBedrockDestinationModelArns="$MUKUROJI_AI_BEDROCK_DESTINATION_MODEL_ARNS" \
-  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS" \
+  --parameters ApiAllowedOrigins="$MUKUROJI_API_ALLOWED_ORIGINS" \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
 
@@ -689,7 +689,7 @@ bootstrap update は同じ key・同じ owner なら再実行できます。既�
 ```sh
 export PROJECT_DIRECTORY_TABLE_NAME="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
-  --stack-name CdkStack \
+  --stack-name Mukuroji \
   --query "Stacks[0].Outputs[?OutputKey=='ProjectDirectoryTableName'].OutputValue | [0]" \
   --output text)"
 
@@ -705,12 +705,12 @@ Workspace metadata/owner/alias、全 seed project の manager row を consistent
 ```sh
 export FUNCTION_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
-  --stack-name CdkStack \
+  --stack-name Mukuroji \
   --query "Stacks[0].Outputs[?OutputKey=='ApiFunctionUrl'].OutputValue | [0]" \
   --output text)"
 export API_GATEWAY_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
-  --stack-name CdkStack \
+  --stack-name Mukuroji \
   --query "Stacks[0].Outputs[?OutputKey=='ApiGatewayUrl'].OutputValue | [0]" \
   --output text)"
 export ACCESS_TOKEN=<fresh-owner-access-token>
@@ -750,11 +750,11 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 ## Canonical Work Item deploy
 
-CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。旧 Project Task table は既存 logical ID のまま `RETAIN` の decommission resource として保持し、tenant lifecycle の export、delete、verify capability だけが参照します。旧 adapter、route、GSI は削除し、API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
+CDK は canonical Work Item store として `WorkItemsTable` を作成し、table 名を `WorkItemsTableName` output で公開します。API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
 
-Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast や legacy task からの copy は行いません。
+Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast は行いません。
 
-Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がなく、旧 Project Task table が `RETAIN` と base-table key schema を維持し、旧 GSI、API、route への互換 IAM が残っていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。旧 table の残存行は tenant lifecycle の export/delete/verify で drain します。
+Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
 
 ## Work Item configuration
 
@@ -943,7 +943,7 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
 ## Security and durability checks
 
 - Function URL の edge auth は `NONE` ですが、Hono API が Cognito Bearer token の issuer / client / token use を検証します。
-- Function URL、HTTP API、Hono CORS は同じ `TaskApiAllowedOrigins` に揃えます。本番で local default を使いません。
+- Function URL、HTTP API、Hono CORS は同じ `ApiAllowedOrigins` に揃えます。本番で local default を使いません。
 - Lambda IAM は stack table、`workspaces/` file object prefix、指定 user pool に限定します。API role に bucket-wide `ListBucket` は付与しません。
 - Email ingestion Lambda は HTTP route を持たず、Request Intake table と failure DLQ 以外の data-plane 権限を持ちません。
 - Enterprise SCIM group reconciliation は API Lambda と concurrency を共有しない専用 Lambda で実行します。
@@ -972,5 +972,5 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff CdkStack
+bun --filter cdk cdk diff Mukuroji
 ```

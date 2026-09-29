@@ -38,10 +38,10 @@ test('shared server handler is bundled as a Lambda asset with production environ
         },
       }),
     },
-    FunctionName: 'Test-api-v2',
+    FunctionName: 'Test-api',
   });
 
-  const lambdaResource = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
+  const lambdaResource = template.toJSON().Resources.ApiFunctionCE271BD4;
   const variables = lambdaResource.Properties.Environment.Variables;
 
   expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
@@ -155,7 +155,7 @@ test('inbound automation webhook lifecycle uses a distinct public base URL and s
     'AUTOMATION_INBOUND_WEBHOOK_BASE_URL',
   )).toEqual({
     'Fn::Base64': {
-      'Fn::GetAtt': ['ProjectTasksHttpApi4BD7BB44', 'ApiEndpoint'],
+      'Fn::GetAtt': ['HttpApiF5A9A8A7', 'ApiEndpoint'],
     },
   });
   const inboundSecretPrefix = findApiRuntimeConfigurationSource(
@@ -203,11 +203,11 @@ test('inbound automation webhook lifecycle uses a distinct public base URL and s
 test('Function URL and API Gateway invoke the same live Lambda alias', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
-  const functionLogicalId = 'ListProjectTasksFunction2134AF4A';
+  const functionLogicalId = 'ApiFunctionCE271BD4';
   const versionLogicalId = Object.keys(
     template.findResources('AWS::Lambda::Version'),
   ).find((logicalId) =>
-    logicalId.startsWith('ListProjectTasksFunctionCurrentVersion')
+    logicalId.startsWith('ApiFunctionCurrentVersion')
   );
   expect(versionLogicalId).toBeDefined();
   if (!versionLogicalId) {
@@ -275,7 +275,7 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
     },
   });
   template.hasOutput('WorkItemsTableName', {
-    Value: { Ref: 'TeamIssuesTable189D851D' },
+    Value: { Ref: 'WorkItemsTableD3F1672B' },
   });
   template.hasOutput('WorkspaceSearchTableName', {
     Value: { Ref: 'WorkspaceSearchTable2575AD6B' },
@@ -333,7 +333,7 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
     'Fn::Split': [
       ',',
       {
-        Ref: 'TaskApiAllowedOrigins',
+        Ref: 'ApiAllowedOrigins',
       },
     ],
   };
@@ -387,12 +387,12 @@ test('GuardDuty scanning and bucket policy quarantine files until a clean result
   const bucketPolicy = Object.values(
     template.findResources('AWS::S3::BucketPolicy'),
   ).find((resource) =>
-    JSON.stringify(resource).includes('ListProjectTasksFunctionServiceRole')
+    JSON.stringify(resource).includes('ApiFunctionServiceRole')
   );
   const serializedBucketPolicy = JSON.stringify(bucketPolicy);
 
   expect(bucketPolicy).toBeDefined();
-  expect(serializedBucketPolicy).toContain('ListProjectTasksFunctionServiceRole');
+  expect(serializedBucketPolicy).toContain('ApiFunctionServiceRole');
 
   template.hasResourceProperties('AWS::IAM::Role', {
     AssumeRolePolicyDocument: {
@@ -591,7 +591,7 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
           Ref: 'SystemAdminGroups',
         },
         WORK_ITEMS_TABLE_NAME: {
-          Ref: 'TeamIssuesTable189D851D',
+          Ref: 'WorkItemsTableD3F1672B',
         },
         WORKSPACE_ACCESS_TABLE_NAME: {
           Ref: 'WorkspaceAccessTableD7C8D2C7',
@@ -647,7 +647,7 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
     }),
   ]);
   expect(serializedRealtimePolicy).toContain('ProjectDirectoryTable9ED01C01');
-  expect(serializedRealtimePolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedRealtimePolicy).toContain('WorkItemsTableD3F1672B');
   expect(serializedRealtimePolicy).toContain('WorkspaceAccessTableD7C8D2C7');
   expect(serializedRealtimePolicy).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedRealtimePolicy).toContain('cognito-idp:DescribeIdentityProvider');
@@ -697,7 +697,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     throw new Error('Developer platform IAM resources were not synthesized.');
   }
   const apiRoleLogicalId = Object.entries(resources).find(([logicalId, resource]) =>
-    logicalId.startsWith('ListProjectTasksFunctionServiceRole') &&
+    logicalId.startsWith('ApiFunctionServiceRole') &&
     (resource as { Type?: string }).Type === 'AWS::IAM::Role'
   )?.[0];
   expect(apiRoleLogicalId).toBeDefined();
@@ -835,7 +835,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     },
     Effect: 'Allow',
     Resource: expect.arrayContaining([
-      { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkItemsTableD3F1672B', 'Arn'] },
       { 'Fn::GetAtt': [requestTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
@@ -854,10 +854,6 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(JSON.stringify(transactionConditionCheckStatement)).not.toContain(
     developerPlatformTableId,
   );
-  expect(JSON.stringify(transactionConditionCheckStatement)).not.toContain(
-    'ProjectTasksTableE21F6637',
-  );
-  expect(serializedApiPolicies).not.toContain('ProjectTasksTableE21F6637');
   expect(serializedApiPolicies).toContain('DocumentsTable7E808EE5');
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(serializedApiPolicies).toContain('kms:Decrypt');
@@ -1115,7 +1111,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     return actions.length === 1 &&
       actions.includes('dynamodb:DescribeTable') &&
       JSON.stringify(statement.Resource).includes('AuditEventsTable0723963E') &&
-      JSON.stringify(statement.Resource).includes('TeamIssuesTable189D851D') &&
+      JSON.stringify(statement.Resource).includes('WorkItemsTableD3F1672B') &&
       JSON.stringify(statement.Resource).includes('WorkspaceAccessTableD7C8D2C7');
   });
   expect(readinessStatement).toEqual({
@@ -1123,7 +1119,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: [
       { 'Fn::GetAtt': ['AuditEventsTable0723963E', 'Arn'] },
-      { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': ['WorkItemsTableD3F1672B', 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
     ],
   });

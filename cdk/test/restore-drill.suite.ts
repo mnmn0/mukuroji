@@ -256,7 +256,7 @@ test('restore runner and cleanup roles cannot cross production or isolation boun
     'AuditEventsTable',
     'FileProofingTable',
     'ProjectDirectoryTable',
-    'TeamIssuesTable',
+    'WorkItemsTable',
     'WorkItemConfigurationTable',
     'WorkspaceAccessTable',
     'CustomersTable',

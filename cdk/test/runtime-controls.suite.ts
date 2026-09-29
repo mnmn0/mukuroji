@@ -17,7 +17,7 @@ const runtimeControlEnvironmentKeys = [
 
 const controlledFunctionScopes = new Map([
   ['AnalyticsScheduleFunctionBB9E6044', 'analytics-schedule'],
-  ['ListProjectTasksFunction2134AF4A', 'api'],
+  ['ApiFunctionCE271BD4', 'api'],
   ['CollaborationProjectionFunction1AAC5764', 'audit-projection'],
   ['AutomationEventFunction5E8CB543', 'automation-event'],
   ['AutomationScheduleFunction29B41328', 'automation-schedule'],
@@ -44,7 +44,7 @@ const controlledFunctionScopes = new Map([
   ['WorkItemImportFunction651B2883', 'work-item-import'],
 ]);
 
-const apiFunctionLogicalId = 'ListProjectTasksFunction2134AF4A';
+const apiFunctionLogicalId = 'ApiFunctionCE271BD4';
 const directlyConfiguredFunctionScopes = new Map(
   [...controlledFunctionScopes].filter(([logicalId]) =>
     logicalId !== apiFunctionLogicalId

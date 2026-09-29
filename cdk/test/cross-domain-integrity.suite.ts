@@ -38,8 +38,8 @@ test('cross-domain integrity access is unattached, bounded, and read-only', () =
     'AuditEventsTableName',
     'FileProofingTableName',
     'ProjectDirectoryTableName',
-    'WorkItemsTableName',
     'WorkItemConfigurationTableName',
+    'WorkItemsTableName',
     'WorkspaceAccessTableName',
   ].map((outputName) => document.Outputs[outputName]?.Value?.Ref);
   if (!tableLogicalIds.every((logicalId): logicalId is string =>

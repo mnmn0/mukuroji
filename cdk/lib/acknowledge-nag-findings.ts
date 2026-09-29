@@ -22,7 +22,7 @@ const lambdaPaths = [
   'AiAssistanceObservabilityFunction/Resource',
   'FileBucketIncarnationMarkerFunction/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
-  'ListProjectTasksFunction/Resource',
+  'ApiFunction/Resource',
   'WorkItemImportFunction/Resource',
   'RealtimeHandlerFunction/Resource',
   'CollaborationProjectionFunction/Resource',
@@ -42,7 +42,7 @@ const managedPolicyRolePaths = [
   'BucketNotificationsHandler050a0587b7544547bf325f094a3db834/Role/Resource',
   'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
-  'ListProjectTasksFunction/ServiceRole/Resource',
+  'ApiFunction/ServiceRole/Resource',
   'WorkItemImportFunction/ServiceRole/Resource',
   'RealtimeHandlerFunction/ServiceRole/Resource',
   'CollaborationProjectionFunction/ServiceRole/Resource',
@@ -63,13 +63,13 @@ const managedPolicyRolePaths = [
   'AWS679f53fac002430cb0da5b7982bd2287/ServiceRole/Resource',
 ] as const;
 const httpApiRoutePaths = [
-  'ProjectTasksHttpApi/DefaultRoute/Resource',
+  'HttpApi/DefaultRoute/Resource',
   'RealtimeWebSocketApi/$connect-Route/Resource',
   'RealtimeWebSocketApi/$disconnect-Route/Resource',
   'RealtimeWebSocketApi/$default-Route/Resource',
 ] as const;
 const apiStagePaths = [
-  'ProjectTasksHttpApi/DefaultStage/Resource',
+  'HttpApi/DefaultStage/Resource',
   'RealtimeWebSocketStage/Resource',
 ] as const;
 const waiterStateMachinePath = [
@@ -84,7 +84,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::<FileBucketCDFCD6DE.Arn>/workspaces/*]',
     [
       'FileMalwareProtectionPolicy/Resource',
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
       'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
@@ -93,14 +93,14 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
@@ -111,14 +111,14 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
@@ -128,9 +128,9 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
-    'AwsSolutions-IAM5[Resource::<TeamIssuesTable189D851D.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<WorkItemsTableD3F1672B.Arn>/index/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
@@ -143,7 +143,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
     ],
@@ -151,7 +151,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<WorkItemImportBucket14068778.Arn>/work-item-imports/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
       'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
@@ -209,7 +209,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
     ],
@@ -217,7 +217,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
     [
-      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
       'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
@@ -275,7 +275,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<FileProofingTable81DA272F>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<ProjectDirectoryTable9ED01C01>/export/*]',
-    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemsTableD3F1672B>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<CustomersTableB554B793>/export/*]',
@@ -391,7 +391,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
-    'AwsSolutions-IAM5[Resource::<TeamIssuesTable189D851D.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<WorkItemsTableD3F1672B.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<WorkItemImportBucket14068778.Arn>/work-item-imports/*]',
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
@@ -413,7 +413,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<FileProofingTable81DA272F>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<ProjectDirectoryTable9ED01C01>/export/*]',
-    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemsTableD3F1672B>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<CustomersTableB554B793>/export/*]',

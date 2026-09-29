@@ -78,7 +78,7 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     MinLength: 1,
     AllowedPattern: '^\\S+$',
   }));
-  expect(parameters.TaskApiAllowedOrigins).toEqual(expect.objectContaining({
+  expect(parameters.ApiAllowedOrigins).toEqual(expect.objectContaining({
     Type: 'String',
     AllowedPattern: '^https?://[^,\\s]+(,https?://[^,\\s]+)*$',
   }));

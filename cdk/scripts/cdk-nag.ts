@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
-import { CdkStack } from '../lib/cdk-stack';
+import { MukurojiStack } from '../lib/stacks/mukuroji-stack';
 
 const app = new cdk.App({
   context: {
@@ -11,6 +11,6 @@ const app = new cdk.App({
   },
 });
 cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-const stack = new CdkStack(app, 'NagCheck');
+const stack = new MukurojiStack(app, 'NagCheck');
 acknowledgeKnownNagFindings(stack);
 app.synth();

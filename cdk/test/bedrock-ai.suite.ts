@@ -223,7 +223,7 @@ test('AI assistance is opt-in with one exact model and validated JP configuratio
 test('API Lambda receives only the deployed Bedrock allowlist and existing durable table', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const apiFunction = requireRecord(
-    resources.ListProjectTasksFunction2134AF4A,
+    resources.ApiFunctionCE271BD4,
     'API Lambda',
   );
   const functionProperties = requireRecordProperty(apiFunction, 'Properties');

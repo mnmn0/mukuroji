@@ -62,8 +62,8 @@ test('Slack notifications use the sparse due queue with bounded execution and re
         { 'Fn::GetAtt': ['DocumentsTable7E808EE5', 'Arn'] },
         { 'Fn::GetAtt': ['EnterpriseIdentityTable7491FB7A', 'Arn'] },
         { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
-        { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
         { 'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkItemsTableD3F1672B', 'Arn'] },
         { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
       ],
     },
@@ -336,7 +336,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
       'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'],
     },
   });
-  expect(actionsForTable('TeamIssuesTable189D851D')).toEqual([]);
+  expect(actionsForTable('WorkItemsTableD3F1672B')).toEqual([]);
   expect(serializedPolicies).toContain('dynamodb:ConditionCheckItem');
   expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(serializedPolicies).toContain('cognito-idp:AdminDisableUser');
@@ -351,7 +351,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(serializedPolicies).not.toContain('dynamodb:Scan');
   expect(serializedPolicies).not.toContain('secretsmanager:');
 
-  const apiFunction = resources.ListProjectTasksFunction2134AF4A;
+  const apiFunction = resources.ApiFunctionCE271BD4;
   expect(apiFunction.Properties.Timeout).toBe(20);
   const apiFunctionRoleLogicalId = (
     (apiFunction as {
@@ -383,7 +383,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(apiEnterpriseStreamStatement).toBeUndefined();
   expect(Object.values(resources).some((resource) =>
     (resource as { Type?: string }).Type === 'AWS::Lambda::EventSourceMapping' &&
-    JSON.stringify(resource).includes('ListProjectTasksFunction2134AF4A') &&
+    JSON.stringify(resource).includes('ApiFunctionCE271BD4') &&
     JSON.stringify(resource).includes('enterprise-scim-group-job')
   )).toBe(false);
   template.hasResourceProperties('AWS::CloudWatch::Alarm', {
@@ -974,7 +974,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
         },
         MUKUROJI_RUNTIME_ROLE: 'audit-projection',
         WORK_ITEMS_TABLE_NAME: {
-          Ref: 'TeamIssuesTable189D851D',
+          Ref: 'WorkItemsTableD3F1672B',
         },
         WEBSOCKET_CALLBACK_ENDPOINT: Match.anyValue(),
         WEBHOOK_DELIVERY_QUEUE_URL: {
@@ -1065,7 +1065,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
   expect(serializedProjectionPolicy).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedProjectionPolicy).toContain('CognitoUserPoolId');
   expect(serializedProjectionPolicy).toContain(String(enterpriseIdentityTableId));
-  expect(serializedProjectionPolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedProjectionPolicy).toContain('WorkItemsTableD3F1672B');
   expect(serializedProjectionPolicy).toContain('PlanningTable2A0D4CC5');
   expect(serializedProjectionPolicy).toContain('TenantAdministrationTable621D59EB');
   expect(serializedProjectionPolicy).not.toContain('DeveloperPlatformTable772E085C');
@@ -1081,7 +1081,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     .toContain('dynamodb:GetItem');
   expect(actionsForProjectionTable(String(enterpriseIdentityTableId)))
     .toEqual(expect.arrayContaining(['dynamodb:GetItem', 'dynamodb:Query']));
-  expect(actionsForProjectionTable('TeamIssuesTable189D851D'))
+  expect(actionsForProjectionTable('WorkItemsTableD3F1672B'))
     .toContain('dynamodb:ConditionCheckItem');
   expect(serializedProjectionPolicy).toContain('sqs:SendMessage');
   expect(serializedProjectionPolicy).toContain('FileProofingTable');
@@ -1628,7 +1628,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
           Ref: planningTableId,
         },
         WORK_ITEMS_TABLE_NAME: {
-          Ref: 'TeamIssuesTable189D851D',
+          Ref: 'WorkItemsTableD3F1672B',
         },
       }),
     },
@@ -1758,7 +1758,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(workerPolicies).toContain(secretId);
   expect(workerPolicies).toContain(queueId);
   expect(workerPolicies).toContain('DeveloperPlatformTable772E085C');
-  expect(workerPolicies).toContain('TeamIssuesTable189D851D');
+  expect(workerPolicies).toContain('WorkItemsTableD3F1672B');
   expect(workerPolicies).toContain('AuditEventsTable0723963E');
   expect(workerPolicies).toContain('WorkspaceAccessTableD7C8D2C7');
   expect(workerPolicies).toContain('TenantAdministrationTable621D59EB');
@@ -1867,7 +1867,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   expect(pollPolicies).not.toContain('dynamodb:Scan');
   expect(pollPolicies).not.toContain(secretId);
   expect(pollPolicies).not.toContain('secretsmanager:GetSecretValue');
-  expect(pollPolicies).not.toContain('TeamIssuesTable189D851D');
+  expect(pollPolicies).not.toContain('WorkItemsTableD3F1672B');
   expect(pollPolicies).not.toContain('AuditEventsTable0723963E');
   expect(pollPolicies).not.toContain('DeveloperPlatformConnectorKey');
 
@@ -1922,7 +1922,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
         PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
         PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
-        WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        WORK_ITEMS_TABLE_NAME: { Ref: 'WorkItemsTableD3F1672B' },
       }),
     },
   });
@@ -1987,11 +1987,11 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     JSON.stringify(statement.Action).includes('dynamodb:UpdateItem')
   );
   const completionMarkerStatement = scheduleStatements.find((statement) =>
-    JSON.stringify(statement.Resource).includes('TeamIssuesTable189D851D') &&
+    JSON.stringify(statement.Resource).includes('WorkItemsTableD3F1672B') &&
     JSON.stringify(statement.Action).includes('dynamodb:UpdateItem')
   );
 
-  expect(serializedSchedulePolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedSchedulePolicy).toContain('WorkItemsTableD3F1672B');
   expect(serializedSchedulePolicy).toContain('PlanningTable2A0D4CC5');
   expect(serializedSchedulePolicy).toContain('UpdateScheduleDueIndex');
   expect(serializedSchedulePolicy).toContain('ProjectDirectoryTable9ED01C01');
@@ -2588,7 +2588,7 @@ test('request email ingestion is an asynchronous narrow-IAM Lambda with a monito
   expect(serializedPolicies).toContain('ForAnyValue:StringEquals');
   expect(serializedPolicies).toContain('sqs:SendMessage');
   for (const forbiddenResource of [
-    'TeamIssuesTable189D851D',
+    'WorkItemsTableD3F1672B',
     'AuditEventsTable0723963E',
     'ProjectDirectoryTable9ED01C01',
     'FileProofingTable81DA272F',
@@ -2757,7 +2757,7 @@ test('triage schedule wakes due entries through a narrow indexed worker', () => 
   }
   for (const forbiddenResource of [
     'DeveloperPlatformTable',
-    'TeamIssuesTable189D851D',
+    'WorkItemsTableD3F1672B',
   ]) {
     expect(serializedPolicies).not.toContain(forbiddenResource);
   }
@@ -2840,7 +2840,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
-        WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        WORK_ITEMS_TABLE_NAME: { Ref: 'WorkItemsTableD3F1672B' },
         PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
       }),
@@ -2868,7 +2868,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
-        WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        WORK_ITEMS_TABLE_NAME: { Ref: 'WorkItemsTableD3F1672B' },
         PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
       }),
@@ -2933,7 +2933,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     expect(serialized).toContain('WorkItemCollaborationTableFDECF217');
     expect(serialized).toContain('FileProofingTable81DA272F');
     expect(serialized).toContain('ProjectDirectoryTable9ED01C01');
-    expect(serialized).toContain('TeamIssuesTable189D851D');
+    expect(serialized).toContain('WorkItemsTableD3F1672B');
     expect(serialized).toContain('TenantAdministrationTable621D59EB');
     const statements = (policy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
@@ -2991,7 +2991,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
         { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
-        { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkItemsTableD3F1672B', 'Arn'] },
         { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
       ]),
     }));

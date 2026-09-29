@@ -15,7 +15,7 @@ import {
 test('workspace metadata owner alias and project manager rows are idempotently bootstrapped', () => {
   const template = synthesizedTemplate;
   const [, bootstrap] = Object.entries(template.findResources('Custom::AWS')).find(([, candidate]) =>
-    JSON.stringify(candidate).includes('workspace-bootstrap-v2'),
+    JSON.stringify(candidate).includes('workspace-bootstrap'),
   ) ?? [];
 
   if (!bootstrap) {
@@ -75,18 +75,18 @@ test('table bootstrap resources keep stable IDs and a create-only lifecycle', ()
   const resources = synthesizedTemplate.findResources('Custom::AWS');
   const createOnlySeeds = [
     [
-      'SeedProjectTasks637E8868',
-      'canonical-work-items-seed-v1',
-      'TeamIssuesTable189D851D',
+      'SeedWorkItems1A607C25',
+      'canonical-work-items-seed',
+      'WorkItemsTableD3F1672B',
     ],
     [
       'SeedProjectDirectory9B1D2A78',
-      'project-directory-seed-v3',
+      'project-directory-seed',
       'ProjectDirectoryTable9ED01C01',
     ],
     [
       'BootstrapWorkspace455B1D71',
-      'workspace-bootstrap-v2',
+      'workspace-bootstrap',
       'ProjectDirectoryTable9ED01C01',
     ],
   ];
@@ -114,11 +114,11 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
   const outputs = template.toJSON().Outputs;
   const transactionCases = [
     {
-      customResourcePrefix: 'SeedProjectTasks',
-      policyPrefix: 'SeedProjectTasksCustomResourcePolicy',
+      customResourcePrefix: 'SeedWorkItems',
+      policyPrefix: 'SeedWorkItemsCustomResourcePolicy',
       itemActions: ['dynamodb:PutItem'],
       tableOutputName: 'WorkItemsTableName',
-      physicalResourceId: 'canonical-work-items-seed-v1',
+      physicalResourceId: 'canonical-work-items-seed',
       runsOnUpdate: false,
     },
     {
@@ -126,7 +126,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
       policyPrefix: 'SeedProjectDirectoryCustomResourcePolicy',
       itemActions: ['dynamodb:PutItem'],
       tableOutputName: 'ProjectDirectoryTableName',
-      physicalResourceId: 'project-directory-seed-v3',
+      physicalResourceId: 'project-directory-seed',
       runsOnUpdate: false,
     },
     {
@@ -134,7 +134,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
       policyPrefix: 'SeedWorkspaceAccessCustomResourcePolicy',
       itemActions: ['dynamodb:UpdateItem'],
       tableOutputName: 'WorkspaceAccessTableName',
-      physicalResourceId: 'workspace-access-seed-v2',
+      physicalResourceId: 'workspace-access-seed',
       runsOnUpdate: true,
     },
     {
@@ -142,7 +142,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
       policyPrefix: 'BootstrapWorkspaceCustomResourcePolicy',
       itemActions: ['dynamodb:UpdateItem', 'dynamodb:PutItem'],
       tableOutputName: 'ProjectDirectoryTableName',
-      physicalResourceId: 'workspace-bootstrap-v2',
+      physicalResourceId: 'workspace-bootstrap',
       runsOnUpdate: false,
     },
     {
@@ -150,7 +150,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
       policyPrefix: 'SeedWorkspaceDemoMembersCustomResourcePolicy',
       itemActions: ['dynamodb:UpdateItem'],
       tableOutputName: 'WorkspaceAccessTableName',
-      physicalResourceId: 'workspace-access-demo-members-seed-v2',
+      physicalResourceId: 'workspace-access-demo-members-seed',
       runsOnUpdate: true,
     },
   ] as const;
@@ -224,30 +224,26 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
     JSON.stringify(resource).includes('transactWriteItems'),
   );
   const canonicalWorkItemSeedEntry = Object.entries(customResources).find(([logicalId]) =>
-    logicalId === 'SeedProjectTasks637E8868'
+    logicalId === 'SeedWorkItems1A607C25'
   );
   const canonicalWorkItemSeed = canonicalWorkItemSeedEntry?.[1];
   const canonicalWorkItemSeedPolicyEntry = Object.entries(
     template.findResources('AWS::IAM::Policy'),
-  ).find(([logicalId]) => logicalId === 'SeedProjectTasksCustomResourcePolicy924038FB');
+  ).find(([logicalId]) => logicalId === 'SeedWorkItemsCustomResourcePolicyA1DDF8BA');
   const projectDirectorySeed = transactWriteResources.find((resource) =>
-    JSON.stringify(resource).includes('project-directory-seed-v3'),
+    JSON.stringify(resource).includes('project-directory-seed'),
   );
 
-  expect(canonicalWorkItemSeedEntry?.[0]).toBe('SeedProjectTasks637E8868');
+  expect(canonicalWorkItemSeedEntry?.[0]).toBe('SeedWorkItems1A607C25');
   expect(canonicalWorkItemSeed).toBeDefined();
   expect(canonicalWorkItemSeedPolicyEntry).toBeDefined();
   expect(projectDirectorySeed).toBeDefined();
-  expect(JSON.stringify(canonicalWorkItemSeed)).not.toContain('ProjectTasksTableE21F6637');
-  expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry)).not.toContain('ProjectTasksTableE21F6637');
-  expect(JSON.stringify(transactWriteResources)).not.toContain('ProjectTasksTableE21F6637');
-  expect(Object.keys(customResources).join(',')).not.toContain('SeedCanonicalWorkItems');
 
   const workItemPayload = serializeAwsSdkCall(canonicalWorkItemSeed?.Properties.Create);
   const directoryPayload = serializeAwsSdkCall(projectDirectorySeed?.Properties.Create);
 
   expect(workItemPayload).toContain('WorkspaceDirectoryId');
-  expect(workItemPayload).toContain('TeamIssuesTable189D851D');
+  expect(workItemPayload).toContain('WorkItemsTableD3F1672B');
   expect(workItemPayload).toContain('attribute_not_exists(directoryTeamId)');
   expect(workItemPayload).toContain('attribute_not_exists(issueId)');
   expect(workItemPayload).toContain('core-team');
@@ -292,7 +288,7 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
           },
         },
         Effect: 'Allow',
-        Resource: { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+        Resource: { 'Fn::GetAtt': ['WorkItemsTableD3F1672B', 'Arn'] },
       }),
     ]),
   );
