@@ -39,6 +39,10 @@ DASHBOARD_UPDATED_AT="${MUKUROJI_DASHBOARD_UPDATED_AT:-$(date -u +%Y-%m-%dT%H:%M
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
 COGNITO_ENV_FILE="$GENERATED_DIR/cognito.env"
 
+# cognito.env は今回の bootstrap が成功した場合だけ存在させます。検証や初期化の途中で
+# 終了しても以前の内容が残らないよう、最初に削除します。
+rm -f "$COGNITO_ENV_FILE"
+
 if [ -z "$WORKSPACE_AUDIT_PSEUDONYM_KEY" ]; then
   echo 'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY is required. Set it to the output of "openssl rand -hex 32".' >&2
   exit 2
@@ -474,7 +478,7 @@ while [ "$TEAM_ISSUE_UPDATED_AT_INDEX_WAIT_ATTEMPT" -lt 60 ]; do
   sleep 1
 done
 if [ "$TEAM_ISSUE_UPDATED_AT_INDEX_STATUS" != "ACTIVE" ]; then
-  echo "DynamoDB index TeamIssueUpdatedAtIndex did not become active for table $WORK_ITEMS_TABLE." >&2
+  echo "DynamoDB index TeamIssueUpdatedAtIndex did not become active for table $WORK_ITEMS_TABLE. Local data created before this index is not upgraded; recreate it with \"docker compose down --volumes\"." >&2
   exit 1
 fi
 
@@ -824,7 +828,7 @@ while [ "$REALTIME_SCOPE_INDEX_WAIT_ATTEMPT" -lt 60 ]; do
   sleep 1
 done
 if [ "$REALTIME_SCOPE_INDEX_STATUS" != "ACTIVE" ]; then
-  echo "DynamoDB index ScopeConnectionsIndex did not become active for table $REALTIME_SESSIONS_TABLE." >&2
+  echo "DynamoDB index ScopeConnectionsIndex did not become active for table $REALTIME_SESSIONS_TABLE. Local data created before this index is not upgraded; recreate it with \"docker compose down --volumes\"." >&2
   exit 1
 fi
 
