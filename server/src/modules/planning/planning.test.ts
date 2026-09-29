@@ -93,7 +93,6 @@ function createStoredCycle(id: string) {
     cadence: { unit: 'week', count: 2 },
     capacity: 10,
     carryOverPolicy: 'move-incomplete',
-    statusUpdates: [],
     createdAt: NOW.toISOString(),
     updatedAt: NOW.toISOString(),
   }
@@ -200,30 +199,45 @@ function createDateRangeSchedule(startDate: string, endDate: string): WorkItemSc
   }
 }
 
-function createOversizedStoredEntity(id: string) {
+/**
+ * Creates a valid stored Project update target whose latest context exceeds the safe row size.
+ *
+ * @param projectId - Team-local Project identifier of the update target.
+ * @returns An UPDATE_TARGET row larger than the Planning row size limit.
+ */
+function createOversizedStoredUpdateTarget(projectId: string) {
+  const target: PlanningUpdateTarget = { type: 'project', teamId: 'team-1', projectId }
   return {
     workspaceId: 'workspace-1',
-    recordKey: `ENTITY#${id}`,
-    entryType: 'planning-entity',
-    id,
-    type: 'portfolio',
-    title: id,
-    description: 'd'.repeat(20_000),
-    ownerMemberKey: 'owner@example.com',
-    status: 'planned',
-    health: 'on-track',
-    risk: 'none',
-    progressMode: 'automatic',
-    baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
-    forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
-    statusUpdates: Array.from({ length: 32 }, (_, index) => ({
-      id: `${String(index).padStart(2, '0')}${'😀'.repeat(127)}`,
-      message: 'x'.repeat(8_000),
-      authorMemberKey: '😀'.repeat(128),
-      createdAt: NOW.toISOString(),
-    })),
-    createdAt: NOW.toISOString(),
-    updatedAt: NOW.toISOString(),
+    recordKey: `UPDATE_TARGET#PROJECT#team-1#${projectId}`,
+    entryType: 'planning-update-target',
+    target,
+    latestVersion: 1,
+    latestUpdate: {
+      id: 'update-1',
+      version: 1,
+      health: 'on-track',
+      risk: 'none',
+      summary: 'Delivery remains on plan.',
+      progressSnapshot: { percent: 0, linkedWorkItemCount: 0 },
+      authorMemberKey: 'owner@example.com',
+      coveredDueAt: '2026-07-01T00:00:00.000Z',
+      createdAt: '2026-07-01T00:00:00.000Z',
+    },
+    latestContextSnapshot: {
+      health: 'on-track',
+      risk: 'none',
+      progress: { percent: 0, linkedWorkItemCount: 0 },
+      scope: { teamId: 'team-1', projectId },
+      milestones: Array.from({ length: 400 }, (_, index) => ({
+        entityId: `milestone-${String(index).padStart(240, '0')}`,
+        title: 'm'.repeat(500),
+        status: 'planned',
+        forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      })),
+      dependencies: [],
+    },
+    updatedAt: '2026-07-01T00:00:00.000Z',
   }
 }
 
@@ -334,7 +348,7 @@ describe('planning domain', () => {
     })
   })
 
-  test('rejects malformed patches, oversized descriptions, and full status history', async () => {
+  test('rejects malformed patches and oversized descriptions', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     await expect(client.create(
       'workspace-1',
@@ -346,31 +360,15 @@ describe('planning domain', () => {
 
     await client.create(
       'workspace-1',
-      createEntityInput('portfolio-history', 'portfolio', 0),
+      createEntityInput('portfolio-patch', 'portfolio', 0),
       EMPTY_WORK_ITEMS,
     )
     await expect(client.update(
       'workspace-1',
-      'portfolio-history',
+      'portfolio-patch',
       { expectedRevision: 1 } as UpdatePlanningEntityInput,
       EMPTY_WORK_ITEMS,
     )).rejects.toMatchObject({ status: 400, code: 'PlanningPatchInvalid' })
-
-    for (let index = 0; index < 32; index += 1) {
-      await client.addStatusUpdate('workspace-1', 'portfolio-history', {
-        id: `status-${index}`,
-        message: `Update ${index}`,
-        expectedRevision: index + 1,
-      }, 'author@example.com', EMPTY_WORK_ITEMS)
-    }
-    await expect(client.addStatusUpdate('workspace-1', 'portfolio-history', {
-      id: 'status-over-limit',
-      message: 'This update exceeds the retained history.',
-      expectedRevision: 33,
-    }, 'author@example.com', EMPTY_WORK_ITEMS)).rejects.toMatchObject({
-      status: 413,
-      code: 'PlanningStatusUpdateLimitExceeded',
-    })
   })
 
   test('rejects a Work Item link without a Cycle, Milestone, or Goal', async () => {
@@ -1670,7 +1668,7 @@ describe('planning domain', () => {
     ])
   })
 
-  test('duplicates without status history or graph edges and soft-archives the copy', async () => {
+  test('duplicates without graph edges and soft-archives the copy', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     await client.create(
       'workspace-1',
@@ -1682,28 +1680,21 @@ describe('planning domain', () => {
       createEntityInput('roadmap-1', 'roadmap', 1, { parentId: 'portfolio-1' }),
       EMPTY_WORK_ITEMS,
     )
-    await client.addStatusUpdate('workspace-1', 'roadmap-1', {
-      id: 'update-1',
-      message: 'At risk this week',
-      health: 'at-risk',
-      expectedRevision: 2,
-    }, 'author@example.com', EMPTY_WORK_ITEMS)
     await client.createDependency('workspace-1', {
       id: 'dependency-1',
       predecessorId: 'portfolio-1',
       successorId: 'roadmap-1',
       type: 'finish-to-start',
       lagDays: 0,
-      expectedRevision: 3,
+      expectedRevision: 2,
     }, EMPTY_WORK_ITEMS)
     const duplicated = await client.duplicate('workspace-1', 'roadmap-1', {
       targetId: 'roadmap-copy',
       title: 'Roadmap copy',
-      expectedRevision: 4,
+      expectedRevision: 3,
     }, EMPTY_WORK_ITEMS)
 
     const copy = getEntity(duplicated.planning.entities, 'roadmap-copy')
-    expect(copy.statusUpdates).toEqual([])
     expect(duplicated.planning.dependencies.some((dependency) =>
       dependency.predecessorId === copy.id || dependency.successorId === copy.id
     )).toBe(false)
@@ -1711,7 +1702,7 @@ describe('planning domain', () => {
     const archived = await client.archive(
       'workspace-1',
       'roadmap-copy',
-      { expectedRevision: 5 },
+      { expectedRevision: 4 },
       EMPTY_WORK_ITEMS,
     )
     expect(getEntity(archived.planning.entities, 'roadmap-copy').archivedAt)
@@ -1720,7 +1711,7 @@ describe('planning domain', () => {
     const archivedOriginal = await client.archive(
       'workspace-1',
       'roadmap-1',
-      { expectedRevision: 6 },
+      { expectedRevision: 5 },
       EMPTY_WORK_ITEMS,
     )
     expect(archivedOriginal.planning.dependencies).toHaveLength(1)
@@ -1730,7 +1721,7 @@ describe('planning domain', () => {
       successorId: 'roadmap-1',
       type: 'finish-to-start',
       lagDays: 0,
-      expectedRevision: 7,
+      expectedRevision: 6,
     }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
       status: 409,
       code: 'PlanningEntityArchived',
@@ -3559,13 +3550,7 @@ describe('planning persistence', () => {
 
   test('rejects an oversized mutation response before committing it', async () => {
     let transactionCalls = 0
-    const statusUpdates = Array.from({ length: 32 }, (_, index) => ({
-      id: `status-${index}`,
-      message: 'x'.repeat(8_000),
-      authorMemberKey: 'owner@example.com',
-      createdAt: NOW.toISOString(),
-    }))
-    const storedEntities = Array.from({ length: 16 }, (_, index) => ({
+    const storedEntities = Array.from({ length: 201 }, (_, index) => ({
       workspaceId: 'workspace-1',
       recordKey: `ENTITY#portfolio-${index}`,
       entryType: 'planning-entity',
@@ -3580,7 +3565,6 @@ describe('planning persistence', () => {
       progressMode: 'automatic',
       baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
       forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
-      statusUpdates,
       createdAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
     }))
@@ -3636,7 +3620,7 @@ describe('planning persistence', () => {
 
   test('rejects an oversized changed row before committing it', async () => {
     let transactionCalls = 0
-    const storedEntity = createOversizedStoredEntity('portfolio-large')
+    const storedTarget = createOversizedStoredUpdateTarget('project-large')
     const documentClient = {
       async send(command: {
         /** AWS SDK command constructor. */
@@ -3662,7 +3646,7 @@ describe('planning persistence', () => {
         }
         if (command.constructor.name === 'QueryCommand') {
           return {
-            Items: rowsForPlanningRecordPrefixQuery(command.input, [storedEntity]),
+            Items: rowsForPlanningRecordPrefixQuery(command.input, [storedTarget]),
           }
         }
         transactionCalls += 1
@@ -3677,9 +3661,10 @@ describe('planning persistence', () => {
       () => NOW,
     )
 
-    await expect(client.update('workspace-1', 'portfolio-large', {
+    await expect(client.configureUpdateCadence('workspace-1', {
+      target: storedTarget.target,
+      cadence: null,
       expectedRevision: 1,
-      patch: { title: 'Updated portfolio' },
     }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
       status: 413,
       code: 'PlanningRowSizeLimitExceeded',
@@ -3689,11 +3674,23 @@ describe('planning persistence', () => {
 
   test('does not revalidate an oversized unchanged row during another mutation', async () => {
     let transaction: Record<string, unknown> | undefined
-    const storedLargeEntity = createOversizedStoredEntity('portfolio-large')
+    const storedLargeTarget = createOversizedStoredUpdateTarget('project-large')
     const storedSmallEntity = {
-      ...createOversizedStoredEntity('portfolio-small'),
-      description: undefined,
-      statusUpdates: [],
+      workspaceId: 'workspace-1',
+      recordKey: 'ENTITY#portfolio-small',
+      entryType: 'planning-entity',
+      id: 'portfolio-small',
+      type: 'portfolio',
+      title: 'portfolio-small',
+      ownerMemberKey: 'owner@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'none',
+      progressMode: 'automatic',
+      baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
     }
     const documentClient = {
       async send(command: {
@@ -3722,7 +3719,7 @@ describe('planning persistence', () => {
           return {
             Items: rowsForPlanningRecordPrefixQuery(
               command.input,
-              [storedLargeEntity, storedSmallEntity],
+              [storedLargeTarget, storedSmallEntity],
             ),
           }
         }
@@ -3779,7 +3776,6 @@ describe('planning persistence', () => {
         progressMode: 'automatic',
         baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
         forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
-        statusUpdates: [],
         createdAt: NOW.toISOString(),
         updatedAt: NOW.toISOString(),
       })),
@@ -3854,7 +3850,7 @@ describe('planning persistence', () => {
     expect(transactionCalls).toBe(0)
   })
 
-  test('fails closed on malformed stored status history', async () => {
+  test('fails closed on a malformed stored Planning entity', async () => {
     const storedEntity = {
       workspaceId: 'workspace-1',
       recordKey: 'ENTITY#portfolio-1',
@@ -3867,9 +3863,8 @@ describe('planning persistence', () => {
       health: 'on-track',
       risk: 'none',
       progressMode: 'automatic',
-      baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      baseline: 'invalid',
       forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
-      statusUpdates: 'invalid',
       createdAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
     }

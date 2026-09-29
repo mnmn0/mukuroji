@@ -39,8 +39,6 @@ import {
   type PlanningRevisionInput,
   type PlanningRisk,
   type PlanningSnapshot,
-  type PlanningStatusUpdate,
-  type PlanningStatusUpdateInput,
   type PlanningUpdate,
   type PlanningUpdateCadence,
   type PlanningUpdateCadenceMutationResponse,
@@ -111,8 +109,6 @@ const MAX_PLANNING_ROW_BYTES = 300_000
 const MAX_PLANNING_TRANSACTION_BYTES = 3_000_000
 const MAX_PLANNING_SNAPSHOT_BYTES = 4_000_000
 const MAX_DESCRIPTION_BYTES = 20_000
-const MAX_STATUS_MESSAGE_BYTES = 8_000
-const MAX_STATUS_UPDATES = 32
 const MAX_UPDATE_TEXT_BYTES = 8_000
 const MAX_UPDATE_COMMENT_BYTES = 4_000
 const MAX_UPDATE_REACTION_BYTES = 64
@@ -336,14 +332,6 @@ export type PlanningClient = {
     workspaceId: string,
     entityId: string,
     input: MovePlanningEntityInput,
-    workItemState: PlanningWorkItemState,
-  ): Promise<PlanningMutationResponse>
-  /** Planning entity に status update を追記します。 */
-  addStatusUpdate(
-    workspaceId: string,
-    entityId: string,
-    input: PlanningStatusUpdateInput,
-    authorMemberKey: string,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
   /** Project / Initiative update cadence を設定または解除します。 */
@@ -877,7 +865,6 @@ abstract class BasePlanningClient implements PlanningClient {
         id: targetId,
         title: input.title === undefined ? `${source.title} copy` : readTitle(input.title),
         parentId: input.parentId === undefined ? source.parentId : readIdentifier(input.parentId, 'Parent ID'),
-        statusUpdates: [],
         createdAt: now,
         updatedAt: now,
       }
@@ -922,47 +909,6 @@ abstract class BasePlanningClient implements PlanningClient {
       }
       validatePlanningState(next)
       return { state: next }
-    })
-  }
-
-  /** Planning entity に status update を追記します。 */
-  async addStatusUpdate(
-    workspaceId: string,
-    entityId: string,
-    input: PlanningStatusUpdateInput,
-    authorMemberKey: string,
-    workItemState: PlanningWorkItemState,
-  ) {
-    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
-      const current = requireActiveEntity(state, entityId)
-      const updateId = readIdentifier(input.id, 'Status update ID')
-      if (current.statusUpdates.some((update) => update.id === updateId)) {
-        throw conflict('PlanningStatusUpdateExists', `Status update "${updateId}" already exists.`)
-      }
-      if (current.statusUpdates.length >= MAX_STATUS_UPDATES) {
-        throw new PlanningError(
-          413,
-          'PlanningStatusUpdateLimitExceeded',
-          `Planning entities cannot exceed ${MAX_STATUS_UPDATES} status updates.`,
-        )
-      }
-      const message = readMessage(input.message)
-      const update = {
-        id: updateId,
-        message,
-        authorMemberKey: readIdentifier(authorMemberKey, 'Author member key'),
-        ...(input.health === undefined ? {} : { health: readHealth(input.health) }),
-        ...(input.risk === undefined ? {} : { risk: readRisk(input.risk) }),
-        createdAt: now,
-      }
-      const updated: StoredPlanningEntity = {
-        ...current,
-        ...(input.health === undefined ? {} : { health: readHealth(input.health) }),
-        ...(input.risk === undefined ? {} : { risk: readRisk(input.risk) }),
-        statusUpdates: [update, ...current.statusUpdates],
-        updatedAt: now,
-      }
-      return { state: replaceEntity(state, updated) }
     })
   }
 
@@ -3345,6 +3291,13 @@ function createLatestPlanningUpdateSummary(update: PlanningUpdate) {
   }
 }
 
+/**
+ * Builds one validated stored Planning entity from create input.
+ *
+ * @param input - Untrusted entity create input.
+ * @param now - Timestamp recorded as both creation and update time.
+ * @returns The canonical stored entity.
+ */
 function createStoredEntity(input: CreatePlanningEntityInput, now: string): StoredPlanningEntity {
   const description = readOptionalDescription(input.description)
   const entity: StoredPlanningEntity = {
@@ -3373,7 +3326,6 @@ function createStoredEntity(input: CreatePlanningEntityInput, now: string): Stor
     ...(input.goalFramework === undefined
       ? {}
       : { goalFramework: readGoalFramework(input.goalFramework) }),
-    statusUpdates: [],
     createdAt: now,
     updatedAt: now,
   }
@@ -3413,6 +3365,11 @@ function validatePlanningState(state: PlanningWorkspaceState) {
   validateCycleCapacities(state)
 }
 
+/**
+ * Validates the field-level invariants of one stored Planning entity.
+ *
+ * @param entity - Stored entity candidate.
+ */
 function validateEntityFields(entity: StoredPlanningEntity) {
   readIdentifier(entity.id, 'Planning entity ID')
   readEntityType(entity.type)
@@ -3461,7 +3418,6 @@ function validateEntityFields(entity: StoredPlanningEntity) {
     throw invalid('PlanningGoalFrameworkInvalid', 'Only Goal entities can define goalFramework.')
   }
   if (entity.goalFramework !== undefined) readGoalFramework(entity.goalFramework)
-  validateStatusUpdates(entity.statusUpdates)
   if (entity.archivedAt !== undefined) readTimestamp(entity.archivedAt, 'Archived timestamp')
   readTimestamp(entity.createdAt, 'Created timestamp')
   readTimestamp(entity.updatedAt, 'Updated timestamp')
@@ -4976,6 +4932,12 @@ function readPlanningRows(
   }
 }
 
+/**
+ * Decodes one canonical ENTITY row.
+ *
+ * @param row - Untrusted DynamoDB row.
+ * @returns Validated stored Planning entity.
+ */
 function readStoredPlanningEntity(row: Record<string, unknown>): StoredPlanningEntity {
   const id = readIdentifier(row.id, 'Planning entity ID')
   if (row.recordKey !== createEntityRecordKey(id)) {
@@ -4984,7 +4946,6 @@ function readStoredPlanningEntity(row: Record<string, unknown>): StoredPlanningE
   const description = row.description === undefined
     ? undefined
     : readRequiredDescription(row.description)
-  const statusUpdates = readStoredStatusUpdates(row.statusUpdates)
   const entity: StoredPlanningEntity = {
     id,
     type: readEntityType(row.type),
@@ -5017,7 +4978,6 @@ function readStoredPlanningEntity(row: Record<string, unknown>): StoredPlanningE
     ...(row.goalFramework === undefined
       ? {}
       : { goalFramework: readGoalFramework(row.goalFramework) }),
-    statusUpdates,
     ...(row.archivedAt === undefined
       ? {}
       : { archivedAt: readTimestamp(row.archivedAt, 'Archived timestamp') }),
@@ -5644,18 +5604,6 @@ function readStoredPlanningWorkItemLink(row: Record<string, unknown>): PlanningW
     goalIds: readUniqueIdentifiers(row.goalIds, 'Goal ID'),
     createdAt: readTimestamp(row.createdAt, 'Work Item link timestamp'),
   }
-}
-
-function readStoredStatusUpdates(value: unknown) {
-  validateStatusUpdates(value)
-  return value.map((update) => ({
-    id: update.id,
-    message: update.message,
-    authorMemberKey: update.authorMemberKey,
-    ...(update.health === undefined ? {} : { health: update.health }),
-    ...(update.risk === undefined ? {} : { risk: update.risk }),
-    createdAt: update.createdAt,
-  }))
 }
 
 function replaceEntity(state: PlanningWorkspaceState, entity: StoredPlanningEntity) {
@@ -6748,18 +6696,6 @@ function readRequiredDescription(value: unknown) {
   return description
 }
 
-function readMessage(value: unknown) {
-  if (
-    typeof value !== 'string' ||
-    !value.trim() ||
-    !isWellFormedText(value) ||
-    utf8ByteLength(value.trim()) > MAX_STATUS_MESSAGE_BYTES
-  ) {
-    throw invalid('PlanningStatusUpdateInvalid', 'Status update message is invalid.')
-  }
-  return value.trim()
-}
-
 function readGoalFramework(value: unknown): NonNullable<PlanningEntity['goalFramework']> {
   if (value === 'goal' || value === 'objective' || value === 'key-result') return value
   throw invalid('PlanningGoalFrameworkInvalid', 'Planning goalFramework is invalid.')
@@ -6780,28 +6716,6 @@ function readTimestamp(value: unknown, label: string) {
     throw invalid('PlanningTimestampInvalid', `${label} is invalid.`)
   }
   return value
-}
-
-function validateStatusUpdates(value: unknown): asserts value is PlanningStatusUpdate[] {
-  if (!Array.isArray(value) || value.length > MAX_STATUS_UPDATES) {
-    throw invalid('PlanningStatusUpdateInvalid', 'Planning status update history is invalid.')
-  }
-  const ids = new Set<string>()
-  for (const candidate of value) {
-    if (!isRecord(candidate)) {
-      throw invalid('PlanningStatusUpdateInvalid', 'Planning status update history is invalid.')
-    }
-    const id = readIdentifier(candidate.id, 'Status update ID')
-    if (ids.has(id)) {
-      throw invalid('PlanningStatusUpdateInvalid', 'Planning status update IDs must be unique.')
-    }
-    ids.add(id)
-    readMessage(candidate.message)
-    readIdentifier(candidate.authorMemberKey, 'Author member key')
-    if (candidate.health !== undefined) readHealth(candidate.health)
-    if (candidate.risk !== undefined) readRisk(candidate.risk)
-    readTimestamp(candidate.createdAt, 'Status update timestamp')
-  }
 }
 
 function readEntityType(value: unknown): PlanningEntityType {

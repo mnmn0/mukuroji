@@ -19,7 +19,6 @@ export function createPlanningEntityDetailKey(entity: PlanningEntity) {
     entity.risk,
     entity.forecast.startDate,
     entity.forecast.endDate,
-    entity.statusUpdates.length,
     entity.updatedAt,
   ].join('\0')
 }

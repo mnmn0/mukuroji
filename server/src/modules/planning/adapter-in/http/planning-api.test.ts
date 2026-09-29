@@ -1810,48 +1810,6 @@ test('enforces Planning revisions and structural permissions before mutations', 
   expect(structuralCalls).toEqual({ archive: 1, duplicate: 1, move: 1 })
 })
 
-test('requires Workspace administration for unscoped status updates', async () => {
-  const planningClient = new InMemoryPlanningClient()
-  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
-  setTestAppDependencies({ planning: planningClient })
-  const created = await planningApiRequest('/api/planning/entities', 'POST', {
-    id: 'portfolio-workspace',
-    type: 'portfolio',
-    title: 'Workspace portfolio',
-    ownerMemberKey: 'demo@example.com',
-    status: 'active',
-    health: 'on-track',
-    risk: 'low',
-    progressMode: 'automatic',
-    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
-    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
-    expectedRevision: 0,
-  })
-  expect(created.status).toBe(201)
-
-  let statusUpdateCalls = 0
-  const addStatusUpdate = planningClient.addStatusUpdate.bind(planningClient)
-  planningClient.addStatusUpdate = async (...input) => {
-    statusUpdateCalls += 1
-    return addStatusUpdate(...input)
-  }
-  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
-
-  const response = await planningApiRequest(
-    '/api/planning/entities/portfolio-workspace/status-updates',
-    'POST',
-    {
-      id: 'status-workspace',
-      message: 'Member must not update Workspace scope.',
-      health: 'at-risk',
-      expectedRevision: 1,
-    },
-  )
-
-  expect(response.status).toBe(403)
-  expect(statusUpdateCalls).toBe(0)
-})
-
 test('rejects an inactive Planning owner before invoking the mutation client', async () => {
   const planningClient = new InMemoryPlanningClient()
   let createCalls = 0
@@ -2103,7 +2061,7 @@ test('lets Workspace owners clean up inaccessible stale Work Item links', async 
   expect(planning.workItemLinks).toEqual([])
 })
 
-test('lets members add status updates and link accessible canonical Work Items', async () => {
+test('lets members link accessible canonical Work Items', async () => {
   const planningClient = new InMemoryPlanningClient()
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   setTestAppDependencies({ planning: planningClient })
@@ -2115,23 +2073,6 @@ test('lets members add status updates and link accessible canonical Work Items',
   expect(created.status).toBe(201)
 
   configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
-  const statusUpdate = await planningApiRequest(
-    '/api/planning/entities/cycle-current/status-updates',
-    'POST',
-    {
-      id: 'status-1',
-      message: 'Delivery is proceeding.',
-      health: 'on-track',
-      expectedRevision: 1,
-    },
-  )
-  expect(statusUpdate.status).toBe(201)
-  const statusPlanning = await statusUpdate.json() as PlanningSnapshot
-  expect(statusPlanning.entities[0]?.statusUpdates[0]).toMatchObject({
-    id: 'status-1',
-    authorMemberKey: 'demo@example.com',
-  })
-
   const malformedLink = await planningApiRequest(
     '/api/planning/work-item-links/core-team/onboarding-friction',
     'PUT',
@@ -2140,7 +2081,7 @@ test('lets members add status updates and link accessible canonical Work Items',
       workItemId: 'onboarding-friction',
       projectId: 'refero',
       cycleId: 'cycle-current',
-      expectedRevision: 2,
+      expectedRevision: 1,
     },
   )
   expect(malformedLink.status).toBe(400)
@@ -2155,7 +2096,7 @@ test('lets members add status updates and link accessible canonical Work Items',
       projectId: 'refero',
       cycleId: 'cycle-current',
       goalIds: [],
-      expectedRevision: 2,
+      expectedRevision: 1,
     },
   )
 

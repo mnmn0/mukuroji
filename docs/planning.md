@@ -26,7 +26,7 @@ Planning client は FENCE `META` だけを強整合 read し、row がなけれ�
 
 すべての mutation は snapshot の `expectedRevision` を必須とし、認可に使った snapshot と mutation の revision を一致させたうえで、`META` の revision CAS と対象 row を同じ DynamoDB transaction で更新します。Stale write は `409 PlanningRevisionConflict` で拒否し、階層、dependency、link の部分更新を残しません。Canonical Work Item projection は強整合 read で取得します。Workspace member の role / status 更新と Planning scope が参照する Team / Project の archive は、事前検査した `META` revision を directory mutation と同じ transaction で一つ進めます。並行する Planning create / move とは一方だけが成功し、競合側は最新 snapshot で再検査します。
 
-1 Workspace の graph projection は metadata を含め 2,000 row、1 row は安全余裕を含む 300 KB、1 transaction は 100 item / 3 MB、API snapshot は4 MBを上限とします。Versioned update、comment、reaction は graph snapshot に展開せず、target-prefix の cursor API で取得します。Graph read は META の強整合 read を前後 barrier にし、mutable graph の5 prefixだけを強整合 Queryするため、増え続ける update history / annotation rowを物理的に走査しません。Entity description は UTF-8 で 20 KB、legacy status update は1件 8 KB・entity ごとに新しい順で32件までです。Legacy status update は read compatibility のため残し、新しい Project / Initiative report は上限32件のない versioned update を正本にします。上限超過は commit 前に `413` で拒否し、response だけ失敗して revision が進む状態を作りません。
+1 Workspace の graph projection は metadata を含め 2,000 row、1 row は安全余裕を含む 300 KB、1 transaction は 100 item / 3 MB、API snapshot は4 MBを上限とします。Versioned update、comment、reaction は graph snapshot に展開せず、target-prefix の cursor API で取得します。Graph read は META の強整合 read を前後 barrier にし、mutable graph の5 prefixだけを強整合 Queryするため、増え続ける update history / annotation rowを物理的に走査しません。Entity description は UTF-8 で 20 KB までです。Project / Initiative report は entity に埋め込まず、versioned update を正本にします。上限超過は commit 前に `413` で拒否し、response だけ失敗して revision が進む状態を作りません。
 
 ## 階層と roll-up
 
@@ -88,7 +88,7 @@ Schedule の move / resize / replace は、現在の Work Item revisions と Pla
 ## 権限
 
 - active Workspace member: Planning snapshot の参照
-- Project / Team member: Work Item link と status update
+- Project / Team member: Work Item link
 - Project / Team viewer: scoped versioned update history、export、watch の参照と操作
 - Project / Team member: scoped update への comment、reaction の操作
 - Configured update owner または Project / Team manager: manual structured update の publish
@@ -96,4 +96,4 @@ Schedule の move / resize / replace は、現在の Work Item revisions と Pla
 - Workspace owner / admin: Workspace scope の Portfolio / Roadmap 等の管理
 - guest: mutation 不可
 
-Move、dependency、link では起点と終点の両方を検証します。Move は対象 entity と active な全子孫の Team / Project scope を一つの transaction で変更し、archive 済み子孫は履歴上の scope を保持します。Project / Team member は、アクセス可能な Work Item を Workspace scope の戦略 Goal / OKR に link できます。Workspace scope の status update と構造変更は owner / admin に限定します。Entity owner は active Workspace member に限り、member の無効化前に所有 entity を移譲または archive する必要があります。Active entity または保存済み Work Item link が参照する Team / Project の archive は、entity を移動または archive し、link を解除するまで拒否します。権限確認に失敗した場合、Planning store の mutation は呼び出しません。
+Move、dependency、link では起点と終点の両方を検証します。Move は対象 entity と active な全子孫の Team / Project scope を一つの transaction で変更し、archive 済み子孫は履歴上の scope を保持します。Project / Team member は、アクセス可能な Work Item を Workspace scope の戦略 Goal / OKR に link できます。Workspace scope の構造変更は owner / admin に限定します。Entity owner は active Workspace member に限り、member の無効化前に所有 entity を移譲または archive する必要があります。Active entity または保存済み Work Item link が参照する Team / Project の archive は、entity を移動または archive し、link を解除するまで拒否します。権限確認に失敗した場合、Planning store の mutation は呼び出しません。
