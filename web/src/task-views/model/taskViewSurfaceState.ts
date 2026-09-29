@@ -185,7 +185,7 @@ export function taskViewDefinitionToProjectState(
     sortOrder: definition.layout.sort.find((sort) => sort.field === 'dueDate')?.direction === 'desc'
       ? 'due-date-desc'
       : 'due-date-asc',
-    statusFilter: workflowStatus ? createProjectStatusFilterValue(workflowStatus) : 'all',
+    statusFilter: workflowStatus ? createWorkflowStatusFilterValue(workflowStatus) : 'all',
   }
 }
 
@@ -310,7 +310,7 @@ export function taskViewDefinitionToTeamState(
       ...(customFieldValue !== undefined ? { customFieldValue } : {}),
     },
     searchQuery: definition.filters.keyword ?? '',
-    statusFilter: workflowStatus ? createTeamStatusFilterValue(workflowStatus) : 'all',
+    statusFilter: workflowStatus ? createWorkflowStatusFilterValue(workflowStatus) : 'all',
     workItemTypeFilter: definition.filters.workItemTypeIds?.[0] ?? 'all',
     viewMode: definition.layout.mode === 'board' ? 'board' : 'table',
   }
@@ -593,10 +593,6 @@ export function filterTasksByTaskViewDefinition(
       !definition.filters.creatorUserIds.includes(task.creatorMemberKey)
     ) return false
     if (
-      definition.filters.statuses?.length &&
-      !definition.filters.statuses.includes(task.workflowStatusId)
-    ) return false
-    if (
       definition.filters.priorities?.length &&
       !definition.filters.priorities.includes(task.priority)
     ) return false
@@ -608,9 +604,8 @@ export function filterTasksByTaskViewDefinition(
       definition.filters.workflowStatuses?.length &&
       !definition.filters.workflowStatuses.some((status) =>
         status.teamId === task.teamId &&
-        status.statusId === task.workflowStatusId &&
-        (status.workItemTypeId === undefined ||
-          status.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID))
+        status.workItemTypeId === (task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID) &&
+        status.statusId === task.workflowStatusId
       )
     ) return false
     if (
@@ -926,15 +921,12 @@ function isProjectTaskLayout(value: string): value is ProjectTaskLayoutMode {
 }
 
 /**
- * Creates the status filter value used by Project task controls.
+ * Creates the status filter value used by Project task and Team Issue controls.
  *
- * @param status - Team- and optionally Type-qualified workflow status.
- * @returns A legacy colon-delimited value or a collision-safe type-qualified key.
+ * @param status - Team and Work Item Type-qualified workflow status.
+ * @returns The collision-safe Type-qualified status key rendered by the surface controls.
  */
-function createProjectStatusFilterValue(status: TaskViewWorkflowStatusFilter): string {
-  if (status.workItemTypeId === undefined) {
-    return [status.teamId, status.statusId].join(':')
-  }
+function createWorkflowStatusFilterValue(status: TaskViewWorkflowStatusFilter): string {
   return createWorkItemTypeWorkflowStatusKey(
     status.teamId,
     status.workItemTypeId,
@@ -943,34 +935,18 @@ function createProjectStatusFilterValue(status: TaskViewWorkflowStatusFilter): s
 }
 
 /**
- * Creates the status filter value used by Team Issue controls.
+ * Parses the Type-qualified status key used by Project task controls.
  *
- * @param status - Team workflow status filter persisted by a task view.
- * @returns A bare legacy status ID or a collision-safe Type-qualified key.
+ * @param value - UI status filter value, including the all sentinel.
+ * @returns A canonical workflow status filter, or undefined for all/invalid values.
  */
-function createTeamStatusFilterValue(status: TaskViewWorkflowStatusFilter): string {
-  if (status.workItemTypeId === undefined) return status.statusId
-  return createWorkItemTypeWorkflowStatusKey(
-    status.teamId,
-    status.workItemTypeId,
-    status.statusId,
-  )
-}
-
-/** Parses the Team-qualified status key used by Project task controls. */
-function parseProjectStatusFilter(value: string) {
+function parseProjectStatusFilter(value: string): TaskViewWorkflowStatusFilter | undefined {
   if (value === 'all') return undefined
   const parts = value.split('\u0000')
   const [teamId, workItemTypeId, statusId] = parts
-  if (parts.length === 3 && teamId && workItemTypeId && statusId) {
-    return { teamId, workItemTypeId, statusId }
-  }
-  const separatorIndex = value.lastIndexOf(':')
-  if (separatorIndex <= 0 || separatorIndex >= value.length - 1) return undefined
-  return {
-    teamId: value.slice(0, separatorIndex),
-    statusId: value.slice(separatorIndex + 1),
-  }
+  return parts.length === 3 && teamId && workItemTypeId && statusId
+    ? { teamId, workItemTypeId, statusId }
+    : undefined
 }
 
 /**
@@ -984,10 +960,9 @@ function parseTeamStatusFilter(
   value: string,
   teamId: string | undefined,
 ): TaskViewWorkflowStatusFilter | undefined {
-  if (!teamId || value === 'all') return undefined
+  if (!teamId) return undefined
   const parsed = parseProjectStatusFilter(value)
-  if (parsed) return parsed.teamId === teamId ? parsed : undefined
-  return { teamId, statusId: value }
+  return parsed?.teamId === teamId ? parsed : undefined
 }
 
 /** Narrows a canonical due-date preset to the Project screen's available buckets. */
@@ -1010,7 +985,6 @@ function cloneTaskViewFilters(filters: TaskViewDefinition['filters']): TaskViewD
     ...(filters.entityTypes ? { entityTypes: [...filters.entityTypes] } : {}),
     ...(filters.assigneeUserIds ? { assigneeUserIds: [...filters.assigneeUserIds] } : {}),
     ...(filters.creatorUserIds ? { creatorUserIds: [...filters.creatorUserIds] } : {}),
-    ...(filters.statuses ? { statuses: [...filters.statuses] } : {}),
     ...(filters.customFields ? {
       customFields: filters.customFields.map((filter) => ({
         ...filter,

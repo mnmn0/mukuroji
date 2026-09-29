@@ -67,13 +67,13 @@ export type TaskViewScope =
   | TeamTaskViewScope
   | ViewerTaskViewScope
 
-/** Team-qualified workflow status referenced by a task filter. */
+/** Team and Work Item Type-qualified workflow status referenced by a task filter. */
 export type TaskViewWorkflowStatusFilter = {
   /** Team that owns the workflow status definition. */
   teamId: string
-  /** Stable Work Item Type identifier whose workflow owns the status; omitted for legacy unqualified filters. */
-  workItemTypeId?: string
-  /** Stable workflow status identifier within the Team configuration. */
+  /** Stable Work Item Type identifier whose workflow owns the status. */
+  workItemTypeId: string
+  /** Stable workflow status identifier within the Work Item Type workflow. */
   statusId: string
 }
 
@@ -83,10 +83,11 @@ export type TaskViewDueDatePreset = 'overdue' | 'today' | 'upcoming' | 'no-date'
 /**
  * Permission-aware filters shared by Search and every task surface.
  *
- * The inherited Workspace Search fields preserve compatibility with existing saved views.
+ * Task views reuse the Workspace Search filter fields except `statuses`; a workflow status is
+ * referenced only through a fully qualified `workflowStatuses` entry.
  */
-export type TaskViewFilters = WorkspaceSearchFilters & {
-  /** Team-qualified status references used by multi-Team task surfaces. */
+export type TaskViewFilters = Omit<WorkspaceSearchFilters, 'statuses'> & {
+  /** Team and Work Item Type-qualified status references used by task surfaces. */
   workflowStatuses?: TaskViewWorkflowStatusFilter[]
   /** Stable workflow categories retained across status-definition changes. */
   workflowCategories?: WorkflowStatusCategory[]

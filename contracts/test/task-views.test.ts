@@ -61,7 +61,7 @@ describe('task view contracts', () => {
         filters: {
           entityTypes: ['work-item'],
           priorities: ['high'],
-          workflowStatuses: [{ teamId: 'core-team', statusId: 'review' }],
+          workflowStatuses: [{ teamId: 'core-team', workItemTypeId: 'bug', statusId: 'review' }],
           dueDatePreset: 'upcoming',
         },
         layout: {

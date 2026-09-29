@@ -386,7 +386,6 @@ import {
   WorkspaceSearchError,
   createProjectWorkspaceSearchDocument,
   createTaskViewProjectScopeKey,
-  createTaskViewStatusKey,
   createTaskViewWorkflowStatusKey,
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
@@ -512,7 +511,6 @@ import {
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
   createWorkItemRelationGraphRevisionIncrementTransactionItem,
-  getWorkItemConfigurationWorkflows,
   getWorkItemTypeCustomFieldDefinitions,
   normalizeCustomFieldValues,
   previewWorkItemTypeChange,
@@ -26864,7 +26862,6 @@ async function createTaskViewAccessScope(
   const activeWorkItemTypeIds = new Set<string>()
   const readableWorkItemTypeIds = new Set<string>()
   const readableCustomFieldIds = new Set(activeCustomFieldIds)
-  const activeStatusIds = new Set<string>()
   const activeWorkflowStatusIds = new Set<string>()
   const readableActorIds = new Set(activeMembers.flatMap((member) => [
     member.memberKey,
@@ -26898,11 +26895,6 @@ async function createTaskViewAccessScope(
         configuration,
       )
     }
-    for (const workflow of getWorkItemConfigurationWorkflows(configuration)) {
-      for (const status of workflow.statuses) {
-        activeStatusIds.add(createTaskViewStatusKey(teamConfiguration.teamId, status.id))
-      }
-    }
     const workItemTypeIds = configuration.workItemTypes?.map((type) => type.id) ?? []
     if (!workItemTypeIds.includes(DEFAULT_WORK_ITEM_TYPE_ID)) {
       workItemTypeIds.push(DEFAULT_WORK_ITEM_TYPE_ID)
@@ -26929,7 +26921,6 @@ async function createTaskViewAccessScope(
     activeWorkItemTypeIds,
     readableWorkItemTypeIds,
     readableCustomFieldIds,
-    activeStatusIds,
     activeWorkflowStatusIds,
     readableActorIds,
     resolveReadableRelationIds: (input) => resolveReadableTaskViewRelationIds(
@@ -27845,12 +27836,17 @@ function readDuplicateSavedTaskViewInput(value: unknown): DuplicateSavedTaskView
 /**
  * Reads filters shared by task-oriented surfaces and Workspace Search.
  *
+ * Workflow statuses are accepted only as Team and Work Item Type-qualified `workflowStatuses`.
+ *
  * @param value - Untrusted filter object.
  * @returns Canonical task-view filters.
  */
 function readTaskViewFilters(value: unknown): TaskViewFilters {
   if (!isRecord(value)) {
     return invalidTaskViewApiInput('Task view filters are invalid.')
+  }
+  if (value.statuses !== undefined) {
+    return invalidTaskViewApiInput('Task view statuses must use qualified workflowStatuses.')
   }
   const filters: TaskViewFilters = {}
   const keyword = readOptionalTaskViewText(value.keyword, 'Task view keyword', 256)
@@ -27863,7 +27859,6 @@ function readTaskViewFilters(value: unknown): TaskViewFilters {
   }
   copyTaskViewStringFilter(filters, value, 'assigneeUserIds')
   copyTaskViewStringFilter(filters, value, 'creatorUserIds')
-  copyTaskViewStringFilter(filters, value, 'statuses')
   copyTaskViewStringFilter(filters, value, 'relationIds')
   copyTaskViewStringFilter(filters, value, 'projectIds')
   copyTaskViewStringFilter(filters, value, 'teamIds')
@@ -27891,15 +27886,11 @@ function readTaskViewFilters(value: unknown): TaskViewFilters {
           'Task view workflow status Team ID',
           256,
         ),
-        ...(status.workItemTypeId === undefined
-          ? {}
-          : {
-              workItemTypeId: readRequiredTaskViewText(
-                status.workItemTypeId,
-                'Task view workflow status Work Item Type ID',
-                256,
-              ),
-            }),
+        workItemTypeId: readRequiredTaskViewText(
+          status.workItemTypeId,
+          'Task view workflow status Work Item Type ID',
+          256,
+        ),
         statusId: readRequiredTaskViewText(
           status.statusId,
           'Task view workflow status ID',
@@ -27944,7 +27935,7 @@ function readTaskViewFilters(value: unknown): TaskViewFilters {
 function copyTaskViewStringFilter(
   target: TaskViewFilters,
   source: Record<string, unknown>,
-  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds' | 'workItemTypeIds',
+  key: 'assigneeUserIds' | 'creatorUserIds' | 'relationIds' | 'projectIds' | 'teamIds' | 'workItemTypeIds',
 ): void {
   const candidate = source[key]
   if (candidate === undefined) return

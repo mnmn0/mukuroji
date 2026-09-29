@@ -116,7 +116,6 @@ import {
   useTeamWorkItemConfigurations,
 } from '../../work-items/queries/useWorkItemConfigurations'
 import {
-  resolveConfiguredWorkflowStatuses,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
   resolveWorkItemTypeWorkflowStatuses,
@@ -506,13 +505,6 @@ export function TaskPage() {
       ),
     [workItemConfigurationLoadResult.configurationsByTeam],
   )
-  const taskViewLegacyStatusIds = useMemo(
-    () => [...new Set(Object.values(workItemConfigurationLoadResult.configurationsByTeam)
-      .flatMap((resolved) =>
-        resolveConfiguredWorkflowStatuses(resolved.configuration).map((status) => status.id)
-      ))],
-    [workItemConfigurationLoadResult.configurationsByTeam],
-  )
   const taskViewFields = useMemo(
     () => [
       ...standardTaskViewFields,
@@ -544,7 +536,6 @@ export function TaskPage() {
       columns: taskViewColumns,
       fields: taskViewFields,
       layoutModes: ['table', 'board', 'gantt', 'calendar'],
-      legacyStatusIds: taskViewLegacyStatusIds,
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },

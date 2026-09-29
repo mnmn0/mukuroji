@@ -735,7 +735,7 @@ function createInput(searchParams: URLSearchParams): UseTaskViewControllerInput 
       fields: ['title', 'status', 'dueDate'],
       layoutModes: ['table', 'board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
-      workflowStatuses: [{ teamId: 'core-team', statusId: 'active' }],
+      workflowStatuses: [{ teamId: 'core-team', workItemTypeId: 'default', statusId: 'active' }],
     },
     enabled: true,
     onSearchParamsChange: () => undefined,

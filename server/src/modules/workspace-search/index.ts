@@ -11,7 +11,6 @@ export {
   createSavedWorkspaceViewRecordKey,
   createTaskViewProjectScopeKey,
   createTaskViewRecordKey,
-  createTaskViewStatusKey,
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocument,
