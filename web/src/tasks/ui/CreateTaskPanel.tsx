@@ -1,4 +1,8 @@
-import type { WorkItemConfiguration, WorkItemSchedule } from '@mukuroji/contracts'
+import type {
+  CreateWorkItemInput,
+  WorkItemConfiguration,
+  WorkItemSchedule,
+} from '@mukuroji/contracts'
 import { useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import type { ProjectMember } from '../../projects/api'
@@ -20,7 +24,6 @@ import {
   resolveWorkItemTypeWorkflow,
 } from '../../work-items/model/workItemDisplay'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
-import type { CreateWorkItemInput } from '../api/tasks'
 import {
   resolveTaskPriority,
   taskPriorities,

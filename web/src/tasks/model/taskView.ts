@@ -7,6 +7,8 @@ import {
   type WorkItemConfiguration,
   type WorkItemPatch,
   type WorkItemSchedule,
+  type CanonicalWorkItem,
+  type WorkItemPriority,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
@@ -33,7 +35,6 @@ import {
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
 } from '../../work-items/model/workItemDisplay'
-import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
   deriveTaskScheduleDueDate,
   resolveTaskSchedule,

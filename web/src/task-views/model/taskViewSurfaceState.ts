@@ -1,4 +1,5 @@
 import {
+  type CanonicalWorkItem,
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type SearchCustomFieldFilter,
@@ -10,7 +11,6 @@ import {
   type TaskViewUrlOverride,
   type TaskViewWorkflowStatusFilter,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   matchesTaskDueDateFilter,
   type TaskScreenViewState,

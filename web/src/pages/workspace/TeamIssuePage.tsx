@@ -18,6 +18,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   WorkItemTypeChangePreview,
+  WorkItemPriority,
 } from '@mukuroji/contracts'
 import {
   createSearchWorkItemTypeKey,
@@ -117,7 +118,6 @@ import {
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
-import type { WorkItemPriority } from '../../tasks/api'
 import {
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,

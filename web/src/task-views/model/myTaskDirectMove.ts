@@ -1,11 +1,11 @@
 import type {
+  CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
   WorkItemActionContext,
   WorkItemActionResult,
   WorkItemActionTarget,
 } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../../issues/api'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
 import {
   clearTaskStatusMoveRequest,

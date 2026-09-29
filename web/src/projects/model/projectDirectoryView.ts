@@ -1,6 +1,5 @@
-import type { ProjectQuickAccessItem } from '@mukuroji/contracts'
+import type { CanonicalWorkItem, ProjectQuickAccessItem } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
-import type { CanonicalWorkItem } from '../../tasks/api/tasks'
 import {
   isOpenWorkItem,
   resolveWorkItemAssignee,

@@ -2,6 +2,8 @@ import type {
   BulkOperation,
   BulkOperationPreview,
   BulkOperationRequest,
+  CanonicalWorkItem,
+  CreateWorkItemInput,
   CuratedContextSourceKind,
   ResolvedWorkItemConfiguration,
   TaskViewScope,
@@ -78,10 +80,6 @@ import {
   createProjectIssuesPath,
 } from '../../shared/routing/paths'
 import { useReportWorkspaceSidebarRouteState } from '../../shared/ui/sidebar'
-import {
-  type CreateWorkItemInput,
-  type CanonicalWorkItem,
-} from '../../tasks/api'
 import {
   createProjectUsersPageKey,
   mergeProjectUsers,

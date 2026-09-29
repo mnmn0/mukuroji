@@ -1,4 +1,5 @@
 import type {
+  CanonicalWorkItem,
   ConfirmedWorkItemSchedule,
   PlanningSnapshot,
   WorkItemScheduleChangePreview,
@@ -22,7 +23,6 @@ import { createWorkItemDependencyMutationController } from '../../planning/mutat
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
-import type { CanonicalWorkItem } from '../api'
 import { applyConfirmedSchedulesToTasks } from '../model/scheduleConfirmation'
 import {
   refreshScheduleConfirmationCache,

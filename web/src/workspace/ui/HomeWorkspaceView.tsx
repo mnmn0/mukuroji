@@ -1,4 +1,5 @@
 import type {
+  CanonicalWorkItem,
   FocusQueueResponse,
   ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
@@ -7,7 +8,6 @@ import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { workspaceNavPaths } from '../../shared/routing/paths'
 import { CheckCircleIcon, ClockIcon, ChevronIcon } from '../../shared/ui/icons'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   getFocusActionabilityMessageKey,
   getFocusQueueItems,

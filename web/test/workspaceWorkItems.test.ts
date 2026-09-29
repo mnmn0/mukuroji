@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  type CanonicalWorkItem,
   DEFAULT_WORK_ITEM_TYPE,
   createDefaultDueDateWorkItemSchedule,
   deriveWorkItemScheduleDueDate,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'

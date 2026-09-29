@@ -7,11 +7,11 @@ import {
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusDefinition,
   type WorkItemConfiguration,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import type { WorkspaceMember } from '../src/workspace/api/access'
-import type { CanonicalWorkItem } from '../src/tasks/api/tasks'
 import {
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,
