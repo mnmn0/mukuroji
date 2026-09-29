@@ -60,7 +60,7 @@ Context item は capture 時点の原文、選択した引用、permalink、acto
 
 Canonical snapshot は履歴として保持しても、current viewer の source permission を確認できない response では原文、引用、permalink を返しません。`kind`、source ID、container ID、actor/time/revision と安全な unavailable reason だけを返し、Work Item の閲覧権限を source 本文の閲覧権限として流用しません。
 
-Context item の作成・更新・差し替え audit は AuditEvents stream consumer から Workspace Search へ再投影します。同期 response 後の best-effort projection が失敗しても、processed receipt より前の stream retry が current snapshot の upsert または superseded document の delete に収束します。
+Context item の作成・更新・差し替え audit は AuditEvents stream consumer から Workspace Search へ再投影します。同期 response 後の best-effort projection が失敗しても、processed receipt より前の stream retry が current snapshot の upsert または superseded document の delete に収束します。Search 投影は event の processed receipt とは別の receipt を持ち、親 Work Item の存在と assigned project が投影時から変わっていないことを条件に、notification 投影より前に記録します。親 scope が変わった場合は古い document を削除して stream retry に戻し、Search receipt がある retry は Search を再投影せず notification 投影から再開します。processed receipt がある event は再処理しません。
 
 ## Permission
 
