@@ -102,6 +102,8 @@ CDKで追加される `SlackDeliveryIndex` と `SlackNotificationFunction` の�
 
 60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
+HTTPエラーの再試行可否と待機時間は、受信済みのstatusと `Retry-After` で判定します。エラー本文は読み取らず破棄し、本文の接続切断や破棄処理の失敗で429の待機時間を失ったり、403などの恒久的な拒否を再試行へ変えたりしません。HTTP 200は引き続き本文の `ok` を確認してから成功扱いにし、その確認前の通信障害は再試行します。
+
 永続的失敗はnotification rowの `slackDeliveryStatus: failed` と秘密情報を含まない `slackLastCode` に残り、Lambda errorsおよび `SlackNotificationDlq` のアラーム対象になります。失敗rowは同じ `SlackDeliveryIndex` の `slack-failed#<番号>` partitionへ移し、ランダムな `slackFailureReference` を記録します。CloudWatchの `SlackNotificationFailed` ログにある `shard` と `dueAt` でindexをQueryし、返されたkeyをGetして `slackFailureReference` とログの `reference` を照合すれば、テーブル全体をScanせず対象を特定できます。ログは90日保持し、通知本文、メールアドレス、Webhook URLを含めません。
 
 送信先を修復した後、運用者は該当rowのversionを条件に `slackAttempts: 0`、`slackDeliveryStatus: pending`、元の `slackQueueShard`（`slack#<番号>`）、現在時刻の `slackNextAttemptAt` を戻して再試行できます。送信済みrowの再投入は重複投稿になるため、Slack側の着信を先に確認します。`notification-schedule` runtime controlで停止できます。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Slack`）が15分以上の状態で3回続くと滞留アラームを出します。破損候補は最大10ページまで越えて後続を処理し、`InvalidQueueCandidates` とworker失敗で検出します。破損した正本は自動で書き換えず、運用者が確認・修復します。
