@@ -355,9 +355,10 @@ export type TaskViewAccessScope = {
   readableWorkItemTypeIds?: ReadonlySet<string>
   /** Current viewer が値を参照できる custom field ID です。未指定時は active field をすべて許可します。 */
   readableCustomFieldIds?: ReadonlySet<string>
-  /** 現在存在する `${teamId}\0${statusId}` 形式の Team-qualified workflow status key です。 */
-  activeStatusIds?: ReadonlySet<string>
-  /** Type-qualified workflow status keys currently present in the visible configurations. */
+  /**
+   * `${teamId}\0${workItemTypeId}\0${statusId}` workflow status keys currently present in the
+   * visible configurations. Omit to defer deletion migration.
+   */
   activeWorkflowStatusIds?: ReadonlySet<string>
   /** Current viewer が layout で利用できる built-in field です。未指定時はすべて許可します。 */
   readableColumnIds?: ReadonlySet<string>
@@ -731,7 +732,7 @@ type StoredTaskViewDefault = {
   /** Default に指定した task view ID です。 */
   viewId: string
   /** Marker generation used to guard same-timestamp replacement races. */
-  generation?: string
+  generation: string
   /** Default marker 最終更新日時です。 */
   updatedAt: string
 }
@@ -3438,20 +3439,6 @@ export function migrateSavedWorkspaceView(
 }
 
 /**
- * Creates the canonical Team-qualified key used by task view status allowlists.
- *
- * @param teamId - Team that owns the workflow status.
- * @param statusId - Stable workflow status identifier within the Team.
- * @returns Collision-safe allowlist key for the Team and status pair.
- */
-export function createTaskViewStatusKey(teamId: string, statusId: string) {
-  return `${requireText(teamId, 'Task view status Team ID')}\0${requireText(
-    statusId,
-    'Task view status ID',
-  )}`
-}
-
-/**
  * Creates the canonical Type-qualified key used by task view status allowlists.
  *
  * @param teamId - Team that owns the workflow status.
@@ -3568,20 +3555,6 @@ async function sanitizeTaskViewDefinition(
             access.readableWorkItemTypeIds,
             warnings,
           ),
-        }),
-    ...(definition.filters.statuses === undefined
-      ? {}
-      : {
-          statuses: definition.filters.statuses.filter((statusId) => {
-            if (isTaskViewLegacyStatusActive(statusId, definition, access)) return true
-            addTaskViewMigrationWarning(
-              warnings,
-              'deleted-workflow-status',
-              'filter',
-              'removed',
-            )
-            return false
-          }),
         }),
     ...(definition.filters.workflowStatuses === undefined
       ? {}
@@ -3778,54 +3751,20 @@ function isReadableTaskViewBuiltInField(
   return !enforcePermission || !access.readableColumnIds || access.readableColumnIds.has(field)
 }
 
-/** Returns whether a type-qualified or legacy workflow status is currently active. */
+/**
+ * Checks whether a Team and Work Item Type-qualified workflow status is currently configured.
+ *
+ * @param status - Qualified workflow status filter stored by the view.
+ * @param access - Current access scope carrying the active status allowlist, when available.
+ * @returns Whether the status exists, or true when deletion migration is deferred.
+ */
 function isTaskViewWorkflowStatusActive(
   status: TaskViewWorkflowStatusFilter,
   access: TaskViewAccessScope,
 ) {
-  if (status.workItemTypeId !== undefined && access.activeWorkflowStatusIds) {
-    return access.activeWorkflowStatusIds.has(createTaskViewWorkflowStatusKey(
-      status.teamId,
-      status.workItemTypeId,
-      status.statusId,
-    ))
-  }
-  if (access.activeStatusIds) {
-    return access.activeStatusIds.has(createTaskViewStatusKey(status.teamId, status.statusId))
-  }
-  if (status.workItemTypeId !== undefined || !access.activeWorkflowStatusIds) return true
-  const teamPrefix = `${requireText(status.teamId, 'Task view status Team ID')}\0`
-  const statusSuffix = `\0${requireText(status.statusId, 'Task view status ID')}`
-  return [...access.activeWorkflowStatusIds].some((key) =>
-    key.startsWith(teamPrefix) && key.endsWith(statusSuffix)
+  return !access.activeWorkflowStatusIds || access.activeWorkflowStatusIds.has(
+    createTaskViewWorkflowStatusKey(status.teamId, status.workItemTypeId, status.statusId),
   )
-}
-
-/** Returns whether a legacy unqualified status still exists in any relevant Team workflow. */
-function isTaskViewLegacyStatusActive(
-  statusId: string,
-  definition: TaskViewDefinition,
-  access: TaskViewAccessScope,
-) {
-  if (!access.activeStatusIds && !access.activeWorkflowStatusIds) return true
-  const teamIds = new Set<string>()
-  const scopeTeamId = getTaskViewScopeTeamId(definition.scope)
-  if (scopeTeamId) teamIds.add(scopeTeamId)
-  for (const teamId of definition.filters.teamIds ?? []) {
-    if (access.teamIds.has(teamId)) teamIds.add(teamId)
-  }
-  if (!teamIds.size) {
-    for (const teamId of access.teamIds) teamIds.add(teamId)
-  }
-  if (teamIds.size) {
-    return [...teamIds].some((teamId) =>
-      isTaskViewWorkflowStatusActive({ teamId, statusId }, access)
-    )
-  }
-  const suffix = `\0${statusId}`
-  const activeStatusIds = access.activeStatusIds ?? access.activeWorkflowStatusIds
-  if (!activeStatusIds) return false
-  return [...activeStatusIds].some((key) => key.endsWith(suffix))
 }
 
 /** Appends one deterministic migration warning without exposing an unreadable identifier. */
@@ -4066,7 +4005,18 @@ function matchesWorkspaceSearchFilters(
   return true
 }
 
-/** Matches a Search status filter against a legacy bare status or a qualified Work Item status key. */
+/**
+ * Matches Workspace Search status filter values against one indexed document.
+ *
+ * A qualified key (`teamId\0workItemTypeId\0statusId`) matches only that Work Item workflow
+ * status. A bare value matches any document with the same status code; Document lifecycle and
+ * context item states have no qualified form, and AI-drafted Search filters select bare workflow
+ * status IDs.
+ *
+ * @param document - Indexed document being evaluated.
+ * @param statusFilters - Bare status codes or qualified Work Item status keys.
+ * @returns Whether any status filter value matches the document.
+ */
 function matchesWorkspaceSearchStatusFilter(
   document: WorkspaceSearchDocument,
   statusFilters: readonly string[],
@@ -4889,10 +4839,18 @@ function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewS
   if (!valid) invalidTaskView('Task view surface and scope do not match.')
 }
 
-/** Validates filters shared by all task surfaces. */
+/**
+ * Validates filters shared by all task surfaces.
+ *
+ * @param filters - Untrusted filter object from an API request or a persisted definition.
+ * @returns Canonical filters whose workflow statuses are all Team and Work Item Type-qualified.
+ */
 function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
   if (!isRecordValue(filters)) {
     return invalidTaskView('Task view filters are invalid.')
+  }
+  if (filters.statuses !== undefined) {
+    return invalidTaskView('Task view statuses must use qualified workflowStatuses.')
   }
   const base = normalizeWorkspaceSearchFilters(filters)
   const workflowStatuses = filters.workflowStatuses === undefined
@@ -4923,7 +4881,12 @@ function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
   }
 }
 
-/** Validates and deduplicates Team-qualified workflow status filters. */
+/**
+ * Validates and deduplicates Team and Work Item Type-qualified workflow status filters.
+ *
+ * @param values - Untrusted workflow status filter list.
+ * @returns Unique qualified filters in their first-occurrence order.
+ */
 function normalizeTaskViewWorkflowStatuses(
   values: unknown,
 ): NonNullable<TaskViewFilters['workflowStatuses']> {
@@ -4934,23 +4897,18 @@ function normalizeTaskViewWorkflowStatuses(
     if (!isRecordValue(value)) {
       return invalidTaskView('Task view workflow status is invalid.')
     }
-    const workItemTypeId = value.workItemTypeId === undefined
-      ? undefined
-      : requireText(value.workItemTypeId, 'Task view workflow status Work Item Type ID', 256)
     return {
       teamId: requireText(value.teamId, 'Task view workflow status Team ID', 256),
-      ...(workItemTypeId === undefined ? {} : { workItemTypeId }),
+      workItemTypeId: requireText(
+        value.workItemTypeId,
+        'Task view workflow status Work Item Type ID',
+        256,
+      ),
       statusId: requireText(value.statusId, 'Task view workflow status ID', 256),
     }
   })
   return [...new Map(normalized.map((value) => [
-    value.workItemTypeId === undefined
-      ? createTaskViewStatusKey(value.teamId, value.statusId)
-      : createTaskViewWorkflowStatusKey(
-          value.teamId,
-          value.workItemTypeId,
-          value.statusId,
-        ),
+    createTaskViewWorkflowStatusKey(value.teamId, value.workItemTypeId, value.statusId),
     value,
   ])).values()]
 }
@@ -5388,9 +5346,7 @@ function readStoredTaskViewDefault(value: Record<string, unknown>): StoredTaskVi
     const scope = readStoredTaskViewScope(value.scope)
     const userId = optionalStoredText(value.userId)
     const teamId = optionalStoredText(value.teamId)
-    const generation = value.generation === undefined
-      ? undefined
-      : requireIdentifier(value.generation, 'Task view default generation')
+    const generation = requireIdentifier(value.generation, 'Task view default generation')
     const viewId = requireIdentifier(value.viewId, 'Task view default view ID')
     if (
       (value.ownerType === 'personal' && (!userId || teamId)) ||
@@ -5416,7 +5372,7 @@ function readStoredTaskViewDefault(value: Record<string, unknown>): StoredTaskVi
       surface,
       scope,
       viewId,
-      ...(generation ? { generation } : {}),
+      generation,
       updatedAt: requireText(value.updatedAt, 'Task view default updatedAt', 128),
     }
   } catch (error) {
@@ -5951,20 +5907,15 @@ function createTaskViewDefaultGuardTransactionItem(
 }
 
 /**
- * Creates a marker-generation condition with a legacy timestamp fallback.
+ * Creates the condition that binds a marker mutation to the observed marker generation.
  *
  * @param marker - Persisted marker generation observed by the current operation.
  * @returns DynamoDB condition fragments that reject a replacement marker.
  */
 function createTaskViewDefaultGenerationCondition(marker: StoredTaskViewDefault) {
-  if (marker.generation) {
-    const names: Record<string, string> = { '#generation': 'generation' }
-    const values: Record<string, unknown> = { ':generation': marker.generation }
-    return { expression: '#generation = :generation', names, values }
-  }
-  const names: Record<string, string> = { '#updatedAt': 'updatedAt' }
-  const values: Record<string, unknown> = { ':updatedAt': marker.updatedAt }
-  return { expression: '#updatedAt = :updatedAt', names, values }
+  const names: Record<string, string> = { '#generation': 'generation' }
+  const values: Record<string, unknown> = { ':generation': marker.generation }
+  return { expression: '#generation = :generation', names, values }
 }
 
 function createSavedViewIdempotencyHash(

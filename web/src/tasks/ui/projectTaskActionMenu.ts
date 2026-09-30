@@ -1,5 +1,5 @@
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
-import type { CanonicalWorkItem } from '../api/tasks'
+import type { CanonicalWorkItem } from '@mukuroji/contracts'
 
 /**
  * Opens the canonical Project task action menu for one row or card.

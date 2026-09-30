@@ -70,23 +70,6 @@ const planningUpdateStates = new Set<string>([
   'stale',
 ])
 
-/** Returns whether a value is one Planning status update. */
-function isPlanningStatusUpdate(value: unknown): boolean {
-  return isRecord(value) &&
-    typeof value.id === 'string' &&
-    typeof value.message === 'string' &&
-    typeof value.authorMemberKey === 'string' &&
-    (
-      value.health === undefined ||
-      typeof value.health === 'string' && planningHealthValues.has(value.health)
-    ) &&
-    (
-      value.risk === undefined ||
-      typeof value.risk === 'string' && planningRiskValues.has(value.risk)
-    ) &&
-    typeof value.createdAt === 'string'
-}
-
 /** Returns whether a value is one Planning entity projection. */
 function isPlanningEntity(value: unknown): boolean {
   return isRecord(value) &&
@@ -117,8 +100,6 @@ function isPlanningEntity(value: unknown): boolean {
       value.goalFramework === 'objective' ||
       value.goalFramework === 'key-result'
     ) &&
-    Array.isArray(value.statusUpdates) &&
-    value.statusUpdates.every(isPlanningStatusUpdate) &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
     isOptionalString(value.description) &&

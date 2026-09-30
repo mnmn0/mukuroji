@@ -7,11 +7,11 @@ import {
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusDefinition,
   type WorkItemConfiguration,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import type { WorkspaceMember } from '../src/workspace/api/access'
-import type { CanonicalWorkItem } from '../src/tasks/api/tasks'
 import {
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,
@@ -727,7 +727,9 @@ describe('task custom-field display, filters, and sorting', () => {
 
     expect(resolveEffectiveStatusFilter('core-team\u0000default\u0000todo', columns))
       .toBe('core-team\u0000default\u0000todo')
-    expect(resolveEffectiveStatusFilter('removed-team:todo', columns)).toBe('all')
+    expect(resolveEffectiveStatusFilter('removed-team\u0000default\u0000todo', columns))
+      .toBe('all')
+    expect(resolveEffectiveStatusFilter('core-team:todo', columns)).toBe('all')
     expect(resolveEffectiveDefinitionFilter(validDefinitionFilter, configuration))
       .toBe(validDefinitionFilter)
     expect(resolveEffectiveDefinitionFilter(staleDefinitionFilter, configuration)).toEqual({

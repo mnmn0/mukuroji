@@ -86,7 +86,6 @@ const taskViewFilterIds: readonly string[] = [
   'entityTypes',
   'assigneeUserIds',
   'creatorUserIds',
-  'statuses',
   'customFields',
   'relationIds',
   'date',
@@ -157,10 +156,8 @@ export type TaskViewSanitizeOptions = {
   fields: readonly string[]
   /** Field references available as visible columns. */
   columns: readonly string[]
-  /** Team-qualified workflow statuses visible to the current viewer. */
+  /** Team and Work Item Type-qualified workflow statuses visible to the current viewer. */
   workflowStatuses: readonly TaskViewWorkflowStatusFilter[]
-  /** Legacy unqualified workflow status identifiers visible to the current viewer. */
-  legacyStatusIds?: readonly string[]
   /** Columns that must remain after migration. */
   requiredColumns?: readonly string[]
   /** Whether warnings may expose removed identifiers to the current viewer. */
@@ -641,8 +638,6 @@ function sanitizeTaskViewFilters(
   warnings: TaskViewMigrationWarning[],
 ): TaskViewFilters {
   const allowedFields = new Set(options.fields)
-  const allowedLegacyStatuses = new Set(options.legacyStatusIds ?? [])
-  const allowedWorkflowStatuses = options.workflowStatuses
   const allowedWorkflowStatusKeys = new Set(
     options.workflowStatuses.map(createWorkflowStatusKey),
   )
@@ -662,27 +657,9 @@ function sanitizeTaskViewFilters(
       return false
     })
   }
-  if (next.statuses) {
-    next.statuses = next.statuses.filter((statusId) => {
-      if (allowedLegacyStatuses.has(statusId)) {
-        return true
-      }
-      warnings.push(createMigrationWarning(
-        'deleted-workflow-status',
-        'filter',
-        'removed',
-        readReferenceId(statusId, options),
-      ))
-      return false
-    })
-  }
   if (next.workflowStatuses) {
     next.workflowStatuses = next.workflowStatuses.filter((status) => {
-      if (isTaskViewWorkflowStatusAllowed(
-        status,
-        allowedWorkflowStatuses,
-        allowedWorkflowStatusKeys,
-      )) {
+      if (allowedWorkflowStatusKeys.has(createWorkflowStatusKey(status))) {
         return true
       }
       warnings.push(createMigrationWarning(
@@ -724,7 +701,6 @@ function readTaskViewFilters(value: unknown): TaskViewFilters | undefined {
   if (
     !copyStringArray(value, 'assigneeUserIds', filters) ||
     !copyStringArray(value, 'creatorUserIds', filters) ||
-    !copyStringArray(value, 'statuses', filters) ||
     !copyStringArray(value, 'relationIds', filters) ||
     !copyStringArray(value, 'projectIds', filters) ||
     !copyStringArray(value, 'teamIds', filters) ||
@@ -1047,10 +1023,10 @@ function readWorkspaceSearchDateFilter(value: unknown): WorkspaceSearchDateFilte
 }
 
 /**
- * Reads Team-qualified workflow status filters.
+ * Reads Team and Work Item Type-qualified workflow status filters.
  *
  * @param value - Unknown status filter array.
- * @returns Safe status filters or undefined.
+ * @returns Safe status filters, or undefined when any entry is not fully qualified.
  */
 function readWorkflowStatusFilters(value: unknown): TaskViewWorkflowStatusFilter[] | undefined {
   if (value === undefined) return undefined
@@ -1060,16 +1036,13 @@ function readWorkflowStatusFilters(value: unknown): TaskViewWorkflowStatusFilter
     if (
       !isRecord(candidate) ||
       typeof candidate.teamId !== 'string' ||
-      typeof candidate.statusId !== 'string' ||
-      candidate.workItemTypeId !== undefined &&
-        typeof candidate.workItemTypeId !== 'string'
+      typeof candidate.workItemTypeId !== 'string' ||
+      typeof candidate.statusId !== 'string'
     ) return undefined
     result.push({
       statusId: candidate.statusId,
       teamId: candidate.teamId,
-      ...(typeof candidate.workItemTypeId === 'string'
-        ? { workItemTypeId: candidate.workItemTypeId }
-        : {}),
+      workItemTypeId: candidate.workItemTypeId,
     })
   }
   return result
@@ -1088,7 +1061,6 @@ function copyStringArray(
   key:
     | 'assigneeUserIds'
     | 'creatorUserIds'
-    | 'statuses'
     | 'relationIds'
     | 'projectIds'
     | 'teamIds'
@@ -1230,7 +1202,6 @@ function cloneTaskViewFilters(filters: TaskViewFilters): TaskViewFilters {
     ...(filters.entityTypes ? { entityTypes: [...filters.entityTypes] } : {}),
     ...(filters.assigneeUserIds ? { assigneeUserIds: [...filters.assigneeUserIds] } : {}),
     ...(filters.creatorUserIds ? { creatorUserIds: [...filters.creatorUserIds] } : {}),
-    ...(filters.statuses ? { statuses: [...filters.statuses] } : {}),
     ...(filters.customFields ? {
       customFields: filters.customFields.map((filter) => ({
         ...filter,
@@ -1291,7 +1262,7 @@ function cloneTaskViewScope(scope: TaskViewScope): TaskViewScope {
 }
 
 /**
- * Creates a stable Team-qualified workflow status key.
+ * Creates a stable Team and Work Item Type-qualified workflow status key.
  *
  * @param status - Status reference.
  * @returns Collision-safe lookup key.
@@ -1299,30 +1270,9 @@ function cloneTaskViewScope(scope: TaskViewScope): TaskViewScope {
 function createWorkflowStatusKey(status: TaskViewWorkflowStatusFilter): string {
   return [
     status.teamId,
-    status.workItemTypeId ?? '',
+    status.workItemTypeId,
     status.statusId,
   ].join('\u0000')
-}
-
-/**
- * Tests a workflow status filter against the current status capabilities.
- *
- * @param status - Persisted status filter to validate.
- * @param allowedStatuses - Current type-qualified and legacy status capabilities.
- * @param allowedStatusKeys - Exact lookup keys for type-qualified status capabilities.
- * @returns Whether the filter is still available.
- */
-function isTaskViewWorkflowStatusAllowed(
-  status: TaskViewWorkflowStatusFilter,
-  allowedStatuses: readonly TaskViewWorkflowStatusFilter[],
-  allowedStatusKeys: ReadonlySet<string>,
-): boolean {
-  if (status.workItemTypeId !== undefined) {
-    return allowedStatusKeys.has(createWorkflowStatusKey(status))
-  }
-  return allowedStatuses.some((candidate) =>
-    candidate.teamId === status.teamId && candidate.statusId === status.statusId
-  )
 }
 
 /**

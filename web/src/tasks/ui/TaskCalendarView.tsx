@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type {
+  CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
   WorkItemConfiguration,
   WorkItemSchedule,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from '../api/tasks'
 import { TeamIssuesApiError } from '../../issues/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'

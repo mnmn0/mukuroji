@@ -204,6 +204,24 @@ describe('saved task-view API', () => {
     })
   })
 
+  test('rejects status filters that are not Team and Work Item Type-qualified', async () => {
+    for (const filters of [
+      { workflowStatuses: [{ teamId: 'core-team', statusId: 'started' }] },
+      { statuses: ['started'] },
+    ]) {
+      installJsonResponses([{
+        ...createSavedTaskViewFixture('unqualified-status-view'),
+        definition: { ...createDefinition(), filters },
+      }])
+
+      await expect(getSavedTaskView('access-token', 'unqualified-status-view')).rejects
+        .toMatchObject({
+          code: 'InvalidTaskViewResponse',
+          status: 502,
+        })
+    }
+  })
+
   test('rejects unknown filter fields before they can reset known filters', async () => {
     const malformed = {
       ...createSavedTaskViewFixture('future-filter-view'),

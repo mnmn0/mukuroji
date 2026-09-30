@@ -1,4 +1,4 @@
-import type { CreatePlanningEntityInput, DuplicatePlanningEntityInput, MovePlanningEntityInput, PlanningRevisionInput, PlanningSnapshot, PlanningStatusUpdateInput, UpdatePlanningEntityInput } from '@mukuroji/contracts'
+import type { CreatePlanningEntityInput, DuplicatePlanningEntityInput, MovePlanningEntityInput, PlanningRevisionInput, PlanningSnapshot, UpdatePlanningEntityInput } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { PlanningApiError } from './errors'
 
@@ -127,32 +127,18 @@ export function movePlanningEntity(
 }
 
 /**
- * Planning entity に status update を追加します。
+ * Posts one action to a Planning entity action sub-resource.
  *
- * @param accessToken - Authorization header に使う access token です。
- * @param entityId - 更新対象 entity ID です。
- * @param input - revision と status update の内容です。
- * @param mutationContext - retry 間で共有する mutation request context です。
- * @returns status update 追加後の planning snapshot です。
+ * @param entityId - Planning entity ID that owns the action.
+ * @param action - Entity action path segment.
+ * @param accessToken - Access token used for the Authorization header.
+ * @param input - JSON request body for the action.
+ * @param mutationContext - Mutation request context shared across retries.
+ * @returns The parsed response body.
  */
-export function addPlanningStatusUpdate(
-  accessToken: string,
-  entityId: string,
-  input: PlanningStatusUpdateInput,
-  mutationContext: MutationRequestContext,
-) {
-  return requestEntityAction<PlanningSnapshot>(
-    entityId,
-    'status-updates',
-    accessToken,
-    input,
-    mutationContext,
-  )
-}
-
 function requestEntityAction<T>(
   entityId: string,
-  action: 'archive' | 'duplicate' | 'move' | 'status-updates',
+  action: 'archive' | 'duplicate' | 'move',
   accessToken: string,
   input: unknown,
   mutationContext: MutationRequestContext,

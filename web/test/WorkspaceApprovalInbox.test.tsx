@@ -5,6 +5,7 @@ import {
   type FocusActionabilityReason,
   type PlanningUpdateTargetSummary,
   type ResolvedWorkItemConfiguration,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
@@ -14,7 +15,6 @@ import { WorkspaceInboxView } from '../src/notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { TeamOverviewView } from '../src/projects/ui/TeamOverviewView'
 import { createTranslator } from '../src/shared/i18n/i18n'
-import type { CanonicalWorkItem } from '../src/tasks/api'
 import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
 import { DashboardWorkspaceView } from '../src/workspace/ui/DashboardWorkspaceView'
 import { HomeWorkspaceView } from '../src/workspace/ui/HomeWorkspaceView'

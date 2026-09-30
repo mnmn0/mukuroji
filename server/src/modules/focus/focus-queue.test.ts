@@ -513,7 +513,6 @@ describe('Focus queue projection', () => {
       linkedWorkItemCount: 1,
       baseline: { startDate: '2026-08-01', endDate: '2026-08-10' },
       forecast: { startDate: '2026-08-01', endDate: '2026-08-10' },
-      statusUpdates: [],
       createdAt: '2026-08-01T00:00:00.000Z',
       updatedAt: '2026-08-09T00:00:00.000Z',
     }

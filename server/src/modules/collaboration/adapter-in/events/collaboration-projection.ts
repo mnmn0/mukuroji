@@ -345,7 +345,11 @@ const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
 })
 const s3Client = new S3Client({ region: getAwsRegion() })
 const projectionConsumerName = 'collaboration-projection-v1'
-/** Independent receipt namespace for context search during rolling deployments. */
+/**
+ * Receipt namespace for the context Search projection. The receipt is fenced to the parent
+ * Work Item scope and written before the event's projection receipt, so a retry after a later
+ * notification or realtime failure does not repeat a completed Search write.
+ */
 const curatedContextSearchProjectionConsumerName = 'collaboration-context-search-v2'
 const watcherNotificationEventTypes = new Set([
   'comment.created',
@@ -532,6 +536,19 @@ export async function processCollaborationProjectionBatch(
   }
 }
 
+/**
+ * Projects one audit stream record into file cleanup, Search, notifications, and realtime.
+ *
+ * The projection receipt marks the whole event as processed. A curated-context event first
+ * projects Search under its own parent-fenced receipt, so a retry skips a Search write that
+ * already succeeded and continues with the notification projection.
+ *
+ * @param record - DynamoDB stream record from the audit table.
+ * @param currentSystemAdminCache - Batch-scoped cache of current system-admin checks.
+ * @param enterpriseSnapshotCache - Batch-scoped cache of Enterprise Identity snapshots.
+ * @param dependencies - External ports used by the projection.
+ * @returns A promise that resolves after the record is projected or skipped.
+ */
 async function processRecord(
   record: DynamoStreamRecord,
   currentSystemAdminCache: Map<string, Promise<boolean>>,
@@ -554,32 +571,15 @@ async function processRecord(
     return
   }
 
-  const isCuratedContextEvent = curatedContextSearchProjectionEventTypes.has(event.eventType)
-  const searchProjectionProcessed = isCuratedContextEvent
-    ? await isProjectionProcessed(event.eventId, curatedContextSearchProjectionConsumerName)
-    : true
-  let currentScope: CurrentWorkItemNotificationScope | undefined
-  if (isCuratedContextEvent && !searchProjectionProcessed) {
-    currentScope = await readCurrentWorkItemScope(event)
-  }
   if (await isProjectionProcessed(event.eventId)) {
-    if (isCuratedContextEvent && !searchProjectionProcessed && currentScope) {
-      currentScope = await projectCuratedContextSearchEventWithParentFence(
-        event,
-        dependencies.curatedContextSearch,
-      )
-      await acknowledgeCuratedContextSearchProjection(
-        event.eventId,
-        event,
-        currentScope,
-        dependencies.curatedContextSearch,
-      )
-    }
     return
   }
 
-  currentScope ??= await readCurrentWorkItemScope(event)
-  if (isCuratedContextEvent && !searchProjectionProcessed) {
+  let currentScope: CurrentWorkItemNotificationScope
+  if (
+    curatedContextSearchProjectionEventTypes.has(event.eventType) &&
+    !await isProjectionProcessed(event.eventId, curatedContextSearchProjectionConsumerName)
+  ) {
     currentScope = await projectCuratedContextSearchEventWithParentFence(
       event,
       dependencies.curatedContextSearch,
@@ -590,6 +590,8 @@ async function processRecord(
       currentScope,
       dependencies.curatedContextSearch,
     )
+  } else {
+    currentScope = await readCurrentWorkItemScope(event)
   }
   if (!currentScope.exists) {
     await markProjectionProcessed(event.eventId)

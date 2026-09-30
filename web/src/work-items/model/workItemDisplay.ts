@@ -467,29 +467,6 @@ export function resolveCreateWorkflowStatuses(
     : []
 }
 
-/** Returns every status reachable from the configured Work Item workflows. */
-export function resolveConfiguredWorkflowStatuses(
-  configuration: WorkItemConfigurationLike,
-): WorkflowStatusDefinition[] {
-  const resolvedConfiguration = getWorkItemConfiguration(configuration)
-  if (!resolvedConfiguration) return []
-
-  const workflows = [
-    resolvedConfiguration.workflow,
-    ...(resolvedConfiguration.workflows ?? []),
-    ...resolveWorkItemTypes(resolvedConfiguration).flatMap((type) => {
-      const workflow = resolveWorkItemTypeWorkflow(resolvedConfiguration, type.id)
-      return workflow ? [workflow] : []
-    }),
-  ]
-  const statusesById = new Map<string, WorkflowStatusDefinition>()
-  for (const status of workflows.flatMap((workflow) => workflow.statuses)) {
-    if (!statusesById.has(status.id)) statusesById.set(status.id, status)
-  }
-
-  return sortWorkflowStatuses([...statusesById.values()])
-}
-
 /**
  * Work Item 編集 form で現在 status から選択できる workflow status を返します。
  *

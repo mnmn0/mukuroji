@@ -11,6 +11,7 @@ import type {
   WorkItemScheduleCalendarPolicy,
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
+  CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import { DEFAULT_WORK_ITEM_TYPE, DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import { Fragment, useId, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
@@ -62,7 +63,6 @@ import {
   WorkItemRelationsEditor,
   type WorkItemRelationEditorInput,
 } from '../../work-items/ui/WorkItemRelationsEditor'
-import type { CanonicalWorkItem } from '../api/tasks'
 import { CustomerImpactPanel } from '../../customers/ui'
 import { resolveTaskPriority, taskPriorities } from '../model/taskView'
 import {
