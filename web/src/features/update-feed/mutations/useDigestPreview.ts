@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview } from '@mukuroji/contracts'
 import { generateDigestPreview, getDigestState, saveDigestPreferences } from '../api/digest'
 import { useDigestState } from '../queries/useDigestState'
+import { UpdateFeedApiError } from '../api/updateFeed'
 
 /** Ephemeral result bound to the metadata revision observed after generation. */
 type PreviewSnapshot = {
@@ -83,7 +84,13 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
           if (active.current) { dismiss(); setRefreshFailed(true); setError(failure) }
           return false
         }
-        if (active.current && generation === epoch.current && body.current && Date.now() < deadline.current && refreshed?.preferences.enabled && JSON.stringify(refreshed.preferences) === JSON.stringify(query.data.preferences)) setPreview({ result: body.current, revision: refreshed.revision })
+        if (active.current && generation === epoch.current && body.current && Date.now() < deadline.current) {
+          if (!refreshed.preferences.enabled || JSON.stringify(refreshed.preferences) !== JSON.stringify(query.data.preferences)) {
+            dismiss(); setError(new UpdateFeedApiError(409, 'UpdateFeedDigestConflict'))
+            return false
+          }
+          setPreview({ result: body.current, revision: refreshed.revision })
+        }
       }
       return active.current
     } catch (failure) {
