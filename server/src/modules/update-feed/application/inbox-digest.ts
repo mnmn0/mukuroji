@@ -144,7 +144,7 @@ export type InboxDigestScheduleResult = {
   /** Failed candidates that must be retried separately from the continuation. */
   failed: InboxDigestRecipient[]
   /** Terminal candidates requiring inspection, never automatic retry. */
-  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'recipient-mismatch' }[]
+  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' }[]
   /** Next source checkpoint; must not discard failed candidates. */
   cursor?: string
 }
@@ -169,7 +169,7 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
     try {
       if (await deliverInboxDigest(schedule.dependencies, recipient, now) === 'delivered') result.delivered++
     } catch (error) {
-      const reason = error instanceof PlanningError ? error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error.code === 'UpdateFeedDigestRecipientMismatch' ? 'recipient-mismatch' : ['UpdateFeedDigestInvalid', 'UpdateFeedDigestStorageFailure'].includes(error.code) ? 'corrupt-state' : undefined : undefined
+      const reason = error instanceof PlanningError ? error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error.code === 'UpdateFeedDigestRecipientMismatch' ? 'recipient-mismatch' : error.code === 'UpdateFeedDigestCorruptState' ? 'corrupt-state' : error.code === 'UpdateFeedDigestStoragePermanent' ? 'storage-permanent' : undefined : undefined
       if (reason) result.terminal.push({ recipient, reason })
       else result.failed.push(recipient)
     }
