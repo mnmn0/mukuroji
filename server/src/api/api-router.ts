@@ -25949,6 +25949,13 @@ async function requirePlanningEntityPermission(
  */
 async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string) {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
+  const readContext: TeamPermissionReadContext = {
+    directory,
+    readProjectAccesses: () => projectAccesses ??= principal.legacyProjectScopeAccesses
+      ? Promise.resolve(principal.legacyProjectScopeAccesses)
+      : getEffectiveProjectScopeAccessList(principal, directory),
+  }
   /** Requires the current active directory hierarchy even for Workspace administrators. */
   const activeScope = (scope: Pick<PlanningEntity, 'teamId' | 'projectId'>): boolean => {
     if (!scope.teamId) return scope.projectId === undefined
@@ -25963,11 +25970,11 @@ async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: stri
       const scope = target.type === 'project' ? target : snapshot.entities.find((entity) => entity.id === target.entityId && entity.type === 'initiative' && !entity.archivedAt)
       if (!scope || !activeScope(scope)) return false
       try {
-        await requirePlanningUpdateTargetPermission(principal, snapshot, target, 'viewer')
+        await requirePlanningUpdateTargetPermission(principal, snapshot, target, 'viewer', readContext)
         if (summary.latestUpdate) {
           const captured = summary.latestUpdate.capturedScope
           if (!captured || !activeScope(captured) || captured.teamId !== scope.teamId || captured.projectId !== scope.projectId) return false
-          await requirePlanningUpdateCapturedScopePermission(principal, captured)
+          await requirePlanningUpdateCapturedScopePermission(principal, captured, readContext)
         }
         return true
       } catch (error) {
@@ -25985,6 +25992,7 @@ async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: stri
  * @param snapshot - Current Planning snapshot used for Initiative scope resolution.
  * @param target - Validated Project or Initiative target.
  * @param minimumRole - Minimum Project-style role required by the operation.
+ * @param readContext - Optional request-local directory and ACL read cache.
  * @returns The matching Initiative entity for Initiative targets, otherwise undefined.
  */
 async function requirePlanningUpdateTargetPermission(
@@ -25992,6 +26000,7 @@ async function requirePlanningUpdateTargetPermission(
   snapshot: PlanningSnapshot,
   target: PlanningUpdateTarget,
   minimumRole: ProjectRole,
+  readContext?: TeamPermissionReadContext,
 ) {
   if (target.type === 'project') {
     await requirePlanningUpdateProjectPermission(
@@ -25999,6 +26008,7 @@ async function requirePlanningUpdateTargetPermission(
       target.teamId,
       target.projectId,
       minimumRole,
+      readContext,
     )
     return undefined
   }
@@ -26017,11 +26027,12 @@ async function requirePlanningUpdateTargetPermission(
       entity.teamId,
       entity.projectId,
       minimumRole,
+      readContext,
     )
   } else if (entity.projectId) {
     await requireProjectPermission(principal, entity.projectId, minimumRole)
   } else if (entity.teamId) {
-    await requirePlanningUpdateTeamPermission(principal, entity.teamId, minimumRole)
+    await requirePlanningUpdateTeamPermission(principal, entity.teamId, minimumRole, readContext)
   } else {
     requirePlanningWorkspaceScopeRead(principal)
     if (minimumRole === 'manager') requireWorkspaceAdministration(principal)
@@ -26038,10 +26049,12 @@ async function requirePlanningUpdateTargetPermission(
  *
  * @param principal - Current authenticated Workspace principal.
  * @param scope - Scope captured by the immutable update.
+ * @param readContext - Optional request-local directory and ACL read cache.
  */
 async function requirePlanningUpdateCapturedScopePermission(
   principal: WorkspacePrincipal,
   scope: { teamId?: string; projectId?: string },
+  readContext?: TeamPermissionReadContext,
 ): Promise<void> {
   if (scope.projectId !== undefined) {
     if (scope.teamId === undefined) {
@@ -26056,11 +26069,12 @@ async function requirePlanningUpdateCapturedScopePermission(
       scope.teamId,
       scope.projectId,
       'viewer',
+      readContext,
     )
     return
   }
   if (scope.teamId !== undefined) {
-    await requirePlanningUpdateTeamPermission(principal, scope.teamId, 'viewer')
+    await requirePlanningUpdateTeamPermission(principal, scope.teamId, 'viewer', readContext)
     return
   }
   requirePlanningWorkspaceScopeRead(principal)
@@ -26112,13 +26126,15 @@ function isPlanningVisibilityAuthorizationError(error: unknown): boolean {
  * @param principal - Authenticated Workspace principal.
  * @param teamId - Team that owns the Initiative target.
  * @param minimumRole - Required role on at least one Project in that Team.
+ * @param readContext - Optional request-local directory and ACL read cache.
  */
 async function requirePlanningUpdateTeamPermission(
   principal: WorkspacePrincipal,
   teamId: string,
   minimumRole: ProjectRole,
+  readContext?: TeamPermissionReadContext,
 ): Promise<void> {
-  const context = await requireTeamPermission(principal, teamId, minimumRole)
+  const context = await requireTeamPermission(principal, teamId, minimumRole, readContext)
   if (principal.isSystemAdmin || context.projectAccesses === undefined) return
   const hasQualifiedAccess = context.team.projects.some((project) =>
     context.projectAccesses?.some((access) =>
@@ -26146,14 +26162,16 @@ async function requirePlanningUpdateTeamPermission(
  * @param teamId - Owning Team identifier.
  * @param projectId - Team-local Project identifier.
  * @param minimumRole - Required Project role.
+ * @param readContext - Optional request-local directory and ACL read cache.
  */
 async function requirePlanningUpdateProjectPermission(
   principal: WorkspacePrincipal,
   teamId: string,
   projectId: string,
   minimumRole: ProjectRole,
+  readContext?: TeamPermissionReadContext,
 ) {
-  const context = await requireTeamPermission(principal, teamId, minimumRole)
+  const context = await requireTeamPermission(principal, teamId, minimumRole, readContext)
   if (!context.team.projects.some((project) => project.id === projectId)) {
     throw new PlanningError(
       404,
@@ -29959,10 +29977,12 @@ async function requireProjectPermission(
  * Reads effective Project roles while retaining an available owner Team qualifier.
  *
  * @param principal - Authenticated principal whose direct and enterprise access is merged.
+ * @param requestDirectory - Optional current directory already loaded by the request.
  * @returns Strongest role per Team-qualified or legacy-unqualified Project identity.
  */
 async function getEffectiveProjectScopeAccessList(
   principal: ProjectPrincipal,
+  requestDirectory?: ProjectDirectoryResponse,
 ): Promise<ProjectAccessEntry[]> {
   const directAccesses = principal.enterpriseLegacyProjectAccessSuppressed
     ? []
@@ -29974,7 +29994,7 @@ async function getEffectiveProjectScopeAccessList(
   const accessDirectory = [...directAccesses, ...enterpriseAccesses].some((access) =>
     access.teamId === undefined
   )
-    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+    ? requestDirectory ?? await workspaceDependencies.projectDirectory.getProjectDirectory(
         principal.directoryId,
         'ja',
         true,
@@ -30184,12 +30204,21 @@ type TeamPermissionContext = {
   projectAccesses?: ProjectAccessEntry[]
 }
 
+/** Request-local directory and lazily resolved effective ACLs for aggregate authorization. */
+type TeamPermissionReadContext = {
+  /** Current active directory, never reused across requests. */
+  directory: ProjectDirectoryResponse
+  /** Current effective ACLs, resolved at most once within this request. */
+  readProjectAccesses(): Promise<ProjectAccessEntry[]>
+}
+
 async function requireTeamPermission(
   principal: ProjectPrincipal,
   teamId: string,
   minimumRole: ProjectRole,
+  readContext?: TeamPermissionReadContext,
 ): Promise<TeamPermissionContext> {
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const directory = readContext?.directory ?? await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const team = directory.teams.find((candidate) => candidate.id === teamId)
 
   if (!team) {
@@ -30234,7 +30263,7 @@ async function requireTeamPermission(
   }
 
   const teamProjectIds = new Set(team.projects.map((project) => project.id))
-  const projectAccesses = (await getEffectiveProjectScopeAccessList(principal))
+  const projectAccesses = (await (readContext?.readProjectAccesses() ?? getEffectiveProjectScopeAccessList(principal)))
     .filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
 
   for (const projectAccess of projectAccesses) {

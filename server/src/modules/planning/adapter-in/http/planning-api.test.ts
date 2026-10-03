@@ -292,12 +292,29 @@ test('aggregates latest Project and Initiative updates without history reads and
   planning.listUpdateComments = async () => { throw new Error('Feed must not read annotations') }
   planning.listUpdateReactions = async () => { throw new Error('Feed must not read annotations') }
   setTestAppDependencies({ planning })
+  const directoryClient = getTestAppDependencies().workspace.projectDirectory
+  const readDirectory = directoryClient.getProjectDirectory.bind(directoryClient)
+  const readAccesses = directoryClient.getProjectAccessList.bind(directoryClient)
+  const readPlanning = planning.get.bind(planning)
+  let projectionRead = false
+  let perTargetAuthorizationReads = 0
+  planning.get = async (...args) => { projectionRead = true; return readPlanning(...args) }
+  directoryClient.getProjectDirectory = async (...args) => {
+    if (projectionRead) perTargetAuthorizationReads++
+    return readDirectory(...args)
+  }
+  directoryClient.getProjectAccessList = async (...args) => {
+    if (projectionRead) perTargetAuthorizationReads++
+    return readAccesses(...args)
+  }
   const response = await planningApiRequest('/api/planning/update-feed?view=for-me')
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({ total: 2, truncated: false, entries: [
     { target: { type: 'initiative' }, reasons: ['update-owner', 'latest-author'] },
     { target: { type: 'project' }, reasons: ['update-owner', 'latest-author'] },
   ] })
+  expect(perTargetAuthorizationReads).toBe(0)
+  planning.get = readPlanning
   expect(await planning.get('user#demo@example.com', { workItems: [] })).toEqual(before)
   expect((await planningApiRequest('/api/planning/update-feed?limit=101')).status).toBe(400)
 
