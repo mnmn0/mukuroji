@@ -392,12 +392,25 @@ for (const frequency of ['daily', 'weekly'] as const) for (const boundary of [fa
   f.indexed.push(structuredClone(f.metadata()))
   const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
   expect((await f.store.listDue(shard)).recipients).toEqual([recipient])
-  if (boundary) expect(await f.run()).toBe('delivered')
+  if (boundary) expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, start + 60_001, start)).toBe('delivered')
   else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestAttemptsExhausted' })
   expect((await f.store.get('w', 'reader')).history.find((row) => row.id === id)).toMatchObject({ status: 'failed', attempts: 3, leaseUntil: 0 })
   expect(f.notifications()).toHaveLength(boundary ? 1 : 0)
   if (boundary) { expect(await f.run()).toBe('not-due'); expect(f.notifications()).toHaveLength(1) }
   else expect(f.metadata().inboxDigestDueAt).toBe(Date.parse(frequency === 'daily' ? '2026-10-04T00:00:00Z' : '2026-10-05T00:00:00Z'))
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`durable ${frequency} completion accepts pinned scheduling time with fresh lease after rollover`, async () => {
+  const f = await fixture()
+  const scheduledAt = Date.parse('2026-10-04T23:59:30Z')
+  const retryAt = scheduledAt + 120_000
+  f.advance(retryAt - now)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] } })
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt, scheduledAt)).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ startedAt: scheduledAt, status: 'completed', id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}` }])
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt + 1, scheduledAt)).toBe('not-due')
+  expect(f.notifications()).toHaveLength(1)
 })
 
 test('transaction failures classify complete cancellation vectors and permanent SDK failures without leaking details', async () => {
