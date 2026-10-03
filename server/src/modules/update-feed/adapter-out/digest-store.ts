@@ -59,9 +59,13 @@ export class DynamoDbUpdateFeedDigestStore implements UpdateFeedDigestPersistenc
     const result = { ...parsed, revision: parsed.revision + 1 }
     const fence: PlanningCallerAuthorizationConditionCheck[] = planningRevision === undefined ? [] : [{ ConditionCheck: {
       TableName: this.tableName, Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: 'META' },
-      ConditionExpression: '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
-      ExpressionAttributeNames: { '#entryType': 'entryType', '#schemaVersion': 'schemaVersion', '#revision': 'revision' },
-      ExpressionAttributeValues: { ':entryType': 'planning-meta', ':schemaVersion': 1, ':revision': planningRevision },
+      ConditionExpression: planningRevision === 0
+        ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
+        : '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
+      ...(planningRevision === 0 ? {} : {
+        ExpressionAttributeNames: { '#entryType': 'entryType', '#schemaVersion': 'schemaVersion', '#revision': 'revision' },
+        ExpressionAttributeValues: { ':entryType': 'planning-meta', ':schemaVersion': 1, ':revision': planningRevision },
+      }),
     } }]
     try {
       await this.client.send(new TransactWriteCommand({ TransactItems: [{ Put: {
