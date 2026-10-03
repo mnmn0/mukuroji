@@ -35,6 +35,7 @@ export const updatesMessages = {
   "updates.digest.conflict": "設定が変更されたか、生成処理中です。再読み込みしてからお試しください。",
   "updates.digest.exhausted": "この期間のプレビュー試行回数の上限に達しました。",
   "updates.digest.error": "プレビューの取得または生成に失敗しました。もう一度お試しください。",
+  "updates.digest.refresh": "プレビューは生成されましたが、現在の設定を確認できませんでした。再読み込み後に新しいプレビューを生成してください。",
   "updates.digest.attempts": "試行 {count} 回目",
   "updates.digest.status.pending": "プレビュー生成中",
   "updates.digest.status.completed": "プレビュー生成済み",

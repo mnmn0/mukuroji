@@ -35,6 +35,6 @@ export function DigestPanelContainer(props: DigestPanelContainerProps) {
 function DigestContent({ token, enabled, canEdit, locale, guard }: DigestPanelContainerProps) {
   const controller = useDigestPreview(token, enabled, locale, guard)
   const error = controller.error
-  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
+  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
   return <DigestPanel {...controller} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={controller.reload} onDismiss={controller.dismiss} />
 }

@@ -35,6 +35,7 @@ export const updatesMessages = {
   "updates.digest.conflict": "Settings changed or a preview is running. Reload before trying again.",
   "updates.digest.exhausted": "The preview attempt limit was reached for this interval.",
   "updates.digest.error": "Unable to load or generate the preview. Try again.",
+  "updates.digest.refresh": "Preview generated, but current settings could not be verified. Reload before generating a fresh preview.",
   "updates.digest.attempts": "Attempt {count}",
   "updates.digest.status.pending": "Preview in progress",
   "updates.digest.status.completed": "Preview generated",
