@@ -6,16 +6,17 @@ import type { SavedUpdateFeeds, UpdateFeedDigestState } from '@mukuroji/contract
 /** Installs session and durable mock server state; reloads retain only server-owned read state.
  * @param page - Browser page whose API requests are intercepted.
  * @param guest - Whether the authenticated member is a read-only guest.
+ * @param expiresAt - Optional fixed session expiry for deliberately skewed device-clock tests.
  * @returns Controls for simulating revocation and refresh failure.
  */
-async function mockFeed(page: Page, guest = false) {
+async function mockFeed(page: Page, guest = false, expiresAt?: number) {
   const saved: SavedUpdateFeeds = { revision: 0, feeds: [] }
   const digest: UpdateFeedDigestState = { revision: 0, preferences: { enabled: false, frequency: 'daily', views: ['for-me'] }, history: [] }
   const state = { feed: structuredClone(updateFeedFixture), saved, digest, digestRequests: 0, digestConflict: false, denied: false, failed: false, forbidden: false, conflict: false }
-  await page.addInitScript(() => {
-    localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'feed-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
+  await page.addInitScript(({ expiresAt }) => {
+    localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'feed-test', expiresAt: expiresAt ?? Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
     localStorage.setItem('mukuroji.locale', 'en')
-  })
+  }, { expiresAt })
   await page.route('**/api/auth/me', (route) => route.fulfill({ json: { attributes: { 'custom:workspace_id': 'workspace-demo', email: 'demo@example.com', name: 'Demo' }, groups: guest ? [] : ['mukuroji-system-admins'], isSystemAdmin: !guest, username: 'demo@example.com', workspaceMemberStatus: 'active', workspaceRole: guest ? 'guest' : 'owner' } }))
   await page.route('**/api/teams/projects**', (route) => route.fulfill({ json: { teams: projectDirectoryFixtures } }))
   await page.route('**/api/projects/quick-access', (route) => route.fulfill({ json: { items: [], revision: 0 } }))
@@ -157,7 +158,7 @@ test('generation after another session changes preferences reports conflict inst
   await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
 })
 
-for (const interruption of ['deadline', 'blur', 'close']) test(`stalled metadata releases preview on ${interruption} without late resurrection`, async ({ page }) => {
+for (const interruption of ['deadline', 'blur', 'close', 'scope']) test(`stalled metadata releases preview on ${interruption} without late resurrection`, async ({ page }) => {
   const state = await mockFeed(page)
   state.digest.preferences.enabled = true
   await page.clock.install()
@@ -175,6 +176,7 @@ for (const interruption of ['deadline', 'blur', 'close']) test(`stalled metadata
   await expect.poll(() => waiting).toBe(true)
   if (interruption === 'deadline') await page.clock.fastForward(15_001)
   else if (interruption === 'blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+  else if (interruption === 'scope') await page.evaluate(() => { history.pushState(null, '', '/updates?view=recent'); dispatchEvent(new PopStateEvent('popstate')) })
   else await summary.click()
   release()
   if (interruption === 'close') await summary.click()
@@ -184,7 +186,7 @@ for (const interruption of ['deadline', 'blur', 'close']) test(`stalled metadata
   expect(state.digestRequests).toBe(1)
 })
 
-test('independently delayed feed and saved metadata do not close the opened disclosure', async ({ page }) => {
+test('delayed source metadata preserves the open disclosure, dirty draft and owned focus', async ({ page }) => {
   await mockFeed(page)
   let releaseFeed = () => {}
   let releaseSaved = () => {}
@@ -198,30 +200,96 @@ test('independently delayed feed and saved metadata do not close the opened disc
   await page.keyboard.press('Enter')
   const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
   await expect(panel).toBeVisible()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByLabel('Interval', { exact: true }).focus()
   releaseFeed()
   await expect(page.getByRole('link', { name: 'Customer onboarding', exact: true })).toBeVisible()
   await expect(panel).toBeVisible()
-  await expect(summary).toBeFocused()
+  await expect(panel.getByLabel('Interval', { exact: true })).toBeFocused()
   releaseSaved()
-  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
-  await expect(summary).toBeFocused()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
+  await expect(panel.getByLabel('Interval', { exact: true })).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeEnabled()
 })
 
-test('reload keeps current exhausted receipts blocked but permits completed replay', async ({ page }) => {
-  const state = await mockFeed(page)
-  await page.clock.install({ time: new Date('2026-10-03T12:00:00Z') })
+for (const frequency of ['daily', 'weekly'] as const) for (const deviceTime of ['2026-10-04T12:00:00Z', '2026-10-20T12:00:00Z']) test(`${frequency} exhaustion recovers after server rollover despite device time ${deviceTime}`, async ({ page }) => {
+  const state = await mockFeed(page, false, Date.parse('2100-01-01T00:00:00Z'))
+  await page.clock.install({ time: new Date(deviceTime) })
   state.digest.preferences.enabled = true
-  state.digest.history = [{ id: 'daily:2026-10-03', status: 'failed', attempts: 3, token: 'last', leaseUntil: 0, count: 0 }]
+  state.digest.preferences.frequency = frequency
+  state.digest.history = [{ id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`, status: 'failed', attempts: 3, token: 'last', leaseUntil: 0, count: 0 }]
+  let rolledOver = false
+  await page.route('**/api/planning/update-feed/digest/preview?*', async (route) => {
+    state.digestRequests++
+    if (!rolledOver) return route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestAttemptsExhausted' } })
+    const id = `${frequency}:2026-10-05`
+    state.digest = { ...state.digest, revision: state.digest.revision + 1, history: [...state.digest.history, { id, status: 'completed', attempts: 1, token: 'new', leaseUntil: 0, count: 0 }] }
+    await route.fulfill({ json: { id, replay: false, entries: [], transport: 'preview', truncated: false } })
+  })
   await page.goto('/updates')
   await page.locator('summary', { hasText: 'Digest preview' }).click()
   const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
   await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
-  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
-  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
-  state.digest.history[0]!.status = 'completed'
+  await expect(panel.getByRole('alert')).toContainText('attempt limit')
+  rolledOver = true
   await panel.getByRole('button', { name: 'Reload', exact: true }).click()
   await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
-  expect(state.digestRequests).toBe(0)
+  expect(state.digestRequests).toBe(1)
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
+  expect(state.digestRequests).toBe(2)
+})
+
+test('Planning refresh and view navigation preserve dirty settings and focus without retaining preview content', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  await page.route('**/api/planning/update-feed?*', async (route) => { reads++; await route.fallback() })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await expect(summary.getByText('Preview only · No notifications are sent')).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Digest preview', exact: true })).toHaveCount(0)
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  const interval = panel.getByLabel('Interval', { exact: true })
+  await interval.selectOption('weekly')
+  await interval.focus()
+  state.feed.revision++
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(interval).toHaveValue('weekly')
+  await expect(interval).toBeFocused()
+  await page.evaluate(() => { history.pushState(null, '', '/updates?view=recent'); dispatchEvent(new PopStateEvent('popstate')) })
+  await expect(page).toHaveURL(/view=recent/)
+  await expect(interval).toHaveValue('weekly')
+  await expect(interval).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeEnabled()
+})
+
+test('Feed scope invalidation does not swallow a concurrent settings save conflict', async ({ page }) => {
+  const state = await mockFeed(page)
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  await page.route('**/api/planning/update-feed/digest', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    waiting = true; await gate; await route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save preview settings' }).click()
+  await expect.poll(() => waiting).toBe(true)
+  state.feed.revision++
+  await page.evaluate(() => { history.pushState(null, '', '/updates?view=recent'); dispatchEvent(new PopStateEvent('popstate')) })
+  release()
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
 })
 
 test('save conflict and focus refresh preserve unsaved cadence until explicit reload', async ({ page }) => {
