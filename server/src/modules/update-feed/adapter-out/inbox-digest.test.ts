@@ -14,6 +14,7 @@ import { createInboxDigestScheduleHandler } from '../adapter-in/schedules/inbox-
 
 const now = Date.parse('2026-10-03T12:00:00Z')
 const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
+const candidate = { ...recipient, frequency: 'daily' as const }
 
 /** Isolated transaction-boundary model; never touches live storage or notifications. */
 async function fixture(count = 1) {
@@ -78,12 +79,12 @@ for (const corrupt of [true, false]) test(`actual read-state adapter corruption=
     return { Item: { ...command.input.Key, schemaVersion: 1, revision: 1, read: 'malformed' } }
   }) as DynamoDBDocumentClient['send']
   const readState = new DynamoDbUpdateFeedReadStateStore('planning', client)
-  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [recipient] }), dependencies: { authorize: async () => {
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [candidate] }), dependencies: { authorize: async () => {
     const context = await f.dependencies.authorize(recipient)
     if (!context) throw new Error('Fixture missing')
     return { ...context, readState }
   } } }, now)
-  expect(result.failed).toEqual(corrupt ? [] : [{ ...recipient, scheduledAt: now }])
+  expect(result.failed).toEqual(corrupt ? [] : [{ ...candidate, scheduledAt: now }])
   expect(result.terminal).toEqual(corrupt ? [{ recipient, reason: 'corrupt-state' }] : [])
   expect(result.delivered).toBe(0)
   expect(f.inbox.size).toBe(0)
@@ -96,7 +97,7 @@ for (const sameTeam of [true, false]) test(`Feed duplicate classification uses T
   const second = structuredClone(first)
   if (!sameTeam && second.target.type === 'project') second.target.teamId = 'other-team'
   f.snapshot.updateTargets.push(second)
-  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [recipient] }), dependencies: f.dependencies }, now)
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [candidate] }), dependencies: f.dependencies }, now)
   expect(result).toMatchObject({ processed: 1, delivered: sameTeam ? 0 : 1, failed: [], terminal: sameTeam ? [{ recipient, reason: 'corrupt-state' }] : [] })
   expect(f.inbox.size).toBe(sameTeam ? 0 : 1)
 })
@@ -241,7 +242,7 @@ test('scheduler is opt-in, bounds pages, deduplicates recipients and preserves f
     listCandidates: async (_cursor: string | undefined, limit: number) => {
       calls++
       expect(limit).toBe(100)
-      return { recipients: [recipient, recipient], cursor: 'next-page' }
+      return { recipients: [candidate, candidate], cursor: 'next-page' }
     },
   }
   const handler = createInboxDigestScheduleHandler(schedule, () => now)
@@ -249,11 +250,11 @@ test('scheduler is opt-in, bounds pages, deduplicates recipients and preserves f
   expect(calls).toBe(0)
   schedule.enabled = true
   f.fail(true)
-  expect(await runInboxDigestSchedule(schedule, now)).toEqual({ processed: 1, delivered: 0, failed: [{ ...recipient, scheduledAt: now }], terminal: [], cursor: 'next-page' })
+  expect(await runInboxDigestSchedule(schedule, now)).toEqual({ processed: 1, delivered: 0, failed: [{ ...candidate, scheduledAt: now }], terminal: [], cursor: 'next-page' })
   f.fail(false)
   expect(await handler()).toMatchObject({ processed: 1, delivered: 1, failed: [] })
   await expect(runInboxDigestSchedule(schedule, now, 'next-page')).rejects.toThrow('Invalid digest candidate page')
-  await expect(runInboxDigestSchedule({ ...schedule, listCandidates: async () => ({ recipients: Array.from({ length: 101 }, () => recipient) }) }, now)).rejects.toThrow('Invalid digest candidate page')
+  await expect(runInboxDigestSchedule({ ...schedule, listCandidates: async () => ({ recipients: Array.from({ length: 101 }, () => candidate) }) }, now)).rejects.toThrow('Invalid digest candidate page')
 })
 
 test('notification TTL is first-claim epoch seconds plus 365 days, stable for weekly retries', () => {
@@ -270,7 +271,7 @@ test('notification TTL is first-claim epoch seconds plus 365 days, stable for we
 test('scheduler separates terminal candidates from transient retries in a mixed bounded page', async () => {
   const f = await fixture()
   const owners = ['success', 'transient', 'exhausted', 'corrupt', 'mismatch', 'permanent', 'unknown', 'invalid-input'].map((workspaceId) => ({ workspaceId, memberKey: 'reader' }))
-  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [...owners, owners[0]!], cursor: 'next' }), dependencies: { authorize: async (owner) => {
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [...owners, owners[0]!].map((owner) => ({ ...owner, frequency: 'daily' as const })), cursor: 'next' }), dependencies: { authorize: async (owner) => {
     if (owner.workspaceId === 'transient') throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Unavailable')
     if (owner.workspaceId === 'exhausted') throw new PlanningError(409, 'UpdateFeedDigestAttemptsExhausted', 'Exhausted')
     if (owner.workspaceId === 'corrupt') throw new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Invalid state')
@@ -282,16 +283,32 @@ test('scheduler separates terminal candidates from transient retries in a mixed 
     if (owner.workspaceId === 'mismatch') return context
     return { ...context, recipient: owner, store: { ...context.store, get: () => context.store.get(recipient.workspaceId, recipient.memberKey), replace: (_workspaceId, memberKey, state) => context.store.replace(recipient.workspaceId, memberKey, state), complete: (_owner, state, revision, message) => context.store.complete(recipient, state, revision, message) } }
   } } }, now)
-  expect(result).toEqual({ processed: 8, delivered: 1, failed: [owners[1], owners[6]].map((owner) => ({ ...owner, scheduledAt: now })), terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }, { recipient: owners[5], reason: 'storage-permanent' }, { recipient: owners[7], reason: 'invalid-input' }], cursor: 'next' })
+  expect(result).toEqual({ processed: 8, delivered: 1, failed: [owners[1], owners[6]].map((owner) => ({ ...owner, frequency: 'daily', scheduledAt: now })), terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }, { recipient: owners[5], reason: 'storage-permanent' }, { recipient: owners[7], reason: 'invalid-input' }], cursor: 'next' })
 })
 
 for (const invalid of ['limit', 'signals']) test(`real Feed ${invalid} invariant is terminal without scheduler retry`, async () => {
   const f = await fixture(invalid === 'limit' ? 2001 : 1)
   f.reader.expandedSignals = true
   f.reader.readSignals = async () => [{ target: { type: 'project', teamId: 'other', projectId: 'not-authorized' }, projectMember: false, watching: false }]
-  const result = await runInboxDigestSchedule({ enabled: true, dependencies: f.dependencies, listCandidates: async () => ({ recipients: [recipient] }) }, now)
+  const result = await runInboxDigestSchedule({ enabled: true, dependencies: f.dependencies, listCandidates: async () => ({ recipients: [candidate] }) }, now)
   expect(result).toMatchObject({ delivered: 0, failed: [], terminal: [{ recipient, reason: invalid === 'limit' ? 'invalid-input' : 'corrupt-state' }] })
   expect(f.inbox.size).toBe(0)
+})
+
+for (const beforeClaim of [true, false]) test(`cadence change cancels a pinned retry beforeClaim=${beforeClaim} without backdating the new cadence`, async () => {
+  const f = await fixture()
+  const scheduledAt = Date.parse('2026-10-04T23:59:30Z')
+  f.fail(!beforeClaim)
+  const first = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [candidate] }), dependencies: beforeClaim ? { authorize: async () => { throw new Error('Unavailable') } } : f.dependencies }, scheduledAt)
+  expect(first.failed).toEqual([{ ...candidate, scheduledAt }])
+  f.fail(false)
+  await f.configure({ enabled: true, frequency: 'weekly', views: ['recent'] })
+  const retryAt = scheduledAt + 120_000
+  expect(await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: first.failed }), dependencies: f.dependencies }, retryAt)).toMatchObject({ delivered: 0, failed: [], terminal: [] })
+  expect(f.inbox.size).toBe(0)
+  expect((await f.metadata.get(recipient.workspaceId, recipient.memberKey)).history.some((row) => row.id === 'weekly:2026-09-28')).toBe(false)
+  expect(await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [{ ...recipient, frequency: 'weekly' }] }), dependencies: f.dependencies }, retryAt)).toMatchObject({ delivered: 1 })
+  expect((await f.metadata.get(recipient.workspaceId, recipient.memberKey)).history.at(-1)?.id).toBe('weekly:2026-10-05')
 })
 
 test('unreachable validated-query invariants stay terminal while unknown transport errors stay retryable', () => {
@@ -311,8 +328,8 @@ for (const frequency of ['daily', 'weekly'] as const) for (const boundary of ['b
   } }
   if (boundary === 'failed-claim') f.fail(true)
   if (boundary === 'lost-response') f.loseResponse(true)
-  const result = await runInboxDigestSchedule({ enabled: true, dependencies, listCandidates: async () => ({ recipients: [recipient] }) }, scheduledAt)
-  expect(result.failed).toEqual([{ ...recipient, scheduledAt }])
+  const result = await runInboxDigestSchedule({ enabled: true, dependencies, listCandidates: async () => ({ recipients: [{ ...recipient, frequency }] }) }, scheduledAt)
+  expect(result.failed).toEqual([{ ...recipient, frequency, scheduledAt }])
   f.fail(false); f.loseResponse(false)
   const retryAt = scheduledAt + 120_000
   f.beforeComplete(async () => {

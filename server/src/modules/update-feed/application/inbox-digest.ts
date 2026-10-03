@@ -13,8 +13,13 @@ export type InboxDigestRecipient = {
 }
 
 /** Trusted failed work retains its logical scheduler time across redelivery. */
-export type InboxDigestRetry = InboxDigestRecipient & {
+export type InboxDigestRetry = InboxDigestCandidate & {
   /** Original server scheduling time, never a client event timestamp. */ scheduledAt: number
+}
+
+/** Trusted discovery binds the cadence before authorization or claim can fail. */
+export type InboxDigestCandidate = InboxDigestRecipient & {
+  /** Current cadence observed by the strongly checked candidate source. */ frequency: 'daily' | 'weekly'
 }
 
 /** Content-free Inbox message; opening the Feed performs current authorization again. */
@@ -65,7 +70,7 @@ export type InboxDigestDependencies = {
 }
 
 /** Safe per-recipient result, with no report content or identity in logs. */
-export type InboxDigestOutcome = 'disabled' | 'denied' | 'not-due' | 'delivered' | 'empty'
+export type InboxDigestOutcome = 'disabled' | 'denied' | 'not-due' | 'delivered' | 'empty' | 'cancelled'
 
 /** Calculates a UTC day or Monday week key, shared by due selection and generation.
  * @param state - Current validated delivery settings.
@@ -87,15 +92,18 @@ export function inboxDigestInterval(state: UpdateFeedDigestState, now: number): 
  * @param recipient - Server-resolved delivery owner.
  * @param now - Trusted invocation clock.
  * @param scheduledAt - Original trusted scheduling time for this logical attempt.
+ * @param frequency - Cadence pinned at discovery; changed consent cancels this attempt.
  * @returns Safe outcome; transient failures propagate for scheduler retry.
  */
-export async function deliverInboxDigest(dependencies: InboxDigestDependencies, recipient: InboxDigestRecipient, now: number, scheduledAt = now): Promise<InboxDigestOutcome> {
+export async function deliverInboxDigest(dependencies: InboxDigestDependencies, recipient: InboxDigestRecipient, now: number, scheduledAt = now, frequency?: InboxDigestCandidate['frequency']): Promise<InboxDigestOutcome> {
   if (!Number.isSafeInteger(now) || now < 0 || now > 8_640_000_000_000_000) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest clock')
   if (!Number.isSafeInteger(scheduledAt) || scheduledAt < 0 || scheduledAt > now) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest scheduling time.')
   const context = await dependencies.authorize(recipient)
   if (!context) return 'denied'
   if (context.reader.memberKey !== recipient.memberKey || context.recipient.memberKey !== recipient.memberKey || context.recipient.workspaceId !== recipient.workspaceId) throw new PlanningError(502, 'UpdateFeedDigestRecipientMismatch', 'Digest recipient mismatch')
   let state = await context.store.get(recipient.workspaceId, recipient.memberKey)
+  // Historical work without an original cadence cannot safely reconstruct its interval.
+  if ((frequency !== undefined && frequency !== state.preferences.frequency) || (frequency === undefined && scheduledAt !== now)) return 'cancelled'
   let id = inboxDigestInterval(state, scheduledAt)
   if (!state.preferences.enabled) return 'disabled'
   // An old interval may still own a live claim across midnight/Monday. Reconcile
@@ -140,7 +148,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
 /** One bounded candidate page from a due index or explicitly configured recipient set. */
 export type InboxDigestCandidatePage = {
   /** At most the requested number of server-resolved recipients. */
-  recipients: (InboxDigestRecipient | InboxDigestRetry)[]
+  recipients: (InboxDigestCandidate | InboxDigestRetry)[]
   /** Opaque continuation; present when more candidates remain. */
   cursor?: string
 }
@@ -205,11 +213,11 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
     seen.add(key)
     result.processed++
     try {
-      if (await deliverInboxDigest(schedule.dependencies, recipient, now, scheduledAt) === 'delivered') result.delivered++
+      if (await deliverInboxDigest(schedule.dependencies, recipient, now, scheduledAt, candidate.frequency) === 'delivered') result.delivered++
     } catch (error) {
       const reason = inboxDigestTerminalReason(error)
       if (reason) result.terminal.push({ recipient, reason })
-      else result.failed.push({ ...recipient, scheduledAt })
+      else result.failed.push({ ...recipient, frequency: candidate.frequency, scheduledAt })
     }
   }
   result.cursor = page.cursor
