@@ -39,12 +39,13 @@ export function DigestPanelContainer(props: DigestPanelContainerProps) {
 function DigestContent({ token, enabled, canEdit, locale, guard, restoreFocus, contentKey, open }: DigestPanelContainerProps & { /** Disclosure state, separate from controller lifetime. */ open: boolean; /** Stable fallback for removed controls. */ restoreFocus(): void }) {
   const controller = useDigestPreview(token, enabled && open, locale, guard)
   const saved = useSavedUpdateFeeds(token, enabled && open, guard)
-  const { dismiss } = controller
+  const { dismiss, invalidateContent } = controller
   // Cancel owned browser requests/timers and clear ephemeral content before paint;
   // unrelated Feed scope changes must preserve the personal settings form and focus.
-  useLayoutEffect(() => { dismiss() }, [contentKey, open, dismiss])
+  useLayoutEffect(() => { invalidateContent() }, [contentKey, invalidateContent])
+  useLayoutEffect(() => { dismiss() }, [open, dismiss])
   const error = controller.error
   if (!open) return null
-  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
+  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : controller.interrupted ? 'interrupted' : undefined
   return <DigestPanel {...controller} savedFeeds={saved.data} savedStatus={saved.isLoading || saved.isValidating ? 'loading' : saved.error ? 'error' : saved.data ? 'ready' : 'loading'} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={() => { controller.reload(); void saved.mutate().catch(() => undefined) }} onDismiss={controller.dismiss} />
 }

@@ -608,10 +608,10 @@ test('preview completion does not reclaim focus moved outside its form', async (
   await expect(summary).toBeFocused()
 })
 
-for (const source of ['feed', 'saved']) test(`${source} outage leaves healthy standard digest controls available`, async ({ page }) => {
+for (const source of ['feed', 'saved']) for (const failure of ['503', 'network']) test(`${source} ${failure} outage leaves healthy standard digest controls available`, async ({ page }) => {
   const state = await mockFeed(page)
   state.digest.preferences.enabled = true
-  await page.route(source === 'feed' ? '**/api/planning/update-feed?*' : '**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 503, json: { code: 'Unavailable' } }))
+  await page.route(source === 'feed' ? '**/api/planning/update-feed?*' : '**/api/planning/update-feed/saved', (route) => failure === 'network' ? route.abort('failed') : route.fulfill({ status: 503, json: { code: 'Unavailable' } }))
   await page.goto('/updates')
   await page.locator('summary', { hasText: 'Digest preview' }).click()
   const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
@@ -641,6 +641,34 @@ test('generation after another session changes preferences reports conflict inst
   await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
 })
 
+for (const source of ['feed', 'saved']) test(`first ${source} hydration during the initial POST keeps its truthful result`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  let releaseSource = () => {}
+  let releasePost = () => {}
+  const sourceGate = new Promise<void>((resolve) => { releaseSource = resolve })
+  const postGate = new Promise<void>((resolve) => { releasePost = resolve })
+  let posted = false
+  let hydrated = false
+  await page.route(source === 'feed' ? '**/api/planning/update-feed?*' : '**/api/planning/update-feed/saved', async (route) => { await sourceGate; await route.fallback(); hydrated = true })
+  await page.route('**/api/planning/update-feed/digest/preview?*', async (route) => { posted = true; await postGate; await route.fallback() })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect.poll(() => posted).toBe(true)
+  expect(hydrated).toBe(false)
+  releaseSource()
+  await expect.poll(() => hydrated).toBe(true)
+  if (source === 'feed') await expect(page.getByTestId('update-feed-row').first()).toBeVisible()
+  else await expect(page.getByRole('button', { name: 'New feed', exact: true })).toBeEnabled()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  releasePost()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
+  expect(state.digestRequests).toBe(1)
+  expect(state.digest.history[0]?.attempts).toBe(1)
+})
+
 for (const interruption of ['deadline', 'blur', 'close', 'scope']) test(`stalled metadata releases preview on ${interruption} without late resurrection`, async ({ page }) => {
   const state = await mockFeed(page)
   state.digest.preferences.enabled = true
@@ -659,10 +687,20 @@ for (const interruption of ['deadline', 'blur', 'close', 'scope']) test(`stalled
   await expect.poll(() => waiting).toBe(true)
   if (interruption === 'deadline') await page.clock.fastForward(15_001)
   else if (interruption === 'blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')))
-  else if (interruption === 'scope') await page.evaluate(() => { history.pushState(null, '', '/updates?view=recent'); dispatchEvent(new PopStateEvent('popstate')) })
+  else if (interruption === 'scope') {
+    await page.evaluate(() => { history.pushState(null, '', '/updates?view=recent'); dispatchEvent(new PopStateEvent('popstate')) })
+    await expect(page.getByLabel('Feed', { exact: true })).toHaveValue('recent')
+    await expect(page.getByRole('region', { name: 'Digest preview', exact: true }).getByRole('alert')).toContainText('The attempt may have completed')
+  }
   else await summary.click()
   release()
   if (interruption === 'close') await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  if (interruption === 'scope') {
+    await expect(panel.getByRole('alert')).toContainText('The attempt may have completed')
+    await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+    await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  }
   await expect(page.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
   await expect(page.getByLabel('Current preview', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('region', { name: 'Digest preview', exact: true }).getByRole('alert')).toHaveCount(0)
@@ -1074,9 +1112,11 @@ for (const mode of ['visible', 'pending', 'draft']) test(`read-state changes inv
   state.digest.preferences.enabled = true
   let release = () => {}
   const gate = new Promise<void>((resolve) => { release = resolve })
-  if (mode === 'pending') await page.route('**/api/planning/update-feed/digest/preview', async (route) => {
+  let waiting = false
+  if (mode === 'pending') await page.route('**/api/planning/update-feed/digest/preview?*', async (route) => {
     const entries = structuredClone(state.feed.entries.filter((entry) => entry.latestUpdate && !entry.readState?.read))
     state.digestRequests++
+    waiting = true
     await gate
     await route.fulfill({ json: { id: 'daily:2026-10-03', replay: false, entries, truncated: false, transport: 'preview' } })
   })
@@ -1087,6 +1127,7 @@ for (const mode of ['visible', 'pending', 'draft']) test(`read-state changes inv
   else {
     await panel.getByRole('button', { name: 'Generate preview' }).click()
     await expect.poll(() => state.digestRequests).toBe(1)
+    if (mode === 'pending') await expect.poll(() => waiting).toBe(true)
     if (mode === 'visible') await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
   }
   const revision = state.feed.revision
@@ -1103,6 +1144,10 @@ for (const mode of ['visible', 'pending', 'draft']) test(`read-state changes inv
   await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue(mode === 'draft' ? 'weekly' : 'daily')
   expect(state.feed.revision).toBe(revision)
   expect(state.digestRequests).toBe(mode === 'draft' ? 0 : 1)
+  if (mode === 'pending') {
+    await expect(panel.getByRole('alert')).toContainText('The attempt may have completed')
+    await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  }
 })
 
 test('guests have no mutation controls and permission denial offers no reload loop', async ({ page }) => {
