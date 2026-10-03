@@ -125,6 +125,28 @@ test('explicit read/unread survives a fresh page and refresh removes revoked con
   await expect(page.getByTestId('update-feed-row')).toHaveCount(0)
 })
 
+test('unavailable saved conditions show only counts and survive edits to other dimensions', async ({ page }) => {
+  const state = await mockFeed(page)
+  const filters = { teamIds: ['hidden-team-a', 'hidden-team-b'], projects: [{ teamId: 'hidden-team-a', projectId: 'hidden-project' }], portfolioIds: ['hidden-portfolio'], initiativeIds: ['hidden-initiative'], health: [], updateStates: [] }
+  state.saved = { revision: 1, feeds: [{ id: 'personal', name: 'My view', view: 'recent', filters }] }
+  await page.goto('/updates?feedId=personal')
+  await page.getByRole('button', { name: 'Edit feed', exact: true }).click()
+  await expect(page.getByRole('listbox', { name: 'Teams', exact: true })).toHaveAccessibleDescription('Unavailable saved conditions: 2. Changing this field removes them; editing other fields keeps them.')
+  for (const name of ['Projects', 'Portfolios', 'Initiative targets']) await expect(page.getByRole('listbox', { name, exact: true })).toHaveAccessibleDescription('Unavailable saved conditions: 1. Changing this field removes them; editing other fields keeps them.')
+  const html = await page.content()
+  for (const hidden of ['hidden-team-a', 'hidden-team-b', 'hidden-project', 'hidden-portfolio', 'hidden-initiative']) expect(html).not.toContain(hidden)
+  await page.getByRole('listbox', { name: 'Reported health', exact: true }).selectOption('at-risk')
+  await page.getByRole('button', { name: 'Save feed', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Edit feed', exact: true })).toBeVisible()
+  expect(state.saved.feeds[0]?.filters).toEqual({ ...filters, health: ['at-risk'] })
+  await page.getByRole('button', { name: 'Edit feed', exact: true }).click()
+  await page.getByRole('listbox', { name: 'Teams', exact: true }).selectOption('core-team')
+  await expect(page.getByRole('listbox', { name: 'Teams', exact: true })).not.toHaveAttribute('aria-describedby')
+  await page.getByRole('button', { name: 'Save feed', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Edit feed', exact: true })).toBeVisible()
+  expect(state.saved.feeds[0]?.filters).toEqual({ ...filters, teamIds: ['core-team'], health: ['at-risk'] })
+})
+
 test('narrow screen wraps reports and failed refresh removes stale rows', async ({ page }) => {
   const state = await mockFeed(page)
   await page.setViewportSize({ width: 390, height: 844 })

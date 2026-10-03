@@ -98,12 +98,12 @@ export function SavedUpdateFeedsPanel({ collection, selectedId, options, options
         </div>
         <p className="text-app-meta text-slate-600">{t('updates.saved.rules')}</p>
         {options ? <div className="grid gap-4 sm:grid-cols-2">
-          <Dimension label={t('updates.saved.teams')} values={editor.feed.filters.teamIds} options={options.teams.map((item) => ({ value: item.id, label: item.name }))} onChange={(teamIds) => changeFilters({ teamIds })} />
-          <Dimension label={t('updates.saved.projects')} values={editor.feed.filters.projects.map((item) => JSON.stringify([item.teamId, item.projectId]))} options={options.projects.map((item) => ({ value: JSON.stringify([item.teamId, item.projectId]), label: `${item.name} (${options.teams.find((team) => team.id === item.teamId)?.name ?? item.teamId})` }))} onChange={(values) => changeFilters({ projects: options.projects.filter((item) => values.includes(JSON.stringify([item.teamId, item.projectId]))).map(({ teamId, projectId }) => ({ teamId, projectId })) })} />
-          <Dimension label={t('updates.saved.portfolios')} values={editor.feed.filters.portfolioIds} options={options.portfolios.map((item) => ({ value: item.id, label: item.name }))} onChange={(portfolioIds) => changeFilters({ portfolioIds })} />
-          <Dimension label={t('updates.saved.initiatives')} values={editor.feed.filters.initiativeIds} options={options.initiatives.map((item) => ({ value: item.id, label: item.name }))} onChange={(initiativeIds) => changeFilters({ initiativeIds })} />
-          <Dimension label={t('updates.saved.health')} values={editor.feed.filters.health} options={healthValues.map((value) => ({ value, label: t(`planning.health.${value}`) }))} onChange={(values) => changeFilters({ health: healthValues.filter((value) => values.includes(value)) })} />
-          <Dimension label={t('updates.saved.status')} values={editor.feed.filters.updateStates} options={stateValues.map((value) => ({ value, label: t(`planning.updateState.${value}`) }))} onChange={(values) => changeFilters({ updateStates: stateValues.filter((value) => values.includes(value)) })} />
+          <Dimension t={t} label={t('updates.saved.teams')} values={editor.feed.filters.teamIds} options={options.teams.map((item) => ({ value: item.id, label: item.name }))} onChange={(teamIds) => changeFilters({ teamIds })} />
+          <Dimension t={t} label={t('updates.saved.projects')} values={editor.feed.filters.projects.map((item) => JSON.stringify([item.teamId, item.projectId]))} options={options.projects.map((item) => ({ value: JSON.stringify([item.teamId, item.projectId]), label: `${item.name} (${options.teams.find((team) => team.id === item.teamId)?.name ?? item.teamId})` }))} onChange={(values) => changeFilters({ projects: options.projects.filter((item) => values.includes(JSON.stringify([item.teamId, item.projectId]))).map(({ teamId, projectId }) => ({ teamId, projectId })) })} />
+          <Dimension t={t} label={t('updates.saved.portfolios')} values={editor.feed.filters.portfolioIds} options={options.portfolios.map((item) => ({ value: item.id, label: item.name }))} onChange={(portfolioIds) => changeFilters({ portfolioIds })} />
+          <Dimension t={t} label={t('updates.saved.initiatives')} values={editor.feed.filters.initiativeIds} options={options.initiatives.map((item) => ({ value: item.id, label: item.name }))} onChange={(initiativeIds) => changeFilters({ initiativeIds })} />
+          <Dimension t={t} label={t('updates.saved.health')} values={editor.feed.filters.health} options={healthValues.map((value) => ({ value, label: t(`planning.health.${value}`) }))} onChange={(values) => changeFilters({ health: healthValues.filter((value) => values.includes(value)) })} />
+          <Dimension t={t} label={t('updates.saved.status')} values={editor.feed.filters.updateStates} options={stateValues.map((value) => ({ value, label: t(`planning.updateState.${value}`) }))} onChange={(values) => changeFilters({ updateStates: stateValues.filter((value) => values.includes(value)) })} />
         </div> : <p role={optionsFailed ? 'alert' : 'status'}>{t(optionsFailed ? 'updates.saved.optionsError' : 'updates.loading')}</p>}
         <p className="text-app-meta text-slate-500">{t('updates.saved.visibility')}</p>
       </>}
@@ -115,11 +115,15 @@ export function SavedUpdateFeedsPanel({ collection, selectedId, options, options
 }
 
 /** Accessible native multi-selection for one independent filter dimension. */
-function Dimension({ label, values, options, onChange }: {
+function Dimension({ t, label, values, options, onChange }: {
+  /** Localized description for retained unavailable conditions. */ t: ReturnType<typeof createTranslator>
   /** Localized dimension label. */ label: string
   /** Selected logical values. */ values: string[]
   /** Current authorized choices. */ options: { /** Logical value. */ value: string; /** Current label. */ label: string }[]
   /** Explicit user selection. */ onChange: (values: string[]) => void
 }) {
-  return <label className="text-app-meta font-semibold">{label}<select multiple size={3} className={`${control} mt-1`} value={values} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+  const descriptionId = useId()
+  const available = new Set(options.map((option) => option.value))
+  const unavailableCount = values.filter((value) => !available.has(value)).length
+  return <div><label className="text-app-meta font-semibold">{label}<select multiple size={3} aria-describedby={unavailableCount ? descriptionId : undefined} className={`${control} mt-1`} value={values} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>{unavailableCount ? <p id={descriptionId} className="mt-1 text-app-meta text-slate-600">{t('updates.saved.unavailableConditions').replace('{count}', String(unavailableCount))}</p> : null}</div>
 }

@@ -20,6 +20,7 @@ export const updatesMessages = {
   "updates.saved.visibility": "Choices include only currently accessible targets. Unavailable saved conditions are retained until you edit that field. Portfolios include their readable Initiative descendants and Projects scoped under them.",
   "updates.saved.loadError": "Saved feeds could not be loaded.",
   "updates.saved.optionsError": "Current filter choices could not be verified. Cancel and reopen to retry.",
+  "updates.saved.unavailableConditions": "Unavailable saved conditions: {count}. Changing this field removes them; editing other fields keeps them.",
   "updates.saved.unavailable": "This saved feed is no longer available. Select a standard feed.",
   "updates.saved.limit": "Choose no more than 20 alternatives per field.",
   "updates.saved.conflict": "Saved feeds changed in another session or your access changed. Your draft is retained. Cancel and reopen the latest definition before saving again.",

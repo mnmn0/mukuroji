@@ -34,3 +34,10 @@ export const Conflict: Story = { ...Create, args: { error: new UpdateFeedApiErro
   await userEvent.click(canvas.getByRole('button', { name: 'New feed' }))
   await expect(canvas.getByRole('button', { name: 'Save feed' })).toBeDisabled()
 } }
+/** Retained unavailable conditions expose counts without rendering inaccessible identities. */
+export const UnavailableConditions: Story = { args: { selectedId: 'personal', collection: { revision: 1, feeds: [{ id: 'personal', name: 'My view', view: 'recent', filters: { teamIds: ['unavailable-team-a', 'unavailable-team-b'], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] } }, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getByRole('button', { name: 'Edit feed' }))
+  await expect(canvas.getByRole('listbox', { name: 'Teams' })).toHaveAccessibleDescription('Unavailable saved conditions: 2. Changing this field removes them; editing other fields keeps them.')
+  await expect(canvasElement.innerHTML).not.toContain('unavailable-team-a')
+} }

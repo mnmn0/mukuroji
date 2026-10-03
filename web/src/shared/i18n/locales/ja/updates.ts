@@ -20,6 +20,7 @@ export const updatesMessages = {
   "updates.saved.visibility": "現在閲覧できる対象だけを選択肢に表示します。閲覧できなくなった保存条件は、その項目を編集するまで保持します。ポートフォリオには閲覧可能な配下のイニシアチブとプロジェクトを含みます。",
   "updates.saved.loadError": "保存したフィードを読み込めませんでした。",
   "updates.saved.optionsError": "現在の選択肢を確認できませんでした。キャンセルして開き直してください。",
+  "updates.saved.unavailableConditions": "現在選べない保存条件: {count}件。この項目を変更すると削除され、他の項目だけの編集では保持されます。",
   "updates.saved.unavailable": "この保存フィードは利用できません。標準フィードを選択してください。",
   "updates.saved.limit": "各項目の選択は20件以内にしてください。",
   "updates.saved.conflict": "別のセッションでフィードが変更されたか、権限が変わりました。入力内容は保持しています。キャンセルして最新の条件を開き直してから保存してください。",
