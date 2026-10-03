@@ -473,6 +473,8 @@ test('Feed scope invalidation does not swallow a concurrent settings save confli
 
 test('save conflict and focus refresh preserve unsaved cadence until explicit reload', async ({ page }) => {
   const state = await mockFeed(page)
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'PUT') puts++; await route.fallback() })
   state.digest.preferences.enabled = true
   await page.goto('/updates')
   const summary = page.locator('summary', { hasText: 'Digest preview' })
@@ -483,6 +485,14 @@ test('save conflict and focus refresh preserve unsaved cadence until explicit re
   state.digest.revision += 1
   await panel.getByRole('button', { name: 'Save preview settings' }).click()
   await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  const save = panel.getByRole('button', { name: 'Save preview settings' })
+  await expect(save).toBeDisabled()
+  await save.evaluate((button) => button.click())
+  await panel.getByLabel('Recent', { exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await panel.locator('form').evaluate((form) => form.requestSubmit())
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  expect(puts).toBe(1)
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
   await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
   await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
@@ -490,6 +500,11 @@ test('save conflict and focus refresh preserve unsaved cadence until explicit re
   await page.keyboard.press('Enter')
   await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
   await expect(summary).toBeFocused()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect.poll(() => puts).toBe(2)
+  await expect(save).toBeDisabled()
 })
 
 test('preview expiry restores only focus inside disappearing content', async ({ page }) => {
