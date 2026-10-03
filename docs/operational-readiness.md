@@ -628,6 +628,27 @@ Trust root の candidate OID は base と一致しない限り失敗します。
    rules、protected environment、after JSON を保存してから merge 停止を解除する。失敗時は
    旧 trust root へ戻し、context を外した状態で通常変更を merge しない。
 
+Publisher checkout の regression は `bun run api:contract:test` で検証します。Test は workflow
+に記載した non-cone sparse-checkout pattern で実際の Git checkout を作り、比較 step の shell
+を実行します。Trusted source の明示的な value import は `openapi.ts` → `work-items.ts` →
+`work-item-configuration.ts` です。最後の import は現在 `typeof` だけで使われ Bun 1.3.10 では
+除去されますが、trusted checkout にはこの source import chain 全体を含めます。
+Candidate は canonical JSON wrapper と snapshot の data
+だけで評価し、candidate source は実行しません。Finalizer は network 境界だけを mock し、
+比較失敗・skip、checkout/setup 失敗、古い base、再検証失敗、publish 失敗を検証します。
+これは merge 前の workflow simulation であり、専用 App による live check の成功証拠ではありません。
+
+Snapshot が既に存在しても、`contracts/src/openapi.ts` が生成コードのままなら bootstrap は
+未完了です。Comparator は exact canonical JSON wrapper を要求するため、checkout 修復後も
+その候補を拒否します。Trust-root rotation には source/snapshot の変更を混ぜず、その後の
+別 PR で既存 snapshot の bytes を保った wrapper 移行を検証してください。移行前の trusted
+生成コードと snapshot の一致、移行後の runtime document の一致を確認します。新しい main
+を base にした wrapper PR を probe として使い、App check の成功と head SHA を確認します。
+現行 main の workflow は workflow 自身の変更を拒否するため、この修復 PR 自身を通常の
+Public API check で green にすることはできません。Required context が既に有効なら、上記の
+管理者 rotation 手順と bootstrap 完了の判断が blocker です。Check の成功を偽装したり、
+candidate workflow を privileged 実行したりして回避しないでください。
+
 Shared APIには`live` Aliasによるversion単位のatomic cutoverがありますが、weighted routing/
 CodeDeployによるcode canaryはありません。AppConfig の
 global `enabled` / `disabled` control は code/schema compatibility の段階 rollout ではないため、
