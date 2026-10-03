@@ -12,9 +12,12 @@ const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
 function fixture() {
   const rows = new Map<string, Record<string, unknown>>()
   let loseResponse = false
+  let sdkFailure: ((command: unknown) => unknown) | undefined
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
   // The SDK's overloaded signature is the only assertion in this isolated model.
   client.send = (async (command: unknown) => {
+    const injected = sdkFailure?.(command)
+    if (injected !== undefined) throw injected
     if (command instanceof GetCommand) {
       expect(command.input.ConsistentRead).toBe(true)
       return { Item: structuredClone(rows.get(String(command.input.Key?.recordKey))) }
@@ -46,8 +49,45 @@ function fixture() {
     rows, store: new DynamoDbInboxDigestCheckpoints('planning', client),
     /** Loses the next transaction response after atomic commit. */
     loseResponse() { loseResponse = true },
+    /** Injects a read or write transport failure after fixture initialization. */
+    failCommand(failure: (command: unknown) => unknown) { sdkFailure = failure },
   }
 }
+
+for (const boundary of ['claim-read', 'quarantine-read', 'claim-write', 'save', 'save-failure']) for (const [name, status, code] of [
+  ['TimeoutError', 503, 'UpdateFeedDigestRetryable'],
+  ['AccessDeniedException', 502, 'UpdateFeedDigestStoragePermanent'],
+  ['UnclassifiedNetworkFailure', 502, 'UpdateFeedDigestStorageFailure'],
+] as const) test(`checkpoint ${boundary} classifies ${name}`, async () => {
+  const f = fixture()
+  const owned = (await f.store.claim(0, start))!
+  const before = structuredClone([...f.rows])
+  f.failCommand((command) => (boundary.endsWith('read') ? command instanceof GetCommand : command instanceof TransactWriteCommand) ? Object.assign(new Error('Private SDK detail'), { name }) : undefined)
+  const operation = boundary === 'quarantine-read' ? f.store.isQuarantined(recipient, start) : boundary.startsWith('claim') ? f.store.claim(1, start) : f.store.save(owned, start, true, boundary === 'save-failure' ? recipient : undefined)
+  await expect(operation).rejects.toMatchObject({ status, code })
+  expect([...f.rows]).toEqual(before)
+})
+
+for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestStorageFailure', 'UpdateFeedDigestCorruptState']) test(`candidate invocation ${code} never advances cursor or acknowledges pending work`, async () => {
+  const f = fixture()
+  const owned = (await f.store.claim(0, start))!
+  await f.store.save({ ...owned, cursor: 'unchanged', pending: [{ recipient, attempts: 1 }] }, start, true)
+  let deliveries = 0
+  await expect(runInboxDigestWorker({ checkpoints: f.store, now: () => start, listDue: async () => { throw new PlanningError(code === 'UpdateFeedDigestRetryable' ? 503 : 502, code, 'Unavailable') }, delivery: { authorize: async () => { deliveries++; return undefined } } }, 0)).rejects.toMatchObject({ code })
+  expect(deliveries).toBe(0)
+  expect(f.rows.get('SHARD#0')?.cursor).toBe('unchanged')
+  expect(f.rows.get('SHARD#0')?.pending).toEqual([{ recipient, attempts: 1 }])
+})
+
+test('quarantine parsing failures remain distinct from invalid caller checkpoint input', async () => {
+  const f = fixture()
+  const owned = (await f.store.claim(0, start))!
+  await f.store.save(owned, start, true, recipient)
+  const failure = [...f.rows.values()].find((row) => row.entryType === 'inbox-digest-failure')!
+  failure.schemaVersion = 99
+  await expect(f.store.isQuarantined(recipient, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
+  await expect(f.store.save({ ...owned, pending: [{ recipient, attempts: 99 }] }, start, false)).rejects.toMatchObject({ code: 'UpdateFeedDigestInvalid' })
+})
 
 test('exclusive durable claims survive restart and fence expired workers', async () => {
   const f = fixture()
@@ -68,13 +108,13 @@ test('lost page acknowledgement retains pending work and terminal failures commi
   const f = fixture()
   const owned = (await f.store.claim(1, start))!
   f.loseResponse()
-  await expect(f.store.save({ ...owned, pending: [{ recipient, attempts: 2 }], cursor: 'continued' }, start, false)).rejects.toThrow('Lost acknowledgement')
+  await expect(f.store.save({ ...owned, pending: [{ recipient, attempts: 2 }], cursor: 'continued' }, start, false)).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
   const resumed = (await f.store.claim(1, start + 90_000))!
   expect(resumed.pending).toEqual([{ recipient, attempts: 2 }])
-  await expect(f.store.save({ ...owned, pending: [] }, start, false, recipient)).rejects.toThrow('Conditional failure')
+  await expect(f.store.save({ ...owned, pending: [] }, start, false, recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
   expect(await f.store.isQuarantined(recipient, start)).toBe(false)
   f.loseResponse()
-  await expect(f.store.save({ ...resumed, pending: [] }, start + 90_001, true, recipient)).rejects.toThrow('Lost acknowledgement')
+  await expect(f.store.save({ ...resumed, pending: [] }, start + 90_001, true, recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
   expect(await f.store.isQuarantined(recipient, start)).toBe(true)
   expect(await f.store.isQuarantined(recipient, start + 86_400_000)).toBe(false)
   expect((await f.store.claim(1, start + 90_002))?.pending).toEqual([])
@@ -127,7 +167,7 @@ for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure
   expect(calls).toBe(3)
 })
 
-for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorruptState']) test(`worker quarantines ${code} on the first attempt instead of retrying`, async () => {
+for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorruptState', 'UpdateFeedDigestInvalid']) test(`worker quarantines ${code} on the first attempt instead of retrying`, async () => {
   const f = fixture()
   let clock = start
   let calls = 0
@@ -165,6 +205,6 @@ test('unknown persisted schema fails closed instead of resetting the queue', asy
   const owned = (await f.store.claim(4, start))!
   await f.store.save(owned, start, true)
   f.rows.get('SHARD#4')!.schemaVersion = 2
-  await expect(f.store.claim(4, start)).rejects.toThrow('Invalid')
+  await expect(f.store.claim(4, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
   await expect(f.store.claim(16, start)).rejects.toThrow('Invalid')
 })

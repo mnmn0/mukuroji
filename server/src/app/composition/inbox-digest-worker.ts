@@ -3,6 +3,7 @@ import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infras
 import { DynamoDbInboxDigestCheckpoints, DynamoDbInboxDigestStore, runInboxDigestWorker } from '../../modules/update-feed'
 import { createProductionAppDependencies } from './api-dependencies'
 import { createProductionTenantAvailability } from './tenant-administration'
+import { PlanningError } from '../../modules/planning'
 
 /** Creates a disabled-by-default worker using the same member and Feed authorization as reads.
  * @returns A bounded handler; disabled invocations perform no AWS calls.
@@ -47,11 +48,18 @@ export function createProductionInboxDigestWorkerHandler() {
   })
 }
 
-/** Validates a persisted internal GSI cursor without accepting arbitrary physical keys. */
-function decodeCursor(cursor: string | undefined, shard: number): Record<string, unknown> | undefined {
+/** Validates a persisted internal GSI cursor without accepting arbitrary physical keys.
+ * @param cursor - Persisted worker continuation, never a user request.
+ * @param shard - Currently owned shard.
+ * @returns Reconstructed SDK key or a typed invocation failure.
+ */
+export function decodeCursor(cursor: string | undefined, shard: number): Record<string, unknown> | undefined {
   if (cursor === undefined) return undefined
-  if (cursor.length > 4096) throw new Error('Invalid Inbox digest cursor')
-  const value: unknown = JSON.parse(cursor)
-  if (typeof value !== 'object' || value === null || Array.isArray(value) || !('workspaceId' in value) || typeof value.workspaceId !== 'string' || !('recordKey' in value) || typeof value.recordKey !== 'string' || !value.recordKey.startsWith('UPDATE_FEED_INBOX_DIGEST#') || !('inboxDigestShard' in value) || value.inboxDigestShard !== `inbox-digest#${shard}` || !('inboxDigestDueAt' in value) || typeof value.inboxDigestDueAt !== 'number' || !Number.isSafeInteger(value.inboxDigestDueAt)) throw new Error('Invalid Inbox digest cursor')
+  /** Keeps persisted physical coordinates out of invocation errors. */
+  const corrupt = () => new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Inbox digest continuation is unavailable.')
+  if (cursor.length > 4096) throw corrupt()
+  let value: unknown
+  try { value = JSON.parse(cursor) } catch { throw corrupt() }
+  if (typeof value !== 'object' || value === null || Array.isArray(value) || !('workspaceId' in value) || typeof value.workspaceId !== 'string' || !value.workspaceId.trim() || !('recordKey' in value) || typeof value.recordKey !== 'string' || !value.recordKey.startsWith('UPDATE_FEED_INBOX_DIGEST#') || !('inboxDigestShard' in value) || value.inboxDigestShard !== `inbox-digest#${shard}` || !('inboxDigestDueAt' in value) || typeof value.inboxDigestDueAt !== 'number' || !Number.isSafeInteger(value.inboxDigestDueAt) || value.inboxDigestDueAt < 0) throw corrupt()
   return { workspaceId: value.workspaceId, recordKey: value.recordKey, inboxDigestShard: value.inboxDigestShard, inboxDigestDueAt: value.inboxDigestDueAt }
 }

@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { InboxDigestCheckpoint, InboxDigestCheckpointStore, InboxDigestPending } from '../application/inbox-digest-worker'
 import type { InboxDigestRecipient } from '../application/inbox-digest'
+import { PlanningError } from '../../planning'
+import { digestStorageFailure } from './digest-storage-failure'
 
 /** Durable shard leases, pending pages and terminal failures in the existing Planning table. */
 export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStore {
@@ -20,9 +22,9 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
    */
   async isQuarantined(recipient: InboxDigestRecipient, now: number): Promise<boolean> {
     const key = failureKey(recipient, now)
-    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true }))
+    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
     if (Item === undefined) return false
-    if (Item.workspaceId !== key.workspaceId || Item.recordKey !== key.recordKey || Item.entryType !== 'inbox-digest-failure' || Item.schemaVersion !== 1 || !record(Item.recipient) || Item.recipient.workspaceId !== recipient.workspaceId || Item.recipient.memberKey !== recipient.memberKey) throw invalid()
+    if (Item.workspaceId !== key.workspaceId || Item.recordKey !== key.recordKey || Item.entryType !== 'inbox-digest-failure' || Item.schemaVersion !== 1 || !record(Item.recipient) || Item.recipient.workspaceId !== recipient.workspaceId || Item.recipient.memberKey !== recipient.memberKey) throw corrupt()
     return true
   }
 
@@ -34,8 +36,8 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
   async claim(shard: number, now: number): Promise<InboxDigestCheckpoint | undefined> {
     if (!Number.isInteger(shard) || shard < 0 || shard >= 16 || !integer(now)) throw invalid()
     const key = checkpointKey(shard)
-    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true }))
-    const current = Item === undefined ? { shard, revision: 0, token: '', leaseUntil: 0, retryAt: 0, pending: [] } : parseCheckpoint(Item, shard)
+    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+    const current = Item === undefined ? { shard, revision: 0, token: '', leaseUntil: 0, retryAt: 0, pending: [] } : storedCheckpoint(Item, shard)
     if (current.leaseUntil > now || current.retryAt > now) return undefined
     const result = { ...current, revision: current.revision + 1, token: randomUUID(), leaseUntil: now + 90_000 }
     try {
@@ -44,7 +46,7 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
         ...(current.revision === 0 ? {} : { ExpressionAttributeNames: { '#revision': 'revision' }, ExpressionAttributeValues: { ':revision': current.revision, ':now': now, ':type': 'inbox-digest-checkpoint', ':schema': 1 } }),
       } }] }))
       return result
-    } catch (error) { if (conditional(error)) return undefined; throw error }
+    } catch (error) { if (conditional(error)) return undefined; return digestStorageFailure(error, 1) }
   }
 
   /** Saves progress and any exhausted recipient atomically under current ownership.
@@ -64,7 +66,7 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
       ConditionExpression: '#revision = :revision AND #token = :token AND leaseUntil > :now AND entryType = :type AND schemaVersion = :schema',
       ExpressionAttributeNames: { '#revision': 'revision', '#token': 'token' },
       ExpressionAttributeValues: { ':revision': validated.revision, ':token': validated.token, ':now': now, ':type': 'inbox-digest-checkpoint', ':schema': 1 },
-    } }, ...(failure ? [{ Put: { TableName: this.table, Item: { ...failureKey(failure, now), entryType: 'inbox-digest-failure', schemaVersion: 1, recipient: failure, shard: input.shard, failedAt: new Date(now).toISOString(), expiresAt: Math.floor(now / 1000) + 30 * 86_400 } } }] : [])] }))
+    } }, ...(failure ? [{ Put: { TableName: this.table, Item: { ...failureKey(failure, now), entryType: 'inbox-digest-failure', schemaVersion: 1, recipient: failure, shard: input.shard, failedAt: new Date(now).toISOString(), expiresAt: Math.floor(now / 1000) + 30 * 86_400 } } }] : [])] })).catch((error: unknown) => digestStorageFailure(error, failure ? 2 : 1))
     return result
   }
 }
@@ -92,4 +94,10 @@ function conditional(error: unknown) {
   return record(error) && error.name === 'TransactionCanceledException' && Array.isArray(error.CancellationReasons) && error.CancellationReasons.length === 1 && record(error.CancellationReasons[0]) && error.CancellationReasons[0].Code === 'ConditionalCheckFailed'
 }
 /** Creates a nonreflective checkpoint failure. */
-function invalid() { return new Error('Invalid or expired Inbox digest checkpoint') }
+function invalid() { return new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid or expired Inbox digest checkpoint') }
+/** Classifies only persisted parsing failures as corruption, never SDK exceptions. */
+function storedCheckpoint(row: Record<string, unknown>, shard: number) {
+  try { return parseCheckpoint(row, shard) } catch { throw corrupt() }
+}
+/** Produces a bodyless persisted-state error for invocation-level recovery. */
+function corrupt() { return new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Inbox digest checkpoint metadata is unavailable.') }
