@@ -24,11 +24,13 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
   const [preview, setPreview] = useState<PreviewSnapshot>()
   const [error, setError] = useState<unknown>()
   const [refreshFailed, setRefreshFailed] = useState(false)
+  const [interrupted, setInterrupted] = useState(false)
   const query = useDigestState(token, enabled, guard, () => { if (refreshFailed) { setRefreshFailed(false); setError(undefined) } })
   const [pending, setPending] = useState(false)
   const [draftReset, setDraftReset] = useState(0)
   const active = useRef(true)
   const busy = useRef(false)
+  const generating = useRef(false)
   const epoch = useRef(0)
   const body = useRef<UpdateFeedDigestPreview | undefined>(undefined)
   const deadline = useRef(0)
@@ -42,6 +44,11 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
     metadataRequest.current?.abort()
     if (active.current) setPreview(undefined)
   }, [])
+  /** Records an uncertain server attempt when actual Feed state changes mid-generation. */
+  const invalidateContent = useCallback(() => {
+    dismiss()
+    if (active.current && generating.current) setInterrupted(true)
+  }, [dismiss])
   useEffect(() => {
     active.current = true
     /** Content cannot survive switching away from the authenticated screen. */
@@ -61,7 +68,8 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
   /** Performs one explicit action without automatically retrying mutations. */
   const run = async (preferences?: UpdateFeedDigestPreferences, expectedRevision?: number): Promise<boolean> => {
     if (!token || !enabled || !query.data || refreshFailed || busy.current) return false
-    busy.current = true; setPending(true); setError(undefined); setRefreshFailed(false); dismiss()
+    if (!preferences && interrupted) return false
+    busy.current = true; generating.current = !preferences; setPending(true); setError(undefined); setRefreshFailed(false); setInterrupted(false); dismiss()
     const generation = epoch.current
     try {
       if (preferences) {
@@ -104,7 +112,7 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
         else if (!preferences) await query.mutate().catch(() => undefined)
       }
       return false
-    } finally { busy.current = false; if (active.current) setPending(false) }
+    } finally { busy.current = false; generating.current = false; if (active.current) setPending(false) }
   }
   /** Reloads metadata explicitly; a failed refresh never restores the discarded body. */
   const reload = async () => {
@@ -112,9 +120,9 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
     busy.current = true; setPending(true); dismiss()
     try {
       const state = await guard(getDigestState(token))
-      if (active.current) { await query.mutate(state, { revalidate: false }); setError(undefined); setRefreshFailed(false); setDraftReset((value) => value + 1) }
+      if (active.current) { await query.mutate(state, { revalidate: false }); setError(undefined); setRefreshFailed(false); setInterrupted(false); setDraftReset((value) => value + 1) }
     } catch (failure) { if (active.current) { setError(failure); setRefreshFailed(true); await query.mutate(undefined, { revalidate: false }) } }
     finally { busy.current = false; if (active.current) setPending(false) }
   }
-  return { state: refreshFailed ? undefined : query.data, loading: query.isLoading, error: query.error ?? error, refreshFailed, pending, draftReset, preview: refreshFailed || query.error || !enabled || !token || query.isValidating || query.data?.revision !== preview?.revision ? undefined : preview?.result, save: (preferences: UpdateFeedDigestPreferences, expectedRevision?: number) => run(preferences, expectedRevision), generate: () => run(), dismiss, reload: () => { void reload() } }
+  return { state: refreshFailed ? undefined : query.data, loading: query.isLoading, error: query.error ?? error, refreshFailed, interrupted, pending, draftReset, preview: refreshFailed || query.error || !enabled || !token || query.isValidating || query.data?.revision !== preview?.revision ? undefined : preview?.result, save: (preferences: UpdateFeedDigestPreferences, expectedRevision?: number) => run(preferences, expectedRevision), generate: () => run(), dismiss, invalidateContent, reload: () => { void reload() } }
 }
