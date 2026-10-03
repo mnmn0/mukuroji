@@ -2,3 +2,7 @@
 export { parseUpdateFeedQuery, readUpdateFeed, type UpdateFeedReader } from './application/read-update-feed'
 export { parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReadStateStore } from './application/read-state'
 export { DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, type UpdateFeedReadStatePersistence } from './adapter-out/read-state-store'
+export { parseSavedUpdateFeeds, type SavedUpdateFeedsStore } from './application/saved-feeds'
+export { resolveUpdateFeedFilterScope } from './application/filter-scope'
+export { readUpdateFeedFilterOptions } from './application/filter-options'
+export { DynamoDbSavedUpdateFeedsStore, InMemorySavedUpdateFeedsStore, type SavedUpdateFeedsPersistence } from './adapter-out/saved-feeds-store'

@@ -579,7 +579,7 @@ import {
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
-import { parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReader } from '../modules/update-feed'
+import { readUpdateFeedFilterOptions, resolveUpdateFeedFilterScope, parseSavedUpdateFeeds, parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReader } from '../modules/update-feed'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
@@ -1343,6 +1343,9 @@ const workItemDependencies: WorkItemDependencies = {
   get updateFeedReadState() {
     return requireAppDependencies().workItems.updateFeedReadState
   },
+  get savedUpdateFeeds() {
+    return requireAppDependencies().workItems.savedUpdateFeeds
+  },
   get requestIntake() {
     return requireAppDependencies().workItems.requestIntake
   },
@@ -1763,6 +1766,7 @@ const enterpriseRoutePermissionRules = [
   },
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
+  { method: 'PUT', pathPattern: '/api/planning/update-feed/saved', permission: 'planning.read' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-forms*', permission: 'requests.manage' },
@@ -7099,13 +7103,47 @@ routeApp.get('/api/planning/update-feed', async (c) => {
   if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    if (['view', 'limit', 'locale'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
+    if (['view', 'limit', 'locale', 'feedId'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
       throw new PlanningError(400, 'UpdateFeedQueryAmbiguous', 'Feed query parameters must occur at most once.')
     }
-    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit'), readLocale(c)))
+    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit'), readLocale(c), c.req.query('feedId')))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
+})
+
+/** Returns current authorized labels for editing filter dimensions. */
+routeApp.get('/api/planning/update-feed/options', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if ((c.req.queries('locale')?.length ?? 0) > 1) throw new PlanningError(400, 'UpdateFeedQueryAmbiguous', 'Feed query parameters must occur at most once.')
+    return c.json(await readUpdateFeedFilterOptions(await createPlanningUpdateFeedReader(principal, readLocale(c))))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
+})
+
+/** Reads only the authenticated member's bounded saved filter definitions. */
+routeApp.get('/api/planning/update-feed/saved', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    return c.json(await workItemDependencies.savedUpdateFeeds.get(principal.directoryId, principal.userKey))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
+})
+
+/** Creates, edits, or deletes personal definitions through a bounded collection CAS. */
+routeApp.put('/api/planning/update-feed/saved', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
+    const input = parseSavedUpdateFeeds(await readPlanningJson<unknown>(c.req))
+    const store = workItemDependencies.savedUpdateFeeds.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'))
+    return c.json(await store.replace(principal.directoryId, principal.userKey, input))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
 })
 
 /** Persists the current member's explicit read state for one currently readable report. */
@@ -25980,12 +26018,16 @@ async function requirePlanningEntityPermission(
  * @param view - Untrusted standard feed selector.
  * @param limit - Untrusted bounded response size.
  * @param locale - Active display language for current Project titles.
+ * @param feedId - Optional member-owned saved definition identifier.
  * @returns The authorized live feed, without loading Work Items or history.
  */
-async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string, locale: Locale = 'ja') {
+async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string, locale: Locale = 'ja', feedId?: string) {
   parseUpdateFeedQuery(view, limit)
+  const definition = feedId === undefined ? undefined : (await workItemDependencies.savedUpdateFeeds.get(principal.directoryId, principal.userKey)).feeds.find((feed) => feed.id === feedId)
+  if (feedId !== undefined && !definition) throw new PlanningError(404, 'SavedUpdateFeedNotFound', 'Saved feed was not found.')
+  if (definition && view !== undefined && definition.view !== view) throw new PlanningError(409, 'SavedUpdateFeedsConflict', 'Saved feed changed. Reload before opening it.')
   const reader = await createPlanningUpdateFeedReader(principal, locale)
-  return withUpdateFeedReadState(workItemDependencies.updateFeedReadState, principal.directoryId, principal.userKey, await readUpdateFeed(reader, view, limit))
+  return withUpdateFeedReadState(workItemDependencies.updateFeedReadState, principal.directoryId, principal.userKey, await readUpdateFeed(reader, definition?.view ?? view, limit, definition?.filters))
 }
 
 /** Creates request-local target authorization shared by feed reads and read-state mutations. */
@@ -26004,8 +26046,24 @@ async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, loc
     const team = directory.teams.find((candidate) => candidate.id === scope.teamId)
     return team !== undefined && (scope.projectId === undefined || team.projects.some((project) => project.id === scope.projectId))
   }
+  const scopeAccess = new Map<string, Promise<boolean>>()
+  /** Caches authorization of current hierarchy scopes without exposing inaccessible ancestry. */
+  const readableScope = (scope: Pick<PlanningEntity, 'teamId' | 'projectId'>): Promise<boolean> => {
+    const key = JSON.stringify([scope.teamId ?? null, scope.projectId ?? null])
+    const existing = scopeAccess.get(key)
+    if (existing) return existing
+    const access = (async () => {
+      if (!activeScope(scope)) return false
+      try { await requirePlanningUpdateCapturedScopePermission(principal, scope, readContext); return true }
+      catch (error) { if (isPlanningVisibilityAuthorizationError(error)) return false; throw error }
+    })()
+    scopeAccess.set(key, access)
+    return access
+  }
   return {
     memberKey: principal.userKey,
+    filterScope: (summary, snapshot) => resolveUpdateFeedFilterScope(summary, snapshot, readableScope),
+    describeTeam: (teamId) => directory.teams.find((team) => team.id === teamId)?.name ?? teamId,
     describeTarget: (summary, snapshot) => {
       const target = summary.target
       return target.type === 'initiative'

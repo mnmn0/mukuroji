@@ -26,10 +26,11 @@ export class UpdateFeedApiError extends Error {
  * @param token - Session bearer token.
  * @param view - Standard server feed selector.
  * @param locale - Active UI language used for current target names.
+ * @param feedId - Optional server-owned personal filter definition.
  * @returns Validated response in server-ranked order.
  */
-export async function getUpdateFeed(token: string, view: UpdateFeedView, locale: 'ja' | 'en' = 'ja'): Promise<UpdateFeedResponse> {
-  const value = await request(token, `?view=${view}&limit=100&locale=${locale}`)
+export async function getUpdateFeed(token: string, view: UpdateFeedView, locale: 'ja' | 'en' = 'ja', feedId?: string): Promise<UpdateFeedResponse> {
+  const value = await requestUpdateFeed(token, `?view=${view}&limit=100&locale=${locale}${feedId === undefined ? '' : `&feedId=${encodeURIComponent(feedId)}`}`)
   if (!isRecord(value) || !isUpdateFeedView(value.view) || value.view !== view || !isNonnegativeSafeInteger(value.revision) || !isNonnegativeSafeInteger(value.total) || typeof value.truncated !== 'boolean' || !Array.isArray(value.entries) || value.entries.length > 100 || !value.entries.every(isEntry)) throw new UpdateFeedApiError(502)
   return { view: value.view, revision: value.revision, total: value.total, truncated: value.truncated, entries: value.entries }
 }
@@ -40,13 +41,18 @@ export async function getUpdateFeed(token: string, view: UpdateFeedView, locale:
  * @returns Authoritative committed personal state.
  */
 export async function setUpdateFeedReadState(token: string, input: SetUpdateFeedReadStateInput): Promise<UpdateFeedReadState> {
-  const value = await request(token, '/read-state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+  const value = await requestUpdateFeed(token, '/read-state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
   if (!isReadState(value)) throw new UpdateFeedApiError(502)
   return value
 }
 
-/** Requests JSON with a session-scoped bearer token. */
-async function request(token: string, suffix: string, init?: RequestInit): Promise<unknown> {
+/** Requests JSON with a session-scoped bearer token.
+ * @param token - Current session bearer token.
+ * @param suffix - Feature-owned route suffix.
+ * @param init - Optional mutation request settings.
+ * @returns Untrusted JSON for feature-specific boundary validation.
+ */
+export async function requestUpdateFeed(token: string, suffix: string, init?: RequestInit): Promise<unknown> {
   const response = await fetch(`${apiBase}/planning/update-feed${suffix}`, { ...init, headers: { ...init?.headers, Authorization: `Bearer ${token}` } })
   if (!response.ok) {
     const error: unknown = await response.json().catch(() => undefined)
