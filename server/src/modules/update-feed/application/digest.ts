@@ -98,6 +98,7 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   start.setUTCHours(0, 0, 0, 0)
   if (state.preferences.frequency === 'weekly') start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
   const id = `${state.preferences.frequency}:${start.toISOString().slice(0, 10)}`
+  if (isDigestIntervalExpired(state, id)) throw new PlanningError(409, 'UpdateFeedDigestIntervalExpired', 'Digest interval is outside retained history.')
   const existing = state.history.find((receipt) => receipt.id === id)
   const replay = existing?.status === 'completed'
   if (!replay && existing?.status === 'pending' && existing.leaseUntil > now) throw conflict()
@@ -105,7 +106,7 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   const token = randomUUID()
   if (!replay) {
     const receipt: UpdateFeedDigestReceipt = { id, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, token, leaseUntil: now + 60_000, count: 0 }
-    state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].slice(-20) })
+    state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].sort((a, b) => compareIntervals(a.id, b.id)).slice(-20) })
   }
   try {
     // A fresh projection is loaded for each attempt/replay; no historical report scan.
@@ -153,6 +154,19 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
     }
     throw error
   }
+}
+
+/** Rejects work below the durable retained-history boundary; normal writes never move it backward.
+ * @param state - Validated bodyless metadata whose history is preserved by settings writes.
+ * @param id - Validated logical interval identity.
+ * @returns Whether the interval predates every receipt in a full retention window.
+ */
+export function isDigestIntervalExpired(state: UpdateFeedDigestState, id: string): boolean {
+  return state.history.length === 20 && state.history.every((receipt) => compareIntervals(receipt.id, id) > 0)
+}
+/** Orders retention by logical date, with cadence as a deterministic same-date tie breaker. */
+function compareIntervals(a: string, b: string): number {
+  return a.slice(a.indexOf(':') + 1).localeCompare(b.slice(b.indexOf(':') + 1)) || a.localeCompare(b)
 }
 
 /** Narrows an untrusted object without assertions. */
