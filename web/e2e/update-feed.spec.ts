@@ -161,6 +161,112 @@ test('Inbox settings conflict requires reload and permission loss hides consent'
   expect(state.digestRequests).toBe(0)
 })
 
+for (const interruption of ['deadline', 'blur', 'close']) test(`stalled metadata releases preview on ${interruption} without late resurrection`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.clock.install()
+  let release = () => {}
+  const blocked = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  await page.route('**/api/planning/update-feed/digest', async (route) => {
+    if (state.digestRequests > 0) { waiting = true; await blocked; await route.fulfill({ json: state.digest }).catch(() => undefined) }
+    else await route.fallback()
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  await page.getByRole('button', { name: 'Generate preview' }).click()
+  await expect.poll(() => waiting).toBe(true)
+  if (interruption === 'deadline') await page.clock.fastForward(15_001)
+  else if (interruption === 'blur') await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+  else await summary.click()
+  release()
+  if (interruption === 'close') await summary.click()
+  await expect(page.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  await expect(page.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('region', { name: 'Digest preview', exact: true }).getByRole('alert')).toHaveCount(0)
+  expect(state.digestRequests).toBe(1)
+})
+
+test('independently delayed feed and saved metadata do not close the opened disclosure', async ({ page }) => {
+  await mockFeed(page)
+  let releaseFeed = () => {}
+  let releaseSaved = () => {}
+  const feedWait = new Promise<void>((resolve) => { releaseFeed = resolve })
+  const savedWait = new Promise<void>((resolve) => { releaseSaved = resolve })
+  await page.route('**/api/planning/update-feed?*', async (route) => { await feedWait; await route.fallback() })
+  await page.route('**/api/planning/update-feed/saved', async (route) => { await savedWait; await route.fallback() })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.focus()
+  await page.keyboard.press('Enter')
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(panel).toBeVisible()
+  releaseFeed()
+  await expect(page.getByRole('link', { name: 'Customer onboarding', exact: true })).toBeVisible()
+  await expect(panel).toBeVisible()
+  await expect(summary).toBeFocused()
+  releaseSaved()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(summary).toBeFocused()
+})
+
+test('reload keeps current exhausted receipts blocked but permits completed replay', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install({ time: new Date('2026-10-03T12:00:00Z') })
+  state.digest.preferences.enabled = true
+  state.digest.history = [{ id: 'daily:2026-10-03', status: 'failed', attempts: 3, token: 'last', leaseUntil: 0, count: 0 }]
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  state.digest.history[0]!.status = 'completed'
+  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  expect(state.digestRequests).toBe(0)
+})
+
+test('save conflict and focus refresh preserve unsaved cadence until explicit reload', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByLabel('Recent', { exact: true }).check()
+  state.digest.revision += 1
+  await panel.getByRole('button', { name: 'Save preview settings' }).click()
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
+  await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+  await panel.getByRole('button', { name: 'Reload', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(summary).toBeFocused()
+})
+
+test('preview expiry restores only focus inside disappearing content', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.clock.install()
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  await page.getByRole('button', { name: 'Generate preview' }).click()
+  await page.getByLabel('Current preview', { exact: true }).getByRole('link').focus()
+  await page.clock.fastForward(15_001)
+  await expect(summary).toBeFocused()
+  await page.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(page.getByLabel('Current preview', { exact: true })).toBeVisible()
+  await page.getByLabel('Interval', { exact: true }).focus()
+  await page.clock.fastForward(15_001)
+  await expect(page.getByLabel('Interval', { exact: true })).toBeFocused()
+})
+
 for (const failure of ['network', 'forbidden']) test(`completed preview followed by ${failure} metadata failure hides content until fresh recovery`, async ({ page }) => {
   const state = await mockFeed(page)
   state.digest.preferences.enabled = true

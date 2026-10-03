@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview, UpdateFeedDigestState } from '@mukuroji/contracts'
 import type { createTranslator } from '../../../shared/i18n/i18n'
@@ -10,6 +10,10 @@ import { DigestSavedFeedSelection } from './DigestSavedFeedSelection'
 type DigestPanelProps = {
   /** Current session-owned saved definitions; absent after lookup failure. */
   savedFeeds?: import('@mukuroji/contracts').SavedUpdateFeeds
+  /** Explicit reload discards an unsaved draft. */
+  draftReset?: number
+  /** Stable focus destination when a focused control disappears. */
+  restoreFocus?(): void
   /** Current personal metadata, absent after failed reads. */
   state?: UpdateFeedDigestState
   /** Short-lived currently authorized result. */
@@ -25,7 +29,7 @@ type DigestPanelProps = {
   /** Current localized copy. */
   t: ReturnType<typeof createTranslator>
   /** Saves explicit preferences. */
-  onSave(preferences: UpdateFeedDigestPreferences): Promise<boolean>
+  onSave(preferences: UpdateFeedDigestPreferences, expectedRevision?: number): Promise<boolean>
   /** Generates a current manual preview. */
   onGenerate(): Promise<boolean>
   /** Refreshes metadata after errors without generating content. */
@@ -42,13 +46,19 @@ const actionClass = 'min-h-11 rounded-md border border-slate-300 px-3 text-app-m
  */
 export function DigestPanel(props: DigestPanelProps) {
   const { state, preview, loading, pending, canEdit, failure, t, onReload } = props
-  return <section aria-label={t('updates.digest.title')} className="min-w-0 border-y border-slate-200 py-4">
+  const focused = useRef<HTMLElement | null>(null)
+  // Restore only a removed focused descendant, never another live control.
+  useLayoutEffect(() => {
+    if (focused.current && !focused.current.isConnected && document.activeElement === document.body && document.hasFocus()) props.restoreFocus?.()
+    if (focused.current && !focused.current.isConnected) focused.current = null
+  })
+  return <section onFocusCapture={(event) => { focused.current = event.target }} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focused.current = null }} aria-label={t('updates.digest.title')} className="min-w-0 border-y border-slate-200 py-4">
     <p className="mb-4 text-app-meta font-semibold text-teal-800">{t('updates.digest.previewOnly')}</p>
     {loading ? <p role="status">{t('updates.loading')}</p> : null}
     {failure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3 border-l-2 border-amber-500 pl-3"><p>{t(`updates.digest.${failure}`)}</p>{failure !== 'denied' ? <button className={actionClass} disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
     {!canEdit ? <p className="text-app-meta text-slate-600">{t('updates.readOnly')}</p> : null}
     {state && failure !== 'denied' ? <>
-      <DigestForm {...props} state={state} />
+      <DigestForm key={props.draftReset} {...props} state={state} />
       <h3 className="mt-6 text-sm font-semibold text-slate-800">{t('updates.digest.history')}</h3>
       {state.history.length ? <ul className="mt-2 divide-y divide-slate-200">
         {[...state.history].reverse().map((receipt) => <li key={receipt.id} className="flex flex-wrap justify-between gap-x-4 gap-y-1 py-3 text-app-meta text-slate-600">
@@ -73,17 +83,18 @@ export function DigestPanel(props: DigestPanelProps) {
 }
 
 /** Owns an unsaved draft scoped to its base revision while preserving keyboard focus. */
-function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, onGenerate, onDismiss }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
+function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, onGenerate, onDismiss, onReload: propsReload }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
   const id = useId()
   const generateButton = useRef<HTMLButtonElement>(null)
   const restoreActionFocus = useRef(false)
   const [edit, setEdit] = useState<{ /** Revision at which editing began. */ revision: number; /** Unsaved preferences. */ preferences: UpdateFeedDigestPreferences }>()
-  const draft = edit?.revision === state.revision ? edit.preferences : state.preferences
+  const draft = edit?.preferences ?? state.preferences
   const dirty = JSON.stringify(draft) !== JSON.stringify(state.preferences)
   const valid = validDigestSelection(draft, savedFeeds)
+  const stale = dirty && edit !== undefined && edit.revision !== state.revision
   const unavailable = pending || !canEdit || failure === 'denied'
   /** Discards stale output immediately when the visible settings change. */
-  const change = (next: UpdateFeedDigestPreferences) => { setEdit({ revision: state.revision, preferences: next }); onDismiss() }
+  const change = (next: UpdateFeedDigestPreferences) => { setEdit({ revision: dirty && edit ? edit.revision : state.revision, preferences: next }); onDismiss() }
   // DOM focus must wait for React to commit the re-enabled fieldset.
   useEffect(() => {
     if (pending || !restoreActionFocus.current) return
@@ -92,7 +103,8 @@ function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, o
   }, [pending])
   /** Remembers only user-triggered actions for DOM focus restoration. */
   const perform = (action: () => Promise<boolean>) => { restoreActionFocus.current = true; return action() }
-  return <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid) void perform(() => onSave(draft)) }}>
+  return <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid && !stale) void perform(() => onSave(draft, edit?.revision ?? state.revision)) }}>
+    {stale && failure !== 'conflict' ? <div role="alert"><p>{t('updates.digest.conflict')}</p><button type="button" className={actionClass} disabled={pending} onClick={propsReload}>{t('workspace.error.retry')}</button></div> : null}
     <fieldset disabled={unavailable} className="min-w-0">
       <legend className="text-sm font-semibold text-slate-800">{t('updates.digest.settings')}</legend>
       <label className="mt-2 flex min-h-11 items-center gap-3 text-app-body"><input type="checkbox" checked={draft.enabled} onChange={(event) => change({ ...draft, enabled: event.target.checked })} className="size-4 accent-teal-700" />{t('updates.digest.enabled')}</label>
@@ -109,7 +121,7 @@ function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, o
       <DigestSavedFeedSelection collection={savedFeeds} preferences={draft} t={t} onChange={change} />
       {!valid ? <p role="alert" className="mt-2 text-app-meta text-amber-800">{t('updates.digest.chooseView')}</p> : null}
       <div className="mt-4 flex flex-wrap gap-3">
-        <button type="submit" className={actionClass} disabled={unavailable || !dirty || !valid}>{t('updates.digest.save')}</button>
+        <button type="submit" className={actionClass} disabled={unavailable || stale || !dirty || !valid}>{t('updates.digest.save')}</button>
         <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !valid || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
       </div>
       {dirty ? <p role="status" className="mt-2 text-app-meta text-slate-600">{t('updates.digest.unsaved')}</p> : null}
