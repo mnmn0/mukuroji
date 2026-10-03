@@ -317,6 +317,11 @@ test('aggregates latest Project and Initiative updates without history reads and
   planning.get = readPlanning
   expect(await planning.get('user#demo@example.com', { workItems: [] })).toEqual(before)
   expect((await planningApiRequest('/api/planning/update-feed?limit=101')).status).toBe(400)
+  for (const query of ['view=recent&view=overdue', 'limit=1&limit=2']) {
+    const ambiguous = await planningApiRequest(`/api/planning/update-feed?${query}`)
+    expect(ambiguous.status).toBe(400)
+    expect(await ambiguous.json()).toMatchObject({ code: 'UpdateFeedQueryAmbiguous' })
+  }
 
   configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [] })
   const denied = await planningApiRequest('/api/planning/update-feed')
@@ -704,6 +709,11 @@ test('keeps filtered Planning history within the requested limit while advancing
   const movedFeed = await planningApiRequest('/api/planning/update-feed')
   expect(movedFeed.status).toBe(200)
   expect(await movedFeed.json()).toMatchObject({ entries: [], total: 0 })
+  const ownedMovedFeed = await planningApiRequest('/api/planning/update-feed?view=for-me')
+  expect(ownedMovedFeed.status).toBe(200)
+  const ownedMovedBody = await ownedMovedFeed.json()
+  expect(ownedMovedBody).toMatchObject({ total: 1, entries: [{ health: 'unknown', reasons: ['update-owner'], relevance: 2 }] })
+  expect(ownedMovedBody.entries[0]).not.toHaveProperty('latestUpdate')
   expect(movedGraphBody.updateTargets.find((updateTarget) =>
     updateTarget.target.type === 'initiative' &&
     updateTarget.target.entityId === target.entityId

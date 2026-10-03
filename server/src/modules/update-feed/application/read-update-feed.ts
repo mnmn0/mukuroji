@@ -7,8 +7,8 @@ export interface UpdateFeedReader {
   memberKey: string
   /** Reads the bounded Planning graph, never update history or annotations. */
   readSnapshot(): Promise<PlanningSnapshot>
-  /** Revalidates active target and immutable captured scope; infrastructure errors must propagate. */
-  canRead(target: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot): Promise<boolean>
+  /** Returns the authorized target with unreadable latest content removed, or undefined; infrastructure errors propagate. */
+  authorizeTarget(target: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot): Promise<PlanningUpdateTargetSummary | undefined>
 }
 
 /**
@@ -33,8 +33,10 @@ export async function readUpdateFeed(
     throw new PlanningError(413, 'UpdateFeedTargetLimitExceeded', 'Feed target projection exceeds its bounded read limit.')
   }
   const entries = new Map<string, UpdateFeedEntry>()
-  for (const summary of snapshot.updateTargets) {
-    if (summary.archivedAt || !await reader.canRead(summary, snapshot)) continue
+  for (const candidate of snapshot.updateTargets) {
+    if (candidate.archivedAt) continue
+    const summary = await reader.authorizeTarget(candidate, snapshot)
+    if (!summary) continue
     const reasons: UpdateFeedEntry['reasons'] = []
     const memberKey = reader.memberKey.trim().toLowerCase()
     if (summary.cadence?.updateOwnerMemberKey.toLowerCase() === memberKey) reasons.push('update-owner')

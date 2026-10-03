@@ -35,7 +35,7 @@ test('keeps health and submission predicates separate and emits one entry for mu
   missing.latestVersion = 0
   const state = await snapshot([late, risk, missing])
   const before = structuredClone(state)
-  const reader = { memberKey: 'READER', readSnapshot: async () => state, canRead: async () => true }
+  const reader = { memberKey: 'READER', readSnapshot: async () => state, authorizeTarget: async (summary: PlanningUpdateTargetSummary) => summary }
   expect((await readUpdateFeed(reader, 'overdue')).entries.map((entry) => entry.health)).toEqual(['on-track'])
   expect((await readUpdateFeed(reader, 'at-risk')).entries.map((entry) => entry.updateState)).toEqual(['current'])
   expect((await readUpdateFeed(reader, 'missing')).entries[0]?.health).toBe('unknown')
@@ -52,17 +52,17 @@ test('rechecks permissions each request, excludes archives, and propagates stora
   const state = await snapshot([target('active'), archived])
   let allowed = true
   let checks = 0
-  const reader = { memberKey: 'reader', readSnapshot: async () => state, canRead: async () => { checks++; return allowed } }
+  const reader = { memberKey: 'reader', readSnapshot: async () => state, authorizeTarget: async (summary: PlanningUpdateTargetSummary) => { checks++; return allowed ? summary : undefined } }
   expect((await readUpdateFeed(reader)).total).toBe(1)
   allowed = false
   expect((await readUpdateFeed(reader)).total).toBe(0)
   expect(checks).toBe(2)
-  await expect(readUpdateFeed({ ...reader, canRead: async () => { throw new Error('unavailable') } })).rejects.toThrow('unavailable')
+  await expect(readUpdateFeed({ ...reader, authorizeTarget: async () => { throw new Error('unavailable') } })).rejects.toThrow('unavailable')
 })
 
 test('bounds output, exposes truncation, and orders ties independently of storage order', async () => {
   const state = await snapshot([target('z'), target('a')])
-  const reader = { memberKey: 'reader', readSnapshot: async () => state, canRead: async () => true }
+  const reader = { memberKey: 'reader', readSnapshot: async () => state, authorizeTarget: async (summary: PlanningUpdateTargetSummary) => summary }
   expect(await readUpdateFeed(reader, 'recent', '1')).toMatchObject({ total: 2, truncated: true, entries: [{ target: { projectId: 'a' } }] })
   state.updateTargets.reverse()
   expect((await readUpdateFeed(reader, 'recent', '1')).entries[0]?.target).toMatchObject({ projectId: 'a' })
@@ -70,10 +70,22 @@ test('bounds output, exposes truncation, and orders ties independently of storag
   await expect(readUpdateFeed(reader)).rejects.toMatchObject({ code: 'UpdateFeedTargetLimitExceeded' })
 })
 
+test('keeps overdue and owned targets when authorization redacts their old latest report', async () => {
+  const state = await snapshot([target('moved', 'overdue')])
+  const reader = {
+    memberKey: 'reader', readSnapshot: async () => state,
+    authorizeTarget: async (summary: PlanningUpdateTargetSummary) => ({ ...summary, latestUpdate: undefined }),
+  }
+  expect(await readUpdateFeed(reader, 'overdue')).toMatchObject({ total: 1, entries: [{ health: 'unknown', updateState: 'overdue' }] })
+  expect((await readUpdateFeed(reader, 'for-me')).entries[0]).toMatchObject({ reasons: ['update-owner'], relevance: 2 })
+  expect((await readUpdateFeed(reader, 'recent')).total).toBe(0)
+  expect((await readUpdateFeed(reader, 'at-risk')).total).toBe(0)
+})
+
 test('validates query input before reading and rejects duplicate projection identities', async () => {
   const state = await snapshot([target('x'), target('x')])
   let reads = 0
-  const reader = { memberKey: 'reader', readSnapshot: async () => { reads++; return state }, canRead: async () => true }
+  const reader = { memberKey: 'reader', readSnapshot: async () => { reads++; return state }, authorizeTarget: async (summary: PlanningUpdateTargetSummary) => summary }
   for (const limit of ['0', '-1', '101', '1.5', '1e1', '', ' 1']) {
     await expect(readUpdateFeed(reader, 'recent', limit)).rejects.toMatchObject({ code: 'UpdateFeedLimitInvalid' })
   }

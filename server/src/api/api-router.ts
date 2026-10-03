@@ -7095,6 +7095,9 @@ routeApp.get('/api/planning/update-feed', async (c) => {
   if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if ((c.req.queries('view')?.length ?? 0) > 1 || (c.req.queries('limit')?.length ?? 0) > 1) {
+      throw new PlanningError(400, 'UpdateFeedQueryAmbiguous', 'Feed query parameters must occur at most once.')
+    }
     return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit')))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
@@ -25965,20 +25968,26 @@ async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: stri
   return readUpdateFeed({
     memberKey: principal.userKey,
     readSnapshot: () => workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
-    canRead: async (summary, snapshot) => {
+    authorizeTarget: async (summary, snapshot) => {
       const target = summary.target
       const scope = target.type === 'project' ? target : snapshot.entities.find((entity) => entity.id === target.entityId && entity.type === 'initiative' && !entity.archivedAt)
-      if (!scope || !activeScope(scope)) return false
+      if (!scope || !activeScope(scope)) return undefined
       try {
         await requirePlanningUpdateTargetPermission(principal, snapshot, target, 'viewer', readContext)
-        if (summary.latestUpdate) {
-          const captured = summary.latestUpdate.capturedScope
-          if (!captured || !activeScope(captured) || captured.teamId !== scope.teamId || captured.projectId !== scope.projectId) return false
-          await requirePlanningUpdateCapturedScopePermission(principal, captured, readContext)
-        }
-        return true
       } catch (error) {
-        if (isPlanningVisibilityAuthorizationError(error)) return false
+        if (isPlanningVisibilityAuthorizationError(error)) return undefined
+        throw error
+      }
+      if (!summary.latestUpdate) return summary
+      const captured = summary.latestUpdate.capturedScope
+      if (!captured || !activeScope(captured) || captured.teamId !== scope.teamId || captured.projectId !== scope.projectId) {
+        return { ...summary, latestUpdate: undefined }
+      }
+      try {
+        await requirePlanningUpdateCapturedScopePermission(principal, captured, readContext)
+        return summary
+      } catch (error) {
+        if (isPlanningVisibilityAuthorizationError(error)) return { ...summary, latestUpdate: undefined }
         throw error
       }
     },
