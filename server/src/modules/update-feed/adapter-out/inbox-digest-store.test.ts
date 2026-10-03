@@ -22,6 +22,7 @@ async function fixture() {
   let loseClaimResponse = false
   let clock = now
   let readError: unknown
+  let preferencesReadError: unknown
   let writeError: unknown
   let beforeTransaction: (() => void) | undefined
   const indexed: Record<string, unknown>[] = []
@@ -47,6 +48,7 @@ async function fixture() {
     commands.push(command)
     if (command instanceof GetCommand) {
       if (readError) throw readError
+      if (preferencesReadError && command.input.TableName === 'notifications') throw preferencesReadError
       expect(command.input.ConsistentRead).toBe(true)
       return { Item: structuredClone(rows.get(coordinate(command.input.TableName!, command.input.Key!))) }
     }
@@ -92,6 +94,8 @@ async function fixture() {
     advance(milliseconds: number) { clock += milliseconds },
     /** Injects a read-only SDK failure. */
     failRead(error: unknown) { readError = error },
+    /** Fails only the post-claim notification preference read. */
+    failPreferencesRead(error: unknown) { preferencesReadError = error },
     /** Injects a transaction SDK failure or a size-aware cancellation vector. */
     failWrite(error: unknown) { writeError = error },
     /** Inspects notification rows separately from metadata and preferences. */
@@ -204,7 +208,7 @@ test('malformed due rows fail closed and metadata cannot bypass the atomic compl
   const state = await f.store.get('w', 'reader')
   await expect(f.store.replace('w', 'reader', { ...state, history: [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'forged', leaseUntil: 0, count: 1 }] })).rejects.toMatchObject({ status: 409 })
   f.metadata().inboxDigestDueAt = 'malformed'
-  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
+  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
   expect(f.notifications()).toHaveLength(0)
 })
 
@@ -267,7 +271,7 @@ test('read failures distinguish absent, transient SDK and corrupt persisted enve
   const original = structuredClone(f.metadata())
   for (const mutation of [{ schemaVersion: 2 }, { memberKey: 'other' }, { preferences: { enabled: true } }, { history: [{}] }, { history: [{ id: 'daily:2026-10-03', status: 'failed', attempts: 1, token: 'claim', leaseUntil: 0, count: 0, startedAt: -1 }] }, { inboxDigestShard: 'wrong' }, { inboxDigestDueAt: 'invalid' }]) {
     f.rows.set(f.coordinate('planning', original), { ...original, ...mutation })
-    await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
+    await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
   }
   f.rows.set(f.coordinate('planning', original), original)
   await expect(f.store.replace('w', 'reader', { ...emptyDigestState(), revision: -1 })).rejects.toMatchObject({ status: 400 })
@@ -299,18 +303,78 @@ test('late-week delivery uses first claim time for sorting and full retention, s
   expect(f.notifications()[0]?.notificationKey).toBe(key)
 })
 
+for (const [name, code, terminal] of [
+  ['TimeoutError', 'UpdateFeedDigestRetryable', undefined],
+  ['AccessDeniedException', 'UpdateFeedDigestStoragePermanent', 'storage-permanent'],
+  ['NetworkingError', 'UpdateFeedDigestStorageFailure', undefined],
+] as const) test(`post-claim preference read classifies ${name} without committing a notification`, async () => {
+  const f = await fixture()
+  f.failPreferencesRead(Object.assign(new Error('private SDK detail'), { name }))
+  try { await f.run(); throw new Error('Expected rejection') }
+  catch (error) { expect(error).toMatchObject({ code }); expect(inboxDigestTerminalReason(error)).toBe(terminal); expect(String(error)).not.toContain('private SDK') }
+  expect(f.notifications()).toHaveLength(0)
+  expect((await f.store.get('w', 'reader')).history[0]).toMatchObject({ status: 'failed', attempts: 1 })
+  f.failPreferencesRead(undefined)
+  f.advance(60_000)
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('malformed notification preferences are corruption while absent consent defaults and explicit opt-out stays conflict', async () => {
+  const owner = createNotificationRecipientKey('w', 'reader')
+  const key = { recipientKey: owner, notificationKey: NOTIFICATION_PREFERENCES_KEY }
+  const valid = { ...key, itemType: 'preferences', version: 1, channels: { inApp: true, email: false, push: false, slack: false }, frequency: 'instant', quietHours: { enabled: false, start: '22:00', end: '08:00', timeZone: 'UTC' } }
+  for (const bad of [{ ...valid, recipientKey: 'other' }, { ...valid, notificationKey: 'other' }, { ...valid, itemType: 'wrong' }, { ...valid, channels: { inApp: 'true' } }]) {
+    const f = await fixture()
+    f.rows.set(f.coordinate('notifications', key), bad)
+    await expect(f.run()).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+    expect(f.notifications()).toHaveLength(0)
+  }
+  const off = await fixture()
+  off.rows.set(off.coordinate('notifications', key), { ...valid, channels: { ...valid.channels, inApp: false } })
+  await expect(off.run()).rejects.toMatchObject({ status: 409, code: 'UpdateFeedDigestConflict' })
+  expect(off.notifications()).toHaveLength(0)
+  expect(await (await fixture()).run()).toBe('delivered')
+})
+
+for (const frequency of ['daily', 'weekly'] as const) for (const boundary of [false, true]) test(`lost third ${frequency} claim recovers with boundary=${boundary}`, async () => {
+  const f = await fixture()
+  const start = boundary ? Date.parse('2026-10-04T23:59:30Z') : now
+  f.advance(start - now)
+  const id = `${frequency}:${frequency === 'weekly' ? '2026-09-28' : boundary ? '2026-10-04' : '2026-10-03'}`
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] }, history: [{ id, status: 'failed', attempts: 2, token: 'previous', leaseUntil: 0, startedAt: start - 60_000, count: 0 }] })
+  f.loseClaimResponse()
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  expect(f.metadata().inboxDigestDueAt).toBe(start + 60_000)
+  expect((await f.store.get('w', 'reader')).history[0]).toMatchObject({ id, status: 'pending', attempts: 3 })
+  expect(await f.run()).toBe('not-due')
+  f.advance(60_001)
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  expect((await f.store.listDue(shard)).recipients).toEqual([recipient])
+  if (boundary) expect(await f.run()).toBe('delivered')
+  else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestAttemptsExhausted' })
+  expect((await f.store.get('w', 'reader')).history.find((row) => row.id === id)).toMatchObject({ status: 'failed', attempts: 3, leaseUntil: 0 })
+  expect(f.notifications()).toHaveLength(boundary ? 1 : 0)
+  if (boundary) { expect(await f.run()).toBe('not-due'); expect(f.notifications()).toHaveLength(1) }
+  else expect(f.metadata().inboxDigestDueAt).toBe(Date.parse(frequency === 'daily' ? '2026-10-04T00:00:00Z' : '2026-10-05T00:00:00Z'))
+})
+
 test('transaction failures classify complete cancellation vectors and permanent SDK failures without leaking details', async () => {
   const f = await fixture()
   const state = await f.store.get('w', 'reader')
-  for (const name of ['ValidationException', 'AccessDeniedException', 'ResourceNotFoundException', 'UnexpectedFailure']) {
+  for (const name of ['ValidationException', 'AccessDeniedException', 'ResourceNotFoundException']) {
     f.failWrite(Object.assign(new Error('private SDK detail'), { name }))
     try { await f.store.replace('w', 'reader', state); throw new Error('Expected rejection') }
     catch (error) {
-      expect(error).toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
-      expect(inboxDigestTerminalReason(error)).toBe('corrupt-state')
+      expect(error).toMatchObject({ status: 502, code: 'UpdateFeedDigestStoragePermanent' })
+      expect(inboxDigestTerminalReason(error)).toBe('storage-permanent')
       expect(String(error)).not.toContain('private SDK')
     }
   }
+  f.failWrite(new Error('Unknown network failure'))
+  await expect(f.store.replace('w', 'reader', state)).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
   for (const name of ['ThrottlingException', 'TimeoutError', 'TransactionInProgressException', 'InternalServerError']) {
     f.failWrite(Object.assign(new Error('temporary'), { name }))
     await expect(f.store.replace('w', 'reader', state)).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestRetryable' })
