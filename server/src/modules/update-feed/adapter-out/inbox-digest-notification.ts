@@ -27,5 +27,6 @@ export function createInboxDigestNotification(recipient: InboxDigestRecipient, m
     deepLink: message.deepLink,
     reasons: ['digest'],
     deliveryChannels: ['inApp'],
+    expiresAt: Math.floor(Date.parse(message.occurredAt) / 1000) + 365 * 86_400,
   }
 }
