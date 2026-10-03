@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { UpdateFeedApiError } from '../api/updateFeed'
 import { useInboxDigestSettings } from '../mutations/useInboxDigestSettings'
 import { createTranslator } from '../../../shared/i18n/i18n'
@@ -19,12 +19,13 @@ type Props = {
  */
 export function InboxDigestPanelContainer(props: Props) {
   const [open, setOpen] = useState(false)
-  return <details className="mb-5" onToggle={(event) => setOpen(event.currentTarget.open)}><summary className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-teal-800">{createTranslator(props.locale)('updates.inbox.title')}</summary>{open ? <Content {...props} /> : null}</details>
+  const summary = useRef<HTMLElement>(null)
+  return <details className="mb-5" onToggle={(event) => setOpen(event.currentTarget.open)}><summary ref={summary} className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-teal-800">{createTranslator(props.locale)('updates.inbox.title')}</summary>{open ? <Content {...props} restoreFocus={() => summary.current?.focus()} /> : null}</details>
 }
 /** Maps transport failures into safe presentation categories. */
-function Content({ token, enabled, canEdit, locale, guard }: Props) {
+function Content({ token, enabled, canEdit, locale, guard, restoreFocus }: Props & { /** Stable focus destination for removed controls. */ restoreFocus(): void }) {
   const controller = useInboxDigestSettings(token, enabled, guard)
   const error = controller.error
   const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
-  return <InboxDigestPanel {...controller} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onReload={controller.reload} />
+  return <InboxDigestPanel {...controller} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onReload={controller.reload} />
 }
