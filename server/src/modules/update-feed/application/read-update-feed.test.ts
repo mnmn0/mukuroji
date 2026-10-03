@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import type { PlanningSnapshot, PlanningUpdateTargetSummary } from '@mukuroji/contracts'
+import type { PlanningSnapshot, PlanningUpdateTargetSummary, UpdateFeedFilters } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../planning/planning'
 import { readUpdateFeed } from './read-update-feed'
 
@@ -100,4 +100,22 @@ test('validates query input before reading and rejects duplicate projection iden
   }
   overdue.archivedAt = '2026-08-02T00:00:00.000Z'
   await expect(readUpdateFeed({ ...reader, authorizeTarget: async () => undefined })).rejects.toMatchObject({ code: 'UpdateFeedDuplicateTarget' })
+})
+
+test('applies saved dimensions before top-N and rechecks access on every saved-feed read', async () => {
+  const targets = Array.from({ length: 150 }, (_, i) => target(String(i).padStart(3, '0')))
+  const chosen = targets[149]
+  if (!chosen?.latestUpdate) throw new Error('Missing fixture')
+  chosen.latestUpdate.health = 'off-track'
+  chosen.updateState = 'overdue'
+  const state = await snapshot(targets)
+  let allowed = true
+  const reader = { memberKey: 'reader', readSnapshot: async () => state, authorizeTarget: async (summary: PlanningUpdateTargetSummary) => allowed ? summary : undefined, filterScope: async (summary: PlanningUpdateTargetSummary) => ({ ...(summary.target.type === 'project' ? summary.target : {}), portfolioIds: ['portfolio'] }) }
+  const filters: UpdateFeedFilters = { teamIds: ['team', 'other'], projects: [{ teamId: 'team', projectId: '149' }], portfolioIds: ['portfolio'], initiativeIds: [], health: ['off-track'], updateStates: ['overdue'] }
+  expect(await readUpdateFeed(reader, 'recent', '1', filters)).toMatchObject({ total: 1, truncated: false, entries: [{ target: { projectId: '149' }, health: 'off-track', updateState: 'overdue' }] })
+  expect((await readUpdateFeed(reader, 'recent', '1', { ...filters, teamIds: ['denied'] })).total).toBe(0)
+  expect((await readUpdateFeed(reader, 'recent', '1', { ...filters, updateStates: ['current'] })).total).toBe(0)
+  expect((await readUpdateFeed(reader, 'recent', '1', { ...filters, initiativeIds: ['portfolio'] })).total).toBe(0)
+  allowed = false
+  expect((await readUpdateFeed(reader, 'recent', '1', filters)).total).toBe(0)
 })

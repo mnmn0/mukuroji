@@ -29,6 +29,7 @@ import type {
   PlanningMutationResponse,
   PlanningSnapshot,
   PlanningUpdateTarget,
+  SavedUpdateFeed,
 } from '@mukuroji/contracts'
 import {
   PLANNING_SCHEMA_VERSION,
@@ -42,6 +43,24 @@ import {
 
 afterEach(() => {
   resetTestApp()
+})
+
+test('personal saved-feed CRUD requires current authentication, rejects guests and preserves CAS', async () => {
+  configureFakeProjectClients(true)
+  const feed: SavedUpdateFeed = { id: 'risk', name: 'My risks', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }
+  expect(await (await planningApiRequest('/api/planning/update-feed/saved')).json()).toEqual({ revision: 0, feeds: [] })
+  const created = await planningApiRequest('/api/planning/update-feed/saved', 'PUT', { expectedRevision: 0, feeds: [feed], memberKey: 'someone-else' })
+  expect(created.status).toBe(200)
+  expect(await created.json()).toEqual({ revision: 1, feeds: [feed] })
+  expect((await planningApiRequest('/api/planning/update-feed/saved', 'PUT', { expectedRevision: 0, feeds: [] })).status).toBe(409)
+  expect((await planningApiRequest('/api/planning/update-feed?feedId=risk&view=recent')).status).toBe(409)
+  expect((await planningApiRequest('/api/planning/update-feed?feedId=unknown')).status).toBe(404)
+  expect((await planningApiRequest('/api/planning/update-feed?feedId=risk&feedId=other')).status).toBe(400)
+  expect((await planningApiRequest('/api/planning/update-feed/saved', 'PUT', { expectedRevision: 1, feeds: [{ ...feed, name: 'Edited' }] })).status).toBe(200)
+  expect((await planningApiRequest('/api/planning/update-feed/saved', 'PUT', { expectedRevision: 2, feeds: [] })).status).toBe(200)
+  expect(await (await planningApiRequest('/api/planning/update-feed/saved')).json()).toEqual({ revision: 3, feeds: [] })
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  expect((await planningApiRequest('/api/planning/update-feed/saved', 'PUT', { expectedRevision: 3, feeds: [feed] })).status).toBe(403)
 })
 
 test('authenticates read-state requests before parsing malformed JSON', async () => {
@@ -437,6 +456,11 @@ test('aggregates latest Project and Initiative updates without history reads and
   expect(await english.json()).toMatchObject({ entries: [expect.anything(), { title: 'English project' }] })
   const japanese = await planningApiRequest('/api/planning/update-feed?view=recent&locale=ja')
   expect(await japanese.json()).toMatchObject({ entries: [expect.anything(), { title: '日本語のプロジェクト' }] })
+  const optionsResponse = await planningApiRequest('/api/planning/update-feed/options?locale=en')
+  expect(optionsResponse.status).toBe(200)
+  const options = await optionsResponse.json()
+  expect(options).toMatchObject({ projects: [{ teamId: 'core-team', projectId: 'refero', name: 'English project' }], initiatives: [{ id: expect.any(String), name: expect.any(String) }] })
+  expect(options).not.toHaveProperty('entries')
   planning.get = readPlanning
   const readInput = { target: targets[0], version: 1, read: true, expectedRevision: 0 }
   const stateStore = getTestAppDependencies().workItems.updateFeedReadState

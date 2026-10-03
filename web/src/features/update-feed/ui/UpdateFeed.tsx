@@ -1,11 +1,13 @@
 import type { UpdateFeedEntry, UpdateFeedResponse, UpdateFeedView } from '@mukuroji/contracts'
 import { Link } from 'react-router'
-import { useId } from 'react'
+import { useId, type ReactNode } from 'react'
 import type { createTranslator, Locale } from '../../../shared/i18n/i18n'
 import { updateFeedTargetKey, updateFeedTargetPath, updateFeedViews, isUpdateFeedView } from '../model/updateFeed'
 
 /** Pure feed presentation and user intent callbacks. */
 type UpdateFeedProps = {
+  /** Optional personal filter controls below the page heading. */
+  controls?: ReactNode
   /** Current authorized response, absent while loading or on failure. */
   response?: UpdateFeedResponse
   /** Selected server view. */
@@ -38,7 +40,7 @@ type UpdateFeedProps = {
  * @param props - Authorized response, localized state, and user intent callbacks.
  * @returns Responsive report list with loading, empty, and error states.
  */
-export function UpdateFeed({ response, view, locale, t, loading, failed, denied, canMarkRead, mutationFailed, pending, onViewChange, onRetry, onToggle }: UpdateFeedProps) {
+export function UpdateFeed({ controls, response, view, locale, t, loading, failed, denied, canMarkRead, mutationFailed, pending, onViewChange, onRetry, onToggle }: UpdateFeedProps) {
   const viewId = useId()
   return <section className="mx-auto w-full max-w-5xl" aria-label={t('updates.title')}>
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3 border-b border-slate-200 pb-4">
@@ -50,6 +52,7 @@ export function UpdateFeed({ response, view, locale, t, loading, failed, denied,
       </div>
       {response ? <p className="text-app-meta text-slate-500">{t('updates.count').replace('{count}', String(response.total))}</p> : null}
     </div>
+    {controls}
     {view === 'for-me' ? <p className="mb-4 text-app-meta text-slate-600">{t('updates.ranking')}</p> : null}
     {loading ? <p role="status" className="py-12 text-center text-slate-500">{t('updates.loading')}</p> : null}
     {failed ? denied ? <p role="alert" className="border-l-2 border-slate-400 p-4">{t('updates.denied')}</p> : <div role="alert" className="flex flex-wrap items-center gap-3 border-l-2 border-amber-500 p-4"><p>{t('updates.error')}</p><button className="min-h-10 px-3 font-semibold text-teal-800 underline" onClick={onRetry}>{t('workspace.error.retry')}</button></div> : null}
