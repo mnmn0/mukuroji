@@ -6,6 +6,7 @@ import type { SidebarNavId, SidebarTeamViewId } from '../ui/sidebar'
 export const workspaceNavPaths: Record<SidebarNavId, string> = {
   home: '/home',
   focus: '/focus',
+  updates: '/updates',
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
   requests: '/requests',

@@ -2,6 +2,8 @@ import {
   createApiTestHarness,
 } from '../../../../api/test-support/api-test-harness'
 const {
+  app,
+  configureFakeAuthenticatedUser,
   configureFakeProjectClients,
   createCollaborationStub,
   createCyclePlanningInput,
@@ -12,11 +14,13 @@ const {
   resetTestApp,
   seedPlanningWorkspaceParentAndScopedChild,
   setTestAppDependencies,
+  withTestEnvironment,
 } = createApiTestHarness()
 import {
   InMemoryPlanningClient,
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
+import { CognitoServiceError } from '../../../authentication'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
@@ -38,6 +42,59 @@ import {
 
 afterEach(() => {
   resetTestApp()
+})
+
+test('authenticates read-state requests before parsing malformed JSON', async () => {
+  let authenticationAttempted = false
+  configureFakeAuthenticatedUser({}, () => {
+    authenticationAttempted = true
+    throw new CognitoServiceError(400, 'NotAuthorizedException', 'Invalid token')
+  })
+  const response = await app.request('/api/planning/update-feed/read-state', {
+    method: 'PUT', headers: { Authorization: 'Bearer invalid-token', 'Content-Type': 'application/json' }, body: '{broken',
+  })
+  expect(authenticationAttempted).toBe(true)
+  expect(response.status).toBe(401)
+})
+
+test('persists service-account read state using Enterprise control without a synthetic member fence', async () => {
+  const workspaceId = 'workspace-service-feed'
+  await withTestEnvironment({ ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable', MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceId }, async () => {
+    configureFakeProjectClients(false)
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const timestamp = new Date().toISOString()
+    const issued = await identity.createServiceAccountWithToken({
+      workspaceId, accountId: 'feed-reader', displayName: 'Feed reader',
+      permissions: ['planning.read', 'projects.read', 'service-accounts.use'], roleId: 'project:viewer',
+      scope: { workspaceId, kind: 'project', targetId: 'refero' }, credentialLifetimeDays: 30,
+      allowedSourceCidrs: [], status: 'active', credentialGeneration: 0, revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    }, 'create-feed-reader', 'create-feed-reader-fingerprint')
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    const target: PlanningUpdateTarget = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+    await planning.configureUpdateCadence(workspaceId, { target, expectedRevision: 0, cadence: {
+      updateOwnerMemberKey: 'demo@example.com', cadence: { unit: 'week', count: 1 }, timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24,
+    } }, { workItems: [] })
+    await planning.publishUpdate(workspaceId, { target, expectedRevision: 1, id: 'report', health: 'on-track', risk: 'none', summary: 'Visible report', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '', evidence: [] }, 'demo@example.com', { workItems: [] })
+    setTestAppDependencies({ planning, enterpriseIdentity: identity })
+    const store = getTestAppDependencies().workItems.updateFeedReadState
+    const bindCaller = store.withCallerAuthorization.bind(store)
+    let checked = false
+    store.withCallerAuthorization = (checks) => {
+      expect(checks).toHaveLength(1)
+      expect(checks[0]?.ConditionCheck).toMatchObject({ TableName: 'EnterpriseIdentityTable', Key: { scopeKey: `WORKSPACE#${workspaceId}`, recordKey: 'CONTROL' } })
+      expect(checks[0]?.ConditionCheck.ExpressionAttributeValues?.[':expectedControlRevision']).toBeGreaterThan(0)
+      checked = true
+      return bindCaller(checks)
+    }
+    const input = { target, version: 1, read: true, expectedRevision: 0 }
+    const response = await app.request('/api/planning/update-feed/read-state', { method: 'PUT', headers: { Authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ read: true, revision: 1 })
+    expect(checked).toBe(true)
+    await identity.revokeServiceAccountToken(workspaceId, issued.account.accountId)
+    const revoked = await app.request('/api/planning/update-feed/read-state', { method: 'PUT', headers: { Authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, read: false, expectedRevision: 1 }) })
+    expect(revoked.status).toBe(401)
+  })
 })
 
 /** Creates the canonical two-endpoint dependency input shared by API idempotency tests. */
@@ -362,7 +419,8 @@ test('aggregates latest Project and Initiative updates without history reads and
   planning.get = async (...args) => { projectionRead = true; return readPlanning(...args) }
   directoryClient.getProjectDirectory = async (...args) => {
     if (projectionRead) perTargetAuthorizationReads++
-    return readDirectory(...args)
+    const directory = await readDirectory(...args)
+    return { ...directory, teams: directory.teams.map((team) => ({ ...team, projects: team.projects.map((project) => ({ ...project, name: args[1] === 'en' ? 'English project' : '日本語のプロジェクト' })) })) }
   }
   directoryClient.getProjectAccessList = async (...args) => {
     if (projectionRead) perTargetAuthorizationReads++
@@ -375,19 +433,52 @@ test('aggregates latest Project and Initiative updates without history reads and
     { target: { type: 'project' }, reasons: ['update-owner', 'latest-author'] },
   ] })
   expect(perTargetAuthorizationReads).toBe(0)
+  const english = await planningApiRequest('/api/planning/update-feed?view=recent&locale=en')
+  expect(await english.json()).toMatchObject({ entries: [expect.anything(), { title: 'English project' }] })
+  const japanese = await planningApiRequest('/api/planning/update-feed?view=recent&locale=ja')
+  expect(await japanese.json()).toMatchObject({ entries: [expect.anything(), { title: '日本語のプロジェクト' }] })
   planning.get = readPlanning
+  const readInput = { target: targets[0], version: 1, read: true, expectedRevision: 0 }
+  const stateStore = getTestAppDependencies().workItems.updateFeedReadState
+  const bindCaller = stateStore.withCallerAuthorization.bind(stateStore)
+  let callerGuardBound = false
+  stateStore.withCallerAuthorization = (checks) => {
+    expect(checks).toContainEqual(expect.objectContaining({ ConditionCheck: expect.objectContaining({ Key: { workspaceId: 'user#demo@example.com', recordKey: 'MEMBER#demo@example.com' } }) }))
+    callerGuardBound = true
+    return bindCaller(checks)
+  }
+  const markedRead = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', readInput)
+  expect(markedRead.status).toBe(200)
+  expect(callerGuardBound).toBe(true)
+  expect(await markedRead.json()).toEqual({ read: true, revision: 1 })
+  const refreshed = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(await refreshed.json()).toMatchObject({ entries: [
+    { target: { type: 'initiative' }, readState: { read: false, revision: 0 } },
+    { target: { type: 'project' }, readState: { read: true, revision: 1 } },
+  ] })
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', readInput)).status).toBe(409)
+  const readAuthorizationRevision = planning.getAuthorizationRevision.bind(planning)
+  planning.getAuthorizationRevision = async () => before.revision - 1
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })).status).toBe(409)
+  planning.getAuthorizationRevision = readAuthorizationRevision
   expect(await planning.get('user#demo@example.com', { workItems: [] })).toEqual(before)
   expect((await planningApiRequest('/api/planning/update-feed?limit=101')).status).toBe(400)
-  for (const query of ['view=recent&view=overdue', 'limit=1&limit=2']) {
+  for (const query of ['view=recent&view=overdue', 'limit=1&limit=2', 'locale=en&locale=ja']) {
     const ambiguous = await planningApiRequest(`/api/planning/update-feed?${query}`)
     expect(ambiguous.status).toBe(400)
     expect(await ambiguous.json()).toMatchObject({ code: 'UpdateFeedQueryAmbiguous' })
   }
 
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  expect((await planningApiRequest('/api/planning/update-feed')).status).toBe(200)
+  const guestWrite = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })
+  expect(guestWrite.status).toBe(403)
+  expect(await guestWrite.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
   configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [] })
   const denied = await planningApiRequest('/api/planning/update-feed')
   expect(denied.status).toBe(200)
   expect(await denied.json()).toMatchObject({ entries: [], total: 0 })
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })).status).toBe(404)
 
   const identity = new InMemoryEnterpriseIdentityClient()
   const readIdentity = identity.getSnapshot.bind(identity)
@@ -401,12 +492,16 @@ test('aggregates latest Project and Initiative updates without history reads and
   const enterpriseFeed = await planningApiRequest('/api/planning/update-feed')
   expect(enterpriseFeed.status).toBe(200)
   expect(await enterpriseFeed.json()).toMatchObject({ total: 2 })
+  const viewerChoice = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })
+  expect(viewerChoice.status).toBe(200)
+  expect(await viewerChoice.json()).toEqual({ read: false, revision: 2 })
   setTestAppDependencies({ enterpriseIdentity: new InMemoryEnterpriseIdentityClient() })
 
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner', teamProjects: [] })
   const archived = await planningApiRequest('/api/planning/update-feed')
   expect(archived.status).toBe(200)
   expect(await archived.json()).toMatchObject({ entries: [], total: 0 })
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, expectedRevision: 2 })).status).toBe(404)
 })
 
 test('filters legacy Planning update targets by their Team-qualified Project ACL', async () => {

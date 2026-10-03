@@ -24,6 +24,7 @@ import { customersMessages } from './customers'
  */
 export const jaMessages = {
   ...coreMessages,
+  ...updatesMessages,
   ...marketingMessages,
   ...authMessages,
   ...workspaceMessages,
@@ -49,3 +50,4 @@ export const jaMessages = {
  * Translation key defined by the canonical Japanese dictionary.
  */
 export type MessageKey = keyof typeof jaMessages
+import { updatesMessages } from './updates'
