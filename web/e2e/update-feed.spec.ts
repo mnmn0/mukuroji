@@ -710,12 +710,58 @@ test('explains membership, watch and interaction separately from health, submiss
   await page.screenshot({ path: '/tmp/issue241-relevance-mobile.png', fullPage: true })
 })
 
+for (const mode of ['visible', 'pending', 'draft']) test(`read-state changes invalidate ${mode} preview work without replacing its editor`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  if (mode === 'pending') await page.route('**/api/planning/update-feed/digest/preview', async (route) => {
+    const entries = structuredClone(state.feed.entries.filter((entry) => entry.latestUpdate && !entry.readState?.read))
+    state.digestRequests++
+    await gate
+    await route.fulfill({ json: { id: 'daily:2026-10-03', replay: false, entries, truncated: false, transport: 'preview' } })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  if (mode === 'draft') await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  else {
+    await panel.getByRole('button', { name: 'Generate preview' }).click()
+    await expect.poll(() => state.digestRequests).toBe(1)
+    if (mode === 'visible') await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
+  }
+  const revision = state.feed.revision
+  await page.getByRole('button', { name: 'Mark as read: Customer onboarding', exact: true }).click()
+  const focus = mode === 'draft' ? panel.getByLabel('Interval', { exact: true }) : page.getByLabel('Feed', { exact: true })
+  await focus.focus()
+  await expect.poll(() => state.feed.entries[0]?.readState?.read).toBe(true)
+  await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  release()
+  await expect(panel.getByRole('button', { name: 'Working…' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Mark as unread: Customer onboarding', exact: true })).toBeVisible()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  await expect(focus).toBeFocused()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue(mode === 'draft' ? 'weekly' : 'daily')
+  expect(state.feed.revision).toBe(revision)
+  expect(state.digestRequests).toBe(mode === 'draft' ? 0 : 1)
+})
+
 test('guests have no mutation controls and permission denial offers no reload loop', async ({ page }) => {
   const state = await mockFeed(page, true)
   await page.goto('/updates')
   await expect(page.getByTestId('update-feed-row')).toHaveCount(3)
   await expect(page.getByText('Guest access is read-only.')).toBeVisible()
   await expect(page.getByRole('button', { name: /^Mark as/ })).toHaveCount(0)
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const digest = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(digest.getByText('Guest access is read-only.')).toBeVisible()
+  await expect(digest.getByRole('button', { name: /Save preview settings|Generate preview|Clear custom selection/ })).toHaveCount(0)
+  await expect(digest.locator('form')).toHaveCount(0)
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const inbox = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  await expect(inbox.getByText('Guest access is read-only.')).toBeVisible()
+  await expect(inbox.locator('form')).toHaveCount(0)
+  await expect(inbox.getByRole('button', { name: /Save Inbox settings|Clear custom selection/ })).toHaveCount(0)
   await page.screenshot({ path: '/tmp/issue241-feed-guest.png', fullPage: true })
   state.forbidden = true
   await page.getByLabel('Feed', { exact: true }).selectOption('recent')
