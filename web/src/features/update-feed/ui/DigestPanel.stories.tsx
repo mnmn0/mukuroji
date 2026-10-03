@@ -51,3 +51,7 @@ export const Loading: Story = { args: { state: undefined, loading: true } }
 export const Japanese: Story = { args: { ...Preview.args, t: createTranslator('ja') } }
 /** Current authorization may result in an empty preview. */
 export const Empty: Story = { args: { preview: { id: 'daily:2026-10-03', replay: true, entries: [], truncated: false, transport: 'preview' } } }
+/** A bounded candidate scan cannot establish that every selected feed is read. */
+export const BoundedEmpty: Story = { args: { preview: { id: 'daily:2026-10-03', replay: false, entries: [], truncated: true, transport: 'preview' } } }
+/** Japanese bounded-empty copy preserves the same uncertainty. */
+export const BoundedEmptyJapanese: Story = { args: { ...BoundedEmpty.args, t: createTranslator('ja') } }

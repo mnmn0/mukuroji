@@ -37,12 +37,13 @@ export function DigestPanelContainer(props: DigestPanelContainerProps) {
 /** Connects safe presentation categories to the session-owned controller. */
 function DigestContent({ token, enabled, canEdit, locale, guard, restoreFocus, contentKey, open }: DigestPanelContainerProps & { /** Disclosure state, separate from controller lifetime. */ open: boolean; /** Stable fallback for removed controls. */ restoreFocus(): void }) {
   const controller = useDigestPreview(token, enabled && open, locale, guard)
-  const { dismiss } = controller
+  const { dismiss, invalidateContent } = controller
   // Cancel owned browser requests/timers and clear ephemeral content before paint;
   // unrelated Feed scope changes must preserve the personal settings form and focus.
-  useLayoutEffect(() => { dismiss() }, [contentKey, open, dismiss])
+  useLayoutEffect(() => { invalidateContent() }, [contentKey, invalidateContent])
+  useLayoutEffect(() => { dismiss() }, [open, dismiss])
   const error = controller.error
   if (!open) return null
-  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
+  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : controller.interrupted ? 'interrupted' : undefined
   return <DigestPanel {...controller} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={controller.reload} onDismiss={controller.dismiss} />
 }
