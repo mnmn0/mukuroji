@@ -297,6 +297,31 @@ test('completion preserves prior history and rejects forged or multiple transiti
   expect(g.notifications()).toHaveLength(0)
 })
 
+for (const frequency of ['daily', 'weekly'] as const) test(`fresh GSI discovery retries failed ${frequency} claim after UTC rollover before the new interval`, async () => {
+  const f = await fixture()
+  const claimAt = Date.parse('2026-10-04T23:59:30Z')
+  const interval = `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`
+  const scheduledAt = Date.parse(`${interval.split(':')[1]}T00:00:00Z`)
+  f.advance(claimAt - now)
+  const initial = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...initial, preferences: { enabled: true, frequency, views: ['recent'] } })
+  const read = f.context.reader.readSnapshot
+  f.context.reader.readSnapshot = async () => { f.advance(60_001); throw new Error('Read failed after rollover') }
+  await expect(f.run()).rejects.toThrow('Read failed after rollover')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, status: 'failed', attempts: 1, startedAt: claimAt }])
+  expect(f.metadata().inboxDigestDueAt).toBe(claimAt + 120_001)
+  f.context.reader.readSnapshot = read
+  f.advance(60_000)
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  const page = await f.store.listDue(shard)
+  expect(page.recipients).toEqual([{ ...recipient, frequency, scheduledAt }])
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: page.recipients }), dependencies: { authorize: async () => f.context } }, claimAt + 120_001)
+  expect(result).toMatchObject({ delivered: 1, failed: [], terminal: [] })
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, status: 'completed', attempts: 2, startedAt: claimAt }])
+  expect(f.notifications()).toHaveLength(1)
+})
+
 test('completion rejects a logical interval later than its real first claim', async () => {
   const f = await fixture()
   const state = await f.store.get('w', 'reader')
