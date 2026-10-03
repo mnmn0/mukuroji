@@ -41,15 +41,16 @@ export function parseDigestPreferences(value: unknown): UpdateFeedDigestPreferen
   if (value.savedFeeds !== undefined) {
     const saved = value.savedFeeds
     if (!record(saved) || !integer(saved.revision) || saved.revision < 1 || saved.revision >= Number.MAX_SAFE_INTEGER || !Array.isArray(saved.ids) || saved.ids.length < 1 || saved.ids.length > 6 || !saved.ids.every((id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 512 && id.trim() === id && Array.from(id).every((char) => char.charCodeAt(0) > 31 && char.charCodeAt(0) !== 127)) || new Set(saved.ids).size !== saved.ids.length) throw invalid()
-    savedFeeds = { revision: saved.revision, ids: [...saved.ids] }
+    savedFeeds = { revision: saved.revision, ids: [...saved.ids].sort() }
   }
   if (value.views.length + (savedFeeds?.ids.length ?? 0) < 1 || value.views.length + (savedFeeds?.ids.length ?? 0) > 6) throw invalid()
+  const order = ['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue']
   const views = value.views.map((view: unknown) => {
     if (typeof view !== 'string' || !['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue'].includes(view)) throw invalid()
     return parseUpdateFeedQuery(view).view
   })
   if (new Set(views).size !== views.length) throw invalid()
-  return { enabled: value.enabled, frequency: value.frequency, views, ...(savedFeeds ? { savedFeeds } : {}) }
+  return { enabled: value.enabled, frequency: value.frequency, views: views.sort((a, b) => order.indexOf(a) - order.indexOf(b)), ...(savedFeeds ? { savedFeeds } : {}) }
 }
 
 /** Validates the complete bodyless row, failing closed on malformed persistence.
@@ -122,7 +123,7 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
     const projection = await readUpdateFeedProjection(stableReader)
     const entries = new Map<string, UpdateFeedDigestPreview['entries'][number]>()
     let truncated = false
-    for (const source of [...state.preferences.views.map((view) => ({ view, filters: undefined })), ...saved]) {
+    for (const source of [...parseDigestPreferences(state.preferences).views.map((view) => ({ view, filters: undefined })), ...saved]) {
       const feed = await selectUpdateFeedProjection(projection, source.view, '100', source.filters)
       truncated ||= feed.truncated
       for (const entry of feed.entries) {
@@ -170,7 +171,7 @@ async function resolveDigestSavedFeeds(preferences: UpdateFeedDigestPreferences,
   if (!preferences.savedFeeds) return []
   const collection = await read?.()
   if (!collection || collection.revision !== preferences.savedFeeds.revision) throw conflict()
-  return preferences.savedFeeds.ids.map((id) => {
+  return [...preferences.savedFeeds.ids].sort().map((id) => {
     const feed = collection.feeds.find((candidate) => candidate.id === id)
     if (!feed) throw conflict()
     return feed

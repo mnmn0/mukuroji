@@ -131,6 +131,61 @@ test('saved filters constrain custom-only digests and changing definitions abort
   expect(() => parseDigestPreferences({ enabled: true, frequency: 'daily', views: ['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue'], savedFeeds: { revision: 1, ids: ['mine'] } })).toThrow()
 })
 
+test('custom source permutations normalize API input and select the same fifty reports from legacy rows', async () => {
+  const results = []
+  for (const ids of [['a-recent', 'z-risk'], ['z-risk', 'a-recent']]) {
+    const f = await fixture(51)
+    f.snapshot.updateTargets.forEach((target, index) => {
+      if (target.latestUpdate) {
+        target.latestUpdate.health = index === 50 ? 'at-risk' : 'on-track'
+        target.latestUpdate.createdAt = index === 50 ? '2026-10-02T00:00:00Z' : '2026-10-03T00:00:00Z'
+      }
+    })
+    const definitions = new InMemorySavedUpdateFeedsStore()
+    const filters = { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] }
+    await definitions.replace('w', 'reader', { expectedRevision: 0, feeds: [{ id: 'z-risk', name: 'Risks', view: 'at-risk', filters }, { id: 'a-recent', name: 'Recent', view: 'recent', filters }] })
+    f.reader.readSavedFeeds = () => definitions.get('w', 'reader')
+    const preferences = parseDigestPreferences({ enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids } })
+    expect(preferences.savedFeeds?.ids).toEqual(['a-recent', 'z-risk'])
+    await replaceDigestPreferences(f.store, 'w', 'reader', { expectedRevision: 1, preferences }, definitions)
+    const legacy = await f.store.get('w', 'reader')
+    legacy.preferences.savedFeeds = { revision: 1, ids }
+    legacy.history = [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'legacy', leaseUntil: 0, count: 50 }]
+    const result = await previewUpdateFeedDigest(f.reader, f.readState, { get: async () => legacy, replace: f.store.replace.bind(f.store) }, 'w', now)
+    expect(result.entries).toHaveLength(50)
+    expect(result.entries.some((entry) => entry.target.type === 'project' && entry.target.projectId === 'project-50')).toBe(false)
+    results.push(result.entries.map((entry) => entry.target))
+  }
+  expect(results[0]).toEqual(results[1])
+})
+
+test('selection permutations normalize API input and choose the same fifty reports from legacy rows', async () => {
+  const results = []
+  for (const views of [['recent', 'at-risk'], ['at-risk', 'recent']]) {
+    const f = await fixture(51)
+    f.snapshot.updateTargets.forEach((target, index) => {
+      if (target.latestUpdate) {
+        target.latestUpdate.health = index === 50 ? 'at-risk' : 'on-track'
+        target.latestUpdate.createdAt = index === 50 ? '2026-10-02T00:00:00Z' : '2026-10-03T00:00:00Z'
+      }
+    })
+    const preferences = parseDigestPreferences({ enabled: true, frequency: 'daily', views })
+    expect(preferences.views).toEqual(['recent', 'at-risk'])
+    const current = await f.store.get('w', 'reader')
+    await replaceDigestPreferences(f.store, 'w', 'reader', { expectedRevision: current.revision, preferences })
+    // Simulate an existing noncanonical adapter row, bypassing input normalization.
+    const legacy = await f.store.get('w', 'reader')
+    legacy.history = [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'legacy', leaseUntil: 0, count: 50 }]
+    legacy.preferences.views.reverse()
+    if (views[0] === 'recent') legacy.preferences.views.reverse()
+    const store = { get: async () => legacy, replace: f.store.replace.bind(f.store) }
+    const result = await previewUpdateFeedDigest(f.reader, f.readState, store, 'w', now)
+    expect(result.entries).toHaveLength(50)
+    results.push(result.entries.map((entry) => entry.target))
+  }
+  expect(results[0]).toEqual(results[1])
+})
+
 /** Creates canonical reports and isolated personal persistence with no delivery dependency. */
 async function fixture(count = 1) {
   const targets: PlanningUpdateTargetSummary[] = Array.from({ length: count }, (_, index) => ({

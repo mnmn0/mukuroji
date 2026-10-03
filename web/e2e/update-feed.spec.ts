@@ -80,6 +80,26 @@ async function mockFeed(page: Page, guest = false, expiresAt?: number) {
   return state
 }
 
+for (const inbox of [false, true]) test(`${inbox ? 'Inbox' : 'preview'} saves canonical custom IDs without treating reselection as an edit`, async ({ page }) => {
+  const state = await mockFeed(page)
+  const filters = { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] }
+  state.saved = { revision: 1, feeds: [{ id: 'z-risk', name: 'Risk source', view: 'at-risk', filters }, { id: 'a-recent', name: 'Recent source', view: 'recent', filters }] }
+  const target = inbox ? state.inbox : state.digest
+  target.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['z-risk', 'a-recent'] } }
+  await page.goto('/updates')
+  const title = inbox ? 'Inbox digest settings' : 'Digest preview'
+  await page.locator('summary', { hasText: title }).click()
+  const panel = page.getByRole('region', { name: title, exact: true })
+  const save = panel.getByRole('button', { name: inbox ? 'Save Inbox settings' : 'Save preview settings' })
+  await panel.getByLabel('Risk source', { exact: true }).uncheck()
+  await panel.getByLabel('Risk source', { exact: true }).check()
+  await expect(save).toBeDisabled()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await save.click()
+  await expect.poll(() => (inbox ? state.inbox : state.digest).preferences.savedFeeds?.ids).toEqual(['a-recent', 'z-risk'])
+  await expect(save).toBeDisabled()
+})
+
 for (const outcome of ['success', 'deleted', '503', '401']) test(`pending custom definitions preserve selection and withdrawal before ${outcome}`, async ({ page }) => {
   const state = await mockFeed(page)
   state.saved = { revision: 1, feeds: [{ id: 'private-custom-id', name: 'Current custom source', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }
@@ -230,6 +250,111 @@ for (const conflict of [false, true]) test(`Inbox keyboard save restores owned f
     await expect.poll(() => puts).toBe(2)
     await expect(save).toBeDisabled()
   }
+})
+
+for (const convergence of ['external', 'revert']) test(`Inbox ${convergence} convergence retires the whole draft`, async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => { if (route.request().method() === 'GET') reads++; await route.fallback() })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  if (convergence === 'revert') await panel.getByLabel('Interval', { exact: true }).selectOption('daily')
+  else {
+    state.inbox = { ...state.inbox, revision: 1, preferences: { ...state.inbox.preferences, frequency: 'weekly' } }
+    const before = reads
+    await page.clock.fastForward(6_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => reads).toBeGreaterThan(before)
+  }
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  state.inbox = { ...state.inbox, revision: 2, preferences: { enabled: true, frequency: convergence === 'revert' ? 'weekly' : 'daily', views: ['recent'] } }
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue(state.inbox.preferences.frequency)
+  await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
+test('Inbox saves canonical selections and ignores checkbox reselection order', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.inbox.preferences.views = ['at-risk', 'recent']
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByLabel('Recent', { exact: true }).uncheck()
+  await panel.getByLabel('Recent', { exact: true }).check()
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect.poll(() => state.inbox.preferences.views).toEqual(['recent', 'at-risk'])
+})
+
+for (const failure of ['network', 'forbidden']) test(`Inbox ${failure} verification failure survives closing until a fresh GET succeeds`, async ({ page }) => {
+  await mockFeed(page)
+  await page.clock.install()
+  let readsFail = false
+  let stalled = false
+  let waiting = false
+  let puts = 0
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() === 'PUT') { puts++; return route.fulfill({ status: failure === 'forbidden' ? 403 : 409, json: {} }) }
+    if (stalled) { waiting = true; await gate }
+    if (readsFail) return route.abort('failed')
+    await route.fallback()
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByRole('alert')).toBeVisible()
+  if (failure === 'network') { readsFail = true; await panel.getByRole('button', { name: 'Reload', exact: true }).click() }
+  await expect(panel.locator('form')).toHaveCount(0)
+  stalled = true
+  await summary.click()
+  await page.clock.fastForward(6_001)
+  await summary.click()
+  await expect.poll(() => waiting).toBe(true)
+  await expect(panel.locator('form')).toHaveCount(0)
+  expect(puts).toBe(1)
+  readsFail = false
+  release()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  expect(puts).toBe(1)
+})
+
+for (const outside of [false, true]) test(`Inbox restores removed owned focus on window return with outside focus ${outside}`, async ({ page }) => {
+  await mockFeed(page)
+  let waiting = false
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    waiting = true; await gate; await route.fulfill({ status: 403, json: {} })
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect.poll(() => waiting).toBe(true)
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur')) })
+  release()
+  await expect(panel.locator('form')).toHaveCount(0)
+  const other = page.getByLabel('Feed', { exact: true })
+  if (outside) await other.focus()
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true }); window.dispatchEvent(new Event('focus')) })
+  await expect(outside ? other : summary).toBeFocused()
 })
 
 test('saved Inbox draft follows a later external preference change without false conflict', async ({ page }) => {
@@ -414,6 +539,48 @@ test('a saved preview draft follows later external settings without a false conf
   await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
   await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
   await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
+for (const convergence of ['external', 'revert']) test(`a ${convergence} converged preview draft retires before another server update`, async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'GET') reads++; await route.fallback() })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  if (convergence === 'revert') await panel.getByLabel('Interval', { exact: true }).selectOption('daily')
+  else {
+    state.digest = { ...state.digest, revision: 1, preferences: { ...state.digest.preferences, frequency: 'weekly' } }
+    const before = reads
+    await page.clock.fastForward(6_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => reads).toBeGreaterThan(before)
+  }
+  await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeDisabled()
+  state.digest = { ...state.digest, revision: 2, preferences: { enabled: true, frequency: convergence === 'revert' ? 'weekly' : 'daily', views: ['recent'] } }
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue(state.digest.preferences.frequency)
+  await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
+test('preview save canonicalizes existing selections and ignores checkbox reselection order', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.views = ['at-risk', 'recent']
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByLabel('At risk / off track', { exact: true }).uncheck()
+  await panel.getByLabel('At risk / off track', { exact: true }).check()
+  await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeDisabled()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save preview settings' }).click()
+  await expect.poll(() => state.digest.preferences.views).toEqual(['recent', 'at-risk'])
 })
 
 test('preview completion does not reclaim focus moved outside its form', async ({ page }) => {
@@ -666,11 +833,33 @@ test('preview expiry restores only focus inside disappearing content', async ({ 
   await expect(page.getByLabel('Interval', { exact: true })).toBeFocused()
 })
 
-for (const failure of ['network', 'forbidden']) test(`completed preview followed by ${failure} metadata failure hides content until fresh recovery`, async ({ page }) => {
+for (const outside of [false, true]) test(`blurred preview removal restores owned focus on return with outside focus ${outside}`, async ({ page }) => {
   const state = await mockFeed(page)
   state.digest.preferences.enabled = true
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  await page.getByRole('button', { name: 'Generate preview' }).click()
+  await page.getByLabel('Current preview', { exact: true }).getByRole('link').focus()
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur')) })
+  await expect(page.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  const other = page.getByLabel('Feed', { exact: true })
+  if (outside) await other.focus()
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true }); window.dispatchEvent(new Event('focus')) })
+  await expect(outside ? other : summary).toBeFocused()
+})
+
+for (const failure of ['network', 'forbidden']) test(`completed preview followed by ${failure} metadata failure hides content until fresh recovery`, async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  state.digest.preferences.enabled = true
   let failRefresh = true
+  let stallRefresh = false
+  let waiting = false
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
   await page.route('**/api/planning/update-feed/digest', async (route) => {
+    if (stallRefresh && route.request().method() === 'GET') { waiting = true; await gate }
     if (route.request().method() === 'GET' && state.digestRequests > 0 && failRefresh) {
       if (failure === 'network') return route.abort('failed')
       return route.fulfill({ status: 403, json: { code: 'WorkspacePermissionDenied' } })
@@ -685,12 +874,18 @@ for (const failure of ['network', 'forbidden']) test(`completed preview followed
   await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
   expect(state.digestRequests).toBe(1)
   expect(state.digest.history[0]?.status).toBe('completed')
+  stallRefresh = true
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  await page.clock.fastForward(6_001)
+  await summary.click()
+  await expect.poll(() => waiting).toBe(true)
+  await expect(panel.locator('form')).toHaveCount(0)
+  await expect(panel.getByRole('heading', { name: 'Preview history' })).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toHaveCount(0)
+  expect(state.digestRequests).toBe(1)
   failRefresh = false
-  if (failure === 'network') await panel.getByRole('button', { name: 'Reload', exact: true }).click()
-  else {
-    await page.reload()
-    await page.locator('summary', { hasText: 'Digest preview' }).click()
-  }
+  release()
   await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
   await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
   expect(state.digestRequests).toBe(1)

@@ -4,6 +4,7 @@ import type { createTranslator } from '../../../shared/i18n/i18n'
 import { updateFeedViews } from '../model/updateFeed'
 import { validDigestSelection } from '../model/digestSelection'
 import { DigestSavedFeedSelection } from './DigestSavedFeedSelection'
+import { normalizeDigestPreferences, sameDigestPreferences } from '../model/digestPreferences'
 
 /** Pure consent view with no send or preview callback. */
 type InboxDigestPanelProps = {
@@ -30,25 +31,34 @@ export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pend
   const [edit, setEdit] = useState<{ /** Draft base revision. */ revision: number; /** Explicit reload generation. */ reset?: number; /** Unsaved consent. */ preferences: UpdateFeedDigestPreferences }>()
   const currentEdit = edit?.reset === draftReset ? edit : undefined
   const draft = currentEdit?.preferences ?? state?.preferences
-  const dirty = JSON.stringify(draft) !== JSON.stringify(state?.preferences)
   const valid = draft !== undefined && validDigestSelection(draft, savedStatus && savedStatus !== 'ready' ? undefined : savedFeeds)
+  const dirty = Boolean(draft && (!state || !sameDigestPreferences(draft, state.preferences)))
+  if (edit && (!currentEdit || (state && !dirty))) setEdit(undefined)
   const stale = dirty && currentEdit !== undefined && currentEdit.revision !== state?.revision
   const effectiveFailure = failure ?? (stale ? 'conflict' : undefined)
   const unavailable = pending || !canEdit || Boolean(effectiveFailure)
   const focused = useRef<HTMLElement | null>(null)
   // Only removed or disabled owned controls require a stable focus fallback.
   useLayoutEffect(() => {
-    const lost = focused.current && (!focused.current.isConnected || (!pending && focused.current.matches(':disabled')))
-    if (lost && (document.activeElement === document.body || document.activeElement === focused.current) && document.hasFocus()) restoreFocus?.()
-    if (lost) focused.current = null
+    /** Restores owned focus after a removed control outlives window activity. */
+    const restore = () => {
+      const lost = focused.current && (!focused.current.isConnected || (!pending && focused.current.matches(':disabled')))
+      if (!lost || !document.hasFocus()) return
+      if (document.activeElement === document.body || document.activeElement === focused.current) restoreFocus?.()
+      focused.current = null
+    }
+    restore()
+    window.addEventListener('focus', restore)
+    document.addEventListener('visibilitychange', restore)
+    return () => { window.removeEventListener('focus', restore); document.removeEventListener('visibilitychange', restore) }
   })
   /** Keeps edits bound to the displayed metadata revision. */
-  const change = (preferences: UpdateFeedDigestPreferences) => { if (state) setEdit({ revision: dirty && currentEdit ? currentEdit.revision : state.revision, reset: draftReset, preferences }) }
+  const change = (preferences: UpdateFeedDigestPreferences) => { if (state) setEdit(sameDigestPreferences(preferences, state.preferences) ? undefined : { revision: dirty && currentEdit ? currentEdit.revision : state.revision, reset: draftReset, preferences: normalizeDigestPreferences(preferences) }) }
   /** Acknowledges only the submitted draft; later edits and failed saves remain owned. */
   const save = async () => {
     if (!draft || !state) return
     const submitted = currentEdit
-    if (await onSave(draft, submitted?.revision ?? state.revision)) setEdit((current) => current === submitted ? undefined : current)
+    if (await onSave(normalizeDigestPreferences(draft), submitted?.revision ?? state.revision)) setEdit((current) => current === submitted ? undefined : current)
   }
   return <section onFocusCapture={(event) => { focused.current = event.target }} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focused.current = null }} aria-label={t('updates.inbox.title')} className="min-w-0 border-y border-slate-200 py-4">
     <p className="mb-4 text-app-meta font-semibold text-slate-600">{t('updates.inbox.inactive')}</p>

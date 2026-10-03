@@ -7,6 +7,7 @@ import { createTranslator } from '../../../shared/i18n/i18n'
 import { updateFeedFixture } from '../fixtures'
 import { DigestPanel } from './DigestPanel'
 
+/** Configures preview stories with session-free fixtures and explicit interaction callbacks. */
 const meta = {
   title: 'Application/Updates/Digest preview', component: DigestPanel,
   parameters: { layout: 'padded' },

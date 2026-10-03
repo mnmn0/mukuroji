@@ -5,6 +5,7 @@ import type { UpdateFeedDigestPreferences, UpdateFeedDigestState } from '@mukuro
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { InboxDigestPanel } from './InboxDigestPanel'
 
+/** Configures consent stories with session-free fixtures and explicit interaction callbacks. */
 const meta = {
   title: 'Application/Updates/Inbox digest settings', component: InboxDigestPanel,
   parameters: { layout: 'padded' },
