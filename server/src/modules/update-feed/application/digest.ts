@@ -85,14 +85,16 @@ export async function replaceDigestPreferences(store: UpdateFeedDigestStore, wor
  * @param store - Caller-bound atomic digest persistence.
  * @param workspaceId - Authenticated Workspace.
  * @param now - Server clock; injectable for deterministic tests.
+ * @param scheduledAt - Trusted logical scheduler time; leases still use the current clock.
  * @returns Ephemeral content which is never persisted or sent.
  */
-export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readState: UpdateFeedReadStateStore, store: UpdateFeedDigestStore, workspaceId: string, now = Date.now()): Promise<UpdateFeedDigestPreview> {
+export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readState: UpdateFeedReadStateStore, store: UpdateFeedDigestStore, workspaceId: string, now = Date.now(), scheduledAt = now): Promise<UpdateFeedDigestPreview> {
   if (!integer(now) || now > 8_640_000_000_000_000) throw invalid()
+  if (!integer(scheduledAt) || scheduledAt > now) throw invalid()
   const memberKey = reader.memberKey
   let state = await store.get(workspaceId, memberKey)
   if (!state.preferences.enabled) throw new PlanningError(409, 'UpdateFeedDigestDisabled', 'Enable manual digest previews first.')
-  const start = new Date(now)
+  const start = new Date(scheduledAt)
   start.setUTCHours(0, 0, 0, 0)
   if (state.preferences.frequency === 'weekly') start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
   const id = `${state.preferences.frequency}:${start.toISOString().slice(0, 10)}`
