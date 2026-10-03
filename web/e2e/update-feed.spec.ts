@@ -870,6 +870,8 @@ for (const mode of ['visible', 'pending', 'draft']) test(`read-state changes inv
 
 test('guests have no mutation controls and permission denial offers no reload loop', async ({ page }) => {
   const state = await mockFeed(page, true)
+  state.digest.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['private-guest-selection'] } }
+  state.inbox.preferences = structuredClone(state.digest.preferences)
   await page.goto('/updates')
   await expect(page.getByTestId('update-feed-row')).toHaveCount(3)
   await expect(page.getByText('Guest access is read-only.')).toBeVisible()
@@ -884,6 +886,8 @@ test('guests have no mutation controls and permission denial offers no reload lo
   await expect(inbox.getByText('Guest access is read-only.')).toBeVisible()
   await expect(inbox.locator('form')).toHaveCount(0)
   await expect(inbox.getByRole('button', { name: /Save Inbox settings|Clear custom selection/ })).toHaveCount(0)
+  await expect(digest).not.toContainText('private-guest-selection')
+  await expect(inbox).not.toContainText('private-guest-selection')
   await page.screenshot({ path: '/tmp/issue241-feed-guest.png', fullPage: true })
   state.forbidden = true
   await page.getByLabel('Feed', { exact: true }).selectOption('recent')
