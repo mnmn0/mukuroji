@@ -96,6 +96,7 @@ function DigestForm({ state, savedFeeds, savedStatus, pending, canEdit, failure,
   const valid = validDigestSelection(draft, savedStatus && savedStatus !== 'ready' ? undefined : savedFeeds)
   const stale = dirty && edit !== undefined && edit.revision !== state.revision
   const unavailable = pending || !canEdit || failure === 'denied'
+  const canSave = !unavailable && !stale && failure !== 'conflict' && dirty && valid
   /** Discards stale output immediately when the visible settings change. */
   const change = (next: UpdateFeedDigestPreferences) => { setEdit({ revision: dirty && edit ? edit.revision : state.revision, preferences: next }); onDismiss() }
   // DOM focus must wait for React to commit the re-enabled fieldset.
@@ -115,7 +116,7 @@ function DigestForm({ state, savedFeeds, savedStatus, pending, canEdit, failure,
     if (success) setEdit((current) => current === submitted ? undefined : current)
     return success
   }
-  return <form ref={form} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) restoreActionFocus.current = false }} onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid && !stale) void perform(save) }}>
+  return <form ref={form} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) restoreActionFocus.current = false }} onSubmit={(event) => { event.preventDefault(); if (canSave) void perform(save) }}>
     {stale && failure !== 'conflict' ? <div role="alert"><p>{t('updates.digest.conflict')}</p><button type="button" className={actionClass} disabled={pending} onClick={propsReload}>{t('workspace.error.retry')}</button></div> : null}
     <fieldset disabled={unavailable} className="min-w-0">
       <legend className="text-sm font-semibold text-slate-800">{t('updates.digest.settings')}</legend>
@@ -133,7 +134,7 @@ function DigestForm({ state, savedFeeds, savedStatus, pending, canEdit, failure,
       <DigestSavedFeedSelection collection={savedFeeds} status={savedStatus} preferences={draft} t={t} onChange={change} />
       {!valid && !(savedStatus === 'loading' && draft.savedFeeds) ? <p role="alert" className="mt-2 text-app-meta text-amber-800">{t('updates.digest.chooseView')}</p> : null}
       <div className="mt-4 flex flex-wrap gap-3">
-        <button type="submit" className={actionClass} disabled={unavailable || stale || !dirty || !valid}>{t('updates.digest.save')}</button>
+        <button type="submit" className={actionClass} disabled={!canSave}>{t('updates.digest.save')}</button>
         <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !valid || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
       </div>
       {dirty ? <p role="status" className="mt-2 text-app-meta text-slate-600">{t('updates.digest.unsaved')}</p> : null}

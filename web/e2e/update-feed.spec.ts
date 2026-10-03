@@ -199,6 +199,8 @@ for (const inbox of [false, true]) test(`${inbox ? 'Inbox' : 'preview'} custom d
 
 for (const conflict of [false, true]) test(`Inbox keyboard save restores owned focus with conflict=${conflict}`, async ({ page }) => {
   const state = await mockFeed(page)
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => { if (route.request().method() === 'PUT') puts++; await route.fallback() })
   state.inbox.preferences.enabled = true
   state.digestConflict = conflict
   await page.goto('/updates')
@@ -210,7 +212,24 @@ for (const conflict of [false, true]) test(`Inbox keyboard save restores owned f
   await page.keyboard.press('Enter')
   await expect(summary).toBeFocused()
   await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
-  if (conflict) await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  if (conflict) {
+    await expect(panel.getByRole('alert')).toContainText('Settings changed')
+    const save = panel.getByRole('button', { name: 'Save Inbox settings' })
+    await save.evaluate((button) => button.click())
+    await panel.locator('form').evaluate((form) => { form.tabIndex = -1; form.focus() })
+    await page.keyboard.press('Enter')
+    await panel.locator('form').evaluate((form) => form.requestSubmit())
+    await expect(panel.getByRole('alert')).toContainText('Settings changed')
+    await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).not.toBeChecked()
+    expect(puts).toBe(1)
+    state.digestConflict = false
+    await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+    await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).toBeChecked()
+    await panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).uncheck()
+    await save.click()
+    await expect.poll(() => puts).toBe(2)
+    await expect(save).toBeDisabled()
+  }
 })
 
 test('saved Inbox draft follows a later external preference change without false conflict', async ({ page }) => {
@@ -592,7 +611,8 @@ test('save conflict and focus refresh preserve unsaved cadence until explicit re
   const state = await mockFeed(page)
   await page.clock.install()
   let reads = 0
-  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'GET') reads++; await route.fallback() })
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'GET') reads++; if (route.request().method() === 'PUT') puts++; await route.fallback() })
   state.digest.preferences.enabled = true
   await page.goto('/updates')
   const summary = page.locator('summary', { hasText: 'Digest preview' })
@@ -603,6 +623,14 @@ test('save conflict and focus refresh preserve unsaved cadence until explicit re
   state.digest.revision += 1
   await panel.getByRole('button', { name: 'Save preview settings' }).click()
   await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  const save = panel.getByRole('button', { name: 'Save preview settings' })
+  await expect(save).toBeDisabled()
+  await save.evaluate((button) => button.click())
+  await panel.getByLabel('Recent', { exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await panel.locator('form').evaluate((form) => form.requestSubmit())
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  expect(puts).toBe(1)
   const previousReads = reads
   await page.clock.fastForward(6_001)
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
@@ -613,6 +641,11 @@ test('save conflict and focus refresh preserve unsaved cadence until explicit re
   await page.keyboard.press('Enter')
   await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
   await expect(summary).toBeFocused()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await expect(save).toBeEnabled()
+  await save.click()
+  await expect.poll(() => puts).toBe(2)
+  await expect(save).toBeDisabled()
 })
 
 test('preview expiry restores only focus inside disappearing content', async ({ page }) => {
