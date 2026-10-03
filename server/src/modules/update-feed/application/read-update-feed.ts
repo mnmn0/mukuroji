@@ -5,9 +5,15 @@ import { PlanningError } from '../../planning'
 export interface UpdateFeedReader {
   /** Current member identity, resolved by the server. */
   memberKey: string
-  /** Reads the bounded Planning graph, never update history or annotations. */
+  /** Reads the bounded Planning graph, never update history or annotations.
+   * @returns Current bounded graph for the authenticated Workspace.
+   */
   readSnapshot(): Promise<PlanningSnapshot>
-  /** Returns the authorized target with unreadable latest content removed, or undefined; infrastructure errors propagate. */
+  /** Authorizes a current target and redacts inaccessible latest content; infrastructure errors propagate.
+   * @param target - Candidate latest-target projection.
+   * @param snapshot - Current bounded graph for resolving Initiative scope.
+   * @returns Authorized target with unreadable content removed, or undefined for a denied target.
+   */
   authorizeTarget(target: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot): Promise<PlanningUpdateTargetSummary | undefined>
 }
 

@@ -26144,6 +26144,18 @@ async function requirePlanningUpdateTeamPermission(
   minimumRole: ProjectRole,
   readContext?: TeamPermissionReadContext,
 ): Promise<void> {
+  const directPlanningRead = minimumRole === 'viewer' && (
+    principal.enterpriseTeamAccesses?.some((access) => access.teamId === teamId && access.permissions.includes('planning.read')) ||
+    principal.enterpriseRouteAuthorizedAtResource && principal.enterprisePermissions?.includes('planning.read') && (
+      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+      principal.enterpriseAuthorizationResource?.kind === 'team' && principal.enterpriseAuthorizationResource.targetId === teamId
+    )
+  )
+  if (directPlanningRead) {
+    const directory = readContext?.directory ?? await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+    if (!directory.teams.some((team) => team.id === teamId)) throw new PlanningError(404, 'TeamNotFound', 'The Planning Team was not found.')
+    return
+  }
   const context = await requireTeamPermission(principal, teamId, minimumRole, readContext)
   if (principal.isSystemAdmin || context.directTeamGrant || context.projectAccesses === undefined) return
   const hasQualifiedAccess = context.team.projects.some((project) =>

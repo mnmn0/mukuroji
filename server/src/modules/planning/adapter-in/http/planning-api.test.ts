@@ -20,6 +20,7 @@ import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/e
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
+  EnterpriseCustomRole,
   EnterpriseRoleAssignment,
   PlanningMutationResponse,
   PlanningSnapshot,
@@ -306,11 +307,20 @@ test('preserves direct Enterprise Team access for an Initiative in an empty Team
     principalKind: 'member', principalId: 'demo@example.com', roleId: 'team:member',
     scope: { workspaceId: 'user#demo@example.com', kind: 'team', targetId: 'core-team' }, source: 'direct',
   }]
-  identity.getSnapshot = async (workspaceId) => ({ ...await readIdentity(workspaceId), roleAssignments: assignments })
+  const customRole: EnterpriseCustomRole = {
+    workspaceId: 'user#demo@example.com', roleId: 'custom:planning-reader', name: 'Planning reader',
+    permissions: ['planning.read'], guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (workspaceId) => ({ ...await readIdentity(workspaceId), roleAssignments: assignments, customRoles: [customRole] })
   setTestAppDependencies({ planning, enterpriseIdentity: identity })
   const granted = await planningApiRequest('/api/planning/update-feed?view=recent')
   expect(granted.status).toBe(200)
   expect(await granted.json()).toMatchObject({ total: 1, entries: [{ target, latestUpdate: { summary: 'Team report' } }] })
+  assignments = assignments.map((assignment) => ({ ...assignment, roleId: customRole.roleId }))
+  const customGranted = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(customGranted.status).toBe(200)
+  expect(await customGranted.json()).toMatchObject({ total: 1, entries: [{ target, latestUpdate: { summary: 'Team report' } }] })
   assignments = []
   const revoked = await planningApiRequest('/api/planning/update-feed?view=recent')
   expect(revoked.status).toBe(200)
