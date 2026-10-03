@@ -24,6 +24,7 @@ export const updatesMessages = {
   "updates.digest.selectionLimit": "標準とカスタムを合わせて6件まで選択できます。",
   "updates.digest.selectionChanged": "保存したフィードが変更されたか、利用できません。選択を解除して選び直してください。",
   "updates.digest.savedUnavailable": "保存したフィードを利用できません。",
+  "updates.digest.savedLoading": "保存したフィードを読み込み中…",
   "updates.digest.clearSaved": "カスタム選択を解除",
   "updates.digest.save": "プレビュー設定を保存",
   "updates.digest.generate": "プレビューを生成",

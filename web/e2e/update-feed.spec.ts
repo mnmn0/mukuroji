@@ -79,6 +79,51 @@ async function mockFeed(page: Page, guest = false) {
   return state
 }
 
+for (const outcome of ['success', 'deleted', '503', '401']) test(`pending custom definitions preserve selection and withdrawal before ${outcome}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.saved = { revision: 1, feeds: [{ id: 'private-custom-id', name: 'Current custom source', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }
+  state.digest.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['private-custom-id'] } }
+  state.inbox.preferences = structuredClone(state.digest.preferences)
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/planning/update-feed/saved', async (route) => {
+    await gate
+    if (outcome === '503' || outcome === '401') return route.fulfill({ status: Number(outcome), json: {} })
+    await route.fulfill({ json: outcome === 'deleted' ? { revision: 2, feeds: [] } : state.saved })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const preview = page.getByRole('region', { name: 'Digest preview', exact: true })
+  const inbox = page.getByRole('region', { name: 'Inbox digest settings' })
+  for (const panel of [preview, inbox]) {
+    await expect(panel.getByText('Loading saved feeds…')).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Clear custom selection' })).toHaveCount(0)
+    await expect(panel.getByRole('alert')).toHaveCount(0)
+    await expect(panel).not.toContainText('private-custom-id')
+  }
+  await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  await inbox.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).uncheck()
+  await inbox.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect.poll(() => state.inbox.preferences.enabled).toBe(false)
+  expect(state.inbox.preferences.savedFeeds?.ids).toEqual(['private-custom-id'])
+  release()
+  if (outcome === '401') {
+    await expect(preview).toHaveCount(0)
+    await expect(inbox).toHaveCount(0)
+  } else {
+    for (const panel of [preview, inbox]) {
+      await expect(panel.getByText('Loading saved feeds…')).toHaveCount(0)
+      await expect(panel.getByRole('button', { name: 'Clear custom selection' })).toBeVisible()
+      if (outcome === 'success') await expect(panel.getByLabel('Current custom source', { exact: true })).toBeChecked()
+      else await expect(panel).not.toContainText('Current custom source')
+    }
+    if (outcome === 'success') await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+    else await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  }
+  expect(state.digestRequests).toBe(0)
+})
+
 for (const failure of ['503', 'abort']) test(`saved lookup ${failure} still permits keyboard consent withdrawal without exposing custom IDs`, async ({ page }) => {
   const state = await mockFeed(page)
   state.inbox.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['private-custom-id'] } }

@@ -8,7 +8,7 @@ import { InboxDigestPanel } from './InboxDigestPanel'
 const meta = {
   title: 'Application/Updates/Inbox digest settings', component: InboxDigestPanel,
   parameters: { layout: 'padded' },
-  args: { state: { revision: 0, preferences: { enabled: false, frequency: 'daily', views: ['for-me'] }, history: [] }, loading: false, pending: false, canEdit: true, t: createTranslator('en'), onSave: fn(async () => true), onReload: fn() },
+  args: { savedFeeds: { revision: 0, feeds: [] }, state: { revision: 0, preferences: { enabled: false, frequency: 'daily', views: ['for-me'] }, history: [] }, loading: false, pending: false, canEdit: true, t: createTranslator('en'), onSave: fn(async () => true), onReload: fn() },
 } satisfies Meta<typeof InboxDigestPanel>
 export default meta
 /** Consent variants use the production presentation contract. */
@@ -29,6 +29,8 @@ export const Japanese: Story = { args: { t: createTranslator('ja') } }
 export const CustomFeeds: Story = { args: { savedFeeds: { revision: 2, feeds: [{ id: 'mine', name: 'Portfolio risks I follow', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }, state: { revision: 3, preferences: { enabled: true, frequency: 'weekly', views: [], savedFeeds: { revision: 2, ids: ['mine'] } }, history: [] } } }
 /** Changed or deleted definitions require explicit reselection without leaking old IDs. */
 export const ChangedSelection: Story = { args: { ...CustomFeeds.args, savedFeeds: { revision: 3, feeds: [] } } }
+/** A pending definition read does not offer a destructive reset of cached selections. */
+export const SavedLoading: Story = { args: { ...CustomFeeds.args, savedStatus: 'loading' } }
 /** Controls an acknowledgement separately from subsequent local edits. */
 function SaveDraftHarness() {
   const [state, setState] = useState<UpdateFeedDigestState>(meta.args.state)

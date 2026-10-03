@@ -17,3 +17,13 @@ test('unavailable/deleted saved selections expose no remembered ID or private la
   }
   expect(validDigestSelection({ enabled: true, frequency: 'daily', views: ['recent'] })).toBe(true)
 })
+
+test('pending saved definitions do not assert an error or permit clearing a retained selection', () => {
+  const preferences: UpdateFeedDigestPreferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['sensitive-id'] } }
+  const html = renderToStaticMarkup(<DigestSavedFeedSelection status="loading" preferences={preferences} t={createTranslator('en')} onChange={() => undefined} />)
+  expect(html).toContain('Loading saved feeds')
+  expect(html).toContain('role="status"')
+  expect(html).not.toContain('role="alert"')
+  expect(html).not.toContain('Clear custom selection')
+  expect(html).not.toContain('sensitive-id')
+})

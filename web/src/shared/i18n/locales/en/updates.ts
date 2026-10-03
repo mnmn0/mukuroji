@@ -24,6 +24,7 @@ export const updatesMessages = {
   "updates.digest.selectionLimit": "Up to six standard and custom feeds combined.",
   "updates.digest.selectionChanged": "Saved feeds changed or are unavailable. Clear this selection and choose again.",
   "updates.digest.savedUnavailable": "Saved feeds are unavailable.",
+  "updates.digest.savedLoading": "Loading saved feeds…",
   "updates.digest.clearSaved": "Clear custom selection",
   "updates.digest.save": "Save preview settings",
   "updates.digest.generate": "Generate preview",

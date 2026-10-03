@@ -10,6 +10,8 @@ import { DigestSavedFeedSelection } from './DigestSavedFeedSelection'
 type DigestPanelProps = {
   /** Current session-owned saved definitions; absent after lookup failure. */
   savedFeeds?: import('@mukuroji/contracts').SavedUpdateFeeds
+  /** Current saved definition query readiness. */
+  savedStatus?: 'loading' | 'ready' | 'error'
   /** Explicit reload discards an unsaved draft. */
   draftReset?: number
   /** Stable focus destination when a focused control disappears. */
@@ -67,7 +69,7 @@ export function DigestPanel(props: DigestPanelProps) {
         </li>)}
       </ul> : <p className="mt-2 text-app-meta text-slate-500">{t('updates.digest.noHistory')}</p>}
     </> : null}
-    {state && preview && !failure && validDigestSelection(state.preferences, props.savedFeeds) ? <div className="mt-6" aria-label={t('updates.digest.result')}>
+    {state && preview && !failure && validDigestSelection(state.preferences, props.savedStatus && props.savedStatus !== 'ready' ? undefined : props.savedFeeds) ? <div className="mt-6" aria-label={t('updates.digest.result')}>
       <h3 className="text-sm font-semibold text-slate-800">{t('updates.digest.result')}</h3>
       <p role="status" className="mt-1 text-app-meta text-slate-600">{t(preview.replay ? 'updates.digest.replay' : 'updates.digest.generated')}</p>
       {preview.entries.length === 0 ? <p className="py-5 text-app-body text-slate-500">{t('updates.digest.empty')}</p> : <ul className="mt-2 divide-y divide-slate-200">
@@ -83,7 +85,7 @@ export function DigestPanel(props: DigestPanelProps) {
 }
 
 /** Owns an unsaved draft scoped to its base revision while preserving keyboard focus. */
-function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, onGenerate, onDismiss, restoreFocus, onReload: propsReload }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
+function DigestForm({ state, savedFeeds, savedStatus, pending, canEdit, failure, t, onSave, onGenerate, onDismiss, restoreFocus, onReload: propsReload }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
   const id = useId()
   const form = useRef<HTMLFormElement>(null)
   const generateButton = useRef<HTMLButtonElement>(null)
@@ -91,7 +93,7 @@ function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, o
   const [edit, setEdit] = useState<{ /** Revision at which editing began. */ revision: number; /** Unsaved preferences. */ preferences: UpdateFeedDigestPreferences }>()
   const draft = edit?.preferences ?? state.preferences
   const dirty = JSON.stringify(draft) !== JSON.stringify(state.preferences)
-  const valid = validDigestSelection(draft, savedFeeds)
+  const valid = validDigestSelection(draft, savedStatus && savedStatus !== 'ready' ? undefined : savedFeeds)
   const stale = dirty && edit !== undefined && edit.revision !== state.revision
   const unavailable = pending || !canEdit || failure === 'denied'
   /** Discards stale output immediately when the visible settings change. */
@@ -128,8 +130,8 @@ function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, o
           {updateFeedViews.map((view) => <label key={view} className="flex min-h-11 items-center gap-3 pr-3 text-app-body"><input type="checkbox" className="size-4 accent-teal-700" checked={draft.views.includes(view)} onChange={(event) => change({ ...draft, views: event.target.checked ? [...draft.views, view] : draft.views.filter((selected) => selected !== view) })} />{t(`updates.view.${view}`)}</label>)}
         </div></fieldset>
       </div>
-      <DigestSavedFeedSelection collection={savedFeeds} preferences={draft} t={t} onChange={change} />
-      {!valid ? <p role="alert" className="mt-2 text-app-meta text-amber-800">{t('updates.digest.chooseView')}</p> : null}
+      <DigestSavedFeedSelection collection={savedFeeds} status={savedStatus} preferences={draft} t={t} onChange={change} />
+      {!valid && !(savedStatus === 'loading' && draft.savedFeeds) ? <p role="alert" className="mt-2 text-app-meta text-amber-800">{t('updates.digest.chooseView')}</p> : null}
       <div className="mt-4 flex flex-wrap gap-3">
         <button type="submit" className={actionClass} disabled={unavailable || stale || !dirty || !valid}>{t('updates.digest.save')}</button>
         <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !valid || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>

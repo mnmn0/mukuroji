@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview, UpdateFeedDigestReceipt, UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError } from '../../planning'
-import { parseUpdateFeedQuery, readUpdateFeed, type UpdateFeedReader } from './read-update-feed'
+import { parseUpdateFeedQuery, readUpdateFeedProjection, selectUpdateFeedProjection, type UpdateFeedReader } from './read-update-feed'
 import { updateFeedReportKey, withUpdateFeedReadState, type UpdateFeedReadStateStore } from './read-state'
 import type { SavedUpdateFeedsStore } from './saved-feeds'
 
@@ -119,10 +119,11 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
     // A fresh projection is loaded for each attempt/replay; no historical report scan.
     const initialSnapshot = await reader.readSnapshot()
     const stableReader: UpdateFeedReader = { ...reader, readSnapshot: async () => initialSnapshot }
+    const projection = await readUpdateFeedProjection(stableReader)
     const entries = new Map<string, UpdateFeedDigestPreview['entries'][number]>()
     let truncated = false
     for (const source of [...state.preferences.views.map((view) => ({ view, filters: undefined })), ...saved]) {
-      const feed = await readUpdateFeed(stableReader, source.view, '100', source.filters)
+      const feed = await selectUpdateFeedProjection(projection, source.view, '100', source.filters)
       truncated ||= feed.truncated
       for (const entry of feed.entries) {
         if (!entry.latestUpdate) continue

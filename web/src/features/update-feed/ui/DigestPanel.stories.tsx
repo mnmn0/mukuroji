@@ -11,7 +11,7 @@ const meta = {
   title: 'Application/Updates/Digest preview', component: DigestPanel,
   parameters: { layout: 'padded' },
   decorators: [(Story) => <MemoryRouter><div className="mx-auto max-w-5xl"><Story /></div></MemoryRouter>],
-  args: { state: { revision: 1, preferences: { enabled: true, frequency: 'daily', views: ['for-me'] }, history: [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'fixture', leaseUntil: 0, count: 1 }] }, loading: false, pending: false, canEdit: true, t: createTranslator('en'), onSave: fn(async () => true), onGenerate: fn(async () => true), onReload: fn(), onDismiss: fn() },
+  args: { savedFeeds: { revision: 0, feeds: [] }, state: { revision: 1, preferences: { enabled: true, frequency: 'daily', views: ['for-me'] }, history: [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'fixture', leaseUntil: 0, count: 1 }] }, loading: false, pending: false, canEdit: true, t: createTranslator('en'), onSave: fn(async () => true), onGenerate: fn(async () => true), onReload: fn(), onDismiss: fn() },
 } satisfies Meta<typeof DigestPanel>
 export default meta
 /** Story variants use the production pure presentation contract. */
@@ -38,6 +38,8 @@ function SaveDraftHarness() {
 }
 /** A successful save clears only its own submitted draft, never subsequent edits. */
 export const SaveDraft: Story = { render: () => <SaveDraftHarness /> }
+/** Pending definitions suppress custom generation and premature clearing, not withdrawal. */
+export const SavedLoading: Story = { args: { savedStatus: 'loading', state: { ...meta.args.state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['mine'] } } } } }
 /** Permission loss suppresses cached content and settings. */
 export const Denied: Story = { args: { ...Preview.args, failure: 'denied', canEdit: false } }
 /** Conflict offers metadata reload without automatic generation. */
