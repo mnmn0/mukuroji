@@ -107,10 +107,10 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
     const entries = new Map<string, UpdateFeedDigestPreview['entries'][number]>()
     let truncated = false
     for (const view of state.preferences.views) {
-      const feed = await withUpdateFeedReadState(readState, workspaceId, memberKey, await readUpdateFeed(stableReader, view, '100'))
+      const feed = await readUpdateFeed(stableReader, view, '100')
       truncated ||= feed.truncated
       for (const entry of feed.entries) {
-        if (!entry.latestUpdate || entry.readState?.read) continue
+        if (!entry.latestUpdate) continue
         const key = updateFeedReportKey({ target: entry.target, version: entry.latestUpdate.version })
         if (!entries.has(key)) entries.set(key, entry)
       }

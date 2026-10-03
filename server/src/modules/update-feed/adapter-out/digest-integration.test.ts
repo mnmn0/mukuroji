@@ -67,6 +67,26 @@ test('final authorization and read-state checks drop access lost or read during 
   expect((await g.run()).entries).toHaveLength(0)
 })
 
+test('final read-state wins for both transitions after bounded overlapping view collection', async () => {
+  const f = await fixture(2)
+  const first = f.snapshot.updateTargets[0]!.target
+  const second = f.snapshot.updateTargets[1]!.target
+  await f.readState.set('w', 'reader', { target: first, version: 1, read: true, expectedRevision: 0 })
+  let reads = 0
+  f.reader.readSnapshot = async () => {
+    if (++reads === 2) {
+      await f.readState.set('w', 'reader', { target: first, version: 1, read: false, expectedRevision: 1 })
+      await f.readState.set('w', 'reader', { target: second, version: 1, read: true, expectedRevision: 0 })
+    }
+    return f.snapshot
+  }
+  const result = await f.run()
+  expect(reads).toBe(2)
+  expect(result.entries.map((entry) => entry.target)).toEqual([first])
+  expect(result.entries[0]?.readState?.read).toBe(false)
+  expect((await f.store.get('w', 'reader')).history[0]?.count).toBe(1)
+})
+
 test('claims fence concurrent generators and reclaim expired leases with bounded attempts', async () => {
   const f = await fixture()
   const state = await f.store.get('w', 'reader')
