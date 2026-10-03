@@ -1,5 +1,6 @@
 import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError } from '../../planning'
+import { TenantAdministrationError } from '../../tenant-administration'
 import { previewUpdateFeedDigest, type UpdateFeedDigestStore } from './digest'
 import type { UpdateFeedReader } from './read-update-feed'
 import type { UpdateFeedReadStateStore } from './read-state'
@@ -162,10 +163,11 @@ export type InboxDigestScheduleResult = {
  * @returns A stable bodyless terminal category, or undefined for retryable failures.
  */
 export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' | undefined {
+  if (error instanceof TenantAdministrationError && error.code === 'TenantAdministrationCorrupt') return 'corrupt-state'
   if (!(error instanceof PlanningError)) return undefined
   if (error.code === 'UpdateFeedDigestAttemptsExhausted') return 'exhausted'
   if (error.code === 'UpdateFeedDigestRecipientMismatch') return 'recipient-mismatch'
-  if (error.code === 'UpdateFeedDigestCorruptState') return 'corrupt-state'
+  if (error.code === 'UpdateFeedDigestCorruptState' || error.code === 'UpdateFeedReadStateCorrupt') return 'corrupt-state'
   if (error.code === 'UpdateFeedDigestStoragePermanent') return 'storage-permanent'
   if (error.code === 'UpdateFeedDigestInvalid') return 'invalid-input'
   return undefined

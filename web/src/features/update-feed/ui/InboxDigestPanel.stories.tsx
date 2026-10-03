@@ -31,6 +31,8 @@ export const CustomFeeds: Story = { args: { savedFeeds: { revision: 2, feeds: [{
 export const ChangedSelection: Story = { args: { ...CustomFeeds.args, savedFeeds: { revision: 3, feeds: [] } } }
 /** A pending definition read does not offer a destructive reset of cached selections. */
 export const SavedLoading: Story = { args: { ...CustomFeeds.args, savedStatus: 'loading' } }
+/** Read-only guests are not offered consent mutations. */
+export const Guest: Story = { args: { canEdit: false } }
 /** Controls an acknowledgement separately from subsequent local edits. */
 function SaveDraftHarness() {
   const [state, setState] = useState<UpdateFeedDigestState>(meta.args.state)

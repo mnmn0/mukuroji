@@ -42,6 +42,8 @@ export const SaveDraft: Story = { render: () => <SaveDraftHarness /> }
 export const SavedLoading: Story = { args: { savedStatus: 'loading', state: { ...meta.args.state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['mine'] } } } } }
 /** Permission loss suppresses cached content and settings. */
 export const Denied: Story = { args: { ...Preview.args, failure: 'denied', canEdit: false } }
+/** Guests can inspect receipts without mutation controls. */
+export const Guest: Story = { args: { canEdit: false } }
 /** Conflict offers metadata reload without automatic generation. */
 export const Conflict: Story = { args: { failure: 'conflict' } }
 /** Initial loading renders no stale metadata. */

@@ -7,11 +7,12 @@ import { setUpdateFeedReadState } from '../api/updateFeed'
  * @param token - Session bearer token.
  * @param refresh - Reloads the current authorized view.
  * @param guard - Shared authenticated-request error boundary.
- * @returns Serialized toggle action, pending state, and latest failure.
+ * @returns Serialized toggle action, successful-write revision, pending state, and latest failure.
  */
 export function useUpdateFeedReadState(token: string | undefined, refresh: () => Promise<unknown>, guard: <T>(request: Promise<T>) => Promise<T>) {
   const { mutate } = useSWRConfig()
   const [pending, setPending] = useState(false)
+  const [revision, setRevision] = useState(0)
   const [error, setError] = useState<unknown>()
   const busy = useRef(false)
   const active = useRef(true)
@@ -29,6 +30,7 @@ export function useUpdateFeedReadState(token: string | undefined, refresh: () =>
     setError(undefined)
     try {
       await setUpdateFeedReadState(token, { target: entry.target, version: latest.version, expectedRevision: state.revision, read: !state.read })
+      if (active.current) setRevision((value) => value + 1)
     } catch (failure) {
       if (active.current) {
         await guard(Promise.reject(failure)).catch(() => undefined)
@@ -43,5 +45,5 @@ export function useUpdateFeedReadState(token: string | undefined, refresh: () =>
       if (active.current) setPending(false)
     }
   }
-  return { toggle, pending, error }
+  return { toggle, pending, error, revision }
 }

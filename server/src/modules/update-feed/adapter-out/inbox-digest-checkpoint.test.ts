@@ -4,6 +4,7 @@ import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-s
 import { DynamoDbInboxDigestCheckpoints } from './inbox-digest-checkpoint'
 import { runInboxDigestWorker } from '../application/inbox-digest-worker'
 import { PlanningError } from '../../planning'
+import { TenantAdministrationError } from '../../tenant-administration'
 
 const start = Date.parse('2026-10-03T12:00:00Z')
 const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
@@ -146,14 +147,14 @@ test('worker persists bounded continuation before delivery and resumes after a c
   expect(seen).toBe(2)
 })
 
-for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure']) test(`worker bounds ${code} recovery to three attempts with backoff and quarantine`, async () => {
+for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure', 'UpdateFeedReadStateStorageFailure', 'TenantAdministrationUnavailable']) test(`worker bounds ${code} recovery to three attempts with backoff and quarantine`, async () => {
   const f = fixture()
   let clock = start
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
     async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient, recipient] } },
-    delivery: { async authorize() { calls++; throw new PlanningError(code === 'UpdateFeedDigestRetryable' ? 503 : 502, code, 'Unavailable') } },
+    delivery: { async authorize() { calls++; throw code === 'TenantAdministrationUnavailable' ? new TenantAdministrationError(503, code, 'Unavailable') : new PlanningError(code === 'UpdateFeedDigestRetryable' ? 503 : 502, code, 'Unavailable') } },
   }
   for (let attempt = 0; attempt < 3; attempt++) {
     expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 1, delivered: 0, failed: 1 })
@@ -167,14 +168,14 @@ for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure
   expect(calls).toBe(3)
 })
 
-for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorruptState', 'UpdateFeedDigestInvalid']) test(`worker quarantines ${code} on the first attempt instead of retrying`, async () => {
+for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorruptState', 'UpdateFeedReadStateCorrupt', 'TenantAdministrationCorrupt', 'UpdateFeedDigestInvalid']) test(`worker quarantines ${code} on the first attempt instead of retrying`, async () => {
   const f = fixture()
   let clock = start
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
     async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient] } },
-    delivery: { async authorize() { calls++; throw new PlanningError(502, code, 'Storage requires inspection') } },
+    delivery: { async authorize() { calls++; throw code === 'TenantAdministrationCorrupt' ? new TenantAdministrationError(502, code, 'Storage requires inspection') : new PlanningError(502, code, 'Storage requires inspection') } },
   }
   expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 1, delivered: 0, failed: 1 })
   expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
