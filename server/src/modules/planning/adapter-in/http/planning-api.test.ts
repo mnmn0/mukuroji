@@ -66,6 +66,26 @@ test('manual digest preferences and preview use authenticated identity and rejec
   expect((await planningApiRequest(`${path}/preview`, 'POST', {})).status).toBe(403)
 })
 
+test('both digest settings bind owned custom definitions and reject deleted selections without reflecting IDs', async () => {
+  configureFakeProjectClients(true)
+  const savedPath = '/api/planning/update-feed/saved'
+  const feed: SavedUpdateFeed = { id: 'private-custom-id', name: 'Personal filter', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }
+  expect((await planningApiRequest(savedPath, 'PUT', { expectedRevision: 0, feeds: [feed] })).status).toBe(200)
+  const preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: [feed.id] } }
+  for (const path of ['/api/planning/update-feed/digest', '/api/planning/update-feed/digest/inbox']) {
+    const saved = await planningApiRequest(path, 'PUT', { expectedRevision: 0, preferences, memberKey: 'attacker' })
+    expect(saved.status).toBe(200)
+    expect((await saved.json()).preferences).toEqual(preferences)
+  }
+  expect((await planningApiRequest('/api/planning/update-feed/digest/preview', 'POST', {})).status).toBe(200)
+  expect((await planningApiRequest(savedPath, 'PUT', { expectedRevision: 1, feeds: [] })).status).toBe(200)
+  const rejected = await planningApiRequest('/api/planning/update-feed/digest/preview', 'POST', {})
+  expect(rejected.status).toBe(409)
+  expect(await rejected.text()).not.toContain(feed.id)
+  expect((await planningApiRequest('/api/planning/update-feed/digest/inbox', 'PUT', { expectedRevision: 1, preferences })).status).toBe(409)
+  expect((await planningApiRequest('/api/planning/update-feed/digest/inbox', 'PUT', { expectedRevision: 1, preferences: { ...preferences, enabled: false } })).status).toBe(200)
+})
+
 test('Inbox consent defaults off, stays separate from previews, ignores client identity and uses CAS', async () => {
   configureFakeProjectClients(true)
   const path = '/api/planning/update-feed/digest/inbox'

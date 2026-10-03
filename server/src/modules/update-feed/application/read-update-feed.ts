@@ -3,6 +3,8 @@ import { PlanningError, type PlanningUpdateActivity } from '../../planning'
 
 /** Request-scoped ports bound to an authenticated Workspace principal. */
 export interface UpdateFeedReader {
+  /** Reads only this member's bounded saved collection for revision-pinned digest selection. */
+  readSavedFeeds?(): Promise<import('@mukuroji/contracts').SavedUpdateFeeds>
   /** Emits expanded reasons only for clients that explicitly support the newer response. */
   expandedSignals?: boolean
   /** Supplies a deterministic clock for expiring recent signals. */

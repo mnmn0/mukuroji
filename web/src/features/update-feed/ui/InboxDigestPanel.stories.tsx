@@ -23,3 +23,7 @@ export const Conflict: Story = { args: { failure: 'conflict' } }
 export const Loading: Story = { args: { state: undefined, loading: true } }
 /** Japanese copy wraps on narrow screens. */
 export const Japanese: Story = { args: { t: createTranslator('ja') } }
+/** Current personal definitions can be selected independently of standard views. */
+export const CustomFeeds: Story = { args: { savedFeeds: { revision: 2, feeds: [{ id: 'mine', name: 'Portfolio risks I follow', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }, state: { revision: 3, preferences: { enabled: true, frequency: 'weekly', views: [], savedFeeds: { revision: 2, ids: ['mine'] } }, history: [] } } }
+/** Changed or deleted definitions require explicit reselection without leaking old IDs. */
+export const ChangedSelection: Story = { args: { ...CustomFeeds.args, savedFeeds: { revision: 3, feeds: [] } } }

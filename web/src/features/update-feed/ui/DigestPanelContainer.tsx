@@ -3,6 +3,7 @@ import { UpdateFeedApiError } from '../api/updateFeed'
 import { useDigestPreview } from '../mutations/useDigestPreview'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { DigestPanel } from './DigestPanel'
+import { useSavedUpdateFeeds } from '../queries/useSavedUpdateFeeds'
 
 /** Session and permission inputs supplied by the owning Workspace page. */
 type DigestPanelContainerProps = {
@@ -34,7 +35,8 @@ export function DigestPanelContainer(props: DigestPanelContainerProps) {
 /** Connects safe presentation categories to the session-owned controller. */
 function DigestContent({ token, enabled, canEdit, locale, guard }: DigestPanelContainerProps) {
   const controller = useDigestPreview(token, enabled, locale, guard)
+  const saved = useSavedUpdateFeeds(token, enabled, guard)
   const error = controller.error
   const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
-  return <DigestPanel {...controller} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={controller.reload} onDismiss={controller.dismiss} />
+  return <DigestPanel {...controller} savedFeeds={saved.data} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={() => { controller.reload(); void saved.mutate().catch(() => undefined) }} onDismiss={controller.dismiss} />
 }

@@ -3,6 +3,7 @@ import { UpdateFeedApiError } from '../api/updateFeed'
 import { useInboxDigestSettings } from '../mutations/useInboxDigestSettings'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { InboxDigestPanel } from './InboxDigestPanel'
+import { useSavedUpdateFeeds } from '../queries/useSavedUpdateFeeds'
 
 /** Session-bound settings inputs. */
 type Props = {
@@ -24,7 +25,8 @@ export function InboxDigestPanelContainer(props: Props) {
 /** Maps transport failures into safe presentation categories. */
 function Content({ token, enabled, canEdit, locale, guard }: Props) {
   const controller = useInboxDigestSettings(token, enabled, guard)
+  const saved = useSavedUpdateFeeds(token, enabled, guard)
   const error = controller.error
   const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
-  return <InboxDigestPanel {...controller} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onReload={controller.reload} />
+  return <InboxDigestPanel {...controller} savedFeeds={saved.data} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onReload={() => { controller.reload(); void saved.mutate().catch(() => undefined) }} />
 }

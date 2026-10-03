@@ -5,8 +5,49 @@ import { InMemoryUpdateFeedDigestStore } from './digest-store'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { parseDigestPreferences, parseDigestState, previewUpdateFeedDigest, replaceDigestPreferences } from '../application/digest'
 import type { UpdateFeedReader } from '../application/read-update-feed'
+import { InMemorySavedUpdateFeedsStore } from './saved-feeds-store'
 
 const now = Date.parse('2026-10-03T12:00:00Z')
+
+test('custom digest sources resolve only owned current definitions, deduplicate and reauthorize', async () => {
+  const f = await fixture(60)
+  const definitions = new InMemorySavedUpdateFeedsStore()
+  const filters = { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] }
+  await definitions.replace('w', 'reader', { expectedRevision: 0, feeds: [{ id: 'mine', name: 'Private selection name', view: 'recent', filters }] })
+  let reads = 0
+  f.reader.readSavedFeeds = () => { reads++; return definitions.get('w', 'reader') }
+  await replaceDigestPreferences(f.store, 'w', 'reader', { expectedRevision: 1, preferences: { enabled: true, frequency: 'daily', views: ['recent'], savedFeeds: { revision: 1, ids: ['mine'] } } }, definitions)
+  const result = await f.run()
+  expect(reads).toBe(2)
+  expect(result.entries).toHaveLength(50)
+  expect(result.truncated).toBe(true)
+  expect(JSON.stringify(await f.store.get('w', 'reader'))).not.toContain('Private selection name')
+  expect(JSON.stringify(result)).not.toContain('Private selection name')
+  f.reader.authorizeTarget = async () => undefined
+  expect((await f.run()).entries).toHaveLength(0)
+  await definitions.replace('w', 'reader', { expectedRevision: 1, feeds: [] })
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  await expect(replaceDigestPreferences(f.store, 'w', 'other', { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['mine'] } } }, definitions)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+})
+
+test('saved filters constrain custom-only digests and changing definitions aborts generation', async () => {
+  const f = await fixture(2)
+  const definitions = new InMemorySavedUpdateFeedsStore()
+  const feeds = [{ id: 'mine', name: 'One project', view: 'recent' as const, filters: { teamIds: [], projects: [{ teamId: 'team', projectId: 'project-0' }], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }]
+  await definitions.replace('w', 'reader', { expectedRevision: 0, feeds })
+  f.reader.readSavedFeeds = () => definitions.get('w', 'reader')
+  await replaceDigestPreferences(f.store, 'w', 'reader', { expectedRevision: 1, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['mine'] } } }, definitions)
+  expect((await f.run()).entries.map((entry) => entry.target)).toEqual([{ type: 'project', teamId: 'team', projectId: 'project-0' }])
+  let reads = 0
+  f.reader.readSnapshot = async () => {
+    if (++reads === 2) await definitions.replace('w', 'reader', { expectedRevision: 1, feeds: [{ ...feeds[0]!, name: 'Changed' }] })
+    return f.snapshot
+  }
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect(parseDigestPreferences({ enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 2, ids: ['mine'] } }).savedFeeds?.revision).toBe(2)
+  expect(() => parseDigestPreferences({ enabled: true, frequency: 'daily', views: ['recent'], savedFeeds: { revision: 1, ids: ['mine', 'mine'] } })).toThrow()
+  expect(() => parseDigestPreferences({ enabled: true, frequency: 'daily', views: ['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue'], savedFeeds: { revision: 1, ids: ['mine'] } })).toThrow()
+})
 
 /** Creates canonical reports and isolated personal persistence with no delivery dependency. */
 async function fixture(count = 1) {

@@ -79,6 +79,39 @@ async function mockFeed(page: Page, guest = false) {
   return state
 }
 
+for (const inbox of [false, true]) test(`${inbox ? 'Inbox' : 'preview'} custom digest selection pins revision and hides deleted selections`, async ({ page }, testInfo) => {
+  const state = await mockFeed(page)
+  state.saved = { revision: 1, feeds: [{ id: 'private-selection-id', name: 'My portfolio risks', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }
+  await page.goto('/updates')
+  const title = inbox ? 'Inbox digest settings' : 'Digest preview'
+  await page.locator('summary', { hasText: title }).click()
+  const panel = page.getByRole('region', { name: title, exact: true })
+  await panel.getByLabel('My portfolio risks', { exact: true }).check()
+  await panel.getByLabel('For me', { exact: true }).uncheck()
+  await panel.getByLabel(inbox ? 'Receive update digests in Inbox when delivery becomes available' : 'Enable manual previews').check()
+  const save = panel.getByRole('button', { name: inbox ? 'Save Inbox settings' : 'Save preview settings' })
+  await save.click()
+  await expect(save).toBeDisabled()
+  expect((inbox ? state.inbox : state.digest).preferences).toMatchObject({ views: [], savedFeeds: { revision: 1, ids: ['private-selection-id'] } })
+  expect(state.digestRequests).toBe(0)
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('custom-digest-mobile.png'), fullPage: true })
+  state.saved = { revision: 2, feeds: [] }
+  await page.reload()
+  await page.locator('summary', { hasText: title }).click()
+  await expect(panel.getByText('Saved feeds changed or are unavailable. Clear this selection and choose again.')).toBeVisible()
+  await expect(panel).not.toContainText('private-selection-id')
+  await expect(panel).not.toContainText('My portfolio risks')
+  await expect(save).toBeDisabled()
+  await panel.getByRole('button', { name: 'Clear custom selection' }).click()
+  await panel.getByLabel('Recent', { exact: true }).check()
+  await save.click()
+  await expect(save).toBeDisabled()
+  expect((inbox ? state.inbox : state.digest).preferences.savedFeeds).toBeUndefined()
+  expect(state.digestRequests).toBe(0)
+})
+
 test('Inbox consent is lazy, off by default, independent from previews and retained after reload', async ({ page }, testInfo) => {
   const state = await mockFeed(page)
   await page.goto('/updates')
@@ -90,11 +123,11 @@ test('Inbox consent is lazy, off by default, independent from previews and retai
   const panel = page.getByRole('region', { name: 'Inbox digest settings' })
   const consent = panel.getByLabel('Receive update digests in Inbox when delivery becomes available')
   await expect(consent).not.toBeChecked()
-  await expect(panel.getByText(/Automatic delivery is not active yet/)).toBeVisible()
+  await expect(panel.getByText(/Automatic delivery also requires operator activation/)).toBeVisible()
   await consent.check()
   await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
   await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
-  await expect(panel.getByText('Delivery preference saved. Automatic delivery is not active.')).toBeVisible()
+  await expect(panel.getByText('Delivery preference saved. This does not activate automatic delivery.')).toBeVisible()
   expect(state.digest.preferences.enabled).toBe(false)
   expect(state.digestRequests).toBe(0)
   await page.reload()
