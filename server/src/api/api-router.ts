@@ -579,7 +579,7 @@ import {
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
-import { previewUpdateFeedDigest, replaceDigestPreferences, readUpdateFeedFilterOptions, resolveUpdateFeedFilterScope, parseSavedUpdateFeeds, parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReader } from '../modules/update-feed'
+import { previewUpdateFeedDigest, replaceDigestPreferences, readUpdateFeedFilterOptions, resolveUpdateFeedFilterScope, parseSavedUpdateFeeds, parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type InboxDigestDependencies, type InboxDigestStore, type InboxDigestRecipient, type UpdateFeedReader } from '../modules/update-feed'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
@@ -40410,6 +40410,36 @@ async function resolveDeveloperManagementPrincipal(
     subjectUserId: principal.userId,
     scopes: [],
   }, requirement)
+}
+
+/** Reuses current background-member and Feed authorization without constructing HTTP requests.
+ * @param bindStore - Composition-owned durable store with current caller/tenant fences.
+ * @param tenantIsActive - Current tenant lifecycle check; errors propagate.
+ * @param locale - Language resolved by worker configuration.
+ * @returns Fresh authorization per candidate, bound to the surrounding dependency context.
+ */
+export function createInboxDigestRecipientAuthorization(
+  bindStore: (recipient: InboxDigestRecipient, checks: readonly PlanningCallerAuthorizationConditionCheck[]) => InboxDigestStore,
+  tenantIsActive: (workspaceId: string) => Promise<boolean>,
+  locale: Locale = 'ja',
+): InboxDigestDependencies {
+  return { async authorize(recipient) {
+    if (!await tenantIsActive(recipient.workspaceId)) return undefined
+    const authorizationRevision = await workItemDependencies.planning.getAuthorizationRevision(recipient.workspaceId)
+    try {
+      const principal = await resolveDeveloperManagementPrincipal({
+        workspaceId: recipient.workspaceId, userId: recipient.memberKey,
+        capabilities: { canManageCredentials: false, canManageWebhooks: false, canManageIntegrations: false, canImport: false, canExport: false },
+      }, { permission: 'planning.read', evaluateProjectScopes: true })
+      if (principal.workspaceRole === 'guest' || principal.directoryId !== recipient.workspaceId || principal.userKey !== recipient.memberKey) return undefined
+      const reader = await createPlanningUpdateFeedReader(principal, locale, true)
+      const store = bindStore(recipient, createPlanningCallerAuthorizationConditionChecks(principal))
+      return { recipient, authorizationRevision, reader, readState: workItemDependencies.updateFeedReadState, store }
+    } catch (error) {
+      if (isPlanningVisibilityAuthorizationError(error)) return undefined
+      throw error
+    }
+  } }
 }
 
 /**
