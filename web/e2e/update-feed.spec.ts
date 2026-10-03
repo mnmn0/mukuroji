@@ -80,6 +80,40 @@ async function mockFeed(page: Page, guest = false, expiresAt?: number) {
   return state
 }
 
+for (const action of ['save-enabled', 'save-disabled', 'error']) for (const outside of [false, true]) test(`inactive Inbox action ${action} restores focus on return with outside focus ${outside}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.inbox.preferences.enabled = true
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    waiting = true
+    await gate
+    if (action === 'error') return route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+    return route.fallback()
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  if (action === 'save-disabled') await panel.getByLabel('Receive update digests in Inbox').uncheck()
+  else await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => waiting).toBe(true)
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur')) })
+  release()
+  if (action === 'error') await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  else await expect.poll(() => state.inbox.revision).toBe(1)
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  await expect(summary).not.toBeFocused()
+  const other = page.getByLabel('Feed', { exact: true })
+  if (outside) await other.focus()
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true }); window.dispatchEvent(new Event('focus')) })
+  await expect(outside ? other : summary).toBeFocused()
+})
+
 for (const conflict of [false, true]) test(`Inbox keyboard save restores owned focus with conflict=${conflict}`, async ({ page }) => {
   const state = await mockFeed(page)
   let puts = 0
