@@ -62,6 +62,10 @@ export function parseDigestState(value: unknown): UpdateFeedDigestState {
   const history: UpdateFeedDigestReceipt[] = value.history.map((row: unknown) => {
     if (!record(row) || typeof row.id !== 'string' || !/^(daily|weekly):\d{4}-\d{2}-\d{2}$/.test(row.id) || !['pending', 'completed', 'failed'].includes(String(row.status)) || !integer(row.attempts) || row.attempts < 1 || row.attempts > 3 || typeof row.token !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(row.token) || !integer(row.leaseUntil) || !integer(row.count) || row.count > 50) throw invalid()
     if (row.status !== 'pending' && row.status !== 'completed' && row.status !== 'failed') throw invalid()
+    const date = row.id.slice(row.id.indexOf(':') + 1)
+    const timestamp = Date.parse(`${date}T00:00:00.000Z`)
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== date) throw invalid()
+    if (row.id.startsWith('weekly:') && new Date(timestamp).getUTCDay() !== 1) throw invalid()
     if (row.startedAt !== undefined && (!integer(row.startedAt) || row.startedAt > 8_640_000_000_000_000)) throw invalid()
     return { id: row.id, status: row.status, attempts: row.attempts, token: row.token, leaseUntil: row.leaseUntil, count: row.count, ...(row.startedAt === undefined ? {} : { startedAt: row.startedAt }) }
   })

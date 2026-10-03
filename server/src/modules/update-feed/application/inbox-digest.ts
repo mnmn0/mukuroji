@@ -119,7 +119,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   }
   const reader: UpdateFeedReader = { ...context.reader, readSnapshot: async () => {
     const snapshot = await context.reader.readSnapshot()
-    if (snapshot.revision !== context.authorizationRevision) throw new Error('Digest authorization changed')
+    if (snapshot.revision !== context.authorizationRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest authorization changed')
     return snapshot
   } }
   const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now)
@@ -167,7 +167,7 @@ export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrup
   if (!(error instanceof PlanningError)) return undefined
   if (error.code === 'UpdateFeedDigestAttemptsExhausted') return 'exhausted'
   if (error.code === 'UpdateFeedDigestRecipientMismatch') return 'recipient-mismatch'
-  if (error.code === 'UpdateFeedDigestCorruptState' || error.code === 'UpdateFeedReadStateCorrupt') return 'corrupt-state'
+  if (error.code === 'UpdateFeedDigestCorruptState' || error.code === 'UpdateFeedReadStateCorrupt' || error.code === 'UpdateFeedDuplicateTarget') return 'corrupt-state'
   if (error.code === 'UpdateFeedDigestStoragePermanent') return 'storage-permanent'
   if (error.code === 'UpdateFeedDigestInvalid') return 'invalid-input'
   return undefined

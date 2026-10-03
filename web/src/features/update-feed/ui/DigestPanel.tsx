@@ -112,11 +112,19 @@ function DigestForm({ state, savedFeeds, savedStatus, pending, canEdit, failure,
   const change = (next: UpdateFeedDigestPreferences) => { setEdit(sameDigestPreferences(next, state.preferences) ? undefined : { revision: dirty && edit ? edit.revision : state.revision, preferences: normalizeDigestPreferences(next) }); onDismiss() }
   // DOM focus must wait for React to commit the re-enabled fieldset.
   useEffect(() => {
-    if (pending || !restoreActionFocus.current) return
-    restoreActionFocus.current = false
-    if (!document.hasFocus() || document.activeElement !== document.body) return
-    if (generateButton.current && !generateButton.current.matches(':disabled')) generateButton.current.focus()
-    else restoreFocus?.()
+    /** Retains action ownership until the active window can restore lost focus. */
+    const restore = () => {
+      if (pending || !restoreActionFocus.current || !document.hasFocus()) return
+      restoreActionFocus.current = false
+      const active = document.activeElement
+      if (active !== document.body && !(active && form.current?.contains(active) && active.matches(':disabled'))) return
+      if (generateButton.current && !generateButton.current.matches(':disabled')) generateButton.current.focus()
+      else restoreFocus?.()
+    }
+    restore()
+    window.addEventListener('focus', restore)
+    document.addEventListener('visibilitychange', restore)
+    return () => { window.removeEventListener('focus', restore); document.removeEventListener('visibilitychange', restore) }
   }, [pending, restoreFocus])
   /** Remembers only user-triggered actions for DOM focus restoration. */
   const perform = (action: () => Promise<boolean>) => { restoreActionFocus.current = Boolean(form.current?.contains(document.activeElement)); return action() }
