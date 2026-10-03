@@ -13,6 +13,11 @@ export type InboxDigestRecipient = {
   memberKey: string
 }
 
+/** Trusted failed work retains its logical scheduler time across redelivery. */
+export type InboxDigestRetry = InboxDigestRecipient & {
+  /** Original server scheduling time, never a client event timestamp. */ scheduledAt: number
+}
+
 /** Content-free Inbox message; opening the Feed performs current authorization again. */
 export type InboxDigestMessage = {
   /** Deterministic recipient-scoped interval identity. */
@@ -82,14 +87,17 @@ export function inboxDigestInterval(state: UpdateFeedDigestState, now: number): 
  * @param dependencies - Fresh recipient authorization.
  * @param recipient - Server-resolved delivery owner.
  * @param now - Trusted invocation clock.
+ * @param scheduledAt - Original trusted scheduling time for this logical attempt.
  * @returns Safe outcome; transient failures propagate for scheduler retry.
  */
-export async function deliverInboxDigest(dependencies: InboxDigestDependencies, recipient: InboxDigestRecipient, now: number): Promise<InboxDigestOutcome> {
+export async function deliverInboxDigest(dependencies: InboxDigestDependencies, recipient: InboxDigestRecipient, now: number, scheduledAt = now): Promise<InboxDigestOutcome> {
+  if (!Number.isSafeInteger(now) || now < 0 || now > 8_640_000_000_000_000) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest clock')
+  if (!Number.isSafeInteger(scheduledAt) || scheduledAt < 0 || scheduledAt > now) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest scheduling time.')
   const context = await dependencies.authorize(recipient)
   if (!context) return 'denied'
   if (context.reader.memberKey !== recipient.memberKey || context.recipient.memberKey !== recipient.memberKey || context.recipient.workspaceId !== recipient.workspaceId) throw new PlanningError(502, 'UpdateFeedDigestRecipientMismatch', 'Digest recipient mismatch')
   let state = await context.store.get(recipient.workspaceId, recipient.memberKey)
-  const id = inboxDigestInterval(state, now)
+  let id = inboxDigestInterval(state, scheduledAt)
   if (!state.preferences.enabled) return 'disabled'
   // An old interval may still own a live claim across midnight/Monday. Reconcile
   // expired claims durably before selecting a new interval, including attempt three.
@@ -97,7 +105,13 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   if (state.history.some((item) => item.status === 'pending')) {
     state = await context.store.replace(recipient.workspaceId, recipient.memberKey, { ...state, history: state.history.map((item) => item.status === 'pending' ? { ...item, status: 'failed', leaseUntil: 0 } : item) })
   }
-  const receipt = state.history.find((item) => item.id === id)
+  let receipt = state.history.find((item) => item.id === id)
+  // Only exhausted failed intervals may advance; unfinished logical retries stay pinned.
+  if (receipt?.status === 'failed' && receipt.attempts >= 3 && id !== inboxDigestInterval(state, now)) {
+    scheduledAt = now
+    id = inboxDigestInterval(state, now)
+    receipt = state.history.find((item) => item.id === id)
+  }
   if (receipt?.status === 'completed' || (receipt?.status === 'pending' && receipt.leaseUntil > now)) return 'not-due'
   // Reject clock rollback rather than re-emitting an interval pruned from history.
   if (state.history.some((item) => item.id.slice(item.id.indexOf(':') + 1) > new Date(now).toISOString().slice(0, 10))) return 'not-due'
@@ -120,14 +134,14 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
     if (snapshot.revision !== context.authorizationRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest authorization changed')
     return snapshot
   } }
-  const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now)
+  const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now, scheduledAt)
   return result.entries.length === 0 ? 'empty' : 'delivered'
 }
 
 /** One bounded candidate page from a due index or explicitly configured recipient set. */
 export type InboxDigestCandidatePage = {
   /** At most the requested number of server-resolved recipients. */
-  recipients: InboxDigestRecipient[]
+  recipients: (InboxDigestRecipient | InboxDigestRetry)[]
   /** Opaque continuation; present when more candidates remain. */
   cursor?: string
 }
@@ -149,25 +163,27 @@ export type InboxDigestScheduleResult = {
   /** Number of new Inbox notifications committed. */
   delivered: number
   /** Failed candidates that must be retried separately from the continuation. */
-  failed: InboxDigestRecipient[]
+  failed: InboxDigestRetry[]
   /** Terminal candidates requiring inspection, never automatic retry. */
   terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' }[]
   /** Next source checkpoint; must not discard failed candidates. */
   cursor?: string
 }
 
-/** Identifies failures that require inspection instead of automatic recipient retry.
- * @param error - Application-classified delivery failure.
- * @returns A stable bodyless terminal category, or undefined for retryable failures.
+/** Classifies deterministic invariants separately from unknown transport failures.
+ * @param error - Typed failure from the bounded digest read/delivery call graph.
+ * @returns Bodyless operator category, or undefined for retryable/unknown failures.
  */
 export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' | undefined {
   if (error instanceof TenantAdministrationError && error.code === 'TenantAdministrationCorrupt') return 'corrupt-state'
   if (!(error instanceof PlanningError)) return undefined
   if (error.code === 'UpdateFeedDigestAttemptsExhausted') return 'exhausted'
   if (error.code === 'UpdateFeedDigestRecipientMismatch') return 'recipient-mismatch'
-  if (error.code === 'UpdateFeedDigestCorruptState' || error.code === 'UpdateFeedReadStateCorrupt' || error.code === 'UpdateFeedDuplicateTarget') return 'corrupt-state'
+  if (['UpdateFeedDigestCorruptState', 'UpdateFeedReadStateCorrupt', 'UpdateFeedDuplicateTarget', 'UpdateFeedSignalsInvalid', 'SavedUpdateFeedsCorruptState'].includes(error.code)) return 'corrupt-state'
   if (error.code === 'UpdateFeedDigestStoragePermanent') return 'storage-permanent'
-  if (error.code === 'UpdateFeedDigestInvalid') return 'invalid-input'
+  // Limits/views are validated before normal generation; reaching these codes
+  // nevertheless identifies a deterministic invariant, never a storage outage.
+  if (['UpdateFeedDigestInvalid', 'UpdateFeedTargetLimitExceeded', 'UpdateFeedReadStateLimit', 'UpdateFeedReadStateInvalid', 'UpdateFeedViewInvalid', 'UpdateFeedLimitInvalid'].includes(error.code)) return 'invalid-input'
   return undefined
 }
 
@@ -183,17 +199,19 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
   const page = await schedule.listCandidates(cursor, 100, now)
   if (page.recipients.length > 100 || (page.cursor !== undefined && (!page.cursor || page.cursor === cursor))) throw new Error('Invalid digest candidate page')
   const seen = new Set<string>()
-  for (const recipient of page.recipients) {
+  for (const candidate of page.recipients) {
+    const recipient = { workspaceId: candidate.workspaceId, memberKey: candidate.memberKey }
+    const scheduledAt = 'scheduledAt' in candidate ? candidate.scheduledAt : now
     const key = JSON.stringify([recipient.workspaceId, recipient.memberKey])
     if (seen.has(key)) continue
     seen.add(key)
     result.processed++
     try {
-      if (await deliverInboxDigest(schedule.dependencies, recipient, now) === 'delivered') result.delivered++
+      if (await deliverInboxDigest(schedule.dependencies, recipient, now, scheduledAt) === 'delivered') result.delivered++
     } catch (error) {
       const reason = inboxDigestTerminalReason(error)
       if (reason) result.terminal.push({ recipient, reason })
-      else result.failed.push(recipient)
+      else result.failed.push({ ...recipient, scheduledAt })
     }
   }
   result.cursor = page.cursor

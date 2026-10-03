@@ -38,14 +38,14 @@ export class DynamoDbSavedUpdateFeedsStore implements SavedUpdateFeedsPersistenc
    * @returns Validated definitions or empty revision zero.
    */
   async get(workspaceId: string, memberKey: string): Promise<SavedUpdateFeeds> {
+    const key = recordKey(memberKey)
+    const { Item: row } = await this.client.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey: key }, ConsistentRead: true })).catch((error: unknown) => storageFailure(error))
+    if (row === undefined) return { revision: 0, feeds: [] }
     try {
-      const key = recordKey(memberKey)
-      const { Item: row } = await this.client.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey: key }, ConsistentRead: true }))
-      if (row === undefined) return { revision: 0, feeds: [] }
       if (row.workspaceId !== workspaceId || row.recordKey !== key || row.schemaVersion !== 1 || row.entryType !== 'update-feed-definitions' || typeof row.revision !== 'number' || !Number.isSafeInteger(row.revision) || row.revision < 1) throw new Error('Invalid saved definitions')
       const parsed = parseSavedUpdateFeeds({ expectedRevision: 0, feeds: row.feeds })
       return { revision: row.revision, feeds: parsed.feeds }
-    } catch (error) { return storageFailure(error) }
+    } catch { throw new PlanningError(502, 'SavedUpdateFeedsCorruptState', 'Saved feed metadata is invalid.') }
   }
   /** Atomically replaces personal definitions with CAS and current caller checks.
    * @param workspaceId - Server-resolved Workspace.
