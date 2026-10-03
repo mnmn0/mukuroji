@@ -1,4 +1,5 @@
 /** Public Update Feed application surface. */
+export { createInboxDigestScheduleHandler } from './adapter-in/schedules/inbox-digest-schedule'
 export { previewUpdateFeedDigest, replaceDigestPreferences } from './application/digest'
 export { DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore, type UpdateFeedDigestPersistence } from './adapter-out/digest-store'
 export { parseUpdateFeedQuery, readUpdateFeed, type UpdateFeedReader } from './application/read-update-feed'
