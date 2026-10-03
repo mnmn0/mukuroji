@@ -3,6 +3,7 @@ import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview } from '@muku
 import { generateDigestPreview, getDigestState, saveDigestPreferences } from '../api/digest'
 import { useDigestState } from '../queries/useDigestState'
 import { UpdateFeedApiError } from '../api/updateFeed'
+import { sameDigestPreferences } from '../model/digestPreferences'
 
 /** Ephemeral result bound to the metadata revision observed after generation. */
 type PreviewSnapshot = {
@@ -20,10 +21,10 @@ type PreviewSnapshot = {
  * @returns Serialized actions and fail-closed preview state.
  */
 export function useDigestPreview(token: string | undefined, enabled: boolean, locale: 'ja' | 'en', guard: <T>(request: Promise<T>) => Promise<T>) {
-  const query = useDigestState(token, enabled, guard)
   const [preview, setPreview] = useState<PreviewSnapshot>()
   const [error, setError] = useState<unknown>()
   const [refreshFailed, setRefreshFailed] = useState(false)
+  const query = useDigestState(token, enabled, guard, () => { if (refreshFailed) { setRefreshFailed(false); setError(undefined) } })
   const [pending, setPending] = useState(false)
   const [draftReset, setDraftReset] = useState(0)
   const active = useRef(true)
@@ -59,7 +60,7 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
   }
   /** Performs one explicit action without automatically retrying mutations. */
   const run = async (preferences?: UpdateFeedDigestPreferences, expectedRevision?: number): Promise<boolean> => {
-    if (!token || !enabled || !query.data || busy.current) return false
+    if (!token || !enabled || !query.data || refreshFailed || busy.current) return false
     busy.current = true; setPending(true); setError(undefined); setRefreshFailed(false); dismiss()
     const generation = epoch.current
     try {
@@ -85,7 +86,7 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
           return false
         }
         if (active.current && generation === epoch.current && body.current && Date.now() < deadline.current) {
-          if (!refreshed.preferences.enabled || JSON.stringify(refreshed.preferences) !== JSON.stringify(query.data.preferences)) {
+          if (!refreshed.preferences.enabled || !sameDigestPreferences(refreshed.preferences, query.data.preferences)) {
             dismiss(); setError(new UpdateFeedApiError(409, 'UpdateFeedDigestConflict'))
             return false
           }

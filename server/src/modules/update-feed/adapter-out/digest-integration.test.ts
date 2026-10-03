@@ -8,6 +8,33 @@ import type { UpdateFeedReader } from '../application/read-update-feed'
 
 const now = Date.parse('2026-10-03T12:00:00Z')
 
+test('selection permutations normalize API input and choose the same fifty reports from legacy rows', async () => {
+  const results = []
+  for (const views of [['recent', 'at-risk'], ['at-risk', 'recent']]) {
+    const f = await fixture(51)
+    f.snapshot.updateTargets.forEach((target, index) => {
+      if (target.latestUpdate) {
+        target.latestUpdate.health = index === 50 ? 'at-risk' : 'on-track'
+        target.latestUpdate.createdAt = index === 50 ? '2026-10-02T00:00:00Z' : '2026-10-03T00:00:00Z'
+      }
+    })
+    const preferences = parseDigestPreferences({ enabled: true, frequency: 'daily', views })
+    expect(preferences.views).toEqual(['recent', 'at-risk'])
+    const current = await f.store.get('w', 'reader')
+    await replaceDigestPreferences(f.store, 'w', 'reader', { expectedRevision: current.revision, preferences })
+    // Simulate an existing noncanonical adapter row, bypassing input normalization.
+    const legacy = await f.store.get('w', 'reader')
+    legacy.history = [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'legacy', leaseUntil: 0, count: 50 }]
+    legacy.preferences.views.reverse()
+    if (views[0] === 'recent') legacy.preferences.views.reverse()
+    const store = { get: async () => legacy, replace: f.store.replace.bind(f.store) }
+    const result = await previewUpdateFeedDigest(f.reader, f.readState, store, 'w', now)
+    expect(result.entries).toHaveLength(50)
+    results.push(result.entries.map((entry) => entry.target))
+  }
+  expect(results[0]).toEqual(results[1])
+})
+
 /** Creates canonical reports and isolated personal persistence with no delivery dependency. */
 async function fixture(count = 1) {
   const targets: PlanningUpdateTargetSummary[] = Array.from({ length: count }, (_, index) => ({
