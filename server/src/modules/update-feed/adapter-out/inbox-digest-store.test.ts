@@ -231,7 +231,7 @@ test('due query is bounded and rechecks stale index entries against strongly con
   const row = f.metadata()
   f.indexed.push({ workspaceId: row.workspaceId, recordKey: row.recordKey })
   const shard = Number(String(row.inboxDigestShard).split('#')[1])
-  expect(await f.store.listDue(shard, 10)).toEqual({ recipients: [recipient], cursor: { workspaceId: 'next', recordKey: 'next' } })
+  expect(await f.store.listDue(shard, 10)).toEqual({ recipients: [{ ...recipient, frequency: 'daily' }], cursor: { workspaceId: 'next', recordKey: 'next' } })
   await f.run()
   expect((await f.store.listDue(shard, 10)).recipients).toEqual([])
   const state = await f.store.get('w', 'reader')
@@ -295,6 +295,14 @@ test('completion preserves prior history and rejects forged or multiple transiti
   g.advance(60_001)
   await expect(g.store.complete(recipient, { ...pending, history: completed.history.slice(1) }, 0, undefined)).rejects.toMatchObject({ status: 409 })
   expect(g.notifications()).toHaveLength(0)
+})
+
+test('completion rejects a logical interval later than its real first claim', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  const claimed = await f.store.replace('w', 'reader', { ...state, history: [{ id: 'daily:2026-10-04', status: 'pending', attempts: 1, token: 'claim', startedAt: now, leaseUntil: now + 60_000, count: 0 }] })
+  await expect(f.store.complete(recipient, { ...claimed, history: claimed.history.map((row) => ({ ...row, status: 'completed', leaseUntil: 0 })) }, 0, undefined)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect(f.notifications()).toHaveLength(0)
 })
 
 test('read failures distinguish absent, transient SDK and corrupt persisted envelopes/preferences/receipts/due fields', async () => {
@@ -391,8 +399,8 @@ for (const frequency of ['daily', 'weekly'] as const) for (const boundary of [fa
   f.advance(60_001)
   f.indexed.push(structuredClone(f.metadata()))
   const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
-  expect((await f.store.listDue(shard)).recipients).toEqual([recipient])
-  if (boundary) expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, start + 60_001, start)).toBe('delivered')
+  expect((await f.store.listDue(shard)).recipients).toEqual([{ ...recipient, frequency }])
+  if (boundary) expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, start + 60_001, start, frequency)).toBe('delivered')
   else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestAttemptsExhausted' })
   expect((await f.store.get('w', 'reader')).history.find((row) => row.id === id)).toMatchObject({ status: 'failed', attempts: 3, leaseUntil: 0 })
   expect(f.notifications()).toHaveLength(boundary ? 1 : 0)
@@ -400,16 +408,22 @@ for (const frequency of ['daily', 'weekly'] as const) for (const boundary of [fa
   else expect(f.metadata().inboxDigestDueAt).toBe(Date.parse(frequency === 'daily' ? '2026-10-04T00:00:00Z' : '2026-10-05T00:00:00Z'))
 })
 
-for (const frequency of ['daily', 'weekly'] as const) test(`durable ${frequency} completion accepts pinned scheduling time with fresh lease after rollover`, async () => {
+for (const frequency of ['daily', 'weekly'] as const) test(`delayed first ${frequency} claim keeps logical interval but orders and expires from actual claim time`, async () => {
   const f = await fixture()
   const scheduledAt = Date.parse('2026-10-04T23:59:30Z')
   const retryAt = scheduledAt + 120_000
-  f.advance(retryAt - now)
+  f.advance(scheduledAt - now)
   const state = await f.store.get('w', 'reader')
   await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] } })
-  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt, scheduledAt)).toBe('delivered')
-  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ startedAt: scheduledAt, status: 'completed', id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}` }])
-  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt + 1, scheduledAt)).toBe('not-due')
+  f.failWrite(Object.assign(new Error('Claim transport failure'), { name: 'TimeoutError' }))
+  await expect(deliverInboxDigest({ authorize: async () => f.context }, recipient, scheduledAt, scheduledAt, frequency)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  expect((await f.store.get('w', 'reader')).history).toEqual([])
+  f.failWrite(undefined)
+  f.advance(retryAt - scheduledAt)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt, scheduledAt, frequency)).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ startedAt: retryAt, status: 'completed', id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}` }])
+  expect(f.notifications()[0]).toMatchObject({ occurredAt: new Date(retryAt).toISOString(), expiresAt: Math.floor(retryAt / 1000) + 365 * 86_400 })
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt + 1, scheduledAt, frequency)).toBe('not-due')
   expect(f.notifications()).toHaveLength(1)
 })
 
