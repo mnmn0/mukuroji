@@ -67,6 +67,63 @@ async function mockFeed(page: Page, guest = false) {
   return state
 }
 
+for (const action of ['save-off', 'conflict']) test(`keyboard ${action} restores preview summary when no action remains enabled`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  if (action === 'save-off') await panel.getByRole('checkbox', { name: 'Enable manual previews' }).uncheck()
+  else state.digestConflict = true
+  await panel.getByRole('button', { name: action === 'save-off' ? 'Save preview settings' : 'Generate preview' }).focus()
+  await page.keyboard.press('Enter')
+  await expect(summary).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+})
+
+test('a saved preview draft follows later external settings without a false conflict', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'GET') reads++; await route.fallback() })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save preview settings' }).click()
+  await expect.poll(() => state.digest.revision).toBe(1)
+  await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeDisabled()
+  state.digest = { ...state.digest, revision: 2, preferences: { enabled: true, frequency: 'daily', views: ['recent'] } }
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
+test('preview completion does not reclaim focus moved outside its form', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  await page.route('**/api/planning/update-feed/digest/preview?*', async (route) => { waiting = true; await gate; await route.fulfill({ status: 409, json: {} }) })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByRole('button', { name: 'Generate preview' }).focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => waiting).toBe(true)
+  await summary.focus()
+  release()
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await expect(summary).toBeFocused()
+})
+
 for (const source of ['feed', 'saved']) test(`${source} outage leaves healthy standard digest controls available`, async ({ page }) => {
   const state = await mockFeed(page)
   state.digest.preferences.enabled = true

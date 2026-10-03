@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { GetCommand, QueryCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '../../planning'
+import { digestStorageFailure } from './digest-storage-failure'
 import { createNotificationRecipientKey, NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences } from '../../notifications'
 import { emptyDigestState, parseDigestState } from '../application/digest'
 import { inboxDigestInterval, type InboxDigestMessage, type InboxDigestRecipient, type InboxDigestStore } from '../application/inbox-digest'
@@ -54,10 +55,8 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
    */
   async get(workspaceId: string, memberKey: string): Promise<UpdateFeedDigestState> {
     const recipient = normalize({ workspaceId, memberKey })
-    try {
-      const { Item } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: key(recipient), ConsistentRead: true }))
-      return Item === undefined ? emptyDigestState() : parseRow(Item, recipient)
-    } catch (error) { return readFailure(error) }
+    const { Item } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: key(recipient), ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+    return Item === undefined ? emptyDigestState() : parseRow(Item, recipient)
   }
 
   /** Changes settings/claims/failures using CAS and current recipient guards.
@@ -101,9 +100,8 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
     if ((after.count === 0) !== (message === undefined) || (message && (message.id !== expectedMessage.id || message.occurredAt !== expectedMessage.occurredAt || message.deepLink !== '/updates'))) throw conflict()
     const recipientKey = createNotificationRecipientKey(recipient.workspaceId, recipient.memberKey)
     const preferenceKey = { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }
-    const { Item: preferencesRow } = await this.client.send(new GetCommand({ TableName: this.notificationsTable, Key: preferenceKey, ConsistentRead: true }))
-    if (preferencesRow && (preferencesRow.recipientKey !== recipientKey || preferencesRow.notificationKey !== NOTIFICATION_PREFERENCES_KEY)) throw conflict()
-    const preferences = parseStoredNotificationPreferences(preferencesRow, true)
+    const { Item: preferencesRow } = await this.client.send(new GetCommand({ TableName: this.notificationsTable, Key: preferenceKey, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+    const preferences = notificationPreferences(preferencesRow, recipientKey)
     if (!preferences.channels.inApp) throw conflict()
     const guards: PlanningCallerAuthorizationConditionCheck[] = [
       { ConditionCheck: { TableName: this.planningTable, Key: { workspaceId: `FENCE#${recipient.workspaceId}`, recordKey: 'META' },
@@ -156,23 +154,17 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       ...(state.revision === 0 ? {} : { ExpressionAttributeNames: { '#revision': 'revision', '#type': 'entryType', '#schema': 'schemaVersion' }, ExpressionAttributeValues: { ':revision': state.revision, ':type': 'update-feed-inbox-digest', ':schema': 1 } }),
     } }, ...this.checks, ...guards, ...(message ? [{ Put: { TableName: this.notificationsTable, Item: createInboxDigestNotification(recipient, message, this.locale), ConditionExpression: 'attribute_not_exists(recipientKey) AND attribute_not_exists(notificationKey)' } }] : [])]
     try { await this.client.send(new TransactWriteCommand({ TransactItems: items })) }
-    catch (error) { return transactionFailure(error, items.length) }
+    catch (error) { return digestStorageFailure(error, items.length) }
     return result
   }
 }
 
-/** Separates conditional conflicts, transient SDK failures and permanent persistence failures. */
-function transactionFailure(error: unknown, size: number): never {
-  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
-  if (name === 'TransactionCanceledException' && typeof error === 'object' && error !== null && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
-    const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
-    if (codes.length === size) {
-      if (codes.includes('ConditionalCheckFailed') && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) throw conflict()
-      const transient = ['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError']
-      if (codes.some((code) => transient.includes(String(code))) && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed' || transient.includes(String(code)))) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Inbox digest storage is temporarily unavailable.')
-    }
-  }
-  return readFailure(error)
+/** Validates stored notification consent independently of SDK and explicit opt-out failures. */
+function notificationPreferences(row: Record<string, unknown> | undefined, recipientKey: string) {
+  try {
+    if (row && (row.recipientKey !== recipientKey || row.notificationKey !== NOTIFICATION_PREFERENCES_KEY)) throw new Error('Invalid preference owner')
+    return parseStoredNotificationPreferences(row, true)
+  } catch { throw new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Notification preferences are invalid.') }
 }
 
 /** Validates current metadata and its server-derived recipient key. */
@@ -183,13 +175,7 @@ function parseRow(row: Record<string, unknown>, recipient: InboxDigestRecipient)
     if (state.preferences.enabled && (row.inboxDigestShard !== shardKey(recipient) || typeof row.inboxDigestDueAt !== 'number' || !Number.isSafeInteger(row.inboxDigestDueAt) || row.inboxDigestDueAt < 0)) throw new Error('Invalid due metadata')
     if (!state.preferences.enabled && (row.inboxDigestShard !== undefined || row.inboxDigestDueAt !== undefined)) throw new Error('Unexpected due metadata')
     return state
-  } catch { throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Inbox digest metadata is unavailable.') }
-}
-/** Normalizes SDK reads and persisted-state failures without leaking storage details. */
-function readFailure(error: unknown): never {
-  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
-  if (typeof name === 'string' && ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TransactionInProgressException', 'TimeoutError', 'RequestTimeout', 'RequestTimeoutException'].includes(name)) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Inbox digest storage is temporarily unavailable.')
-  throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Inbox digest metadata is unavailable.')
+  } catch { throw new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Inbox digest metadata is unavailable.') }
 }
 /** Normalizes server identities before deriving storage coordinates. */
 function normalize(recipient: InboxDigestRecipient): InboxDigestRecipient {
@@ -205,7 +191,8 @@ function dueFields(recipient: InboxDigestRecipient, state: UpdateFeedDigestState
   const receipt = state.history.find((item) => item.id === id)
   const start = Date.parse(`${id.slice(id.indexOf(':') + 1)}T00:00:00.000Z`)
   const next = start + (state.preferences.frequency === 'daily' ? 1 : 7) * 86_400_000
-  const due = receipt?.status === 'completed' || (receipt?.attempts ?? 0) >= 3 ? next : receipt?.status === 'pending' ? receipt.leaseUntil : receipt?.status === 'failed' ? now + 60_000 : now
+  const pending = state.history.filter((item) => item.status === 'pending')
+  const due = pending.length ? Math.min(...pending.map((item) => item.leaseUntil)) : receipt?.status === 'completed' || (receipt?.attempts ?? 0) >= 3 ? next : receipt?.status === 'failed' ? now + 60_000 : now
   return { inboxDigestShard: shardKey(recipient), inboxDigestDueAt: due }
 }
 /** Stable sparse-index shard bound to both Workspace and member. */

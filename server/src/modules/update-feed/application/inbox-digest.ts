@@ -87,9 +87,15 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   const context = await dependencies.authorize(recipient)
   if (!context) return 'denied'
   if (context.reader.memberKey !== recipient.memberKey || context.recipient.memberKey !== recipient.memberKey || context.recipient.workspaceId !== recipient.workspaceId) throw new PlanningError(502, 'UpdateFeedDigestRecipientMismatch', 'Digest recipient mismatch')
-  const state = await context.store.get(recipient.workspaceId, recipient.memberKey)
+  let state = await context.store.get(recipient.workspaceId, recipient.memberKey)
   const id = inboxDigestInterval(state, now)
   if (!state.preferences.enabled) return 'disabled'
+  // An old interval may still own a live claim across midnight/Monday. Reconcile
+  // expired claims durably before selecting a new interval, including attempt three.
+  if (state.history.some((item) => item.status === 'pending' && item.leaseUntil > now)) return 'not-due'
+  if (state.history.some((item) => item.status === 'pending')) {
+    state = await context.store.replace(recipient.workspaceId, recipient.memberKey, { ...state, history: state.history.map((item) => item.status === 'pending' ? { ...item, status: 'failed', leaseUntil: 0 } : item) })
+  }
   const receipt = state.history.find((item) => item.id === id)
   if (receipt?.status === 'completed' || (receipt?.status === 'pending' && receipt.leaseUntil > now)) return 'not-due'
   // Reject clock rollback rather than re-emitting an interval pruned from history.
@@ -144,7 +150,7 @@ export type InboxDigestScheduleResult = {
   /** Failed candidates that must be retried separately from the continuation. */
   failed: InboxDigestRecipient[]
   /** Terminal candidates requiring inspection, never automatic retry. */
-  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'recipient-mismatch' }[]
+  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' }[]
   /** Next source checkpoint; must not discard failed candidates. */
   cursor?: string
 }
@@ -153,11 +159,12 @@ export type InboxDigestScheduleResult = {
  * @param error - Application-classified delivery failure.
  * @returns A stable bodyless terminal category, or undefined for retryable failures.
  */
-export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'recipient-mismatch' | undefined {
+export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | undefined {
   if (!(error instanceof PlanningError)) return undefined
   if (error.code === 'UpdateFeedDigestAttemptsExhausted') return 'exhausted'
   if (error.code === 'UpdateFeedDigestRecipientMismatch') return 'recipient-mismatch'
-  if (['UpdateFeedDigestInvalid', 'UpdateFeedDigestStorageFailure'].includes(error.code)) return 'corrupt-state'
+  if (error.code === 'UpdateFeedDigestCorruptState') return 'corrupt-state'
+  if (error.code === 'UpdateFeedDigestStoragePermanent') return 'storage-permanent'
   return undefined
 }
 
