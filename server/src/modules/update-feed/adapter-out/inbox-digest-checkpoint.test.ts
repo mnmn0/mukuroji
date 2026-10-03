@@ -2,9 +2,12 @@ import { expect, test } from 'bun:test'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestCheckpoints } from './inbox-digest-checkpoint'
-import { runInboxDigestWorker } from '../application/inbox-digest-worker'
+import { runInboxDigestWorker, runInboxDigestWorkerInvocation } from '../application/inbox-digest-worker'
 import { PlanningError } from '../../planning'
 import { TenantAdministrationError } from '../../tenant-administration'
+import { InMemoryUpdateFeedDigestStore } from './digest-store'
+import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
+import { InMemoryPlanningClient } from '../../planning/planning'
 
 const start = Date.parse('2026-10-03T12:00:00Z')
 const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
@@ -48,6 +51,8 @@ function fixture() {
   }) as DynamoDBDocumentClient['send']
   return {
     rows, store: new DynamoDbInboxDigestCheckpoints('planning', client),
+    /** Recreates the adapter while keeping only durable rows. */
+    restart() { return new DynamoDbInboxDigestCheckpoints('planning', client) },
     /** Loses the next transaction response after atomic commit. */
     loseResponse() { loseResponse = true },
     /** Injects a read or write transport failure after fixture initialization. */
@@ -157,18 +162,18 @@ for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure
     delivery: { async authorize() { calls++; throw code === 'TenantAdministrationUnavailable' ? new TenantAdministrationError(503, code, 'Unavailable') : new PlanningError(code === 'UpdateFeedDigestRetryable' ? 503 : 502, code, 'Unavailable') } },
   }
   for (let attempt = 0; attempt < 3; attempt++) {
-    expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 1, delivered: 0, failed: 1 })
-    expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 0, delivered: 0, failed: 0 })
+    expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 1, delivered: 0, failed: 1, deferred: 0 })
+    expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
     clock += 60_000
   }
   expect(calls).toBe(3)
   expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
   expect(f.rows.get('SHARD#3')?.pending).toEqual([])
-  expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 0, delivered: 0, failed: 0 })
+  expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
   expect(calls).toBe(3)
 })
 
-for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorruptState', 'UpdateFeedReadStateCorrupt', 'TenantAdministrationCorrupt', 'UpdateFeedDigestInvalid']) test(`worker quarantines ${code} on the first attempt instead of retrying`, async () => {
+for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorruptState', 'UpdateFeedReadStateCorrupt', 'UpdateFeedDuplicateTarget', 'TenantAdministrationCorrupt', 'UpdateFeedDigestInvalid']) test(`worker quarantines ${code} on the first attempt instead of retrying`, async () => {
   const f = fixture()
   let clock = start
   let calls = 0
@@ -177,11 +182,11 @@ for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorrupt
     async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient] } },
     delivery: { async authorize() { calls++; throw code === 'TenantAdministrationCorrupt' ? new TenantAdministrationError(502, code, 'Storage requires inspection') : new PlanningError(502, code, 'Storage requires inspection') } },
   }
-  expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 1, delivered: 0, failed: 1 })
+  expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 1, delivered: 0, failed: 1, deferred: 0 })
   expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
   expect(f.rows.get('SHARD#5')?.pending).toEqual([])
   clock += 60_000
-  expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 0, delivered: 0, failed: 0 })
+  expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
   expect(calls).toBe(1)
 })
 
@@ -193,10 +198,10 @@ test('unknown failure can recover on the next bounded attempt without quarantine
     if (++calls === 1) throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Unknown SDK failure')
     return undefined
   } } }
-  expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 1 })
+  expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 1, deferred: 0 })
   expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
   clock += 60_000
-  expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 0 })
+  expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 0 })
   expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
   expect(f.rows.get('SHARD#6')?.pending).toEqual([])
 })
@@ -208,4 +213,80 @@ test('unknown persisted schema fails closed instead of resetting the queue', asy
   f.rows.get('SHARD#4')!.schemaVersion = 2
   await expect(f.store.claim(4, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
   await expect(f.store.claim(16, start)).rejects.toThrow('Invalid')
+})
+
+test('rotation survives crashes, lost acknowledgements and concurrent reservations', async () => {
+  const f = fixture()
+  expect(await f.store.reserveStartShard()).toBe(0) // Simulate crash before any shard work.
+  expect(await f.restart().reserveStartShard()).toBe(1)
+  const concurrent = await Promise.all([f.restart().reserveStartShard(), f.restart().reserveStartShard()])
+  expect(concurrent.sort()).toEqual([2, 3])
+  f.loseResponse()
+  await expect(f.store.reserveStartShard()).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
+  expect(await f.restart().reserveStartShard()).toBe(5)
+  f.rows.get('ROTATION')!.nextShard = 16
+  await expect(f.store.reserveStartShard()).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
+})
+
+for (const cadence of [3_600_000, 86_400_000]) test(`durable rotation reaches every busy shard with cadence ${cadence}`, async () => {
+  const f = fixture()
+  let clock = start
+  const firstShards: number[] = []
+  for (let invocation = 0; invocation < 16; invocation++) {
+    clock = start + invocation * cadence
+    const began = clock
+    const shards: number[] = []
+    const result = await runInboxDigestWorkerInvocation({
+      checkpoints: f.restart(), now: () => clock,
+      async listDue(shard, _cursor, limit) {
+        expect(clock - began).toBeLessThan(150_000)
+        expect(limit).toBeLessThanOrEqual(20)
+        shards.push(shard)
+        return { recipients: [recipient] }
+      },
+      delivery: { async authorize() { clock += 80_000; return undefined } },
+    })
+    firstShards.push(shards[0]!)
+    expect(shards).toHaveLength(2)
+    expect(result).toEqual({ processed: 2, delivered: 0, failed: 0, deferred: 0 })
+  }
+  expect(firstShards).toEqual(Array.from({ length: 16 }, (_, index) => index))
+})
+
+for (const recovery of ['revoked', 'optout', 'cas']) test(`known conflicts defer without infrastructure retries and re-evaluate ${recovery}`, async () => {
+  const f = fixture()
+  const metadata = new InMemoryUpdateFeedDigestStore()
+  const initial = await metadata.get(recipient.workspaceId, recipient.memberKey)
+  await metadata.replace(recipient.workspaceId, recipient.memberKey, { ...initial, preferences: { ...initial.preferences, enabled: recovery === 'cas' } })
+  let clock = start
+  let calls = 0
+  const dependencies = {
+    checkpoints: f.store, now: () => clock,
+    async listDue() { return { recipients: [recipient] } },
+    delivery: { async authorize() {
+      if (++calls <= 4) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Current state changed')
+      if (recovery === 'revoked') return undefined
+      return {
+        recipient, authorizationRevision: 0,
+        reader: { memberKey: recipient.memberKey, readSnapshot: () => new InMemoryPlanningClient().get(recipient.workspaceId, { workItems: [] }), authorizeTarget: async () => undefined },
+        readState: new InMemoryUpdateFeedReadStateStore(),
+        store: {
+          get: (workspaceId: string, memberKey: string) => metadata.get(workspaceId, memberKey),
+          replace: metadata.replace.bind(metadata),
+          complete: (_owner: typeof recipient, state: Awaited<ReturnType<typeof metadata.get>>) => metadata.replace(recipient.workspaceId, recipient.memberKey, state),
+        },
+      }
+    } },
+  }
+  for (let attempt = 0; attempt < 4; attempt++) {
+    expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 1 })
+    expect(f.rows.get('SHARD#7')?.pending).toEqual([{ recipient, attempts: 0 }])
+    expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
+    expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
+    clock += 60_000
+  }
+  expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 0 })
+  expect(calls).toBe(5)
+  expect(f.rows.get('SHARD#7')?.pending).toEqual([])
+  expect((await metadata.get(recipient.workspaceId, recipient.memberKey)).history).toMatchObject(recovery === 'cas' ? [{ status: 'completed' }] : [])
 })

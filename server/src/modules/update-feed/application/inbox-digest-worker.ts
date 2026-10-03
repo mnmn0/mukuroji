@@ -1,4 +1,5 @@
 import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestDependencies, type InboxDigestRecipient } from './inbox-digest'
+import { PlanningError } from '../../planning'
 
 /** Bounded retry, including failures before a delivery claim exists. */
 export type InboxDigestPending = {
@@ -19,6 +20,8 @@ export type InboxDigestCheckpoint = {
 
 /** Durable checkpoint operations fence duplicate batches and stale workers. */
 export interface InboxDigestCheckpointStore {
+  /** Durably advances the first shard before work, independent of invocation cadence. */
+  reserveStartShard(): Promise<number>
   /** Claims an idle or expired shard; locked/backing-off shards return undefined. */
   claim(shard: number, now: number): Promise<InboxDigestCheckpoint | undefined>
   /** Saves only the current unexpired token/revision, incrementing revision. */
@@ -37,12 +40,13 @@ export type InboxDigestWorkerDependencies = {
 /** Processes one bounded shard with crash-safe page ownership and retry preservation.
  * @param dependencies - Current authorization, candidate reads and durable checkpoints.
  * @param shard - Fixed shard selected by the scheduler.
+ * @param deadline - Invocation admission deadline, also bounding recipient starts.
  * @returns Safe counts; failures remain durably pending for the next invocation.
  */
-export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDependencies, shard: number) {
+export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDependencies, shard: number, deadline = Infinity) {
   let state = await dependencies.checkpoints.claim(shard, dependencies.now())
-  if (!state) return { processed: 0, delivered: 0, failed: 0 }
-  const result = { processed: 0, delivered: 0, failed: 0 }
+  if (!state) return { processed: 0, delivered: 0, failed: 0, deferred: 0 }
+  const result = { processed: 0, delivered: 0, failed: 0, deferred: 0 }
   if (state.pending.length < 20) {
     const limit = 20 - state.pending.length
     const page = await dependencies.listDue(shard, state.cursor, limit)
@@ -55,24 +59,45 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
   const batch = [...state.pending]
   for (const item of batch) {
     const { recipient } = item
-    if (dependencies.now() + 5_000 >= state.leaseUntil) break
+    if (dependencies.now() + 5_000 >= Math.min(state.leaseUntil, deadline)) break
     let retry = false
     let permanent = false
+    let conflict = false
     try {
       if (await deliverInboxDigest(dependencies.delivery, recipient, dependencies.now()) === 'delivered') result.delivered++
     } catch (error) {
       // Exhausted intervals advance through the due index. Permanent storage or
       // identity failures require durable inspection evidence without more retries.
       const terminal = inboxDigestTerminalReason(error)
-      retry = terminal === undefined
+      conflict = error instanceof PlanningError && error.code === 'UpdateFeedDigestConflict'
+      retry = terminal === undefined && !conflict
       permanent = terminal !== undefined && terminal !== 'exhausted'
-      result.failed++
+      if (conflict) result.deferred++
+      else result.failed++
     }
     result.processed++
     const remaining = state.pending.filter((item) => item.recipient.workspaceId !== recipient.workspaceId || item.recipient.memberKey !== recipient.memberKey)
     const exhausted = retry && item.attempts >= 2
-    state = await dependencies.checkpoints.save({ ...state, pending: retry && !exhausted ? [...remaining, { recipient, attempts: item.attempts + 1 }] : remaining }, dependencies.now(), false, exhausted || permanent ? recipient : undefined)
+    state = await dependencies.checkpoints.save({ ...state, pending: conflict ? [...remaining, item] : retry && !exhausted ? [...remaining, { recipient, attempts: item.attempts + 1 }] : remaining }, dependencies.now(), false, exhausted || permanent ? recipient : undefined)
   }
-  await dependencies.checkpoints.save({ ...state, retryAt: result.failed ? dependencies.now() + 60_000 : 0 }, dependencies.now(), true)
+  await dependencies.checkpoints.save({ ...state, retryAt: result.failed || result.deferred ? dependencies.now() + 60_000 : 0 }, dependencies.now(), true)
+  return result
+}
+
+/** Starts from a durably rotating shard and admits bounded work for 150 seconds.
+ * @param dependencies - Durable scheduling, recipient authorization and trusted clock.
+ * @returns Aggregate counts; unfinished pages remain in their shard checkpoints.
+ */
+export async function runInboxDigestWorkerInvocation(dependencies: InboxDigestWorkerDependencies) {
+  const deadline = dependencies.now() + 150_000
+  const first = await dependencies.checkpoints.reserveStartShard()
+  const result = { processed: 0, delivered: 0, failed: 0, deferred: 0 }
+  for (let offset = 0; offset < 16 && dependencies.now() + 5_000 < deadline; offset++) {
+    const progress = await runInboxDigestWorker(dependencies, (first + offset) % 16, deadline)
+    result.processed += progress.processed
+    result.delivered += progress.delivered
+    result.failed += progress.failed
+    result.deferred += progress.deferred
+  }
   return result
 }

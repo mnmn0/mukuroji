@@ -15,6 +15,30 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
    */
   constructor(table: string, client: DynamoDBDocumentClient) { this.table = table; this.client = client }
 
+  /** Reserves a fair start before any shard work; crashes cannot pin the next invocation.
+   * @returns The prior rotation position, atomically advanced modulo sixteen.
+   */
+  async reserveStartShard(): Promise<number> {
+    const key = { workspaceId: 'SYSTEM#INBOX_DIGEST', recordKey: 'ROTATION' }
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+      if (Item !== undefined && (Item.workspaceId !== key.workspaceId || Item.recordKey !== key.recordKey || Item.entryType !== 'inbox-digest-rotation' || Item.schemaVersion !== 1 || !integer(Item.revision) || Item.revision < 1 || Item.revision >= Number.MAX_SAFE_INTEGER || !integer(Item.nextShard) || Item.nextShard >= 16)) throw corrupt()
+      const first = Item?.nextShard ?? 0
+      const revision = Item?.revision ?? 0
+      try {
+        await this.client.send(new TransactWriteCommand({ TransactItems: [{ Put: {
+          TableName: this.table, Item: { ...key, entryType: 'inbox-digest-rotation', schemaVersion: 1, revision: revision + 1, nextShard: (first + 1) % 16 },
+          ConditionExpression: revision === 0 ? 'attribute_not_exists(recordKey)' : '#revision = :revision AND entryType = :type AND schemaVersion = :schema',
+          ...(revision === 0 ? {} : { ExpressionAttributeNames: { '#revision': 'revision' }, ExpressionAttributeValues: { ':revision': revision, ':type': 'inbox-digest-rotation', ':schema': 1 } }),
+        } }] }))
+        return first
+      } catch (error) {
+        if (!conditional(error)) return digestStorageFailure(error, 1)
+      }
+    }
+    throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Inbox digest rotation is concurrently owned.')
+  }
+
   /** Suppresses an exhausted recipient until the next UTC day, retaining recovery evidence.
    * @param recipient - Candidate from the strongly checked due row.
    * @param now - Trusted clock.

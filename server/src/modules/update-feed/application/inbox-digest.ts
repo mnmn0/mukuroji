@@ -117,7 +117,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   }
   const reader: UpdateFeedReader = { ...context.reader, readSnapshot: async () => {
     const snapshot = await context.reader.readSnapshot()
-    if (snapshot.revision !== context.authorizationRevision) throw new Error('Digest authorization changed')
+    if (snapshot.revision !== context.authorizationRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest authorization changed')
     return snapshot
   } }
   const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now)

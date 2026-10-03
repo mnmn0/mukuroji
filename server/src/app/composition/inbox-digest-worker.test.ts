@@ -4,8 +4,38 @@ import { createApiTestHarness } from '../../api/test-support/api-test-harness'
 import { InMemoryUpdateFeedDigestStore } from '../../modules/update-feed/adapter-out/digest-store'
 import { createProductionInboxDigestWorkerHandler, decodeCursor } from './inbox-digest-worker'
 import { handler } from '../../handlers/inbox-digest-worker-handler'
+import { createInboxDigestAppDependencies } from './inbox-digest-dependencies'
 
 const recipient = { workspaceId: 'user#demo@example.com', memberKey: 'demo@example.com' }
+
+test('enabled production worker bootstraps with only its resources and rejects missing authorization resources', () => {
+  const resources = ['PLANNING_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME', 'ENTERPRISE_IDENTITY_TABLE_NAME', 'TENANT_ADMINISTRATION_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'COGNITO_USER_POOL_ID', 'COGNITO_CLIENT_ID']
+  const unrelated = ['ANALYTICS_TABLE_NAME', 'TIME_TRACKING_TABLE_NAME', 'WORK_ITEM_IMPORT_BUCKET_NAME', 'WORK_ITEM_IMPORT_QUEUE_URL', 'MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY', 'PUBLIC_API_CURSOR_SECRET', 'ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET']
+  const keys = [...resources, ...unrelated, 'NODE_ENV', 'AWS_LAMBDA_FUNCTION_NAME', 'INBOX_DIGEST_WORKER_ENABLED']
+  const before = new Map(keys.map((key) => [key, process.env[key]]))
+  try {
+    for (const key of resources) process.env[key] = 'isolated-test-resource'
+    for (const key of unrelated) delete process.env[key]
+    process.env.NODE_ENV = 'production'
+    process.env.AWS_LAMBDA_FUNCTION_NAME = 'isolated-digest-worker'
+    process.env.INBOX_DIGEST_WORKER_ENABLED = 'true'
+    // Construction only: no enabled handler is invoked and no AWS operation occurs.
+    expect(typeof createProductionInboxDigestWorkerHandler()).toBe('function')
+    const graph = createInboxDigestAppDependencies('isolated-test-resource', 'isolated-test-resource')
+    expect(() => Reflect.get(graph.workItems.analytics, 'query')).toThrow('Capability is unavailable')
+    expect(() => Reflect.get(graph.timeTracking.timeTrackingService, 'query')).toThrow('Capability is unavailable')
+    for (const key of resources) {
+      delete process.env[key]
+      expect(() => createProductionInboxDigestWorkerHandler()).toThrow('resources are not configured')
+      process.env[key] = 'isolated-test-resource'
+    }
+  } finally {
+    for (const [key, value] of before) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})
 
 test('persisted cursor decoding rejects malformed continuations with a typed nonreflective error', () => {
   const key = { workspaceId: 'workspace', recordKey: 'UPDATE_FEED_INBOX_DIGEST#hash', inboxDigestShard: 'inbox-digest#2', inboxDigestDueAt: 123 }

@@ -2,7 +2,7 @@
 export { createInboxDigestScheduleHandler } from './adapter-in/schedules/inbox-digest-schedule'
 export { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './adapter-out/inbox-digest-store'
 export { DynamoDbInboxDigestCheckpoints } from './adapter-out/inbox-digest-checkpoint'
-export { runInboxDigestWorker } from './application/inbox-digest-worker'
+export { runInboxDigestWorker, runInboxDigestWorkerInvocation } from './application/inbox-digest-worker'
 export { deliverInboxDigest, type InboxDigestDependencies, type InboxDigestStore, type InboxDigestRecipient } from './application/inbox-digest'
 export { previewUpdateFeedDigest, replaceDigestPreferences } from './application/digest'
 export { DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore, type UpdateFeedDigestPersistence } from './adapter-out/digest-store'
