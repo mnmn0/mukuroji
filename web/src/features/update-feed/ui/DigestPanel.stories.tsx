@@ -1,5 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { MemoryRouter } from 'react-router'
+import { useRef, useState } from 'react'
+import type { UpdateFeedDigestPreferences, UpdateFeedDigestState } from '@mukuroji/contracts'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { updateFeedFixture } from '../fixtures'
@@ -22,8 +24,20 @@ export const Settings: Story = { play: async ({ canvasElement, args }) => {
   await userEvent.selectOptions(canvas.getByLabelText('Interval'), 'weekly')
   await expect(canvas.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
   await userEvent.click(canvas.getByRole('button', { name: 'Save preview settings' }))
-  await expect(args.onSave).toHaveBeenCalledWith({ enabled: true, frequency: 'weekly', views: ['for-me'] })
+  await expect(args.onSave).toHaveBeenCalledWith({ enabled: true, frequency: 'weekly', views: ['for-me'] }, 1)
 } }
+/** Keeps the asynchronous acknowledgement independently controllable for draft regression checks. */
+function SaveDraftHarness() {
+  const [state, setState] = useState<UpdateFeedDigestState>(meta.args.state)
+  const finish = useRef<(() => void) | undefined>(undefined)
+  /** Commits the submitted preferences without preventing a later local edit. */
+  const save = (preferences: UpdateFeedDigestPreferences) => new Promise<boolean>((resolve) => {
+    finish.current = () => { setState((current) => ({ ...current, revision: current.revision + 1, preferences })); resolve(true) }
+  })
+  return <><DigestPanel {...meta.args} state={state} onSave={save} /><button onClick={() => finish.current?.()}>Finish submitted save</button><button onClick={() => setState((current) => ({ ...current, revision: current.revision + 1, preferences: { ...current.preferences, frequency: 'daily', views: ['recent'] } }))}>External settings update</button></>
+}
+/** A successful save clears only its own submitted draft, never subsequent edits. */
+export const SaveDraft: Story = { render: () => <SaveDraftHarness /> }
 /** Permission loss suppresses cached content and settings. */
 export const Denied: Story = { args: { ...Preview.args, failure: 'denied', canEdit: false } }
 /** Conflict offers metadata reload without automatic generation. */
