@@ -30,18 +30,19 @@ export function DigestPanelContainer(props: DigestPanelContainerProps) {
   const t = createTranslator(props.locale)
   return <details className="mb-5" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary ref={summary} className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-teal-800 focus-visible:outline-2 focus-visible:outline-teal-700">{t('updates.digest.title')}<span className="mt-1 block text-app-meta font-normal">{t('updates.digest.previewOnly')}</span></summary>
-    {open ? <DigestContent {...props} restoreFocus={() => summary.current?.focus()} /> : null}
+    <DigestContent {...props} open={open} restoreFocus={() => summary.current?.focus()} />
   </details>
 }
 
 /** Connects safe presentation categories to the session-owned controller. */
-function DigestContent({ token, enabled, canEdit, locale, guard, restoreFocus, contentKey }: DigestPanelContainerProps & { /** Stable fallback for removed controls. */ restoreFocus(): void }) {
-  const controller = useDigestPreview(token, enabled, locale, guard)
+function DigestContent({ token, enabled, canEdit, locale, guard, restoreFocus, contentKey, open }: DigestPanelContainerProps & { /** Disclosure state, separate from controller lifetime. */ open: boolean; /** Stable fallback for removed controls. */ restoreFocus(): void }) {
+  const controller = useDigestPreview(token, enabled && open, locale, guard)
   const { dismiss } = controller
   // Cancel owned browser requests/timers and clear ephemeral content before paint;
   // unrelated Feed scope changes must preserve the personal settings form and focus.
-  useLayoutEffect(() => { dismiss() }, [contentKey, dismiss])
+  useLayoutEffect(() => { dismiss() }, [contentKey, open, dismiss])
   const error = controller.error
+  if (!open) return null
   const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
   return <DigestPanel {...controller} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={controller.reload} onDismiss={controller.dismiss} />
 }
