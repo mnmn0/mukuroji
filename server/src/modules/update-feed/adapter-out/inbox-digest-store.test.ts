@@ -1,0 +1,201 @@
+import { expect, test } from 'bun:test'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
+import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
+import { InMemoryPlanningClient } from '../../planning/planning'
+import { NOTIFICATION_PREFERENCES_KEY, createNotificationRecipientKey, toNotificationItem } from '../../notifications'
+import { emptyDigestState } from '../application/digest'
+import { deliverInboxDigest } from '../application/inbox-digest'
+import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
+import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
+
+const recipient = { workspaceId: 'w', memberKey: 'reader' }
+const now = Date.parse('2026-10-03T12:00:00Z')
+const membershipKey = { workspaceId: 'w', recordKey: 'MEMBER#reader' }
+const membership: PlanningCallerAuthorizationConditionCheck = { ConditionCheck: { TableName: 'members', Key: membershipKey, ConditionExpression: '#version = :version', ExpressionAttributeNames: { '#version': 'version' }, ExpressionAttributeValues: { ':version': 2 } } }
+
+/** Creates an SDK-command-boundary transactional model with atomic condition evaluation. */
+async function fixture() {
+  const rows = new Map<string, Record<string, unknown>>()
+  const commands: unknown[] = []
+  let loseResponse = false
+  let loseClaimResponse = false
+  let clock = now
+  let beforeTransaction: (() => void) | undefined
+  const indexed: Record<string, unknown>[] = []
+  /** Derives model coordinates from the known table schemas. */
+  const coordinate = (table: string, value: Record<string, unknown>) => JSON.stringify([table, table === 'notifications' ? value.recipientKey : value.workspaceId, table === 'notifications' ? value.notificationKey : value.recordKey])
+  rows.set(coordinate('members', membershipKey), { ...membershipKey, version: 2 })
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
+  /** Evaluates the actual generated conjunction against the isolated row. */
+  const condition = (expression: string | undefined, row: Record<string, unknown> | undefined, names: Record<string, string> = {}, values: Record<string, unknown> = {}) => {
+    return expression?.split(' AND ').every((part) => {
+      const absent = /^attribute_not_exists\((\w+)\)$/.exec(part)
+      if (absent) return row?.[absent[1]!] === undefined
+      const [path, expected] = part.split(' = ')
+      let observed: unknown = row
+      for (const component of (path ?? '').split('.')) {
+        observed = typeof observed === 'object' && observed !== null && !Array.isArray(observed) ? Reflect.get(observed, names[component] ?? component) : undefined
+      }
+      return expected !== undefined && observed === values[expected]
+    }) ?? true
+  }
+  // Only the SDK's overloaded send signature needs this test-only cast.
+  client.send = (async (command: unknown) => {
+    commands.push(command)
+    if (command instanceof GetCommand) {
+      expect(command.input.ConsistentRead).toBe(true)
+      return { Item: structuredClone(rows.get(coordinate(command.input.TableName!, command.input.Key!))) }
+    }
+    if (command instanceof QueryCommand) {
+      expect(command.input.IndexName).toBe(INBOX_DIGEST_INDEX.name)
+      expect(command.input.Limit).toBeLessThanOrEqual(100)
+      expect(command.input.ConsistentRead).toBeUndefined()
+      return { Items: indexed, LastEvaluatedKey: { workspaceId: 'next', recordKey: 'next' } }
+    }
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected SDK command')
+    beforeTransaction?.()
+    const items = command.input.TransactItems ?? []
+    const reasons = items.map((item) => {
+      const operation = item.Put ?? item.ConditionCheck
+      if (!operation?.TableName) throw new Error('Missing transaction operation')
+      const value = 'Item' in operation ? operation.Item : operation.Key
+      if (!value) throw new Error('Missing transaction coordinates')
+      return { Code: condition(operation.ConditionExpression, rows.get(coordinate(operation.TableName, value)), operation.ExpressionAttributeNames, operation.ExpressionAttributeValues) ? 'None' : 'ConditionalCheckFailed' }
+    })
+    if (reasons.some((reason) => reason.Code !== 'None')) throw Object.assign(new Error('Conditional failure'), { name: 'TransactionCanceledException', CancellationReasons: reasons })
+    // Evaluate every condition first; apply all writes without an await boundary.
+    for (const item of items) if (item.Put?.Item && item.Put.TableName) rows.set(coordinate(item.Put.TableName, item.Put.Item), structuredClone(item.Put.Item))
+    if (loseClaimResponse) { loseClaimResponse = false; throw new Error('Lost claim response') }
+    if (loseResponse && items.some((item) => item.Put?.TableName === 'notifications')) throw new Error('Lost response')
+    return {}
+  }) as DynamoDBDocumentClient['send']
+  const store = new DynamoDbInboxDigestStore('planning', 'notifications', client, [membership], () => clock, 'ja')
+  await store.replace('w', 'reader', { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent', 'at-risk'] } })
+  const snapshot = await new InMemoryPlanningClient().get('w', { workItems: [] })
+  snapshot.updateTargets = [{ target: { type: 'project', teamId: 'team', projectId: 'project' }, latestVersion: 1, updateState: 'current', updatedAt: new Date(now).toISOString(), latestUpdate: { id: 'report', version: 1, health: 'at-risk', risk: 'none', summary: 'Private content', authorMemberKey: 'reader', coveredDueAt: new Date(now).toISOString(), createdAt: new Date(now).toISOString(), progressSnapshot: { percent: 20, linkedWorkItemCount: 1 }, capturedScope: { teamId: 'team', projectId: 'project' } } }]
+  const context = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
+  return {
+    store, rows, indexed, commands, coordinate,
+    run: () => deliverInboxDigest({ authorize: async () => context }, recipient, clock),
+    /** Injects a condition-boundary race. */
+    beforeTransaction(callback: () => void) { beforeTransaction = callback },
+    /** Loses only completion acknowledgements after both durable rows commit. */
+    loseResponse() { loseResponse = true },
+    /** Loses a committed claim response without running the completion path. */
+    loseClaimResponse() { loseClaimResponse = true },
+    /** Advances the trusted clock for lease and cadence tests. */
+    advance(milliseconds: number) { clock += milliseconds },
+    /** Inspects notification rows separately from metadata and preferences. */
+    notifications: () => [...rows.values()].filter((row) => row.itemType === 'notification'),
+    /** Inspects the separate delivery metadata. */
+    metadata: () => [...rows.values()].find((row) => row.entryType === 'update-feed-inbox-digest')!,
+  }
+}
+
+test('atomic SDK completion binds authorization, missing META, preferences and deterministic Inbox insertion', async () => {
+  const f = await fixture()
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+  const transaction = f.commands.filter((command) => command instanceof TransactWriteCommand).at(-1)
+  if (!(transaction instanceof TransactWriteCommand)) throw new Error('Missing transaction')
+  expect(transaction.input.TransactItems).toHaveLength(5)
+  expect(transaction.input.TransactItems?.[2]?.ConditionCheck).toMatchObject({ Key: { workspaceId: 'FENCE#w', recordKey: 'META' }, ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)' })
+  expect(toNotificationItem(f.notifications()[0], createNotificationRecipientKey('w', 'reader'), new Date(now))).toMatchObject({ title: '更新ダイジェストを確認できます', state: 'unread' })
+  expect(JSON.stringify(f.notifications())).not.toContain('Private content')
+  expect(f.metadata().inboxDigestDueAt).toBe(Date.parse('2026-10-04T00:00:00Z'))
+  expect(await f.run()).toBe('not-due')
+})
+
+test('lost transaction response and concurrent attempts preserve a single durable Inbox row', async () => {
+  const f = await fixture()
+  f.loseResponse()
+  await expect(f.run()).rejects.toMatchObject({ status: 503 })
+  expect(f.notifications()).toHaveLength(1)
+  const row = f.notifications()[0]!
+  row.inboxState = 'archived'
+  expect(await f.run()).toBe('not-due')
+  expect(f.notifications()[0]?.inboxState).toBe('archived')
+  const g = await fixture()
+  await Promise.allSettled([g.run(), g.run()])
+  expect(g.notifications()).toHaveLength(1)
+  expect((await g.store.get('w', 'reader')).history[0]?.status).toBe('completed')
+})
+
+test('membership revocation or first Planning creation rolls back both completion writes', async () => {
+  for (const boundary of ['membership', 'planning']) {
+    const f = await fixture()
+    f.beforeTransaction(() => {
+      const transaction = f.commands.at(-1)
+      if (!(transaction instanceof TransactWriteCommand) || !transaction.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) return
+      if (boundary === 'membership') f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 3 })
+      else f.rows.set(f.coordinate('planning', { workspaceId: 'FENCE#w', recordKey: 'META' }), { workspaceId: 'FENCE#w', recordKey: 'META', entryType: 'planning-meta', schemaVersion: 1, revision: 1 })
+    })
+    await expect(f.run()).rejects.toMatchObject({ status: 409 })
+    expect(f.notifications()).toHaveLength(0)
+    expect((await f.store.get('w', 'reader')).history[0]?.status).not.toBe('completed')
+  }
+})
+
+test('lost claim response stays leased then reclaims once; disabled settings fence pending completion', async () => {
+  const f = await fixture()
+  f.loseClaimResponse()
+  await expect(f.run()).rejects.toMatchObject({ status: 503 })
+  expect(await f.run()).toBe('not-due')
+  expect(f.notifications()).toHaveLength(0)
+  expect(f.metadata().inboxDigestDueAt).toBe(now + 60_000)
+  f.advance(60_001)
+  expect(await f.run()).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history[0]?.attempts).toBe(2)
+  const g = await fixture()
+  g.beforeTransaction(() => {
+    const command = g.commands.at(-1)
+    if (!(command instanceof TransactWriteCommand) || !command.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) return
+    const row = g.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+    delete row.inboxDigestShard
+    delete row.inboxDigestDueAt
+  })
+  await expect(g.run()).rejects.toMatchObject({ status: 409 })
+  expect(g.notifications()).toHaveLength(0)
+  expect(await g.run()).toBe('disabled')
+})
+
+test('concurrent Inbox preference creation is fenced and a retry cannot deliver after channel disable', async () => {
+  const f = await fixture()
+  f.beforeTransaction(() => {
+    const transaction = f.commands.at(-1)
+    if (!(transaction instanceof TransactWriteCommand) || !transaction.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) return
+    const row = { recipientKey: 'w#reader', notificationKey: NOTIFICATION_PREFERENCES_KEY, itemType: 'preferences', version: 1, channels: { inApp: false, email: false, push: false, slack: false }, frequency: 'instant', quietHours: { enabled: false, start: '22:00', end: '08:00', timeZone: 'UTC' } }
+    f.rows.set(f.coordinate('notifications', row), row)
+  })
+  await expect(f.run()).rejects.toMatchObject({ status: 409 })
+  await expect(f.run()).rejects.toMatchObject({ status: 409 })
+  expect(f.notifications()).toHaveLength(0)
+})
+
+test('due query is bounded and rechecks stale index entries against strongly consistent canonical metadata', async () => {
+  const f = await fixture()
+  const row = f.metadata()
+  f.indexed.push({ workspaceId: row.workspaceId, recordKey: row.recordKey })
+  const shard = Number(String(row.inboxDigestShard).split('#')[1])
+  expect(await f.store.listDue(shard, 10)).toEqual({ recipients: [recipient], cursor: { workspaceId: 'next', recordKey: 'next' } })
+  await f.run()
+  expect((await f.store.listDue(shard, 10)).recipients).toEqual([])
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { ...state.preferences, enabled: false } })
+  expect(f.metadata().inboxDigestShard).toBeUndefined()
+  expect((await f.store.listDue(shard, 10)).recipients).toEqual([])
+  await expect(f.store.listDue(shard, 101)).rejects.toMatchObject({ status: 409 })
+  expect((await f.store.get('other', 'reader')).preferences.enabled).toBe(false)
+})
+
+test('malformed due rows fail closed and metadata cannot bypass the atomic completion path', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await expect(f.store.replace('w', 'reader', { ...state, history: [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'forged', leaseUntil: 0, count: 1 }] })).rejects.toMatchObject({ status: 409 })
+  f.metadata().inboxDigestDueAt = 'malformed'
+  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 409 })
+  expect(f.notifications()).toHaveLength(0)
+})
