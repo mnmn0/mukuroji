@@ -124,7 +124,8 @@ function parseCheckpoint(row: Record<string, unknown>, shard: number): InboxDige
 /** Validates shared page/deferred metadata while retaining legacy checkpoint compatibility. */
 function parsePending(item: unknown): InboxDigestPending {
   if (!record(item) || !record(item.recipient) || typeof item.recipient.workspaceId !== 'string' || !item.recipient.workspaceId || typeof item.recipient.memberKey !== 'string' || !item.recipient.memberKey || !integer(item.attempts) || item.attempts > 2 || (item.scheduledAt !== undefined && (!integer(item.scheduledAt) || item.scheduledAt > 8_640_000_000_000_000)) || (item.conflicts !== undefined && (!integer(item.conflicts) || item.conflicts > 2))) throw invalid()
-  return { recipient: { workspaceId: item.recipient.workspaceId, memberKey: item.recipient.memberKey }, attempts: item.attempts, ...(item.scheduledAt === undefined ? {} : { scheduledAt: item.scheduledAt }), ...(item.conflicts === undefined ? {} : { conflicts: item.conflicts }) }
+  if (item.frequency !== undefined && ((item.frequency !== 'daily' && item.frequency !== 'weekly') || item.scheduledAt === undefined)) throw invalid()
+  return { recipient: { workspaceId: item.recipient.workspaceId, memberKey: item.recipient.memberKey }, attempts: item.attempts, ...(item.scheduledAt === undefined ? {} : { scheduledAt: item.scheduledAt }), ...(item.frequency === undefined ? {} : { frequency: item.frequency }), ...(item.conflicts === undefined ? {} : { conflicts: item.conflicts }) }
 }
 /** Binds parked logical work to one server-resolved owner without a lossy TTL. */
 function deferredKey(recipient: InboxDigestRecipient) { return { workspaceId: 'SYSTEM#INBOX_DIGEST', recordKey: `DEFERRED#${createHash('sha256').update(JSON.stringify([recipient.workspaceId, recipient.memberKey])).digest('hex')}` } }
