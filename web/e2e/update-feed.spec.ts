@@ -191,8 +191,117 @@ test('Inbox settings conflict requires reload and permission loss hides consent'
   state.inboxDenied = true
   await panel.getByRole('button', { name: 'Reload', exact: true }).click()
   await expect(panel.locator('form')).toHaveCount(0)
+  await expect(page.locator('summary', { hasText: 'Inbox digest settings' })).toBeFocused()
   expect(state.inbox.preferences.enabled).toBe(false)
   expect(state.digestRequests).toBe(0)
+})
+
+test('Inbox conflict preserves the original consent draft through a real focus refresh until explicit reload', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  const writes: number[] = []
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() === 'GET') reads++
+    else writes.push(route.request().postDataJSON().expectedRevision)
+    await route.fallback()
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).check()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByLabel('Recent', { exact: true }).check()
+  state.inbox.revision++
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  expect(writes).toEqual([0])
+  const initialReads = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(initialReads)
+  await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).toBeChecked()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
+  await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  await panel.getByRole('button', { name: 'Reload', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).not.toBeChecked()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(summary).toBeFocused()
+  expect(writes).toEqual([0])
+})
+
+for (const source of ['feed', 'saved']) for (const failure of ['503', 'abort']) test(`healthy Inbox withdrawal survives ${source} ${failure}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.inbox.preferences.enabled = true
+  await page.route(source === 'feed' ? '**/api/planning/update-feed?*' : '**/api/planning/update-feed/saved', (route) => failure === 'abort' ? route.abort('failed') : route.fulfill({ status: 503, json: {} }))
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.focus()
+  await page.keyboard.press('Enter')
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).focus()
+  await page.keyboard.press('Space')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => state.inbox.preferences.enabled).toBe(false)
+})
+
+test('Inbox denial never steals focus from an outside disclosure', async ({ page }) => {
+  await mockFeed(page)
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    waiting = true; await gate; await route.fulfill({ status: 403, json: {} })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).check()
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect.poll(() => waiting).toBe(true)
+  const outside = page.locator('summary', { hasText: 'Digest preview' })
+  await outside.focus()
+  release()
+  await expect(panel.locator('form')).toHaveCount(0)
+  await expect(outside).toBeFocused()
+})
+
+for (const source of ['feed', 'saved']) test(`${source} outage leaves healthy standard digest controls available`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.route(source === 'feed' ? '**/api/planning/update-feed?*' : '**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 503, json: { code: 'Unavailable' } }))
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
+  expect(state.digestRequests).toBe(1)
+})
+
+test('generation after another session changes preferences reports conflict instead of silent success', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  state.digest.preferences = { enabled: true, frequency: 'weekly', views: ['recent'] }
+  state.digest.revision++
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  expect(state.digestRequests).toBe(1)
+  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
+  expect(state.digestRequests).toBe(1)
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
 })
 
 for (const interruption of ['deadline', 'blur', 'close']) test(`stalled metadata releases preview on ${interruption} without late resurrection`, async ({ page }) => {

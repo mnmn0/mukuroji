@@ -3,6 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestCheckpoints } from './inbox-digest-checkpoint'
 import { runInboxDigestWorker } from '../application/inbox-digest-worker'
+import { PlanningError } from '../../planning'
 
 const start = Date.parse('2026-10-03T12:00:00Z')
 const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
@@ -122,6 +123,23 @@ test('worker quarantines after three failures, backs off and bounds duplicate ba
   expect(calls).toBe(3)
   expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
   expect(f.rows.get('SHARD#3')?.pending).toEqual([])
+})
+
+test('worker quarantines permanent storage failures on the first attempt instead of retrying them', async () => {
+  const f = fixture()
+  let clock = start
+  let calls = 0
+  const dependencies = {
+    checkpoints: f.store, now: () => clock,
+    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient] } },
+    delivery: { async authorize() { calls++; throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Storage configuration unavailable') } },
+  }
+  expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 1, delivered: 0, failed: 1 })
+  expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
+  expect(f.rows.get('SHARD#5')?.pending).toEqual([])
+  clock += 60_000
+  expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 0, delivered: 0, failed: 0 })
+  expect(calls).toBe(1)
 })
 
 test('unknown persisted schema fails closed instead of resetting the queue', async () => {

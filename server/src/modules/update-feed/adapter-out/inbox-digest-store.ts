@@ -99,7 +99,10 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
     const before = current.history.find((row) => row.id === id)
     const after = state.history.find((row) => row.id === id)
     if (!Number.isSafeInteger(planningRevision) || planningRevision < 0 || current.revision !== state.revision || !current.preferences.enabled || !before || before.status !== 'pending' || before.leaseUntil <= this.now() || !after || after.status !== 'completed' || after.token !== before.token || after.attempts !== before.attempts || after.leaseUntil !== 0 || JSON.stringify(current.preferences) !== JSON.stringify(state.preferences) || JSON.stringify(state.history) !== JSON.stringify(current.history.map((row) => row.id === id ? after : row))) throw conflict()
-    const expectedMessage = { id: `update-feed-digest:${id}`, occurredAt: `${id.slice(id.indexOf(':') + 1)}T00:00:00.000Z`, deepLink: '/updates' }
+    if (after.startedAt !== before.startedAt) throw conflict()
+    const startedAt = before.startedAt ?? before.leaseUntil - 60_000
+    if (startedAt < 0 || startedAt > before.leaseUntil - 60_000 || inboxDigestInterval(state, startedAt) !== id) throw conflict()
+    const expectedMessage = { id: `update-feed-digest:${id}`, occurredAt: new Date(startedAt).toISOString(), deepLink: '/updates' }
     if ((after.count === 0) !== (message === undefined) || (message && (message.id !== expectedMessage.id || message.occurredAt !== expectedMessage.occurredAt || message.deepLink !== '/updates'))) throw conflict()
     const recipientKey = createNotificationRecipientKey(recipient.workspaceId, recipient.memberKey)
     const preferenceKey = { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }
@@ -159,15 +162,23 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       ...(state.revision === 0 ? {} : { ExpressionAttributeNames: { '#revision': 'revision', '#type': 'entryType', '#schema': 'schemaVersion' }, ExpressionAttributeValues: { ':revision': state.revision, ':type': 'update-feed-inbox-digest', ':schema': 1 } }),
     } }, ...this.checks, ...guards, ...(message ? [{ Put: { TableName: this.notificationsTable, Item: createInboxDigestNotification(recipient, message, this.locale), ConditionExpression: 'attribute_not_exists(recipientKey) AND attribute_not_exists(notificationKey)' } }] : [])]
     try { await this.client.send(new TransactWriteCommand({ TransactItems: items })) }
-    catch (error) {
-      if (typeof error === 'object' && error !== null && 'name' in error && error.name === 'TransactionCanceledException' && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
-        const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
-        if (codes.length === items.length && codes.includes('ConditionalCheckFailed') && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) throw conflict()
-      }
-      throw new PlanningError(503, 'InboxDigestStorageFailure', 'Inbox digest persistence failed.')
-    }
+    catch (error) { return transactionFailure(error, items.length) }
     return result
   }
+}
+
+/** Separates conditional conflicts, transient SDK failures and permanent persistence failures. */
+function transactionFailure(error: unknown, size: number): never {
+  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
+  if (name === 'TransactionCanceledException' && typeof error === 'object' && error !== null && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
+    const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
+    if (codes.length === size) {
+      if (codes.includes('ConditionalCheckFailed') && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) throw conflict()
+      const transient = ['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError']
+      if (codes.some((code) => transient.includes(String(code))) && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed' || transient.includes(String(code)))) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Inbox digest storage is temporarily unavailable.')
+    }
+  }
+  return readFailure(error)
 }
 
 /** Validates current metadata and its server-derived recipient key. */
@@ -183,7 +194,7 @@ function parseRow(row: Record<string, unknown>, recipient: InboxDigestRecipient)
 /** Normalizes SDK reads and persisted-state failures without leaking storage details. */
 function readFailure(error: unknown): never {
   const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
-  if (typeof name === 'string' && ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TransactionInProgressException', 'TimeoutError'].includes(name)) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Inbox digest storage is temporarily unavailable.')
+  if (typeof name === 'string' && ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TransactionInProgressException', 'TimeoutError', 'RequestTimeout', 'RequestTimeoutException'].includes(name)) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Inbox digest storage is temporarily unavailable.')
   throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Inbox digest metadata is unavailable.')
 }
 /** Normalizes server identities before deriving storage coordinates. */

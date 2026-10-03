@@ -61,7 +61,8 @@ export function parseDigestState(value: unknown): UpdateFeedDigestState {
   const history: UpdateFeedDigestReceipt[] = value.history.map((row: unknown) => {
     if (!record(row) || typeof row.id !== 'string' || !/^(daily|weekly):\d{4}-\d{2}-\d{2}$/.test(row.id) || !['pending', 'completed', 'failed'].includes(String(row.status)) || !integer(row.attempts) || row.attempts < 1 || row.attempts > 3 || typeof row.token !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(row.token) || !integer(row.leaseUntil) || !integer(row.count) || row.count > 50) throw invalid()
     if (row.status !== 'pending' && row.status !== 'completed' && row.status !== 'failed') throw invalid()
-    return { id: row.id, status: row.status, attempts: row.attempts, token: row.token, leaseUntil: row.leaseUntil, count: row.count }
+    if (row.startedAt !== undefined && (!integer(row.startedAt) || row.startedAt > 8_640_000_000_000_000)) throw invalid()
+    return { id: row.id, status: row.status, attempts: row.attempts, token: row.token, leaseUntil: row.leaseUntil, count: row.count, ...(row.startedAt === undefined ? {} : { startedAt: row.startedAt }) }
   })
   if (new Set(history.map((row) => row.id)).size !== history.length) throw invalid()
   return { revision: value.revision, preferences: parseDigestPreferences(value.preferences), history }
@@ -111,7 +112,7 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   if (!replay && (existing?.attempts ?? 0) >= 3) throw new PlanningError(409, 'UpdateFeedDigestAttemptsExhausted', 'Digest preview retry limit reached for this interval.')
   const token = randomUUID()
   if (!replay) {
-    const receipt: UpdateFeedDigestReceipt = { id, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, token, leaseUntil: now + 60_000, count: 0 }
+    const receipt: UpdateFeedDigestReceipt = { id, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, token, leaseUntil: now + 60_000, startedAt: existing?.startedAt ?? now, count: 0 }
     state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].slice(-20) }, undefined, savedRevision)
   }
   try {

@@ -30,6 +30,8 @@ export type UpdateFeedDigestReceipt = {
   token: string
   /** Epoch milliseconds until which the claim is exclusive. */
   leaseUntil: number
+  /** First claim's epoch milliseconds, stable across attempts; absent on older receipts. */
+  startedAt?: number
   /** Number of entries at completion; contains no target identifiers. */
   count: number
 }

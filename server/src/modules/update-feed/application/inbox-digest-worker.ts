@@ -1,4 +1,4 @@
-import { deliverInboxDigest, type InboxDigestDependencies, type InboxDigestRecipient } from './inbox-digest'
+import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestDependencies, type InboxDigestRecipient } from './inbox-digest'
 
 /** Bounded retry, including failures before a delivery claim exists. */
 export type InboxDigestPending = {
@@ -57,17 +57,21 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     const { recipient } = item
     if (dependencies.now() + 5_000 >= state.leaseUntil) break
     let retry = false
+    let permanent = false
     try {
       if (await deliverInboxDigest(dependencies.delivery, recipient, dependencies.now()) === 'delivered') result.delivered++
     } catch (error) {
-      // The delivery due index advances exhausted intervals to the next cadence.
-      retry = !(typeof error === 'object' && error !== null && 'code' in error && error.code === 'UpdateFeedDigestAttemptsExhausted')
+      // Exhausted intervals advance through the due index. Permanent storage or
+      // identity failures require durable inspection evidence without more retries.
+      const terminal = inboxDigestTerminalReason(error)
+      retry = terminal === undefined
+      permanent = terminal !== undefined && terminal !== 'exhausted'
       result.failed++
     }
     result.processed++
     const remaining = state.pending.filter((item) => item.recipient.workspaceId !== recipient.workspaceId || item.recipient.memberKey !== recipient.memberKey)
     const exhausted = retry && item.attempts >= 2
-    state = await dependencies.checkpoints.save({ ...state, pending: retry && !exhausted ? [...remaining, { recipient, attempts: item.attempts + 1 }] : remaining }, dependencies.now(), false, exhausted ? recipient : undefined)
+    state = await dependencies.checkpoints.save({ ...state, pending: retry && !exhausted ? [...remaining, { recipient, attempts: item.attempts + 1 }] : remaining }, dependencies.now(), false, exhausted || permanent ? recipient : undefined)
   }
   await dependencies.checkpoints.save({ ...state, retryAt: result.failed ? dependencies.now() + 60_000 : 0 }, dependencies.now(), true)
   return result

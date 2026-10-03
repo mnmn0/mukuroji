@@ -16,7 +16,7 @@ export type InboxDigestRecipient = {
 export type InboxDigestMessage = {
   /** Deterministic recipient-scoped interval identity. */
   id: string
-  /** UTC interval start, stable across retries and response loss. */
+  /** First claim time, stable across retries and response loss. */
   occurredAt: string
   /** Existing authenticated Feed route, with no cached report identifiers or bodies. */
   deepLink: '/updates'
@@ -104,7 +104,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
       if (completed?.status !== 'completed') throw new Error('Digest completion missing')
       const message: InboxDigestMessage | undefined = completed.count === 0 ? undefined : {
         id: `update-feed-digest:${id}`,
-        occurredAt: `${id.slice(id.indexOf(':') + 1)}T00:00:00.000Z`,
+        occurredAt: new Date(completed.startedAt ?? now).toISOString(),
         deepLink: '/updates',
       }
       return context.store.complete(recipient, next, planningRevision, message, savedFeedsRevision)
@@ -151,6 +151,18 @@ export type InboxDigestScheduleResult = {
   cursor?: string
 }
 
+/** Identifies failures that require inspection instead of automatic recipient retry.
+ * @param error - Application-classified delivery failure.
+ * @returns A stable bodyless terminal category, or undefined for retryable failures.
+ */
+export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'recipient-mismatch' | undefined {
+  if (!(error instanceof PlanningError)) return undefined
+  if (error.code === 'UpdateFeedDigestAttemptsExhausted') return 'exhausted'
+  if (error.code === 'UpdateFeedDigestRecipientMismatch') return 'recipient-mismatch'
+  if (['UpdateFeedDigestInvalid', 'UpdateFeedDigestStorageFailure'].includes(error.code)) return 'corrupt-state'
+  return undefined
+}
+
 /** Drains at most 100 recipients and reports continuation and failures explicitly.
  * @param schedule - Disabled-by-default scheduler configuration and ports.
  * @param now - Trusted invocation clock.
@@ -171,7 +183,7 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
     try {
       if (await deliverInboxDigest(schedule.dependencies, recipient, now) === 'delivered') result.delivered++
     } catch (error) {
-      const reason = error instanceof PlanningError ? error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error.code === 'UpdateFeedDigestRecipientMismatch' ? 'recipient-mismatch' : ['UpdateFeedDigestInvalid', 'UpdateFeedDigestStorageFailure'].includes(error.code) ? 'corrupt-state' : undefined : undefined
+      const reason = inboxDigestTerminalReason(error)
       if (reason) result.terminal.push({ recipient, reason })
       else result.failed.push(recipient)
     }
