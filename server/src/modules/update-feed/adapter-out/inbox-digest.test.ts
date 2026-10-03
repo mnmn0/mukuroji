@@ -213,9 +213,9 @@ test('scheduler is opt-in, bounds pages, deduplicates recipients and preserves f
   await expect(runInboxDigestSchedule({ ...schedule, listCandidates: async () => ({ recipients: Array.from({ length: 101 }, () => recipient) }) }, now)).rejects.toThrow('Invalid digest candidate page')
 })
 
-test('notification TTL is interval-start epoch seconds plus 365 days, stable for weekly retries', () => {
+test('notification TTL is first-claim epoch seconds plus 365 days, stable for weekly retries', () => {
   for (const id of ['daily:2026-10-03', 'weekly:2026-09-28']) {
-    const occurredAt = `${id.split(':')[1]}T00:00:00.000Z`
+    const occurredAt = '2026-10-03T18:45:00.000Z'
     const message: InboxDigestMessage = { id: `update-feed-digest:${id}`, occurredAt, deepLink: '/updates' }
     const first = createInboxDigestNotification(recipient, message)
     expect(first.expiresAt).toBe(Date.parse(occurredAt) / 1000 + 365 * 86400)
@@ -226,15 +226,18 @@ test('notification TTL is interval-start epoch seconds plus 365 days, stable for
 
 test('scheduler separates terminal candidates from transient retries in a mixed bounded page', async () => {
   const f = await fixture()
-  const owners = ['success', 'transient', 'exhausted', 'corrupt', 'mismatch'].map((workspaceId) => ({ workspaceId, memberKey: 'reader' }))
+  const owners = ['success', 'transient', 'exhausted', 'corrupt', 'mismatch', 'permanent', 'unknown', 'invalid-input'].map((workspaceId) => ({ workspaceId, memberKey: 'reader' }))
   const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [...owners, owners[0]!], cursor: 'next' }), dependencies: { authorize: async (owner) => {
     if (owner.workspaceId === 'transient') throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Unavailable')
     if (owner.workspaceId === 'exhausted') throw new PlanningError(409, 'UpdateFeedDigestAttemptsExhausted', 'Exhausted')
-    if (owner.workspaceId === 'corrupt') throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Invalid state')
+    if (owner.workspaceId === 'corrupt') throw new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Invalid state')
+    if (owner.workspaceId === 'permanent') throw new PlanningError(502, 'UpdateFeedDigestStoragePermanent', 'Configuration failure')
+    if (owner.workspaceId === 'unknown') throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Unknown SDK failure')
+    if (owner.workspaceId === 'invalid-input') throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Input is not persisted corruption')
     const context = await f.dependencies.authorize(recipient)
     if (!context) throw new Error('Fixture missing')
     if (owner.workspaceId === 'mismatch') return context
     return { ...context, recipient: owner, store: { ...context.store, get: () => context.store.get(recipient.workspaceId, recipient.memberKey), replace: (_workspaceId, memberKey, state) => context.store.replace(recipient.workspaceId, memberKey, state), complete: (_owner, state, revision, message) => context.store.complete(recipient, state, revision, message) } }
   } } }, now)
-  expect(result).toEqual({ processed: 5, delivered: 1, failed: [owners[1]], terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }], cursor: 'next' })
+  expect(result).toEqual({ processed: 8, delivered: 1, failed: [owners[1], owners[6], owners[7]], terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }, { recipient: owners[5], reason: 'storage-permanent' }], cursor: 'next' })
 })
