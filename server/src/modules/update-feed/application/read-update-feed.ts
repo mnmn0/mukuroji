@@ -40,6 +40,14 @@ export async function readUpdateFeed(
   if (snapshot.updateTargets.length > 2000) {
     throw new PlanningError(413, 'UpdateFeedTargetLimitExceeded', 'Feed target projection exceeds its bounded read limit.')
   }
+  const identities = new Set<string>()
+  for (const candidate of snapshot.updateTargets) {
+    const key = targetKey(candidate)
+    if (identities.has(key)) {
+      throw new PlanningError(409, 'UpdateFeedDuplicateTarget', 'Feed projection contains duplicate target identities.')
+    }
+    identities.add(key)
+  }
   const entries = new Map<string, UpdateFeedEntry>()
   for (const candidate of snapshot.updateTargets) {
     if (candidate.archivedAt) continue
@@ -66,9 +74,6 @@ export async function readUpdateFeed(
     }
     if (!matchesView(entry, view)) continue
     const key = targetKey(entry)
-    if (entries.has(key)) {
-      throw new PlanningError(409, 'UpdateFeedDuplicateTarget', 'Feed projection contains duplicate target identities.')
-    }
     entries.set(key, entry)
   }
   const ranked = [...entries.values()].sort((a, b) =>
@@ -110,7 +115,7 @@ function matchesView(entry: UpdateFeedEntry, view: UpdateFeedView): boolean {
 }
 
 /** Creates an unambiguous identity without exposing physical storage keys. */
-function targetKey(entry: UpdateFeedEntry): string {
+function targetKey(entry: Pick<UpdateFeedEntry, 'target'>): string {
   const target = entry.target
   return JSON.stringify(target.type === 'project' ? ['project', target.teamId, target.projectId] : ['initiative', target.entityId])
 }
