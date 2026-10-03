@@ -92,4 +92,12 @@ test('validates query input before reading and rejects duplicate projection iden
   await expect(readUpdateFeed(reader, 'invalid')).rejects.toMatchObject({ code: 'UpdateFeedViewInvalid' })
   expect(reads).toBe(0)
   await expect(readUpdateFeed(reader)).rejects.toMatchObject({ code: 'UpdateFeedDuplicateTarget' })
+  const overdue = target('x', 'overdue')
+  delete overdue.latestUpdate
+  state.updateTargets = [target('x'), overdue]
+  for (const view of ['recent', 'overdue', 'at-risk', 'missing', 'stale', 'for-me']) {
+    await expect(readUpdateFeed(reader, view)).rejects.toMatchObject({ code: 'UpdateFeedDuplicateTarget' })
+  }
+  overdue.archivedAt = '2026-08-02T00:00:00.000Z'
+  await expect(readUpdateFeed({ ...reader, authorizeTarget: async () => undefined })).rejects.toMatchObject({ code: 'UpdateFeedDuplicateTarget' })
 })
