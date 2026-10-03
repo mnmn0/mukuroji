@@ -7113,8 +7113,8 @@ routeApp.put('/api/planning/update-feed/read-state', async (c) => {
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
   try {
-    const input = parseUpdateFeedReadState(await readPlanningJson<unknown>(c.req))
     const initialPrincipal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const input = parseUpdateFeedReadState(await readPlanningJson<unknown>(c.req))
     const authorizationRevision = await workItemDependencies.planning.getAuthorizationRevision(initialPrincipal.directoryId)
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     if (principal.directoryId !== initialPrincipal.directoryId) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Workspace authorization changed.')
@@ -7124,7 +7124,8 @@ routeApp.put('/api/planning/update-feed/read-state', async (c) => {
       if (snapshot.revision !== authorizationRevision) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Target authorization changed. Refresh and retry.')
       return snapshot
     } }
-    return c.json(await setUpdateFeedReadState(reader, workItemDependencies.updateFeedReadState, principal.directoryId, input))
+    const store = workItemDependencies.updateFeedReadState.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal))
+    return c.json(await setUpdateFeedReadState(reader, store, principal.directoryId, input))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }

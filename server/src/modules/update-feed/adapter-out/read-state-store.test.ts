@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbUpdateFeedReadStateStore } from './read-state-store'
+import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 
 /** Builds a document client with an isolated command-level test boundary. */
 function clientFor(send: (command: unknown) => Promise<unknown>): DynamoDBDocumentClient {
@@ -12,6 +13,10 @@ function clientFor(send: (command: unknown) => Promise<unknown>): DynamoDBDocume
 }
 
 const report = { target: { type: 'project' as const, teamId: 'team', projectId: 'project' }, version: 1 }
+const callerChecks: PlanningCallerAuthorizationConditionCheck[] = [
+  { ConditionCheck: { TableName: 'members', Key: { workspaceId: 'workspace', recordKey: 'MEMBER#reader' }, ConditionExpression: '#version = :version AND #status = :active', ExpressionAttributeNames: { '#version': 'version', '#status': 'status' }, ExpressionAttributeValues: { ':version': 3, ':active': 'active' } } },
+  { ConditionCheck: { TableName: 'identity', Key: { scopeKey: 'WORKSPACE#workspace', recordKey: 'CONTROL' }, ConditionExpression: '#revision = :revision', ExpressionAttributeNames: { '#revision': 'controlRevision' }, ExpressionAttributeValues: { ':revision': 8 } } },
+]
 
 test('reads only exact bounded keys with strong consistency and rejects corrupt or failed reads', async () => {
   let reads = 0
@@ -37,7 +42,7 @@ test('reads only exact bounded keys with strong consistency and rejects corrupt 
   corrupt = true
   await expect(store.getMany('workspace', 'reader', [report])).rejects.toMatchObject({ status: 502 })
   unavailable = true
-  await expect(store.getMany('workspace', 'reader', [report])).rejects.toThrow('unavailable')
+  await expect(store.getMany('workspace', 'reader', [report])).rejects.toMatchObject({ status: 502, code: 'UpdateFeedReadStateStorageFailure' })
 })
 
 test('atomically guards Planning revision and member-state CAS without copying report content', async () => {
@@ -46,15 +51,59 @@ test('atomically guards Planning revision and member-state CAS without copying r
     expect(command).toBeInstanceOf(TransactWriteCommand)
     if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
     const items = command.input.TransactItems
-    expect(items).toHaveLength(2)
+    expect(items).toHaveLength(4)
+    expect(items?.slice(2)).toEqual(callerChecks)
     expect(items?.[0]?.ConditionCheck).toMatchObject({ Key: { workspaceId: 'FENCE#workspace', recordKey: 'META' }, ExpressionAttributeValues: { ':revision': 7 } })
     expect(items?.[1]?.Put).toMatchObject({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: { workspaceId: 'workspace', schemaVersion: 1, read: true, revision: 1 } })
     expect(Object.keys(items?.[1]?.Put?.Item ?? {}).sort()).toEqual(['read', 'recordKey', 'revision', 'schemaVersion', 'workspaceId'])
-    if (conflict) throw Object.assign(new Error('conflict'), { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] })
+    if (conflict) throw Object.assign(new Error('conflict'), { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }, { Code: 'None' }] })
     return {}
   })
-  const store = new DynamoDbUpdateFeedReadStateStore('planning', client)
+  const store = new DynamoDbUpdateFeedReadStateStore('planning', client).withCallerAuthorization(callerChecks)
   expect(await store.set('workspace', 'reader', { ...report, read: true, expectedRevision: 0 }, 7)).toEqual({ read: true, revision: 1 })
   conflict = true
   await expect(store.set('workspace', 'reader', { ...report, read: true, expectedRevision: 0 }, 7)).rejects.toMatchObject({ status: 409 })
+})
+
+test('requires caller guards and rejects membership or Enterprise revocation at commit time', async () => {
+  let changedIndex = 2
+  let commits = 0
+  const client = clientFor(async (command) => {
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
+    expect(command.input.TransactItems?.slice(2)).toEqual(callerChecks)
+    if (changedIndex >= 0) throw Object.assign(new Error('revoked'), { name: 'TransactionCanceledException', CancellationReasons: command.input.TransactItems?.map((_, index) => ({ Code: index === changedIndex ? 'ConditionalCheckFailed' : 'None' })) })
+    commits++
+    return {}
+  })
+  const unbound = new DynamoDbUpdateFeedReadStateStore('planning', client)
+  const input = { ...report, read: true, expectedRevision: 0 }
+  await expect(unbound.set('workspace', 'reader', input, 7)).rejects.toMatchObject({ code: 'UpdateFeedAuthorizationUnavailable' })
+  const store = unbound.withCallerAuthorization(callerChecks)
+  for (const index of [2, 3]) {
+    changedIndex = index
+    await expect(store.set('workspace', 'reader', input, 7)).rejects.toMatchObject({ code: 'UpdateFeedReadStateConflict' })
+  }
+  expect(commits).toBe(0)
+  changedIndex = -1
+  expect(await store.set('workspace', 'reader', input, 7)).toEqual({ read: true, revision: 1 })
+  expect(commits).toBe(1)
+})
+
+test('distinguishes conditional-only, mixed transient, unknown and malformed transaction failures', async () => {
+  for (const [codes, status, code] of [
+    [['None', 'ConditionalCheckFailed'], 409, 'UpdateFeedReadStateConflict'],
+    [['None', 'TransactionConflict'], 503, 'UpdateFeedReadStateRetryable'],
+    [['ConditionalCheckFailed', 'ThrottlingError'], 503, 'UpdateFeedReadStateRetryable'],
+    [['ProvisionedThroughputExceeded', 'None'], 503, 'UpdateFeedReadStateRetryable'],
+    [['ConditionalCheckFailed', 'ValidationError'], 502, 'UpdateFeedReadStateStorageFailure'],
+    [['ConditionalCheckFailed', undefined], 502, 'UpdateFeedReadStateStorageFailure'],
+    [[], 502, 'UpdateFeedReadStateStorageFailure'],
+  ] as const) {
+    const reasons = codes.length ? [...codes, 'None', 'None'] : []
+    const client = clientFor(async () => { throw Object.assign(new Error('private provider detail'), { name: 'TransactionCanceledException', CancellationReasons: reasons.map((Code) => ({ Code })) }) })
+    const store = new DynamoDbUpdateFeedReadStateStore('planning', client).withCallerAuthorization(callerChecks)
+    await expect(store.set('workspace', 'reader', { ...report, read: true, expectedRevision: 0 }, 7)).rejects.toMatchObject({ status, code })
+  }
+  const client = clientFor(async () => { throw Object.assign(new Error('private provider detail'), { name: 'ThrottlingException' }) })
+  await expect(new DynamoDbUpdateFeedReadStateStore('planning', client).getMany('workspace', 'reader', [report])).rejects.toMatchObject({ status: 503, code: 'UpdateFeedReadStateRetryable' })
 })

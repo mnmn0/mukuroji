@@ -2,6 +2,8 @@ import {
   createApiTestHarness,
 } from '../../../../api/test-support/api-test-harness'
 const {
+  app,
+  configureFakeAuthenticatedUser,
   configureFakeProjectClients,
   createCollaborationStub,
   createCyclePlanningInput,
@@ -17,6 +19,7 @@ import {
   InMemoryPlanningClient,
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
+import { CognitoServiceError } from '../../../authentication'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
@@ -38,6 +41,19 @@ import {
 
 afterEach(() => {
   resetTestApp()
+})
+
+test('authenticates read-state requests before parsing malformed JSON', async () => {
+  let authenticationAttempted = false
+  configureFakeAuthenticatedUser({}, () => {
+    authenticationAttempted = true
+    throw new CognitoServiceError(400, 'NotAuthorizedException', 'Invalid token')
+  })
+  const response = await app.request('/api/planning/update-feed/read-state', {
+    method: 'PUT', headers: { Authorization: 'Bearer invalid-token', 'Content-Type': 'application/json' }, body: '{broken',
+  })
+  expect(authenticationAttempted).toBe(true)
+  expect(response.status).toBe(401)
 })
 
 /** Creates the canonical two-endpoint dependency input shared by API idempotency tests. */
@@ -377,8 +393,17 @@ test('aggregates latest Project and Initiative updates without history reads and
   expect(perTargetAuthorizationReads).toBe(0)
   planning.get = readPlanning
   const readInput = { target: targets[0], version: 1, read: true, expectedRevision: 0 }
+  const stateStore = getTestAppDependencies().workItems.updateFeedReadState
+  const bindCaller = stateStore.withCallerAuthorization.bind(stateStore)
+  let callerGuardBound = false
+  stateStore.withCallerAuthorization = (checks) => {
+    expect(checks).toContainEqual(expect.objectContaining({ ConditionCheck: expect.objectContaining({ Key: { workspaceId: 'user#demo@example.com', recordKey: 'MEMBER#demo@example.com' } }) }))
+    callerGuardBound = true
+    return bindCaller(checks)
+  }
   const markedRead = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', readInput)
   expect(markedRead.status).toBe(200)
+  expect(callerGuardBound).toBe(true)
   expect(await markedRead.json()).toEqual({ read: true, revision: 1 })
   const refreshed = await planningApiRequest('/api/planning/update-feed?view=recent')
   expect(await refreshed.json()).toMatchObject({ entries: [

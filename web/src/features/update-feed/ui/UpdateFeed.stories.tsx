@@ -22,7 +22,7 @@ export const Reports: Story = { play: async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
   await expect(canvas.getByText('On track')).toBeVisible()
   await expect(canvas.getByText('Overdue')).toBeVisible()
-  await userEvent.click(canvas.getByRole('button', { name: 'Mark as read' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Mark as read: Customer onboarding' }))
   await expect(args.onToggle).toHaveBeenCalledWith(updateFeedFixture.entries[0])
 } }
 /** Localized view suitable for narrow-screen verification. */

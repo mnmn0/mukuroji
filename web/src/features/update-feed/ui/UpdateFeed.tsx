@@ -68,8 +68,8 @@ export function UpdateFeed({ response, view, locale, t, loading, failed, mutatio
           {entry.reasons.length ? <p className="mt-2 text-app-meta text-slate-600">{entry.reasons.map((reason) => t(`updates.reason.${reason}`)).join(' · ')}</p> : null}
         </div>
         <div className="flex flex-wrap items-start gap-2 sm:flex-col sm:items-end">
-          {entry.readState ? <button className="min-h-10 rounded-md border border-slate-300 bg-white px-3 text-app-meta font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" disabled={pending} onClick={() => onToggle(entry)}>{t(entry.readState.read ? 'updates.markUnread' : 'updates.markRead')}</button> : null}
-          <Link className="inline-flex min-h-10 items-center px-3 text-app-meta font-semibold text-teal-800 underline-offset-4 hover:underline" to={updateFeedTargetPath(entry.target)}>{t('updates.history')}</Link>
+          {entry.readState ? <button aria-label={t(entry.readState.read ? 'updates.markUnreadTarget' : 'updates.markReadTarget').replace('{title}', () => entry.title)} className="min-h-10 rounded-md border border-slate-300 bg-white px-3 text-app-meta font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" disabled={pending} onClick={() => onToggle(entry)}>{t(entry.readState.read ? 'updates.markUnread' : 'updates.markRead')}</button> : null}
+          <Link aria-label={t('updates.historyTarget').replace('{title}', () => entry.title)} className="inline-flex min-h-10 items-center px-3 text-app-meta font-semibold text-teal-800 underline-offset-4 hover:underline" to={updateFeedTargetPath(entry.target)}>{t('updates.history')}</Link>
         </div>
       </li>)}
     </ul> : null}

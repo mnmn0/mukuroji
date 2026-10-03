@@ -46,7 +46,7 @@ import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
-import type { UpdateFeedReadStateStore } from '../../modules/update-feed'
+import type { UpdateFeedReadStatePersistence } from '../../modules/update-feed'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
@@ -181,7 +181,7 @@ export interface WorkItemDependencies {
   /** Provides Planning persistence. */
   planning: PlanningClient
   /** Provides durable per-member, per-version feed read state. */
-  updateFeedReadState: UpdateFeedReadStateStore
+  updateFeedReadState: UpdateFeedReadStatePersistence
   /** Provides Request Intake persistence. */
   requestIntake: RequestIntakeClient
   /** Provides the Team Triage queue and replay-safe mutation surface. */
