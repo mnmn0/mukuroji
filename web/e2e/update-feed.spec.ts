@@ -207,6 +207,7 @@ test('delayed source metadata preserves the open disclosure, dirty draft and own
   await expect(panel).toBeVisible()
   await expect(panel.getByLabel('Interval', { exact: true })).toBeFocused()
   releaseSaved()
+  await expect(page.getByRole('button', { name: 'New feed', exact: true })).toBeEnabled()
   await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
   await expect(panel.getByLabel('Interval', { exact: true })).toBeFocused()
   await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeEnabled()
@@ -257,14 +258,17 @@ test('Planning refresh and view navigation preserve dirty settings and focus wit
   await interval.selectOption('weekly')
   await interval.focus()
   state.feed.revision++
+  state.feed.entries[0]!.title = 'Refreshed planning target'
   const before = reads
   await page.clock.fastForward(6_001)
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
   await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(page.getByRole('link', { name: 'Refreshed planning target', exact: true })).toBeVisible()
   await expect(interval).toHaveValue('weekly')
   await expect(interval).toBeFocused()
   await page.evaluate(() => { history.pushState(null, '', '/updates?view=recent'); dispatchEvent(new PopStateEvent('popstate')) })
   await expect(page).toHaveURL(/view=recent/)
+  await expect(page.getByLabel('Feed', { exact: true })).toHaveValue('recent')
   await expect(interval).toHaveValue('weekly')
   await expect(interval).toBeFocused()
   await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeEnabled()
