@@ -82,6 +82,7 @@ async function mockFeed(page: Page, guest = false) {
 for (const failure of ['503', 'abort']) test(`saved lookup ${failure} still permits keyboard consent withdrawal without exposing custom IDs`, async ({ page }) => {
   const state = await mockFeed(page)
   state.inbox.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['private-custom-id'] } }
+  state.digest.preferences = structuredClone(state.inbox.preferences)
   await page.route('**/api/planning/update-feed/saved', (route) => failure === 'abort' ? route.abort('failed') : route.fulfill({ status: 503, json: { code: 'SavedUpdateFeedsUnavailable' } }))
   await page.goto('/updates')
   const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
@@ -101,7 +102,11 @@ for (const failure of ['503', 'abort']) test(`saved lookup ${failure} still perm
   await expect.poll(() => state.inbox.preferences.enabled).toBe(false)
   expect(state.inbox.preferences.savedFeeds).toEqual({ revision: 1, ids: ['private-custom-id'] })
   expect(state.digestRequests).toBe(0)
-  await expect(page.locator('summary', { hasText: 'Digest preview' })).toHaveCount(0)
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const preview = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  await expect(preview.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  await expect(preview).not.toContainText('private-custom-id')
 })
 
 test('saved lookup permission denial keeps digest controls unavailable', async ({ page }) => {
