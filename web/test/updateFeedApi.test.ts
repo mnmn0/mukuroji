@@ -8,6 +8,7 @@ afterEach(() => { globalThis.fetch = originalFetch })
 test('validates independent health and submission fields without changing server ranking', async () => {
   globalThis.fetch = async (url) => {
     expect(String(url)).toContain('locale=en')
+    expect(String(url)).toContain('relevance=2')
     return Response.json(updateFeedFixture)
   }
   expect(await getUpdateFeed('session', 'for-me', 'en')).toEqual(updateFeedFixture)

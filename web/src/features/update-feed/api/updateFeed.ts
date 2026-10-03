@@ -30,7 +30,7 @@ export class UpdateFeedApiError extends Error {
  * @returns Validated response in server-ranked order.
  */
 export async function getUpdateFeed(token: string, view: UpdateFeedView, locale: 'ja' | 'en' = 'ja', feedId?: string): Promise<UpdateFeedResponse> {
-  const value = await requestUpdateFeed(token, `?view=${view}&limit=100&locale=${locale}${feedId === undefined ? '' : `&feedId=${encodeURIComponent(feedId)}`}`)
+  const value = await requestUpdateFeed(token, `?view=${view}&limit=100&locale=${locale}&relevance=2${feedId === undefined ? '' : `&feedId=${encodeURIComponent(feedId)}`}`)
   if (!isRecord(value) || !isUpdateFeedView(value.view) || value.view !== view || !isNonnegativeSafeInteger(value.revision) || !isNonnegativeSafeInteger(value.total) || typeof value.truncated !== 'boolean' || !Array.isArray(value.entries) || value.entries.length > 100 || !value.entries.every(isEntry)) throw new UpdateFeedApiError(502)
   return { view: value.view, revision: value.revision, total: value.total, truncated: value.truncated, entries: value.entries }
 }

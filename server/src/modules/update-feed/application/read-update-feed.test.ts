@@ -41,7 +41,7 @@ test('keeps health and submission predicates separate and emits one entry for mu
   expect((await readUpdateFeed(reader, 'missing')).entries[0]?.health).toBe('unknown')
   const feed = await readUpdateFeed(reader, 'for-me')
   expect(feed.total).toBe(3)
-  expect(feed.entries[0]).toMatchObject({ reasons: ['update-owner', 'latest-author'], relevance: 9 })
+  expect(feed.entries[0]).toMatchObject({ reasons: ['update-owner', 'latest-author'], relevance: 3 })
   expect(feed.entries[0]?.latestUpdate).not.toHaveProperty('capturedScope')
   expect((await readUpdateFeed(reader)).total).toBe(2)
   expect(state).toEqual(before)
@@ -77,7 +77,7 @@ test('keeps overdue and owned targets when authorization redacts their old lates
     authorizeTarget: async (summary: PlanningUpdateTargetSummary) => ({ ...summary, latestUpdate: undefined }),
   }
   expect(await readUpdateFeed(reader, 'overdue')).toMatchObject({ total: 1, entries: [{ health: 'unknown', updateState: 'overdue' }] })
-  expect((await readUpdateFeed(reader, 'for-me')).entries[0]).toMatchObject({ reasons: ['update-owner'], relevance: 8 })
+  expect((await readUpdateFeed(reader, 'for-me')).entries[0]).toMatchObject({ reasons: ['update-owner'], relevance: 2 })
   expect((await readUpdateFeed(reader, 'recent')).total).toBe(0)
   expect((await readUpdateFeed(reader, 'at-risk')).total).toBe(0)
 })
@@ -129,7 +129,7 @@ test('ranks current relationships once, expires activity and never promotes atte
   })
   const state = await snapshot(targets)
   const now = Date.parse('2026-08-15T00:00:00.000Z')
-  const reader = { memberKey: ' Reader ', now: () => now, readSnapshot: async () => state, authorizeTarget: async (item: PlanningUpdateTargetSummary) => item.target.type === 'project' && item.target.projectId !== 'denied' ? item : undefined, readSignals: async (items: readonly PlanningUpdateTargetSummary[]): Promise<UpdateFeedTargetSignals[]> => {
+  const reader = { expandedSignals: true, memberKey: ' Reader ', now: () => now, readSnapshot: async () => state, authorizeTarget: async (item: PlanningUpdateTargetSummary) => item.target.type === 'project' && item.target.projectId !== 'denied' ? item : undefined, readSignals: async (items: readonly PlanningUpdateTargetSummary[]): Promise<UpdateFeedTargetSignals[]> => {
     expect(items).toHaveLength(3)
     return items.map(({ target }) => ({ target, projectMember: target.type === 'project' && target.projectId !== 'popular', watching: target.type === 'project' && target.projectId === 'combined', activity: { target, version: 1, revision: 1, commentAt: '2026-08-14T00:00:00.000Z', reactionAt: '2026-08-14T00:00:00.000Z', participants: target.type === 'project' && target.projectId === 'combined' ? [{ memberKey: 'reader', at: '2026-08-01T00:00:00.000Z' }] : [] } }))
   } }

@@ -3,6 +3,8 @@ import { PlanningError, type PlanningUpdateActivity } from '../../planning'
 
 /** Request-scoped ports bound to an authenticated Workspace principal. */
 export interface UpdateFeedReader {
+  /** Emits expanded reasons only for clients that explicitly support the newer response. */
+  expandedSignals?: boolean
   /** Supplies a deterministic clock for expiring recent signals. */
   now?: () => number
   /** Loads bounded current-member signals only after target authorization.
@@ -95,7 +97,7 @@ export async function readUpdateFeed(
   }
   const signals = new Map<string, UpdateFeedTargetSignals>()
   const authorizedIdentities = new Set(authorized.map(targetKey))
-  for (const signal of authorized.length ? await reader.readSignals?.(authorized, snapshot) ?? [] : []) {
+  for (const signal of reader.expandedSignals && authorized.length ? await reader.readSignals?.(authorized, snapshot) ?? [] : []) {
     const key = targetKey(signal)
     if (signals.has(key) || !authorizedIdentities.has(key)) throw new PlanningError(503, 'UpdateFeedSignalsInvalid', 'Feed signals are inconsistent.')
     signals.set(key, signal)
@@ -128,8 +130,8 @@ export async function readUpdateFeed(
         createdAt: latest.createdAt,
       } } : {}),
       reasons,
-      relevance: (reasons.includes('update-owner') ? 8 : 0) + (reasons.includes('project-member') ? 4 : 0) + (reasons.includes('watching') ? 3 : 0) + (reasons.includes('recent-interaction') ? 2 : 0) + (reasons.includes('latest-author') ? 1 : 0),
-      attention: { score: (attentionReasons.includes('recent-comment') ? 2 : 0) + (attentionReasons.includes('recent-reaction') ? 1 : 0), reasons: attentionReasons },
+      relevance: (reasons.includes('update-owner') ? reader.expandedSignals ? 8 : 2 : 0) + (reasons.includes('project-member') ? 4 : 0) + (reasons.includes('watching') ? 3 : 0) + (reasons.includes('recent-interaction') ? 2 : 0) + (reasons.includes('latest-author') ? 1 : 0),
+      ...(reader.expandedSignals ? { attention: { score: (attentionReasons.includes('recent-comment') ? 2 : 0) + (attentionReasons.includes('recent-reaction') ? 1 : 0), reasons: attentionReasons } } : {}),
     }
     if (!matchesView(entry, view)) continue
     if (filters) {
