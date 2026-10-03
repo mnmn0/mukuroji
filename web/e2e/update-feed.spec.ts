@@ -294,7 +294,7 @@ test('Inbox saves canonical selections and ignores checkbox reselection order', 
   await expect.poll(() => state.inbox.preferences.views).toEqual(['recent', 'at-risk'])
 })
 
-for (const failure of ['network', 'forbidden']) test(`Inbox ${failure} verification failure survives closing until a fresh GET succeeds`, async ({ page }) => {
+for (const boundary of ['disclosure', 'route']) for (const failure of ['network', 'forbidden']) test(`${boundary}: Inbox ${failure} verification failure survives closing until a fresh GET succeeds`, async ({ page }) => {
   await mockFeed(page)
   await page.clock.install()
   let readsFail = false
@@ -319,8 +319,13 @@ for (const failure of ['network', 'forbidden']) test(`Inbox ${failure} verificat
   if (failure === 'network') { readsFail = true; await panel.getByRole('button', { name: 'Reload', exact: true }).click() }
   await expect(panel.locator('form')).toHaveCount(0)
   stalled = true
-  await summary.click()
+  if (boundary === 'disclosure') await summary.click()
+  else {
+    await page.evaluate(() => { history.pushState(null, '', '/help'); dispatchEvent(new PopStateEvent('popstate')) })
+    await expect(summary).toHaveCount(0)
+  }
   await page.clock.fastForward(6_001)
+  if (boundary === 'route') await page.evaluate(() => { history.pushState(null, '', '/updates'); dispatchEvent(new PopStateEvent('popstate')) })
   await summary.click()
   await expect.poll(() => waiting).toBe(true)
   await expect(panel.locator('form')).toHaveCount(0)
