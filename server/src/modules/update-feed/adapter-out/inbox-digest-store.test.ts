@@ -5,7 +5,7 @@ import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import { InMemoryPlanningClient } from '../../planning/planning'
 import { NOTIFICATION_PREFERENCES_KEY, createNotificationRecipientKey, toNotificationItem } from '../../notifications'
 import { emptyDigestState } from '../application/digest'
-import { deliverInboxDigest } from '../application/inbox-digest'
+import { deliverInboxDigest, type InboxDigestContext } from '../application/inbox-digest'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
 
@@ -76,7 +76,7 @@ async function fixture() {
   await store.replace('w', 'reader', { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent', 'at-risk'] } })
   const snapshot = await new InMemoryPlanningClient().get('w', { workItems: [] })
   snapshot.updateTargets = [{ target: { type: 'project', teamId: 'team', projectId: 'project' }, latestVersion: 1, updateState: 'current', updatedAt: new Date(now).toISOString(), latestUpdate: { id: 'report', version: 1, health: 'at-risk', risk: 'none', summary: 'Private content', authorMemberKey: 'reader', coveredDueAt: new Date(now).toISOString(), createdAt: new Date(now).toISOString(), progressSnapshot: { percent: 20, linkedWorkItemCount: 1 }, capturedScope: { teamId: 'team', projectId: 'project' } } }]
-  const context = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
+  const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
   return {
     store, rows, indexed, commands, coordinate, context,
     run: () => deliverInboxDigest({ authorize: async () => context }, recipient, clock),
