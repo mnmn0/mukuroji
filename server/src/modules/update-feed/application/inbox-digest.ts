@@ -169,7 +169,7 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
     try {
       if (await deliverInboxDigest(schedule.dependencies, recipient, now) === 'delivered') result.delivered++
     } catch (error) {
-      const reason = error instanceof PlanningError ? error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error.code === 'UpdateFeedDigestRecipientMismatch' ? 'recipient-mismatch' : error.code === 'UpdateFeedDigestCorruptState' || error.code === 'UpdateFeedReadStateCorrupt' ? 'corrupt-state' : error.code === 'UpdateFeedDigestStoragePermanent' ? 'storage-permanent' : error.code === 'UpdateFeedDigestInvalid' ? 'invalid-input' : undefined : undefined
+      const reason = error instanceof PlanningError ? error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error.code === 'UpdateFeedDigestRecipientMismatch' ? 'recipient-mismatch' : error.code === 'UpdateFeedDigestCorruptState' || error.code === 'UpdateFeedReadStateCorrupt' || error.code === 'UpdateFeedDuplicateTarget' ? 'corrupt-state' : error.code === 'UpdateFeedDigestStoragePermanent' ? 'storage-permanent' : error.code === 'UpdateFeedDigestInvalid' ? 'invalid-input' : undefined : undefined
       if (reason) result.terminal.push({ recipient, reason })
       else result.failed.push(recipient)
     }
