@@ -311,6 +311,62 @@ for (const beforeClaim of [true, false]) test(`cadence change cancels a pinned r
   expect((await f.metadata.get(recipient.workspaceId, recipient.memberKey)).history.at(-1)?.id).toBe('weekly:2026-10-05')
 })
 
+test('a lost committed claim acknowledgment retains same-clock retries until lease recovery', async () => {
+  const f = await fixture()
+  const context = await f.dependencies.authorize(recipient)
+  if (!context) throw new Error('Missing fixture')
+  let lose = true
+  const dependencies: InboxDigestDependencies = { authorize: async () => ({ ...context, store: { ...context.store, replace: async (...args) => {
+    const saved = await context.store.replace(...args)
+    if (lose) { lose = false; throw new Error('Lost claim acknowledgment') }
+    return saved
+  } } }) }
+  const first = await runInboxDigestSchedule({ enabled: true, dependencies, listCandidates: async () => ({ recipients: [candidate] }) }, now)
+  expect(first.failed).toEqual([{ ...candidate, scheduledAt: now }])
+  const immediate = await runInboxDigestSchedule({ enabled: true, dependencies, listCandidates: async () => ({ recipients: first.failed }) }, now)
+  expect(immediate.failed).toEqual(first.failed)
+  expect(f.inbox.size).toBe(0)
+  const recovered = await runInboxDigestSchedule({ enabled: true, dependencies, listCandidates: async () => ({ recipients: immediate.failed }) }, now + 60_001)
+  expect(recovered).toMatchObject({ delivered: 1, failed: [] })
+  expect(f.inbox.size).toBe(1)
+  expect((await f.metadata.get(recipient.workspaceId, recipient.memberKey)).history).toMatchObject([{ attempts: 2, status: 'completed' }])
+})
+
+for (const count of [0, 1]) test(`pruned ${count ? 'nonempty' : 'empty'} interval cannot reclaim or evict retained receipts`, async () => {
+  const f = await fixture(count)
+  for (let day = 0; day < 21; day++) await f.run(now + day * 86_400_000)
+  const before = await f.metadata.get(recipient.workspaceId, recipient.memberKey)
+  const inboxBefore = [...f.inbox]
+  expect(before.history).toHaveLength(20)
+  expect(await deliverInboxDigest(f.dependencies, recipient, now + 21 * 86_400_000, now, 'daily')).toBe('cancelled')
+  expect(await f.metadata.get(recipient.workspaceId, recipient.memberKey)).toEqual(before)
+  expect([...f.inbox]).toEqual(inboxBefore)
+})
+
+test('late accepted receipts remain ordered by logical date rather than append order', async () => {
+  const f = await fixture(0)
+  await f.run(now)
+  await f.run(now + 2 * 86_400_000)
+  expect(await deliverInboxDigest(f.dependencies, recipient, now + 2 * 86_400_000, now + 86_400_000, 'daily')).toBe('empty')
+  expect((await f.metadata.get(recipient.workspaceId, recipient.memberKey)).history.map((row) => row.id)).toEqual(['daily:2026-10-03', 'daily:2026-10-04', 'daily:2026-10-05'])
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`${frequency} continuation discovers new recipients at the current time rather than replaying prior-page time`, async () => {
+  const f = await fixture()
+  await f.configure({ enabled: true, frequency, views: ['recent'] })
+  const discovered: number[] = []
+  const schedule = { enabled: true, dependencies: f.dependencies, listCandidates: async (cursor: string | undefined, _limit: number, clock: number) => {
+    discovered.push(clock)
+    return cursor ? { recipients: [{ ...recipient, frequency }] } : { recipients: [], cursor: 'new-page' }
+  } }
+  const firstAt = Date.parse('2026-10-04T23:59:50Z')
+  const first = await runInboxDigestSchedule(schedule, firstAt)
+  expect(first).toMatchObject({ processed: 0, cursor: 'new-page' })
+  expect(await runInboxDigestSchedule(schedule, firstAt + 20_000, first.cursor)).toMatchObject({ delivered: 1 })
+  expect(discovered).toEqual([firstAt, firstAt + 20_000])
+  expect((await f.metadata.get(recipient.workspaceId, recipient.memberKey)).history[0]?.id).toBe(`${frequency}:2026-10-05`)
+})
+
 test('unreachable validated-query invariants stay terminal while unknown transport errors stay retryable', () => {
   for (const code of ['UpdateFeedReadStateLimit', 'UpdateFeedReadStateInvalid', 'UpdateFeedViewInvalid', 'UpdateFeedLimitInvalid']) expect(inboxDigestTerminalReason(new PlanningError(400, code, 'Invariant'))).toBe('invalid-input')
   expect(inboxDigestTerminalReason(new PlanningError(502, 'SavedUpdateFeedsCorruptState', 'Invalid metadata'))).toBe('corrupt-state')

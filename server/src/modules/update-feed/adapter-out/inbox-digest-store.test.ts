@@ -110,6 +110,20 @@ async function fixture() {
   }
 }
 
+for (const empty of [true, false]) test(`pruned ${empty ? 'empty' : 'nonempty'} interval performs no SDK transaction or retained-history eviction`, async () => {
+  const f = await fixture()
+  if (empty) f.context.reader.authorizeTarget = async () => undefined
+  for (let day = 0; day < 21; day++) { await f.run(); f.advance(86_400_000) }
+  const before = await f.store.get('w', 'reader')
+  const notifications = structuredClone(f.notifications())
+  const transactions = f.commands.filter((command) => command instanceof TransactWriteCommand).length
+  expect(before.history).toHaveLength(20)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 21 * 86_400_000, now, 'daily')).toBe('cancelled')
+  expect(f.commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(transactions)
+  expect(await f.store.get('w', 'reader')).toEqual(before)
+  expect(f.notifications()).toEqual(notifications)
+})
+
 test('atomic SDK completion binds authorization, missing META, preferences and deterministic Inbox insertion', async () => {
   const f = await fixture()
   expect(await f.run()).toBe('delivered')
@@ -295,6 +309,31 @@ test('completion preserves prior history and rejects forged or multiple transiti
   g.advance(60_001)
   await expect(g.store.complete(recipient, { ...pending, history: completed.history.slice(1) }, 0, undefined)).rejects.toMatchObject({ status: 409 })
   expect(g.notifications()).toHaveLength(0)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`fresh GSI discovery retries failed ${frequency} claim after UTC rollover before the new interval`, async () => {
+  const f = await fixture()
+  const claimAt = Date.parse('2026-10-04T23:59:30Z')
+  const interval = `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`
+  const scheduledAt = Date.parse(`${interval.split(':')[1]}T00:00:00Z`)
+  f.advance(claimAt - now)
+  const initial = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...initial, preferences: { enabled: true, frequency, views: ['recent'] } })
+  const read = f.context.reader.readSnapshot
+  f.context.reader.readSnapshot = async () => { f.advance(60_001); throw new Error('Read failed after rollover') }
+  await expect(f.run()).rejects.toThrow('Read failed after rollover')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, status: 'failed', attempts: 1, startedAt: claimAt }])
+  expect(f.metadata().inboxDigestDueAt).toBe(claimAt + 120_001)
+  f.context.reader.readSnapshot = read
+  f.advance(60_000)
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  const page = await f.store.listDue(shard)
+  expect(page.recipients).toEqual([{ ...recipient, frequency, scheduledAt }])
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: page.recipients }), dependencies: { authorize: async () => f.context } }, claimAt + 120_001)
+  expect(result).toMatchObject({ delivered: 1, failed: [], terminal: [] })
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, status: 'completed', attempts: 2, startedAt: claimAt }])
+  expect(f.notifications()).toHaveLength(1)
 })
 
 test('completion rejects a logical interval later than its real first claim', async () => {
