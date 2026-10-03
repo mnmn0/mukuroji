@@ -74,6 +74,7 @@ export function UpdateFeed({ controls, response, view, locale, t, loading, faile
           <p className="mt-3 whitespace-pre-wrap break-words text-app-body leading-relaxed text-slate-700">{entry.latestUpdate?.summary ?? t('updates.noReport')}</p>
           {entry.latestUpdate ? <p className="mt-2 break-words text-app-meta text-slate-500">{entry.latestUpdate.authorMemberKey} · <time dateTime={entry.latestUpdate.createdAt}>{new Date(entry.latestUpdate.createdAt).toLocaleString(locale)}</time></p> : null}
           {entry.reasons.length ? <p className="mt-2 text-app-meta text-slate-600">{entry.reasons.map((reason) => t(`updates.reason.${reason}`)).join(' · ')}</p> : null}
+          {entry.attention?.reasons.length ? <p className="mt-1 text-app-meta text-slate-600">{entry.attention.reasons.map((reason) => t(`updates.attention.${reason}`)).join(' · ')}</p> : null}
         </div>
         <div className="flex flex-wrap items-start gap-2 sm:flex-col sm:items-end">
           {entry.readState && canMarkRead ? <button aria-label={t(entry.readState.read ? 'updates.markUnreadTarget' : 'updates.markReadTarget').replace('{title}', () => entry.title)} className="min-h-10 rounded-md border border-slate-300 bg-white px-3 text-app-meta font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" disabled={pending} onClick={() => onToggle(entry)}>{t(entry.readState.read ? 'updates.markUnread' : 'updates.markRead')}</button> : null}

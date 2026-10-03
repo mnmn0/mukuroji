@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { BatchGetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { CuratedContextSource } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../audit/audit'
 import {
@@ -43,6 +43,46 @@ function createClient(
     false,
   )
 }
+
+test('batches only exact current-member watcher keys and retries bounded unprocessed scopes', async () => {
+  const requests: number[] = []
+  let first = true
+  let subscribed = true
+  const client = createClient(async (command) => {
+    if (!(command instanceof BatchGetCommand)) throw new Error('Watcher scan or unbounded read')
+    const request = command.input.RequestItems?.['collaboration-table']
+    expect(request?.ConsistentRead).toBe(true)
+    const keys = request?.Keys ?? []
+    requests.push(keys.length)
+    expect(keys.every((key) => key.recordKey === 'WATCHER#member@example.com')).toBe(true)
+    const pending = first ? keys.slice(0, 1) : []
+    const processed = first ? keys.slice(1) : keys
+    first = false
+    return { Responses: { 'collaboration-table': processed.map((key) => ({ ...key, entryType: 'watcher', memberKey: 'member@example.com', state: subscribed ? 'subscribed' : 'unsubscribed', explicit: true, reasons: new Set(['manual']), createdAt: '2026-08-15T00:00:00.000Z', updatedAt: '2026-08-15T00:00:00.000Z' })) }, UnprocessedKeys: { 'collaboration-table': { Keys: pending } } }
+  })
+  const scopes = Array.from({ length: 101 }, (_, index) => `scope-${index}`)
+  expect(new Set(await client.getMemberSubscribedScopes('Member@Example.com', [...scopes, scopes[0] ?? 'scope-0']))).toEqual(new Set(scopes))
+  expect(requests).toEqual([100, 1, 1])
+  subscribed = false
+  expect(await client.getMemberSubscribedScopes('member@example.com', scopes)).toEqual([])
+})
+
+test('fails watcher batches closed on foreign rows, exhaustion and over-budget inputs', async () => {
+  let mode = 'retry'
+  let calls = 0
+  const client = createClient(async (command) => {
+    if (!(command instanceof BatchGetCommand)) throw new Error('Unexpected command')
+    calls++
+    const keys = command.input.RequestItems?.['collaboration-table']?.Keys ?? []
+    return mode === 'retry' ? { UnprocessedKeys: { 'collaboration-table': { Keys: keys } } } : { Responses: { 'collaboration-table': [{ entityKey: 'foreign', recordKey: 'WATCHER#member@example.com', entryType: 'watcher', memberKey: 'member@example.com', state: 'subscribed', explicit: true, reasons: new Set(['manual']), createdAt: '2026-08-15T00:00:00.000Z', updatedAt: '2026-08-15T00:00:00.000Z' }] } }
+  })
+  await expect(client.getMemberSubscribedScopes('member@example.com', ['scope'])).rejects.toMatchObject({ code: 'WatcherReadRetryable' })
+  expect(calls).toBe(3)
+  mode = 'foreign'
+  await expect(client.getMemberSubscribedScopes('member@example.com', ['scope'])).rejects.toMatchObject({ code: 'InvalidCollaborationRecord' })
+  await expect(client.getMemberSubscribedScopes('member@example.com', Array.from({ length: 2001 }, (_, i) => String(i)))).rejects.toMatchObject({ status: 413 })
+  expect(calls).toBe(4)
+})
 
 /**
  * Tests whether a value supports safe property access in the in-memory DynamoDB test transport.

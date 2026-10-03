@@ -40,3 +40,13 @@ test('writes qualified immutable identity and preserves authorization/conflict f
   globalThis.fetch = async () => Response.json({ code: 'EnterpriseMfaRequired' }, { status: 403 })
   await expect(setUpdateFeedReadState('session', input)).rejects.toMatchObject({ status: 403, code: 'EnterpriseMfaRequired' })
 })
+
+test('accepts explained personal signals and rejects corrupt attention without re-ranking', async () => {
+  const response = { ...updateFeedFixture, entries: [{ ...updateFeedFixture.entries[0], relevance: 9, reasons: ['project-member', 'watching', 'recent-interaction'], attention: { score: 3, reasons: ['recent-comment', 'recent-reaction'] } }] }
+  globalThis.fetch = async () => Response.json(response)
+  expect(await getUpdateFeed('session', 'for-me')).toEqual(response)
+  for (const attention of [{ score: 4, reasons: [] }, { score: 1, reasons: ['unknown'] }, { score: 2, reasons: ['recent-comment', 'recent-comment'] }, { score: -1, reasons: [] }]) {
+    globalThis.fetch = async () => Response.json({ ...response, entries: [{ ...response.entries[0], attention }] })
+    await expect(getUpdateFeed('session', 'for-me')).rejects.toMatchObject({ status: 502 })
+  }
+})

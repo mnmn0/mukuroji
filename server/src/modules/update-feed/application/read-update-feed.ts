@@ -1,8 +1,16 @@
-import type { PlanningSnapshot, PlanningUpdateTargetSummary, UpdateFeedEntry, UpdateFeedFilters, UpdateFeedResponse, UpdateFeedView } from '@mukuroji/contracts'
-import { PlanningError } from '../../planning'
+import type { PlanningSnapshot, PlanningUpdateTarget, PlanningUpdateTargetSummary, UpdateFeedEntry, UpdateFeedFilters, UpdateFeedResponse, UpdateFeedView } from '@mukuroji/contracts'
+import { PlanningError, type PlanningUpdateActivity } from '../../planning'
 
 /** Request-scoped ports bound to an authenticated Workspace principal. */
 export interface UpdateFeedReader {
+  /** Supplies a deterministic clock for expiring recent signals. */
+  now?: () => number
+  /** Loads bounded current-member signals only after target authorization.
+   * @param targets - Current authorized summaries with inaccessible latest content removed.
+   * @param snapshot - Current bounded graph.
+   * @returns Current membership/watch and compact source activity.
+   */
+  readSignals?(targets: readonly PlanningUpdateTargetSummary[], snapshot: PlanningSnapshot): Promise<UpdateFeedTargetSignals[]>
   /** Current member identity, resolved by the server. */
   memberKey: string
   /** Resolves a current authorized Team name for filter controls.
@@ -32,6 +40,14 @@ export interface UpdateFeedReader {
    * @returns Authorized target with unreadable content removed, or undefined for a denied target.
    */
   authorizeTarget(target: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot): Promise<PlanningUpdateTargetSummary | undefined>
+}
+
+/** Server-owned signals; raw participants never cross the response boundary. */
+export type UpdateFeedTargetSignals = {
+  /** Qualified target these signals describe. */ target: PlanningUpdateTarget
+  /** Current explicit effective Project membership, excluding blanket administrator access. */ projectMember: boolean
+  /** Current exact target subscription. */ watching: boolean
+  /** Compact source projection, used only for the authorized latest version. */ activity?: PlanningUpdateActivity
 }
 
 /** Current principal-visible dimensions used by saved filters. */
@@ -71,15 +87,34 @@ export async function readUpdateFeed(
     }
     identities.add(key)
   }
-  const entries = new Map<string, UpdateFeedEntry>()
+  const authorized: PlanningUpdateTargetSummary[] = []
   for (const candidate of snapshot.updateTargets) {
     if (candidate.archivedAt) continue
     const summary = await reader.authorizeTarget(candidate, snapshot)
-    if (!summary) continue
+    if (summary) authorized.push(summary)
+  }
+  const signals = new Map<string, UpdateFeedTargetSignals>()
+  const authorizedIdentities = new Set(authorized.map(targetKey))
+  for (const signal of authorized.length ? await reader.readSignals?.(authorized, snapshot) ?? [] : []) {
+    const key = targetKey(signal)
+    if (signals.has(key) || !authorizedIdentities.has(key)) throw new PlanningError(503, 'UpdateFeedSignalsInvalid', 'Feed signals are inconsistent.')
+    signals.set(key, signal)
+  }
+  const now = reader.now?.() ?? Date.now()
+  const entries = new Map<string, UpdateFeedEntry>()
+  for (const summary of authorized) {
     const reasons: UpdateFeedEntry['reasons'] = []
     const memberKey = reader.memberKey.trim().toLowerCase()
     if (summary.cadence?.updateOwnerMemberKey.toLowerCase() === memberKey) reasons.push('update-owner')
+    const signal = signals.get(targetKey(summary))
+    if (signal?.projectMember) reasons.push('project-member')
+    if (signal?.watching) reasons.push('watching')
+    const activity = summary.latestUpdate && signal?.activity?.version === summary.latestUpdate.version && targetKey(signal.activity) === targetKey(summary) ? signal.activity : undefined
+    if (recent(activity?.participants.find((participant) => participant.memberKey === memberKey)?.at, now, 30)) reasons.push('recent-interaction')
     if (summary.latestUpdate?.authorMemberKey.toLowerCase() === memberKey) reasons.push('latest-author')
+    const attentionReasons: NonNullable<UpdateFeedEntry['attention']>['reasons'] = []
+    if (recent(activity?.commentAt, now, 7)) attentionReasons.push('recent-comment')
+    if (recent(activity?.reactionAt, now, 7)) attentionReasons.push('recent-reaction')
     const latest = summary.latestUpdate
     const entry: UpdateFeedEntry = {
       title: reader.describeTarget?.(summary, snapshot) ?? (summary.target.type === 'project' ? summary.target.projectId : summary.target.entityId),
@@ -93,7 +128,8 @@ export async function readUpdateFeed(
         createdAt: latest.createdAt,
       } } : {}),
       reasons,
-      relevance: (reasons.includes('update-owner') ? 2 : 0) + (reasons.includes('latest-author') ? 1 : 0),
+      relevance: (reasons.includes('update-owner') ? 8 : 0) + (reasons.includes('project-member') ? 4 : 0) + (reasons.includes('watching') ? 3 : 0) + (reasons.includes('recent-interaction') ? 2 : 0) + (reasons.includes('latest-author') ? 1 : 0),
+      attention: { score: (attentionReasons.includes('recent-comment') ? 2 : 0) + (attentionReasons.includes('recent-reaction') ? 1 : 0), reasons: attentionReasons },
     }
     if (!matchesView(entry, view)) continue
     if (filters) {
@@ -105,10 +141,17 @@ export async function readUpdateFeed(
   }
   const ranked = [...entries.values()].sort((a, b) =>
     (view === 'for-me' ? b.relevance - a.relevance : 0) ||
+    (view === 'for-me' ? (b.attention?.score ?? 0) - (a.attention?.score ?? 0) : 0) ||
     compareText(b.latestUpdate?.createdAt ?? '', a.latestUpdate?.createdAt ?? '') ||
     compareText(targetKey(a), targetKey(b)),
   )
   return { view, revision: snapshot.revision, entries: ranked.slice(0, limit), total: ranked.length, truncated: ranked.length > limit }
+}
+
+/** Expires activity without accepting future timestamps from clock skew or corrupt sources. */
+function recent(at: string | undefined, now: number, days: number): boolean {
+  const age = at === undefined ? Number.NaN : now - Date.parse(at)
+  return age >= 0 && age <= days * 86_400_000
 }
 
 /** Intersects dimensions while treating selected alternatives within each as a union. */

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { PlanningSnapshot, PlanningUpdateTargetSummary, UpdateFeedFilters } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../planning/planning'
-import { readUpdateFeed } from './read-update-feed'
+import { readUpdateFeed, type UpdateFeedTargetSignals } from './read-update-feed'
 
 /** Creates a latest-target fixture with independent health and submission status. */
 function target(projectId: string, state: PlanningUpdateTargetSummary['updateState'] = 'current'): PlanningUpdateTargetSummary {
@@ -41,7 +41,7 @@ test('keeps health and submission predicates separate and emits one entry for mu
   expect((await readUpdateFeed(reader, 'missing')).entries[0]?.health).toBe('unknown')
   const feed = await readUpdateFeed(reader, 'for-me')
   expect(feed.total).toBe(3)
-  expect(feed.entries[0]).toMatchObject({ reasons: ['update-owner', 'latest-author'], relevance: 3 })
+  expect(feed.entries[0]).toMatchObject({ reasons: ['update-owner', 'latest-author'], relevance: 9 })
   expect(feed.entries[0]?.latestUpdate).not.toHaveProperty('capturedScope')
   expect((await readUpdateFeed(reader)).total).toBe(2)
   expect(state).toEqual(before)
@@ -77,7 +77,7 @@ test('keeps overdue and owned targets when authorization redacts their old lates
     authorizeTarget: async (summary: PlanningUpdateTargetSummary) => ({ ...summary, latestUpdate: undefined }),
   }
   expect(await readUpdateFeed(reader, 'overdue')).toMatchObject({ total: 1, entries: [{ health: 'unknown', updateState: 'overdue' }] })
-  expect((await readUpdateFeed(reader, 'for-me')).entries[0]).toMatchObject({ reasons: ['update-owner'], relevance: 2 })
+  expect((await readUpdateFeed(reader, 'for-me')).entries[0]).toMatchObject({ reasons: ['update-owner'], relevance: 8 })
   expect((await readUpdateFeed(reader, 'recent')).total).toBe(0)
   expect((await readUpdateFeed(reader, 'at-risk')).total).toBe(0)
 })
@@ -118,4 +118,31 @@ test('applies saved dimensions before top-N and rechecks access on every saved-f
   expect((await readUpdateFeed(reader, 'recent', '1', { ...filters, initiativeIds: ['portfolio'] })).total).toBe(0)
   allowed = false
   expect((await readUpdateFeed(reader, 'recent', '1', filters)).total).toBe(0)
+})
+
+test('ranks current relationships once, expires activity and never promotes attention alone into For me', async () => {
+  const targets = ['combined', 'member', 'popular', 'denied'].map((id) => {
+    const item = target(id)
+    item.cadence = undefined
+    if (item.latestUpdate) item.latestUpdate.authorMemberKey = 'another-member'
+    return item
+  })
+  const state = await snapshot(targets)
+  const now = Date.parse('2026-08-15T00:00:00.000Z')
+  const reader = { memberKey: ' Reader ', now: () => now, readSnapshot: async () => state, authorizeTarget: async (item: PlanningUpdateTargetSummary) => item.target.type === 'project' && item.target.projectId !== 'denied' ? item : undefined, readSignals: async (items: readonly PlanningUpdateTargetSummary[]): Promise<UpdateFeedTargetSignals[]> => {
+    expect(items).toHaveLength(3)
+    return items.map(({ target }) => ({ target, projectMember: target.type === 'project' && target.projectId !== 'popular', watching: target.type === 'project' && target.projectId === 'combined', activity: { target, version: 1, revision: 1, commentAt: '2026-08-14T00:00:00.000Z', reactionAt: '2026-08-14T00:00:00.000Z', participants: target.type === 'project' && target.projectId === 'combined' ? [{ memberKey: 'reader', at: '2026-08-01T00:00:00.000Z' }] : [] } }))
+  } }
+  const feed = await readUpdateFeed(reader, 'for-me')
+  expect(feed.entries).toHaveLength(2)
+  expect(feed.entries[0]).toMatchObject({ reasons: ['project-member', 'watching', 'recent-interaction'], relevance: 9, attention: { score: 3, reasons: ['recent-comment', 'recent-reaction'] } })
+  expect(JSON.stringify(feed)).not.toContain('participants')
+  expect((await readUpdateFeed({ ...reader, now: () => now + 31 * 86_400_000 }, 'for-me')).entries[0]).toMatchObject({ relevance: 7, reasons: ['project-member', 'watching'], attention: { score: 0, reasons: [] } })
+  expect((await readUpdateFeed({ ...reader, now: () => now - 31 * 86_400_000 }, 'for-me')).entries[0]?.attention?.score).toBe(0)
+  const redacted = await readUpdateFeed({ ...reader, authorizeTarget: async (item) => item.target.type === 'project' && item.target.projectId !== 'denied' ? { ...item, latestUpdate: undefined } : undefined }, 'for-me')
+  expect(redacted.entries[0]).toMatchObject({ relevance: 7, attention: { score: 0, reasons: [] } })
+  const newVersion = targets[0]?.latestUpdate
+  if (!newVersion) throw new Error('Missing latest fixture')
+  newVersion.version = 2
+  expect((await readUpdateFeed(reader, 'for-me')).entries[0]).toMatchObject({ relevance: 7, attention: { score: 0, reasons: [] } })
 })

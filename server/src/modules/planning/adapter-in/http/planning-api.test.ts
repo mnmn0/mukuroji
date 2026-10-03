@@ -448,8 +448,8 @@ test('aggregates latest Project and Initiative updates without history reads and
   const response = await planningApiRequest('/api/planning/update-feed?view=for-me')
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({ total: 2, truncated: false, entries: [
-    { target: { type: 'initiative' }, reasons: ['update-owner', 'latest-author'] },
-    { target: { type: 'project' }, reasons: ['update-owner', 'latest-author'] },
+    { target: { type: 'initiative' }, reasons: ['update-owner', 'project-member', 'latest-author'] },
+    { target: { type: 'project' }, reasons: ['update-owner', 'project-member', 'latest-author'] },
   ] })
   expect(perTargetAuthorizationReads).toBe(0)
   const english = await planningApiRequest('/api/planning/update-feed?view=recent&locale=en')
@@ -515,7 +515,7 @@ test('aggregates latest Project and Initiative updates without history reads and
   setTestAppDependencies({ enterpriseIdentity: identity })
   const enterpriseFeed = await planningApiRequest('/api/planning/update-feed')
   expect(enterpriseFeed.status).toBe(200)
-  expect(await enterpriseFeed.json()).toMatchObject({ total: 2 })
+  expect(await enterpriseFeed.json()).toMatchObject({ total: 2, entries: [{ reasons: expect.arrayContaining(['project-member']) }, { reasons: expect.arrayContaining(['project-member']) }] })
   const viewerChoice = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })
   expect(viewerChoice.status).toBe(200)
   expect(await viewerChoice.json()).toEqual({ read: false, revision: 2 })
@@ -526,6 +526,28 @@ test('aggregates latest Project and Initiative updates without history reads and
   expect(archived.status).toBe(200)
   expect(await archived.json()).toMatchObject({ entries: [], total: 0 })
   expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, expectedRevision: 2 })).status).toBe(404)
+})
+
+test('relevance uses current explicit membership and watches without treating admin visibility as membership', async () => {
+  configureFakeProjectClients(true, { projectAccesses: [], workspaceRole: 'owner', cognitoUserGroups: ['mukuroji-system-admins'], systemAdminMemberKeys: ['demo@example.com'] })
+  const planning = new InMemoryPlanningClient()
+  const target: PlanningUpdateTarget = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+  await planning.configureUpdateCadence('user#demo@example.com', { target, expectedRevision: 0, cadence: { updateOwnerMemberKey: 'other@example.com', cadence: { unit: 'week', count: 1 }, timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24 } }, { workItems: [] })
+  let watching = true
+  let reads = 0
+  const collaboration = createCollaborationStub({ getMemberSubscribedScopes: async (member, scopes) => { expect(member).toBe('demo@example.com'); expect(scopes).toHaveLength(1); reads++; return watching ? [...scopes] : [] } })
+  setTestAppDependencies({ planning, collaboration })
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me')).json()).toMatchObject({ entries: [{ reasons: ['watching'], relevance: 3 }] })
+  watching = false
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me')).json()).toMatchObject({ entries: [], total: 0 })
+  configureFakeProjectClients(false, { workspaceRole: 'member', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  setTestAppDependencies({ planning, collaboration })
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me')).json()).toMatchObject({ entries: [{ reasons: ['project-member'], relevance: 4 }] })
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [] })
+  setTestAppDependencies({ planning, collaboration })
+  const before = reads
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me')).json()).toMatchObject({ entries: [], total: 0 })
+  expect(reads).toBe(before)
 })
 
 test('filters legacy Planning update targets by their Team-qualified Project ACL', async () => {
@@ -892,7 +914,7 @@ test('keeps filtered Planning history within the requested limit while advancing
   const ownedMovedFeed = await planningApiRequest('/api/planning/update-feed?view=for-me')
   expect(ownedMovedFeed.status).toBe(200)
   const ownedMovedBody = await ownedMovedFeed.json()
-  expect(ownedMovedBody).toMatchObject({ total: 1, entries: [{ health: 'unknown', reasons: ['update-owner'], relevance: 2 }] })
+  expect(ownedMovedBody).toMatchObject({ total: 1, entries: [{ health: 'unknown', reasons: ['update-owner', 'project-member'], relevance: 12, attention: { score: 0, reasons: [] } }] })
   expect(ownedMovedBody.entries[0]).not.toHaveProperty('latestUpdate')
   expect(movedGraphBody.updateTargets.find((updateTarget) =>
     updateTarget.target.type === 'initiative' &&

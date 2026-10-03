@@ -26062,6 +26062,29 @@ async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, loc
   }
   return {
     memberKey: principal.userKey,
+    readSignals: async (targets, snapshot) => {
+      const keys = targets.map(({ target }) => createPlanningUpdateCollaborationEntityKey(principal.directoryId, createPlanningUpdatePublicTargetKey(target)))
+      const [accesses, subscribed, activities] = await Promise.all([
+        principal.enterpriseLegacyProjectAccessSuppressed ? [] : principal.legacyProjectScopeAccesses ?? workspaceDependencies.projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey),
+        workItemDependencies.collaboration.getMemberSubscribedScopes(principal.userKey, keys),
+        workItemDependencies.planning.getUpdateActivities(principal.directoryId),
+      ])
+      const watches = new Set(subscribed)
+      const activityByTarget = new Map(activities.map((activity) => [createPlanningUpdatePublicTargetKey(activity.target), activity]))
+      /** Counts explicit current Project grants, excluding broad Workspace/Team/admin visibility. */
+      const isProjectMember = (scope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined): boolean => {
+        if (!scope?.teamId || !scope.projectId) return false
+        const { teamId, projectId } = scope
+        if (accesses.some((access) => access.role !== undefined && planningProjectAccessMatchesQualifiedScope(access, directory, teamId, projectId))) return true
+        const evaluation = principal.enterpriseAuthorizationEvaluation
+        if (!evaluation || evaluation.principal.kind === 'break-glass') return false
+        return evaluateEnterpriseAccess({ permission: 'planning.read', principal: { ...evaluation.principal, systemAdministrator: false, includeWorkspaceRolePermissions: false, directPermissions: [] }, assignments: evaluation.assignments.filter((assignment) => assignment.scope.kind === 'project'), groupMappings: evaluation.groupMappings.filter((mapping) => mapping.scope.kind === 'project'), customRoles: evaluation.snapshot.customRoles, resource: { workspaceId: principal.directoryId, kind: 'project', targetId: scope.projectId, parentTeamId: scope.teamId }, projectScopeOwnerTeamId: resolveProjectAccessTeamId({ projectId: scope.projectId }, directory) }).allowed
+      }
+      return targets.map(({ target }, index) => {
+        const scope = target.type === 'project' ? target : snapshot.entities.find((entity) => entity.id === target.entityId)
+        return { target, projectMember: isProjectMember(scope), watching: watches.has(keys[index] ?? ''), activity: activityByTarget.get(createPlanningUpdatePublicTargetKey(target)) }
+      })
+    },
     filterScope: (summary, snapshot) => resolveUpdateFeedFilterScope(summary, snapshot, readableScope),
     describeTeam: (teamId) => directory.teams.find((team) => team.id === teamId)?.name ?? teamId,
     describeTarget: (summary, snapshot) => {
