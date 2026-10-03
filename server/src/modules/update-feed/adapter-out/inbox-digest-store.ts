@@ -7,6 +7,7 @@ import { createNotificationRecipientKey, NOTIFICATION_PREFERENCES_KEY, parseStor
 import { emptyDigestState, parseDigestState } from '../application/digest'
 import { inboxDigestInterval, type InboxDigestMessage, type InboxDigestRecipient, type InboxDigestStore } from '../application/inbox-digest'
 import { createInboxDigestNotification } from './inbox-digest-notification'
+import { digestSavedFeedsFence } from './saved-feeds-store'
 
 /** Undeployed sparse GSI schema; activation requires separate infrastructure review. */
 export const INBOX_DIGEST_INDEX = { name: 'InboxDigestDueIndex', partitionKey: 'inboxDigestShard', sortKey: 'inboxDigestDueAt', shards: 16 } as const
@@ -63,14 +64,16 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
    * @param workspaceId - Authenticated Workspace.
    * @param memberKey - Authenticated member.
    * @param input - Observed state and requested replacement.
+   * @param _planningRevision - Reserved application-port argument; completion uses complete().
+   * @param savedFeedsRevision - Optional confirmed collection fence for settings and claims.
    * @returns Committed state; completion is only permitted through complete().
    */
-  async replace(workspaceId: string, memberKey: string, input: UpdateFeedDigestState): Promise<UpdateFeedDigestState> {
+  async replace(workspaceId: string, memberKey: string, input: UpdateFeedDigestState, _planningRevision?: number, savedFeedsRevision?: number): Promise<UpdateFeedDigestState> {
     const recipient = normalize({ workspaceId, memberKey })
     const current = await this.get(workspaceId, memberKey)
     const next = parseDigestState(input)
     if (next.revision !== current.revision || next.history.some((receipt) => receipt.status === 'completed' && !current.history.some((old) => JSON.stringify(old) === JSON.stringify(receipt)))) throw conflict()
-    return this.write(recipient, next, [])
+    return this.write(recipient, next, digestSavedFeedsFence(this.planningTable, recipient.workspaceId, recipient.memberKey, savedFeedsRevision))
   }
 
   /** Atomically inserts a deterministic Inbox row with the fenced completion receipt.
@@ -78,11 +81,13 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
    * @param input - Desired completion at the claimed revision.
    * @param planningRevision - Captured content authorization fence.
    * @param message - Bodyless Inbox link; absent only for an empty result.
+   * @param savedFeedsRevision - Confirmed personal collection revision, required for custom selections.
    * @returns Committed state; lost responses are recovered through get().
    */
-  async complete(owner: InboxDigestRecipient, input: UpdateFeedDigestState, planningRevision: number, message: InboxDigestMessage | undefined): Promise<UpdateFeedDigestState> {
+  async complete(owner: InboxDigestRecipient, input: UpdateFeedDigestState, planningRevision: number, message: InboxDigestMessage | undefined, savedFeedsRevision?: number): Promise<UpdateFeedDigestState> {
     const recipient = normalize(owner)
     const state = parseDigestState(input)
+    if (state.preferences.savedFeeds?.revision !== savedFeedsRevision) throw conflict()
     const current = await this.get(recipient.workspaceId, recipient.memberKey)
     // Completion belongs to the single claimed transition, even if generation
     // crosses UTC midnight or Monday before its lease expires.
@@ -113,6 +118,7 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
         ...(preferencesRow === undefined ? {} : { ExpressionAttributeNames: { '#type': 'itemType', '#version': 'version', '#channels': 'channels', '#inApp': 'inApp' }, ExpressionAttributeValues: { ':type': 'preferences', ':version': preferences.version, ':enabled': true } }),
       } },
     ]
+    guards.push(...digestSavedFeedsFence(this.planningTable, recipient.workspaceId, recipient.memberKey, savedFeedsRevision))
     return this.write(recipient, state, guards, message, before.leaseUntil)
   }
 

@@ -1,4 +1,6 @@
 import { expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
+import type { SavedUpdateFeeds } from '@mukuroji/contracts'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
@@ -83,7 +85,7 @@ async function fixture() {
   await store.replace('w', 'reader', { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent', 'at-risk'] } })
   const snapshot = await new InMemoryPlanningClient().get('w', { workItems: [] })
   snapshot.updateTargets = [{ target: { type: 'project', teamId: 'team', projectId: 'project' }, latestVersion: 1, updateState: 'current', updatedAt: new Date(now).toISOString(), latestUpdate: { id: 'report', version: 1, health: 'at-risk', risk: 'none', summary: 'Private content', authorMemberKey: 'reader', coveredDueAt: new Date(now).toISOString(), createdAt: new Date(now).toISOString(), progressSnapshot: { percent: 20, linkedWorkItemCount: 1 }, capturedScope: { teamId: 'team', projectId: 'project' } } }]
-  const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
+  const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSavedFeeds: async (): Promise<SavedUpdateFeeds> => ({ revision: 1, feeds: [{ id: 'custom', name: 'Personal name', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }), readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
   return {
     store, rows, indexed, commands, coordinate, context,
     run: () => deliverInboxDigest({ authorize: async () => context }, recipient, clock),
@@ -122,6 +124,28 @@ test('atomic SDK completion binds authorization, missing META, preferences and d
   expect(JSON.stringify(f.notifications())).not.toContain('Private content')
   expect(f.metadata().inboxDigestDueAt).toBe(Date.parse('2026-10-04T00:00:00Z'))
   expect(await f.run()).toBe('not-due')
+})
+
+test('saved-feed revision is fenced atomically with Inbox delivery, including changes after the final read', async () => {
+  for (const change of [false, true]) {
+    const f = await fixture()
+    const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+    f.rows.set(f.coordinate('planning', definition), definition)
+    const state = await f.store.get('w', 'reader')
+    await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+    if (change) f.beforeTransaction(() => {
+      const transaction = f.commands.at(-1)
+      if (transaction instanceof TransactWriteCommand && transaction.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 2 })
+    })
+    if (change) {
+      await expect(f.run()).rejects.toMatchObject({ status: 409 })
+      expect(f.notifications()).toHaveLength(0)
+    } else {
+      expect(await f.run()).toBe('delivered')
+      expect(f.notifications()).toHaveLength(1)
+      expect(JSON.stringify(f.notifications())).not.toContain('Personal name')
+    }
+  }
 })
 
 test('lost transaction response and concurrent attempts preserve a single durable Inbox row', async () => {

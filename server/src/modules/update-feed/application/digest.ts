@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview, UpdateFeedDigestReceipt, UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError } from '../../planning'
-import { parseUpdateFeedQuery, readUpdateFeed, type UpdateFeedReader } from './read-update-feed'
+import { parseUpdateFeedQuery, readUpdateFeedProjection, selectUpdateFeedProjection, type UpdateFeedReader } from './read-update-feed'
 import { updateFeedReportKey, withUpdateFeedReadState, type UpdateFeedReadStateStore } from './read-state'
+import type { SavedUpdateFeedsStore } from './saved-feeds'
 
 /** Atomic member-scoped persistence for preferences, claims and bodyless receipts. */
 export interface UpdateFeedDigestStore {
@@ -17,9 +18,10 @@ export interface UpdateFeedDigestStore {
    * @param memberKey - Authenticated member.
    * @param state - Desired state carrying the observed revision.
    * @param planningRevision - Optional revision spanning content authorization.
+   * @param savedFeedsRevision - Optional confirmed personal definition revision fenced atomically.
    * @returns Committed state with an incremented revision.
    */
-  replace(workspaceId: string, memberKey: string, state: UpdateFeedDigestState, planningRevision?: number): Promise<UpdateFeedDigestState>
+  replace(workspaceId: string, memberKey: string, state: UpdateFeedDigestState, planningRevision?: number, savedFeedsRevision?: number): Promise<UpdateFeedDigestState>
 }
 
 /** Creates disabled preview preferences without enabling any scheduler.
@@ -34,13 +36,20 @@ export function emptyDigestState(): UpdateFeedDigestState {
  * @returns Reconstructed bounded preferences.
  */
 export function parseDigestPreferences(value: unknown): UpdateFeedDigestPreferences {
-  if (!record(value) || typeof value.enabled !== 'boolean' || (value.frequency !== 'daily' && value.frequency !== 'weekly') || !Array.isArray(value.views) || value.views.length < 1 || value.views.length > 6) throw invalid()
+  if (!record(value) || typeof value.enabled !== 'boolean' || (value.frequency !== 'daily' && value.frequency !== 'weekly') || !Array.isArray(value.views) || value.views.length > 6) throw invalid()
+  let savedFeeds: UpdateFeedDigestPreferences['savedFeeds']
+  if (value.savedFeeds !== undefined) {
+    const saved = value.savedFeeds
+    if (!record(saved) || !integer(saved.revision) || saved.revision < 1 || saved.revision >= Number.MAX_SAFE_INTEGER || !Array.isArray(saved.ids) || saved.ids.length < 1 || saved.ids.length > 6 || !saved.ids.every((id: unknown): id is string => typeof id === 'string' && id.length > 0 && id.length <= 512 && id.trim() === id && Array.from(id).every((char) => char.charCodeAt(0) > 31 && char.charCodeAt(0) !== 127)) || new Set(saved.ids).size !== saved.ids.length) throw invalid()
+    savedFeeds = { revision: saved.revision, ids: [...saved.ids] }
+  }
+  if (value.views.length + (savedFeeds?.ids.length ?? 0) < 1 || value.views.length + (savedFeeds?.ids.length ?? 0) > 6) throw invalid()
   const views = value.views.map((view: unknown) => {
     if (typeof view !== 'string' || !['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue'].includes(view)) throw invalid()
     return parseUpdateFeedQuery(view).view
   })
   if (new Set(views).size !== views.length) throw invalid()
-  return { enabled: value.enabled, frequency: value.frequency, views }
+  return { enabled: value.enabled, frequency: value.frequency, views, ...(savedFeeds ? { savedFeeds } : {}) }
 }
 
 /** Validates the complete bodyless row, failing closed on malformed persistence.
@@ -64,14 +73,17 @@ export function parseDigestState(value: unknown): UpdateFeedDigestState {
  * @param workspaceId - Authenticated Workspace.
  * @param memberKey - Authenticated member.
  * @param value - Untrusted preference mutation.
+ * @param savedFeeds - Current member-owned collection resolver, required for custom selections.
  * @returns Committed preferences and receipts.
  */
-export async function replaceDigestPreferences(store: UpdateFeedDigestStore, workspaceId: string, memberKey: string, value: unknown): Promise<UpdateFeedDigestState> {
+export async function replaceDigestPreferences(store: UpdateFeedDigestStore, workspaceId: string, memberKey: string, value: unknown, savedFeeds?: SavedUpdateFeedsStore): Promise<UpdateFeedDigestState> {
   if (!record(value) || !integer(value.expectedRevision)) throw invalid()
   const preferences = parseDigestPreferences(value.preferences)
+  // Withdrawing consent must not depend on an available/unchanged source collection.
+  if (preferences.enabled) await resolveDigestSavedFeeds(preferences, savedFeeds ? () => savedFeeds.get(workspaceId, memberKey) : undefined)
   const current = await store.get(workspaceId, memberKey)
   if (current.revision !== value.expectedRevision) throw conflict()
-  return store.replace(workspaceId, memberKey, { ...current, preferences })
+  return store.replace(workspaceId, memberKey, { ...current, preferences }, undefined, preferences.enabled ? preferences.savedFeeds?.revision : undefined)
 }
 
 /** Generates only a manual preview using current Feed authorization and personal read state.
@@ -88,6 +100,8 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   const memberKey = reader.memberKey
   let state = await store.get(workspaceId, memberKey)
   if (!state.preferences.enabled) throw new PlanningError(409, 'UpdateFeedDigestDisabled', 'Enable manual digest previews first.')
+  const saved = await resolveDigestSavedFeeds(state.preferences, reader.readSavedFeeds)
+  const savedRevision = state.preferences.savedFeeds?.revision
   const start = new Date(now)
   start.setUTCHours(0, 0, 0, 0)
   if (state.preferences.frequency === 'weekly') start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
@@ -99,16 +113,17 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   const token = randomUUID()
   if (!replay) {
     const receipt: UpdateFeedDigestReceipt = { id, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, token, leaseUntil: now + 60_000, startedAt: existing?.startedAt ?? now, count: 0 }
-    state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].slice(-20) })
+    state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].slice(-20) }, undefined, savedRevision)
   }
   try {
     // A fresh projection is loaded for each attempt/replay; no historical report scan.
     const initialSnapshot = await reader.readSnapshot()
     const stableReader: UpdateFeedReader = { ...reader, readSnapshot: async () => initialSnapshot }
+    const projection = await readUpdateFeedProjection(stableReader)
     const entries = new Map<string, UpdateFeedDigestPreview['entries'][number]>()
     let truncated = false
-    for (const view of state.preferences.views) {
-      const feed = await readUpdateFeed(stableReader, view, '100')
+    for (const source of [...state.preferences.views.map((view) => ({ view, filters: undefined })), ...saved]) {
+      const feed = await selectUpdateFeedProjection(projection, source.view, '100', source.filters)
       truncated ||= feed.truncated
       for (const entry of feed.entries) {
         if (!entry.latestUpdate) continue
@@ -133,11 +148,12 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
       selected.push(...checked.entries.filter((entry) => !entry.readState?.read))
     }
     const result: UpdateFeedDigestPreview = { id, replay, entries: selected.slice(0, 50), truncated: truncated || selected.length > 50, transport: 'preview' }
+    await resolveDigestSavedFeeds(state.preferences, reader.readSavedFeeds)
     if (!replay) {
-      await store.replace(workspaceId, memberKey, { ...state, history: state.history.map((receipt) => receipt.id === id && receipt.token === token ? { ...receipt, status: 'completed', leaseUntil: 0, count: result.entries.length } : receipt) }, snapshot.revision)
+      await store.replace(workspaceId, memberKey, { ...state, history: state.history.map((receipt) => receipt.id === id && receipt.token === token ? { ...receipt, status: 'completed', leaseUntil: 0, count: result.entries.length } : receipt) }, snapshot.revision, savedRevision)
     } else {
       // A concurrent preference change invalidates even a bodyless receipt replay.
-      await store.replace(workspaceId, memberKey, state, snapshot.revision)
+      await store.replace(workspaceId, memberKey, state, snapshot.revision, savedRevision)
     }
     return result
   } catch (error) {
@@ -147,6 +163,18 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
     }
     throw error
   }
+}
+
+/** Resolves a bounded personal selection without exposing missing IDs or definition names. */
+async function resolveDigestSavedFeeds(preferences: UpdateFeedDigestPreferences, read: UpdateFeedReader['readSavedFeeds']) {
+  if (!preferences.savedFeeds) return []
+  const collection = await read?.()
+  if (!collection || collection.revision !== preferences.savedFeeds.revision) throw conflict()
+  return preferences.savedFeeds.ids.map((id) => {
+    const feed = collection.feeds.find((candidate) => candidate.id === id)
+    if (!feed) throw conflict()
+    return feed
+  })
 }
 
 /** Narrows an untrusted object without assertions. */
