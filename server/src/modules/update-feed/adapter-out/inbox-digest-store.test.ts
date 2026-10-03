@@ -148,6 +148,88 @@ test('saved-feed revision is fenced atomically with Inbox delivery, including ch
   }
 })
 
+for (const change of ['edited', 'deleted']) for (const during of [false, true]) test(`${change} definitions disable stale delivery once, during generation ${during}, until explicit reselection`, async () => {
+  const f = await fixture()
+  const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+  const original = await f.context.reader.readSavedFeeds!()
+  let collection = original
+  let reads = 0
+  f.rows.set(f.coordinate('planning', definition), definition)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+  const indexedBeforeChange = structuredClone(f.metadata())
+  f.context.reader.readSavedFeeds = async () => {
+    if (++reads === (during ? 2 : 1)) {
+      collection = { revision: 2, feeds: change === 'deleted' ? [] : original.feeds.map((feed) => ({ ...feed, name: 'Edited private definition' })) }
+      f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 2 })
+    }
+    return collection
+  }
+  expect(await f.run()).toBe('disabled')
+  const paused = await f.store.get('w', 'reader')
+  expect(paused.preferences.enabled).toBe(false)
+  expect(paused.preferences.savedFeeds?.revision).toBe(1)
+  expect(paused.history).toHaveLength(during ? 1 : 0)
+  if (during) expect(paused.history[0]).toMatchObject({ status: 'failed', attempts: 1 })
+  expect(f.metadata().inboxDigestShard).toBeUndefined()
+  expect(f.metadata().inboxDigestDueAt).toBeUndefined()
+  f.indexed.push(indexedBeforeChange)
+  const shard = Number(String(indexedBeforeChange.inboxDigestShard).split('#')[1])
+  expect((await f.store.listDue(shard)).recipients).toEqual([]) // Stale GSI results are strongly rechecked.
+  const queries = reads
+  for (let repetition = 0; repetition < 4; repetition++) expect(await f.run()).toBe('disabled')
+  expect(reads).toBe(queries)
+  expect(await f.store.get('w', 'reader')).toEqual(paused)
+  expect(f.notifications()).toHaveLength(0)
+  collection = { ...original, revision: 3 }
+  f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 3 })
+  expect(await f.run()).toBe('disabled') // Restoring a definition never restores withdrawn consent.
+  await f.store.replace('w', 'reader', { ...paused, preferences: { ...paused.preferences, enabled: true, savedFeeds: { revision: 3, ids: ['custom'] } } }, undefined, 3)
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+for (const withdrawal of [false, true]) test(`stale selection handling preserves concurrent explicit consent change, withdrawal ${withdrawal}`, async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = async () => {
+    const current = await f.store.get('w', 'reader')
+    await f.store.replace('w', 'reader', { ...current, preferences: { enabled: !withdrawal, frequency: 'weekly', views: ['recent'] } })
+    return { revision: 2, feeds: [] }
+  }
+  if (withdrawal) expect(await f.run()).toBe('disabled')
+  else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect((await f.store.get('w', 'reader')).preferences).toEqual({ enabled: !withdrawal, frequency: 'weekly', views: ['recent'] })
+  expect(f.notifications()).toHaveLength(0)
+  expect(await f.run()).toBe(withdrawal ? 'disabled' : 'delivered')
+})
+
+test('missing definition reader is an availability failure, never silent consent withdrawal', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = undefined
+  await expect(f.run()).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestAuthorizationUnavailable' })
+  expect((await f.store.get('w', 'reader')).preferences.enabled).toBe(true)
+  expect(f.notifications()).toHaveLength(0)
+})
+
+test('stale-selection disable is CAS-fenced against a reselection at the write boundary', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = async () => ({ revision: 2, feeds: [] })
+  f.beforeTransaction(() => {
+    const row = f.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: true, frequency: 'weekly', views: ['recent'] }
+  })
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect((await f.store.get('w', 'reader')).preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['recent'] })
+  expect(f.notifications()).toHaveLength(0)
+})
+
 test('lost transaction response and concurrent attempts preserve a single durable Inbox row', async () => {
   const f = await fixture()
   f.loseResponse()

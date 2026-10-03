@@ -122,8 +122,18 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
     if (snapshot.revision !== context.authorizationRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest authorization changed')
     return snapshot
   } }
-  const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now)
-  return result.entries.length === 0 ? 'empty' : 'delivered'
+  try {
+    const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now)
+    return result.entries.length === 0 ? 'empty' : 'delivered'
+  } catch (error) {
+    if (!(error instanceof PlanningError) || error.code !== 'UpdateFeedDigestSelectionStale') throw error
+    const current = await context.store.get(recipient.workspaceId, recipient.memberKey)
+    if (!current.preferences.enabled) return 'disabled'
+    // Preserve a concurrent explicit reselection; only withdraw the exact stale consent.
+    if (JSON.stringify(current.preferences) !== JSON.stringify(state.preferences)) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest settings changed during reselection handling.')
+    await context.store.replace(recipient.workspaceId, recipient.memberKey, { ...current, preferences: { ...current.preferences, enabled: false } })
+    return 'disabled'
+  }
 }
 
 /** One bounded candidate page from a due index or explicitly configured recipient set. */

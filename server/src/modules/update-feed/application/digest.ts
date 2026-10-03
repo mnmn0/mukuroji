@@ -170,14 +170,19 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   }
 }
 
-/** Resolves a bounded personal selection without exposing missing IDs or definition names. */
+/** Resolves a bounded personal selection without exposing missing IDs or definition names.
+ * @param preferences - Validated selection explicitly confirmed by the member.
+ * @param read - Current member-owned definition reader.
+ * @returns Current definitions, or a distinct reselection error for changed/deleted selections.
+ */
 async function resolveDigestSavedFeeds(preferences: UpdateFeedDigestPreferences, read: UpdateFeedReader['readSavedFeeds']) {
   if (!preferences.savedFeeds) return []
-  const collection = await read?.()
-  if (!collection || collection.revision !== preferences.savedFeeds.revision) throw conflict()
+  if (!read) throw new PlanningError(503, 'UpdateFeedDigestAuthorizationUnavailable', 'Saved digest definitions are unavailable.')
+  const collection = await read()
+  if (!collection || collection.revision !== preferences.savedFeeds.revision) throw selectionStale()
   return [...preferences.savedFeeds.ids].sort().map((id) => {
     const feed = collection.feeds.find((candidate) => candidate.id === id)
-    if (!feed) throw conflict()
+    if (!feed) throw selectionStale()
     return feed
   })
 }
@@ -190,3 +195,5 @@ function integer(value: unknown): value is number { return typeof value === 'num
 function invalid() { return new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest preferences or state.') }
 /** Creates a stable optimistic concurrency failure. */
 function conflict() { return new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest state changed or generation is already running.') }
+/** Requires explicit reselection rather than retrying an obsolete saved definition. */
+function selectionStale() { return new PlanningError(409, 'UpdateFeedDigestSelectionStale', 'Saved digest selection changed. Reselect the current feeds before enabling delivery.') }

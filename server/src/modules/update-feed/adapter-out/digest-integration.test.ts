@@ -108,8 +108,8 @@ test('custom digest sources resolve only owned current definitions, deduplicate 
   f.reader.authorizeTarget = async () => undefined
   expect((await f.run()).entries).toHaveLength(0)
   await definitions.replace('w', 'reader', { expectedRevision: 1, feeds: [] })
-  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
-  await expect(replaceDigestPreferences(f.store, 'w', 'other', { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['mine'] } } }, definitions)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestSelectionStale' })
+  await expect(replaceDigestPreferences(f.store, 'w', 'other', { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['mine'] } } }, definitions)).rejects.toMatchObject({ code: 'UpdateFeedDigestSelectionStale' })
 })
 
 test('saved filters constrain custom-only digests and changing definitions aborts generation', async () => {
@@ -125,7 +125,7 @@ test('saved filters constrain custom-only digests and changing definitions abort
     if (++reads === 2) await definitions.replace('w', 'reader', { expectedRevision: 1, feeds: [{ ...feeds[0]!, name: 'Changed' }] })
     return f.snapshot
   }
-  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestSelectionStale' })
   expect(parseDigestPreferences({ enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 2, ids: ['mine'] } }).savedFeeds?.revision).toBe(2)
   expect(() => parseDigestPreferences({ enabled: true, frequency: 'daily', views: ['recent'], savedFeeds: { revision: 1, ids: ['mine', 'mine'] } })).toThrow()
   expect(() => parseDigestPreferences({ enabled: true, frequency: 'daily', views: ['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue'], savedFeeds: { revision: 1, ids: ['mine'] } })).toThrow()
