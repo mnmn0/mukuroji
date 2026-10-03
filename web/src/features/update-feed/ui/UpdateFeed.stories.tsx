@@ -27,6 +27,18 @@ export const Reports: Story = { play: async ({ canvasElement, args }) => {
 } }
 /** Localized view suitable for narrow-screen verification. */
 export const Japanese: Story = { args: { locale: 'ja', t: createTranslator('ja') } }
+/** Personal relevance and report attention remain independently explained. */
+export const Relevance: Story = {
+  args: { response: { ...updateFeedFixture, entries: updateFeedFixture.entries.slice(0, 1).map((entry) => ({ ...entry, relevance: 9, reasons: ['project-member', 'watching', 'recent-interaction'], attention: { score: 3, reasons: ['recent-comment', 'recent-reaction'] } })), total: 1 } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(/You are a current Project member/)).toBeVisible()
+    await expect(canvas.getByText(/You watch this target/)).toBeVisible()
+    await expect(canvas.getByText(/Comment activity within 7 days/)).toBeVisible()
+    await expect(canvas.getByText('On track')).toBeVisible()
+    await expect(canvas.getByText('Overdue')).toBeVisible()
+  },
+}
 /** Empty feeds preserve the selected filter and navigation. */
 export const Empty: Story = { args: { response: { ...updateFeedFixture, entries: [], total: 0 } } }
 /** First-request loading state. */

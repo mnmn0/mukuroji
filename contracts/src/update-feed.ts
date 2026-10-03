@@ -4,7 +4,15 @@ import type { PlanningHealth, PlanningLatestUpdateSummary, PlanningUpdateState, 
 export type UpdateFeedView = 'for-me' | 'recent' | 'at-risk' | 'missing' | 'stale' | 'overdue'
 
 /** Explainable relevance signals available without reading historical annotations. */
-export type UpdateFeedReason = 'update-owner' | 'latest-author'
+export type UpdateFeedReason = 'update-owner' | 'project-member' | 'watching' | 'recent-interaction' | 'latest-author'
+
+/** Recent source activity, independent of personal relationship and reported health. */
+export type UpdateFeedAttention = {
+  /** Recent comment contributes two points; recent reaction contributes one. */
+  score: number
+  /** Activity observed on the current immutable version within the last seven days. */
+  reasons: ('recent-comment' | 'recent-reaction')[]
+}
 
 /** One current, authorized Project or Initiative projection. */
 export type UpdateFeedEntry = {
@@ -20,8 +28,10 @@ export type UpdateFeedEntry = {
   latestUpdate?: Omit<PlanningLatestUpdateSummary, 'capturedScope'>
   /** Stable reasons explaining the current relevance score. */
   reasons: UpdateFeedReason[]
-  /** Owner contributes two points; latest author contributes one. */
+  /** Sum of owner8, current Project member4, watcher3, recent participant2 and latest author1. */
   relevance: number
+  /** Optional for compatibility with earlier feed responses; never implies personal relevance. */
+  attention?: UpdateFeedAttention
   /** Per-member read state for this exact published version; absent without readable content. */
   readState?: UpdateFeedReadState
 }

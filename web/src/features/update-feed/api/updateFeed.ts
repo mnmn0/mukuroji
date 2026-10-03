@@ -30,7 +30,7 @@ export class UpdateFeedApiError extends Error {
  * @returns Validated response in server-ranked order.
  */
 export async function getUpdateFeed(token: string, view: UpdateFeedView, locale: 'ja' | 'en' = 'ja', feedId?: string): Promise<UpdateFeedResponse> {
-  const value = await requestUpdateFeed(token, `?view=${view}&limit=100&locale=${locale}${feedId === undefined ? '' : `&feedId=${encodeURIComponent(feedId)}`}`)
+  const value = await requestUpdateFeed(token, `?view=${view}&limit=100&locale=${locale}&relevance=2${feedId === undefined ? '' : `&feedId=${encodeURIComponent(feedId)}`}`)
   if (!isRecord(value) || !isUpdateFeedView(value.view) || value.view !== view || !isNonnegativeSafeInteger(value.revision) || !isNonnegativeSafeInteger(value.total) || typeof value.truncated !== 'boolean' || !Array.isArray(value.entries) || value.entries.length > 100 || !value.entries.every(isEntry)) throw new UpdateFeedApiError(502)
   return { view: value.view, revision: value.revision, total: value.total, truncated: value.truncated, entries: value.entries }
 }
@@ -72,7 +72,8 @@ function isEntry(value: unknown): value is UpdateFeedEntry {
     !isHealth(value.health) || typeof value.updateState !== 'string' ||
     !['not-configured', 'missing', 'current', 'stale', 'overdue'].includes(value.updateState) ||
     !isNonnegativeSafeInteger(value.relevance) || !Array.isArray(value.reasons) ||
-    !value.reasons.every((reason) => reason === 'update-owner' || reason === 'latest-author')) return false
+    !value.reasons.every((reason) => reason === 'update-owner' || reason === 'project-member' || reason === 'watching' || reason === 'recent-interaction' || reason === 'latest-author')) return false
+  if (value.attention !== undefined && (!isRecord(value.attention) || !isNonnegativeSafeInteger(value.attention.score) || value.attention.score > 3 || !Array.isArray(value.attention.reasons) || !value.attention.reasons.every((reason) => reason === 'recent-comment' || reason === 'recent-reaction') || new Set(value.attention.reasons).size !== value.attention.reasons.length)) return false
   const target = value.target
   if (!(target.type === 'project' && typeof target.teamId === 'string' && target.teamId.length > 0 &&
     typeof target.projectId === 'string' && target.projectId.length > 0) &&

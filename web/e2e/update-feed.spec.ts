@@ -49,6 +49,28 @@ async function mockFeed(page: Page, guest = false) {
   return state
 }
 
+test('explains membership, watch and interaction separately from health, submission and attention', async ({ page }) => {
+  const state = await mockFeed(page)
+  const entry = state.feed.entries[0]
+  if (!entry) throw new Error('Missing fixture')
+  entry.relevance = 9
+  entry.reasons = ['project-member', 'watching', 'recent-interaction']
+  entry.attention = { score: 3, reasons: ['recent-comment', 'recent-reaction'] }
+  await page.goto('/updates')
+  const row = page.getByTestId('update-feed-row').first()
+  await expect(row.getByText(/You are a current Project member/)).toBeVisible()
+  await expect(row.getByText(/You watch this target/)).toBeVisible()
+  await expect(row.getByText(/You interacted within 30 days/)).toBeVisible()
+  await expect(row.getByText(/Comment activity within 7 days/)).toBeVisible()
+  await expect(row.getByText(/including removed reactions/)).toBeVisible()
+  await expect(row.getByText('On track', { exact: true })).toBeVisible()
+  await expect(row.getByText('Overdue', { exact: true })).toBeVisible()
+  await page.screenshot({ path: '/tmp/issue241-relevance-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: '/tmp/issue241-relevance-mobile.png', fullPage: true })
+})
+
 test('guests have no mutation controls and permission denial offers no reload loop', async ({ page }) => {
   const state = await mockFeed(page, true)
   await page.goto('/updates')
