@@ -579,7 +579,7 @@ import {
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
-import { readUpdateFeedFilterOptions, resolveUpdateFeedFilterScope, parseSavedUpdateFeeds, parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReader } from '../modules/update-feed'
+import { previewUpdateFeedDigest, replaceDigestPreferences, readUpdateFeedFilterOptions, resolveUpdateFeedFilterScope, parseSavedUpdateFeeds, parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReader } from '../modules/update-feed'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
@@ -1346,6 +1346,9 @@ const workItemDependencies: WorkItemDependencies = {
   get savedUpdateFeeds() {
     return requireAppDependencies().workItems.savedUpdateFeeds
   },
+  get updateFeedDigest() {
+    return requireAppDependencies().workItems.updateFeedDigest
+  },
   get requestIntake() {
     return requireAppDependencies().workItems.requestIntake
   },
@@ -1767,6 +1770,8 @@ const enterpriseRoutePermissionRules = [
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/saved', permission: 'planning.read' },
+  { method: 'PUT', pathPattern: '/api/planning/update-feed/digest', permission: 'planning.read' },
+  { method: 'POST', pathPattern: '/api/planning/update-feed/digest/preview', permission: 'planning.read' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-forms*', permission: 'requests.manage' },
@@ -7112,6 +7117,49 @@ routeApp.get('/api/planning/update-feed', async (c) => {
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
+})
+
+/** Reads only personal digest preferences and content-free receipts. */
+routeApp.get('/api/planning/update-feed/digest', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    return c.json(await workItemDependencies.updateFeedDigest.get(principal.directoryId, principal.userKey))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
+})
+
+/** Saves manual-preview preferences without enabling a live delivery schedule. */
+routeApp.put('/api/planning/update-feed/digest', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
+    const store = workItemDependencies.updateFeedDigest.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'))
+    return c.json(await replaceDigestPreferences(store, principal.directoryId, principal.userKey, await readPlanningJson<unknown>(c.req)))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
+})
+
+/** Manually previews a digest; no Inbox, notification or schedule transport is connected. */
+routeApp.post('/api/planning/update-feed/digest/preview', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const initialPrincipal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const authorizationRevision = await workItemDependencies.planning.getAuthorizationRevision(initialPrincipal.directoryId)
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if (principal.directoryId !== initialPrincipal.directoryId) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Workspace authorization changed.')
+    if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
+    const store = workItemDependencies.updateFeedDigest.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'))
+    const authorizedReader = await createPlanningUpdateFeedReader(principal, readLocale(c), true)
+    const reader: UpdateFeedReader = { ...authorizedReader, readSnapshot: async () => {
+      const snapshot = await authorizedReader.readSnapshot()
+      if (snapshot.revision !== authorizationRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Feed authorization changed. Retry with current permissions.')
+      return snapshot
+    } }
+    return c.json(await previewUpdateFeedDigest(reader, workItemDependencies.updateFeedReadState, store, principal.directoryId))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
 })
 
 /** Returns current authorized labels for editing filter dimensions. */

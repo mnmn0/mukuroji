@@ -1,4 +1,6 @@
 /** Public Update Feed application surface. */
+export { previewUpdateFeedDigest, replaceDigestPreferences } from './application/digest'
+export { DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore, type UpdateFeedDigestPersistence } from './adapter-out/digest-store'
 export { parseUpdateFeedQuery, readUpdateFeed, type UpdateFeedReader } from './application/read-update-feed'
 export { parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReadStateStore } from './application/read-state'
 export { DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, type UpdateFeedReadStatePersistence } from './adapter-out/read-state-store'
