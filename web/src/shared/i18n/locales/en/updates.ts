@@ -1,5 +1,15 @@
 /** en messages for the Update Feed. */
 export const updatesMessages = {
+  "updates.inbox.title": "Inbox digest settings",
+  "updates.inbox.denied": "You no longer have access to Inbox digest settings.",
+  "updates.inbox.conflict": "Settings changed. Reload before saving again.",
+  "updates.inbox.error": "Unable to load or save Inbox settings.",
+  "updates.inbox.settings": "Delivery consent",
+  "updates.inbox.inactive": "Automatic delivery is not active yet. Saving records your preference only.",
+  "updates.inbox.enabled": "Receive update digests in Inbox when delivery becomes available",
+  "updates.inbox.save": "Save Inbox settings",
+  "updates.inbox.optedIn": "Delivery preference saved. Automatic delivery is not active.",
+  "updates.inbox.disabled": "Inbox digests are off.",
   "updates.digest.title": "Digest preview",
   "updates.digest.previewOnly": "Preview only · No notifications are sent",
   "updates.digest.settings": "Manual preview settings",

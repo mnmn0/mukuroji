@@ -186,6 +186,8 @@ export interface WorkItemDependencies {
   savedUpdateFeeds: SavedUpdateFeedsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */
   updateFeedDigest: UpdateFeedDigestPersistence
+  /** Provides delivery opt-in metadata independently of manual previews. */
+  inboxDigestSettings: UpdateFeedDigestPersistence
   /** Provides Request Intake persistence. */
   requestIntake: RequestIntakeClient
   /** Provides the Team Triage queue and replay-safe mutation surface. */

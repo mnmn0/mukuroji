@@ -11,7 +11,8 @@ import type { SavedUpdateFeeds, UpdateFeedDigestState } from '@mukuroji/contract
 async function mockFeed(page: Page, guest = false) {
   const saved: SavedUpdateFeeds = { revision: 0, feeds: [] }
   const digest: UpdateFeedDigestState = { revision: 0, preferences: { enabled: false, frequency: 'daily', views: ['for-me'] }, history: [] }
-  const state = { feed: structuredClone(updateFeedFixture), saved, digest, digestRequests: 0, digestConflict: false, denied: false, failed: false, forbidden: false, conflict: false }
+  const inbox = structuredClone(digest)
+  const state = { feed: structuredClone(updateFeedFixture), saved, digest, inbox, inboxDenied: false, inboxRequests: 0, digestRequests: 0, digestConflict: false, denied: false, failed: false, forbidden: false, conflict: false }
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'feed-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
     localStorage.setItem('mukuroji.locale', 'en')
@@ -24,6 +25,17 @@ async function mockFeed(page: Page, guest = false) {
     if (state.forbidden) return route.fulfill({ status: 403, json: { code: 'WorkspacePermissionDenied' } })
     if (state.failed) return route.fulfill({ status: 503, json: { message: 'Unavailable' } })
     const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/digest/inbox')) {
+      state.inboxRequests++
+      if (state.inboxDenied) return route.fulfill({ status: 403, json: { code: 'WorkspacePermissionDenied' } })
+      if (route.request().method() === 'PUT') {
+        if (guest) return route.fulfill({ status: 403, json: {} })
+        const input = route.request().postDataJSON()
+        if (state.digestConflict || input.expectedRevision !== state.inbox.revision) return route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+        state.inbox = { ...state.inbox, revision: state.inbox.revision + 1, preferences: input.preferences }
+      }
+      return route.fulfill({ json: state.inbox })
+    }
     if (url.pathname.endsWith('/digest')) {
       if (route.request().method() === 'PUT') {
         const input = route.request().postDataJSON()
@@ -66,6 +78,55 @@ async function mockFeed(page: Page, guest = false) {
   })
   return state
 }
+
+test('Inbox consent is lazy, off by default, independent from previews and retained after reload', async ({ page }, testInfo) => {
+  const state = await mockFeed(page)
+  await page.goto('/updates')
+  await expect(page.getByRole('heading', { name: 'Updates', exact: true })).toBeVisible()
+  expect(state.inboxRequests).toBe(0)
+  const disclosure = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await disclosure.focus()
+  await page.keyboard.press('Enter')
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  const consent = panel.getByLabel('Receive update digests in Inbox when delivery becomes available')
+  await expect(consent).not.toBeChecked()
+  await expect(panel.getByText(/Automatic delivery is not active yet/)).toBeVisible()
+  await consent.check()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByText('Delivery preference saved. Automatic delivery is not active.')).toBeVisible()
+  expect(state.digest.preferences.enabled).toBe(false)
+  expect(state.digestRequests).toBe(0)
+  await page.reload()
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  await expect(consent).toBeChecked()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.screenshot({ path: testInfo.outputPath('inbox-settings-desktop.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('inbox-settings-mobile.png'), fullPage: true })
+  await consent.uncheck()
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByText('Inbox digests are off.')).toBeVisible()
+})
+
+test('Inbox settings conflict requires reload and permission loss hides consent', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByLabel('Receive update digests in Inbox when delivery becomes available').check()
+  state.digestConflict = true
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  state.inboxDenied = true
+  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(panel.locator('form')).toHaveCount(0)
+  expect(state.inbox.preferences.enabled).toBe(false)
+  expect(state.digestRequests).toBe(0)
+})
 
 test('manual digest settings, preview and bodyless history work at desktop and phone widths', async ({ page }, testInfo) => {
   const state = await mockFeed(page)

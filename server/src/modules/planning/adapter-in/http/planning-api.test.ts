@@ -66,6 +66,20 @@ test('manual digest preferences and preview use authenticated identity and rejec
   expect((await planningApiRequest(`${path}/preview`, 'POST', {})).status).toBe(403)
 })
 
+test('Inbox consent defaults off, stays separate from previews, ignores client identity and uses CAS', async () => {
+  configureFakeProjectClients(true)
+  const path = '/api/planning/update-feed/digest/inbox'
+  expect((await (await planningApiRequest(path)).json()).preferences.enabled).toBe(false)
+  const settings = { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: ['recent'] }, workspaceId: 'attacker', memberKey: 'attacker' }
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(200)
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(409)
+  expect((await (await planningApiRequest('/api/planning/update-feed/digest')).json()).preferences.enabled).toBe(false)
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 1, preferences: { ...settings.preferences, enabled: false } })).status).toBe(200)
+  expect((await (await planningApiRequest(path)).json()).history).toEqual([])
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(403)
+})
+
 test('personal saved-feed CRUD requires current authentication, rejects guests and preserves CAS', async () => {
   configureFakeProjectClients(true)
   const feed: SavedUpdateFeed = { id: 'risk', name: 'My risks', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }

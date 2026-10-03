@@ -9,6 +9,22 @@ import { isEntry, requestUpdateFeed, UpdateFeedApiError } from './updateFeed'
  */
 export async function getDigestState(token: string): Promise<UpdateFeedDigestState> { return readState(await requestUpdateFeed(token, '/digest')) }
 
+/** Reads delivery consent independently of preview preferences.
+ * @param token - Current session.
+ * @returns Validated delivery metadata.
+ */
+export async function getInboxDigestState(token: string): Promise<UpdateFeedDigestState> { return readState(await requestUpdateFeed(token, '/digest/inbox')) }
+
+/** Saves explicit Inbox consent without activating a scheduler or sending content.
+ * @param token - Current session.
+ * @param expectedRevision - Observed settings revision.
+ * @param preferences - Explicit consent and cadence.
+ * @returns Committed delivery metadata.
+ */
+export async function saveInboxDigestPreferences(token: string, expectedRevision: number, preferences: UpdateFeedDigestPreferences): Promise<UpdateFeedDigestState> {
+  return readState(await requestUpdateFeed(token, '/digest/inbox', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision, preferences }) }))
+}
+
 /** Saves manual preview preferences with optimistic concurrency.
  * @param token - Current session.
  * @param expectedRevision - Last observed personal revision.
