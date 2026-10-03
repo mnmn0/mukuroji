@@ -408,7 +408,39 @@ for (const outside of [false, true]) test(`blurred preview removal restores owne
   await expect(outside ? other : summary).toBeFocused()
 })
 
-for (const failure of ['network', 'forbidden']) test(`completed preview followed by ${failure} metadata failure hides content until fresh recovery`, async ({ page }) => {
+test('preview save denial requires fresh metadata before reopening can restore controls', async ({ page }) => {
+  await mockFeed(page)
+  await page.clock.install()
+  let puts = 0
+  let stalled = false
+  let waiting = false
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/planning/update-feed/digest', async (route) => {
+    if (route.request().method() === 'PUT') { puts++; return route.fulfill({ status: 403, json: {} }) }
+    if (stalled) { waiting = true; await gate }
+    await route.fallback()
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save preview settings' }).click()
+  await expect(panel.locator('form')).toHaveCount(0)
+  stalled = true
+  await summary.click()
+  await page.clock.fastForward(6_001)
+  await summary.click()
+  await expect.poll(() => waiting).toBe(true)
+  await expect(panel.locator('form')).toHaveCount(0)
+  release()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  expect(puts).toBe(1)
+})
+
+for (const boundary of ['disclosure', 'route']) for (const failure of ['network', 'forbidden']) test(`${boundary}: completed preview followed by ${failure} metadata failure hides content until fresh recovery`, async ({ page }) => {
   const state = await mockFeed(page)
   await page.clock.install()
   state.digest.preferences.enabled = true
@@ -435,8 +467,13 @@ for (const failure of ['network', 'forbidden']) test(`completed preview followed
   expect(state.digest.history[0]?.status).toBe('completed')
   stallRefresh = true
   const summary = page.locator('summary', { hasText: 'Digest preview' })
-  await summary.click()
+  if (boundary === 'disclosure') await summary.click()
+  else {
+    await page.evaluate(() => { history.pushState(null, '', '/help'); dispatchEvent(new PopStateEvent('popstate')) })
+    await expect(summary).toHaveCount(0)
+  }
   await page.clock.fastForward(6_001)
+  if (boundary === 'route') await page.evaluate(() => { history.pushState(null, '', '/updates'); dispatchEvent(new PopStateEvent('popstate')) })
   await summary.click()
   await expect.poll(() => waiting).toBe(true)
   await expect(panel.locator('form')).toHaveCount(0)

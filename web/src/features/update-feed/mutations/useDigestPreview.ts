@@ -82,7 +82,7 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
           if (request.signal.aborted || generation !== epoch.current) return false
           // Generation committed, but its response cannot be displayed until a
           // current metadata/permission read succeeds. Do not retry the POST.
-          if (active.current) { dismiss(); setRefreshFailed(true); setError(failure) }
+          if (active.current) { dismiss(); setRefreshFailed(true); setError(failure); await query.mutate(undefined, { revalidate: false }) }
           return false
         }
         if (active.current && generation === epoch.current && body.current && Date.now() < deadline.current) {
@@ -97,9 +97,11 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
     } catch (failure) {
       if (active.current && (preferences || generation === epoch.current)) {
         dismiss(); setError(failure)
+        const denied = failure instanceof UpdateFeedApiError && (failure.status === 401 || failure.status === 403)
         // Generation conflicts still recheck authorization; save conflicts retain
         // the original editing base until the member explicitly reloads.
-        if (!preferences) await query.mutate().catch(() => undefined)
+        if (denied) { setRefreshFailed(true); await query.mutate(undefined, { revalidate: false }) }
+        else if (!preferences) await query.mutate().catch(() => undefined)
       }
       return false
     } finally { busy.current = false; if (active.current) setPending(false) }
@@ -111,7 +113,7 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
     try {
       const state = await guard(getDigestState(token))
       if (active.current) { await query.mutate(state, { revalidate: false }); setError(undefined); setRefreshFailed(false); setDraftReset((value) => value + 1) }
-    } catch (failure) { if (active.current) { setError(failure); setRefreshFailed(true) } }
+    } catch (failure) { if (active.current) { setError(failure); setRefreshFailed(true); await query.mutate(undefined, { revalidate: false }) } }
     finally { busy.current = false; if (active.current) setPending(false) }
   }
   return { state: refreshFailed ? undefined : query.data, loading: query.isLoading, error: query.error ?? error, refreshFailed, pending, draftReset, preview: refreshFailed || query.error || !enabled || !token || query.isValidating || query.data?.revision !== preview?.revision ? undefined : preview?.result, save: (preferences: UpdateFeedDigestPreferences, expectedRevision?: number) => run(preferences, expectedRevision), generate: () => run(), dismiss, reload: () => { void reload() } }
