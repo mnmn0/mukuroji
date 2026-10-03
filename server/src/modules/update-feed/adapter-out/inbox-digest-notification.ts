@@ -5,9 +5,10 @@ import type { InboxDigestMessage, InboxDigestRecipient } from '../application/in
  * This row and the delivery receipt MUST be inserted atomically by InboxDigestStore.
  * @param recipient - Server-resolved recipient.
  * @param message - Deterministic content-free delivery.
+ * @param locale - Recipient language resolved by composition.
  * @returns An ordinary Inbox row, readable by the existing Notification client.
  */
-export function createInboxDigestNotification(recipient: InboxDigestRecipient, message: InboxDigestMessage) {
+export function createInboxDigestNotification(recipient: InboxDigestRecipient, message: InboxDigestMessage, locale: 'ja' | 'en' = 'en') {
   const recipientKey = createNotificationRecipientKey(recipient.workspaceId, recipient.memberKey)
   return {
     recipientKey,
@@ -23,7 +24,7 @@ export function createInboxDigestNotification(recipient: InboxDigestRecipient, m
     createdAt: message.occurredAt,
     workspaceId: recipient.workspaceId,
     recipientMemberKey: recipient.memberKey,
-    title: 'Update digest available',
+    title: locale === 'ja' ? '更新ダイジェストを確認できます' : 'Update digest available',
     deepLink: message.deepLink,
     reasons: ['digest'],
     deliveryChannels: ['inApp'],
