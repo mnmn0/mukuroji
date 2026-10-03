@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview, UpdateFeedDigestState } from '@mukuroji/contracts'
 import type { createTranslator } from '../../../shared/i18n/i18n'
 import { updateFeedTargetKey, updateFeedTargetPath, updateFeedViews } from '../model/updateFeed'
+import { normalizeDigestPreferences, sameDigestPreferences } from '../model/digestPreferences'
 
 /** Pure manual-preview presentation with explicit user intent callbacks. */
 type DigestPanelProps = {
@@ -45,8 +46,16 @@ export function DigestPanel(props: DigestPanelProps) {
   const focused = useRef<HTMLElement | null>(null)
   // Restore only a removed focused descendant, never another live control.
   useLayoutEffect(() => {
-    if (focused.current && !focused.current.isConnected && document.activeElement === document.body && document.hasFocus()) props.restoreFocus?.()
-    if (focused.current && !focused.current.isConnected) focused.current = null
+    /** Retains detached focus ownership while the browser is inactive. */
+    const restore = () => {
+      if (!focused.current || focused.current.isConnected || !document.hasFocus()) return
+      if (document.activeElement === document.body) props.restoreFocus?.()
+      focused.current = null
+    }
+    restore()
+    window.addEventListener('focus', restore)
+    document.addEventListener('visibilitychange', restore)
+    return () => { window.removeEventListener('focus', restore); document.removeEventListener('visibilitychange', restore) }
   })
   return <section onFocusCapture={(event) => { focused.current = event.target }} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focused.current = null }} aria-label={t('updates.digest.title')} className="min-w-0 border-y border-slate-200 py-4">
     <p className="mb-4 text-app-meta font-semibold text-teal-800">{t('updates.digest.previewOnly')}</p>
@@ -86,12 +95,14 @@ function DigestForm({ state, pending, canEdit, failure, t, onSave, onGenerate, o
   const restoreActionFocus = useRef(false)
   const [edit, setEdit] = useState<{ /** Revision at which editing began. */ revision: number; /** Unsaved preferences. */ preferences: UpdateFeedDigestPreferences }>()
   const draft = edit?.preferences ?? state.preferences
-  const dirty = JSON.stringify(draft) !== JSON.stringify(state.preferences)
+  const dirty = !sameDigestPreferences(draft, state.preferences)
+  // A satisfied draft no longer owns a base revision or a future value.
+  if (edit && !dirty) setEdit(undefined)
   const stale = dirty && edit !== undefined && edit.revision !== state.revision
   const unavailable = pending || !canEdit || failure === 'denied'
   const canSave = !unavailable && !stale && failure !== 'conflict' && dirty && draft.views.length > 0
   /** Discards stale output immediately when the visible settings change. */
-  const change = (next: UpdateFeedDigestPreferences) => { setEdit({ revision: dirty && edit ? edit.revision : state.revision, preferences: next }); onDismiss() }
+  const change = (next: UpdateFeedDigestPreferences) => { setEdit(sameDigestPreferences(next, state.preferences) ? undefined : { revision: dirty && edit ? edit.revision : state.revision, preferences: normalizeDigestPreferences(next) }); onDismiss() }
   // DOM focus must wait for React to commit the re-enabled fieldset.
   useEffect(() => {
     if (pending || !restoreActionFocus.current) return
@@ -105,7 +116,7 @@ function DigestForm({ state, pending, canEdit, failure, t, onSave, onGenerate, o
   /** Clears only the acknowledged snapshot, preserving edits made after submission. */
   const save = async () => {
     const submitted = edit
-    const success = await onSave(draft, submitted?.revision ?? state.revision)
+    const success = await onSave(normalizeDigestPreferences(draft), submitted?.revision ?? state.revision)
     if (success) setEdit((current) => current === submitted ? undefined : current)
     return success
   }
