@@ -36,6 +36,17 @@ test('reads one strongly consistent scoped row and fails closed on malformed per
   expect(await store.get('w', 'reader')).toEqual(emptyDigestState())
 })
 
+for (const frequency of ['daily', 'weekly']) test(`${frequency} receipt dates must be real UTC calendar dates`, async () => {
+  let date = '2024-02-29'
+  const store = new DynamoDbUpdateFeedDigestStore('planning', clientFor(async (command) => {
+    if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+    return { Item: { ...command.input.Key, ...emptyDigestState(), revision: 1, entryType: 'update-feed-digest', schemaVersion: 1, history: [{ id: `${frequency}:${date}`, status: 'completed', attempts: 1, token: 'receipt', leaseUntil: 0, count: 0 }] } }
+  }))
+  for (date of frequency === 'weekly' ? ['2024-02-26', '2000-02-28', '2026-09-28', '2026-10-05'] : ['2024-02-29', '2000-02-29', '2026-01-31', '2026-12-31']) expect((await store.get('w', 'reader')).history[0]?.id).toBe(`${frequency}:${date}`)
+  for (date of ['2026-99-99', '2026-00-01', '2026-01-00', '2026-02-29', '1900-02-29', '2026-02-30', '2026-04-31', '2026-12-32']) await expect(store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+  if (frequency === 'weekly') for (date of ['2026-10-03', '2026-10-04', '2024-02-29']) await expect(store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+})
+
 test('SDK reads and writes distinguish permanent, transient and unknown failures without exposing details', async () => {
   for (const [name, status, code] of [
     ['ValidationException', 502, 'UpdateFeedDigestStoragePermanent'],
