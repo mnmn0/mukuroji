@@ -67,6 +67,40 @@ async function mockFeed(page: Page, guest = false) {
   return state
 }
 
+for (const failure of ['network', 'forbidden']) test(`completed preview followed by ${failure} metadata failure hides content until fresh recovery`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  let failRefresh = true
+  await page.route('**/api/planning/update-feed/digest', async (route) => {
+    if (route.request().method() === 'GET' && state.digestRequests > 0 && failRefresh) {
+      if (failure === 'network') return route.abort('failed')
+      return route.fulfill({ status: 403, json: { code: 'WorkspacePermissionDenied' } })
+    }
+    return route.fallback()
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByText(failure === 'network' ? 'Preview generated, but current settings could not be verified. Reload before generating a fresh preview.' : 'You no longer have access to digest previews.')).toBeVisible()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  expect(state.digestRequests).toBe(1)
+  expect(state.digest.history[0]?.status).toBe('completed')
+  failRefresh = false
+  if (failure === 'network') await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  else {
+    await page.reload()
+    await page.locator('summary', { hasText: 'Digest preview' }).click()
+  }
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  expect(state.digestRequests).toBe(1)
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByLabel('Current preview', { exact: true }).getByRole('link', { name: 'Customer onboarding' })).toBeVisible()
+  expect(state.digestRequests).toBe(2)
+  expect(state.digest.history[0]?.attempts).toBe(1)
+})
+
 test('manual digest settings, preview and bodyless history work at desktop and phone widths', async ({ page }, testInfo) => {
   const state = await mockFeed(page)
   await page.setViewportSize({ width: 1440, height: 900 })

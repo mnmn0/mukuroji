@@ -17,7 +17,7 @@ type DigestPanelProps = {
   /** Whether this member may mutate personal preview state. */
   canEdit: boolean
   /** Safe presentation category, independent of transport errors. */
-  failure?: 'denied' | 'conflict' | 'exhausted' | 'error'
+  failure?: 'denied' | 'conflict' | 'exhausted' | 'refresh' | 'error'
   /** Current localized copy. */
   t: ReturnType<typeof createTranslator>
   /** Saves explicit preferences. */
