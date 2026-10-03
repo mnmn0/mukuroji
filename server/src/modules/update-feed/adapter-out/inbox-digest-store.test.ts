@@ -10,6 +10,7 @@ import { emptyDigestState } from '../application/digest'
 import { deliverInboxDigest, inboxDigestTerminalReason, runInboxDigestSchedule, type InboxDigestContext } from '../application/inbox-digest'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
+import { DynamoDbSavedUpdateFeedsStore } from './saved-feeds-store'
 
 const recipient = { workspaceId: 'w', memberKey: 'reader' }
 const now = Date.parse('2026-10-03T12:00:00Z')
@@ -146,6 +147,28 @@ test('saved-feed revision is fenced atomically with Inbox delivery, including ch
       expect(JSON.stringify(f.notifications())).not.toContain('Personal name')
     }
   }
+})
+
+for (const corrupt of [true, false]) test(`saved-definition SDK boundary corruption=${corrupt} is classified through real scheduled delivery`, async () => {
+  const f = await fixture()
+  const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+  f.rows.set(f.coordinate('planning', definition), definition)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
+  // The SDK's overloaded transport is the only test-only assertion here.
+  client.send = (async (command: unknown) => {
+    expect(command).toBeInstanceOf(GetCommand)
+    if (!corrupt) throw new Error('Unknown SDK failure')
+    return { Item: { ...definition, feeds: [{ id: 'invalid' }] } }
+  }) as DynamoDBDocumentClient['send']
+  const definitions = new DynamoDbSavedUpdateFeedsStore('planning', client)
+  f.context.reader.readSavedFeeds = () => definitions.get('w', 'reader')
+  const result = await runInboxDigestSchedule({ enabled: true, dependencies: { authorize: async () => f.context }, listCandidates: async () => ({ recipients: [recipient] }) }, now)
+  expect(result.terminal).toEqual(corrupt ? [{ recipient, reason: 'corrupt-state' }] : [])
+  expect(result.failed).toEqual(corrupt ? [] : [{ ...recipient, scheduledAt: now }])
+  expect((await f.store.get('w', 'reader')).history).toEqual([])
+  expect(f.notifications()).toHaveLength(0)
 })
 
 for (const change of ['edited', 'deleted']) for (const during of [false, true]) test(`${change} definitions disable stale delivery once, during generation ${during}, until explicit reselection`, async () => {
@@ -498,12 +521,37 @@ for (const frequency of ['daily', 'weekly'] as const) for (const boundary of [fa
   f.indexed.push(structuredClone(f.metadata()))
   const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
   expect((await f.store.listDue(shard)).recipients).toEqual([recipient])
-  if (boundary) expect(await f.run()).toBe('delivered')
+  if (boundary) expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, start + 60_001, start)).toBe('delivered')
   else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestAttemptsExhausted' })
   expect((await f.store.get('w', 'reader')).history.find((row) => row.id === id)).toMatchObject({ status: 'failed', attempts: 3, leaseUntil: 0 })
   expect(f.notifications()).toHaveLength(boundary ? 1 : 0)
   if (boundary) { expect(await f.run()).toBe('not-due'); expect(f.notifications()).toHaveLength(1) }
   else expect(f.metadata().inboxDigestDueAt).toBe(Date.parse(frequency === 'daily' ? '2026-10-04T00:00:00Z' : '2026-10-05T00:00:00Z'))
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`durable ${frequency} completion accepts pinned scheduling time with fresh lease after rollover`, async () => {
+  const f = await fixture()
+  const scheduledAt = Date.parse('2026-10-04T23:59:30Z')
+  const retryAt = scheduledAt + 120_000
+  f.advance(retryAt - now)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] } })
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt, scheduledAt)).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ startedAt: scheduledAt, status: 'completed', id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}` }])
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, retryAt + 1, scheduledAt)).toBe('not-due')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('a pinned retry defers a live prior claim instead of acknowledging unfinished logical work', async () => {
+  const f = await fixture()
+  f.loseClaimResponse()
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  f.advance(30_000)
+  await expect(deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 30_000, now)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  f.advance(30_001)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 60_001, now)).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ attempts: 2, startedAt: now, status: 'completed' }])
+  expect(f.notifications()).toHaveLength(1)
 })
 
 test('transaction failures classify complete cancellation vectors and permanent SDK failures without leaking details', async () => {
