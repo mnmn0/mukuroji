@@ -22,7 +22,7 @@ type DigestPanelProps = {
   /** Whether this member may mutate personal preview state. */
   canEdit: boolean
   /** Safe presentation category, independent of transport errors. */
-  failure?: 'denied' | 'conflict' | 'exhausted' | 'refresh' | 'error'
+  failure?: 'denied' | 'conflict' | 'exhausted' | 'refresh' | 'interrupted' | 'error'
   /** Current localized copy. */
   t: ReturnType<typeof createTranslator>
   /** Saves explicit preferences. */
@@ -75,14 +75,14 @@ export function DigestPanel(props: DigestPanelProps) {
     {state && preview && !failure ? <div className="mt-6" aria-label={t('updates.digest.result')}>
       <h3 className="text-sm font-semibold text-slate-800">{t('updates.digest.result')}</h3>
       <p role="status" className="mt-1 text-app-meta text-slate-600">{t(preview.replay ? 'updates.digest.replay' : 'updates.digest.generated')}</p>
-      {preview.entries.length === 0 ? <p className="py-5 text-app-body text-slate-500">{t('updates.digest.empty')}</p> : <ul className="mt-2 divide-y divide-slate-200">
+      {preview.entries.length === 0 ? <p className="py-5 text-app-body text-slate-500">{t(preview.truncated ? 'updates.digest.boundedEmpty' : 'updates.digest.empty')}</p> : <ul className="mt-2 divide-y divide-slate-200">
         {preview.entries.map((entry) => <li key={updateFeedTargetKey(entry.target)} className="min-w-0 py-4">
           <Link className="inline-flex min-h-11 max-w-full items-center break-words font-semibold text-teal-800 underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-teal-700" to={updateFeedTargetPath(entry.target)}>{entry.title}</Link>
           <p className="whitespace-pre-wrap break-words text-app-body text-slate-700">{entry.latestUpdate?.summary}</p>
           <p className="mt-2 text-app-meta text-slate-600">{t(`planning.health.${entry.health}`)} · {t(`planning.updateState.${entry.updateState}`)}</p>
         </li>)}
       </ul>}
-      {preview.truncated ? <p role="status" className="mt-3 text-app-meta text-slate-600">{t('updates.truncated').replace('{count}', String(preview.entries.length))}</p> : null}
+      {preview.truncated && preview.entries.length > 0 ? <p role="status" className="mt-3 text-app-meta text-slate-600">{t('updates.digest.truncated').replace('{count}', String(preview.entries.length))}</p> : null}
     </div> : null}
   </section>
 }
@@ -139,7 +139,7 @@ function DigestForm({ state, pending, canEdit, failure, t, onSave, onGenerate, o
       <p className="mt-2 text-app-meta text-slate-500">{t('updates.digest.standardOnly')}</p>
       <div className="mt-4 flex flex-wrap gap-3">
         <button type="submit" className={actionClass} disabled={!canSave}>{t('updates.digest.save')}</button>
-        <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
+        <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict' || failure === 'interrupted'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
       </div>
       {dirty ? <p role="status" className="mt-2 text-app-meta text-slate-600">{t('updates.digest.unsaved')}</p> : null}
     </fieldset>
