@@ -649,6 +649,19 @@ Public API check で green にすることはできません。Required context 
 管理者 rotation 手順と bootstrap 完了の判断が blocker です。Check の成功を偽装したり、
 candidate workflow を privileged 実行したりして回避しないでください。
 
+Canonical wrapper の JSON import は Node ESM consumer のため `with { type: 'json' }` を
+含む exact source に固定します。Bun だけでなく Node/Playwright consumer でも検証し、
+attribute の省略を許すような source check の緩和は行いません。
+
+Rotation 前に実際の required contexts を確認してください。専用 App context がまだ required
+でない場合は、上記 step 3/5 の context 削除・復元は適用せず、既存 ruleset と protected
+environment を変更しません。その場合も「全 CI 成功」の運用条件には、最終 SHA の rotation
+PR だけに限定した Public API gate と対応 publisher workflow の失敗に対する明示的な例外が
+必要です。他の applicable CI と両 bot review は成功を要求します。Merge 停止中に rotation
+だけを merge し、new-main base の wrapper probe で App actor・candidate SHA・base SHA と
+成功を確認します。Probe が失敗した場合は通常変更を merge せず、原因調査または旧 trust root
+への rollback を個別承認のもとで行います。Required context の新規追加は別の判断です。
+
 Shared APIには`live` Aliasによるversion単位のatomic cutoverがありますが、weighted routing/
 CodeDeployによるcode canaryはありません。AppConfig の
 global `enabled` / `disabled` control は code/schema compatibility の段階 rollout ではないため、

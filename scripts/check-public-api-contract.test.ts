@@ -20,7 +20,7 @@ import {
 const checkerPath = resolve(import.meta.dir, "check-public-api-contract.ts");
 const repositoryRoot = resolve(import.meta.dir, "..");
 const temporaryDirectories: string[] = [];
-const canonicalRuntimeWrapper = `import publicApiOpenApiDocumentJson from '../openapi/public-api-v1.json'
+const canonicalRuntimeWrapper = `import publicApiOpenApiDocumentJson from '../openapi/public-api-v1.json' with { type: 'json' }
 
 /**
  * Public REST API major version.
@@ -139,6 +139,11 @@ test("publisher reports the pending wrapper migration and never executes candida
   const legacy = await comparePublisherFixture(fixture);
   expect(legacy.status).toBe(1);
   expect(legacy.stderr).toContain("must be the trusted canonical JSON wrapper");
+  await writeFile(source, canonicalRuntimeWrapper.replace(" with { type: 'json' }", ""));
+  fixtureGit(fixture.candidate, ["commit", "-am", "Missing JSON import attribute fixture"]);
+  const missingAttribute = await comparePublisherFixture(fixture);
+  expect(missingAttribute.status).toBe(1);
+  expect(missingAttribute.stderr).toContain("must be the trusted canonical JSON wrapper");
   await writeFile(source, `${canonicalRuntimeWrapper}\nthrow new Error('CANDIDATE_EXECUTED');\n`);
   fixtureGit(fixture.candidate, ["commit", "-am", "Untrusted candidate fixture"]);
   const result = await comparePublisherFixture(fixture);
