@@ -4,6 +4,7 @@ export const updatesMessages = {
   "updates.inbox.denied": "受信設定を表示する権限がありません。",
   "updates.inbox.conflict": "設定が変更されました。再読み込みしてから保存してください。",
   "updates.inbox.error": "受信設定の取得または保存に失敗しました。",
+  "updates.inbox.saveError": "保存を確認できませんでした。入力内容は保持されています。もう一度保存してください。",
   "updates.inbox.settings": "ダイジェストの受信設定",
   "updates.inbox.inactive": "保存されるのは受信設定のみです。自動配信には運用者による有効化も必要です。",
   "updates.inbox.enabled": "配信開始後、更新ダイジェストを受信トレイで受け取る",

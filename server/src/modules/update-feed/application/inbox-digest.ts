@@ -1,7 +1,7 @@
 import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError } from '../../planning'
 import { TenantAdministrationError } from '../../tenant-administration'
-import { previewUpdateFeedDigest, type UpdateFeedDigestStore } from './digest'
+import { isDigestIntervalExpired, previewUpdateFeedDigest, type UpdateFeedDigestStore } from './digest'
 import type { UpdateFeedReader } from './read-update-feed'
 import type { UpdateFeedReadStateStore } from './read-state'
 
@@ -109,10 +109,11 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   if ((frequency !== undefined && frequency !== state.preferences.frequency) || (frequency === undefined && scheduledAt !== now)) return 'cancelled'
   let id = inboxDigestInterval(state, scheduledAt)
   if (!state.preferences.enabled) return 'disabled'
+  if (isDigestIntervalExpired(state, id)) return 'cancelled'
   // An old interval may still own a live claim across midnight/Monday. Reconcile
   // expired claims durably before selecting a new interval, including attempt three.
   if (state.history.some((item) => item.status === 'pending' && item.leaseUntil > now)) {
-    if (scheduledAt < now) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest interval is still leased.')
+    if (frequency !== undefined || scheduledAt < now) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest interval is still leased.')
     return 'not-due'
   }
   if (state.history.some((item) => item.status === 'pending')) {
@@ -173,7 +174,9 @@ export type InboxDigestCandidatePage = {
 export type InboxDigestSchedule = {
   /** Independent operator activation switch; defaults to absent/disabled in composition. */
   enabled: boolean
-  /** Reads due candidates without scanning canonical updates or notification history. */
+  /** Discovers current due candidates. New pages bind new discoveries to their current clock;
+   * known failed work must carry its original scheduledAt/frequency separately.
+   */
   listCandidates(cursor: string | undefined, limit: number, now: number): Promise<InboxDigestCandidatePage>
   /** Resolves fresh recipient authorization per candidate. */
   dependencies: InboxDigestDependencies
@@ -206,7 +209,7 @@ export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrup
   if (error.code === 'UpdateFeedDigestStoragePermanent') return 'storage-permanent'
   // Limits/views are validated before normal generation; reaching these codes
   // nevertheless identifies a deterministic invariant, never a storage outage.
-  if (['UpdateFeedDigestInvalid', 'UpdateFeedTargetLimitExceeded', 'UpdateFeedReadStateLimit', 'UpdateFeedReadStateInvalid', 'UpdateFeedViewInvalid', 'UpdateFeedLimitInvalid'].includes(error.code)) return 'invalid-input'
+  if (['UpdateFeedDigestInvalid', 'UpdateFeedDigestIntervalExpired', 'UpdateFeedTargetLimitExceeded', 'UpdateFeedReadStateLimit', 'UpdateFeedReadStateInvalid', 'UpdateFeedViewInvalid', 'UpdateFeedLimitInvalid'].includes(error.code)) return 'invalid-input'
   return undefined
 }
 

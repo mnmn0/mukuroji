@@ -4,6 +4,7 @@ export const updatesMessages = {
   "updates.inbox.denied": "You no longer have access to Inbox digest settings.",
   "updates.inbox.conflict": "Settings changed. Reload before saving again.",
   "updates.inbox.error": "Unable to load or save Inbox settings.",
+  "updates.inbox.saveError": "Unable to confirm the save. Your changes are kept; try saving again.",
   "updates.inbox.settings": "Delivery consent",
   "updates.inbox.inactive": "Saving records your preference only. Automatic delivery also requires operator activation.",
   "updates.inbox.enabled": "Receive update digests in Inbox when delivery becomes available",
