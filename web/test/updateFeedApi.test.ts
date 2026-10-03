@@ -6,8 +6,11 @@ const originalFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = originalFetch })
 
 test('validates independent health and submission fields without changing server ranking', async () => {
-  globalThis.fetch = async () => Response.json(updateFeedFixture)
-  expect(await getUpdateFeed('session', 'for-me')).toEqual(updateFeedFixture)
+  globalThis.fetch = async (url) => {
+    expect(String(url)).toContain('locale=en')
+    return Response.json(updateFeedFixture)
+  }
+  expect(await getUpdateFeed('session', 'for-me', 'en')).toEqual(updateFeedFixture)
   for (const invalid of [
     { ...updateFeedFixture, view: 'recent' },
     { ...updateFeedFixture, entries: [{ ...updateFeedFixture.entries[0], readState: { read: true, revision: -1 } }] },

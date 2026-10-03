@@ -13,6 +13,8 @@ export const updatesMessages = {
   "updates.ranking": "Your update ownership ranks first, followed by reports you authored. Newest reports break ties.",
   "updates.loading": "Loading updates…",
   "updates.error": "Updates could not be verified. Reload to check current access.",
+  "updates.denied": "You do not have permission to view updates. Contact a workspace administrator.",
+  "updates.readOnly": "Guest access is read-only.",
   "updates.saveError": "Your choice could not be saved. Check the current state and try again.",
   "updates.empty": "No updates in this feed",
   "updates.emptyHint": "Try another feed. Only currently accessible targets are shown.",

@@ -25,10 +25,11 @@ export class UpdateFeedApiError extends Error {
 /** Reads a validated, live feed for the selected standard view.
  * @param token - Session bearer token.
  * @param view - Standard server feed selector.
+ * @param locale - Active UI language used for current target names.
  * @returns Validated response in server-ranked order.
  */
-export async function getUpdateFeed(token: string, view: UpdateFeedView): Promise<UpdateFeedResponse> {
-  const value = await request(token, `?view=${view}&limit=100`)
+export async function getUpdateFeed(token: string, view: UpdateFeedView, locale: 'ja' | 'en' = 'ja'): Promise<UpdateFeedResponse> {
+  const value = await request(token, `?view=${view}&limit=100&locale=${locale}`)
   if (!isRecord(value) || !isUpdateFeedView(value.view) || value.view !== view || !isNonnegativeSafeInteger(value.revision) || !isNonnegativeSafeInteger(value.total) || typeof value.truncated !== 'boolean' || !Array.isArray(value.entries) || value.entries.length > 100 || !value.entries.every(isEntry)) throw new UpdateFeedApiError(502)
   return { view: value.view, revision: value.revision, total: value.total, truncated: value.truncated, entries: value.entries }
 }

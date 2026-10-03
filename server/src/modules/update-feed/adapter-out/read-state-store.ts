@@ -80,7 +80,9 @@ export class DynamoDbUpdateFeedReadStateStore implements UpdateFeedReadStatePers
     try {
       await this.client.send(new TransactWriteCommand({ TransactItems: [
         { ConditionCheck: { TableName: this.tableName, Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: 'META' },
-          ConditionExpression: '#revision = :revision', ExpressionAttributeNames: { '#revision': 'revision' }, ExpressionAttributeValues: { ':revision': planningRevision } } },
+          ConditionExpression: '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
+          ExpressionAttributeNames: { '#entryType': 'entryType', '#schemaVersion': 'schemaVersion', '#revision': 'revision' },
+          ExpressionAttributeValues: { ':entryType': 'planning-meta', ':schemaVersion': 1, ':revision': planningRevision } } },
         { Put: { TableName: this.tableName, Item: { workspaceId, recordKey: recordKey(memberKey, input), schemaVersion: 1, ...state },
           ConditionExpression: input.expectedRevision === 0 ? 'attribute_not_exists(recordKey)' : '#revision = :revision',
           ...(input.expectedRevision === 0 ? {} : { ExpressionAttributeNames: { '#revision': 'revision' }, ExpressionAttributeValues: { ':revision': input.expectedRevision } }),

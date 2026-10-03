@@ -53,7 +53,10 @@ test('atomically guards Planning revision and member-state CAS without copying r
     const items = command.input.TransactItems
     expect(items).toHaveLength(4)
     expect(items?.slice(2)).toEqual(callerChecks)
-    expect(items?.[0]?.ConditionCheck).toMatchObject({ Key: { workspaceId: 'FENCE#workspace', recordKey: 'META' }, ExpressionAttributeValues: { ':revision': 7 } })
+    expect(items?.[0]?.ConditionCheck).toMatchObject({ Key: { workspaceId: 'FENCE#workspace', recordKey: 'META' },
+      ConditionExpression: '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
+      ExpressionAttributeNames: { '#entryType': 'entryType', '#schemaVersion': 'schemaVersion', '#revision': 'revision' },
+      ExpressionAttributeValues: { ':entryType': 'planning-meta', ':schemaVersion': 1, ':revision': 7 } })
     expect(items?.[1]?.Put).toMatchObject({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: { workspaceId: 'workspace', schemaVersion: 1, read: true, revision: 1 } })
     expect(Object.keys(items?.[1]?.Put?.Item ?? {}).sort()).toEqual(['read', 'recordKey', 'revision', 'schemaVersion', 'workspaceId'])
     if (conflict) throw Object.assign(new Error('conflict'), { name: 'TransactionCanceledException', CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }, { Code: 'None' }] })
@@ -79,7 +82,7 @@ test('requires caller guards and rejects membership or Enterprise revocation at 
   const input = { ...report, read: true, expectedRevision: 0 }
   await expect(unbound.set('workspace', 'reader', input, 7)).rejects.toMatchObject({ code: 'UpdateFeedAuthorizationUnavailable' })
   const store = unbound.withCallerAuthorization(callerChecks)
-  for (const index of [2, 3]) {
+  for (const index of [0, 2, 3]) {
     changedIndex = index
     await expect(store.set('workspace', 'reader', input, 7)).rejects.toMatchObject({ code: 'UpdateFeedReadStateConflict' })
   }

@@ -12,6 +12,8 @@ export const updatesMessages = {
   "updates.count": "対象 {count} 件",
   "updates.ranking": "更新担当の対象を優先し、次に自分が報告した対象を表示します。同順位では新しい報告が先になります。",
   "updates.loading": "アップデートを読み込み中…",
+  "updates.denied": "更新を閲覧する権限がありません。ワークスペースの管理者にお問い合わせください。",
+  "updates.readOnly": "ゲストは閲覧のみ利用できます。",
   "updates.error": "閲覧権限とアップデートを確認できませんでした。再読み込みしてください。",
   "updates.saveError": "状態を保存できませんでした。現在の状態を確認して、もう一度お試しください。",
   "updates.empty": "このフィードに対象はありません",

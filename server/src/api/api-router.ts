@@ -7099,10 +7099,10 @@ routeApp.get('/api/planning/update-feed', async (c) => {
   if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    if ((c.req.queries('view')?.length ?? 0) > 1 || (c.req.queries('limit')?.length ?? 0) > 1) {
+    if (['view', 'limit', 'locale'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
       throw new PlanningError(400, 'UpdateFeedQueryAmbiguous', 'Feed query parameters must occur at most once.')
     }
-    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit')))
+    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit'), readLocale(c)))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
@@ -7118,6 +7118,7 @@ routeApp.put('/api/planning/update-feed/read-state', async (c) => {
     const authorizationRevision = await workItemDependencies.planning.getAuthorizationRevision(initialPrincipal.directoryId)
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     if (principal.directoryId !== initialPrincipal.directoryId) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Workspace authorization changed.')
+    if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
     const authorizedReader = await createPlanningUpdateFeedReader(principal)
     const reader: UpdateFeedReader = { ...authorizedReader, readSnapshot: async () => {
       const snapshot = await authorizedReader.readSnapshot()
@@ -25978,17 +25979,18 @@ async function requirePlanningEntityPermission(
  * @param principal - Authenticated current Workspace principal.
  * @param view - Untrusted standard feed selector.
  * @param limit - Untrusted bounded response size.
+ * @param locale - Active display language for current Project titles.
  * @returns The authorized live feed, without loading Work Items or history.
  */
-async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string) {
+async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string, locale: Locale = 'ja') {
   parseUpdateFeedQuery(view, limit)
-  const reader = await createPlanningUpdateFeedReader(principal)
+  const reader = await createPlanningUpdateFeedReader(principal, locale)
   return withUpdateFeedReadState(workItemDependencies.updateFeedReadState, principal.directoryId, principal.userKey, await readUpdateFeed(reader, view, limit))
 }
 
 /** Creates request-local target authorization shared by feed reads and read-state mutations. */
-async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal): Promise<UpdateFeedReader> {
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, locale: Locale = 'ja'): Promise<UpdateFeedReader> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, locale, true)
   let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
   const readContext: TeamPermissionReadContext = {
     directory,

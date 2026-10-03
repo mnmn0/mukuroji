@@ -18,6 +18,10 @@ type UpdateFeedProps = {
   loading: boolean
   /** Whether the latest refresh failed. */
   failed: boolean
+  /** Whether current permissions deny the feed, rather than a transient failure. */
+  denied: boolean
+  /** Whether this non-guest caller may save personal state. */
+  canMarkRead: boolean
   /** Whether a personal-state mutation failed. */
   mutationFailed: boolean
   /** Whether a mutation is in progress. */
@@ -34,7 +38,7 @@ type UpdateFeedProps = {
  * @param props - Authorized response, localized state, and user intent callbacks.
  * @returns Responsive report list with loading, empty, and error states.
  */
-export function UpdateFeed({ response, view, locale, t, loading, failed, mutationFailed, pending, onViewChange, onRetry, onToggle }: UpdateFeedProps) {
+export function UpdateFeed({ response, view, locale, t, loading, failed, denied, canMarkRead, mutationFailed, pending, onViewChange, onRetry, onToggle }: UpdateFeedProps) {
   const viewId = useId()
   return <section className="mx-auto w-full max-w-5xl" aria-label={t('updates.title')}>
     <div className="mb-5 flex flex-wrap items-end justify-between gap-3 border-b border-slate-200 pb-4">
@@ -48,7 +52,8 @@ export function UpdateFeed({ response, view, locale, t, loading, failed, mutatio
     </div>
     {view === 'for-me' ? <p className="mb-4 text-app-meta text-slate-600">{t('updates.ranking')}</p> : null}
     {loading ? <p role="status" className="py-12 text-center text-slate-500">{t('updates.loading')}</p> : null}
-    {failed ? <div role="alert" className="flex flex-wrap items-center gap-3 border-l-2 border-amber-500 p-4"><p>{t('updates.error')}</p><button className="min-h-10 px-3 font-semibold text-teal-800 underline" onClick={onRetry}>{t('workspace.error.retry')}</button></div> : null}
+    {failed ? denied ? <p role="alert" className="border-l-2 border-slate-400 p-4">{t('updates.denied')}</p> : <div role="alert" className="flex flex-wrap items-center gap-3 border-l-2 border-amber-500 p-4"><p>{t('updates.error')}</p><button className="min-h-10 px-3 font-semibold text-teal-800 underline" onClick={onRetry}>{t('workspace.error.retry')}</button></div> : null}
+    {response && !canMarkRead ? <p className="mb-4 text-app-meta text-slate-600">{t('updates.readOnly')}</p> : null}
     {mutationFailed ? <p role="alert" className="mb-4 border-l-2 border-amber-500 p-3 text-app-meta">{t('updates.saveError')}</p> : null}
     {response && response.entries.length === 0 ? <div className="py-16 text-center"><h2 className="text-lg font-semibold text-slate-800">{t('updates.empty')}</h2><p className="mt-2 text-app-body text-slate-500">{t('updates.emptyHint')}</p></div> : null}
     {response && !failed ? <ul className="divide-y divide-slate-200">
@@ -68,7 +73,7 @@ export function UpdateFeed({ response, view, locale, t, loading, failed, mutatio
           {entry.reasons.length ? <p className="mt-2 text-app-meta text-slate-600">{entry.reasons.map((reason) => t(`updates.reason.${reason}`)).join(' · ')}</p> : null}
         </div>
         <div className="flex flex-wrap items-start gap-2 sm:flex-col sm:items-end">
-          {entry.readState ? <button aria-label={t(entry.readState.read ? 'updates.markUnreadTarget' : 'updates.markReadTarget').replace('{title}', () => entry.title)} className="min-h-10 rounded-md border border-slate-300 bg-white px-3 text-app-meta font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" disabled={pending} onClick={() => onToggle(entry)}>{t(entry.readState.read ? 'updates.markUnread' : 'updates.markRead')}</button> : null}
+          {entry.readState && canMarkRead ? <button aria-label={t(entry.readState.read ? 'updates.markUnreadTarget' : 'updates.markReadTarget').replace('{title}', () => entry.title)} className="min-h-10 rounded-md border border-slate-300 bg-white px-3 text-app-meta font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50" disabled={pending} onClick={() => onToggle(entry)}>{t(entry.readState.read ? 'updates.markUnread' : 'updates.markRead')}</button> : null}
           <Link aria-label={t('updates.historyTarget').replace('{title}', () => entry.title)} className="inline-flex min-h-10 items-center px-3 text-app-meta font-semibold text-teal-800 underline-offset-4 hover:underline" to={updateFeedTargetPath(entry.target)}>{t('updates.history')}</Link>
         </div>
       </li>)}

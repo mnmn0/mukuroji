@@ -419,7 +419,8 @@ test('aggregates latest Project and Initiative updates without history reads and
   planning.get = async (...args) => { projectionRead = true; return readPlanning(...args) }
   directoryClient.getProjectDirectory = async (...args) => {
     if (projectionRead) perTargetAuthorizationReads++
-    return readDirectory(...args)
+    const directory = await readDirectory(...args)
+    return { ...directory, teams: directory.teams.map((team) => ({ ...team, projects: team.projects.map((project) => ({ ...project, name: args[1] === 'en' ? 'English project' : '日本語のプロジェクト' })) })) }
   }
   directoryClient.getProjectAccessList = async (...args) => {
     if (projectionRead) perTargetAuthorizationReads++
@@ -432,6 +433,10 @@ test('aggregates latest Project and Initiative updates without history reads and
     { target: { type: 'project' }, reasons: ['update-owner', 'latest-author'] },
   ] })
   expect(perTargetAuthorizationReads).toBe(0)
+  const english = await planningApiRequest('/api/planning/update-feed?view=recent&locale=en')
+  expect(await english.json()).toMatchObject({ entries: [expect.anything(), { title: 'English project' }] })
+  const japanese = await planningApiRequest('/api/planning/update-feed?view=recent&locale=ja')
+  expect(await japanese.json()).toMatchObject({ entries: [expect.anything(), { title: '日本語のプロジェクト' }] })
   planning.get = readPlanning
   const readInput = { target: targets[0], version: 1, read: true, expectedRevision: 0 }
   const stateStore = getTestAppDependencies().workItems.updateFeedReadState
@@ -458,12 +463,17 @@ test('aggregates latest Project and Initiative updates without history reads and
   planning.getAuthorizationRevision = readAuthorizationRevision
   expect(await planning.get('user#demo@example.com', { workItems: [] })).toEqual(before)
   expect((await planningApiRequest('/api/planning/update-feed?limit=101')).status).toBe(400)
-  for (const query of ['view=recent&view=overdue', 'limit=1&limit=2']) {
+  for (const query of ['view=recent&view=overdue', 'limit=1&limit=2', 'locale=en&locale=ja']) {
     const ambiguous = await planningApiRequest(`/api/planning/update-feed?${query}`)
     expect(ambiguous.status).toBe(400)
     expect(await ambiguous.json()).toMatchObject({ code: 'UpdateFeedQueryAmbiguous' })
   }
 
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  expect((await planningApiRequest('/api/planning/update-feed')).status).toBe(200)
+  const guestWrite = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })
+  expect(guestWrite.status).toBe(403)
+  expect(await guestWrite.json()).toMatchObject({ code: 'WorkspaceRoleDenied' })
   configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [] })
   const denied = await planningApiRequest('/api/planning/update-feed')
   expect(denied.status).toBe(200)

@@ -10,7 +10,7 @@ const meta = {
   title: 'Application/Updates/Feed', component: UpdateFeed,
   parameters: { layout: 'fullscreen' },
   decorators: [(Story) => <MemoryRouter><main className="min-h-screen bg-white p-6 max-[600px]:p-4"><Story /></main></MemoryRouter>],
-  args: { response: updateFeedFixture, view: 'for-me', locale: 'en', t: createTranslator('en'), loading: false, failed: false, mutationFailed: false, pending: false, onRetry: fn(), onToggle: fn(), onViewChange: fn() },
+  args: { response: updateFeedFixture, view: 'for-me', locale: 'en', t: createTranslator('en'), loading: false, failed: false, denied: false, canMarkRead: true, mutationFailed: false, pending: false, onRetry: fn(), onToggle: fn(), onViewChange: fn() },
 } satisfies Meta<typeof UpdateFeed>
 export default meta
 
@@ -35,3 +35,7 @@ export const Loading: Story = { args: { response: undefined, loading: true } }
 export const Error: Story = { args: { response: undefined, failed: true } }
 /** Conflict feedback keeps explicit user control of the next choice. */
 export const Conflict: Story = { args: { mutationFailed: true } }
+/** Permission denial does not offer an ineffective transient-error retry. */
+export const Denied: Story = { args: { response: undefined, failed: true, denied: true } }
+/** Guests can read authorized content without mutation controls. */
+export const Guest: Story = { args: { canMarkRead: false } }
