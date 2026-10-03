@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestCheckpoints } from './inbox-digest-checkpoint'
-import { runInboxDigestWorker, runInboxDigestWorkerInvocation } from '../application/inbox-digest-worker'
+import { runInboxDigestWorker, runInboxDigestWorkerInvocation, type InboxDigestWorkerDependencies } from '../application/inbox-digest-worker'
 import { PlanningError } from '../../planning'
 import { TenantAdministrationError } from '../../tenant-administration'
 import { InMemoryUpdateFeedDigestStore } from './digest-store'
@@ -11,6 +11,91 @@ import { InMemoryPlanningClient } from '../../planning/planning'
 
 const start = Date.parse('2026-10-03T12:00:00Z')
 const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
+
+for (const frequency of ['daily', 'weekly'] as const) test(`twenty preclaim conflicts park atomically, advance pages and recover the original ${frequency} interval`, async () => {
+  const f = fixture()
+  const metadata = new InMemoryUpdateFeedDigestStore()
+  const scheduledAt = Date.parse('2026-10-04T23:59:30Z')
+  let clock = scheduledAt
+  let blocked = true
+  const owners = Array.from({ length: 20 }, (_, index) => ({ ...recipient, memberKey: `reader-${index}` }))
+  const healthy = { ...recipient, memberKey: 'healthy' }
+  for (const owner of [...owners, healthy]) {
+    const state = await metadata.get(owner.workspaceId, owner.memberKey)
+    await metadata.replace(owner.workspaceId, owner.memberKey, { ...state, preferences: { enabled: true, frequency, views: ['recent'] } })
+  }
+  const cursors: (string | undefined)[] = []
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.store, now: () => clock,
+    listDue: async (_shard, cursor) => { cursors.push(cursor); return cursor === 'page-2' ? { recipients: [healthy] } : { recipients: owners, cursor: 'page-2' } },
+    delivery: { authorize: async (owner) => {
+      if (owner.memberKey !== 'healthy' && blocked) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Preclaim revision changed')
+      return {
+        recipient: owner, authorizationRevision: 0,
+        reader: { memberKey: owner.memberKey, readSnapshot: () => new InMemoryPlanningClient().get(owner.workspaceId, { workItems: [] }), authorizeTarget: async () => undefined },
+        readState: new InMemoryUpdateFeedReadStateStore(),
+        store: {
+          get: metadata.get.bind(metadata), replace: metadata.replace.bind(metadata),
+          complete: async (_recipient, state) => {
+            expect((await metadata.get(owner.workspaceId, owner.memberKey)).history.at(-1)?.leaseUntil).toBe(clock + 60_000)
+            return metadata.replace(owner.workspaceId, owner.memberKey, state)
+          },
+        },
+      }
+    } },
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    expect(await runInboxDigestWorker(dependencies, 0)).toMatchObject({ processed: 20, deferred: 20, failed: 0 })
+    clock += 60_000
+  }
+  expect(f.rows.get('SHARD#0')?.pending).toEqual([])
+  expect(f.rows.get('SHARD#0')?.cursor).toBe('page-2')
+  expect([...f.rows.values()].filter((row) => row.entryType === 'inbox-digest-deferred')).toHaveLength(20)
+  for (const owner of owners) {
+    expect(await f.store.readDeferred(owner)).toEqual({ recipient: owner, attempts: 0, conflicts: 2, scheduledAt })
+    expect(await f.store.isQuarantined(owner, clock)).toBe(false)
+  }
+  expect((await runInboxDigestWorker(dependencies, 0)).processed).toBe(1)
+  expect((await metadata.get(healthy.workspaceId, healthy.memberKey)).history).toMatchObject([{ status: 'completed' }])
+  blocked = false
+  dependencies.checkpoints = f.restart()
+  expect((await runInboxDigestWorker(dependencies, 0)).processed).toBe(20)
+  expect(cursors).toEqual([undefined, 'page-2', undefined])
+  for (const owner of owners) {
+    expect((await metadata.get(owner.workspaceId, owner.memberKey)).history).toMatchObject([{ id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`, startedAt: scheduledAt, status: 'completed' }])
+    expect(await f.store.readDeferred(owner)).toBeUndefined()
+  }
+})
+
+test('park and acknowledgment survive response loss and reject stale checkpoint owners atomically', async () => {
+  const f = fixture()
+  const owned = (await f.store.claim(0, start))!
+  const item = { recipient, attempts: 1, conflicts: 2, scheduledAt: start - 86_400_000 }
+  const pending = await f.store.save({ ...owned, pending: [item], cursor: 'next' }, start, false)
+  f.loseResponse()
+  await expect(f.store.save({ ...pending, pending: [] }, start, false, undefined, { kind: 'park', item })).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
+  expect(await f.restart().readDeferred(recipient)).toEqual(item)
+  expect(f.rows.get('SHARD#0')?.pending).toEqual([])
+  expect(f.rows.get('SHARD#0')?.cursor).toBe('next')
+  await expect(f.store.save({ ...pending, pending: [] }, start, false, undefined, { kind: 'finish', item })).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect(await f.store.readDeferred(recipient)).toEqual(item)
+  const resumed = (await f.store.claim(0, start + 90_000))!
+  f.loseResponse()
+  await expect(f.store.save(resumed, start + 90_000, true, undefined, { kind: 'finish', item })).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
+  expect(await f.store.readDeferred(recipient)).toBeUndefined()
+  expect((await f.store.claim(0, start + 90_001))?.pending).toEqual([])
+})
+
+test('parked state corruption is distinct from SDK failure and never silently loses its logical time', async () => {
+  const f = fixture()
+  const state = (await f.store.claim(0, start))!
+  await f.store.save(state, start, true, undefined, { kind: 'park', item: { recipient, attempts: 1, scheduledAt: start } })
+  const row = [...f.rows.values()].find((item) => item.entryType === 'inbox-digest-deferred')!
+  row.pending = { recipient, attempts: 1 }
+  await expect(f.store.readDeferred(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
+  f.failCommand(() => new Error('Unknown transport failure'))
+  await expect(f.store.readDeferred(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
+})
 
 /** Models actual generated transaction conditions; no external storage is accessed. */
 function fixture() {
@@ -28,7 +113,8 @@ function fixture() {
     }
     if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
     const items = command.input.TransactItems ?? []
-    const reasons = items.map(({ Put }) => {
+    const reasons = items.map(({ Put, Delete }) => {
+      if (Delete) return { Code: 'None' }
       if (!Put?.Item) throw new Error('Expected Put')
       const row = rows.get(String(Put.Item.recordKey))
       const names = Put.ExpressionAttributeNames ?? {}
@@ -45,7 +131,10 @@ function fixture() {
       return { Code: valid ? 'None' : 'ConditionalCheckFailed' }
     })
     if (reasons.some(({ Code }) => Code !== 'None')) throw Object.assign(new Error('Conditional failure'), { name: 'TransactionCanceledException', CancellationReasons: reasons })
-    for (const { Put } of items) if (Put?.Item) rows.set(String(Put.Item.recordKey), structuredClone(Put.Item))
+    for (const { Put, Delete } of items) {
+      if (Put?.Item) rows.set(String(Put.Item.recordKey), structuredClone(Put.Item))
+      if (Delete?.Key) rows.delete(String(Delete.Key.recordKey))
+    }
     if (loseResponse) { loseResponse = false; throw new Error('Lost acknowledgement') }
     return {}
   }) as DynamoDBDocumentClient['send']
@@ -140,7 +229,7 @@ test('worker persists bounded continuation before delivery and resumes after a c
     },
     delivery: { async authorize() {
       seen++
-      expect(f.rows.get('SHARD#2')?.pending).toEqual([{ recipient, attempts: 0 }])
+      expect(f.rows.get('SHARD#2')?.pending).toEqual([{ recipient, attempts: 0, scheduledAt: start }])
       if (seen === 1) clock += 90_001
       return undefined // Revoked recipients never reach delivery storage.
     } },
@@ -280,7 +369,7 @@ for (const recovery of ['revoked', 'optout', 'cas']) test(`known conflicts defer
   }
   for (let attempt = 0; attempt < 4; attempt++) {
     expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 1 })
-    expect(f.rows.get('SHARD#7')?.pending).toEqual([{ recipient, attempts: 0 }])
+    expect(f.rows.get('SHARD#7')?.pending).toEqual(attempt === 2 ? [] : [{ recipient, attempts: 0, scheduledAt: start, conflicts: attempt === 3 ? 1 : attempt + 1 }])
     expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
     expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
     clock += 60_000

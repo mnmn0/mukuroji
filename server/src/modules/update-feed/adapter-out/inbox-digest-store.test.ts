@@ -413,6 +413,18 @@ for (const frequency of ['daily', 'weekly'] as const) test(`durable ${frequency}
   expect(f.notifications()).toHaveLength(1)
 })
 
+test('a pinned retry defers a live prior claim instead of acknowledging unfinished logical work', async () => {
+  const f = await fixture()
+  f.loseClaimResponse()
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  f.advance(30_000)
+  await expect(deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 30_000, now)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  f.advance(30_001)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 60_001, now)).toBe('delivered')
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ attempts: 2, startedAt: now, status: 'completed' }])
+  expect(f.notifications()).toHaveLength(1)
+})
+
 test('transaction failures classify complete cancellation vectors and permanent SDK failures without leaking details', async () => {
   const f = await fixture()
   const state = await f.store.get('w', 'reader')

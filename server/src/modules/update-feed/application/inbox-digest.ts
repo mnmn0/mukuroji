@@ -101,7 +101,10 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   if (!state.preferences.enabled) return 'disabled'
   // An old interval may still own a live claim across midnight/Monday. Reconcile
   // expired claims durably before selecting a new interval, including attempt three.
-  if (state.history.some((item) => item.status === 'pending' && item.leaseUntil > now)) return 'not-due'
+  if (state.history.some((item) => item.status === 'pending' && item.leaseUntil > now)) {
+    if (scheduledAt < now) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest interval is still leased.')
+    return 'not-due'
+  }
   if (state.history.some((item) => item.status === 'pending')) {
     state = await context.store.replace(recipient.workspaceId, recipient.memberKey, { ...state, history: state.history.map((item) => item.status === 'pending' ? { ...item, status: 'failed', leaseUntil: 0 } : item) })
   }

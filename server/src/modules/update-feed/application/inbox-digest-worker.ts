@@ -5,6 +5,14 @@ import { PlanningError } from '../../planning'
 export type InboxDigestPending = {
   /** Reauthorized destination. */ recipient: InboxDigestRecipient
   /** Prior worker failures, zero through two. */ attempts: number
+  /** Original trusted scheduling time; absent only on legacy checkpoint rows. */ scheduledAt?: number
+  /** Page-local conflict deferrals, independent of infrastructure attempts. */ conflicts?: number
+}
+
+/** Atomic movement between a page and durable per-recipient deferred work. */
+export type InboxDigestSettlement = {
+  /** Park a blocked interval or remove its parked record after acknowledgment. */ kind: 'park' | 'finish'
+  /** Owner and original logical attempt metadata. */ item: InboxDigestPending
 }
 
 /** One durable shard checkpoint; pending recipients are written before any delivery. */
@@ -24,8 +32,10 @@ export interface InboxDigestCheckpointStore {
   reserveStartShard(): Promise<number>
   /** Claims an idle or expired shard; locked/backing-off shards return undefined. */
   claim(shard: number, now: number): Promise<InboxDigestCheckpoint | undefined>
+  /** Reads a parked interval consistently before re-admitting its due recipient. */
+  readDeferred(recipient: InboxDigestRecipient): Promise<InboxDigestPending | undefined>
   /** Saves only the current unexpired token/revision, incrementing revision. */
-  save(state: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestRecipient): Promise<InboxDigestCheckpoint>
+  save(state: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestRecipient, settlement?: InboxDigestSettlement): Promise<InboxDigestCheckpoint>
 }
 
 /** Current candidate source with bounded opaque continuation. */
@@ -52,9 +62,14 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     const page = await dependencies.listDue(shard, state.cursor, limit)
     if (page.recipients.length > limit || (page.cursor !== undefined && page.cursor === state.cursor)) throw new Error('Invalid digest continuation')
     const unique = new Map(state.pending.map((item) => [JSON.stringify(item.recipient), item]))
-    for (const recipient of page.recipients) if (!unique.has(JSON.stringify(recipient))) unique.set(JSON.stringify(recipient), { recipient, attempts: 0 })
+    for (const recipient of page.recipients) if (!unique.has(JSON.stringify(recipient))) {
+      const parked = await dependencies.checkpoints.readDeferred(recipient)
+      unique.set(JSON.stringify(recipient), parked ? { ...parked, conflicts: 0 } : { recipient, attempts: 0, scheduledAt: dependencies.now() })
+    }
     state = await dependencies.checkpoints.save({ ...state, pending: [...unique.values()], cursor: page.cursor }, dependencies.now(), false)
   }
+  // Upgrade legacy pending work once, durably, before its first delivery attempt.
+  if (state.pending.some((item) => item.scheduledAt === undefined)) state = await dependencies.checkpoints.save({ ...state, pending: state.pending.map((item) => ({ ...item, scheduledAt: item.scheduledAt ?? dependencies.now() })) }, dependencies.now(), false)
   // Never repeat failed recipients within the same invocation.
   const batch = [...state.pending]
   for (const item of batch) {
@@ -64,7 +79,7 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     let permanent = false
     let conflict = false
     try {
-      if (await deliverInboxDigest(dependencies.delivery, recipient, dependencies.now()) === 'delivered') result.delivered++
+      if (await deliverInboxDigest(dependencies.delivery, recipient, dependencies.now(), item.scheduledAt) === 'delivered') result.delivered++
     } catch (error) {
       // Exhausted intervals advance through the due index. Permanent storage or
       // identity failures require durable inspection evidence without more retries.
@@ -78,7 +93,10 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     result.processed++
     const remaining = state.pending.filter((item) => item.recipient.workspaceId !== recipient.workspaceId || item.recipient.memberKey !== recipient.memberKey)
     const exhausted = retry && item.attempts >= 2
-    state = await dependencies.checkpoints.save({ ...state, pending: conflict ? [...remaining, item] : retry && !exhausted ? [...remaining, { recipient, attempts: item.attempts + 1 }] : remaining }, dependencies.now(), false, exhausted || permanent ? recipient : undefined)
+    const park = conflict && (item.conflicts ?? 0) >= 2
+    const pending = conflict && !park ? [...remaining, { ...item, conflicts: (item.conflicts ?? 0) + 1 }] : retry && !exhausted ? [...remaining, { ...item, attempts: item.attempts + 1 }] : remaining
+    const settlement: InboxDigestSettlement | undefined = park ? { kind: 'park', item } : !conflict && (!retry || exhausted) ? { kind: 'finish', item } : undefined
+    state = await dependencies.checkpoints.save({ ...state, pending }, dependencies.now(), false, exhausted || permanent ? recipient : undefined, settlement)
   }
   await dependencies.checkpoints.save({ ...state, retryAt: result.failed || result.deferred ? dependencies.now() + 60_000 : 0 }, dependencies.now(), true)
   return result

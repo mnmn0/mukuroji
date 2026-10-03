@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { InboxDigestCheckpoint, InboxDigestCheckpointStore, InboxDigestPending } from '../application/inbox-digest-worker'
+import type { InboxDigestCheckpoint, InboxDigestCheckpointStore, InboxDigestPending, InboxDigestSettlement } from '../application/inbox-digest-worker'
 import type { InboxDigestRecipient } from '../application/inbox-digest'
 import { PlanningError } from '../../planning'
 import { digestStorageFailure } from './digest-storage-failure'
@@ -73,24 +73,43 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
     } catch (error) { if (conditional(error)) return undefined; return digestStorageFailure(error, 1) }
   }
 
+  /** Recovers parked logical work without resetting its infrastructure retry budget.
+   * @param recipient - Strongly rechecked due owner.
+   * @returns Durable parked work, or undefined when none exists.
+   */
+  async readDeferred(recipient: InboxDigestRecipient): Promise<InboxDigestPending | undefined> {
+    const key = deferredKey(recipient)
+    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+    if (Item === undefined) return undefined
+    try {
+      const item = parsePending(Item.pending)
+      if (Item.workspaceId !== key.workspaceId || Item.recordKey !== key.recordKey || Item.entryType !== 'inbox-digest-deferred' || Item.schemaVersion !== 1 || item.scheduledAt === undefined || item.recipient.workspaceId !== recipient.workspaceId || item.recipient.memberKey !== recipient.memberKey) throw invalid()
+      return item
+    } catch { throw corrupt() }
+  }
+
   /** Saves progress and any exhausted recipient atomically under current ownership.
    * @param input - Owned checkpoint with desired pending work.
    * @param now - Trusted clock.
    * @param release - Whether to release the shard lease.
    * @param failure - Exhausted recipient retained for operator recovery.
+   * @param settlement - Durable park or acknowledgment in the same checkpoint transaction.
    * @returns Committed checkpoint; lost acknowledgements resume from storage.
    */
-  async save(input: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestRecipient): Promise<InboxDigestCheckpoint> {
+  async save(input: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestRecipient, settlement?: InboxDigestSettlement): Promise<InboxDigestCheckpoint> {
     const key = checkpointKey(input.shard)
     const validated = parseCheckpoint({ ...key, entryType: 'inbox-digest-checkpoint', schemaVersion: 1, ...input }, input.shard)
     if (!integer(now) || validated.leaseUntil <= now) throw invalid()
+    const settled = settlement ? parsePending(settlement.item) : undefined
+    if (settlement && (!settled || settled.scheduledAt === undefined || settled.scheduledAt > now || !['park', 'finish'].includes(settlement.kind))) throw invalid()
+    const movement = settled && settlement ? settlement.kind === 'park' ? [{ Put: { TableName: this.table, Item: { ...deferredKey(settled.recipient), entryType: 'inbox-digest-deferred', schemaVersion: 1, pending: settled } } }] : [{ Delete: { TableName: this.table, Key: deferredKey(settled.recipient) } }] : []
     const result = { ...validated, revision: validated.revision + 1, leaseUntil: release ? 0 : validated.leaseUntil }
     await this.client.send(new TransactWriteCommand({ TransactItems: [{ Put: { TableName: this.table,
       Item: { ...key, entryType: 'inbox-digest-checkpoint', schemaVersion: 1, ...result },
       ConditionExpression: '#revision = :revision AND #token = :token AND leaseUntil > :now AND entryType = :type AND schemaVersion = :schema',
       ExpressionAttributeNames: { '#revision': 'revision', '#token': 'token' },
       ExpressionAttributeValues: { ':revision': validated.revision, ':token': validated.token, ':now': now, ':type': 'inbox-digest-checkpoint', ':schema': 1 },
-    } }, ...(failure ? [{ Put: { TableName: this.table, Item: { ...failureKey(failure, now), entryType: 'inbox-digest-failure', schemaVersion: 1, recipient: failure, shard: input.shard, failedAt: new Date(now).toISOString(), expiresAt: Math.floor(now / 1000) + 30 * 86_400 } } }] : [])] })).catch((error: unknown) => digestStorageFailure(error, failure ? 2 : 1))
+    } }, ...(failure ? [{ Put: { TableName: this.table, Item: { ...failureKey(failure, now), entryType: 'inbox-digest-failure', schemaVersion: 1, recipient: failure, shard: input.shard, failedAt: new Date(now).toISOString(), expiresAt: Math.floor(now / 1000) + 30 * 86_400 } } }] : []), ...movement] })).catch((error: unknown) => digestStorageFailure(error, 1 + (failure ? 1 : 0) + movement.length))
     return result
   }
 }
@@ -98,13 +117,17 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
 /** Validates persisted scheduling state before it can select work. */
 function parseCheckpoint(row: Record<string, unknown>, shard: number): InboxDigestCheckpoint {
   if (!Number.isInteger(shard) || shard < 0 || shard >= 16 || row.workspaceId !== 'SYSTEM#INBOX_DIGEST' || row.recordKey !== `SHARD#${shard}` || row.shard !== shard || row.entryType !== 'inbox-digest-checkpoint' || row.schemaVersion !== 1 || !integer(row.revision) || row.revision < 1 || row.revision >= Number.MAX_SAFE_INTEGER || typeof row.token !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(row.token) || !integer(row.leaseUntil) || !integer(row.retryAt) || (row.cursor !== undefined && (typeof row.cursor !== 'string' || row.cursor.length > 4096 || !row.cursor)) || !Array.isArray(row.pending) || row.pending.length > 20) throw invalid()
-  const pending: InboxDigestPending[] = row.pending.map((item: unknown) => {
-    if (!record(item) || !record(item.recipient) || typeof item.recipient.workspaceId !== 'string' || !item.recipient.workspaceId || typeof item.recipient.memberKey !== 'string' || !item.recipient.memberKey || !integer(item.attempts) || item.attempts > 2) throw invalid()
-    return { recipient: { workspaceId: item.recipient.workspaceId, memberKey: item.recipient.memberKey }, attempts: item.attempts }
-  })
+  const pending = row.pending.map(parsePending)
   if (new Set(pending.map((item) => JSON.stringify(item.recipient))).size !== pending.length) throw invalid()
   return { shard, revision: row.revision, token: row.token, leaseUntil: row.leaseUntil, retryAt: row.retryAt, pending, ...(typeof row.cursor === 'string' ? { cursor: row.cursor } : {}) }
 }
+/** Validates shared page/deferred metadata while retaining legacy checkpoint compatibility. */
+function parsePending(item: unknown): InboxDigestPending {
+  if (!record(item) || !record(item.recipient) || typeof item.recipient.workspaceId !== 'string' || !item.recipient.workspaceId || typeof item.recipient.memberKey !== 'string' || !item.recipient.memberKey || !integer(item.attempts) || item.attempts > 2 || (item.scheduledAt !== undefined && (!integer(item.scheduledAt) || item.scheduledAt > 8_640_000_000_000_000)) || (item.conflicts !== undefined && (!integer(item.conflicts) || item.conflicts > 2))) throw invalid()
+  return { recipient: { workspaceId: item.recipient.workspaceId, memberKey: item.recipient.memberKey }, attempts: item.attempts, ...(item.scheduledAt === undefined ? {} : { scheduledAt: item.scheduledAt }), ...(item.conflicts === undefined ? {} : { conflicts: item.conflicts }) }
+}
+/** Binds parked logical work to one server-resolved owner without a lossy TTL. */
+function deferredKey(recipient: InboxDigestRecipient) { return { workspaceId: 'SYSTEM#INBOX_DIGEST', recordKey: `DEFERRED#${createHash('sha256').update(JSON.stringify([recipient.workspaceId, recipient.memberKey])).digest('hex')}` } }
 /** Fixed noncanonical coordinates, never supplied by a tenant. */
 function checkpointKey(shard: number) { return { workspaceId: 'SYSTEM#INBOX_DIGEST', recordKey: `SHARD#${shard}` } }
 /** Binds terminal evidence to a recipient and UTC retry day. */
