@@ -27,7 +27,7 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
       return true
     } catch (failure) {
       setError(failure)
-      if (failure instanceof UpdateFeedApiError && (failure.status === 401 || failure.status === 403)) setVerificationRequired(true)
+      if (failure instanceof UpdateFeedApiError && (failure.status === 401 || failure.status === 403)) { setVerificationRequired(true); await query.mutate(undefined, { revalidate: false }) }
       return false
     } finally { busy.current = false; setPending(false) }
   }
@@ -39,7 +39,7 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
       const state = await guard(getInboxDigestState(token))
       await query.mutate(state, { revalidate: false })
       setError(undefined); setVerificationRequired(false); setDraftReset((value) => value + 1)
-    } catch (failure) { setError(failure); setVerificationRequired(true) }
+    } catch (failure) { setError(failure); setVerificationRequired(true); await query.mutate(undefined, { revalidate: false }) }
     finally { busy.current = false; setPending(false) }
   }
   return { state: verificationRequired ? undefined : query.data, pending, loading: query.isLoading, error: query.error ?? error, draftReset, save, reload: () => { void reload() } }
