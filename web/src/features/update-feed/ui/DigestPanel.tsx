@@ -54,7 +54,7 @@ export function DigestPanel(props: DigestPanelProps) {
     {failure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3 border-l-2 border-amber-500 pl-3"><p>{t(`updates.digest.${failure}`)}</p>{failure !== 'denied' ? <button className={actionClass} disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
     {!canEdit ? <p className="text-app-meta text-slate-600">{t('updates.readOnly')}</p> : null}
     {state && failure !== 'denied' ? <>
-      <DigestForm key={props.draftReset} {...props} state={state} />
+      {canEdit ? <DigestForm key={props.draftReset} {...props} state={state} /> : null}
       <h3 className="mt-6 text-sm font-semibold text-slate-800">{t('updates.digest.history')}</h3>
       {state.history.length ? <ul className="mt-2 divide-y divide-slate-200">
         {[...state.history].reverse().map((receipt) => <li key={receipt.id} className="flex flex-wrap justify-between gap-x-4 gap-y-1 py-3 text-app-meta text-slate-600">
