@@ -266,6 +266,66 @@ test('returns an authenticated empty Planning graph with accessible Work Item pr
   ])
 })
 
+test('aggregates latest Project and Initiative updates without history reads and removes revoked or archived targets', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(planning, 'feed-initiative', 'core-team', 'refero')
+  const targets: PlanningUpdateTarget[] = [
+    { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    { type: 'initiative', entityId: 'feed-initiative' },
+  ]
+  let revision = 3
+  for (const target of targets) {
+    await planning.configureUpdateCadence('user#demo@example.com', {
+      target, expectedRevision: revision++, cadence: {
+        updateOwnerMemberKey: 'demo@example.com', cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24,
+      },
+    }, { workItems: [] })
+    await planning.publishUpdate('user#demo@example.com', {
+      target, expectedRevision: revision++, id: 'same-local-id', health: 'at-risk', risk: 'medium',
+      summary: 'Visible report', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '', evidence: [],
+    }, 'demo@example.com', { workItems: [] })
+  }
+  const before = await planning.get('user#demo@example.com', { workItems: [] })
+  planning.listUpdates = async () => { throw new Error('Feed must not read history') }
+  planning.listUpdateComments = async () => { throw new Error('Feed must not read annotations') }
+  planning.listUpdateReactions = async () => { throw new Error('Feed must not read annotations') }
+  setTestAppDependencies({ planning })
+  const response = await planningApiRequest('/api/planning/update-feed?view=for-me')
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ total: 2, truncated: false, entries: [
+    { target: { type: 'initiative' }, reasons: ['update-owner', 'latest-author'] },
+    { target: { type: 'project' }, reasons: ['update-owner', 'latest-author'] },
+  ] })
+  expect(await planning.get('user#demo@example.com', { workItems: [] })).toEqual(before)
+  expect((await planningApiRequest('/api/planning/update-feed?limit=101')).status).toBe(400)
+
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [] })
+  const denied = await planningApiRequest('/api/planning/update-feed')
+  expect(denied.status).toBe(200)
+  expect(await denied.json()).toMatchObject({ entries: [], total: 0 })
+
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const assignment: EnterpriseRoleAssignment = {
+    workspaceId: 'user#demo@example.com', assignmentId: 'feed-project-viewer',
+    principalKind: 'member', principalId: 'demo@example.com', roleId: 'project:viewer',
+    scope: { workspaceId: 'user#demo@example.com', kind: 'project', targetId: 'refero' }, source: 'direct',
+  }
+  identity.getSnapshot = async (workspaceId) => ({ ...await readIdentity(workspaceId), roleAssignments: [assignment] })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+  const enterpriseFeed = await planningApiRequest('/api/planning/update-feed')
+  expect(enterpriseFeed.status).toBe(200)
+  expect(await enterpriseFeed.json()).toMatchObject({ total: 2 })
+  setTestAppDependencies({ enterpriseIdentity: new InMemoryEnterpriseIdentityClient() })
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner', teamProjects: [] })
+  const archived = await planningApiRequest('/api/planning/update-feed')
+  expect(archived.status).toBe(200)
+  expect(await archived.json()).toMatchObject({ entries: [], total: 0 })
+})
+
 test('filters legacy Planning update targets by their Team-qualified Project ACL', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',
@@ -624,6 +684,9 @@ test('keeps filtered Planning history within the requested limit while advancing
   const movedGraph = await planningApiRequest('/api/planning')
   expect(movedGraph.status).toBe(200)
   const movedGraphBody: PlanningSnapshot = await movedGraph.json()
+  const movedFeed = await planningApiRequest('/api/planning/update-feed')
+  expect(movedFeed.status).toBe(200)
+  expect(await movedFeed.json()).toMatchObject({ entries: [], total: 0 })
   expect(movedGraphBody.updateTargets.find((updateTarget) =>
     updateTarget.target.type === 'initiative' &&
     updateTarget.target.entityId === target.entityId

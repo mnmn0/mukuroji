@@ -1,0 +1,83 @@
+import { expect, test } from 'bun:test'
+import type { PlanningSnapshot, PlanningUpdateTargetSummary } from '@mukuroji/contracts'
+import { InMemoryPlanningClient } from '../../planning/planning'
+import { readUpdateFeed } from './read-update-feed'
+
+/** Creates a latest-target fixture with independent health and submission status. */
+function target(projectId: string, state: PlanningUpdateTargetSummary['updateState'] = 'current'): PlanningUpdateTargetSummary {
+  return {
+    target: { type: 'project', teamId: 'team', projectId },
+    latestVersion: 1, updateState: state, updatedAt: '2026-08-01T00:00:00.000Z',
+    cadence: {
+      updateOwnerMemberKey: 'reader', cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24,
+    },
+    latestUpdate: {
+      id: 'same-local-id', version: 1, health: 'on-track', risk: 'none', summary: projectId,
+      authorMemberKey: 'reader', createdAt: '2026-08-01T00:00:00.000Z',
+      coveredDueAt: '2026-08-01T00:00:00.000Z', progressSnapshot: { percent: 50, linkedWorkItemCount: 1 },
+      capturedScope: { teamId: 'team', projectId },
+    },
+  }
+}
+
+/** Produces a bounded graph fixture without loading update history. */
+async function snapshot(updateTargets: PlanningUpdateTargetSummary[]): Promise<PlanningSnapshot> {
+  return { ...await new InMemoryPlanningClient().get('workspace', { workItems: [] }), updateTargets }
+}
+
+test('keeps health and submission predicates separate and emits one entry for multiple relevance reasons', async () => {
+  const late = target('late', 'overdue')
+  const risk = target('risk')
+  if (risk.latestUpdate) risk.latestUpdate.health = 'off-track'
+  const missing = target('missing', 'missing')
+  delete missing.latestUpdate
+  missing.latestVersion = 0
+  const state = await snapshot([late, risk, missing])
+  const before = structuredClone(state)
+  const reader = { memberKey: 'READER', readSnapshot: async () => state, canRead: async () => true }
+  expect((await readUpdateFeed(reader, 'overdue')).entries.map((entry) => entry.health)).toEqual(['on-track'])
+  expect((await readUpdateFeed(reader, 'at-risk')).entries.map((entry) => entry.updateState)).toEqual(['current'])
+  expect((await readUpdateFeed(reader, 'missing')).entries[0]?.health).toBe('unknown')
+  const feed = await readUpdateFeed(reader, 'for-me')
+  expect(feed.total).toBe(3)
+  expect(feed.entries[0]).toMatchObject({ reasons: ['update-owner', 'latest-author'], relevance: 3 })
+  expect(feed.entries[0]?.latestUpdate).not.toHaveProperty('capturedScope')
+  expect((await readUpdateFeed(reader)).total).toBe(2)
+  expect(state).toEqual(before)
+})
+
+test('rechecks permissions each request, excludes archives, and propagates storage failures', async () => {
+  const archived = { ...target('archived'), archivedAt: '2026-08-02T00:00:00.000Z' }
+  const state = await snapshot([target('active'), archived])
+  let allowed = true
+  let checks = 0
+  const reader = { memberKey: 'reader', readSnapshot: async () => state, canRead: async () => { checks++; return allowed } }
+  expect((await readUpdateFeed(reader)).total).toBe(1)
+  allowed = false
+  expect((await readUpdateFeed(reader)).total).toBe(0)
+  expect(checks).toBe(2)
+  await expect(readUpdateFeed({ ...reader, canRead: async () => { throw new Error('unavailable') } })).rejects.toThrow('unavailable')
+})
+
+test('bounds output, exposes truncation, and orders ties independently of storage order', async () => {
+  const state = await snapshot([target('z'), target('a')])
+  const reader = { memberKey: 'reader', readSnapshot: async () => state, canRead: async () => true }
+  expect(await readUpdateFeed(reader, 'recent', '1')).toMatchObject({ total: 2, truncated: true, entries: [{ target: { projectId: 'a' } }] })
+  state.updateTargets.reverse()
+  expect((await readUpdateFeed(reader, 'recent', '1')).entries[0]?.target).toMatchObject({ projectId: 'a' })
+  state.updateTargets = Array.from({ length: 2001 }, () => target('x'))
+  await expect(readUpdateFeed(reader)).rejects.toMatchObject({ code: 'UpdateFeedTargetLimitExceeded' })
+})
+
+test('validates query input before reading and rejects duplicate projection identities', async () => {
+  const state = await snapshot([target('x'), target('x')])
+  let reads = 0
+  const reader = { memberKey: 'reader', readSnapshot: async () => { reads++; return state }, canRead: async () => true }
+  for (const limit of ['0', '-1', '101', '1.5', '1e1', '', ' 1']) {
+    await expect(readUpdateFeed(reader, 'recent', limit)).rejects.toMatchObject({ code: 'UpdateFeedLimitInvalid' })
+  }
+  await expect(readUpdateFeed(reader, 'invalid')).rejects.toMatchObject({ code: 'UpdateFeedViewInvalid' })
+  expect(reads).toBe(0)
+  await expect(readUpdateFeed(reader)).rejects.toMatchObject({ code: 'UpdateFeedDuplicateTarget' })
+})

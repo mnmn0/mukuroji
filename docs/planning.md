@@ -49,6 +49,14 @@ Cycle を archive できるのは、残っている link の canonical Work Item
 
 ## Project / Initiative health update
 
+### Update Feed read model (Issue #241, first slice)
+
+`GET /api/planning/update-feed?view=recent&limit=50` returns a live, permission-aware aggregate of the latest Project / Initiative summaries. Supported views are `recent`, `for-me`, `at-risk` (including off-track), `missing`, `stale`, and `overdue`. Health remains independent from submission state. `for-me` currently explains relevance through `update-owner` (2 points) and `latest-author` (1 point); matches contribute to one target entry, not duplicate entries. Ranking uses relevance for `for-me`, then latest publication time descending and a deterministic Team-qualified target identity for ties. Recent excludes targets without a report; submission views include them with unknown health.
+
+The reader uses the existing bounded Planning graph (maximum 2,000 rows / 4 MB), without loading Work Items, history, comments, or reactions. No update body, canonical row, or feed copy is written. Each request revalidates active directory hierarchy, current target permissions, and the latest summary's captured scope. Archived, revoked, moved-scope, and unprovable legacy summaries are excluded; infrastructure errors fail the request rather than returning a partial success. Responses whitelist public summary fields and retain target identity plus immutable version for existing history/detail APIs, which continue to authorize their own reads.
+
+`limit` accepts 1–100 (default 50); `total` counts only authorized matches and `truncated` explicitly reports omitted matches. This first slice is a bounded top-N API, not cursor pagination or a completed user-facing Feed. Follow-on slices must add the Feed screen/deep links, member/watch/recent-interaction and annotation signals, custom feed CRUD, server-persisted per-user read state, and daily/weekly Inbox digests using the same authorization/read model with deduplication and retry receipts. Issue #241 remains open until those criteria, cross-session persistence, and digest retries are verified.
+
 Health update の target は Project と Initiative の union です。Project は Planning entity ではないため `{teamId, projectId}` で Team-qualified に識別し、Initiative は `{entityId}` で識別します。Target ごとに update owner、週次または月次 cadence、IANA time zone、次回期限、事前 reminder、任意の期限後 escalation を設定できます。月次 cadence は設定時の local day を anchor とし、1月31日から2月末へ clamp した後も3月31日に戻します。週次 cadence は local wall-clock を維持して DST をまたぎます。
 
 報告された health (`unknown` / `on-track` / `at-risk` / `off-track`) と提出状況 (`not-configured` / `missing` / `current` / `stale` / `overdue`) は別の値です。Cadence 未設定は `not-configured`、初回提出前かつ期限前は `missing`、reminder window 前に提出済みなら `current`、提出済みでも次の reminder window に入れば `stale`、次回期限に達すれば `overdue` とします。List、Timeline、Portfolio、Dashboard、詳細 pane は両者を別の badge / column で表示します。

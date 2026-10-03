@@ -579,6 +579,7 @@ import {
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
+import { readUpdateFeed } from '../modules/update-feed'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
@@ -7083,6 +7084,18 @@ routeApp.get('/api/planning', async (c) => {
       principal,
       await workItemDependencies.planning.get(principal.directoryId, workItemState),
     ))
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Returns a bounded, currently authorized aggregate of latest Planning updates. */
+routeApp.get('/api/planning/update-feed', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit')))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
@@ -25925,6 +25938,44 @@ async function requirePlanningEntityPermission(
     allowWorkspaceScopeMember,
   )
   return entity
+}
+
+/**
+ * Composes the feed reader with current directory and Planning authorization.
+ * @param principal - Authenticated current Workspace principal.
+ * @param view - Untrusted standard feed selector.
+ * @param limit - Untrusted bounded response size.
+ * @returns The authorized live feed, without loading Work Items or history.
+ */
+async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string) {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  /** Requires the current active directory hierarchy even for Workspace administrators. */
+  const activeScope = (scope: Pick<PlanningEntity, 'teamId' | 'projectId'>): boolean => {
+    if (!scope.teamId) return scope.projectId === undefined
+    const team = directory.teams.find((candidate) => candidate.id === scope.teamId)
+    return team !== undefined && (scope.projectId === undefined || team.projects.some((project) => project.id === scope.projectId))
+  }
+  return readUpdateFeed({
+    memberKey: principal.userKey,
+    readSnapshot: () => workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
+    canRead: async (summary, snapshot) => {
+      const target = summary.target
+      const scope = target.type === 'project' ? target : snapshot.entities.find((entity) => entity.id === target.entityId && entity.type === 'initiative' && !entity.archivedAt)
+      if (!scope || !activeScope(scope)) return false
+      try {
+        await requirePlanningUpdateTargetPermission(principal, snapshot, target, 'viewer')
+        if (summary.latestUpdate) {
+          const captured = summary.latestUpdate.capturedScope
+          if (!captured || !activeScope(captured) || captured.teamId !== scope.teamId || captured.projectId !== scope.projectId) return false
+          await requirePlanningUpdateCapturedScopePermission(principal, captured)
+        }
+        return true
+      } catch (error) {
+        if (isPlanningVisibilityAuthorizationError(error)) return false
+        throw error
+      }
+    },
+  }, view, limit)
 }
 
 /**
