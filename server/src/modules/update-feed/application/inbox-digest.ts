@@ -32,6 +32,8 @@ export interface InboxDigestStore extends UpdateFeedDigestStore {
    * @param state - Completed metadata carrying the observed claim revision.
    * @param planningRevision - Current content authorization fence.
    * @param message - Bodyless notification, absent for an empty digest.
+   * @param savedFeedsRevision - Confirmed owner collection revision for custom sources,
+   * transactionally fenced with completion; omitted for standard-only selections.
    * @returns Committed incremented metadata; failure must leave both rows unchanged.
    */
   complete(recipient: InboxDigestRecipient, state: UpdateFeedDigestState, planningRevision: number, message: InboxDigestMessage | undefined, savedFeedsRevision?: number): Promise<UpdateFeedDigestState>
