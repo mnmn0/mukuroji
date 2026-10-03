@@ -579,7 +579,7 @@ import {
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
-import { readUpdateFeed } from '../modules/update-feed'
+import { parseUpdateFeedQuery, readUpdateFeed } from '../modules/update-feed'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
@@ -25951,6 +25951,7 @@ async function requirePlanningEntityPermission(
  * @returns The authorized live feed, without loading Work Items or history.
  */
 async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string) {
+  parseUpdateFeedQuery(view, limit)
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
   let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
   const readContext: TeamPermissionReadContext = {

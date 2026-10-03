@@ -266,6 +266,24 @@ test('returns an authenticated empty Planning graph with accessible Work Item pr
   ])
 })
 
+test('rejects invalid feed selectors before the feed directory read even during an outage', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner', projectAccesses: [] })
+  const directory = getTestAppDependencies().workspace.projectDirectory
+  const originalRead = directory.getProjectDirectory.bind(directory)
+  let strongReads = 0
+  directory.getProjectDirectory = async (...args) => {
+    if (args[2] === true) {
+      strongReads++
+      throw new Error('Directory unavailable')
+    }
+    return originalRead(...args)
+  }
+  for (const query of ['view=invalid', 'limit=101', 'limit=1.5']) {
+    expect((await planningApiRequest(`/api/planning/update-feed?${query}`)).status).toBe(400)
+  }
+  expect(strongReads).toBe(0)
+})
+
 test('aggregates latest Project and Initiative updates without history reads and removes revoked or archived targets', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
   const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))

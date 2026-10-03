@@ -23,11 +23,7 @@ export async function readUpdateFeed(
   viewInput?: string,
   limitInput?: string,
 ): Promise<UpdateFeedResponse> {
-  const view = readView(viewInput)
-  const limit = limitInput === undefined ? 50 : Number(limitInput)
-  if ((limitInput !== undefined && !/^[1-9][0-9]*$/.test(limitInput)) || !Number.isSafeInteger(limit) || limit > 100) {
-    throw new PlanningError(400, 'UpdateFeedLimitInvalid', 'Feed limit must be an integer from 1 to 100.')
-  }
+  const { view, limit } = parseUpdateFeedQuery(viewInput, limitInput)
   const snapshot = await reader.readSnapshot()
   if (snapshot.updateTargets.length > 2000) {
     throw new PlanningError(413, 'UpdateFeedTargetLimitExceeded', 'Feed target projection exceeds its bounded read limit.')
@@ -68,6 +64,16 @@ export async function readUpdateFeed(
     compareText(targetKey(a), targetKey(b)),
   )
   return { view, revision: snapshot.revision, entries: ranked.slice(0, limit), total: ranked.length, truncated: ranked.length > limit }
+}
+
+/** Validates HTTP selectors before constructing storage-backed authorization ports. */
+export function parseUpdateFeedQuery(viewInput?: string, limitInput?: string) {
+  const view = readView(viewInput)
+  const limit = limitInput === undefined ? 50 : Number(limitInput)
+  if ((limitInput !== undefined && !/^[1-9][0-9]*$/.test(limitInput)) || !Number.isSafeInteger(limit) || limit > 100) {
+    throw new PlanningError(400, 'UpdateFeedLimitInvalid', 'Feed limit must be an integer from 1 to 100.')
+  }
+  return { view, limit }
 }
 
 /** Validates a standard feed discriminator before any storage reads. */
