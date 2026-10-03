@@ -50,9 +50,41 @@ test('reads one strongly consistent scoped row and fails closed on malformed per
   expect(await store.get('w', ' Reader ')).toEqual({ ...emptyDigestState(), revision: 1 })
   await store.get('w', 'reader')
   expect(keys[0]).toEqual(keys[1])
-  for (mode of ['schema', 'identity', 'receipt', 'preferences']) await expect(store.get('w', 'reader')).rejects.toMatchObject({ status: 502 })
+  for (mode of ['schema', 'identity', 'receipt', 'preferences']) await expect(store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
   mode = 'missing'
   expect(await store.get('w', 'reader')).toEqual(emptyDigestState())
+})
+
+test('SDK reads and writes distinguish permanent, transient and unknown failures without exposing details', async () => {
+  for (const [name, status, code] of [
+    ['ValidationException', 502, 'UpdateFeedDigestStoragePermanent'],
+    ['AccessDeniedException', 502, 'UpdateFeedDigestStoragePermanent'],
+    ['ResourceNotFoundException', 502, 'UpdateFeedDigestStoragePermanent'],
+    ['TimeoutError', 503, 'UpdateFeedDigestRetryable'],
+    ['ThrottlingException', 503, 'UpdateFeedDigestRetryable'],
+    ['Error', 502, 'UpdateFeedDigestStorageFailure'],
+    ['NetworkingError', 502, 'UpdateFeedDigestStorageFailure'],
+  ] as const) {
+    const store = new DynamoDbUpdateFeedDigestStore('planning', clientFor(async () => { throw Object.assign(new Error('private SDK detail'), { name }) }), checks)
+    for (const operation of [() => store.get('w', 'reader'), () => store.replace('w', 'reader', emptyDigestState())]) {
+      try { await operation(); throw new Error('Expected failure') }
+      catch (error) { expect(error).toMatchObject({ status, code }); expect(String(error)).not.toContain('private SDK') }
+    }
+  }
+})
+
+test('malformed cancellation evidence stays unknown and proven permanent reasons outrank transient ones', async () => {
+  for (const [codes, code] of [
+    [['ValidationError', 'ThrottlingError'], 'UpdateFeedDigestStoragePermanent'],
+    [['None', 'ItemCollectionSizeLimitExceeded'], 'UpdateFeedDigestStoragePermanent'],
+    [['None', 'ThrottlingError'], 'UpdateFeedDigestRetryable'],
+    [['None', 'UnknownReason'], 'UpdateFeedDigestStorageFailure'],
+    [['ValidationError'], 'UpdateFeedDigestStorageFailure'],
+    [['None', 'None'], 'UpdateFeedDigestStorageFailure'],
+  ] as const) {
+    const store = new DynamoDbUpdateFeedDigestStore('planning', clientFor(async () => { throw { name: 'TransactionCanceledException', CancellationReasons: codes.map((Code) => ({ Code })) } }), checks)
+    await expect(store.replace('w', 'reader', emptyDigestState())).rejects.toMatchObject({ code })
+  }
 })
 
 test('atomically guards receipt CAS, caller revocation and Planning authorization fence', async () => {

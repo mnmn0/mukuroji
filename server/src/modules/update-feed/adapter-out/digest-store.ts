@@ -4,6 +4,7 @@ import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import { parseDigestState, emptyDigestState, type UpdateFeedDigestStore } from '../application/digest'
 import { digestSavedFeedsFence } from './saved-feeds-store'
+import { digestStorageFailure } from './digest-storage-failure'
 
 /** Composition-only binding for fresh caller authorization conditions. */
 export interface UpdateFeedDigestPersistence extends UpdateFeedDigestStore {
@@ -39,13 +40,14 @@ export class DynamoDbUpdateFeedDigestStore implements UpdateFeedDigestPersistenc
    * @returns Validated digest metadata or empty revision zero.
    */
   async get(workspaceId: string, memberKey: string): Promise<UpdateFeedDigestState> {
+    const key = recordKey(memberKey)
+    const response = await this.client.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey: key }, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+    const row = response.Item
+    if (row === undefined) return emptyDigestState()
     try {
-      const key = recordKey(memberKey)
-      const { Item: row } = await this.client.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey: key }, ConsistentRead: true }))
-      if (row === undefined) return emptyDigestState()
       if (row.workspaceId !== workspaceId || row.recordKey !== key || row.schemaVersion !== 1 || row.entryType !== 'update-feed-digest' || typeof row.revision !== 'number' || !Number.isSafeInteger(row.revision) || row.revision < 1) throw new Error('Invalid saved digest metadata')
       return parseDigestState({ revision: row.revision, preferences: row.preferences, history: row.history })
-    } catch (error) { return storageFailure(error) }
+    } catch { throw new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Digest metadata is invalid.') }
   }
   /** Atomically replaces digest metadata with CAS and current caller checks.
    * @param workspaceId - Server-resolved Workspace.
@@ -77,7 +79,7 @@ export class DynamoDbUpdateFeedDigestStore implements UpdateFeedDigestPersistenc
         ConditionExpression: parsed.revision === 0 ? 'attribute_not_exists(recordKey)' : '#revision = :revision AND #schema = :schema AND #type = :type',
         ...(parsed.revision === 0 ? {} : { ExpressionAttributeNames: { '#revision': 'revision', '#schema': 'schemaVersion', '#type': 'entryType' }, ExpressionAttributeValues: { ':revision': parsed.revision, ':schema': 1, ':type': 'update-feed-digest' } }),
       } }, ...this.checks, ...fence] }))
-    } catch (error) { return storageFailure(error, this.checks.length + fence.length + 1) }
+    } catch (error) { return digestStorageFailure(error, this.checks.length + fence.length + 1) }
     return result
   }
 }
@@ -115,17 +117,3 @@ export class InMemoryUpdateFeedDigestStore implements UpdateFeedDigestPersistenc
 
 /** Derives a member-specific noncanonical key with no user-supplied physical key. */
 function recordKey(memberKey: string) { return `UPDATE_FEED_DIGEST#${createHash('sha256').update(memberKey.trim().toLowerCase()).digest('hex')}` }
-/** Classifies full transaction reason vectors and rejects malformed persistence. */
-function storageFailure(error: unknown, size = 0): never {
-  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
-  if (name === 'TransactionCanceledException' && typeof error === 'object' && error !== null && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
-    const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
-    if (size > 0 && codes.length === size) {
-      if (codes.includes('ConditionalCheckFailed') && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest state or permissions changed. Reload before saving.')
-      const transient = ['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError']
-      if (codes.some((code) => transient.includes(String(code))) && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed' || transient.includes(String(code)))) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Digest storage is temporarily unavailable.')
-    }
-  }
-  if (typeof name === 'string' && ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TransactionInProgressException', 'TimeoutError'].includes(name)) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Digest storage is temporarily unavailable.')
-  throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Digest storage request failed.')
-}

@@ -106,14 +106,14 @@ test('worker persists bounded continuation before delivery and resumes after a c
   expect(seen).toBe(2)
 })
 
-test('worker quarantines after three failures, backs off and bounds duplicate batches', async () => {
+for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure']) test(`worker bounds ${code} recovery to three attempts with backoff and quarantine`, async () => {
   const f = fixture()
   let clock = start
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
-    async listDue() { return { recipients: [recipient, recipient] } },
-    delivery: { async authorize() { calls++; throw new Error('Unavailable') } },
+    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient, recipient] } },
+    delivery: { async authorize() { calls++; throw new PlanningError(code === 'UpdateFeedDigestRetryable' ? 503 : 502, code, 'Unavailable') } },
   }
   for (let attempt = 0; attempt < 3; attempt++) {
     expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 1, delivered: 0, failed: 1 })
@@ -123,16 +123,18 @@ test('worker quarantines after three failures, backs off and bounds duplicate ba
   expect(calls).toBe(3)
   expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
   expect(f.rows.get('SHARD#3')?.pending).toEqual([])
+  expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 0, delivered: 0, failed: 0 })
+  expect(calls).toBe(3)
 })
 
-test('worker quarantines permanent storage failures on the first attempt instead of retrying them', async () => {
+for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorruptState']) test(`worker quarantines ${code} on the first attempt instead of retrying`, async () => {
   const f = fixture()
   let clock = start
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
     async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient] } },
-    delivery: { async authorize() { calls++; throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Storage configuration unavailable') } },
+    delivery: { async authorize() { calls++; throw new PlanningError(502, code, 'Storage requires inspection') } },
   }
   expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 1, delivered: 0, failed: 1 })
   expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
@@ -140,6 +142,22 @@ test('worker quarantines permanent storage failures on the first attempt instead
   clock += 60_000
   expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 0, delivered: 0, failed: 0 })
   expect(calls).toBe(1)
+})
+
+test('unknown failure can recover on the next bounded attempt without quarantine', async () => {
+  const f = fixture()
+  let clock = start
+  let calls = 0
+  const dependencies = { checkpoints: f.store, now: () => clock, async listDue() { return { recipients: [recipient] } }, delivery: { async authorize() {
+    if (++calls === 1) throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Unknown SDK failure')
+    return undefined
+  } } }
+  expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 1 })
+  expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
+  clock += 60_000
+  expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 0 })
+  expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
+  expect(f.rows.get('SHARD#6')?.pending).toEqual([])
 })
 
 test('unknown persisted schema fails closed instead of resetting the queue', async () => {

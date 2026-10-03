@@ -124,7 +124,7 @@ test('Inbox metadata HTTP boundary preserves stable storage failure categories w
     response = await planningApiRequest(path, method, method === 'PUT' ? settings : undefined)
     expect(response.status).toBe(502)
     const body = await response.json()
-    expect(body).toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
+    expect(body).toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
     expect(JSON.stringify(body)).not.toContain('private')
   }
 })

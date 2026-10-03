@@ -83,8 +83,9 @@ export function DigestPanel(props: DigestPanelProps) {
 }
 
 /** Owns an unsaved draft scoped to its base revision while preserving keyboard focus. */
-function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, onGenerate, onDismiss, onReload: propsReload }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
+function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, onGenerate, onDismiss, restoreFocus, onReload: propsReload }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
   const id = useId()
+  const form = useRef<HTMLFormElement>(null)
   const generateButton = useRef<HTMLButtonElement>(null)
   const restoreActionFocus = useRef(false)
   const [edit, setEdit] = useState<{ /** Revision at which editing began. */ revision: number; /** Unsaved preferences. */ preferences: UpdateFeedDigestPreferences }>()
@@ -99,11 +100,20 @@ function DigestForm({ state, savedFeeds, pending, canEdit, failure, t, onSave, o
   useEffect(() => {
     if (pending || !restoreActionFocus.current) return
     restoreActionFocus.current = false
-    if (document.activeElement === document.body && generateButton.current && !generateButton.current.disabled) generateButton.current.focus()
-  }, [pending])
+    if (!document.hasFocus() || document.activeElement !== document.body) return
+    if (generateButton.current && !generateButton.current.matches(':disabled')) generateButton.current.focus()
+    else restoreFocus?.()
+  }, [pending, restoreFocus])
   /** Remembers only user-triggered actions for DOM focus restoration. */
-  const perform = (action: () => Promise<boolean>) => { restoreActionFocus.current = true; return action() }
-  return <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid && !stale) void perform(() => onSave(draft, edit?.revision ?? state.revision)) }}>
+  const perform = (action: () => Promise<boolean>) => { restoreActionFocus.current = Boolean(form.current?.contains(document.activeElement)); return action() }
+  /** Clears only the acknowledged snapshot, preserving edits made after submission. */
+  const save = async () => {
+    const submitted = edit
+    const success = await onSave(draft, submitted?.revision ?? state.revision)
+    if (success) setEdit((current) => current === submitted ? undefined : current)
+    return success
+  }
+  return <form ref={form} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) restoreActionFocus.current = false }} onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid && !stale) void perform(save) }}>
     {stale && failure !== 'conflict' ? <div role="alert"><p>{t('updates.digest.conflict')}</p><button type="button" className={actionClass} disabled={pending} onClick={propsReload}>{t('workspace.error.retry')}</button></div> : null}
     <fieldset disabled={unavailable} className="min-w-0">
       <legend className="text-sm font-semibold text-slate-800">{t('updates.digest.settings')}</legend>

@@ -35,19 +35,26 @@ export function InboxDigestPanel({ state, savedFeeds, loading, pending, canEdit,
   const effectiveFailure = failure ?? (stale ? 'conflict' : undefined)
   const unavailable = pending || !canEdit || Boolean(effectiveFailure)
   const focused = useRef<HTMLElement | null>(null)
-  // DOM removal, not an unrelated refresh, owns focus restoration.
+  // Only removed or disabled owned controls require a stable focus fallback.
   useLayoutEffect(() => {
-    if (focused.current && !focused.current.isConnected && document.activeElement === document.body && document.hasFocus()) restoreFocus?.()
-    if (focused.current && !focused.current.isConnected) focused.current = null
+    const lost = focused.current && (!focused.current.isConnected || (!pending && focused.current.matches(':disabled')))
+    if (lost && (document.activeElement === document.body || document.activeElement === focused.current) && document.hasFocus()) restoreFocus?.()
+    if (lost) focused.current = null
   })
   /** Keeps edits bound to the displayed metadata revision. */
   const change = (preferences: UpdateFeedDigestPreferences) => { if (state) setEdit({ revision: dirty && currentEdit ? currentEdit.revision : state.revision, reset: draftReset, preferences }) }
+  /** Acknowledges only the submitted draft; later edits and failed saves remain owned. */
+  const save = async () => {
+    if (!draft || !state) return
+    const submitted = currentEdit
+    if (await onSave(draft, submitted?.revision ?? state.revision)) setEdit((current) => current === submitted ? undefined : current)
+  }
   return <section onFocusCapture={(event) => { focused.current = event.target }} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focused.current = null }} aria-label={t('updates.inbox.title')} className="min-w-0 border-y border-slate-200 py-4">
     <p className="mb-4 text-app-meta font-semibold text-slate-600">{t('updates.inbox.inactive')}</p>
     {loading ? <p role="status">{t('updates.loading')}</p> : null}
     {effectiveFailure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3"><p>{t(`updates.inbox.${effectiveFailure}`)}</p>{effectiveFailure !== 'denied' ? <button className="min-h-11 rounded-md border px-3" disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
     {!canEdit ? <p>{t('updates.readOnly')}</p> : null}
-    {draft && state && failure !== 'denied' ? <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid) void onSave(draft, currentEdit?.revision ?? state.revision) }}>
+    {draft && state && failure !== 'denied' ? <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid) void save() }}>
       <fieldset disabled={unavailable} className="min-w-0"><legend className="text-sm font-semibold">{t('updates.inbox.settings')}</legend>
         <label className="flex min-h-11 items-center gap-3"><input type="checkbox" className="size-4 accent-teal-700" checked={draft.enabled} onChange={(event) => change({ ...draft, enabled: event.target.checked })} />{t('updates.inbox.enabled')}</label>
         <label htmlFor={`${id}-cadence`} className="mt-3 block text-app-meta font-semibold">{t('updates.digest.frequency')}</label>

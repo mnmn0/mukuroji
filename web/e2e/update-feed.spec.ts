@@ -151,6 +151,44 @@ for (const inbox of [false, true]) test(`${inbox ? 'Inbox' : 'preview'} custom d
   expect(state.digestRequests).toBe(0)
 })
 
+for (const conflict of [false, true]) test(`Inbox keyboard save restores owned focus with conflict=${conflict}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.inbox.preferences.enabled = true
+  state.digestConflict = conflict
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).uncheck()
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).focus()
+  await page.keyboard.press('Enter')
+  await expect(summary).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  if (conflict) await expect(panel.getByRole('alert')).toContainText('Settings changed')
+})
+
+test('saved Inbox draft follows a later external preference change without false conflict', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => { if (route.request().method() === 'GET') reads++; await route.fallback() })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect.poll(() => state.inbox.revision).toBe(1)
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  state.inbox = { ...state.inbox, revision: 2, preferences: { enabled: true, frequency: 'daily', views: ['recent'] } }
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
 test('Inbox consent is lazy, off by default, independent from previews and retained after reload', async ({ page }, testInfo) => {
   const state = await mockFeed(page)
   await page.goto('/updates')
@@ -274,6 +312,63 @@ test('Inbox denial never steals focus from an outside disclosure', async ({ page
   release()
   await expect(panel.locator('form')).toHaveCount(0)
   await expect(outside).toBeFocused()
+})
+
+for (const action of ['save-off', 'conflict']) test(`keyboard ${action} restores preview summary when no action remains enabled`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  if (action === 'save-off') await panel.getByRole('checkbox', { name: 'Enable manual previews' }).uncheck()
+  else state.digestConflict = true
+  await panel.getByRole('button', { name: action === 'save-off' ? 'Save preview settings' : 'Generate preview' }).focus()
+  await page.keyboard.press('Enter')
+  await expect(summary).toBeFocused()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+})
+
+test('a saved preview draft follows later external settings without a false conflict', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'GET') reads++; await route.fallback() })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save preview settings' }).click()
+  await expect.poll(() => state.digest.revision).toBe(1)
+  await expect(panel.getByRole('button', { name: 'Save preview settings' })).toBeDisabled()
+  state.digest = { ...state.digest, revision: 2, preferences: { enabled: true, frequency: 'daily', views: ['recent'] } }
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
+test('preview completion does not reclaim focus moved outside its form', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  await page.route('**/api/planning/update-feed/digest/preview?*', async (route) => { waiting = true; await gate; await route.fulfill({ status: 409, json: {} }) })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByRole('button', { name: 'Generate preview' }).focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => waiting).toBe(true)
+  await summary.focus()
+  release()
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await expect(summary).toBeFocused()
 })
 
 for (const source of ['feed', 'saved']) test(`${source} outage leaves healthy standard digest controls available`, async ({ page }) => {
