@@ -239,5 +239,5 @@ test('scheduler separates terminal candidates from transient retries in a mixed 
     if (owner.workspaceId === 'mismatch') return context
     return { ...context, recipient: owner, store: { ...context.store, get: () => context.store.get(recipient.workspaceId, recipient.memberKey), replace: (_workspaceId, memberKey, state) => context.store.replace(recipient.workspaceId, memberKey, state), complete: (_owner, state, revision, message) => context.store.complete(recipient, state, revision, message) } }
   } } }, now)
-  expect(result).toEqual({ processed: 8, delivered: 1, failed: [owners[1], owners[6], owners[7]], terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }, { recipient: owners[5], reason: 'storage-permanent' }], cursor: 'next' })
+  expect(result).toEqual({ processed: 8, delivered: 1, failed: [owners[1], owners[6]], terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }, { recipient: owners[5], reason: 'storage-permanent' }, { recipient: owners[7], reason: 'invalid-input' }], cursor: 'next' })
 })

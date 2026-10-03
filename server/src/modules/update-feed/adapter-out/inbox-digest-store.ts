@@ -128,16 +128,16 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
     const page = await this.client.send(new QueryCommand({ TableName: this.planningTable, IndexName: INBOX_DIGEST_INDEX.name,
       KeyConditionExpression: '#shard = :shard AND #due <= :due', ExpressionAttributeNames: { '#shard': INBOX_DIGEST_INDEX.partitionKey, '#due': INBOX_DIGEST_INDEX.sortKey },
       ExpressionAttributeValues: { ':shard': `inbox-digest#${shard}`, ':due': now }, Limit: limit, ...(cursor ? { ExclusiveStartKey: cursor } : {}),
-    }))
+    })).catch((error: unknown) => digestStorageFailure(error))
     const recipients: InboxDigestRecipient[] = []
     for (const item of page.Items ?? []) {
-      if (typeof item.workspaceId !== 'string' || typeof item.recordKey !== 'string') throw conflict()
-      const { Item: row } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: { workspaceId: item.workspaceId, recordKey: item.recordKey }, ConsistentRead: true }))
+      if (typeof item.workspaceId !== 'string' || !item.workspaceId.trim() || typeof item.recordKey !== 'string' || !item.recordKey.startsWith('UPDATE_FEED_INBOX_DIGEST#')) throw corruptCandidate()
+      const { Item: row } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: { workspaceId: item.workspaceId, recordKey: item.recordKey }, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
       if (!row) continue
-      if (typeof row.memberKey !== 'string') throw conflict()
+      if (typeof row.memberKey !== 'string' || !row.memberKey.trim()) throw corruptCandidate()
       const recipient = normalize({ workspaceId: item.workspaceId, memberKey: row.memberKey })
       const state = parseRow(row, recipient)
-      if (row.recordKey !== item.recordKey) throw conflict()
+      if (row.recordKey !== item.recordKey) throw corruptCandidate()
       if (state.preferences.enabled && row.inboxDigestShard === `inbox-digest#${shard}` && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= now) recipients.push(recipient)
     }
     return { recipients, cursor: page.LastEvaluatedKey }
@@ -199,3 +199,5 @@ function dueFields(recipient: InboxDigestRecipient, state: UpdateFeedDigestState
 function shardKey(recipient: InboxDigestRecipient) { return `inbox-digest#${createHash('sha256').update(JSON.stringify(recipient)).digest()[0]! % 16}` }
 /** Returns a safe CAS/authorization failure. */
 function conflict() { return new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest state or authorization changed.') }
+/** Rejects malformed persisted candidate coordinates without exposing their values. */
+function corruptCandidate() { return new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Inbox digest candidate metadata is unavailable.') }
