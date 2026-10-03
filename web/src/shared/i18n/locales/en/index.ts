@@ -37,6 +37,7 @@ function defineMessages<const Messages extends Record<MessageKey, string>>(
  */
 export const enMessages = defineMessages({
   ...coreMessages,
+  ...updatesMessages,
   ...marketingMessages,
   ...authMessages,
   ...workspaceMessages,
@@ -57,3 +58,4 @@ export const enMessages = defineMessages({
   ...aiAssistanceMessages,
   ...customersMessages,
 })
+import { updatesMessages } from './updates'

@@ -376,6 +376,20 @@ test('aggregates latest Project and Initiative updates without history reads and
   ] })
   expect(perTargetAuthorizationReads).toBe(0)
   planning.get = readPlanning
+  const readInput = { target: targets[0], version: 1, read: true, expectedRevision: 0 }
+  const markedRead = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', readInput)
+  expect(markedRead.status).toBe(200)
+  expect(await markedRead.json()).toEqual({ read: true, revision: 1 })
+  const refreshed = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(await refreshed.json()).toMatchObject({ entries: [
+    { target: { type: 'initiative' }, readState: { read: false, revision: 0 } },
+    { target: { type: 'project' }, readState: { read: true, revision: 1 } },
+  ] })
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', readInput)).status).toBe(409)
+  const readAuthorizationRevision = planning.getAuthorizationRevision.bind(planning)
+  planning.getAuthorizationRevision = async () => before.revision - 1
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })).status).toBe(409)
+  planning.getAuthorizationRevision = readAuthorizationRevision
   expect(await planning.get('user#demo@example.com', { workItems: [] })).toEqual(before)
   expect((await planningApiRequest('/api/planning/update-feed?limit=101')).status).toBe(400)
   for (const query of ['view=recent&view=overdue', 'limit=1&limit=2']) {
@@ -388,6 +402,7 @@ test('aggregates latest Project and Initiative updates without history reads and
   const denied = await planningApiRequest('/api/planning/update-feed')
   expect(denied.status).toBe(200)
   expect(await denied.json()).toMatchObject({ entries: [], total: 0 })
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })).status).toBe(404)
 
   const identity = new InMemoryEnterpriseIdentityClient()
   const readIdentity = identity.getSnapshot.bind(identity)
@@ -401,12 +416,16 @@ test('aggregates latest Project and Initiative updates without history reads and
   const enterpriseFeed = await planningApiRequest('/api/planning/update-feed')
   expect(enterpriseFeed.status).toBe(200)
   expect(await enterpriseFeed.json()).toMatchObject({ total: 2 })
+  const viewerChoice = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })
+  expect(viewerChoice.status).toBe(200)
+  expect(await viewerChoice.json()).toEqual({ read: false, revision: 2 })
   setTestAppDependencies({ enterpriseIdentity: new InMemoryEnterpriseIdentityClient() })
 
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner', teamProjects: [] })
   const archived = await planningApiRequest('/api/planning/update-feed')
   expect(archived.status).toBe(200)
   expect(await archived.json()).toMatchObject({ entries: [], total: 0 })
+  expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, expectedRevision: 2 })).status).toBe(404)
 })
 
 test('filters legacy Planning update targets by their Team-qualified Project ACL', async () => {

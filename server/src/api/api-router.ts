@@ -579,7 +579,7 @@ import {
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
-import { parseUpdateFeedQuery, readUpdateFeed } from '../modules/update-feed'
+import { parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReader } from '../modules/update-feed'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
@@ -1340,6 +1340,9 @@ const workItemDependencies: WorkItemDependencies = {
   get planning() {
     return requireAppDependencies().workItems.planning
   },
+  get updateFeedReadState() {
+    return requireAppDependencies().workItems.updateFeedReadState
+  },
   get requestIntake() {
     return requireAppDependencies().workItems.requestIntake
   },
@@ -1759,6 +1762,7 @@ const enterpriseRoutePermissionRules = [
     permission: 'planning.manage',
   },
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
+  { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-forms*', permission: 'requests.manage' },
@@ -7099,6 +7103,28 @@ routeApp.get('/api/planning/update-feed', async (c) => {
       throw new PlanningError(400, 'UpdateFeedQueryAmbiguous', 'Feed query parameters must occur at most once.')
     }
     return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit')))
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Persists the current member's explicit read state for one currently readable report. */
+routeApp.put('/api/planning/update-feed/read-state', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const input = parseUpdateFeedReadState(await readPlanningJson<unknown>(c.req))
+    const initialPrincipal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const authorizationRevision = await workItemDependencies.planning.getAuthorizationRevision(initialPrincipal.directoryId)
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if (principal.directoryId !== initialPrincipal.directoryId) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Workspace authorization changed.')
+    const authorizedReader = await createPlanningUpdateFeedReader(principal)
+    const reader: UpdateFeedReader = { ...authorizedReader, readSnapshot: async () => {
+      const snapshot = await authorizedReader.readSnapshot()
+      if (snapshot.revision !== authorizationRevision) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Target authorization changed. Refresh and retry.')
+      return snapshot
+    } }
+    return c.json(await setUpdateFeedReadState(reader, workItemDependencies.updateFeedReadState, principal.directoryId, input))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
@@ -25952,6 +25978,12 @@ async function requirePlanningEntityPermission(
  */
 async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string) {
   parseUpdateFeedQuery(view, limit)
+  const reader = await createPlanningUpdateFeedReader(principal)
+  return withUpdateFeedReadState(workItemDependencies.updateFeedReadState, principal.directoryId, principal.userKey, await readUpdateFeed(reader, view, limit))
+}
+
+/** Creates request-local target authorization shared by feed reads and read-state mutations. */
+async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal): Promise<UpdateFeedReader> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
   let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
   const readContext: TeamPermissionReadContext = {
@@ -25966,8 +25998,14 @@ async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: stri
     const team = directory.teams.find((candidate) => candidate.id === scope.teamId)
     return team !== undefined && (scope.projectId === undefined || team.projects.some((project) => project.id === scope.projectId))
   }
-  return readUpdateFeed({
+  return {
     memberKey: principal.userKey,
+    describeTarget: (summary, snapshot) => {
+      const target = summary.target
+      return target.type === 'initiative'
+        ? snapshot.entities.find((entity) => entity.id === target.entityId)?.title ?? target.entityId
+        : directory.teams.find((team) => team.id === target.teamId)?.projects.find((project) => project.id === target.projectId)?.name ?? target.projectId
+    },
     readSnapshot: () => workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
     authorizeTarget: async (summary, snapshot) => {
       const target = summary.target
@@ -25992,7 +26030,7 @@ async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: stri
         throw error
       }
     },
-  }, view, limit)
+  }
 }
 
 /**

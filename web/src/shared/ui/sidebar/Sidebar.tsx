@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
 import { BrandMark } from '../BrandMark'
-import { HandoffIcon } from '../icons'
+import { HandoffIcon, FormIcon } from '../icons'
 
 /**
  * サイドバー内の SVG アイコンに渡す共通 props です。
@@ -76,6 +76,7 @@ export type SidebarTeam = {
 export type SidebarNavId =
   | 'home'
   | 'focus'
+  | 'updates'
   | 'my-tasks'
   | 'inbox'
   | 'requests'
@@ -528,9 +529,15 @@ type SidebarArchiveTarget = {
   projectId?: string
 }
 
+/** Adapts the shared document outline to the sidebar's size classes. */
+function UpdateFeedSidebarIcon({ className }: SidebarIconProps) {
+  return <FormIcon className={`${className ?? ''} fill-none stroke-current stroke-[1.8]`} />
+}
+
 const primaryNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
   { id: 'focus', icon: FocusIcon },
+  { id: 'updates', icon: UpdateFeedSidebarIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
 ]
@@ -624,6 +631,7 @@ const defaultLabels: SidebarLabels = {
   nav: {
     home: 'ホーム',
     focus: 'フォーカス',
+    updates: 'アップデート',
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
     requests: 'リクエスト',
