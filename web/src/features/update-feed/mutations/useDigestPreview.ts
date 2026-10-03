@@ -94,7 +94,7 @@ export function useDigestPreview(token: string | undefined, enabled: boolean, lo
       }
       return active.current
     } catch (failure) {
-      if (active.current && generation === epoch.current) {
+      if (active.current && (preferences || generation === epoch.current)) {
         dismiss(); setError(failure)
         // Generation conflicts still recheck authorization; save conflicts retain
         // the original editing base until the member explicitly reloads.
