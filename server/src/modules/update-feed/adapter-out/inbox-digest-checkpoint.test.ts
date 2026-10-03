@@ -11,13 +11,15 @@ import { InMemoryPlanningClient } from '../../planning/planning'
 
 const start = Date.parse('2026-10-03T12:00:00Z')
 const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
+const candidate = { ...recipient, frequency: 'daily' as const }
 
-for (const frequency of ['daily', 'weekly'] as const) test(`twenty preclaim conflicts park atomically, advance pages and recover the original ${frequency} interval`, async () => {
+for (const frequency of ['daily', 'weekly'] as const) for (const cadenceChanged of [false, true]) test(`twenty preclaim conflicts preserve ${frequency} work across restart with cadenceChanged=${cadenceChanged}`, async () => {
   const f = fixture()
   const metadata = new InMemoryUpdateFeedDigestStore()
   const scheduledAt = Date.parse('2026-10-04T23:59:30Z')
   let clock = scheduledAt
   let blocked = true
+  let discoveryFrequency = frequency
   const owners = Array.from({ length: 20 }, (_, index) => ({ ...recipient, memberKey: `reader-${index}` }))
   const healthy = { ...recipient, memberKey: 'healthy' }
   for (const owner of [...owners, healthy]) {
@@ -27,7 +29,7 @@ for (const frequency of ['daily', 'weekly'] as const) test(`twenty preclaim conf
   const cursors: (string | undefined)[] = []
   const dependencies: InboxDigestWorkerDependencies = {
     checkpoints: f.store, now: () => clock,
-    listDue: async (_shard, cursor) => { cursors.push(cursor); return cursor === 'page-2' ? { recipients: [healthy] } : { recipients: owners, cursor: 'page-2' } },
+    listDue: async (_shard, cursor) => { cursors.push(cursor); return cursor === 'page-2' ? { recipients: [{ ...healthy, frequency }] } : { recipients: owners.map((owner) => ({ ...owner, frequency: discoveryFrequency })), cursor: 'page-2' } },
     delivery: { authorize: async (owner) => {
       if (owner.memberKey !== 'healthy' && blocked) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Preclaim revision changed')
       return {
@@ -52,19 +54,49 @@ for (const frequency of ['daily', 'weekly'] as const) test(`twenty preclaim conf
   expect(f.rows.get('SHARD#0')?.cursor).toBe('page-2')
   expect([...f.rows.values()].filter((row) => row.entryType === 'inbox-digest-deferred')).toHaveLength(20)
   for (const owner of owners) {
-    expect(await f.store.readDeferred(owner)).toEqual({ recipient: owner, attempts: 0, conflicts: 2, scheduledAt })
+    expect(await f.store.readDeferred(owner)).toEqual({ recipient: owner, attempts: 0, conflicts: 2, scheduledAt, frequency })
     expect(await f.store.isQuarantined(owner, clock)).toBe(false)
   }
   expect((await runInboxDigestWorker(dependencies, 0)).processed).toBe(1)
   expect((await metadata.get(healthy.workspaceId, healthy.memberKey)).history).toMatchObject([{ status: 'completed' }])
   blocked = false
+  if (cadenceChanged) {
+    discoveryFrequency = frequency === 'daily' ? 'weekly' : 'daily'
+    for (const owner of owners) {
+      const state = await metadata.get(owner.workspaceId, owner.memberKey)
+      await metadata.replace(owner.workspaceId, owner.memberKey, { ...state, preferences: { ...state.preferences, frequency: discoveryFrequency } })
+    }
+  }
   dependencies.checkpoints = f.restart()
   expect((await runInboxDigestWorker(dependencies, 0)).processed).toBe(20)
   expect(cursors).toEqual([undefined, 'page-2', undefined])
   for (const owner of owners) {
-    expect((await metadata.get(owner.workspaceId, owner.memberKey)).history).toMatchObject([{ id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`, startedAt: scheduledAt, status: 'completed' }])
+    expect((await metadata.get(owner.workspaceId, owner.memberKey)).history).toMatchObject(cadenceChanged ? [] : [{ id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`, startedAt: clock, status: 'completed' }])
     expect(await f.store.readDeferred(owner)).toBeUndefined()
   }
+  if (cadenceChanged) {
+    await runInboxDigestWorker(dependencies, 0)
+    await runInboxDigestWorker(dependencies, 0)
+    for (const owner of owners) expect((await metadata.get(owner.workspaceId, owner.memberKey)).history).toMatchObject([{ id: `${discoveryFrequency}:2026-10-05`, startedAt: clock, status: 'completed' }])
+  }
+})
+
+test('legacy work without a pinned cadence is cancelled rather than generating a guessed historical interval', async () => {
+  const f = fixture()
+  const state = (await f.store.claim(0, start))!
+  await f.store.save({ ...state, pending: [{ recipient, attempts: 1, scheduledAt: start - 86_400_000 }] }, start, true)
+  let authorized = 0
+  const result = await runInboxDigestWorker({ checkpoints: f.store, now: () => start, listDue: async () => ({ recipients: [] }), delivery: { authorize: async () => { authorized++; return undefined } } }, 0)
+  expect(result).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 0 })
+  expect(authorized).toBe(0)
+  expect(f.rows.get('SHARD#0')?.pending).toEqual([])
+})
+
+test('stored cadence without its logical time fails closed instead of rebinding an interval', async () => {
+  const f = fixture()
+  await f.store.claim(0, start)
+  f.rows.get('SHARD#0')!.pending = [{ recipient, attempts: 0, frequency: 'daily' }]
+  await expect(f.store.claim(0, start + 90_000)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
 })
 
 test('park and acknowledgment survive response loss and reject stale checkpoint owners atomically', async () => {
@@ -225,11 +257,11 @@ test('worker persists bounded continuation before delivery and resumes after a c
     async listDue(_shard: number, cursor: string | undefined, limit: number) {
       cursors.push(cursor)
       expect(limit).toBeLessThanOrEqual(20)
-      return { recipients: cursor ? [] : [recipient], cursor: cursor ? undefined : 'page-2' }
+      return { recipients: cursor ? [] : [candidate], cursor: cursor ? undefined : 'page-2' }
     },
     delivery: { async authorize() {
       seen++
-      expect(f.rows.get('SHARD#2')?.pending).toEqual([{ recipient, attempts: 0, scheduledAt: start }])
+      expect(f.rows.get('SHARD#2')?.pending).toEqual([{ recipient, attempts: 0, scheduledAt: start, frequency: 'daily' }])
       if (seen === 1) clock += 90_001
       return undefined // Revoked recipients never reach delivery storage.
     } },
@@ -247,7 +279,7 @@ for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
-    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient, recipient] } },
+    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [candidate, candidate] } },
     delivery: { async authorize() { calls++; throw code === 'TenantAdministrationUnavailable' ? new TenantAdministrationError(503, code, 'Unavailable') : new PlanningError(code === 'UpdateFeedDigestRetryable' ? 503 : 502, code, 'Unavailable') } },
   }
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -268,7 +300,7 @@ for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorrupt
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
-    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [recipient] } },
+    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [candidate] } },
     delivery: { async authorize() { calls++; throw code === 'TenantAdministrationCorrupt' ? new TenantAdministrationError(502, code, 'Storage requires inspection') : new PlanningError(502, code, 'Storage requires inspection') } },
   }
   expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 1, delivered: 0, failed: 1, deferred: 0 })
@@ -283,7 +315,7 @@ test('unknown failure can recover on the next bounded attempt without quarantine
   const f = fixture()
   let clock = start
   let calls = 0
-  const dependencies = { checkpoints: f.store, now: () => clock, async listDue() { return { recipients: [recipient] } }, delivery: { async authorize() {
+  const dependencies = { checkpoints: f.store, now: () => clock, async listDue() { return { recipients: [candidate] } }, delivery: { async authorize() {
     if (++calls === 1) throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Unknown SDK failure')
     return undefined
   } } }
@@ -331,7 +363,7 @@ for (const cadence of [3_600_000, 86_400_000]) test(`durable rotation reaches ev
         expect(clock - began).toBeLessThan(150_000)
         expect(limit).toBeLessThanOrEqual(20)
         shards.push(shard)
-        return { recipients: [recipient] }
+        return { recipients: [candidate] }
       },
       delivery: { async authorize() { clock += 80_000; return undefined } },
     })
@@ -351,7 +383,7 @@ for (const recovery of ['revoked', 'optout', 'cas']) test(`known conflicts defer
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
-    async listDue() { return { recipients: [recipient] } },
+    async listDue() { return { recipients: [candidate] } },
     delivery: { async authorize() {
       if (++calls <= 4) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Current state changed')
       if (recovery === 'revoked') return undefined
@@ -369,7 +401,7 @@ for (const recovery of ['revoked', 'optout', 'cas']) test(`known conflicts defer
   }
   for (let attempt = 0; attempt < 4; attempt++) {
     expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 1 })
-    expect(f.rows.get('SHARD#7')?.pending).toEqual(attempt === 2 ? [] : [{ recipient, attempts: 0, scheduledAt: start, conflicts: attempt === 3 ? 1 : attempt + 1 }])
+    expect(f.rows.get('SHARD#7')?.pending).toEqual(attempt === 2 ? [] : [{ recipient, attempts: 0, scheduledAt: start, frequency: 'daily', conflicts: attempt === 3 ? 1 : attempt + 1 }])
     expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
     expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
     clock += 60_000

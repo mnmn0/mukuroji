@@ -1,4 +1,4 @@
-import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestDependencies, type InboxDigestRecipient } from './inbox-digest'
+import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestCandidate, type InboxDigestDependencies, type InboxDigestRecipient } from './inbox-digest'
 import { PlanningError } from '../../planning'
 
 /** Bounded retry, including failures before a delivery claim exists. */
@@ -6,6 +6,7 @@ export type InboxDigestPending = {
   /** Reauthorized destination. */ recipient: InboxDigestRecipient
   /** Prior worker failures, zero through two. */ attempts: number
   /** Original trusted scheduling time; absent only on legacy checkpoint rows. */ scheduledAt?: number
+  /** Discovery cadence; legacy work without it is cancelled, never backdated. */ frequency?: InboxDigestCandidate['frequency']
   /** Page-local conflict deferrals, independent of infrastructure attempts. */ conflicts?: number
 }
 
@@ -42,7 +43,7 @@ export interface InboxDigestCheckpointStore {
 export type InboxDigestWorkerDependencies = {
   /** Durable shard leases and pending pages. */ checkpoints: InboxDigestCheckpointStore
   /** Strongly rechecked due candidates, at most twenty per call. */
-  listDue(shard: number, cursor: string | undefined, limit: number): Promise<{ /** Due recipients. */ recipients: InboxDigestRecipient[]; /** Explicit continuation. */ cursor?: string }>
+  listDue(shard: number, cursor: string | undefined, limit: number): Promise<{ /** Due recipients with strongly checked discovery cadence. */ recipients: InboxDigestCandidate[]; /** Explicit continuation. */ cursor?: string }>
   /** Current recipient authorization and atomic delivery. */ delivery: InboxDigestDependencies
   /** Trusted clock. */ now(): number
 }
@@ -62,9 +63,11 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     const page = await dependencies.listDue(shard, state.cursor, limit)
     if (page.recipients.length > limit || (page.cursor !== undefined && page.cursor === state.cursor)) throw new Error('Invalid digest continuation')
     const unique = new Map(state.pending.map((item) => [JSON.stringify(item.recipient), item]))
-    for (const recipient of page.recipients) if (!unique.has(JSON.stringify(recipient))) {
+    for (const candidate of page.recipients) {
+      const recipient = { workspaceId: candidate.workspaceId, memberKey: candidate.memberKey }
+      if (unique.has(JSON.stringify(recipient))) continue
       const parked = await dependencies.checkpoints.readDeferred(recipient)
-      unique.set(JSON.stringify(recipient), parked ? { ...parked, conflicts: 0 } : { recipient, attempts: 0, scheduledAt: dependencies.now() })
+      unique.set(JSON.stringify(recipient), parked ? { ...parked, conflicts: 0 } : { recipient, attempts: 0, scheduledAt: dependencies.now(), frequency: candidate.frequency })
     }
     state = await dependencies.checkpoints.save({ ...state, pending: [...unique.values()], cursor: page.cursor }, dependencies.now(), false)
   }
@@ -79,7 +82,9 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     let permanent = false
     let conflict = false
     try {
-      if (await deliverInboxDigest(dependencies.delivery, recipient, dependencies.now(), item.scheduledAt) === 'delivered') result.delivered++
+      // Legacy work cannot prove its original cadence. Acknowledge cancellation;
+      // subsequent strongly checked discovery may bind current consent afresh.
+      if (item.frequency && await deliverInboxDigest(dependencies.delivery, recipient, dependencies.now(), item.scheduledAt, item.frequency) === 'delivered') result.delivered++
     } catch (error) {
       // Exhausted intervals advance through the due index. Permanent storage or
       // identity failures require durable inspection evidence without more retries.

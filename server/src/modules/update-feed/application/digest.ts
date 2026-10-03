@@ -119,7 +119,7 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   if (!replay && (existing?.attempts ?? 0) >= 3) throw new PlanningError(409, 'UpdateFeedDigestAttemptsExhausted', 'Digest preview retry limit reached for this interval.')
   const token = randomUUID()
   if (!replay) {
-    const receipt: UpdateFeedDigestReceipt = { id, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, token, leaseUntil: now + 60_000, startedAt: existing?.startedAt ?? scheduledAt, count: 0 }
+    const receipt: UpdateFeedDigestReceipt = { id, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, token, leaseUntil: now + 60_000, startedAt: existing?.startedAt ?? now, count: 0 }
     state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].slice(-20) }, undefined, savedRevision)
   }
   try {

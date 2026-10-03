@@ -5,7 +5,7 @@ import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '.
 import { digestStorageFailure } from './digest-storage-failure'
 import { createNotificationRecipientKey, NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences } from '../../notifications'
 import { emptyDigestState, parseDigestState } from '../application/digest'
-import { inboxDigestInterval, type InboxDigestMessage, type InboxDigestRecipient, type InboxDigestStore } from '../application/inbox-digest'
+import { inboxDigestInterval, type InboxDigestCandidate, type InboxDigestMessage, type InboxDigestRecipient, type InboxDigestStore } from '../application/inbox-digest'
 import { createInboxDigestNotification } from './inbox-digest-notification'
 import { digestSavedFeedsFence } from './saved-feeds-store'
 
@@ -100,7 +100,9 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
     if (!Number.isSafeInteger(planningRevision) || planningRevision < 0 || current.revision !== state.revision || !current.preferences.enabled || !before || before.status !== 'pending' || before.leaseUntil <= this.now() || !after || after.status !== 'completed' || after.token !== before.token || after.attempts !== before.attempts || after.leaseUntil !== 0 || JSON.stringify(current.preferences) !== JSON.stringify(state.preferences) || JSON.stringify(state.history) !== JSON.stringify(current.history.map((row) => row.id === id ? after : row))) throw conflict()
     if (after.startedAt !== before.startedAt) throw conflict()
     const startedAt = before.startedAt ?? before.leaseUntil - 60_000
-    if (startedAt < 0 || startedAt > before.leaseUntil - 60_000 || inboxDigestInterval(state, startedAt) !== id) throw conflict()
+    // Logical interval may precede the first successful claim after an outage.
+    // Its validated, unchanged receipt ID must never be later than the claim.
+    if (startedAt < 0 || startedAt > before.leaseUntil - 60_000 || Date.parse(`${id.slice(id.indexOf(':') + 1)}T00:00:00.000Z`) > startedAt) throw conflict()
     const expectedMessage = { id: `update-feed-digest:${id}`, occurredAt: new Date(startedAt).toISOString(), deepLink: '/updates' }
     if ((after.count === 0) !== (message === undefined) || (message && (message.id !== expectedMessage.id || message.occurredAt !== expectedMessage.occurredAt || message.deepLink !== '/updates'))) throw conflict()
     const recipientKey = createNotificationRecipientKey(recipient.workspaceId, recipient.memberKey)
@@ -135,7 +137,7 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       KeyConditionExpression: '#shard = :shard AND #due <= :due', ExpressionAttributeNames: { '#shard': INBOX_DIGEST_INDEX.partitionKey, '#due': INBOX_DIGEST_INDEX.sortKey },
       ExpressionAttributeValues: { ':shard': `inbox-digest#${shard}`, ':due': now }, Limit: limit, ...(cursor ? { ExclusiveStartKey: cursor } : {}),
     })).catch((error: unknown) => digestStorageFailure(error))
-    const recipients: InboxDigestRecipient[] = []
+    const recipients: InboxDigestCandidate[] = []
     for (const item of page.Items ?? []) {
       if (typeof item.workspaceId !== 'string' || !item.workspaceId.trim() || typeof item.recordKey !== 'string' || !item.recordKey.startsWith('UPDATE_FEED_INBOX_DIGEST#')) throw corruptCandidate()
       const { Item: row } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: { workspaceId: item.workspaceId, recordKey: item.recordKey }, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
@@ -144,7 +146,7 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       const recipient = normalize({ workspaceId: item.workspaceId, memberKey: row.memberKey })
       const state = parseRow(row, recipient)
       if (row.recordKey !== item.recordKey) throw corruptCandidate()
-      if (state.preferences.enabled && row.inboxDigestShard === `inbox-digest#${shard}` && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= now) recipients.push(recipient)
+      if (state.preferences.enabled && row.inboxDigestShard === `inbox-digest#${shard}` && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= now) recipients.push({ ...recipient, frequency: state.preferences.frequency })
     }
     return { recipients, cursor: page.LastEvaluatedKey }
   }
