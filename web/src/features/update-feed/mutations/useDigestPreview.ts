@@ -1,0 +1,67 @@
+import { useEffect, useRef, useState } from 'react'
+import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview } from '@mukuroji/contracts'
+import { generateDigestPreview, saveDigestPreferences } from '../api/digest'
+import { useDigestState } from '../queries/useDigestState'
+
+/** Ephemeral result bound to the metadata revision observed after generation. */
+type PreviewSnapshot = {
+  /** Fresh authorized response, never shared with SWR. */
+  result: UpdateFeedDigestPreview
+  /** Metadata revision; a later refresh invalidates this result. */
+  revision: number
+}
+
+/** Owns explicit preview actions and short-lived session-local content.
+ * @param token - Current session, also used as the owner component's React key.
+ * @param enabled - Whether Workspace data is currently readable.
+ * @param locale - Current target-label language.
+ * @param guard - Shared session recovery boundary.
+ * @returns Serialized actions and fail-closed preview state.
+ */
+export function useDigestPreview(token: string | undefined, enabled: boolean, locale: 'ja' | 'en', guard: <T>(request: Promise<T>) => Promise<T>) {
+  const query = useDigestState(token, enabled, guard)
+  const [preview, setPreview] = useState<PreviewSnapshot>()
+  const [error, setError] = useState<unknown>()
+  const [pending, setPending] = useState(false)
+  const active = useRef(true)
+  const busy = useRef(false)
+  const epoch = useRef(0)
+  /** Invalidates pending content as well as visible content. */
+  const dismiss = () => { epoch.current += 1; setPreview(undefined) }
+  useEffect(() => {
+    active.current = true
+    /** Content cannot survive switching away from the authenticated screen. */
+    const clear = () => { epoch.current += 1; setPreview(undefined) }
+    window.addEventListener('blur', clear)
+    window.addEventListener('focus', clear)
+    document.addEventListener('visibilitychange', clear)
+    return () => { active.current = false; epoch.current += 1; window.removeEventListener('blur', clear); window.removeEventListener('focus', clear); document.removeEventListener('visibilitychange', clear) }
+  }, [])
+  useEffect(() => {
+    if (!preview) return
+    // External timer bounds ephemeral content without triggering any generation.
+    const timer = window.setTimeout(() => setPreview(undefined), 15_000)
+    return () => window.clearTimeout(timer)
+  }, [preview])
+  /** Performs one explicit action without automatically retrying mutations. */
+  const run = async (preferences?: UpdateFeedDigestPreferences): Promise<boolean> => {
+    if (!token || !enabled || !query.data || busy.current) return false
+    busy.current = true; setPending(true); setError(undefined); dismiss()
+    const generation = epoch.current
+    try {
+      if (preferences) {
+        const state = await guard(saveDigestPreferences(token, query.data.revision, preferences))
+        if (active.current) await query.mutate(state, { revalidate: false })
+      } else {
+        const result = await guard(generateDigestPreview(token, locale))
+        const refreshed = await query.mutate()
+        if (active.current && generation === epoch.current && refreshed?.preferences.enabled && JSON.stringify(refreshed.preferences) === JSON.stringify(query.data.preferences)) setPreview({ result, revision: refreshed.revision })
+      }
+      return active.current
+    } catch (failure) {
+      if (active.current) { setError(failure); setPreview(undefined); await query.mutate().catch(() => undefined) }
+      return false
+    } finally { busy.current = false; if (active.current) setPending(false) }
+  }
+  return { state: query.data, loading: query.isLoading, error: query.error ?? error, pending, preview: query.error || !enabled || !token || query.isValidating || query.data?.revision !== preview?.revision ? undefined : preview?.result, save: (preferences: UpdateFeedDigestPreferences) => run(preferences), generate: () => run(), dismiss, reload: () => { dismiss(); setError(undefined); void query.mutate().catch(() => undefined) } }
+}

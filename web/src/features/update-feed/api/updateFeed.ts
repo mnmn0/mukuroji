@@ -66,8 +66,11 @@ function isReadState(value: unknown): value is UpdateFeedReadState {
   return isRecord(value) && typeof value.read === 'boolean' && isNonnegativeSafeInteger(value.revision)
 }
 
-/** Validates every field used by the view rather than asserting remote JSON. */
-function isEntry(value: unknown): value is UpdateFeedEntry {
+/** Validates every field used by Feed and digest views.
+ * @param value - Untrusted remote entry.
+ * @returns Whether every rendered field satisfies the shared contract.
+ */
+export function isEntry(value: unknown): value is UpdateFeedEntry {
   if (!isRecord(value) || !isRecord(value.target) || typeof value.title !== 'string' ||
     !isHealth(value.health) || typeof value.updateState !== 'string' ||
     !['not-configured', 'missing', 'current', 'stale', 'overdue'].includes(value.updateState) ||

@@ -1,7 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import { updateFeedFixture } from '../src/features/update-feed/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import type { SavedUpdateFeeds } from '@mukuroji/contracts'
+import type { SavedUpdateFeeds, UpdateFeedDigestState } from '@mukuroji/contracts'
 
 /** Installs session and durable mock server state; reloads retain only server-owned read state.
  * @param page - Browser page whose API requests are intercepted.
@@ -10,7 +10,8 @@ import type { SavedUpdateFeeds } from '@mukuroji/contracts'
  */
 async function mockFeed(page: Page, guest = false) {
   const saved: SavedUpdateFeeds = { revision: 0, feeds: [] }
-  const state = { feed: structuredClone(updateFeedFixture), saved, denied: false, failed: false, forbidden: false, conflict: false }
+  const digest: UpdateFeedDigestState = { revision: 0, preferences: { enabled: false, frequency: 'daily', views: ['for-me'] }, history: [] }
+  const state = { feed: structuredClone(updateFeedFixture), saved, digest, digestRequests: 0, digestConflict: false, denied: false, failed: false, forbidden: false, conflict: false }
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'feed-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
     localStorage.setItem('mukuroji.locale', 'en')
@@ -23,6 +24,23 @@ async function mockFeed(page: Page, guest = false) {
     if (state.forbidden) return route.fulfill({ status: 403, json: { code: 'WorkspacePermissionDenied' } })
     if (state.failed) return route.fulfill({ status: 503, json: { message: 'Unavailable' } })
     const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/digest')) {
+      if (route.request().method() === 'PUT') {
+        const input = route.request().postDataJSON()
+        if (state.digestConflict || input.expectedRevision !== state.digest.revision) return route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+        state.digest = { ...state.digest, revision: state.digest.revision + 1, preferences: input.preferences }
+      }
+      return route.fulfill({ json: state.digest })
+    }
+    if (url.pathname.endsWith('/digest/preview')) {
+      state.digestRequests += 1
+      if (state.digestConflict) return route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+      const replay = state.digest.history.length > 0
+      const id = state.digest.preferences.frequency === 'weekly' ? 'weekly:2026-09-28' : 'daily:2026-10-03'
+      const entries = state.denied ? [] : state.feed.entries.filter((entry) => entry.latestUpdate && entry.readState?.read === false)
+      state.digest = { ...state.digest, revision: state.digest.revision + 1, history: [{ id, status: 'completed', attempts: 1, token: 'fixture', leaseUntil: 0, count: entries.length }] }
+      return route.fulfill({ json: { id, replay, entries, truncated: false, transport: 'preview' } })
+    }
     if (url.pathname.endsWith('/saved')) {
       if (route.request().method() === 'PUT') {
         const input = route.request().postDataJSON()
@@ -48,6 +66,116 @@ async function mockFeed(page: Page, guest = false) {
   })
   return state
 }
+
+test('manual digest settings, preview and bodyless history work at desktop and phone widths', async ({ page }, testInfo) => {
+  const state = await mockFeed(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/updates')
+  const disclosure = page.locator('summary', { hasText: 'Digest preview' })
+  await disclosure.focus()
+  await page.keyboard.press('Enter')
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(panel.getByText('Preview only · No notifications are sent')).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  await panel.getByLabel('Enable manual previews').check()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByLabel('Recent', { exact: true }).check()
+  await panel.getByRole('button', { name: 'Save preview settings' }).click()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  expect(state.digest.preferences.frequency).toBe('weekly')
+  expect(state.digestRequests).toBe(0)
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  const preview = panel.getByLabel('Current preview', { exact: true })
+  await expect(preview.getByRole('link', { name: 'Customer onboarding' })).toBeVisible()
+  await expect(panel.getByText(/Preview generated/)).toBeVisible()
+  await expect(preview.getByRole('link')).toHaveAttribute('href', /targetType=project/)
+  await page.screenshot({ path: testInfo.outputPath('digest-ui-desktop.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('digest-ui-mobile.png'), fullPage: true })
+  await preview.getByRole('link').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: testInfo.outputPath('digest-ui-mobile-result.png'), fullPage: true })
+  await panel.getByRole('button', { name: 'Generate preview' }).focus()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(preview.getByText(/Refreshed for current access/)).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeFocused()
+  expect(state.digest.history).toHaveLength(1)
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+  await expect(preview).toHaveCount(0)
+})
+
+test('digest conflicts require reload and permission loss removes preview content', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  state.digestConflict = true
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  expect(state.digestRequests).toBe(1)
+  state.digestConflict = false
+  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByLabel('Current preview')).toBeVisible()
+  state.forbidden = true
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByText('You no longer have access to digest previews.')).toBeVisible()
+  await expect(panel.getByLabel('Current preview')).toHaveCount(0)
+  await expect(panel.locator('form')).toHaveCount(0)
+})
+
+test('changing saved feeds discards the preview and does not alter digest settings', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  state.saved.feeds.push({ id: 'risk', name: 'My risks', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: ['at-risk'], updateStates: [] } })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  await page.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(page.getByLabel('Current preview')).toBeVisible()
+  await page.getByRole('combobox', { name: 'Saved feeds', exact: true }).selectOption('risk')
+  await expect(page.getByLabel('Current preview')).toHaveCount(0)
+  expect(state.digest.preferences.views).toEqual(['for-me'])
+  expect(state.digestRequests).toBe(1)
+})
+
+test('a late preview response cannot restore content after browser focus changes', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  let release: (() => void) | undefined
+  let started: (() => void) | undefined
+  const waiting = new Promise<void>((resolve) => { started = resolve })
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/planning/update-feed/digest/preview*', async (route) => {
+    started?.()
+    await gate
+    return route.fulfill({ json: { id: 'daily:2026-10-03', replay: false, entries: state.feed.entries.slice(0, 1), truncated: false, transport: 'preview' } })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  await page.getByRole('button', { name: 'Generate preview' }).click()
+  await waiting
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+  release?.()
+  await expect(page.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  await expect(page.getByLabel('Current preview')).toHaveCount(0)
+})
+
+test('permission denial on conflict refresh takes precedence over the earlier conflict', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.route('**/api/planning/update-feed/digest/preview*', async (route) => {
+    state.forbidden = true
+    return route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  await page.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(page.getByText('You no longer have access to digest previews.')).toBeVisible()
+  await expect(page.getByText(/Settings changed or a preview is running/)).toHaveCount(0)
+})
 
 test('explains membership, watch and interaction separately from health, submission and attention', async ({ page }) => {
   const state = await mockFeed(page)

@@ -97,7 +97,11 @@ The existing Planning table stores one member-scoped digest metadata row. CAS pr
 
 Completed receipt replay recomputes content under current permissions and read state; no historic summary, title, target identifier, error text, or notification body is retained. Receipt counts describe the original completion and can differ from a later freshly authorized preview. Generating a preview does not mark reports read or mutate canonical updates.
 
-This slice has only the preview transport. Digest UI, custom saved-feed selection for digests, live Inbox/notification delivery, scheduler integration and delivery-level idempotency remain future work. No live send, worker schedule, infrastructure, IAM or credential change is included. It does not close Issue #241.
+The Updates screen now exposes a keyboard-accessible Digest preview disclosure. It loads settings/history only when opened, supports daily/weekly and standard-view preferences with explicit save, and offers manual generation only after settings are saved. The preview-only label is always visible. Receipt statuses describe preview generation, never delivery. Permission failures remove settings and report content; conflicts offer metadata reload rather than automatic generation. Guests have read-only access.
+
+Preview bodies stay in component-local memory, outside SWR and browser storage. They clear on edits, panel close, session/locale/view/saved-definition/Planning-revision changes, browser focus/visibility changes, or after fifteen seconds. Later previews always request fresh server authorization. Saved custom feeds remain separate from digest standard-view selection. Japanese and English copy, narrow-screen wrapping, keyboard disclosure/actions, conflict recovery and permission loss are covered by UI tests.
+
+This slice has only the preview transport. Custom saved-feed selection for digests, live Inbox/notification delivery, scheduler integration and delivery-level idempotency remain future work. No live send, worker schedule, infrastructure, IAM or credential change is included. It does not close Issue #241.
 
 Health update の target は Project と Initiative の union です。Project は Planning entity ではないため `{teamId, projectId}` で Team-qualified に識別し、Initiative は `{entityId}` で識別します。Target ごとに update owner、週次または月次 cadence、IANA time zone、次回期限、事前 reminder、任意の期限後 escalation を設定できます。月次 cadence は設定時の local day を anchor とし、1月31日から2月末へ clamp した後も3月31日に戻します。週次 cadence は local wall-clock を維持して DST をまたぎます。
 
