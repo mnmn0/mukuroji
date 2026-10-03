@@ -89,6 +89,26 @@ for (const corrupt of [true, false]) test(`actual read-state adapter corruption=
   expect(f.inbox.size).toBe(0)
 })
 
+for (const sameTeam of [true, false]) test(`Feed duplicate classification uses Team-qualified identity: same Team ${sameTeam}`, async () => {
+  const f = await fixture()
+  const first = f.snapshot.updateTargets[0]
+  if (!first) throw new Error('Fixture missing')
+  const second = structuredClone(first)
+  if (!sameTeam && second.target.type === 'project') second.target.teamId = 'other-team'
+  f.snapshot.updateTargets.push(second)
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [recipient] }), dependencies: f.dependencies }, now)
+  expect(result).toMatchObject({ processed: 1, delivered: sameTeam ? 0 : 1, failed: [], terminal: sameTeam ? [{ recipient, reason: 'corrupt-state' }] : [] })
+  expect(f.inbox.size).toBe(sameTeam ? 0 : 1)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`${frequency} real future receipts preserve clock rollback protection`, async () => {
+  const f = await fixture()
+  await f.configure({ enabled: true, frequency, views: ['recent'] })
+  expect(await f.run(now + 7 * 86_400_000)).toBe('delivered')
+  expect(await f.run(now)).toBe('not-due')
+  expect(f.inbox.size).toBe(1)
+})
+
 test('delivers a bodyless existing-format Inbox notification once per interval', async () => {
   const f = await fixture(60)
   expect(await f.run()).toBe('delivered')

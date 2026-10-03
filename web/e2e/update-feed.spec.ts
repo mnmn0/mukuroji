@@ -80,6 +80,40 @@ async function mockFeed(page: Page, guest = false, expiresAt?: number) {
   return state
 }
 
+for (const action of ['save-enabled', 'save-disabled', 'error']) for (const outside of [false, true]) test(`inactive Inbox action ${action} restores focus on return with outside focus ${outside}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.inbox.preferences.enabled = true
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    waiting = true
+    await gate
+    if (action === 'error') return route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+    return route.fallback()
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  if (action === 'save-disabled') await panel.getByLabel('Receive update digests in Inbox').uncheck()
+  else await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => waiting).toBe(true)
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur')) })
+  release()
+  if (action === 'error') await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  else await expect.poll(() => state.inbox.revision).toBe(1)
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  await expect(summary).not.toBeFocused()
+  const other = page.getByLabel('Feed', { exact: true })
+  if (outside) await other.focus()
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true }); window.dispatchEvent(new Event('focus')) })
+  await expect(outside ? other : summary).toBeFocused()
+})
+
 for (const conflict of [false, true]) test(`Inbox keyboard save restores owned focus with conflict=${conflict}`, async ({ page }) => {
   const state = await mockFeed(page)
   let puts = 0
@@ -385,6 +419,45 @@ for (const action of ['save-off', 'conflict']) test(`keyboard ${action} restores
   await page.keyboard.press('Enter')
   await expect(summary).toBeFocused()
   await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+})
+
+for (const action of ['save-enabled', 'save-disabled', 'generate', 'error']) for (const outside of [false, true]) test(`inactive preview action ${action} restores focus on return with outside focus ${outside}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  let completed = false
+  await page.route('**/api/planning/update-feed/digest**', async (route) => {
+    if (!['POST', 'PUT'].includes(route.request().method())) return route.fallback()
+    waiting = true
+    await gate
+    if (action === 'error') await route.fulfill({ status: 409, json: { code: 'UpdateFeedDigestConflict' } })
+    else await route.fallback()
+    completed = true
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Digest preview' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  if (action === 'save-disabled') await panel.getByLabel('Enable manual previews').uncheck()
+  else if (action !== 'generate') await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: action === 'generate' ? 'Generate preview' : 'Save preview settings' }).focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => waiting).toBe(true)
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false }); window.dispatchEvent(new Event('blur')) })
+  release()
+  await expect.poll(() => completed).toBe(true)
+  const generate = panel.getByRole('button', { name: 'Generate preview', exact: true })
+  if (action === 'error') await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  else if (action !== 'generate') await expect.poll(() => state.digest.revision).toBe(1)
+  await expect(generate).toBeVisible()
+  await expect(summary).not.toBeFocused()
+  await expect(generate).not.toBeFocused()
+  const other = page.getByLabel('Feed', { exact: true })
+  if (outside) await other.focus()
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true }); window.dispatchEvent(new Event('focus')) })
+  await expect(outside ? other : action === 'save-enabled' || action === 'generate' ? generate : summary).toBeFocused()
 })
 
 test('a saved preview draft follows later external settings without a false conflict', async ({ page }) => {
