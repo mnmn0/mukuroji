@@ -7124,7 +7124,9 @@ routeApp.put('/api/planning/update-feed/read-state', async (c) => {
       if (snapshot.revision !== authorizationRevision) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Target authorization changed. Refresh and retry.')
       return snapshot
     } }
-    const store = workItemDependencies.updateFeedReadState.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal))
+    const callerChecks = createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account')
+    if (callerChecks.length === 0) throw new PlanningError(503, 'UpdateFeedAuthorizationUnavailable', 'Caller authorization conditions are unavailable.')
+    const store = workItemDependencies.updateFeedReadState.withCallerAuthorization(callerChecks)
     return c.json(await setUpdateFeedReadState(reader, store, principal.directoryId, input))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
@@ -19614,6 +19616,7 @@ function toWorkspaceAccessErrorResponse(c: Context, error: unknown) {
   }
 
   const status = error.status === 400 ||
+    error.status === 401 ||
     error.status === 413 ||
     error.status === 403 ||
     error.status === 404 ||
@@ -40325,14 +40328,17 @@ async function createDependencyFencedWorkItemAuthorizationSnapshot(
  *
  * @param principal - Principal whose endpoint-manager permissions were evaluated.
  * @param additionalMembers - Additional active members whose future permissions are required.
+ * @param includePrincipalMembership - Whether the caller has a persisted membership row; false for service-account feed state.
  * @returns Workspace member and optional enterprise CONTROL condition checks.
  */
 function createPlanningCallerAuthorizationConditionChecks(
   principal: WorkspacePrincipal,
   additionalMembers: readonly Pick<WorkspaceMember, 'memberKey' | 'version'>[] = [],
+  includePrincipalMembership = true,
 ): PlanningCallerAuthorizationConditionCheck[] {
   const members = new Map<string, Pick<WorkspaceMember, 'memberKey' | 'version'>>()
-  for (const member of [principal.workspaceMember, ...additionalMembers]) {
+  const principalMembers = includePrincipalMembership ? [principal.workspaceMember] : []
+  for (const member of [...principalMembers, ...additionalMembers]) {
     const memberKey = normalizeProjectMemberKey(member.memberKey)
     if (!members.has(memberKey)) members.set(memberKey, member)
   }

@@ -14,6 +14,7 @@ const {
   resetTestApp,
   seedPlanningWorkspaceParentAndScopedChild,
   setTestAppDependencies,
+  withTestEnvironment,
 } = createApiTestHarness()
 import {
   InMemoryPlanningClient,
@@ -54,6 +55,46 @@ test('authenticates read-state requests before parsing malformed JSON', async ()
   })
   expect(authenticationAttempted).toBe(true)
   expect(response.status).toBe(401)
+})
+
+test('persists service-account read state using Enterprise control without a synthetic member fence', async () => {
+  const workspaceId = 'workspace-service-feed'
+  await withTestEnvironment({ ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable', MUKUROJI_WORKSPACE_DIRECTORY_ID: workspaceId }, async () => {
+    configureFakeProjectClients(false)
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const timestamp = new Date().toISOString()
+    const issued = await identity.createServiceAccountWithToken({
+      workspaceId, accountId: 'feed-reader', displayName: 'Feed reader',
+      permissions: ['planning.read', 'projects.read', 'service-accounts.use'], roleId: 'project:viewer',
+      scope: { workspaceId, kind: 'project', targetId: 'refero' }, credentialLifetimeDays: 30,
+      allowedSourceCidrs: [], status: 'active', credentialGeneration: 0, revision: 1, createdAt: timestamp, updatedAt: timestamp,
+    }, 'create-feed-reader', 'create-feed-reader-fingerprint')
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    const target: PlanningUpdateTarget = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+    await planning.configureUpdateCadence(workspaceId, { target, expectedRevision: 0, cadence: {
+      updateOwnerMemberKey: 'demo@example.com', cadence: { unit: 'week', count: 1 }, timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24,
+    } }, { workItems: [] })
+    await planning.publishUpdate(workspaceId, { target, expectedRevision: 1, id: 'report', health: 'on-track', risk: 'none', summary: 'Visible report', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '', evidence: [] }, 'demo@example.com', { workItems: [] })
+    setTestAppDependencies({ planning, enterpriseIdentity: identity })
+    const store = getTestAppDependencies().workItems.updateFeedReadState
+    const bindCaller = store.withCallerAuthorization.bind(store)
+    let checked = false
+    store.withCallerAuthorization = (checks) => {
+      expect(checks).toHaveLength(1)
+      expect(checks[0]?.ConditionCheck).toMatchObject({ TableName: 'EnterpriseIdentityTable', Key: { scopeKey: `WORKSPACE#${workspaceId}`, recordKey: 'CONTROL' } })
+      expect(checks[0]?.ConditionCheck.ExpressionAttributeValues?.[':expectedControlRevision']).toBeGreaterThan(0)
+      checked = true
+      return bindCaller(checks)
+    }
+    const input = { target, version: 1, read: true, expectedRevision: 0 }
+    const response = await app.request('/api/planning/update-feed/read-state', { method: 'PUT', headers: { Authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ read: true, revision: 1 })
+    expect(checked).toBe(true)
+    await identity.revokeServiceAccountToken(workspaceId, issued.account.accountId)
+    const revoked = await app.request('/api/planning/update-feed/read-state', { method: 'PUT', headers: { Authorization: `Bearer ${issued.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...input, read: false, expectedRevision: 1 }) })
+    expect(revoked.status).toBe(401)
+  })
 })
 
 /** Creates the canonical two-endpoint dependency input shared by API idempotency tests. */
