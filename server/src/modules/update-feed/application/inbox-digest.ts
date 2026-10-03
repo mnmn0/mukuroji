@@ -152,7 +152,7 @@ export type InboxDigestScheduleResult = {
   /** Failed candidates that must be retried separately from the continuation. */
   failed: InboxDigestRecipient[]
   /** Terminal candidates requiring inspection, never automatic retry. */
-  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' }[]
+  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' }[]
   /** Next source checkpoint; must not discard failed candidates. */
   cursor?: string
 }
@@ -161,12 +161,13 @@ export type InboxDigestScheduleResult = {
  * @param error - Application-classified delivery failure.
  * @returns A stable bodyless terminal category, or undefined for retryable failures.
  */
-export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | undefined {
+export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' | undefined {
   if (!(error instanceof PlanningError)) return undefined
   if (error.code === 'UpdateFeedDigestAttemptsExhausted') return 'exhausted'
   if (error.code === 'UpdateFeedDigestRecipientMismatch') return 'recipient-mismatch'
   if (error.code === 'UpdateFeedDigestCorruptState') return 'corrupt-state'
   if (error.code === 'UpdateFeedDigestStoragePermanent') return 'storage-permanent'
+  if (error.code === 'UpdateFeedDigestInvalid') return 'invalid-input'
   return undefined
 }
 

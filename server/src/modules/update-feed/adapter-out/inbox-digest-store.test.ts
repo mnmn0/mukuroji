@@ -7,7 +7,7 @@ import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import { InMemoryPlanningClient } from '../../planning/planning'
 import { NOTIFICATION_PREFERENCES_KEY, createNotificationRecipientKey, toNotificationItem } from '../../notifications'
 import { emptyDigestState } from '../application/digest'
-import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestContext } from '../application/inbox-digest'
+import { deliverInboxDigest, inboxDigestTerminalReason, runInboxDigestSchedule, type InboxDigestContext } from '../application/inbox-digest'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
 
@@ -26,6 +26,7 @@ async function fixture() {
   let readError: unknown
   let preferencesReadError: unknown
   let writeError: unknown
+  let sdkFailure: ((command: unknown) => unknown) | undefined
   let beforeTransaction: (() => void) | undefined
   const indexed: Record<string, unknown>[] = []
   /** Derives model coordinates from the known table schemas. */
@@ -47,6 +48,8 @@ async function fixture() {
   }
   // Only the SDK's overloaded send signature needs this test-only cast.
   client.send = (async (command: unknown) => {
+    const injected = sdkFailure?.(command)
+    if (injected !== undefined) throw injected
     commands.push(command)
     if (command instanceof GetCommand) {
       if (readError) throw readError
@@ -100,6 +103,8 @@ async function fixture() {
     failPreferencesRead(error: unknown) { preferencesReadError = error },
     /** Injects a transaction SDK failure or a size-aware cancellation vector. */
     failWrite(error: unknown) { writeError = error },
+    /** Injects an error at any one SDK boundary without altering stored rows. */
+    failCommand(failure: (command: unknown) => unknown) { sdkFailure = failure },
     /** Inspects notification rows separately from metadata and preferences. */
     notifications: () => [...rows.values()].filter((row) => row.itemType === 'notification'),
     /** Inspects the separate delivery metadata. */
@@ -208,6 +213,40 @@ test('concurrent Inbox preference creation is fenced and a retry cannot deliver 
   })
   await expect(f.run()).rejects.toMatchObject({ status: 409 })
   await expect(f.run()).rejects.toMatchObject({ status: 409 })
+  expect(f.notifications()).toHaveLength(0)
+})
+
+for (const boundary of ['metadata', 'preferences', 'query', 'second-candidate', 'write']) for (const [name, status, code] of [
+  ['TimeoutError', 503, 'UpdateFeedDigestRetryable'],
+  ['AccessDeniedException', 502, 'UpdateFeedDigestStoragePermanent'],
+  ['UnclassifiedNetworkFailure', 502, 'UpdateFeedDigestStorageFailure'],
+] as const) test(`${boundary} SDK ${name} is classified without partial success`, async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  const row = f.metadata()
+  const shard = Number(String(row.inboxDigestShard).split('#')[1])
+  f.indexed.push({ workspaceId: row.workspaceId, recordKey: row.recordKey }, { workspaceId: row.workspaceId, recordKey: row.recordKey })
+  let reads = 0
+  f.failCommand((command) => {
+    const fails = boundary === 'write' ? command instanceof TransactWriteCommand : boundary === 'query' ? command instanceof QueryCommand : command instanceof GetCommand && (boundary === 'preferences' ? command.input.TableName === 'notifications' : boundary === 'second-candidate' ? ++reads === 2 : true)
+    return fails ? Object.assign(new Error('Sensitive SDK detail'), { name }) : undefined
+  })
+  let deliveries = 0
+  const operation = boundary === 'metadata' ? f.store.get('w', 'reader') : boundary === 'preferences' ? f.run() : boundary === 'write' ? f.store.replace('w', 'reader', state) : runInboxDigestSchedule({ enabled: true, listCandidates: async () => { const page = await f.store.listDue(shard); return { recipients: page.recipients, cursor: JSON.stringify(page.cursor) } }, dependencies: { authorize: async () => { deliveries++; return f.context } } }, now)
+  await expect(operation).rejects.toMatchObject({ status, code })
+  expect(f.notifications()).toHaveLength(0)
+  expect(deliveries).toBe(0)
+  if (boundary === 'second-candidate') expect(reads).toBe(2)
+})
+
+for (const malformed of ['index-key', 'owner', 'state']) test(`due candidate ${malformed} corruption is typed and returns no page`, async () => {
+  const f = await fixture()
+  const row = f.metadata()
+  const shard = Number(String(row.inboxDigestShard).split('#')[1])
+  f.indexed.push({ workspaceId: row.workspaceId, recordKey: malformed === 'index-key' ? 'wrong' : row.recordKey })
+  if (malformed === 'owner') row.memberKey = ''
+  if (malformed === 'state') row.history = 'invalid'
+  await expect(f.store.listDue(shard)).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
   expect(f.notifications()).toHaveLength(0)
 })
 

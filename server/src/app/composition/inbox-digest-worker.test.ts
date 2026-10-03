@@ -2,10 +2,21 @@ import { expect, test } from 'bun:test'
 import { createInboxDigestRecipientAuthorization } from '../../api/api-router'
 import { createApiTestHarness } from '../../api/test-support/api-test-harness'
 import { InMemoryUpdateFeedDigestStore } from '../../modules/update-feed/adapter-out/digest-store'
-import { createProductionInboxDigestWorkerHandler } from './inbox-digest-worker'
+import { createProductionInboxDigestWorkerHandler, decodeCursor } from './inbox-digest-worker'
 import { handler } from '../../handlers/inbox-digest-worker-handler'
 
 const recipient = { workspaceId: 'user#demo@example.com', memberKey: 'demo@example.com' }
+
+test('persisted cursor decoding rejects malformed continuations with a typed nonreflective error', () => {
+  const key = { workspaceId: 'workspace', recordKey: 'UPDATE_FEED_INBOX_DIGEST#hash', inboxDigestShard: 'inbox-digest#2', inboxDigestDueAt: 123 }
+  expect(decodeCursor(undefined, 2)).toBeUndefined()
+  expect(decodeCursor(JSON.stringify({ ...key, ignored: 'not forwarded' }), 2)).toEqual(key)
+  for (const cursor of ['private malformed JSON', 'x'.repeat(4097), 'null', JSON.stringify({ ...key, workspaceId: '' }), JSON.stringify({ ...key, inboxDigestShard: 'inbox-digest#3' }), JSON.stringify({ ...key, inboxDigestDueAt: -1 })]) {
+    try { decodeCursor(cursor, 2); throw new Error('Expected rejection') } catch (error) {
+      expect(error).toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState', message: 'Inbox digest continuation is unavailable.' })
+    }
+  }
+})
 
 test('disabled worker and entrypoint perform no resource initialization', async () => {
   const prior = process.env.INBOX_DIGEST_WORKER_ENABLED
