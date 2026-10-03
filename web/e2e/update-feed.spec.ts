@@ -128,6 +128,39 @@ test('Inbox settings conflict requires reload and permission loss hides consent'
   expect(state.digestRequests).toBe(0)
 })
 
+for (const source of ['feed', 'saved']) test(`${source} outage leaves healthy standard digest controls available`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.route(source === 'feed' ? '**/api/planning/update-feed?*' : '**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 503, json: { code: 'Unavailable' } }))
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
+  expect(state.digestRequests).toBe(1)
+})
+
+test('generation after another session changes preferences reports conflict instead of silent success', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.digest.preferences.enabled = true
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const panel = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+  state.digest.preferences = { enabled: true, frequency: 'weekly', views: ['recent'] }
+  state.digest.revision++
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  await expect(panel.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  expect(state.digestRequests).toBe(1)
+  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
+  expect(state.digestRequests).toBe(1)
+  await panel.getByRole('button', { name: 'Generate preview' }).click()
+  await expect(panel.getByLabel('Current preview', { exact: true })).toBeVisible()
+})
+
 for (const interruption of ['deadline', 'blur', 'close']) test(`stalled metadata releases preview on ${interruption} without late resurrection`, async ({ page }) => {
   const state = await mockFeed(page)
   state.digest.preferences.enabled = true

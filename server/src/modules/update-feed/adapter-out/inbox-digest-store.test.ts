@@ -5,7 +5,7 @@ import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import { InMemoryPlanningClient } from '../../planning/planning'
 import { NOTIFICATION_PREFERENCES_KEY, createNotificationRecipientKey, toNotificationItem } from '../../notifications'
 import { emptyDigestState } from '../application/digest'
-import { deliverInboxDigest, type InboxDigestContext } from '../application/inbox-digest'
+import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestContext } from '../application/inbox-digest'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
 
@@ -22,6 +22,7 @@ async function fixture() {
   let loseClaimResponse = false
   let clock = now
   let readError: unknown
+  let writeError: unknown
   let beforeTransaction: (() => void) | undefined
   const indexed: Record<string, unknown>[] = []
   /** Derives model coordinates from the known table schemas. */
@@ -56,6 +57,7 @@ async function fixture() {
       return { Items: indexed, LastEvaluatedKey: { workspaceId: 'next', recordKey: 'next' } }
     }
     if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected SDK command')
+    if (writeError) throw typeof writeError === 'function' ? writeError(command.input.TransactItems?.length ?? 0) : writeError
     beforeTransaction?.()
     const items = command.input.TransactItems ?? []
     const reasons = items.map((item) => {
@@ -68,8 +70,8 @@ async function fixture() {
     if (reasons.some((reason) => reason.Code !== 'None')) throw Object.assign(new Error('Conditional failure'), { name: 'TransactionCanceledException', CancellationReasons: reasons })
     // Evaluate every condition first; apply all writes without an await boundary.
     for (const item of items) if (item.Put?.Item && item.Put.TableName) rows.set(coordinate(item.Put.TableName, item.Put.Item), structuredClone(item.Put.Item))
-    if (loseClaimResponse) { loseClaimResponse = false; throw new Error('Lost claim response') }
-    if (loseResponse && items.some((item) => item.Put?.TableName === 'notifications')) throw new Error('Lost response')
+    if (loseClaimResponse) { loseClaimResponse = false; throw Object.assign(new Error('Lost claim response'), { name: 'TimeoutError' }) }
+    if (loseResponse && items.some((item) => item.Put?.TableName === 'notifications')) throw Object.assign(new Error('Lost response'), { name: 'TimeoutError' })
     return {}
   }) as DynamoDBDocumentClient['send']
   const store = new DynamoDbInboxDigestStore('planning', 'notifications', client, [membership], () => clock, 'ja')
@@ -90,6 +92,8 @@ async function fixture() {
     advance(milliseconds: number) { clock += milliseconds },
     /** Injects a read-only SDK failure. */
     failRead(error: unknown) { readError = error },
+    /** Injects a transaction SDK failure or a size-aware cancellation vector. */
+    failWrite(error: unknown) { writeError = error },
     /** Inspects notification rows separately from metadata and preferences. */
     notifications: () => [...rows.values()].filter((row) => row.itemType === 'notification'),
     /** Inspects the separate delivery metadata. */
@@ -235,6 +239,9 @@ test('completion preserves prior history and rejects forged or multiple transiti
   const forged = structuredClone(completed)
   forged.history[1]!.token = 'forged'
   await expect(f.store.complete(recipient, forged, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  const changedTime = structuredClone(completed)
+  changedTime.history[1]!.startedAt = now - 1
+  await expect(f.store.complete(recipient, changedTime, 0, undefined)).rejects.toMatchObject({ status: 409 })
   const multiple = structuredClone(completed)
   multiple.history[0]!.status = 'completed'
   await expect(f.store.complete(recipient, multiple, 0, undefined)).rejects.toMatchObject({ status: 409 })
@@ -258,11 +265,64 @@ test('read failures distinguish absent, transient SDK and corrupt persisted enve
   await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
   f.failRead(undefined)
   const original = structuredClone(f.metadata())
-  for (const mutation of [{ schemaVersion: 2 }, { memberKey: 'other' }, { preferences: { enabled: true } }, { history: [{}] }, { inboxDigestShard: 'wrong' }, { inboxDigestDueAt: 'invalid' }]) {
+  for (const mutation of [{ schemaVersion: 2 }, { memberKey: 'other' }, { preferences: { enabled: true } }, { history: [{}] }, { history: [{ id: 'daily:2026-10-03', status: 'failed', attempts: 1, token: 'claim', leaseUntil: 0, count: 0, startedAt: -1 }] }, { inboxDigestShard: 'wrong' }, { inboxDigestDueAt: 'invalid' }]) {
     f.rows.set(f.coordinate('planning', original), { ...original, ...mutation })
     await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
   }
   f.rows.set(f.coordinate('planning', original), original)
   await expect(f.store.replace('w', 'reader', { ...emptyDigestState(), revision: -1 })).rejects.toMatchObject({ status: 400 })
   await expect(f.store.replace('w', 'reader', emptyDigestState())).rejects.toMatchObject({ status: 409 })
+})
+
+test('late-week delivery uses first claim time for sorting and full retention, stable across retry and lost response', async () => {
+  const f = await fixture()
+  await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency: 'weekly', views: ['recent'] } })
+  const read = f.context.reader.readSnapshot
+  let fail = true
+  f.context.reader.readSnapshot = async () => { if (fail) throw new Error('Transient content read'); return read() }
+  await expect(f.run()).rejects.toThrow('Transient content read')
+  expect((await f.store.get('w', 'reader')).history[0]?.startedAt).toBe(now)
+  f.advance(60_000)
+  fail = false
+  f.loseResponse()
+  await expect(f.run()).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestRetryable' })
+  const notification = f.notifications()[0]!
+  expect(notification.eventId).toBe('update-feed-digest:weekly:2026-09-28')
+  expect(notification.occurredAt).toBe(new Date(now).toISOString())
+  expect(notification.createdAt).toBe(new Date(now).toISOString())
+  expect(notification.expiresAt).toBe(now / 1000 + 365 * 86400)
+  expect(String(notification.notificationKey) > '2026-10-02T23:59:00.000Z#ordinary-notification').toBe(true)
+  const key = notification.notificationKey
+  f.advance(60_000)
+  expect(await f.run()).toBe('not-due')
+  expect(f.notifications()).toHaveLength(1)
+  expect(f.notifications()[0]?.notificationKey).toBe(key)
+})
+
+test('transaction failures classify complete cancellation vectors and permanent SDK failures without leaking details', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  for (const name of ['ValidationException', 'AccessDeniedException', 'ResourceNotFoundException', 'UnexpectedFailure']) {
+    f.failWrite(Object.assign(new Error('private SDK detail'), { name }))
+    try { await f.store.replace('w', 'reader', state); throw new Error('Expected rejection') }
+    catch (error) {
+      expect(error).toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
+      expect(inboxDigestTerminalReason(error)).toBe('corrupt-state')
+      expect(String(error)).not.toContain('private SDK')
+    }
+  }
+  for (const name of ['ThrottlingException', 'TimeoutError', 'TransactionInProgressException', 'InternalServerError']) {
+    f.failWrite(Object.assign(new Error('temporary'), { name }))
+    await expect(f.store.replace('w', 'reader', state)).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestRetryable' })
+  }
+  for (const [codes, status] of [
+    [['None', 'ConditionalCheckFailed'], 409], [['None', 'TransactionConflict'], 503],
+    [['ConditionalCheckFailed', 'ThrottlingError'], 503], [['ValidationError', 'TransactionConflict'], 502],
+    [['None'], 502], [['None', 'None'], 502], [['None', undefined], 502],
+  ] as const) {
+    f.failWrite({ name: 'TransactionCanceledException', CancellationReasons: codes.map((Code) => ({ Code })) })
+    await expect(f.store.replace('w', 'reader', state)).rejects.toMatchObject({ status })
+  }
+  expect(await f.store.get('w', 'reader')).toEqual(state)
+  expect(f.notifications()).toHaveLength(0)
 })
