@@ -110,6 +110,20 @@ async function fixture() {
   }
 }
 
+for (const empty of [true, false]) test(`pruned ${empty ? 'empty' : 'nonempty'} interval performs no SDK transaction or retained-history eviction`, async () => {
+  const f = await fixture()
+  if (empty) f.context.reader.authorizeTarget = async () => undefined
+  for (let day = 0; day < 21; day++) { await f.run(); f.advance(86_400_000) }
+  const before = await f.store.get('w', 'reader')
+  const notifications = structuredClone(f.notifications())
+  const transactions = f.commands.filter((command) => command instanceof TransactWriteCommand).length
+  expect(before.history).toHaveLength(20)
+  expect(await deliverInboxDigest({ authorize: async () => f.context }, recipient, now + 21 * 86_400_000, now, 'daily')).toBe('cancelled')
+  expect(f.commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(transactions)
+  expect(await f.store.get('w', 'reader')).toEqual(before)
+  expect(f.notifications()).toEqual(notifications)
+})
+
 test('atomic SDK completion binds authorization, missing META, preferences and deterministic Inbox insertion', async () => {
   const f = await fixture()
   expect(await f.run()).toBe('delivered')
