@@ -5,7 +5,7 @@ import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import { InMemoryPlanningClient } from '../../planning/planning'
 import { NOTIFICATION_PREFERENCES_KEY, createNotificationRecipientKey, toNotificationItem } from '../../notifications'
 import { emptyDigestState } from '../application/digest'
-import { deliverInboxDigest } from '../application/inbox-digest'
+import { deliverInboxDigest, type InboxDigestContext } from '../application/inbox-digest'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
 
@@ -21,6 +21,7 @@ async function fixture() {
   let loseResponse = false
   let loseClaimResponse = false
   let clock = now
+  let readError: unknown
   let beforeTransaction: (() => void) | undefined
   const indexed: Record<string, unknown>[] = []
   /** Derives model coordinates from the known table schemas. */
@@ -44,6 +45,7 @@ async function fixture() {
   client.send = (async (command: unknown) => {
     commands.push(command)
     if (command instanceof GetCommand) {
+      if (readError) throw readError
       expect(command.input.ConsistentRead).toBe(true)
       return { Item: structuredClone(rows.get(coordinate(command.input.TableName!, command.input.Key!))) }
     }
@@ -74,9 +76,9 @@ async function fixture() {
   await store.replace('w', 'reader', { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent', 'at-risk'] } })
   const snapshot = await new InMemoryPlanningClient().get('w', { workItems: [] })
   snapshot.updateTargets = [{ target: { type: 'project', teamId: 'team', projectId: 'project' }, latestVersion: 1, updateState: 'current', updatedAt: new Date(now).toISOString(), latestUpdate: { id: 'report', version: 1, health: 'at-risk', risk: 'none', summary: 'Private content', authorMemberKey: 'reader', coveredDueAt: new Date(now).toISOString(), createdAt: new Date(now).toISOString(), progressSnapshot: { percent: 20, linkedWorkItemCount: 1 }, capturedScope: { teamId: 'team', projectId: 'project' } } }]
-  const context = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
+  const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
   return {
-    store, rows, indexed, commands, coordinate,
+    store, rows, indexed, commands, coordinate, context,
     run: () => deliverInboxDigest({ authorize: async () => context }, recipient, clock),
     /** Injects a condition-boundary race. */
     beforeTransaction(callback: () => void) { beforeTransaction = callback },
@@ -86,6 +88,8 @@ async function fixture() {
     loseClaimResponse() { loseClaimResponse = true },
     /** Advances the trusted clock for lease and cadence tests. */
     advance(milliseconds: number) { clock += milliseconds },
+    /** Injects a read-only SDK failure. */
+    failRead(error: unknown) { readError = error },
     /** Inspects notification rows separately from metadata and preferences. */
     notifications: () => [...rows.values()].filter((row) => row.itemType === 'notification'),
     /** Inspects the separate delivery metadata. */
@@ -196,6 +200,69 @@ test('malformed due rows fail closed and metadata cannot bypass the atomic compl
   const state = await f.store.get('w', 'reader')
   await expect(f.store.replace('w', 'reader', { ...state, history: [{ id: 'daily:2026-10-03', status: 'completed', attempts: 1, token: 'forged', leaseUntil: 0, count: 1 }] })).rejects.toMatchObject({ status: 409 })
   f.metadata().inboxDigestDueAt = 'malformed'
-  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 409 })
+  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
   expect(f.notifications()).toHaveLength(0)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) for (const empty of [false, true]) test(`${frequency} claim completes across Monday midnight with empty=${empty}`, async () => {
+  const f = await fixture()
+  const start = Date.parse('2026-10-04T23:59:50Z')
+  f.advance(start - now)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency, views: ['recent'] } })
+  if (empty) f.context.reader.authorizeTarget = async () => undefined
+  const read = f.context.reader.readSnapshot
+  let crossed = false
+  f.context.reader.readSnapshot = async () => { if (!crossed) { crossed = true; f.advance(20_000) }; return read() }
+  expect(await f.run()).toBe(empty ? 'empty' : 'delivered')
+  const id = `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`
+  expect((await f.store.get('w', 'reader')).history[0]).toMatchObject({ id, status: 'completed', attempts: 1 })
+  expect(f.notifications()).toHaveLength(empty ? 0 : 1)
+  expect(f.metadata().inboxDigestDueAt).toBe(start + 20_000)
+  expect(await f.run()).toBe(empty ? 'empty' : 'delivered')
+  expect((await f.store.get('w', 'reader')).history).toHaveLength(2)
+  expect(f.notifications()).toHaveLength(empty ? 0 : 2)
+})
+
+test('completion preserves prior history and rejects forged or multiple transitions and expired claims', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  const claimed = await f.store.replace('w', 'reader', { ...state, history: [
+    { id: 'daily:2026-10-02', status: 'failed', attempts: 1, token: 'older', leaseUntil: 0, count: 0 },
+    { id: 'daily:2026-10-03', status: 'pending', attempts: 1, token: 'claim', leaseUntil: now + 60_000, count: 0 },
+  ] })
+  const completed = { ...claimed, history: claimed.history.map((row) => row.id === 'daily:2026-10-03' ? { ...row, status: 'completed' as const, leaseUntil: 0 } : row) }
+  const forged = structuredClone(completed)
+  forged.history[1]!.token = 'forged'
+  await expect(f.store.complete(recipient, forged, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  const multiple = structuredClone(completed)
+  multiple.history[0]!.status = 'completed'
+  await expect(f.store.complete(recipient, multiple, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  const saved = await f.store.complete(recipient, completed, 0, undefined)
+  expect(saved.history[0]).toEqual(claimed.history[0])
+  const g = await fixture()
+  const pending = await g.store.replace('w', 'reader', { ...await g.store.get('w', 'reader'), history: [claimed.history[1]!] })
+  g.advance(60_001)
+  await expect(g.store.complete(recipient, { ...pending, history: completed.history.slice(1) }, 0, undefined)).rejects.toMatchObject({ status: 409 })
+  expect(g.notifications()).toHaveLength(0)
+})
+
+test('read failures distinguish absent, transient SDK and corrupt persisted envelopes/preferences/receipts/due fields', async () => {
+  const f = await fixture()
+  expect(await f.store.get('missing', 'reader')).toEqual(emptyDigestState())
+  for (const name of ['ThrottlingException', 'TimeoutError', 'ProvisionedThroughputExceededException']) {
+    f.failRead(Object.assign(new Error('private SDK detail'), { name }))
+    await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestRetryable' })
+  }
+  f.failRead(new Error('unknown private failure'))
+  await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
+  f.failRead(undefined)
+  const original = structuredClone(f.metadata())
+  for (const mutation of [{ schemaVersion: 2 }, { memberKey: 'other' }, { preferences: { enabled: true } }, { history: [{}] }, { inboxDigestShard: 'wrong' }, { inboxDigestDueAt: 'invalid' }]) {
+    f.rows.set(f.coordinate('planning', original), { ...original, ...mutation })
+    await expect(f.store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestStorageFailure' })
+  }
+  f.rows.set(f.coordinate('planning', original), original)
+  await expect(f.store.replace('w', 'reader', { ...emptyDigestState(), revision: -1 })).rejects.toMatchObject({ status: 400 })
+  await expect(f.store.replace('w', 'reader', emptyDigestState())).rejects.toMatchObject({ status: 409 })
 })

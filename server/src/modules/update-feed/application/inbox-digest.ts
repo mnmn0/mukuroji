@@ -1,4 +1,5 @@
 import type { UpdateFeedDigestState } from '@mukuroji/contracts'
+import { PlanningError } from '../../planning'
 import { previewUpdateFeedDigest, type UpdateFeedDigestStore } from './digest'
 import type { UpdateFeedReader } from './read-update-feed'
 import type { UpdateFeedReadStateStore } from './read-state'
@@ -85,7 +86,7 @@ export function inboxDigestInterval(state: UpdateFeedDigestState, now: number): 
 export async function deliverInboxDigest(dependencies: InboxDigestDependencies, recipient: InboxDigestRecipient, now: number): Promise<InboxDigestOutcome> {
   const context = await dependencies.authorize(recipient)
   if (!context) return 'denied'
-  if (context.reader.memberKey !== recipient.memberKey || context.recipient.memberKey !== recipient.memberKey || context.recipient.workspaceId !== recipient.workspaceId) throw new Error('Digest recipient mismatch')
+  if (context.reader.memberKey !== recipient.memberKey || context.recipient.memberKey !== recipient.memberKey || context.recipient.workspaceId !== recipient.workspaceId) throw new PlanningError(502, 'UpdateFeedDigestRecipientMismatch', 'Digest recipient mismatch')
   const state = await context.store.get(recipient.workspaceId, recipient.memberKey)
   const id = inboxDigestInterval(state, now)
   if (!state.preferences.enabled) return 'disabled'
@@ -142,6 +143,8 @@ export type InboxDigestScheduleResult = {
   delivered: number
   /** Failed candidates that must be retried separately from the continuation. */
   failed: InboxDigestRecipient[]
+  /** Terminal candidates requiring inspection, never automatic retry. */
+  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'recipient-mismatch' }[]
   /** Next source checkpoint; must not discard failed candidates. */
   cursor?: string
 }
@@ -153,7 +156,7 @@ export type InboxDigestScheduleResult = {
  * @returns Counts, retryable candidate failures and a continuation checkpoint.
  */
 export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now: number, cursor?: string): Promise<InboxDigestScheduleResult> {
-  const result: InboxDigestScheduleResult = { processed: 0, delivered: 0, failed: [] }
+  const result: InboxDigestScheduleResult = { processed: 0, delivered: 0, failed: [], terminal: [] }
   if (!schedule.enabled) return result
   const page = await schedule.listCandidates(cursor, 100, now)
   if (page.recipients.length > 100 || (page.cursor !== undefined && (!page.cursor || page.cursor === cursor))) throw new Error('Invalid digest candidate page')
@@ -165,8 +168,10 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
     result.processed++
     try {
       if (await deliverInboxDigest(schedule.dependencies, recipient, now) === 'delivered') result.delivered++
-    } catch {
-      result.failed.push(recipient)
+    } catch (error) {
+      const reason = error instanceof PlanningError ? error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error.code === 'UpdateFeedDigestRecipientMismatch' ? 'recipient-mismatch' : ['UpdateFeedDigestInvalid', 'UpdateFeedDigestStorageFailure'].includes(error.code) ? 'corrupt-state' : undefined : undefined
+      if (reason) result.terminal.push({ recipient, reason })
+      else result.failed.push(recipient)
     }
   }
   result.cursor = page.cursor

@@ -5,9 +5,10 @@ import { isEntry, requestUpdateFeed, UpdateFeedApiError } from './updateFeed'
 
 /** Reads personal preview preferences and content-free history.
  * @param token - Current session.
+ * @param signal - Cancellation when the ephemeral preview is discarded.
  * @returns Validated personal state.
  */
-export async function getDigestState(token: string): Promise<UpdateFeedDigestState> { return readState(await requestUpdateFeed(token, '/digest')) }
+export async function getDigestState(token: string, signal?: AbortSignal): Promise<UpdateFeedDigestState> { return readState(await requestUpdateFeed(token, '/digest', { signal })) }
 
 /** Reads delivery consent independently of preview preferences.
  * @param token - Current session.
