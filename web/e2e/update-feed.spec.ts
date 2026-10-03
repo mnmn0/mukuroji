@@ -313,6 +313,72 @@ test('Inbox consent is lazy, off by default, independent from previews and retai
   await expect(panel.getByText('Inbox digests are off.')).toBeVisible()
 })
 
+for (const failure of ['network', '503', 'lost-ack', 'stale']) test(`Inbox transient save failure ${failure} keeps the draft and original CAS base`, async ({ page }, testInfo) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  const writes: number[] = []
+  let reads = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') { reads++; return route.fallback() }
+    const input = route.request().postDataJSON()
+    writes.push(input.expectedRevision)
+    if (writes.length !== 1) return route.fallback()
+    if (failure === 'lost-ack') state.inbox = { ...state.inbox, revision: 1, preferences: input.preferences }
+    if (failure === 'network' || failure === 'lost-ack') return route.abort('failed')
+    return route.fulfill({ status: 503, json: { code: 'Unavailable' } })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  const consent = panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })
+  const cadence = panel.getByLabel('Interval', { exact: true })
+  const save = panel.getByRole('button', { name: 'Save Inbox settings' })
+  await consent.check()
+  await cadence.selectOption('weekly')
+  await save.focus()
+  await page.keyboard.press('Enter')
+  await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
+  await expect(consent).toBeChecked()
+  await expect(cadence).toHaveValue('weekly')
+  await expect(cadence).toBeEnabled()
+  await expect(save).toBeEnabled()
+  await expect(panel.getByRole('button', { name: 'Reload', exact: true })).toHaveCount(0)
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+    await page.screenshot({ path: testInfo.outputPath(`inbox-save-error-${viewport.width}.png`), fullPage: true })
+  }
+  await panel.getByLabel('Recent', { exact: true }).check()
+  if (failure === 'stale') {
+    state.inbox.revision++
+    const before = reads
+    await page.clock.fastForward(6_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect.poll(() => reads).toBeGreaterThan(before)
+  } else {
+    await save.focus()
+    await expect(save).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect.poll(() => writes.length).toBe(2)
+    expect(writes).toEqual([0, 0])
+  }
+  if (failure === 'lost-ack' || failure === 'stale') {
+    await expect(panel.getByRole('alert')).toContainText('Settings changed')
+    await expect(cadence).toBeDisabled()
+    await expect(save).toBeDisabled()
+    await expect(consent).toBeChecked()
+    await expect(cadence).toHaveValue('weekly')
+    await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+    await expect(panel.getByRole('button', { name: 'Reload', exact: true })).toBeEnabled()
+    expect(writes).toEqual(failure === 'stale' ? [0] : [0, 0])
+  } else {
+    await expect.poll(() => state.inbox.revision).toBe(1)
+    expect(state.inbox.preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['for-me', 'recent'] })
+    await expect(panel.getByRole('alert')).toHaveCount(0)
+  }
+})
+
 test('Inbox settings conflict requires reload and permission loss hides consent', async ({ page }) => {
   const state = await mockFeed(page)
   await page.goto('/updates')

@@ -1,4 +1,4 @@
-import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestCandidate, type InboxDigestDependencies, type InboxDigestRecipient } from './inbox-digest'
+import { deliverInboxDigest, inboxDigestTerminalReason, type InboxDigestCandidate, type InboxDigestDependencies, type InboxDigestRecipient, type InboxDigestRetry } from './inbox-digest'
 import { PlanningError } from '../../planning'
 
 /** Bounded retry, including failures before a delivery claim exists. */
@@ -43,7 +43,7 @@ export interface InboxDigestCheckpointStore {
 export type InboxDigestWorkerDependencies = {
   /** Durable shard leases and pending pages. */ checkpoints: InboxDigestCheckpointStore
   /** Strongly rechecked due candidates, at most twenty per call. */
-  listDue(shard: number, cursor: string | undefined, limit: number): Promise<{ /** Due recipients with strongly checked discovery cadence. */ recipients: InboxDigestCandidate[]; /** Explicit continuation. */ cursor?: string }>
+  listDue(shard: number, cursor: string | undefined, limit: number): Promise<{ /** Due recipients with strongly checked cadence and any unfinished interval. */ recipients: (InboxDigestCandidate | InboxDigestRetry)[]; /** Explicit continuation. */ cursor?: string }>
   /** Current recipient authorization and atomic delivery. */ delivery: InboxDigestDependencies
   /** Trusted clock. */ now(): number
 }
@@ -67,7 +67,7 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
       const recipient = { workspaceId: candidate.workspaceId, memberKey: candidate.memberKey }
       if (unique.has(JSON.stringify(recipient))) continue
       const parked = await dependencies.checkpoints.readDeferred(recipient)
-      unique.set(JSON.stringify(recipient), parked ? { ...parked, conflicts: 0 } : { recipient, attempts: 0, scheduledAt: dependencies.now(), frequency: candidate.frequency })
+      unique.set(JSON.stringify(recipient), parked ? { ...parked, conflicts: 0 } : { recipient, attempts: 0, scheduledAt: 'scheduledAt' in candidate ? candidate.scheduledAt : dependencies.now(), frequency: candidate.frequency })
     }
     state = await dependencies.checkpoints.save({ ...state, pending: [...unique.values()], cursor: page.cursor }, dependencies.now(), false)
   }

@@ -27,6 +27,6 @@ function Content({ token, enabled, canEdit, locale, guard, restoreFocus, open }:
   const controller = useInboxDigestSettings(token, enabled && open, guard)
   const error = controller.error
   if (!open) return null
-  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : undefined
+  const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? controller.retryableSaveFailure ? 'saveError' : 'error' : undefined
   return <InboxDigestPanel {...controller} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onReload={controller.reload} />
 }

@@ -22,6 +22,8 @@ export const OptedIn: Story = { args: { state: { revision: 1, preferences: { ena
 export const Denied: Story = { args: { failure: 'denied', canEdit: false } }
 /** Conflicts expose an explicit reload action. */
 export const Conflict: Story = { args: { failure: 'conflict' } }
+/** Transient save failures retain editable choices and the existing save action. */
+export const TransientSaveFailure: Story = { args: { failure: 'saveError', onSave: fn(async () => false) } }
 /** Initial loading contains no editable consent. */
 export const Loading: Story = { args: { state: undefined, loading: true } }
 /** Japanese copy wraps on narrow screens. */

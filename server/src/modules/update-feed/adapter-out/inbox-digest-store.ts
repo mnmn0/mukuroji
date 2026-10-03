@@ -5,7 +5,7 @@ import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '.
 import { digestStorageFailure } from './digest-storage-failure'
 import { createNotificationRecipientKey, NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences } from '../../notifications'
 import { emptyDigestState, parseDigestState } from '../application/digest'
-import { inboxDigestInterval, type InboxDigestCandidate, type InboxDigestMessage, type InboxDigestRecipient, type InboxDigestStore } from '../application/inbox-digest'
+import { inboxDigestInterval, type InboxDigestCandidate, type InboxDigestMessage, type InboxDigestRecipient, type InboxDigestRetry, type InboxDigestStore } from '../application/inbox-digest'
 import { createInboxDigestNotification } from './inbox-digest-notification'
 
 /** Undeployed sparse GSI schema; activation requires separate infrastructure review. */
@@ -131,7 +131,7 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       KeyConditionExpression: '#shard = :shard AND #due <= :due', ExpressionAttributeNames: { '#shard': INBOX_DIGEST_INDEX.partitionKey, '#due': INBOX_DIGEST_INDEX.sortKey },
       ExpressionAttributeValues: { ':shard': `inbox-digest#${shard}`, ':due': now }, Limit: limit, ...(cursor ? { ExclusiveStartKey: cursor } : {}),
     })).catch((error: unknown) => digestStorageFailure(error))
-    const recipients: InboxDigestCandidate[] = []
+    const recipients: (InboxDigestCandidate | InboxDigestRetry)[] = []
     for (const item of page.Items ?? []) {
       if (typeof item.workspaceId !== 'string' || !item.workspaceId.trim() || typeof item.recordKey !== 'string' || !item.recordKey.startsWith('UPDATE_FEED_INBOX_DIGEST#')) throw corruptCandidate()
       const { Item: row } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: { workspaceId: item.workspaceId, recordKey: item.recordKey }, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
@@ -140,7 +140,10 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       const recipient = normalize({ workspaceId: item.workspaceId, memberKey: row.memberKey })
       const state = parseRow(row, recipient)
       if (row.recordKey !== item.recordKey) throw corruptCandidate()
-      if (state.preferences.enabled && row.inboxDigestShard === `inbox-digest#${shard}` && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= now) recipients.push({ ...recipient, frequency: state.preferences.frequency })
+      if (state.preferences.enabled && row.inboxDigestShard === `inbox-digest#${shard}` && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= now) {
+        const retry = retryableReceipt(state)
+        recipients.push({ ...recipient, frequency: state.preferences.frequency, ...(retry ? { scheduledAt: Date.parse(`${retry.id.slice(retry.id.indexOf(':') + 1)}T00:00:00.000Z`) } : {}) })
+      }
     }
     return { recipients, cursor: page.LastEvaluatedKey }
   }
@@ -194,8 +197,12 @@ function dueFields(recipient: InboxDigestRecipient, state: UpdateFeedDigestState
   const start = Date.parse(`${id.slice(id.indexOf(':') + 1)}T00:00:00.000Z`)
   const next = start + (state.preferences.frequency === 'daily' ? 1 : 7) * 86_400_000
   const pending = state.history.filter((item) => item.status === 'pending')
-  const due = pending.length ? Math.min(...pending.map((item) => item.leaseUntil)) : receipt?.status === 'completed' || (receipt?.attempts ?? 0) >= 3 ? next : receipt?.status === 'failed' ? now + 60_000 : now
+  const due = pending.length ? Math.min(...pending.map((item) => item.leaseUntil)) : retryableReceipt(state) ? now + 60_000 : receipt?.status === 'completed' || (receipt?.attempts ?? 0) >= 3 ? next : now
   return { inboxDigestShard: shardKey(recipient), inboxDigestDueAt: due }
+}
+/** Selects the oldest unfinished interval under current cadence, never an exhausted receipt. */
+function retryableReceipt(state: UpdateFeedDigestState) {
+  return state.history.filter((item) => item.id.startsWith(`${state.preferences.frequency}:`) && item.status !== 'completed' && item.attempts < 3).sort((a, b) => a.id.localeCompare(b.id))[0]
 }
 /** Stable sparse-index shard bound to both Workspace and member. */
 function shardKey(recipient: InboxDigestRecipient) { return `inbox-digest#${createHash('sha256').update(JSON.stringify(recipient)).digest()[0]! % 16}` }

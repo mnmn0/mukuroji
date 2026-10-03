@@ -12,7 +12,7 @@ type InboxDigestPanelProps = {
   /** Initial load status. */ loading: boolean
   /** Save status. */ pending: boolean
   /** Current write permission. */ canEdit: boolean
-  /** Safe failure category. */ failure?: 'denied' | 'conflict' | 'error'
+  /** Safe failure category. */ failure?: 'denied' | 'conflict' | 'error' | 'saveError'
   /** Localized labels. */ t: ReturnType<typeof createTranslator>
   /** Explicit consent save with its original editing revision. */ onSave(preferences: UpdateFeedDigestPreferences, expectedRevision?: number): Promise<boolean>
   /** Explicit metadata reload. */ onReload(): void
@@ -30,8 +30,8 @@ export function InboxDigestPanel({ state, loading, pending, canEdit, failure, t,
   const dirty = Boolean(draft && (!state || !sameDigestPreferences(draft, state.preferences)))
   if (edit && (!currentEdit || (state && !dirty))) setEdit(undefined)
   const stale = dirty && currentEdit !== undefined && currentEdit.revision !== state?.revision
-  const effectiveFailure = failure ?? (stale ? 'conflict' : undefined)
-  const unavailable = pending || !canEdit || Boolean(effectiveFailure)
+  const effectiveFailure = failure === 'denied' ? failure : stale ? 'conflict' : failure
+  const unavailable = pending || !canEdit || Boolean(effectiveFailure && effectiveFailure !== 'saveError')
   const focused = useRef<HTMLElement | null>(null)
   // Only removed or disabled owned controls require a stable focus fallback.
   useLayoutEffect(() => {
@@ -58,7 +58,7 @@ export function InboxDigestPanel({ state, loading, pending, canEdit, failure, t,
   return <section onFocusCapture={(event) => { focused.current = event.target }} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focused.current = null }} aria-label={t('updates.inbox.title')} className="min-w-0 border-y border-slate-200 py-4">
     <p className="mb-4 text-app-meta font-semibold text-slate-600">{t('updates.inbox.inactive')}</p>
     {loading ? <p role="status">{t('updates.loading')}</p> : null}
-    {effectiveFailure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3"><p>{t(`updates.inbox.${effectiveFailure}`)}</p>{effectiveFailure !== 'denied' ? <button className="min-h-11 rounded-md border px-3" disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
+    {effectiveFailure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3"><p>{t(`updates.inbox.${effectiveFailure}`)}</p>{effectiveFailure !== 'denied' && effectiveFailure !== 'saveError' ? <button className="min-h-11 rounded-md border px-3" disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
     {!canEdit ? <p>{t('updates.readOnly')}</p> : null}
     {canEdit && draft && state && failure !== 'denied' ? <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && draft.views.length) void save() }}>
       <fieldset disabled={unavailable} className="min-w-0"><legend className="text-sm font-semibold">{t('updates.inbox.settings')}</legend>
