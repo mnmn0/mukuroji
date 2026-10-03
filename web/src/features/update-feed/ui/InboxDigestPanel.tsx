@@ -50,7 +50,7 @@ export function InboxDigestPanel({ state, loading, pending, canEdit, failure, t,
     {loading ? <p role="status">{t('updates.loading')}</p> : null}
     {effectiveFailure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3"><p>{t(`updates.inbox.${effectiveFailure}`)}</p>{effectiveFailure !== 'denied' ? <button className="min-h-11 rounded-md border px-3" disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
     {!canEdit ? <p>{t('updates.readOnly')}</p> : null}
-    {draft && state && failure !== 'denied' ? <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && draft.views.length) void save() }}>
+    {canEdit && draft && state && failure !== 'denied' ? <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && draft.views.length) void save() }}>
       <fieldset disabled={unavailable} className="min-w-0"><legend className="text-sm font-semibold">{t('updates.inbox.settings')}</legend>
         <label className="flex min-h-11 items-center gap-3"><input type="checkbox" className="size-4 accent-teal-700" checked={draft.enabled} onChange={(event) => change({ ...draft, enabled: event.target.checked })} />{t('updates.inbox.enabled')}</label>
         <label htmlFor={`${id}-cadence`} className="mt-3 block text-app-meta font-semibold">{t('updates.digest.frequency')}</label>

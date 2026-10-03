@@ -1,10 +1,12 @@
 import { expect, test } from 'bun:test'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
 import type { UpdateFeedDigestState, PlanningUpdateTargetSummary } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../planning/planning'
 import { PlanningError } from '../../planning'
 import { createNotificationRecipientKey, toNotificationItem } from '../../notifications'
 import { InMemoryUpdateFeedDigestStore } from './digest-store'
-import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
+import { DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { createInboxDigestNotification } from './inbox-digest-notification'
 import { deliverInboxDigest, runInboxDigestSchedule, type InboxDigestDependencies, type InboxDigestMessage, type InboxDigestStore } from '../application/inbox-digest'
 import type { UpdateFeedReader } from '../application/read-update-feed'
@@ -65,6 +67,27 @@ async function fixture(count = 1) {
     },
   }
 }
+
+for (const corrupt of [true, false]) test(`actual read-state adapter corruption=${corrupt} has distinct scheduler disposition`, async () => {
+  const f = await fixture()
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
+  // Only the SDK overload is replaced; the real persisted parser classifies the row.
+  client.send = (async (command: unknown) => {
+    if (!(command instanceof GetCommand)) throw new Error('Unexpected SDK command')
+    if (!corrupt) throw new Error('Unknown transport failure')
+    return { Item: { ...command.input.Key, schemaVersion: 1, revision: 1, read: 'malformed' } }
+  }) as DynamoDBDocumentClient['send']
+  const readState = new DynamoDbUpdateFeedReadStateStore('planning', client)
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [recipient] }), dependencies: { authorize: async () => {
+    const context = await f.dependencies.authorize(recipient)
+    if (!context) throw new Error('Fixture missing')
+    return { ...context, readState }
+  } } }, now)
+  expect(result.failed).toEqual(corrupt ? [] : [recipient])
+  expect(result.terminal).toEqual(corrupt ? [{ recipient, reason: 'corrupt-state' }] : [])
+  expect(result.delivered).toBe(0)
+  expect(f.inbox.size).toBe(0)
+})
 
 test('delivers a bodyless existing-format Inbox notification once per interval', async () => {
   const f = await fixture(60)

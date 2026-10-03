@@ -40,6 +40,8 @@ function SaveDraftHarness() {
 export const SaveDraft: Story = { render: () => <SaveDraftHarness /> }
 /** Permission loss suppresses cached content and settings. */
 export const Denied: Story = { args: { ...Preview.args, failure: 'denied', canEdit: false } }
+/** Guests can inspect receipts without mutation controls. */
+export const Guest: Story = { args: { canEdit: false } }
 /** Conflict offers metadata reload without automatic generation. */
 export const Conflict: Story = { args: { failure: 'conflict' } }
 /** Initial loading renders no stale metadata. */

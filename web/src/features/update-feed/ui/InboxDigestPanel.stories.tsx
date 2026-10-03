@@ -25,6 +25,8 @@ export const Conflict: Story = { args: { failure: 'conflict' } }
 export const Loading: Story = { args: { state: undefined, loading: true } }
 /** Japanese copy wraps on narrow screens. */
 export const Japanese: Story = { args: { t: createTranslator('ja') } }
+/** Read-only guests are not offered consent mutations. */
+export const Guest: Story = { args: { canEdit: false } }
 /** Controls an acknowledgement separately from subsequent local edits. */
 function SaveDraftHarness() {
   const [state, setState] = useState<UpdateFeedDigestState>(meta.args.state)
