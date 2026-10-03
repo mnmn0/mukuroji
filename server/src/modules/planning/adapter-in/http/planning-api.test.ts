@@ -20,6 +20,7 @@ import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/e
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
+  EnterpriseCustomRole,
   EnterpriseRoleAssignment,
   PlanningMutationResponse,
   PlanningSnapshot,
@@ -264,6 +265,148 @@ test('returns an authenticated empty Planning graph with accessible Work Item pr
       statusCategory: 'started',
     }),
   ])
+})
+
+test('rejects invalid feed selectors before the feed directory read even during an outage', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'owner', projectAccesses: [] })
+  const directory = getTestAppDependencies().workspace.projectDirectory
+  const originalRead = directory.getProjectDirectory.bind(directory)
+  let strongReads = 0
+  directory.getProjectDirectory = async (...args) => {
+    if (args[2] === true) {
+      strongReads++
+      throw new Error('Directory unavailable')
+    }
+    return originalRead(...args)
+  }
+  for (const query of ['view=invalid', 'limit=101', 'limit=1.5']) {
+    expect((await planningApiRequest(`/api/planning/update-feed?${query}`)).status).toBe(400)
+  }
+  expect(strongReads).toBe(0)
+})
+
+test('preserves direct Enterprise Team access for an Initiative in an empty Team and removes it after revocation', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [], teamProjects: [] })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(planning, 'empty-team-initiative', 'core-team')
+  const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'empty-team-initiative' }
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target, expectedRevision: 3, cadence: {
+      updateOwnerMemberKey: 'demo@example.com', cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24,
+    },
+  }, { workItems: [] })
+  await planning.publishUpdate('user#demo@example.com', {
+    target, expectedRevision: 4, id: 'team-report', health: 'on-track', risk: 'none',
+    summary: 'Team report', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '', evidence: [],
+  }, 'demo@example.com', { workItems: [] })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  let assignments: EnterpriseRoleAssignment[] = [{
+    workspaceId: 'user#demo@example.com', assignmentId: 'direct-team-member',
+    principalKind: 'member', principalId: 'demo@example.com', roleId: 'team:member',
+    scope: { workspaceId: 'user#demo@example.com', kind: 'team', targetId: 'core-team' }, source: 'direct',
+  }]
+  const customRole: EnterpriseCustomRole = {
+    workspaceId: 'user#demo@example.com', roleId: 'custom:planning-reader', name: 'Planning reader',
+    permissions: ['planning.read'], guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (workspaceId) => ({ ...await readIdentity(workspaceId), roleAssignments: assignments, customRoles: [customRole] })
+  setTestAppDependencies({ planning, enterpriseIdentity: identity })
+  const granted = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(granted.status).toBe(200)
+  expect(await granted.json()).toMatchObject({ total: 1, entries: [{ target, latestUpdate: { summary: 'Team report' } }] })
+  assignments = assignments.map((assignment) => ({ ...assignment, roleId: customRole.roleId }))
+  const customGranted = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(customGranted.status).toBe(200)
+  expect(await customGranted.json()).toMatchObject({ total: 1, entries: [{ target, latestUpdate: { summary: 'Team report' } }] })
+  assignments = []
+  const revoked = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(revoked.status).toBe(200)
+  expect(await revoked.json()).toMatchObject({ total: 0, entries: [] })
+})
+
+test('aggregates latest Project and Initiative updates without history reads and removes revoked or archived targets', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(planning, 'feed-initiative', 'core-team', 'refero')
+  const targets: PlanningUpdateTarget[] = [
+    { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    { type: 'initiative', entityId: 'feed-initiative' },
+  ]
+  let revision = 3
+  for (const target of targets) {
+    await planning.configureUpdateCadence('user#demo@example.com', {
+      target, expectedRevision: revision++, cadence: {
+        updateOwnerMemberKey: 'demo@example.com', cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24,
+      },
+    }, { workItems: [] })
+    await planning.publishUpdate('user#demo@example.com', {
+      target, expectedRevision: revision++, id: 'same-local-id', health: 'at-risk', risk: 'medium',
+      summary: 'Visible report', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '', evidence: [],
+    }, 'demo@example.com', { workItems: [] })
+  }
+  const before = await planning.get('user#demo@example.com', { workItems: [] })
+  planning.listUpdates = async () => { throw new Error('Feed must not read history') }
+  planning.listUpdateComments = async () => { throw new Error('Feed must not read annotations') }
+  planning.listUpdateReactions = async () => { throw new Error('Feed must not read annotations') }
+  setTestAppDependencies({ planning })
+  const directoryClient = getTestAppDependencies().workspace.projectDirectory
+  const readDirectory = directoryClient.getProjectDirectory.bind(directoryClient)
+  const readAccesses = directoryClient.getProjectAccessList.bind(directoryClient)
+  const readPlanning = planning.get.bind(planning)
+  let projectionRead = false
+  let perTargetAuthorizationReads = 0
+  planning.get = async (...args) => { projectionRead = true; return readPlanning(...args) }
+  directoryClient.getProjectDirectory = async (...args) => {
+    if (projectionRead) perTargetAuthorizationReads++
+    return readDirectory(...args)
+  }
+  directoryClient.getProjectAccessList = async (...args) => {
+    if (projectionRead) perTargetAuthorizationReads++
+    return readAccesses(...args)
+  }
+  const response = await planningApiRequest('/api/planning/update-feed?view=for-me')
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({ total: 2, truncated: false, entries: [
+    { target: { type: 'initiative' }, reasons: ['update-owner', 'latest-author'] },
+    { target: { type: 'project' }, reasons: ['update-owner', 'latest-author'] },
+  ] })
+  expect(perTargetAuthorizationReads).toBe(0)
+  planning.get = readPlanning
+  expect(await planning.get('user#demo@example.com', { workItems: [] })).toEqual(before)
+  expect((await planningApiRequest('/api/planning/update-feed?limit=101')).status).toBe(400)
+  for (const query of ['view=recent&view=overdue', 'limit=1&limit=2']) {
+    const ambiguous = await planningApiRequest(`/api/planning/update-feed?${query}`)
+    expect(ambiguous.status).toBe(400)
+    expect(await ambiguous.json()).toMatchObject({ code: 'UpdateFeedQueryAmbiguous' })
+  }
+
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [] })
+  const denied = await planningApiRequest('/api/planning/update-feed')
+  expect(denied.status).toBe(200)
+  expect(await denied.json()).toMatchObject({ entries: [], total: 0 })
+
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const assignment: EnterpriseRoleAssignment = {
+    workspaceId: 'user#demo@example.com', assignmentId: 'feed-project-viewer',
+    principalKind: 'member', principalId: 'demo@example.com', roleId: 'project:viewer',
+    scope: { workspaceId: 'user#demo@example.com', kind: 'project', targetId: 'refero' }, source: 'direct',
+  }
+  identity.getSnapshot = async (workspaceId) => ({ ...await readIdentity(workspaceId), roleAssignments: [assignment] })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+  const enterpriseFeed = await planningApiRequest('/api/planning/update-feed')
+  expect(enterpriseFeed.status).toBe(200)
+  expect(await enterpriseFeed.json()).toMatchObject({ total: 2 })
+  setTestAppDependencies({ enterpriseIdentity: new InMemoryEnterpriseIdentityClient() })
+
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner', teamProjects: [] })
+  const archived = await planningApiRequest('/api/planning/update-feed')
+  expect(archived.status).toBe(200)
+  expect(await archived.json()).toMatchObject({ entries: [], total: 0 })
 })
 
 test('filters legacy Planning update targets by their Team-qualified Project ACL', async () => {
@@ -624,6 +767,14 @@ test('keeps filtered Planning history within the requested limit while advancing
   const movedGraph = await planningApiRequest('/api/planning')
   expect(movedGraph.status).toBe(200)
   const movedGraphBody: PlanningSnapshot = await movedGraph.json()
+  const movedFeed = await planningApiRequest('/api/planning/update-feed')
+  expect(movedFeed.status).toBe(200)
+  expect(await movedFeed.json()).toMatchObject({ entries: [], total: 0 })
+  const ownedMovedFeed = await planningApiRequest('/api/planning/update-feed?view=for-me')
+  expect(ownedMovedFeed.status).toBe(200)
+  const ownedMovedBody = await ownedMovedFeed.json()
+  expect(ownedMovedBody).toMatchObject({ total: 1, entries: [{ health: 'unknown', reasons: ['update-owner'], relevance: 2 }] })
+  expect(ownedMovedBody.entries[0]).not.toHaveProperty('latestUpdate')
   expect(movedGraphBody.updateTargets.find((updateTarget) =>
     updateTarget.target.type === 'initiative' &&
     updateTarget.target.entityId === target.entityId
