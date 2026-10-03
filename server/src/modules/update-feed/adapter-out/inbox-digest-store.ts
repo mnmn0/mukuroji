@@ -54,8 +54,10 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
    */
   async get(workspaceId: string, memberKey: string): Promise<UpdateFeedDigestState> {
     const recipient = normalize({ workspaceId, memberKey })
-    const { Item } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: key(recipient), ConsistentRead: true }))
-    return Item === undefined ? emptyDigestState() : parseRow(Item, recipient)
+    try {
+      const { Item } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: key(recipient), ConsistentRead: true }))
+      return Item === undefined ? emptyDigestState() : parseRow(Item, recipient)
+    } catch (error) { return readFailure(error) }
   }
 
   /** Changes settings/claims/failures using CAS and current recipient guards.
@@ -83,7 +85,12 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
     const recipient = normalize(owner)
     const state = parseDigestState(input)
     const current = await this.get(recipient.workspaceId, recipient.memberKey)
-    const id = inboxDigestInterval(state, this.now())
+    // Completion belongs to the single claimed transition, even if generation
+    // crosses UTC midnight or Monday before its lease expires.
+    const changed = state.history.filter((row, index) => JSON.stringify(row) !== JSON.stringify(current.history[index]))
+    const candidate = changed.length === 1 ? changed[0] : undefined
+    if (!candidate || !candidate.id.startsWith(`${state.preferences.frequency}:`)) throw conflict()
+    const id = candidate.id
     const before = current.history.find((row) => row.id === id)
     const after = state.history.find((row) => row.id === id)
     if (!Number.isSafeInteger(planningRevision) || planningRevision < 0 || current.revision !== state.revision || !current.preferences.enabled || !before || before.status !== 'pending' || before.leaseUntil <= this.now() || !after || after.status !== 'completed' || after.token !== before.token || after.attempts !== before.attempts || after.leaseUntil !== 0 || JSON.stringify(current.preferences) !== JSON.stringify(state.preferences) || JSON.stringify(state.history) !== JSON.stringify(current.history.map((row) => row.id === id ? after : row))) throw conflict()
@@ -159,10 +166,19 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
 
 /** Validates current metadata and its server-derived recipient key. */
 function parseRow(row: Record<string, unknown>, recipient: InboxDigestRecipient): UpdateFeedDigestState {
-  if (row.workspaceId !== recipient.workspaceId || row.recordKey !== key(recipient).recordKey || row.memberKey !== recipient.memberKey || row.entryType !== 'update-feed-inbox-digest' || row.schemaVersion !== 1 || typeof row.revision !== 'number' || row.revision < 1) throw conflict()
-  const state = parseDigestState(row)
-  if (state.preferences.enabled && (row.inboxDigestShard !== shardKey(recipient) || typeof row.inboxDigestDueAt !== 'number' || !Number.isSafeInteger(row.inboxDigestDueAt) || row.inboxDigestDueAt < 0)) throw conflict()
-  return state
+  try {
+    if (row.workspaceId !== recipient.workspaceId || row.recordKey !== key(recipient).recordKey || row.memberKey !== recipient.memberKey || row.entryType !== 'update-feed-inbox-digest' || row.schemaVersion !== 1 || typeof row.revision !== 'number' || row.revision < 1) throw new Error('Invalid envelope')
+    const state = parseDigestState(row)
+    if (state.preferences.enabled && (row.inboxDigestShard !== shardKey(recipient) || typeof row.inboxDigestDueAt !== 'number' || !Number.isSafeInteger(row.inboxDigestDueAt) || row.inboxDigestDueAt < 0)) throw new Error('Invalid due metadata')
+    if (!state.preferences.enabled && (row.inboxDigestShard !== undefined || row.inboxDigestDueAt !== undefined)) throw new Error('Unexpected due metadata')
+    return state
+  } catch { throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Inbox digest metadata is unavailable.') }
+}
+/** Normalizes SDK reads and persisted-state failures without leaking storage details. */
+function readFailure(error: unknown): never {
+  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
+  if (typeof name === 'string' && ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TransactionInProgressException', 'TimeoutError'].includes(name)) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Inbox digest storage is temporarily unavailable.')
+  throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Inbox digest metadata is unavailable.')
 }
 /** Normalizes server identities before deriving storage coordinates. */
 function normalize(recipient: InboxDigestRecipient): InboxDigestRecipient {
