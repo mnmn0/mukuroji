@@ -14,19 +14,20 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
   const busy = useRef(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>()
+  const [saveFailed, setSaveFailed] = useState(false)
   const [verificationRequired, setVerificationRequired] = useState(false)
   const query = useInboxDigestState(token, enabled, guard, () => { if (verificationRequired) { setVerificationRequired(false); setError(undefined) } })
   const [draftReset, setDraftReset] = useState(0)
   /** Saves the observed revision; conflicts require explicit reload. */
   const save = async (preferences: UpdateFeedDigestPreferences, expectedRevision?: number) => {
     if (!token || !enabled || !query.data || verificationRequired || busy.current) return false
-    busy.current = true; setPending(true); setError(undefined)
+    busy.current = true; setPending(true); setError(undefined); setSaveFailed(false)
     try {
       const state = await guard(saveInboxDigestPreferences(token, expectedRevision ?? query.data.revision, preferences))
       await query.mutate(state, { revalidate: false })
       return true
     } catch (failure) {
-      setError(failure)
+      setError(failure); setSaveFailed(true)
       if (failure instanceof UpdateFeedApiError && (failure.status === 401 || failure.status === 403)) { setVerificationRequired(true); await query.mutate(undefined, { revalidate: false }) }
       return false
     } finally { busy.current = false; setPending(false) }
@@ -34,7 +35,7 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
   /** Discards a draft only after an explicit successful metadata read. */
   const reload = async () => {
     if (!token || !enabled || busy.current) return
-    busy.current = true; setPending(true)
+    busy.current = true; setPending(true); setSaveFailed(false)
     try {
       const state = await guard(getInboxDigestState(token))
       await query.mutate(state, { revalidate: false })
@@ -42,5 +43,6 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
     } catch (failure) { setError(failure); setVerificationRequired(true); await query.mutate(undefined, { revalidate: false }) }
     finally { busy.current = false; setPending(false) }
   }
-  return { state: verificationRequired ? undefined : query.data, pending, loading: query.isLoading, error: query.error ?? error, draftReset, save, reload: () => { void reload() } }
+  const retryableSaveFailure = !query.error && saveFailed && (!(error instanceof UpdateFeedApiError) || error.status >= 500)
+  return { state: verificationRequired ? undefined : query.data, pending, loading: query.isLoading, error: query.error ?? error, retryableSaveFailure, draftReset, save, reload: () => { void reload() } }
 }
