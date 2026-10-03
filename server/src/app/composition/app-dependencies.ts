@@ -46,7 +46,7 @@ import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
-import type { SavedUpdateFeedsPersistence, UpdateFeedReadStatePersistence } from '../../modules/update-feed'
+import type { SavedUpdateFeedsPersistence, UpdateFeedReadStatePersistence, UpdateFeedDigestPersistence } from '../../modules/update-feed'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
@@ -184,6 +184,8 @@ export interface WorkItemDependencies {
   updateFeedReadState: UpdateFeedReadStatePersistence
   /** Provides bounded member-owned saved feed definitions. */
   savedUpdateFeeds: SavedUpdateFeedsPersistence
+  /** Provides manual digest preferences and content-free generation receipts. */
+  updateFeedDigest: UpdateFeedDigestPersistence
   /** Provides Request Intake persistence. */
   requestIntake: RequestIntakeClient
   /** Provides the Team Triage queue and replay-safe mutation surface. */

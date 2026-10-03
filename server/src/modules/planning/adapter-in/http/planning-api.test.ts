@@ -46,6 +46,26 @@ afterEach(() => {
   resetTestApp()
 })
 
+test('manual digest preferences and preview use authenticated identity and reject guests', async () => {
+  configureFakeProjectClients(true)
+  const path = '/api/planning/update-feed/digest'
+  expect((await (await planningApiRequest(path)).json()).preferences.enabled).toBe(false)
+  expect((await planningApiRequest(`${path}/preview`, 'POST', {})).status).toBe(409)
+  const settings = { expectedRevision: 0, preferences: { enabled: true, frequency: 'weekly', views: ['recent', 'at-risk'] }, memberKey: 'attacker', workspaceId: 'other' }
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(200)
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(409)
+  const first = await planningApiRequest(`${path}/preview`, 'POST', {})
+  expect(first.status).toBe(200)
+  expect(await first.json()).toMatchObject({ transport: 'preview', replay: false, entries: [] })
+  const replay = await planningApiRequest(`${path}/preview`, 'POST', {})
+  expect(replay.status).toBe(200)
+  expect(await replay.json()).toMatchObject({ transport: 'preview', replay: true, entries: [] })
+  expect((await (await planningApiRequest(path)).json()).history).toHaveLength(1)
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(403)
+  expect((await planningApiRequest(`${path}/preview`, 'POST', {})).status).toBe(403)
+})
+
 test('personal saved-feed CRUD requires current authentication, rejects guests and preserves CAS', async () => {
   configureFakeProjectClients(true)
   const feed: SavedUpdateFeed = { id: 'risk', name: 'My risks', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }
