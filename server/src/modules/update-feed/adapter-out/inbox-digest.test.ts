@@ -1,11 +1,12 @@
 import { expect, test } from 'bun:test'
 import type { UpdateFeedDigestState, PlanningUpdateTargetSummary } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../planning/planning'
+import { PlanningError } from '../../planning'
 import { createNotificationRecipientKey, toNotificationItem } from '../../notifications'
 import { InMemoryUpdateFeedDigestStore } from './digest-store'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { createInboxDigestNotification } from './inbox-digest-notification'
-import { deliverInboxDigest, runInboxDigestSchedule, type InboxDigestDependencies, type InboxDigestStore } from '../application/inbox-digest'
+import { deliverInboxDigest, runInboxDigestSchedule, type InboxDigestDependencies, type InboxDigestMessage, type InboxDigestStore } from '../application/inbox-digest'
 import type { UpdateFeedReader } from '../application/read-update-feed'
 import { createInboxDigestScheduleHandler } from '../adapter-in/schedules/inbox-digest-schedule'
 
@@ -205,9 +206,35 @@ test('scheduler is opt-in, bounds pages, deduplicates recipients and preserves f
   expect(calls).toBe(0)
   schedule.enabled = true
   f.fail(true)
-  expect(await runInboxDigestSchedule(schedule, now)).toEqual({ processed: 1, delivered: 0, failed: [recipient], cursor: 'next-page' })
+  expect(await runInboxDigestSchedule(schedule, now)).toEqual({ processed: 1, delivered: 0, failed: [recipient], terminal: [], cursor: 'next-page' })
   f.fail(false)
   expect(await handler()).toMatchObject({ processed: 1, delivered: 1, failed: [] })
   await expect(runInboxDigestSchedule(schedule, now, 'next-page')).rejects.toThrow('Invalid digest candidate page')
   await expect(runInboxDigestSchedule({ ...schedule, listCandidates: async () => ({ recipients: Array.from({ length: 101 }, () => recipient) }) }, now)).rejects.toThrow('Invalid digest candidate page')
+})
+
+test('notification TTL is interval-start epoch seconds plus 365 days, stable for weekly retries', () => {
+  for (const id of ['daily:2026-10-03', 'weekly:2026-09-28']) {
+    const occurredAt = `${id.split(':')[1]}T00:00:00.000Z`
+    const message: InboxDigestMessage = { id: `update-feed-digest:${id}`, occurredAt, deepLink: '/updates' }
+    const first = createInboxDigestNotification(recipient, message)
+    expect(first.expiresAt).toBe(Date.parse(occurredAt) / 1000 + 365 * 86400)
+    expect(createInboxDigestNotification(recipient, message).expiresAt).toBe(first.expiresAt)
+    expect(Number.isSafeInteger(first.expiresAt)).toBe(true)
+  }
+})
+
+test('scheduler separates terminal candidates from transient retries in a mixed bounded page', async () => {
+  const f = await fixture()
+  const owners = ['success', 'transient', 'exhausted', 'corrupt', 'mismatch'].map((workspaceId) => ({ workspaceId, memberKey: 'reader' }))
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [...owners, owners[0]!], cursor: 'next' }), dependencies: { authorize: async (owner) => {
+    if (owner.workspaceId === 'transient') throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Unavailable')
+    if (owner.workspaceId === 'exhausted') throw new PlanningError(409, 'UpdateFeedDigestAttemptsExhausted', 'Exhausted')
+    if (owner.workspaceId === 'corrupt') throw new PlanningError(502, 'UpdateFeedDigestStorageFailure', 'Invalid state')
+    const context = await f.dependencies.authorize(recipient)
+    if (!context) throw new Error('Fixture missing')
+    if (owner.workspaceId === 'mismatch') return context
+    return { ...context, recipient: owner, store: { ...context.store, get: () => context.store.get(recipient.workspaceId, recipient.memberKey), replace: (_workspaceId, memberKey, state) => context.store.replace(recipient.workspaceId, memberKey, state), complete: (_owner, state, revision, message) => context.store.complete(recipient, state, revision, message) } }
+  } } }, now)
+  expect(result).toEqual({ processed: 5, delivered: 1, failed: [owners[1]], terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }], cursor: 'next' })
 })
