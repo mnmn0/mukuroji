@@ -66,7 +66,12 @@ export async function readUpdateFeed(
   return { view, revision: snapshot.revision, entries: ranked.slice(0, limit), total: ranked.length, truncated: ranked.length > limit }
 }
 
-/** Validates HTTP selectors before constructing storage-backed authorization ports. */
+/**
+ * Validates HTTP selectors before constructing storage-backed authorization ports.
+ * @param viewInput - Optional untrusted standard view; defaults to recent.
+ * @param limitInput - Optional untrusted decimal limit; defaults to 50.
+ * @returns A supported view and an integer response limit between 1 and 100.
+ */
 export function parseUpdateFeedQuery(viewInput?: string, limitInput?: string) {
   const view = readView(viewInput)
   const limit = limitInput === undefined ? 50 : Number(limitInput)

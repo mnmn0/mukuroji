@@ -26145,7 +26145,7 @@ async function requirePlanningUpdateTeamPermission(
   readContext?: TeamPermissionReadContext,
 ): Promise<void> {
   const context = await requireTeamPermission(principal, teamId, minimumRole, readContext)
-  if (principal.isSystemAdmin || context.projectAccesses === undefined) return
+  if (principal.isSystemAdmin || context.directTeamGrant || context.projectAccesses === undefined) return
   const hasQualifiedAccess = context.team.projects.some((project) =>
     context.projectAccesses?.some((access) =>
       planningProjectAccessMatchesQualifiedScope(
@@ -30199,6 +30199,8 @@ async function getEffectiveProjectAccessList(principal: ProjectPrincipal) {
  * チーム Issue 操作で使う directory context です。
  */
 type TeamPermissionContext = {
+  /** The requested role is granted directly on this Team, independently of child Projects. */
+  directTeamGrant?: boolean
   /**
    * active team 行です。
    */
@@ -30264,6 +30266,7 @@ async function requireTeamPermission(
     return {
       team,
       directory,
+      directTeamGrant: true,
       projectAccesses: team.projects.map((project) => ({
         teamId,
         projectId: project.id,

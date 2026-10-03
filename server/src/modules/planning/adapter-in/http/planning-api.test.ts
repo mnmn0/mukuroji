@@ -284,6 +284,39 @@ test('rejects invalid feed selectors before the feed directory read even during 
   expect(strongReads).toBe(0)
 })
 
+test('preserves direct Enterprise Team access for an Initiative in an empty Team and removes it after revocation', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [], teamProjects: [] })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(planning, 'empty-team-initiative', 'core-team')
+  const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'empty-team-initiative' }
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target, expectedRevision: 3, cadence: {
+      updateOwnerMemberKey: 'demo@example.com', cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24,
+    },
+  }, { workItems: [] })
+  await planning.publishUpdate('user#demo@example.com', {
+    target, expectedRevision: 4, id: 'team-report', health: 'on-track', risk: 'none',
+    summary: 'Team report', riskSummary: '', decisionSummary: '', helpNeeded: '', nextAction: '', evidence: [],
+  }, 'demo@example.com', { workItems: [] })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  let assignments: EnterpriseRoleAssignment[] = [{
+    workspaceId: 'user#demo@example.com', assignmentId: 'direct-team-member',
+    principalKind: 'member', principalId: 'demo@example.com', roleId: 'team:member',
+    scope: { workspaceId: 'user#demo@example.com', kind: 'team', targetId: 'core-team' }, source: 'direct',
+  }]
+  identity.getSnapshot = async (workspaceId) => ({ ...await readIdentity(workspaceId), roleAssignments: assignments })
+  setTestAppDependencies({ planning, enterpriseIdentity: identity })
+  const granted = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(granted.status).toBe(200)
+  expect(await granted.json()).toMatchObject({ total: 1, entries: [{ target, latestUpdate: { summary: 'Team report' } }] })
+  assignments = []
+  const revoked = await planningApiRequest('/api/planning/update-feed?view=recent')
+  expect(revoked.status).toBe(200)
+  expect(await revoked.json()).toMatchObject({ total: 0, entries: [] })
+})
+
 test('aggregates latest Project and Initiative updates without history reads and removes revoked or archived targets', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
   const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
