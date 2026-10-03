@@ -82,6 +82,8 @@ async function mockFeed(page: Page, guest = false, expiresAt?: number) {
 
 for (const conflict of [false, true]) test(`Inbox keyboard save restores owned focus with conflict=${conflict}`, async ({ page }) => {
   const state = await mockFeed(page)
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => { if (route.request().method() === 'PUT') puts++; await route.fallback() })
   state.inbox.preferences.enabled = true
   state.digestConflict = conflict
   await page.goto('/updates')
@@ -93,7 +95,24 @@ for (const conflict of [false, true]) test(`Inbox keyboard save restores owned f
   await page.keyboard.press('Enter')
   await expect(summary).toBeFocused()
   await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
-  if (conflict) await expect(panel.getByRole('alert')).toContainText('Settings changed')
+  if (conflict) {
+    await expect(panel.getByRole('alert')).toContainText('Settings changed')
+    const save = panel.getByRole('button', { name: 'Save Inbox settings' })
+    await save.evaluate((button) => button.click())
+    await panel.locator('form').evaluate((form) => { form.tabIndex = -1; form.focus() })
+    await page.keyboard.press('Enter')
+    await panel.locator('form').evaluate((form) => form.requestSubmit())
+    await expect(panel.getByRole('alert')).toContainText('Settings changed')
+    await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).not.toBeChecked()
+    expect(puts).toBe(1)
+    state.digestConflict = false
+    await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+    await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).toBeChecked()
+    await panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).uncheck()
+    await save.click()
+    await expect.poll(() => puts).toBe(2)
+    await expect(save).toBeDisabled()
+  }
 })
 
 test('saved Inbox draft follows a later external preference change without false conflict', async ({ page }) => {
