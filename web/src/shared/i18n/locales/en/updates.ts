@@ -5,6 +5,7 @@ export const updatesMessages = {
   "updates.inbox.conflict": "Settings changed. Reload before saving again.",
   "updates.inbox.error": "Unable to load or save Inbox settings.",
   "updates.inbox.saveError": "Unable to confirm the save. Your changes are kept; try saving again.",
+  "updates.inbox.unsaved": "You have unsaved Inbox settings.",
   "updates.inbox.settings": "Delivery consent",
   "updates.inbox.inactive": "Automatic delivery is not active yet. Saving records your preference only.",
   "updates.inbox.enabled": "Receive update digests in Inbox when delivery becomes available",
