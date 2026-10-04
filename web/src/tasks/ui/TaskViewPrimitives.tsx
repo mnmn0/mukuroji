@@ -1,9 +1,10 @@
 import {
+  type CanonicalWorkItem,
   DEFAULT_WORK_ITEM_TYPE,
   type WorkItemConfiguration,
+  type WorkItemPriority,
   type WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkItemTypeDefinition,

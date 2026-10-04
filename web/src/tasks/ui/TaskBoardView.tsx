@@ -1,11 +1,11 @@
 import {
+  type CanonicalWorkItem,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ResolvedWorkItemConfiguration,
   type WorkItemConfiguration,
   type WorkItemPatch,
 } from '@mukuroji/contracts'
 import { Fragment, useState, type DragEvent } from 'react'
-import type { CanonicalWorkItem } from '../api/tasks'
 import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'

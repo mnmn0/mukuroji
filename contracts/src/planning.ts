@@ -356,22 +356,6 @@ export type CycleCarryOverPolicy = 'move-incomplete' | 'keep-incomplete'
 /** Goal / OKR hierarchy での entity の役割です。 */
 export type PlanningGoalFramework = 'goal' | 'objective' | 'key-result'
 
-/** Planning entity に追記する status update です。 */
-export type PlanningStatusUpdate = {
-  /** Entity 内で status update を識別する ID です。 */
-  id: string
-  /** Update 本文です。 */
-  message: string
-  /** Update を作成した Workspace member key です。 */
-  authorMemberKey: string
-  /** Update 時点で明示された health です。 */
-  health?: PlanningHealth
-  /** Update 時点で明示された risk です。 */
-  risk?: PlanningRisk
-  /** 作成日時の ISO 8601 timestamp です。 */
-  createdAt: string
-}
-
 /** Planning hierarchy に保存する versioned entity です。 */
 export type PlanningEntity = {
   /** Workspace 内で entity を識別する ID です。 */
@@ -418,8 +402,6 @@ export type PlanningEntity = {
   carryOverPolicy?: CycleCarryOverPolicy
   /** Goal/OKR hierarchy 上の役割です。 */
   goalFramework?: PlanningGoalFramework
-  /** 新しい順に最大32件保持する status update 一覧です。 */
-  statusUpdates: PlanningStatusUpdate[]
   /** Soft archive した日時の ISO 8601 timestamp です。 */
   archivedAt?: string
   /** 作成日時の ISO 8601 timestamp です。 */
@@ -702,20 +684,6 @@ export type MovePlanningEntityInput = {
   teamId?: string
   /** Entity と子孫へ適用する Move 後の Project scope です。 */
   projectId?: string
-  /** 読み込み時点の planning graph revision です。 */
-  expectedRevision: number
-}
-
-/** Planning entity status update 追加 API の入力です。 */
-export type PlanningStatusUpdateInput = {
-  /** 新しい status update ID です。 */
-  id: string
-  /** Status update 本文です。 */
-  message: string
-  /** Update と同時に設定する health です。 */
-  health?: PlanningHealth
-  /** Update と同時に設定する risk level です。 */
-  risk?: PlanningRisk
   /** 読み込み時点の planning graph revision です。 */
   expectedRevision: number
 }

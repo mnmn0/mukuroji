@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  type CanonicalWorkItem,
   createDefaultDueDateWorkItemSchedule,
   createDefaultUnscheduledWorkItemSchedule,
   deriveWorkItemScheduleDueDate,
@@ -12,7 +13,6 @@ import {
   createTeamProjectSummaries,
   type TeamProjectMemberAccess,
 } from '../src/projects/model/teamInsights'
-import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 
 const baseTask = referoTaskFixtures.find((task) => task.id === 'wireframe')

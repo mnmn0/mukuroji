@@ -639,7 +639,7 @@ export interface CollaborationClient {
   subscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves a watcher while preserving scope-wide counts for compatibility callers. */
+  /** Saves a watcher without compare-and-set and returns the scope-wide state with watcher counts. */
   subscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -651,7 +651,7 @@ export interface CollaborationClient {
   unsubscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves an unsubscribe tombstone while preserving counts for compatibility callers. */
+  /** Saves an unsubscribe tombstone without compare-and-set and returns the scope-wide state. */
   unsubscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -1342,7 +1342,8 @@ function decodeAcceptedResolutionCursor(
         parsed.version !== 2 ||
         parsed.entityKey !== entityKey ||
         parsed.rootCommentId !== rootCommentId ||
-        (parsed.phase !== 'append' && parsed.phase !== 'legacy')) {
+        typeof parsed.recordKey !== 'string' ||
+        !parsed.recordKey.startsWith(acceptedResolutionRecordPrefix(rootCommentId))) {
       throw new Error('cursor mismatch')
     }
     const rawAcceptedResolutionId = parsed.acceptedResolutionId
@@ -1350,35 +1351,15 @@ function decodeAcceptedResolutionCursor(
         !(rawAcceptedResolutionId === null || typeof rawAcceptedResolutionId === 'string')) {
       throw new Error('root snapshot mismatch')
     }
-    const acceptedResolutionId = rawAcceptedResolutionId === null
-      ? null
-      : requireIdentifier(rawAcceptedResolutionId, 'Accepted resolution pointer')
-    if (parsed.phase === 'append') {
-      if (typeof parsed.recordKey !== 'string' ||
-          !parsed.recordKey.startsWith(acceptedResolutionRecordPrefix(rootCommentId))) {
-        throw new Error('append cursor mismatch')
-      }
-      return {
-        version: 2,
-        entityKey,
-        rootCommentId,
-        rootVersion: parsed.rootVersion,
-        acceptedResolutionId,
-        phase: 'append',
-        recordKey: parsed.recordKey,
-      }
-    }
-    if (!isNonNegativeSafeInteger(parsed.legacyOffset)) {
-      throw new Error('legacy cursor mismatch')
-    }
     return {
       version: 2,
       entityKey,
       rootCommentId,
       rootVersion: parsed.rootVersion,
-      acceptedResolutionId,
-      phase: 'legacy',
-      legacyOffset: parsed.legacyOffset,
+      acceptedResolutionId: rawAcceptedResolutionId === null
+        ? null
+        : requireIdentifier(rawAcceptedResolutionId, 'Accepted resolution pointer'),
+      recordKey: parsed.recordKey,
     }
   } catch (error) {
     throw new CollaborationError(
@@ -1907,107 +1888,86 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 /**
- * Parses accepted resolution history from a stored root comment.
+ * Parses one stored accepted-resolution snapshot.
  *
- * @param value - Untrusted stored history.
- * @param rootCommentId - Root comment owning the history.
- * @returns Validated accepted and superseded resolution entries.
+ * @param value - Untrusted snapshot from a history row or a root comment row.
+ * @param rootCommentId - Root comment that must own the snapshot.
+ * @returns Validated accepted or superseded resolution.
  */
-function normalizeAcceptedResolutions(value: unknown, rootCommentId: string) {
-  if (value === undefined) {
-    return []
-  }
-  if (!Array.isArray(value)) {
+function normalizeAcceptedResolution(value: unknown, rootCommentId: string): AcceptedResolution {
+  if (!isRecord(value) ||
+      !isPositiveSafeInteger(value.capturedCommentRevision) ||
+      (value.state !== 'accepted' && value.state !== 'superseded')) {
     throw new CollaborationError(
       503,
       'InvalidCollaborationRecord',
-      'Accepted resolution history is invalid.',
+      'Accepted resolution snapshot is invalid.',
     )
   }
-  const resolutions = value.map((entry): AcceptedResolution => {
-    if (!isRecord(entry) ||
-        !isPositiveSafeInteger(entry.capturedCommentRevision) ||
-        (entry.state !== 'accepted' && entry.state !== 'superseded')) {
-      throw new CollaborationError(
-        503,
-        'InvalidCollaborationRecord',
-        'Accepted resolution history is invalid.',
-      )
+  try {
+    const id = requireIdentifierValue(value.id, 'Accepted resolution ID')
+    const sourceCommentId = requireIdentifierValue(
+      value.sourceCommentId,
+      'Accepted resolution source comment ID',
+    )
+    const sourceRootCommentId = requireIdentifierValue(
+      value.sourceRootCommentId,
+      'Accepted resolution source root comment ID',
+    )
+    if (sourceRootCommentId !== rootCommentId) {
+      throw new Error('accepted resolution root mismatch')
     }
-    try {
-      const id = requireIdentifierValue(entry.id, 'Accepted resolution ID')
-      const sourceCommentId = requireIdentifierValue(
-        entry.sourceCommentId,
-        'Accepted resolution source comment ID',
-      )
-      const sourceRootCommentId = requireIdentifierValue(
-        entry.sourceRootCommentId,
-        'Accepted resolution source root comment ID',
-      )
-      if (sourceRootCommentId !== rootCommentId) {
-        throw new Error('accepted resolution root mismatch')
-      }
-      const capturedCommentAuthorMemberKey = entry.capturedCommentAuthorMemberKey === undefined
-        ? undefined
-        : requireIdentifierValue(
-            entry.capturedCommentAuthorMemberKey,
-            'Accepted resolution captured comment author member key',
-          )
-      const base = {
-        id,
-        sourceCommentId,
-        sourceRootCommentId,
-        capturedCommentRevision: entry.capturedCommentRevision,
-        capturedCommentBody: requireTextValue(
-          entry.capturedCommentBody,
-          'Accepted resolution captured comment body',
-          COLLABORATION_COMMENT_MAX_LENGTH,
-          false,
-        ),
-        ...(capturedCommentAuthorMemberKey
-          ? { capturedCommentAuthorMemberKey }
-          : {}),
-        summary: normalizeContextBody(entry.summary, 'Accepted resolution summary'),
-        acceptedBy: normalizeContextActor(entry.acceptedBy, 'Accepted resolution actor'),
-        acceptedAt: normalizeIsoTimestamp(entry.acceptedAt, 'Accepted resolution acceptedAt'),
-      }
-      if (entry.state === 'accepted') {
-        return { ...base, state: 'accepted' }
-      }
-      return {
-        ...base,
-        state: 'superseded',
-        supersededByResolutionId: requireIdentifierValue(
-          entry.supersededByResolutionId,
-          'Superseding accepted resolution ID',
-        ),
-        supersededBy: normalizeContextActor(
-          entry.supersededBy,
-          'Accepted resolution superseding actor',
-        ),
-        supersededAt: normalizeIsoTimestamp(
-          entry.supersededAt,
-          'Accepted resolution supersededAt',
-        ),
-      }
-    } catch (error) {
-      throw new CollaborationError(
-        503,
-        'InvalidCollaborationRecord',
-        'Accepted resolution history is invalid.',
-        { cause: error },
-      )
+    const capturedCommentAuthorMemberKey = value.capturedCommentAuthorMemberKey === undefined
+      ? undefined
+      : requireIdentifierValue(
+          value.capturedCommentAuthorMemberKey,
+          'Accepted resolution captured comment author member key',
+        )
+    const base = {
+      id,
+      sourceCommentId,
+      sourceRootCommentId,
+      capturedCommentRevision: value.capturedCommentRevision,
+      capturedCommentBody: requireTextValue(
+        value.capturedCommentBody,
+        'Accepted resolution captured comment body',
+        COLLABORATION_COMMENT_MAX_LENGTH,
+        false,
+      ),
+      ...(capturedCommentAuthorMemberKey
+        ? { capturedCommentAuthorMemberKey }
+        : {}),
+      summary: normalizeContextBody(value.summary, 'Accepted resolution summary'),
+      acceptedBy: normalizeContextActor(value.acceptedBy, 'Accepted resolution actor'),
+      acceptedAt: normalizeIsoTimestamp(value.acceptedAt, 'Accepted resolution acceptedAt'),
     }
-  })
-  if (new Set(resolutions.map((resolution) => resolution.id)).size !== resolutions.length ||
-      resolutions.filter((resolution) => resolution.state === 'accepted').length > 1) {
+    if (value.state === 'accepted') {
+      return { ...base, state: 'accepted' }
+    }
+    return {
+      ...base,
+      state: 'superseded',
+      supersededByResolutionId: requireIdentifierValue(
+        value.supersededByResolutionId,
+        'Superseding accepted resolution ID',
+      ),
+      supersededBy: normalizeContextActor(
+        value.supersededBy,
+        'Accepted resolution superseding actor',
+      ),
+      supersededAt: normalizeIsoTimestamp(
+        value.supersededAt,
+        'Accepted resolution supersededAt',
+      ),
+    }
+  } catch (error) {
     throw new CollaborationError(
       503,
       'InvalidCollaborationRecord',
-      'Accepted resolution history is invalid.',
+      'Accepted resolution snapshot is invalid.',
+      { cause: error },
     )
   }
-  return resolutions
 }
 
 /**
@@ -2057,9 +2017,6 @@ function toStoredCommentStorageItem(comment: StoredComment) {
       ? { acceptedResolutionId: comment.acceptedResolutionId }
       : {}),
     ...(currentResolution ? { acceptedResolution: currentResolution } : {}),
-    ...(comment.legacyAcceptedResolutions.length > 0
-      ? { acceptedResolutions: comment.legacyAcceptedResolutions }
-      : {}),
   }
 }
 
@@ -2067,14 +2024,13 @@ function toStoredCommentStorageItem(comment: StoredComment) {
  * Serializes the original successful accepted-resolution response for a receipt.
  *
  * @param comment - Successful bounded root response.
- * @returns Physical comment-shaped snapshot without legacy inline history.
+ * @returns Physical comment-shaped snapshot without the root body or mentions.
  */
 function toAcceptedResolutionReceiptStorageResponse(comment: StoredComment) {
   return toStoredCommentStorageItem({
     ...comment,
     bodyMarkdown: '',
     mentionMemberKeys: [],
-    legacyAcceptedResolutions: [],
   })
 }
 
@@ -2173,24 +2129,14 @@ function toStoredAcceptedResolution(
         typeof value.recordedAt !== 'string') {
       throw new Error('invalid accepted resolution row')
     }
-    const [resolution] = normalizeAcceptedResolutions([value.resolution], expectedRootCommentId)
-    if (!resolution) {
-      throw new Error('missing accepted resolution snapshot')
-    }
+    const resolution = normalizeAcceptedResolution(value.resolution, expectedRootCommentId)
     const recordedAt = normalizeIsoTimestamp(value.recordedAt, 'Accepted resolution recordedAt')
-    const currentRecordKey = acceptedResolutionRecordKey(
+    if (value.recordKey !== acceptedResolutionRecordKey(
       expectedRootCommentId,
       recordedAt,
       resolution.id,
       resolution.state,
-    )
-    const legacyRecordKey = legacyAcceptedResolutionRecordKey(
-      expectedRootCommentId,
-      recordedAt,
-      resolution.id,
-      resolution.state,
-    )
-    if (value.recordKey !== currentRecordKey && value.recordKey !== legacyRecordKey) {
+    )) {
       throw new Error('invalid accepted resolution record key')
     }
     return {
@@ -2314,24 +2260,6 @@ function acceptedResolutionRecordKey(
   return `${acceptedResolutionRecordPrefix(rootCommentId)}${recordedAt}#${stateRank}#${encodeURIComponent(resolutionId)}#${state}`
 }
 
-/**
- * Creates the pre-rank history key retained for read compatibility.
- *
- * @param rootCommentId - Root comment identifier.
- * @param recordedAt - Mutation timestamp.
- * @param resolutionId - Resolution identifier.
- * @param state - Snapshot state.
- * @returns Legacy DynamoDB record key.
- */
-function legacyAcceptedResolutionRecordKey(
-  rootCommentId: string,
-  recordedAt: string,
-  resolutionId: string,
-  state: AcceptedResolution['state'],
-) {
-  return `${acceptedResolutionRecordPrefix(rootCommentId)}${recordedAt}#${encodeURIComponent(resolutionId)}#${state}`
-}
-
 /** Physical comment row with the current accepted-resolution pointer. */
 type StoredComment = CollaborationComment & {
   /** DynamoDB partition key です。 */
@@ -2342,8 +2270,6 @@ type StoredComment = CollaborationComment & {
   entryType: 'comment'
   /** Physical current snapshot と一致する accepted resolution ID です。 */
   acceptedResolutionId?: string
-  /** 旧 schema の physical root row に残る inline history です。 */
-  legacyAcceptedResolutions: AcceptedResolution[]
 }
 
 /** Accepted resolution history の append-only row です。 */
@@ -2540,12 +2466,8 @@ type AcceptedResolutionCursor = {
   rootVersion: number
   /** Accepted-resolution pointer observed when the cursor was issued. */
   acceptedResolutionId: string | null
-  /** Append-only rows または legacy inline history の pagination phase です。 */
-  phase: 'append' | 'legacy'
-  /** Append phase の直前 page で最後に処理した physical row key です。 */
-  recordKey?: string
-  /** Legacy phase の直前 page までに返した item 数です。 */
-  legacyOffset?: number
+  /** 直前 page で最後に処理した append-only history row の physical key です。 */
+  recordKey: string
 }
 
 const defaultPresenceTtlSeconds = 45
@@ -2857,34 +2779,8 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       )
     }
 
-    const legacyHistory = [...root.legacyAcceptedResolutions].sort((left, right) => {
-      const leftAt = left.supersededAt ?? left.acceptedAt
-      const rightAt = right.supersededAt ?? right.acceptedAt
-      return rightAt.localeCompare(leftAt) || right.id.localeCompare(left.id)
-    })
-    if (cursor?.phase === 'legacy') {
-      const offset = cursor.legacyOffset ?? 0
-      const items = legacyHistory.slice(offset, offset + limit)
-      const nextOffset = offset + items.length
-      return {
-        items,
-        ...(nextOffset < legacyHistory.length
-          ? {
-              nextCursor: encodeAcceptedResolutionCursor({
-                version: 2,
-                entityKey,
-                rootCommentId,
-                ...acceptedResolutionCursorSnapshot(root),
-                phase: 'legacy',
-                legacyOffset: nextOffset,
-              }),
-            }
-          : {}),
-      }
-    }
-
     const prefix = acceptedResolutionRecordPrefix(rootCommentId)
-    const exclusiveStartKey = cursor?.recordKey
+    const exclusiveStartKey = cursor
       ? { entityKey, recordKey: cursor.recordKey }
       : undefined
     const response = await this.documentClient.send(new QueryCommand({
@@ -2928,35 +2824,17 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       }
     }
 
-    const hasMoreAppendRows = stoppedBeforeBatchEnd || Boolean(response.LastEvaluatedKey)
-    if (hasMoreAppendRows && lastProcessedRecordKey) {
-      return {
-        items,
-        nextCursor: encodeAcceptedResolutionCursor({
-          version: 2,
-          entityKey,
-          rootCommentId,
-          ...acceptedResolutionCursorSnapshot(root),
-          phase: 'append',
-          recordKey: lastProcessedRecordKey,
-        }),
-      }
-    }
-
-    const remaining = limit - items.length
-    const legacyItems = legacyHistory.slice(0, remaining)
-    items.push(...legacyItems)
+    const hasMoreRows = stoppedBeforeBatchEnd || Boolean(response.LastEvaluatedKey)
     return {
       items,
-      ...(legacyItems.length < legacyHistory.length
+      ...(hasMoreRows && lastProcessedRecordKey
         ? {
             nextCursor: encodeAcceptedResolutionCursor({
               version: 2,
               entityKey,
               rootCommentId,
               ...acceptedResolutionCursorSnapshot(root),
-              phase: 'legacy',
-              legacyOffset: legacyItems.length,
+              recordKey: lastProcessedRecordKey,
             }),
           }
         : {}),
@@ -3647,18 +3525,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           supersededAt: occurredAt,
         } satisfies AcceptedResolution
       : undefined
-    const currentWasLegacy = Boolean(
-      current && root.legacyAcceptedResolutions.some((resolution) => resolution.id === current.id),
-    )
-    const legacyAcceptedResolutions = superseded && currentWasLegacy
-      ? root.legacyAcceptedResolutions.map((resolution) =>
-          resolution.id === superseded.id ? superseded : resolution
-        )
-      : root.legacyAcceptedResolutions
     const after: StoredComment = {
       ...root,
       acceptedResolutions: [accepted],
-      legacyAcceptedResolutions,
       acceptedResolutionId: accepted.id,
       version: root.version + 1,
       updatedAt: occurredAt,
@@ -3717,7 +3586,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
               ExpressionAttributeValues: { ':expectedVersion': input.expectedThreadVersion },
             },
           },
-          ...(superseded && !currentWasLegacy
+          ...(superseded
             ? [acceptedResolutionPut(this.tableName, input.entityKey, root.id, superseded, occurredAt)]
             : []),
           acceptedResolutionPut(this.tableName, input.entityKey, root.id, accepted, occurredAt),
@@ -3818,7 +3687,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       updatedAt: occurredAt,
       reactions: [],
       acceptedResolutions: [],
-      legacyAcceptedResolutions: [],
     }
     const discussionTimelineKey = discussionTimelineRecordKey(
       occurredAt,
@@ -4091,7 +3959,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   async subscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves a watcher while preserving scope-wide counts for compatibility callers. */
+  /** Saves a watcher without compare-and-set and returns the scope-wide state with watcher counts. */
   async subscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -4196,7 +4064,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   async unsubscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
   ): Promise<CollaborationMemberWatcherState>
-  /** Saves an unsubscribe tombstone while preserving counts for compatibility callers. */
+  /** Saves an unsubscribe tombstone without compare-and-set and returns the scope-wide state. */
   async unsubscribe(
     input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
   ): Promise<CollaborationWatcherState>
@@ -4783,7 +4651,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
    * Reads the current curated-context ledger generation consistently.
    *
    * @param entityKey - Work Item collaboration entity key.
-   * @returns The current generation, or zero for a legacy scope without a ledger row.
+   * @returns The current generation, or zero before the first context mutation creates the ledger row.
    */
   private async getCuratedContextLedgerGeneration(entityKey: string): Promise<number> {
     try {
@@ -6020,6 +5888,16 @@ function normalizeMentionMemberKeys(values: string[] | undefined) {
   return [...new Set(values.map(normalizeMemberKey))]
 }
 
+/**
+ * Parses and validates one physical comment row.
+ *
+ * A root row stores only its current accepted resolution and the matching pointer; the
+ * history lives in append-only `RESOLUTION#` rows. A row that embeds a resolution
+ * history array does not match that shape and fails closed.
+ *
+ * @param value - Untrusted DynamoDB document value.
+ * @returns Validated comment row with its current accepted resolution, when one exists.
+ */
 function toStoredComment(value: Record<string, unknown>) {
   if (
     value.entryType !== 'comment' ||
@@ -6035,15 +5913,18 @@ function toStoredComment(value: Record<string, unknown>) {
   ) {
     throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Comment record is invalid.')
   }
+  if (value.acceptedResolutions !== undefined) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Comment record must not embed accepted resolution history.',
+    )
+  }
 
-  const legacyAcceptedResolutions = normalizeAcceptedResolutions(
-    value.acceptedResolutions,
-    value.rootCommentId,
-  )
-  const storedCurrentResolution = value.acceptedResolution === undefined
+  const currentResolution = value.acceptedResolution === undefined
     ? undefined
-    : normalizeAcceptedResolutions([value.acceptedResolution], value.rootCommentId)[0]
-  if (storedCurrentResolution?.state === 'superseded') {
+    : normalizeAcceptedResolution(value.acceptedResolution, value.rootCommentId)
+  if (currentResolution?.state === 'superseded') {
     throw new CollaborationError(
       503,
       'InvalidCollaborationRecord',
@@ -6053,26 +5934,21 @@ function toStoredComment(value: Record<string, unknown>) {
   const acceptedResolutionId = value.acceptedResolutionId === undefined
     ? undefined
     : requireIdentifierValue(value.acceptedResolutionId, 'Accepted resolution ID')
-  if (acceptedResolutionId !== undefined && !storedCurrentResolution) {
+  if (acceptedResolutionId !== undefined && !currentResolution) {
     throw new CollaborationError(
       503,
       'InvalidCollaborationRecord',
       'Accepted resolution pointer requires a current snapshot.',
     )
   }
-  if (storedCurrentResolution && acceptedResolutionId === undefined) {
+  if (currentResolution && acceptedResolutionId === undefined) {
     throw new CollaborationError(
       503,
       'InvalidCollaborationRecord',
       'Accepted resolution current snapshot requires a root pointer.',
     )
   }
-  const legacyCurrentResolution = legacyAcceptedResolutions.find(
-    (resolution) => resolution.state === 'accepted',
-  )
-  const currentResolution = storedCurrentResolution ?? legacyCurrentResolution
-  const normalizedAcceptedResolutionId = acceptedResolutionId ?? currentResolution?.id
-  if (storedCurrentResolution && acceptedResolutionId !== storedCurrentResolution.id) {
+  if (currentResolution && acceptedResolutionId !== currentResolution.id) {
     throw new CollaborationError(
       503,
       'InvalidCollaborationRecord',
@@ -6101,12 +5977,9 @@ function toStoredComment(value: Record<string, unknown>) {
     ...(typeof value.resolvedByMemberKey === 'string'
       ? { resolvedByMemberKey: normalizeMemberKey(value.resolvedByMemberKey) }
       : {}),
-    ...(normalizedAcceptedResolutionId
-      ? { acceptedResolutionId: normalizedAcceptedResolutionId }
-      : {}),
+    ...(acceptedResolutionId ? { acceptedResolutionId } : {}),
     reactions: [],
     acceptedResolutions: currentResolution ? [currentResolution] : [],
-    legacyAcceptedResolutions,
   } satisfies StoredComment
 }
 

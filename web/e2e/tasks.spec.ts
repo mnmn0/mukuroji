@@ -37,6 +37,7 @@ import {
   type WorkItemScheduleDependencyConflict,
   type WorkItemScheduleImpact,
   type WorkItemScheduleOperation,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import {
@@ -50,7 +51,6 @@ import type { InboxNotification, NotificationPreferences } from '../src/notifica
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import {
   teamWorkItemConfigurationFixture,

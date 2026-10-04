@@ -60,7 +60,7 @@ describe('Workspace search status options', () => {
     ])
   })
 
-  test('keeps a legacy bare status visible when restoring an older Search URL', () => {
+  test('keeps a bare Search URL status visible alongside qualified configured statuses', () => {
     const options = createSearchStatusOptions({
       alpha: createResolvedConfiguration('alpha', [
         { id: 'ready', name: 'Ready', sortOrder: 0 },

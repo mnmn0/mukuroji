@@ -1,10 +1,10 @@
 import type {
+  CanonicalWorkItem,
   CustomFieldDefinition,
   CustomFieldValue,
   WorkItemConfiguration,
   WorkItemPatch,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from '../api/tasks'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import {

@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import type {
+  CanonicalWorkItem,
   ConfirmedWorkItemSchedule,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
-import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import {
   applyConfirmedSchedulesToPlanningSnapshot,

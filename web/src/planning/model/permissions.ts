@@ -87,22 +87,6 @@ export function canManagePlanningScope(
 }
 
 /**
- * 現在ユーザーが指定 Planning entity に status update を投稿できるか判定します。
- *
- * @param user - Current user です。
- * @param entity - 判定対象の Planning entity です。
- * @param access - Current user の Project role snapshot です。
- * @returns Backend の member 要件を満たす場合は true です。
- */
-export function canUpdatePlanningEntityStatus(
-  user: CurrentUser | null | undefined,
-  entity: PlanningEntity,
-  access: PlanningAccessSnapshot,
-) {
-  return canUsePlanningScope(user, entity, access, 'member', false)
-}
-
-/**
  * Determines whether the current user may configure one Project or Initiative update cadence.
  *
  * @param user - Current authenticated user.

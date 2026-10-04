@@ -1,4 +1,5 @@
 import {
+  type CanonicalWorkItem,
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ResolvedWorkItemConfiguration,
@@ -7,7 +8,6 @@ import { Fragment, useMemo, useState, type DragEvent, type ReactNode } from 'rea
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   groupTaskViewItems,
   type TaskViewGroupValue,

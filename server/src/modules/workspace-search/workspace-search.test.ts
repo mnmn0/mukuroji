@@ -15,6 +15,7 @@ import {
 import type { TaskViewDefinition } from '@mukuroji/contracts'
 import {
   type CreateTaskViewRequest,
+  type TaskViewAccessScope,
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
   createCommentWorkspaceSearchDocument,
@@ -2464,7 +2465,6 @@ test('sanitizes deleted and permission-restricted task view references with stab
     activeCustomFieldIds: new Set(['kept', 'private']),
     activeWorkItemTypeIds: new Set([createSearchWorkItemTypeKey('core', 'bug')]),
     readableCustomFieldIds: new Set(['kept']),
-    activeStatusIds: new Set(['core\0todo']),
     activeWorkflowStatusIds: new Set(['core\0bug\0todo']),
     readableColumnIds: new Set(['title', 'customFields', 'workItemType']),
     readableActorIds: new Set(['owner@example.com']),
@@ -2489,13 +2489,11 @@ test('sanitizes deleted and permission-restricted task view references with stab
           ],
           teamIds: ['core', 'secret'],
           projectIds: ['project-1', 'project-2'],
-          statuses: ['todo', 'gone'],
           workflowStatuses: [
-            { teamId: 'core', statusId: 'todo' },
-            { teamId: 'core', statusId: 'gone' },
             { teamId: 'core', workItemTypeId: 'bug', statusId: 'todo' },
             { teamId: 'core', workItemTypeId: 'bug', statusId: 'gone' },
-            { teamId: 'secret', statusId: 'hidden' },
+            { teamId: 'core', workItemTypeId: 'task', statusId: 'todo' },
+            { teamId: 'secret', workItemTypeId: 'bug', statusId: 'hidden' },
           ],
           customFields: [
             { fieldId: 'kept', operator: 'equals', value: 'yes' },
@@ -2536,9 +2534,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
     workItemTypeIds: [createSearchWorkItemTypeKey('core', 'bug')],
     teamIds: ['core'],
     projectIds: ['project-1'],
-    statuses: ['todo'],
     workflowStatuses: [
-      { teamId: 'core', statusId: 'todo' },
       { teamId: 'core', workItemTypeId: 'bug', statusId: 'todo' },
     ],
     customFields: [{ fieldId: 'kept', operator: 'equals', value: 'yes' }],
@@ -2566,6 +2562,133 @@ test('sanitizes deleted and permission-restricted task view references with stab
   ]))
   expect(created.migrationWarnings?.every((warning) => warning.referenceId === undefined)).toBe(true)
 })
+
+test('fails closed when a stored task view status filter is not Team and Type-qualified', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = createQualifiedStatusTaskViewAccess()
+  const definition = createQualifiedStatusTaskViewDefinition()
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: { name: 'Qualified statuses', visibility: 'personal', definition },
+  })
+  const viewRecordKey = createTaskViewRecordKey(created.id)
+
+  expect(created.definition.filters.workflowStatuses).toEqual(
+    definition.filters.workflowStatuses,
+  )
+  expect(created.migrationWarnings).toBeUndefined()
+  for (const filters of [
+    { workflowStatuses: [{ teamId: 'core', statusId: 'todo' }] },
+    { statuses: ['todo'] },
+  ]) {
+    control.beforeGet = (items, workspaceId, recordKey) => {
+      const itemKey = `${workspaceId}\0${recordKey}`
+      const row = items.get(itemKey)
+      if (recordKey !== viewRecordKey || !row) return
+      items.set(itemKey, { ...row, definition: { ...definition, filters } })
+    }
+
+    await expect(client.getTaskView({
+      workspaceId: 'workspace-1',
+      viewId: created.id,
+      access,
+    })).rejects.toMatchObject({ code: 'InvalidTaskView', status: 503 })
+  }
+})
+
+test('fails closed when a stored task view default marker has no generation', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = createQualifiedStatusTaskViewAccess()
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Personal default',
+      visibility: 'personal',
+      defaultSource: 'personal',
+      definition: createQualifiedStatusTaskViewDefinition(),
+    },
+  })
+
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+  })).toMatchObject({ preference: { isDefault: true, isPersonalDefault: true } })
+  control.beforeGet = (items, workspaceId, recordKey) => {
+    const itemKey = `${workspaceId}\0${recordKey}`
+    const row = items.get(itemKey)
+    if (row?.entryType !== 'task-view-default') return
+    const marker = structuredClone(row)
+    delete marker.generation
+    items.set(itemKey, marker)
+  }
+
+  await expect(client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+  })).rejects.toMatchObject({ code: 'InvalidTaskView', status: 503 })
+})
+
+/**
+ * Creates owner access for the `core` Team with one active Type-qualified workflow status.
+ *
+ * @returns Task view access that can create and read personal `core` Team views.
+ */
+function createQualifiedStatusTaskViewAccess(): TaskViewAccessScope {
+  return {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['core']),
+    writableTeamIds: new Set(['core']),
+    manageableTeamIds: new Set(['core']),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+    activeWorkflowStatusIds: new Set(['core\0bug\0todo']),
+  }
+}
+
+/**
+ * Creates a `core` Team definition filtered by one Team and Type-qualified workflow status.
+ *
+ * @returns Complete task view definition accepted by the current contract.
+ */
+function createQualifiedStatusTaskViewDefinition(): TaskViewDefinition {
+  return {
+    surface: 'team',
+    scope: { kind: 'team', teamId: 'core' },
+    filters: {
+      workflowStatuses: [{ teamId: 'core', workItemTypeId: 'bug', statusId: 'todo' }],
+    },
+    layout: {
+      mode: 'table',
+      sort: [],
+      columns: [{ field: 'title' }],
+      density: 'comfortable',
+      displayOptions: {},
+    },
+  }
+}
 
 test('retains a currently authorized relation target with no source edge and redacts it after access loss', async () => {
   const client = new DynamoDbWorkspaceSearchClient(

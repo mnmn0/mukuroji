@@ -1637,7 +1637,9 @@ test('task view endpoints forward the complete lifecycle with current permission
   )).toBeFalse()
   expect(listInput?.access.readableCustomFieldIds?.has('score')).toBeTrue()
   expect(listInput?.access.readableCustomFieldIds?.has('restricted-score')).toBeFalse()
-  expect(listInput?.access.activeStatusIds?.has('core-team\0review')).toBeTrue()
+  expect(listInput?.access.activeWorkflowStatusIds?.has('core-team\0bug\0review')).toBeTrue()
+  expect(listInput?.access.activeWorkflowStatusIds?.has('core-team\0default\0review')).toBeTrue()
+  expect(listInput?.access.activeWorkflowStatusIds?.has('restricted-team\0bug\0review')).toBeTrue()
   expect(listInput?.access.readableActorIds?.has('demo@example.com')).toBeTrue()
   expect(listInput?.access.readableActorIds?.has('sato@example.com')).toBeTrue()
   expect(listInput?.access.resolveReadableRelationIds).toBeFunction()
@@ -2306,6 +2308,32 @@ test('task view endpoints reject malformed query and JSON contracts before invok
       },
     }),
   })
+  const unqualifiedStatusResponses: Response[] = []
+  for (const filters of [
+    { workflowStatuses: [{ teamId: 'core-team', statusId: 'review' }] },
+    { statuses: ['review'] },
+  ]) {
+    unqualifiedStatusResponses.push(await app.request('/api/task-views', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        name: 'Unqualified status filter',
+        visibility: 'personal',
+        definition: {
+          surface: 'project',
+          scope: { kind: 'project', projectId: 'refero' },
+          filters,
+          layout: {
+            mode: 'table',
+            sort: [],
+            columns: [{ field: 'title' }],
+            density: 'comfortable',
+            displayOptions: {},
+          },
+        },
+      }),
+    }))
+  }
   const invalidIdempotencyHeaders = {
     ...headers,
     'Idempotency-Key': 'x'.repeat(257),
@@ -2324,12 +2352,16 @@ test('task view endpoints reject malformed query and JSON contracts before invok
     listResponse.status,
     createResponse.status,
     triageResponse.status,
+    ...unqualifiedStatusResponses.map((response) => response.status),
     updateResponse.status,
     deleteResponse.status,
-  ]).toEqual([400, 400, 400, 400, 400])
+  ]).toEqual([400, 400, 400, 400, 400, 400, 400])
   expect(await listResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(await createResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(await triageResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
+  for (const response of unqualifiedStatusResponses) {
+    expect(await response.json()).toMatchObject({ code: 'InvalidTaskView' })
+  }
   expect(await updateResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(await deleteResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(operationCount).toBe(0)

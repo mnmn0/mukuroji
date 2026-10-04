@@ -13,7 +13,6 @@ import {
   canManageAnyPlanningScope,
   canManagePlanningScope,
   canPublishPlanningUpdateTarget,
-  canUpdatePlanningEntityStatus,
   canUpdatePlanningWorkItemLink,
   createPlanningAccessSnapshot,
   filterManageablePlanningScopeTeams,
@@ -51,17 +50,15 @@ describe('planning permissions', () => {
 
     expect(canManageAnyPlanningScope(memberUser, access)).toBe(true)
     expect(canManagePlanningScope(memberUser, scopedEntity, access)).toBe(true)
-    expect(canUpdatePlanningEntityStatus(memberUser, scopedEntity, access)).toBe(true)
     expect(canUpdatePlanningWorkItemLink(memberUser, scopedWorkItem, access)).toBe(true)
   })
 
-  test('allows project members to post scoped updates but not structural or workspace-scoped updates', () => {
+  test('allows project members to link scoped Work Items but not make structural changes', () => {
     const access = createPlanningAccessSnapshot(teams, { 'project-1': 'member' })
 
     expect(canManageAnyPlanningScope(memberUser, access)).toBe(false)
     expect(canManagePlanningScope(memberUser, scopedEntity, access)).toBe(false)
-    expect(canUpdatePlanningEntityStatus(memberUser, scopedEntity, access)).toBe(true)
-    expect(canUpdatePlanningEntityStatus(memberUser, workspaceEntity, access)).toBe(false)
+    expect(canUpdatePlanningWorkItemLink(memberUser, scopedWorkItem, access)).toBe(true)
     expect(canLinkPlanningEntity(memberUser, workspaceEntity, access)).toBe(true)
   })
 
@@ -70,9 +67,7 @@ describe('planning permissions', () => {
     const access = createPlanningAccessSnapshot(teams, {})
 
     expect(canManagePlanningScope(adminUser, workspaceEntity, access)).toBe(true)
-    expect(canUpdatePlanningEntityStatus(adminUser, workspaceEntity, access)).toBe(true)
     expect(canManagePlanningScope(adminUser, scopedEntity, access)).toBe(false)
-    expect(canUpdatePlanningEntityStatus(adminUser, scopedEntity, access)).toBe(false)
   })
 
   test('only exposes Team and Project create scopes managed by the current user', () => {

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { CuratedContextSource } from '@mukuroji/contracts'
+import type { AcceptedResolution, CuratedContextSource } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../audit/audit'
 import {
   type CollaborationAuthorizationConditionCheck,
@@ -804,7 +804,6 @@ test('writes timestamp-first discussion indexes for roots and replies', async ()
           createdAt: '2026-07-12T03:00:00.000Z',
           updatedAt: '2026-07-12T03:00:00.000Z',
           reactions: [],
-          acceptedResolutions: [],
         },
       }
     }
@@ -3563,7 +3562,7 @@ test('hard-bounds large accepted resolution history pages and keeps cursors thre
     const id = `resolution-${String(index).padStart(3, '0')}`
     return {
       entityKey,
-      recordKey: `RESOLUTION#root-many#${recordedAt}#${id}#superseded`,
+      recordKey: `RESOLUTION#root-many#${recordedAt}#0#${id}#superseded`,
       entryType: 'accepted-resolution',
       rootCommentId: 'root-many',
       resolution: {
@@ -3602,7 +3601,7 @@ test('hard-bounds large accepted resolution history pages and keeps cursors thre
     ...historicalRows,
     {
       entityKey,
-      recordKey: `RESOLUTION#root-many#${current.acceptedAt}#${current.id}#accepted`,
+      recordKey: `RESOLUTION#root-many#${current.acceptedAt}#1#${current.id}#accepted`,
       entryType: 'accepted-resolution',
       rootCommentId: 'root-many',
       resolution: current,
@@ -3637,122 +3636,113 @@ test('hard-bounds large accepted resolution history pages and keeps cursors thre
   })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
 })
 
-test('reads and incrementally migrates legacy inline accepted resolution history', async () => {
+/** Verifies that resolution data outside the root pointer and ranked history rows fails closed. */
+test('fails closed on accepted-resolution rows outside the append-only history shape', async () => {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   const actor = { id: 'author@example.com', displayName: 'Author' }
-  const legacySuperseded = {
-    id: 'legacy-old',
-    sourceCommentId: 'reply-old',
-    sourceRootCommentId: 'root-legacy',
-    capturedCommentRevision: 1,
-    capturedCommentBody: 'Old answer',
-    summary: 'Old accepted answer.',
-    acceptedBy: actor,
-    acceptedAt: '2026-07-12T00:01:00.000Z',
-    state: 'superseded',
-    supersededByResolutionId: 'legacy-current',
-    supersededBy: actor,
-    supersededAt: '2026-07-12T00:02:00.000Z',
-  }
-  const legacyCurrent = {
-    id: 'legacy-current',
+  const current: AcceptedResolution = {
+    id: 'resolution-current',
     sourceCommentId: 'reply-current',
-    sourceRootCommentId: 'root-legacy',
+    sourceRootCommentId: 'root-1',
     capturedCommentRevision: 1,
-    capturedCommentBody: 'Legacy current answer',
-    summary: 'Legacy current accepted answer.',
+    capturedCommentBody: 'Current answer',
+    summary: 'Use the current answer.',
     acceptedBy: actor,
     acceptedAt: '2026-07-12T00:02:00.000Z',
     state: 'accepted',
   }
-  const memory = createCollaborationMemory([{
+  const root = {
     entityKey,
-    recordKey: 'COMMENT#root-legacy',
+    recordKey: 'COMMENT#root-1',
     entryType: 'comment',
-    id: 'root-legacy',
-    rootCommentId: 'root-legacy',
+    id: 'root-1',
+    rootCommentId: 'root-1',
     authorMemberKey: actor.id,
-    bodyMarkdown: 'Legacy question',
-    version: 5,
+    bodyMarkdown: 'Question',
+    version: 2,
     mentionMemberKeys: [],
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:02:00.000Z',
-    acceptedResolutions: [legacySuperseded, legacyCurrent],
-  }, {
+    acceptedResolutionId: current.id,
+    acceptedResolution: current,
+  }
+  /** Creates one append-only history row for the current resolution. */
+  const historyRow = (recordKey: string) => ({
     entityKey,
-    recordKey: 'COMMENT#reply-new',
-    entryType: 'comment',
-    id: 'reply-new',
-    rootCommentId: 'root-legacy',
-    parentCommentId: 'root-legacy',
-    authorMemberKey: 'reply@example.com',
-    bodyMarkdown: 'New answer',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-07-12T00:03:00.000Z',
-    updatedAt: '2026-07-12T00:03:00.000Z',
-  }])
+    recordKey,
+    entryType: 'accepted-resolution',
+    rootCommentId: 'root-1',
+    resolution: current,
+    recordedAt: current.acceptedAt,
+  })
 
-  const snapshot = await memory.client.getCommentSnapshot({
+  const embeddedHistory = createCollaborationMemory([{ ...root, acceptedResolutions: [current] }])
+  await expect(embeddedHistory.client.getCommentSnapshot({
     entityKey,
-    commentId: 'root-legacy',
-  })
-  expect(snapshot?.acceptedResolutions).toMatchObject([legacyCurrent])
-  const firstLegacyPage = await memory.client.getAcceptedResolutionHistory({
-    entityKey,
-    rootCommentId: 'root-legacy',
-    limit: 1,
-  })
-  expect(firstLegacyPage.nextCursor).toBeString()
-  const secondLegacyPage = await memory.client.getAcceptedResolutionHistory({
-    entityKey,
-    rootCommentId: 'root-legacy',
-    limit: 1,
-    cursor: firstLegacyPage.nextCursor,
-  })
-  expect(new Set([
-    ...firstLegacyPage.items,
-    ...secondLegacyPage.items,
-  ].map((resolution) => resolution.id))).toEqual(new Set(['legacy-current', 'legacy-old']))
-
-  const migrated = await memory.client.setAcceptedResolution({
+    commentId: 'root-1',
+  })).rejects.toMatchObject({ status: 503, code: 'InvalidCollaborationRecord' })
+  await expect(embeddedHistory.client.setAcceptedResolution({
     workspaceId: 'workspace#one',
     teamId: 'team-a',
     issueId: 'issue-1',
     entityKey,
-    rootCommentId: 'root-legacy',
-    commentId: 'reply-new',
-    summary: 'Use the new answer.',
-    expectedThreadVersion: 5,
+    rootCommentId: 'root-1',
+    commentId: 'reply-current',
+    summary: 'Use the current answer again.',
+    expectedThreadVersion: 2,
     actor,
     canModerate: false,
-    auditContext: createTestAuditContext(
-      'legacy-resolution-migration',
-      '2026-07-12T00:04:00.000Z',
-      { commentId: 'reply-new', summary: 'Use the new answer.' },
-    ),
-  })
-  expect(migrated.acceptedResolutions).toMatchObject([{
-    sourceCommentId: 'reply-new',
-    state: 'accepted',
-  }])
-  const physicalRoot = memory.rows.get(`${entityKey}\0COMMENT#root-legacy`)
-  expect(physicalRoot?.acceptedResolution).toMatchObject({
-    sourceCommentId: 'reply-new',
-    state: 'accepted',
-  })
-  expect(physicalRoot?.acceptedResolutions).toMatchObject([
-    { id: 'legacy-old', state: 'superseded' },
-    { id: 'legacy-current', state: 'superseded' },
+  })).rejects.toMatchObject({ status: 503, code: 'InvalidCollaborationRecord' })
+  expect(embeddedHistory.transactions).toEqual([])
+
+  const unranked = createCollaborationMemory([
+    root,
+    historyRow(`RESOLUTION#root-1#${current.acceptedAt}#${current.id}#accepted`),
   ])
-  const migratedHistory = await memory.client.getAcceptedResolutionHistory({
+  await expect(unranked.client.getAcceptedResolutionHistory({
     entityKey,
-    rootCommentId: 'root-legacy',
-    limit: 10,
-  })
-  expect(migratedHistory.items.map((resolution) => resolution.id)).toEqual([
-    migrated.acceptedResolutions[0]?.id,
-    'legacy-current',
-    'legacy-old',
+    rootCommentId: 'root-1',
+  })).rejects.toMatchObject({ status: 503, code: 'InvalidCollaborationRecord' })
+
+  const ranked = createCollaborationMemory([
+    root,
+    historyRow(`RESOLUTION#root-1#${current.acceptedAt}#1#${current.id}#accepted`),
   ])
+  expect(await ranked.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-1',
+  })).toEqual({ items: [current] })
+})
+
+/** Verifies that a cursor without an append-only history position never reaches the table. */
+test('rejects accepted-resolution cursors without an append-only history position', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const commands: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    commands.push(readCommandInput(command))
+    return {}
+  })
+  /** Encodes one opaque cursor payload. */
+  const encodeCursor = (payload: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+  const cursorScope = {
+    version: 2,
+    entityKey,
+    rootCommentId: 'root-1',
+    rootVersion: 3,
+    acceptedResolutionId: 'resolution-current',
+  }
+  const invalidCursors = [
+    encodeCursor({ ...cursorScope, phase: 'legacy', legacyOffset: 1 }),
+    encodeCursor({ ...cursorScope, recordKey: 'RESOLUTION#other-root#2026-07-12T00:00:00.000Z' }),
+  ]
+
+  for (const cursor of invalidCursors) {
+    await expect(client.getAcceptedResolutionHistory({
+      entityKey,
+      rootCommentId: 'root-1',
+      cursor,
+    })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
+  }
+  expect(commands).toEqual([])
 })

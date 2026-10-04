@@ -18,6 +18,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   WorkItemTypeChangePreview,
+  WorkItemPriority,
 } from '@mukuroji/contracts'
 import {
   createSearchWorkItemTypeKey,
@@ -117,7 +118,6 @@ import {
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
-import type { WorkItemPriority } from '../../tasks/api'
 import {
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,
@@ -172,7 +172,6 @@ import {
   formatWorkItemCustomFieldValue,
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
-  resolveConfiguredWorkflowStatuses,
   resolveWorkItemTypeWorkflowStatuses,
   resolveCreateWorkflowStatuses,
   resolveEditableWorkflowStatuses,
@@ -862,9 +861,6 @@ export function TeamIssuePage() {
     status,
     workItemTypeId,
   }) => ({ statusId: status.id, teamId, workItemTypeId }))
-  const taskViewLegacyStatusIds = resolveConfiguredWorkflowStatuses(taskViewConfiguration).map(
-    (status) => status.id,
-  )
   const taskViewController = useTaskViewController({
     accessToken,
     builtInDefinition: builtInTaskViewDefinition,
@@ -872,7 +868,6 @@ export function TeamIssuePage() {
       columns: taskViewColumns,
       fields: taskViewFields,
       layoutModes: ['table', 'board'],
-      legacyStatusIds: taskViewLegacyStatusIds,
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -3031,24 +3026,20 @@ function CreateIssuePanel({
 /**
  * Resolves a Team Issue status filter without conflating equal IDs across Type workflows.
  *
- * @param statusFilter - Current UI value, including a legacy bare status ID.
+ * @param statusFilter - Current UI value: a Type-qualified status key or the all-status sentinel.
  * @param teamId - Team owning the current Issue surface.
  * @param statuses - Type-qualified statuses available to the Team.
- * @returns A valid Type-qualified filter value or the all-status sentinel.
+ * @returns The filter when it names an available status, otherwise the all-status sentinel.
  */
 function resolveTeamIssueStatusFilter(
   statusFilter: string,
   teamId: string,
   statuses: readonly WorkItemTypeWorkflowStatus[],
 ): string {
-  if (statusFilter === 'all') return 'all'
-  if (statuses.some(({ status, workItemTypeId }) =>
+  return statusFilter !== 'all' && statuses.some(({ status, workItemTypeId }) =>
     createWorkItemTypeWorkflowStatusKey(teamId, workItemTypeId, status.id) === statusFilter
-  )) return statusFilter
-  const legacyMatches = statuses.filter(({ status }) => status.id === statusFilter)
-  const [legacyMatch] = legacyMatches
-  return legacyMatches.length === 1 && legacyMatch
-    ? createWorkItemTypeWorkflowStatusKey(teamId, legacyMatch.workItemTypeId, legacyMatch.status.id)
+  )
+    ? statusFilter
     : 'all'
 }
 

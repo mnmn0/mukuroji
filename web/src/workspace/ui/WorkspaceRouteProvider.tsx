@@ -3,6 +3,7 @@ import {
   type AiAssistanceTask,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
+  type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import {
   useCallback,
@@ -84,7 +85,6 @@ import {
   workspaceNavPaths,
 } from '../../shared/routing/paths'
 import type { SidebarNavId, SidebarTeamViewId } from '../../shared/ui/sidebar'
-import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   type AuthenticatedApiErrorReports,
   listAuthenticatedApiErrors,

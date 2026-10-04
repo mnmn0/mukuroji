@@ -1,8 +1,8 @@
 import type {
+  CanonicalWorkItem,
   ConfirmedWorkItemSchedule,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
-import type { CanonicalWorkItem } from '../api'
 
 /**
  * Applies compact schedule confirmation results to every matching cached task.

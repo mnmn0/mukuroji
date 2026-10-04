@@ -10,6 +10,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   WorkItemScheduleOperation,
+  CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import { createSearchWorkItemTypeKey } from '@mukuroji/contracts'
 import {
@@ -51,7 +52,6 @@ import {
   groupTaskViewItems,
   type TaskViewPresentationSettings,
 } from '../../task-views/model/taskViewPresentation'
-import type { CanonicalWorkItem } from '../api/tasks'
 import {
   createAssigneeFilterOptions,
   resolveDueDateFilterLabelKey,

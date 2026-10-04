@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import type { CanonicalWorkItem } from '../../tasks/api'
+import type { CanonicalWorkItem } from '@mukuroji/contracts'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../fixtures'
