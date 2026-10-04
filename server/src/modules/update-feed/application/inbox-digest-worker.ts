@@ -8,6 +8,13 @@ export type InboxDigestPending = {
   /** Original trusted scheduling time; absent only on legacy checkpoint rows. */ scheduledAt?: number
   /** Discovery cadence; legacy work without it is cancelled, never backdated. */ frequency?: InboxDigestCandidate['frequency']
   /** Page-local conflict deferrals, independent of infrastructure attempts. */ conflicts?: number
+  /** Receipt progress observed on admission, never advanced by a failed worker. */ receiptAttempts?: number
+}
+
+/** Complete bounded failure evidence retained for restricted operator recovery. */
+export type InboxDigestFailure = {
+  /** Original logical work, admission progress and prior infrastructure attempts. */ work: InboxDigestPending
+  /** Safe diagnostic category; never raw SDK text. */ reason: Exclude<ReturnType<typeof inboxDigestTerminalReason>, undefined> | 'retry-exhausted'
 }
 
 /** Atomic movement between a page and durable per-recipient deferred work. */
@@ -36,7 +43,7 @@ export interface InboxDigestCheckpointStore {
   /** Reads a parked interval consistently before re-admitting its due recipient. */
   readDeferred(recipient: InboxDigestRecipient): Promise<InboxDigestPending | undefined>
   /** Saves only the current unexpired token/revision, incrementing revision. */
-  save(state: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestRecipient, settlement?: InboxDigestSettlement): Promise<InboxDigestCheckpoint>
+  save(state: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestFailure, settlement?: InboxDigestSettlement): Promise<InboxDigestCheckpoint>
 }
 
 /** Current candidate source with bounded opaque continuation. */
@@ -67,7 +74,7 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
       const recipient = { workspaceId: candidate.workspaceId, memberKey: candidate.memberKey }
       if (unique.has(JSON.stringify(recipient))) continue
       const parked = await dependencies.checkpoints.readDeferred(recipient)
-      unique.set(JSON.stringify(recipient), parked ? { ...parked, conflicts: 0 } : { recipient, attempts: 0, scheduledAt: 'scheduledAt' in candidate ? candidate.scheduledAt : dependencies.now(), frequency: candidate.frequency })
+      unique.set(JSON.stringify(recipient), parked ? { ...parked, conflicts: 0 } : { recipient, attempts: 0, scheduledAt: 'scheduledAt' in candidate ? candidate.scheduledAt : dependencies.now(), frequency: candidate.frequency, ...(candidate.receiptAttempts === undefined ? {} : { receiptAttempts: candidate.receiptAttempts }) })
     }
     state = await dependencies.checkpoints.save({ ...state, pending: [...unique.values()], cursor: page.cursor }, dependencies.now(), false)
   }
@@ -81,6 +88,7 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     let retry = false
     let permanent = false
     let conflict = false
+    let failureReason: InboxDigestFailure['reason'] = 'retry-exhausted'
     try {
       // Legacy work cannot prove its original cadence. Acknowledge cancellation;
       // subsequent strongly checked discovery may bind current consent afresh.
@@ -89,6 +97,7 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
       // Exhausted intervals advance through the due index. Permanent storage or
       // identity failures require durable inspection evidence without more retries.
       const terminal = inboxDigestTerminalReason(error)
+      failureReason = terminal ?? 'retry-exhausted'
       conflict = error instanceof PlanningError && error.code === 'UpdateFeedDigestConflict'
       retry = terminal === undefined && !conflict
       permanent = terminal !== undefined && terminal !== 'exhausted'
@@ -101,7 +110,7 @@ export async function runInboxDigestWorker(dependencies: InboxDigestWorkerDepend
     const park = conflict && (item.conflicts ?? 0) >= 2
     const pending = conflict && !park ? [...remaining, { ...item, conflicts: (item.conflicts ?? 0) + 1 }] : retry && !exhausted ? [...remaining, { ...item, attempts: item.attempts + 1 }] : remaining
     const settlement: InboxDigestSettlement | undefined = park ? { kind: 'park', item } : !conflict && (!retry || exhausted) ? { kind: 'finish', item } : undefined
-    state = await dependencies.checkpoints.save({ ...state, pending }, dependencies.now(), false, exhausted || permanent ? recipient : undefined, settlement)
+    state = await dependencies.checkpoints.save({ ...state, pending }, dependencies.now(), false, exhausted || permanent ? { work: item, reason: failureReason } : undefined, settlement)
   }
   await dependencies.checkpoints.save({ ...state, retryAt: result.failed || result.deferred ? dependencies.now() + 60_000 : 0 }, dependencies.now(), true)
   return result

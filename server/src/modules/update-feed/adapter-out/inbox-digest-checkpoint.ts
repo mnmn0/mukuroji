@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { InboxDigestCheckpoint, InboxDigestCheckpointStore, InboxDigestPending, InboxDigestSettlement } from '../application/inbox-digest-worker'
-import type { InboxDigestRecipient } from '../application/inbox-digest'
+import type { InboxDigestCheckpoint, InboxDigestCheckpointStore, InboxDigestFailure, InboxDigestPending, InboxDigestSettlement } from '../application/inbox-digest-worker'
+import { inboxDigestLogicalInterval, type InboxDigestCandidate, type InboxDigestRecipient, type InboxDigestRetry } from '../application/inbox-digest'
 import { PlanningError } from '../../planning'
 import { digestStorageFailure } from './digest-storage-failure'
 
@@ -52,6 +52,22 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
     return true
   }
 
+  /** Checks whether this logical admission stage already exhausted its worker budget.
+   * @param candidate - Strongly checked source identity and receipt progress.
+   * @param now - Trusted discovery clock for fresh candidates.
+   * @returns Whether operator recovery is required for this interval/progress stage.
+   */
+  async isExhausted(candidate: InboxDigestCandidate | InboxDigestRetry, now: number): Promise<boolean> {
+    const key = exhaustionKey(candidate, 'scheduledAt' in candidate ? candidate.scheduledAt : now, candidate.receiptAttempts ?? 0)
+    const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+    if (Item === undefined) return false
+    try {
+      const work = parsePending(Item.work)
+      if (!work.frequency || work.scheduledAt === undefined || Item.workspaceId !== key.workspaceId || Item.recordKey !== key.recordKey || Item.entryType !== 'inbox-digest-exhaustion' || Item.schemaVersion !== 1 || !validFailureReason(Item.reason) || Item.workerAttempts !== work.attempts + 1 || exhaustionKey({ ...work.recipient, frequency: work.frequency }, work.scheduledAt, work.receiptAttempts ?? 0).recordKey !== key.recordKey) throw invalid()
+      return true
+    } catch { throw corrupt() }
+  }
+
   /** Claims an idle/expired checkpoint using revision and lease conditions.
    * @param shard - Fixed queue shard.
    * @param now - Trusted clock.
@@ -96,10 +112,17 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
    * @param settlement - Durable park or acknowledgment in the same checkpoint transaction.
    * @returns Committed checkpoint; lost acknowledgements resume from storage.
    */
-  async save(input: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestRecipient, settlement?: InboxDigestSettlement): Promise<InboxDigestCheckpoint> {
+  async save(input: InboxDigestCheckpoint, now: number, release: boolean, failure?: InboxDigestFailure, settlement?: InboxDigestSettlement): Promise<InboxDigestCheckpoint> {
     const key = checkpointKey(input.shard)
     const validated = parseCheckpoint({ ...key, entryType: 'inbox-digest-checkpoint', schemaVersion: 1, ...input }, input.shard)
     if (!integer(now) || validated.leaseUntil <= now) throw invalid()
+    const failedWork = failure ? parsePending(failure.work) : undefined
+    if (failure && (!failedWork?.frequency || failedWork.scheduledAt === undefined || failedWork.scheduledAt > now || !validFailureReason(failure.reason))) throw invalid()
+    const evidence = failedWork && failure ? { work: failedWork, reason: failure.reason, workerAttempts: failedWork.attempts + 1, recipient: failedWork.recipient, shard: input.shard, failedAt: new Date(now).toISOString() } : undefined
+    const failures = failedWork?.frequency && failedWork.scheduledAt !== undefined && evidence ? [
+      { Put: { TableName: this.table, Item: { ...failureKey(failedWork.recipient, now), entryType: 'inbox-digest-failure', schemaVersion: 1, ...evidence, expiresAt: Math.floor(now / 1000) + 30 * 86_400 } } },
+      { Put: { TableName: this.table, Item: { ...exhaustionKey({ ...failedWork.recipient, frequency: failedWork.frequency }, failedWork.scheduledAt, failedWork.receiptAttempts ?? 0), entryType: 'inbox-digest-exhaustion', schemaVersion: 1, ...evidence } } },
+    ] : []
     const settled = settlement ? parsePending(settlement.item) : undefined
     if (settlement && (!settled || settled.scheduledAt === undefined || settled.scheduledAt > now || !['park', 'finish'].includes(settlement.kind))) throw invalid()
     const movement = settled && settlement ? settlement.kind === 'park' ? [{ Put: { TableName: this.table, Item: { ...deferredKey(settled.recipient), entryType: 'inbox-digest-deferred', schemaVersion: 1, pending: settled } } }] : [{ Delete: { TableName: this.table, Key: deferredKey(settled.recipient) } }] : []
@@ -109,7 +132,7 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
       ConditionExpression: '#revision = :revision AND #token = :token AND leaseUntil > :now AND entryType = :type AND schemaVersion = :schema',
       ExpressionAttributeNames: { '#revision': 'revision', '#token': 'token' },
       ExpressionAttributeValues: { ':revision': validated.revision, ':token': validated.token, ':now': now, ':type': 'inbox-digest-checkpoint', ':schema': 1 },
-    } }, ...(failure ? [{ Put: { TableName: this.table, Item: { ...failureKey(failure, now), entryType: 'inbox-digest-failure', schemaVersion: 1, recipient: failure, shard: input.shard, failedAt: new Date(now).toISOString(), expiresAt: Math.floor(now / 1000) + 30 * 86_400 } } }] : []), ...movement] })).catch((error: unknown) => digestStorageFailure(error, 1 + (failure ? 1 : 0) + movement.length))
+    } }, ...failures, ...movement] })).catch((error: unknown) => digestStorageFailure(error, 1 + failures.length + movement.length))
     return result
   }
 }
@@ -124,9 +147,17 @@ function parseCheckpoint(row: Record<string, unknown>, shard: number): InboxDige
 /** Validates shared page/deferred metadata while retaining legacy checkpoint compatibility. */
 function parsePending(item: unknown): InboxDigestPending {
   if (!record(item) || !record(item.recipient) || typeof item.recipient.workspaceId !== 'string' || !item.recipient.workspaceId || typeof item.recipient.memberKey !== 'string' || !item.recipient.memberKey || !integer(item.attempts) || item.attempts > 2 || (item.scheduledAt !== undefined && (!integer(item.scheduledAt) || item.scheduledAt > 8_640_000_000_000_000)) || (item.conflicts !== undefined && (!integer(item.conflicts) || item.conflicts > 2))) throw invalid()
+  if (item.receiptAttempts !== undefined && (!integer(item.receiptAttempts) || item.receiptAttempts > 3)) throw invalid()
   if (item.frequency !== undefined && ((item.frequency !== 'daily' && item.frequency !== 'weekly') || item.scheduledAt === undefined)) throw invalid()
-  return { recipient: { workspaceId: item.recipient.workspaceId, memberKey: item.recipient.memberKey }, attempts: item.attempts, ...(item.scheduledAt === undefined ? {} : { scheduledAt: item.scheduledAt }), ...(item.frequency === undefined ? {} : { frequency: item.frequency }), ...(item.conflicts === undefined ? {} : { conflicts: item.conflicts }) }
+  return { recipient: { workspaceId: item.recipient.workspaceId, memberKey: item.recipient.memberKey }, attempts: item.attempts, ...(item.scheduledAt === undefined ? {} : { scheduledAt: item.scheduledAt }), ...(item.frequency === undefined ? {} : { frequency: item.frequency }), ...(item.conflicts === undefined ? {} : { conflicts: item.conflicts }), ...(item.receiptAttempts === undefined ? {} : { receiptAttempts: item.receiptAttempts }) }
 }
+/** Binds terminal budgets to canonical identity and a bounded, strongly read receipt stage. */
+function exhaustionKey(candidate: InboxDigestCandidate, scheduledAt: number, progress: number) {
+  if (!integer(progress) || progress > 3) throw invalid()
+  return { workspaceId: 'SYSTEM#INBOX_DIGEST', recordKey: `EXHAUSTED#${createHash('sha256').update(JSON.stringify([candidate.workspaceId, candidate.memberKey, inboxDigestLogicalInterval(candidate.frequency, scheduledAt), progress])).digest('hex')}` }
+}
+/** Accepts only stable recovery categories, never reflected exception messages. */
+function validFailureReason(value: unknown): boolean { return typeof value === 'string' && ['retry-exhausted', 'exhausted', 'corrupt-state', 'storage-permanent', 'recipient-mismatch', 'invalid-input'].includes(value) }
 /** Binds parked logical work to one server-resolved owner without a lossy TTL. */
 function deferredKey(recipient: InboxDigestRecipient) { return { workspaceId: 'SYSTEM#INBOX_DIGEST', recordKey: `DEFERRED#${createHash('sha256').update(JSON.stringify([recipient.workspaceId, recipient.memberKey])).digest('hex')}` } }
 /** Fixed noncanonical coordinates, never supplied by a tenant. */

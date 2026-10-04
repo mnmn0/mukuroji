@@ -78,7 +78,7 @@ export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pend
         <DigestSavedFeedSelection collection={savedFeeds} status={savedStatus} preferences={draft} t={t} onChange={change} />
         {!valid && !(savedStatus === 'loading' && draft.savedFeeds) ? <p role="alert">{t('updates.digest.chooseView')}</p> : null}
         <button type="submit" className="mt-4 min-h-11 rounded-md border border-teal-700 px-3 text-sm font-semibold text-teal-800 disabled:opacity-50" disabled={unavailable || !dirty || !valid}>{t(pending ? 'updates.digest.working' : 'updates.inbox.save')}</button>
-        <p role="status" className="mt-2 text-app-meta text-slate-600">{t(dirty ? 'updates.digest.unsaved' : state.preferences.enabled ? 'updates.inbox.optedIn' : 'updates.inbox.disabled')}</p>
+        <p role="status" className="mt-2 text-app-meta text-slate-600">{t(dirty ? 'updates.inbox.unsaved' : state.preferences.enabled ? 'updates.inbox.optedIn' : 'updates.inbox.disabled')}</p>
       </fieldset>
     </form> : null}
   </section>

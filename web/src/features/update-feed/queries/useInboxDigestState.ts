@@ -1,4 +1,5 @@
 import useSWR from 'swr'
+import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { getInboxDigestState } from '../api/digest'
 
 /** Loads delivery settings with session isolation and fail-closed errors.
@@ -8,7 +9,7 @@ import { getInboxDigestState } from '../api/digest'
  * @param onVerified - Clears a retained read barrier only after a successful GET.
  * @returns Metadata query and explicit reload capability.
  */
-export function useInboxDigestState(token: string | undefined, enabled: boolean, guard: <T>(request: Promise<T>) => Promise<T>, onVerified?: () => void) {
+export function useInboxDigestState(token: string | undefined, enabled: boolean, guard: <T>(request: Promise<T>) => Promise<T>, onVerified?: (state: UpdateFeedDigestState) => void) {
   const query = useSWR(token && enabled ? ['update-feed-inbox-settings', token] : null, ([, accessToken]) => guard(getInboxDigestState(accessToken)), { revalidateOnFocus: true, shouldRetryOnError: false, onSuccess: onVerified })
   return { ...query, data: !token || !enabled || query.error ? undefined : query.data }
 }

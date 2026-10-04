@@ -450,6 +450,48 @@ test('Inbox consent is lazy, off by default, independent from previews and retai
   await expect(panel.getByText('Inbox digests are off.')).toBeVisible()
 })
 
+for (const outcome of ['matching', 'differing', 'newer-draft']) test(`Inbox failed save confirmation GET ${outcome} reconciles only submitted preferences`, async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  const writes: number[] = []
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') { reads++; return route.fallback() }
+    const input = route.request().postDataJSON()
+    writes.push(input.expectedRevision)
+    if (outcome !== 'differing') state.inbox = { ...state.inbox, revision: 1, preferences: input.preferences }
+    return route.abort('failed')
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  const cadence = panel.getByLabel('Interval', { exact: true })
+  await cadence.selectOption('weekly')
+  await expect(panel.getByRole('status')).toHaveText('You have unsaved Inbox settings.')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
+  if (outcome === 'newer-draft') await panel.getByLabel('Recent', { exact: true }).check()
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(cadence).toHaveValue('weekly')
+  expect(writes).toEqual([0])
+  if (outcome === 'matching') {
+    await expect(panel.getByRole('alert')).toHaveCount(0)
+    await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+    await expect(panel.getByRole('status')).not.toContainText('unsaved')
+  } else if (outcome === 'newer-draft') {
+    await expect(panel.getByRole('alert')).toContainText('Settings changed')
+    await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+    await expect(cadence).toBeDisabled()
+    await expect(panel.getByRole('status')).toHaveText('You have unsaved Inbox settings.')
+  } else {
+    await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
+    await expect(cadence).toBeEnabled()
+  }
+})
+
 for (const failure of ['network', '503', 'lost-ack', 'stale']) test(`Inbox transient save failure ${failure} keeps the draft and original CAS base`, async ({ page }, testInfo) => {
   const state = await mockFeed(page)
   await page.clock.install()

@@ -97,6 +97,8 @@ async function fixture() {
   return {
     store, rows, indexed, commands, coordinate, context,
     checkpoints: new DynamoDbInboxDigestCheckpoints('planning', client),
+    /** Recreates checkpoint adapters while retaining durable SDK rows. */
+    restartCheckpoints: () => new DynamoDbInboxDigestCheckpoints('planning', client),
     /** Shares the trusted clock across source, delivery and checkpoint boundaries. */
     now: () => clock,
     /** Makes the modeled query a complete one-page source. */
@@ -470,11 +472,103 @@ for (const frequency of ['daily', 'weekly'] as const) test(`fresh GSI discovery 
   f.indexed.push(structuredClone(f.metadata()))
   const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
   const page = await f.store.listDue(shard)
-  expect(page.recipients).toEqual([{ ...recipient, frequency, scheduledAt }])
+  expect(page.recipients).toEqual([{ ...recipient, frequency, scheduledAt, receiptAttempts: 1 }])
   const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: page.recipients }), dependencies: { authorize: async () => f.context } }, claimAt + 120_001)
   expect(result).toMatchObject({ delivered: 1, failed: [], terminal: [] })
   expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, status: 'completed', attempts: 2, startedAt: claimAt }])
   expect(f.notifications()).toHaveLength(1)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) for (const changed of [false, true]) test(`preclaim ${frequency} exhaustion survives restart and day/Monday transitions, cadenceChanged=${changed}`, async () => {
+  const f = await fixture()
+  f.finishIndex()
+  const admittedAt = Date.parse('2026-10-03T23:57:50Z')
+  f.advance(admittedAt - now)
+  await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency, views: ['recent'] } })
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  let calls = 0
+  let failing = true
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async () => {
+      const page = await f.store.listDue(shard)
+      const source = f.restartCheckpoints()
+      const recipients = []
+      for (const candidate of page.recipients) if (!await source.isQuarantined(candidate, f.now()) && !await source.isExhausted(candidate, f.now())) recipients.push(candidate)
+      return { recipients }
+    },
+    delivery: { authorize: async () => { calls++; if (failing) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Private outage'); return f.context } },
+  }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    dependencies.checkpoints = f.restartCheckpoints()
+    expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 1 })
+    if (attempt < 2) f.advance(60_000)
+  }
+  expect(calls).toBe(3)
+  expect((await f.store.get('w', 'reader')).history).toEqual([])
+  const evidence = [...f.rows.values()].find((row) => row.entryType === 'inbox-digest-exhaustion')
+  expect(evidence).toMatchObject({ work: { recipient, frequency, scheduledAt: admittedAt, attempts: 2 }, reason: 'retry-exhausted', workerAttempts: 3 })
+  expect(evidence?.expiresAt).toBeUndefined()
+  expect(JSON.stringify(evidence)).not.toContain('Private outage')
+  const before = structuredClone(evidence)
+  f.advance(86_400_000)
+  expect(await f.restartCheckpoints().isExhausted({ ...recipient, frequency, scheduledAt: admittedAt }, f.now())).toBe(true)
+  const currentFrequency = changed ? frequency === 'daily' ? 'weekly' : 'daily' : frequency
+  if (changed) await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency: currentFrequency, views: ['recent'] } })
+  failing = false
+  const sameWeeklyInterval = frequency === 'weekly' && !changed
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: sameWeeklyInterval ? 0 : 1, delivered: sameWeeklyInterval ? 0 : 1 })
+  expect(calls).toBe(sameWeeklyInterval ? 3 : 4)
+  expect([...f.rows.values()].find((row) => row.entryType === 'inbox-digest-exhaustion')).toEqual(before)
+  if (sameWeeklyInterval) {
+    f.advance(86_400_000)
+    expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ delivered: 1 })
+    expect((await f.store.get('w', 'reader')).history[0]?.id).toBe('weekly:2026-10-05')
+  }
+})
+
+for (const frequency of ['daily', 'weekly'] as const) test(`unchanged ${frequency} receipt progress cannot reset exhausted worker budget next day`, async () => {
+  const f = await fixture()
+  f.finishIndex()
+  await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency, views: ['recent'] } })
+  f.context.reader.readSnapshot = async () => { throw new Error('Initial generation outage') }
+  await expect(f.run()).rejects.toThrow('Initial generation outage')
+  f.advance(60_000)
+  f.indexed.push(structuredClone(f.metadata()))
+  const shard = Number(String(f.metadata().inboxDigestShard).split('#')[1])
+  let calls = 0
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async () => {
+      const page = await f.store.listDue(shard)
+      const recipients = []
+      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now()) && !await f.checkpoints.isExhausted(candidate, f.now())) recipients.push(candidate)
+      return { recipients }
+    },
+    delivery: { authorize: async () => { calls++; throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Unavailable') } },
+  }
+  for (let attempt = 0; attempt < 3; attempt++) { await runInboxDigestWorker(dependencies, shard); f.advance(60_000) }
+  expect(calls).toBe(3)
+  expect([...f.rows.values()].find((row) => row.entryType === 'inbox-digest-exhaustion')).toMatchObject({ work: { frequency, receiptAttempts: 1, attempts: 2 }, workerAttempts: 3 })
+  dependencies.checkpoints = f.restartCheckpoints()
+  f.advance(86_400_000)
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 0 })
+  expect(calls).toBe(3)
+  expect((await f.store.get('w', 'reader')).history).toMatchObject([{ attempts: 1, status: 'failed' }])
+})
+
+test('postclaim conditional conflicts consume the documented generation budget without writing Inbox rows', async () => {
+  const f = await fixture()
+  const key = { workspaceId: 'FENCE#w', recordKey: 'META' }
+  f.rows.set(f.coordinate('planning', key), { ...key, entryType: 'planning-meta', schemaVersion: 1, revision: 1 })
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+    expect((await f.store.get('w', 'reader')).history).toMatchObject([{ status: 'failed', attempts: attempt }])
+    expect(f.notifications()).toEqual([])
+  }
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestAttemptsExhausted' })
+  expect(f.notifications()).toEqual([])
 })
 
 for (const frequency of ['daily', 'weekly'] as const) test(`worker quarantine recovery rediscovers unfinished ${frequency} receipt after two preclaim failures and rollover`, async () => {
@@ -493,7 +587,7 @@ for (const frequency of ['daily', 'weekly'] as const) test(`worker quarantine re
     listDue: async (currentShard, _cursor, limit) => {
       const page = await f.store.listDue(currentShard, limit)
       const recipients = []
-      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now())) recipients.push(candidate)
+      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now()) && !await f.checkpoints.isExhausted(candidate, f.now())) recipients.push(candidate)
       return { recipients }
     },
     delivery: { authorize: async () => {

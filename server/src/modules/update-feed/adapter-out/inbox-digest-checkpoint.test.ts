@@ -12,6 +12,7 @@ import { InMemoryPlanningClient } from '../../planning/planning'
 const start = Date.parse('2026-10-03T12:00:00Z')
 const recipient = { workspaceId: 'workspace', memberKey: 'reader' }
 const candidate = { ...recipient, frequency: 'daily' as const }
+const terminalFailure = { work: { recipient, frequency: 'daily' as const, scheduledAt: start, attempts: 2 }, reason: 'retry-exhausted' as const }
 
 for (const frequency of ['daily', 'weekly'] as const) for (const cadenceChanged of [false, true]) test(`twenty preclaim conflicts preserve ${frequency} work across restart with cadenceChanged=${cadenceChanged}`, async () => {
   const f = fixture()
@@ -190,7 +191,7 @@ for (const boundary of ['claim-read', 'quarantine-read', 'claim-write', 'save', 
   const owned = (await f.store.claim(0, start))!
   const before = structuredClone([...f.rows])
   f.failCommand((command) => (boundary.endsWith('read') ? command instanceof GetCommand : command instanceof TransactWriteCommand) ? Object.assign(new Error('Private SDK detail'), { name }) : undefined)
-  const operation = boundary === 'quarantine-read' ? f.store.isQuarantined(recipient, start) : boundary.startsWith('claim') ? f.store.claim(1, start) : f.store.save(owned, start, true, boundary === 'save-failure' ? recipient : undefined)
+  const operation = boundary === 'quarantine-read' ? f.store.isQuarantined(recipient, start) : boundary.startsWith('claim') ? f.store.claim(1, start) : f.store.save(owned, start, true, boundary === 'save-failure' ? terminalFailure : undefined)
   await expect(operation).rejects.toMatchObject({ status, code })
   expect([...f.rows]).toEqual(before)
 })
@@ -209,7 +210,7 @@ for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStoragePermane
 test('quarantine parsing failures remain distinct from invalid caller checkpoint input', async () => {
   const f = fixture()
   const owned = (await f.store.claim(0, start))!
-  await f.store.save(owned, start, true, recipient)
+  await f.store.save(owned, start, true, terminalFailure)
   const failure = [...f.rows.values()].find((row) => row.entryType === 'inbox-digest-failure')!
   failure.schemaVersion = 99
   await expect(f.store.isQuarantined(recipient, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
@@ -238,13 +239,27 @@ test('lost page acknowledgement retains pending work and terminal failures commi
   await expect(f.store.save({ ...owned, pending: [{ recipient, attempts: 2 }], cursor: 'continued' }, start, false)).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
   const resumed = (await f.store.claim(1, start + 90_000))!
   expect(resumed.pending).toEqual([{ recipient, attempts: 2 }])
-  await expect(f.store.save({ ...owned, pending: [] }, start, false, recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  await expect(f.store.save({ ...owned, pending: [] }, start, false, terminalFailure)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
   expect(await f.store.isQuarantined(recipient, start)).toBe(false)
+  expect(await f.store.isExhausted(candidate, start)).toBe(false)
   f.loseResponse()
-  await expect(f.store.save({ ...resumed, pending: [] }, start + 90_001, true, recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
+  await expect(f.store.save({ ...resumed, pending: [] }, start + 90_001, true, terminalFailure)).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
   expect(await f.store.isQuarantined(recipient, start)).toBe(true)
+  expect(await f.restart().isExhausted(candidate, start)).toBe(true)
+  expect(await f.restart().isExhausted({ ...candidate, scheduledAt: start }, start + 86_400_000)).toBe(true)
   expect(await f.store.isQuarantined(recipient, start + 86_400_000)).toBe(false)
   expect((await f.store.claim(1, start + 90_002))?.pending).toEqual([])
+})
+
+test('exhaustion evidence fails closed on corruption and does not disguise SDK failures', async () => {
+  const f = fixture()
+  const owned = (await f.store.claim(0, start))!
+  await f.store.save(owned, start, true, terminalFailure)
+  const row = [...f.rows.values()].find((value) => value.entryType === 'inbox-digest-exhaustion')!
+  row.work = { ...terminalFailure.work, scheduledAt: start + 86_400_000 }
+  await expect(f.store.isExhausted(candidate, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
+  f.failCommand(() => Object.assign(new Error('Private network failure'), { name: 'TimeoutError' }))
+  await expect(f.store.isExhausted(candidate, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
 })
 
 test('worker persists bounded continuation before delivery and resumes after a crash', async () => {

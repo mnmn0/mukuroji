@@ -3,6 +3,7 @@ import type { UpdateFeedDigestPreferences } from '@mukuroji/contracts'
 import { getInboxDigestState, saveInboxDigestPreferences } from '../api/digest'
 import { useInboxDigestState } from '../queries/useInboxDigestState'
 import { UpdateFeedApiError } from '../api/updateFeed'
+import { sameDigestPreferences } from '../model/digestPreferences'
 
 /** Serializes explicit consent changes without generating or sending notifications.
  * @param token - Session bound to the owning component key.
@@ -12,22 +13,30 @@ import { UpdateFeedApiError } from '../api/updateFeed'
  */
 export function useInboxDigestSettings(token: string | undefined, enabled: boolean, guard: <T>(request: Promise<T>) => Promise<T>) {
   const busy = useRef(false)
+  const unconfirmed = useRef<UpdateFeedDigestPreferences | undefined>(undefined)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<unknown>()
   const [saveFailed, setSaveFailed] = useState(false)
   const [verificationRequired, setVerificationRequired] = useState(false)
-  const query = useInboxDigestState(token, enabled, guard, () => { if (verificationRequired) { setVerificationRequired(false); setError(undefined) } })
+  const query = useInboxDigestState(token, enabled, guard, (state) => {
+    if (verificationRequired) { setVerificationRequired(false); setError(undefined) }
+    if (unconfirmed.current && sameDigestPreferences(unconfirmed.current, state.preferences)) {
+      unconfirmed.current = undefined; setSaveFailed(false); setError(undefined)
+    }
+  })
   const [draftReset, setDraftReset] = useState(0)
   /** Saves the observed revision; conflicts require explicit reload. */
   const save = async (preferences: UpdateFeedDigestPreferences, expectedRevision?: number) => {
     if (!token || !enabled || !query.data || verificationRequired || busy.current) return false
     busy.current = true; setPending(true); setError(undefined); setSaveFailed(false)
+    unconfirmed.current = undefined
     try {
       const state = await guard(saveInboxDigestPreferences(token, expectedRevision ?? query.data.revision, preferences))
       await query.mutate(state, { revalidate: false })
       return true
     } catch (failure) {
       setError(failure); setSaveFailed(true)
+      if (!(failure instanceof UpdateFeedApiError) || failure.status >= 500) unconfirmed.current = preferences
       if (failure instanceof UpdateFeedApiError && (failure.status === 401 || failure.status === 403)) { setVerificationRequired(true); await query.mutate(undefined, { revalidate: false }) }
       return false
     } finally { busy.current = false; setPending(false) }
@@ -36,6 +45,7 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
   const reload = async () => {
     if (!token || !enabled || busy.current) return
     busy.current = true; setPending(true); setSaveFailed(false)
+    unconfirmed.current = undefined
     try {
       const state = await guard(getInboxDigestState(token))
       await query.mutate(state, { revalidate: false })

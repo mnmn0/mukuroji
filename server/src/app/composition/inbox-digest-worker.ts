@@ -41,7 +41,7 @@ export function createProductionInboxDigestWorkerHandler() {
         async listDue(currentShard, cursor, limit) {
           const page = await metadata.listDue(currentShard, limit, decodeCursor(cursor, currentShard))
           const recipients = []
-          for (const recipient of page.recipients) if (!await checkpoints.isQuarantined(recipient, Date.now())) recipients.push(recipient)
+          for (const recipient of page.recipients) if (!await checkpoints.isQuarantined(recipient, Date.now()) && !await checkpoints.isExhausted(recipient, Date.now())) recipients.push(recipient)
           return { recipients, ...(page.cursor ? { cursor: JSON.stringify(page.cursor) } : {}) }
         },
       })
