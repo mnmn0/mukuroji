@@ -26,7 +26,6 @@ export function InboxDigestPanelContainer(props: Props) {
 function Content({ token, enabled, canEdit, locale, guard, restoreFocus, open }: Props & { /** Disclosure state separate from controller lifetime. */ open: boolean; /** Stable focus destination for removed controls. */ restoreFocus(): void }) {
   const controller = useInboxDigestSettings(token, enabled && open, guard)
   const error = controller.error
-  if (!open) return null
   const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? controller.retryableSaveFailure ? 'saveError' : 'error' : undefined
-  return <InboxDigestPanel {...controller} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onReload={controller.reload} />
+  return <div hidden={!open}><InboxDigestPanel {...controller} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onReload={controller.reload} /></div>
 }

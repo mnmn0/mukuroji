@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import type { UpdateFeedDigestPreferences } from '@mukuroji/contracts'
-import { getInboxDigestState, saveInboxDigestPreferences } from '../api/digest'
+import { getInboxDigestState, isAmbiguousInboxSaveFailure, saveInboxDigestPreferences } from '../api/digest'
 import { useInboxDigestState } from '../queries/useInboxDigestState'
 import { UpdateFeedApiError } from '../api/updateFeed'
 import { sameDigestPreferences } from '../model/digestPreferences'
@@ -18,13 +18,13 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
   const [error, setError] = useState<unknown>()
   const [saveFailed, setSaveFailed] = useState(false)
   const [verificationRequired, setVerificationRequired] = useState(false)
+  const [draftReset, setDraftReset] = useState(0)
   const query = useInboxDigestState(token, enabled, guard, (state) => {
-    if (verificationRequired) { setVerificationRequired(false); setError(undefined) }
+    if (verificationRequired) { setVerificationRequired(false); setError(undefined); setDraftReset((value) => value + 1) }
     if (unconfirmed.current && sameDigestPreferences(unconfirmed.current, state.preferences)) {
       unconfirmed.current = undefined; setSaveFailed(false); setError(undefined)
     }
   })
-  const [draftReset, setDraftReset] = useState(0)
   /** Saves the observed revision; conflicts require explicit reload. */
   const save = async (preferences: UpdateFeedDigestPreferences, expectedRevision?: number) => {
     if (!token || !enabled || !query.data || verificationRequired || busy.current) return false
@@ -36,7 +36,7 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
       return true
     } catch (failure) {
       setError(failure); setSaveFailed(true)
-      if (!(failure instanceof UpdateFeedApiError) || failure.status >= 500) unconfirmed.current = preferences
+      if (isAmbiguousInboxSaveFailure(failure)) unconfirmed.current = preferences
       if (failure instanceof UpdateFeedApiError && (failure.status === 401 || failure.status === 403)) { setVerificationRequired(true); await query.mutate(undefined, { revalidate: false }) }
       return false
     } finally { busy.current = false; setPending(false) }
@@ -53,6 +53,6 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
     } catch (failure) { setError(failure); setVerificationRequired(true); await query.mutate(undefined, { revalidate: false }) }
     finally { busy.current = false; setPending(false) }
   }
-  const retryableSaveFailure = !query.error && saveFailed && (!(error instanceof UpdateFeedApiError) || error.status >= 500)
+  const retryableSaveFailure = !query.error && saveFailed && isAmbiguousInboxSaveFailure(error)
   return { state: verificationRequired ? undefined : query.data, pending, loading: query.isLoading, error: query.error ?? error, retryableSaveFailure, draftReset, save, reload: () => { void reload() } }
 }

@@ -28,7 +28,7 @@ export function InboxDigestPanel({ state, loading, pending, canEdit, failure, t,
   const currentEdit = edit?.reset === draftReset ? edit : undefined
   const draft = currentEdit?.preferences ?? state?.preferences
   const dirty = Boolean(draft && (!state || !sameDigestPreferences(draft, state.preferences)))
-  if (edit && (!currentEdit || (state && !dirty))) setEdit(undefined)
+  if (edit && (!currentEdit || failure === 'denied' || (state && !dirty))) setEdit(undefined)
   const stale = dirty && currentEdit !== undefined && currentEdit.revision !== state?.revision
   const effectiveFailure = failure === 'denied' ? failure : stale ? 'conflict' : failure
   const unavailable = pending || !canEdit || Boolean(effectiveFailure && effectiveFailure !== 'saveError')
