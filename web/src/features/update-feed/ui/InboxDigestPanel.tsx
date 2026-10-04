@@ -32,6 +32,8 @@ export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pend
   const [edit, setEdit] = useState<{ /** Draft base revision. */ revision: number; /** Explicit reload generation. */ reset?: number; /** Unsaved consent. */ preferences: UpdateFeedDigestPreferences }>()
   const currentEdit = edit?.reset === draftReset ? edit : undefined
   const draft = currentEdit?.preferences ?? state?.preferences
+  const savedSelection = state?.preferences.savedFeeds
+  const readableSavedSelection = savedSelection && (!savedStatus || savedStatus === 'ready') && savedFeeds?.revision === savedSelection.revision && savedSelection.ids.every((id) => savedFeeds.feeds.some((feed) => feed.id === id))
   const valid = draft !== undefined && validDigestSelection(draft, savedStatus && savedStatus !== 'ready' ? undefined : savedFeeds)
   const dirty = Boolean(draft && (!state || !sameDigestPreferences(draft, state.preferences)))
   if (edit && (!currentEdit || failure === 'denied' || (state && !dirty))) setEdit(undefined)
@@ -80,7 +82,8 @@ export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pend
     {!canEdit ? <p>{t('updates.readOnly')}</p> : null}
     {!canEdit && state && failure !== 'denied' ? <div className="mt-2 text-app-meta text-slate-600">
       <p role="status">{t(state.preferences.enabled ? 'updates.inbox.optedIn' : 'updates.inbox.disabled')}</p>
-      <dl className="mt-3 space-y-2"><div><dt className="font-semibold">{t('updates.digest.frequency')}</dt><dd>{t(state.preferences.frequency === 'daily' ? 'updates.digest.daily' : 'updates.digest.weekly')}</dd></div><div><dt className="font-semibold">{t('updates.digest.views')}</dt><dd>{state.preferences.views.map((view) => t(`updates.view.${view}`)).join(', ')}</dd></div></dl>
+      <dl className="mt-3 space-y-2"><div><dt className="font-semibold">{t('updates.digest.frequency')}</dt><dd>{t(state.preferences.frequency === 'daily' ? 'updates.digest.daily' : 'updates.digest.weekly')}</dd></div>{state.preferences.views.length ? <div><dt className="font-semibold">{t('updates.digest.views')}</dt><dd>{state.preferences.views.map((view) => t(`updates.view.${view}`)).join(', ')}</dd></div> : null}</dl>
+      {savedSelection ? <dl className="mt-2"><dt className="font-semibold">{t('updates.digest.savedFeeds')}</dt><dd className="break-words">{readableSavedSelection ? savedFeeds?.feeds.filter((feed) => savedSelection.ids.includes(feed.id)).map((feed) => feed.name).join(', ') : t(savedStatus === 'loading' ? 'updates.digest.savedLoading' : 'updates.digest.savedUnavailable')}</dd></dl> : null}
     </div> : null}
     {canEdit && draft && state && failure !== 'denied' ? <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid) void save() }}>
       <fieldset disabled={unavailable} className="min-w-0"><legend className="text-sm font-semibold">{t('updates.inbox.settings')}</legend>

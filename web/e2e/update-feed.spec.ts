@@ -80,6 +80,44 @@ async function mockFeed(page: Page, guest = false, expiresAt?: number) {
   return state
 }
 
+for (const source of ['ready', 'changed', 'unavailable', 'denied']) test(`Inbox guest reads custom selection only from ${source} definitions without PUT`, async ({ page }) => {
+  const state = await mockFeed(page, true)
+  await page.clock.install()
+  const filters = { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] }
+  state.saved = { revision: source === 'changed' ? 2 : 1, feeds: [{ id: 'private-source-id', name: 'My saved risk source', view: 'at-risk', filters }] }
+  state.inbox.preferences = { enabled: true, frequency: 'weekly', views: [], savedFeeds: { revision: 1, ids: ['private-source-id'] } }
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => { if (route.request().method() === 'PUT') puts++; await route.fallback() })
+  if (source === 'unavailable') await page.route('**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 503, json: {} }))
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  await expect(panel.getByText('Weekly', { exact: true })).toBeVisible()
+  if (source === 'ready' || source === 'denied') await expect(panel.getByText('My saved risk source', { exact: true })).toBeVisible()
+  else {
+    await expect(panel.getByText('Saved feeds are unavailable.', { exact: true })).toBeVisible()
+    await expect(panel.getByText('My saved risk source', { exact: true })).toHaveCount(0)
+  }
+  await expect(panel).not.toContainText('private-source-id')
+  await expect(panel.locator('form, input, select')).toHaveCount(0)
+  expect(puts).toBe(0)
+  if (source === 'denied') {
+    await page.route('**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 403, json: {} }))
+    await page.clock.fastForward(6_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect(page.locator('summary', { hasText: 'Inbox digest settings' })).toHaveCount(0)
+    await expect(page.getByText('My saved risk source', { exact: true })).toHaveCount(0)
+    expect(puts).toBe(0)
+    return
+  }
+  state.inboxDenied = true
+  await page.reload()
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await expect(panel.locator('dl')).toHaveCount(0)
+  expect(puts).toBe(0)
+})
+
 for (const inbox of [false, true]) test(`${inbox ? 'Inbox' : 'preview'} saves canonical custom IDs without treating reselection as an edit`, async ({ page }) => {
   const state = await mockFeed(page)
   const filters = { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] }
@@ -609,11 +647,13 @@ for (const failure of ['abort', '503']) for (const outside of [false, true]) tes
   await save.focus()
   await page.keyboard.press('Enter')
   await expect.poll(() => waiting).toBe(true)
+  await expect(panel.locator('button[type="submit"]')).toBeDisabled()
   await page.evaluate(() => {
     Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false })
     window.dispatchEvent(new Event('blur'))
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   })
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
   release()
   await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
   await expect(save).toBeEnabled()
@@ -635,7 +675,7 @@ for (const enabled of [false, true]) test(`Inbox guest can read saved consent en
   await page.goto('/updates')
   await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
   const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
-  await expect(panel.getByRole('status')).toHaveText(enabled ? 'Delivery preference saved. Automatic delivery is not active.' : 'Inbox digests are off.')
+  await expect(panel.getByRole('status')).toHaveText(enabled ? 'Delivery preference saved. This does not activate automatic delivery.' : 'Inbox digests are off.')
   await expect(panel.getByText('Daily', { exact: true })).toBeVisible()
   await expect(panel.getByText('For me', { exact: true })).toBeVisible()
   await expect(panel.locator('form, input, select')).toHaveCount(0)

@@ -38,6 +38,8 @@ export const SavedLoading: Story = { args: { ...CustomFeeds.args, savedStatus: '
 export const Guest: Story = { args: { canEdit: false } }
 /** Guests can inspect existing enabled consent without changing it. */
 export const GuestOptedIn: Story = { args: { ...OptedIn.args, canEdit: false } }
+/** Guests see only current revision-matched custom source names. */
+export const GuestCustomFeeds: Story = { args: { ...CustomFeeds.args, canEdit: false } }
 /** Controls an acknowledgement separately from subsequent local edits. */
 function SaveDraftHarness() {
   const [state, setState] = useState<UpdateFeedDigestState>(meta.args.state)
