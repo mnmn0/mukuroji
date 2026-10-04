@@ -559,6 +559,95 @@ for (const failure of ['network', '503', 'malformed', 'lost-ack', 'stale']) test
   }
 })
 
+for (const commit of [false, true]) test(`Inbox local revert dismisses ambiguous save presentation, committed=${commit}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let puts = 0
+  let reads = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') { reads++; return route.fallback() }
+    puts++
+    if (commit) state.inbox = { ...state.inbox, revision: 1, preferences: route.request().postDataJSON().preferences }
+    return route.abort('failed')
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  const cadence = panel.getByLabel('Interval', { exact: true })
+  await cadence.selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
+  await cadence.selectOption('daily')
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(cadence).toHaveValue(commit ? 'weekly' : 'daily')
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+  expect(puts).toBe(1)
+})
+
+for (const failure of ['abort', '503']) for (const outside of [false, true]) test(`Inbox retryable ${failure} restores pending keyboard ownership on window return, outside=${outside}`, async ({ page }) => {
+  await mockFeed(page)
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let waiting = false
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    puts++; waiting = true; await gate
+    if (failure === 'abort') return route.abort('failed')
+    return route.fulfill({ status: 503, json: {} })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  const save = panel.getByRole('button', { name: 'Save Inbox settings' })
+  await save.focus()
+  await page.keyboard.press('Enter')
+  await expect.poll(() => waiting).toBe(true)
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false })
+    window.dispatchEvent(new Event('blur'))
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
+  })
+  release()
+  await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
+  await expect(save).toBeEnabled()
+  const other = page.getByLabel('Feed', { exact: true })
+  if (outside) await other.focus()
+  await page.evaluate(() => { Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true }); window.dispatchEvent(new Event('focus')) })
+  await expect(outside ? other : save).toBeFocused()
+  if (!outside) {
+    await page.keyboard.press('Enter')
+    await expect.poll(() => puts).toBe(2)
+    await expect(save).toBeEnabled()
+    await expect(save).toBeFocused()
+  }
+})
+
+for (const enabled of [false, true]) test(`Inbox guest can read saved consent enabled=${enabled} without mutation controls`, async ({ page }) => {
+  const state = await mockFeed(page, true)
+  state.inbox.preferences.enabled = enabled
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  await expect(panel.getByRole('status')).toHaveText(enabled ? 'Delivery preference saved. Automatic delivery is not active.' : 'Inbox digests are off.')
+  await expect(panel.getByText('Daily', { exact: true })).toBeVisible()
+  await expect(panel.getByText('For me', { exact: true })).toBeVisible()
+  await expect(panel.locator('form, input, select')).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toHaveCount(0)
+  state.inboxDenied = true
+  await page.reload()
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await expect(panel.getByRole('status')).toHaveCount(0)
+  await expect(panel.locator('dl')).toHaveCount(0)
+})
+
 for (const code of ['UpdateFeedDigestCorruptState', 'UpdateFeedDigestStoragePermanent']) test(`Inbox permanent save failure ${code} requires reload even after a matching GET`, async ({ page }) => {
   const state = await mockFeed(page)
   await page.clock.install()

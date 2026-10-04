@@ -20,13 +20,14 @@ type InboxDigestPanelProps = {
   /** Localized labels. */ t: ReturnType<typeof createTranslator>
   /** Explicit consent save with its original editing revision. */ onSave(preferences: UpdateFeedDigestPreferences, expectedRevision?: number): Promise<boolean>
   /** Explicit metadata reload. */ onReload(): void
+  /** Retires obsolete retry presentation when local edits return to observed settings. */ onRevert?(): void
 }
 
 /** Renders separate consent without implying that the scheduler is active.
  * @param props - Current state and explicit consent actions.
  * @returns Accessible native settings.
  */
-export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pending, canEdit, failure, t, onSave, onReload, draftReset, restoreFocus }: InboxDigestPanelProps) {
+export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pending, canEdit, failure, t, onSave, onReload, onRevert, draftReset, restoreFocus }: InboxDigestPanelProps) {
   const id = useId()
   const [edit, setEdit] = useState<{ /** Draft base revision. */ revision: number; /** Explicit reload generation. */ reset?: number; /** Unsaved consent. */ preferences: UpdateFeedDigestPreferences }>()
   const currentEdit = edit?.reset === draftReset ? edit : undefined
@@ -38,13 +39,20 @@ export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pend
   const effectiveFailure = failure === 'denied' ? failure : stale ? 'conflict' : failure
   const unavailable = pending || !canEdit || Boolean(effectiveFailure && effectiveFailure !== 'saveError')
   const focused = useRef<HTMLElement | null>(null)
+  const pendingFocus = useRef(false)
   // Only removed or disabled owned controls require a stable focus fallback.
   useLayoutEffect(() => {
     /** Restores owned focus after a removed control outlives window activity. */
     const restore = () => {
-      const lost = focused.current && (!focused.current.isConnected || (!pending && focused.current.matches(':disabled')))
+      const owner = focused.current
+      if (pending && owner) pendingFocus.current = true
+      const lost = owner && (!owner.isConnected || (!pending && (owner.matches(':disabled') || (pendingFocus.current && document.activeElement === document.body))))
       if (!lost || !document.hasFocus()) return
-      if (document.activeElement === document.body || document.activeElement === focused.current) restoreFocus?.()
+      if (document.activeElement === document.body || document.activeElement === owner) {
+        if (owner.isConnected && !owner.matches(':disabled')) { pendingFocus.current = false; owner.focus(); return }
+        else restoreFocus?.()
+      }
+      pendingFocus.current = false
       focused.current = null
     }
     restore()
@@ -53,7 +61,12 @@ export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pend
     return () => { window.removeEventListener('focus', restore); document.removeEventListener('visibilitychange', restore) }
   })
   /** Keeps edits bound to the displayed metadata revision. */
-  const change = (preferences: UpdateFeedDigestPreferences) => { if (state) setEdit(sameDigestPreferences(preferences, state.preferences) ? undefined : { revision: dirty && currentEdit ? currentEdit.revision : state.revision, reset: draftReset, preferences: normalizeDigestPreferences(preferences) }) }
+  const change = (preferences: UpdateFeedDigestPreferences) => {
+    if (!state) return
+    const reverted = sameDigestPreferences(preferences, state.preferences)
+    setEdit(reverted ? undefined : { revision: dirty && currentEdit ? currentEdit.revision : state.revision, reset: draftReset, preferences: normalizeDigestPreferences(preferences) })
+    if (reverted) onRevert?.()
+  }
   /** Acknowledges only the submitted draft; later edits and failed saves remain owned. */
   const save = async () => {
     if (!draft || !state) return
@@ -65,6 +78,10 @@ export function InboxDigestPanel({ state, savedFeeds, savedStatus, loading, pend
     {loading ? <p role="status">{t('updates.loading')}</p> : null}
     {effectiveFailure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3"><p>{t(`updates.inbox.${effectiveFailure}`)}</p>{effectiveFailure !== 'denied' && effectiveFailure !== 'saveError' ? <button className="min-h-11 rounded-md border px-3" disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
     {!canEdit ? <p>{t('updates.readOnly')}</p> : null}
+    {!canEdit && state && failure !== 'denied' ? <div className="mt-2 text-app-meta text-slate-600">
+      <p role="status">{t(state.preferences.enabled ? 'updates.inbox.optedIn' : 'updates.inbox.disabled')}</p>
+      <dl className="mt-3 space-y-2"><div><dt className="font-semibold">{t('updates.digest.frequency')}</dt><dd>{t(state.preferences.frequency === 'daily' ? 'updates.digest.daily' : 'updates.digest.weekly')}</dd></div><div><dt className="font-semibold">{t('updates.digest.views')}</dt><dd>{state.preferences.views.map((view) => t(`updates.view.${view}`)).join(', ')}</dd></div></dl>
+    </div> : null}
     {canEdit && draft && state && failure !== 'denied' ? <form onSubmit={(event) => { event.preventDefault(); if (!unavailable && dirty && valid) void save() }}>
       <fieldset disabled={unavailable} className="min-w-0"><legend className="text-sm font-semibold">{t('updates.inbox.settings')}</legend>
         <label className="flex min-h-11 items-center gap-3"><input type="checkbox" className="size-4 accent-teal-700" checked={draft.enabled} onChange={(event) => change({ ...draft, enabled: event.target.checked })} />{t('updates.inbox.enabled')}</label>

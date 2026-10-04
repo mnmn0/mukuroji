@@ -56,7 +56,7 @@ for (const frequency of ['daily', 'weekly'] as const) for (const cadenceChanged 
   expect([...f.rows.values()].filter((row) => row.entryType === 'inbox-digest-deferred')).toHaveLength(20)
   for (const owner of owners) {
     expect(await f.store.readDeferred(owner)).toEqual({ recipient: owner, attempts: 0, conflicts: 2, scheduledAt, frequency })
-    expect(await f.store.isQuarantined(owner, clock)).toBe(false)
+    expect(await f.store.isQuarantined(owner, clock, 0)).toBe(false)
   }
   expect((await runInboxDigestWorker(dependencies, 0)).processed).toBe(1)
   expect((await metadata.get(healthy.workspaceId, healthy.memberKey)).history).toMatchObject([{ status: 'completed' }])
@@ -191,7 +191,7 @@ for (const boundary of ['claim-read', 'quarantine-read', 'claim-write', 'save', 
   const owned = (await f.store.claim(0, start))!
   const before = structuredClone([...f.rows])
   f.failCommand((command) => (boundary.endsWith('read') ? command instanceof GetCommand : command instanceof TransactWriteCommand) ? Object.assign(new Error('Private SDK detail'), { name }) : undefined)
-  const operation = boundary === 'quarantine-read' ? f.store.isQuarantined(recipient, start) : boundary.startsWith('claim') ? f.store.claim(1, start) : f.store.save(owned, start, true, boundary === 'save-failure' ? terminalFailure : undefined)
+  const operation = boundary === 'quarantine-read' ? f.store.isQuarantined(recipient, start, 0) : boundary.startsWith('claim') ? f.store.claim(1, start) : f.store.save(owned, start, true, boundary === 'save-failure' ? terminalFailure : undefined)
   await expect(operation).rejects.toMatchObject({ status, code })
   expect([...f.rows]).toEqual(before)
 })
@@ -213,8 +213,53 @@ test('quarantine parsing failures remain distinct from invalid caller checkpoint
   await f.store.save(owned, start, true, terminalFailure)
   const failure = [...f.rows.values()].find((row) => row.entryType === 'inbox-digest-failure')!
   failure.schemaVersion = 99
-  await expect(f.store.isQuarantined(recipient, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
+  await expect(f.store.isQuarantined(recipient, start, 0)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
   await expect(f.store.save({ ...owned, pending: [{ recipient, attempts: 99 }] }, start, false)).rejects.toMatchObject({ code: 'UpdateFeedDigestInvalid' })
+})
+
+for (const kind of ['inbox-digest-failure', 'inbox-digest-exhaustion'] as const) for (const [field, override] of [
+  ['missing work', { work: undefined }],
+  ['work owner', { work: { ...terminalFailure.work, recipient: { ...recipient, workspaceId: 'other' } } }],
+  ['cadence', { work: { ...terminalFailure.work, frequency: 'hourly' } }],
+  ['missing cadence', { work: { ...terminalFailure.work, frequency: undefined } }],
+  ['missing logical time', { work: { ...terminalFailure.work, scheduledAt: undefined } }],
+  ['logical time after failure', { work: { ...terminalFailure.work, scheduledAt: start + 1 } }],
+  ['attempts', { work: { ...terminalFailure.work, attempts: 3 } }],
+  ['receipt attempts', { work: { ...terminalFailure.work, receiptAttempts: 4 } }],
+  ['conflict counter', { work: { ...terminalFailure.work, conflicts: 3 } }],
+  ['reason', { reason: 'unknown private error' }],
+  ['worker attempts', { workerAttempts: 2 }],
+  ['recipient', { recipient: { ...recipient, memberKey: 'other' } }],
+  ['missing shard', { shard: undefined }],
+  ['different valid shard', { shard: 1 }],
+  ['out of range shard', { shard: 16 }],
+  ['missing failure time', { failedAt: undefined }],
+  ['malformed failure time', { failedAt: 'not-a-date' }],
+  ['noncanonical failure time', { failedAt: new Date(start).toISOString().replace('.000Z', 'Z') }],
+  ['future failure time', { failedAt: new Date(start + 1).toISOString() }],
+  ['failure before logical time', { failedAt: new Date(start - 1).toISOString() }],
+  ['retention', { expiresAt: kind === 'inbox-digest-failure' ? undefined : Math.floor(start / 1000) + 30 * 86_400 }],
+  ['retention value', { expiresAt: 0 }],
+  ['day or interval key', { work: { ...terminalFailure.work, scheduledAt: start - 86_400_000 }, failedAt: new Date(start - 86_400_000).toISOString(), ...(kind === 'inbox-digest-failure' ? { expiresAt: Math.floor(start / 1000) + 29 * 86_400 } : {}) }],
+] as const) test(`${kind} rejects corrupt ${field} without acknowledging candidate continuation`, async () => {
+  const f = fixture()
+  const owned = (await f.store.claim(0, start))!
+  await f.store.save({ ...owned, cursor: 'unacknowledged-page' }, start, true, terminalFailure)
+  const row = [...f.rows.values()].find((value) => value.entryType === kind)!
+  Object.assign(row, override)
+  let deliveries = 0
+  await expect(runInboxDigestWorker({
+    checkpoints: f.store, now: () => start,
+    async listDue() {
+      if (kind === 'inbox-digest-failure') await f.store.isQuarantined(recipient, start, 0)
+      else await f.store.isExhausted(candidate, start, 0)
+      return { recipients: [candidate], cursor: 'must-not-commit' }
+    },
+    delivery: { authorize: async () => { deliveries++; return undefined } },
+  }, 0)).rejects.toMatchObject({ status: 502, code: 'UpdateFeedDigestCorruptState' })
+  expect(deliveries).toBe(0)
+  expect(f.rows.get('SHARD#0')?.cursor).toBe('unacknowledged-page')
+  expect(f.rows.get('SHARD#0')?.pending).toEqual([])
 })
 
 test('exclusive durable claims survive restart and fence expired workers', async () => {
@@ -240,14 +285,14 @@ test('lost page acknowledgement retains pending work and terminal failures commi
   const resumed = (await f.store.claim(1, start + 90_000))!
   expect(resumed.pending).toEqual([{ recipient, attempts: 2 }])
   await expect(f.store.save({ ...owned, pending: [] }, start, false, terminalFailure)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
-  expect(await f.store.isQuarantined(recipient, start)).toBe(false)
-  expect(await f.store.isExhausted(candidate, start)).toBe(false)
+  expect(await f.store.isQuarantined(recipient, start + 90_001, 1)).toBe(false)
+  expect(await f.store.isExhausted(candidate, start + 90_001, 1)).toBe(false)
   f.loseResponse()
   await expect(f.store.save({ ...resumed, pending: [] }, start + 90_001, true, terminalFailure)).rejects.toMatchObject({ code: 'UpdateFeedDigestStorageFailure' })
-  expect(await f.store.isQuarantined(recipient, start)).toBe(true)
-  expect(await f.restart().isExhausted(candidate, start)).toBe(true)
-  expect(await f.restart().isExhausted({ ...candidate, scheduledAt: start }, start + 86_400_000)).toBe(true)
-  expect(await f.store.isQuarantined(recipient, start + 86_400_000)).toBe(false)
+  expect(await f.store.isQuarantined(recipient, start + 90_001, 1)).toBe(true)
+  expect(await f.restart().isExhausted(candidate, start + 90_001, 1)).toBe(true)
+  expect(await f.restart().isExhausted({ ...candidate, scheduledAt: start }, start + 86_400_000, 1)).toBe(true)
+  expect(await f.store.isQuarantined(recipient, start + 86_400_000, 1)).toBe(false)
   expect((await f.store.claim(1, start + 90_002))?.pending).toEqual([])
 })
 
@@ -257,9 +302,9 @@ test('exhaustion evidence fails closed on corruption and does not disguise SDK f
   await f.store.save(owned, start, true, terminalFailure)
   const row = [...f.rows.values()].find((value) => value.entryType === 'inbox-digest-exhaustion')!
   row.work = { ...terminalFailure.work, scheduledAt: start + 86_400_000 }
-  await expect(f.store.isExhausted(candidate, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
+  await expect(f.store.isExhausted(candidate, start, 0)).rejects.toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
   f.failCommand(() => Object.assign(new Error('Private network failure'), { name: 'TimeoutError' }))
-  await expect(f.store.isExhausted(candidate, start)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  await expect(f.store.isExhausted(candidate, start, 0)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
 })
 
 test('worker persists bounded continuation before delivery and resumes after a crash', async () => {
@@ -294,7 +339,7 @@ for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
-    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [candidate, candidate] } },
+    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock, 3) ? [] : [candidate, candidate] } },
     delivery: { async authorize() { calls++; throw code === 'TenantAdministrationUnavailable' ? new TenantAdministrationError(503, code, 'Unavailable') : new PlanningError(code === 'UpdateFeedDigestRetryable' ? 503 : 502, code, 'Unavailable') } },
   }
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -303,7 +348,7 @@ for (const code of ['UpdateFeedDigestRetryable', 'UpdateFeedDigestStorageFailure
     clock += 60_000
   }
   expect(calls).toBe(3)
-  expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
+  expect(await f.store.isQuarantined(recipient, clock, 3)).toBe(true)
   expect(f.rows.get('SHARD#3')?.pending).toEqual([])
   expect(await runInboxDigestWorker(dependencies, 3)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
   expect(calls).toBe(3)
@@ -315,11 +360,11 @@ for (const code of ['UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestCorrupt
   let calls = 0
   const dependencies = {
     checkpoints: f.store, now: () => clock,
-    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock) ? [] : [candidate] } },
+    async listDue() { return { recipients: await f.store.isQuarantined(recipient, clock, 5) ? [] : [candidate] } },
     delivery: { async authorize() { calls++; throw code === 'TenantAdministrationCorrupt' ? new TenantAdministrationError(502, code, 'Storage requires inspection') : new PlanningError(502, code, 'Storage requires inspection') } },
   }
   expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 1, delivered: 0, failed: 1, deferred: 0 })
-  expect(await f.store.isQuarantined(recipient, clock)).toBe(true)
+  expect(await f.store.isQuarantined(recipient, clock, 5)).toBe(true)
   expect(f.rows.get('SHARD#5')?.pending).toEqual([])
   clock += 60_000
   expect(await runInboxDigestWorker(dependencies, 5)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
@@ -335,10 +380,10 @@ test('unknown failure can recover on the next bounded attempt without quarantine
     return undefined
   } } }
   expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 1, deferred: 0 })
-  expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
+  expect(await f.store.isQuarantined(recipient, clock, 6)).toBe(false)
   clock += 60_000
   expect(await runInboxDigestWorker(dependencies, 6)).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 0 })
-  expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
+  expect(await f.store.isQuarantined(recipient, clock, 6)).toBe(false)
   expect(f.rows.get('SHARD#6')?.pending).toEqual([])
 })
 
@@ -417,7 +462,7 @@ for (const recovery of ['revoked', 'optout', 'cas']) test(`known conflicts defer
   for (let attempt = 0; attempt < 4; attempt++) {
     expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 1, delivered: 0, failed: 0, deferred: 1 })
     expect(f.rows.get('SHARD#7')?.pending).toEqual(attempt === 2 ? [] : [{ recipient, attempts: 0, scheduledAt: start, frequency: 'daily', conflicts: attempt === 3 ? 1 : attempt + 1 }])
-    expect(await f.store.isQuarantined(recipient, clock)).toBe(false)
+    expect(await f.store.isQuarantined(recipient, clock, 7)).toBe(false)
     expect(await runInboxDigestWorker(dependencies, 7)).toEqual({ processed: 0, delivered: 0, failed: 0, deferred: 0 })
     clock += 60_000
   }

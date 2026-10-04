@@ -639,7 +639,7 @@ for (const frequency of ['daily', 'weekly'] as const) for (const changed of [fal
       const page = await f.store.listDue(shard)
       const source = f.restartCheckpoints()
       const recipients = []
-      for (const candidate of page.recipients) if (!await source.isQuarantined(candidate, f.now()) && !await source.isExhausted(candidate, f.now())) recipients.push(candidate)
+      for (const candidate of page.recipients) if (!await source.isQuarantined(candidate, f.now(), shard) && !await source.isExhausted(candidate, f.now(), shard)) recipients.push(candidate)
       return { recipients }
     },
     delivery: { authorize: async () => { calls++; if (failing) throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Private outage'); return f.context } },
@@ -657,7 +657,7 @@ for (const frequency of ['daily', 'weekly'] as const) for (const changed of [fal
   expect(JSON.stringify(evidence)).not.toContain('Private outage')
   const before = structuredClone(evidence)
   f.advance(86_400_000)
-  expect(await f.restartCheckpoints().isExhausted({ ...recipient, frequency, scheduledAt: admittedAt }, f.now())).toBe(true)
+  expect(await f.restartCheckpoints().isExhausted({ ...recipient, frequency, scheduledAt: admittedAt }, f.now(), shard)).toBe(true)
   const currentFrequency = changed ? frequency === 'daily' ? 'weekly' : 'daily' : frequency
   if (changed) await f.store.replace('w', 'reader', { ...await f.store.get('w', 'reader'), preferences: { enabled: true, frequency: currentFrequency, views: ['recent'] } })
   failing = false
@@ -687,7 +687,7 @@ for (const frequency of ['daily', 'weekly'] as const) test(`unchanged ${frequenc
     listDue: async () => {
       const page = await f.store.listDue(shard)
       const recipients = []
-      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now()) && !await f.checkpoints.isExhausted(candidate, f.now())) recipients.push(candidate)
+      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now(), shard) && !await f.checkpoints.isExhausted(candidate, f.now(), shard)) recipients.push(candidate)
       return { recipients }
     },
     delivery: { authorize: async () => { calls++; throw new PlanningError(503, 'UpdateFeedDigestRetryable', 'Unavailable') } },
@@ -731,7 +731,7 @@ for (const frequency of ['daily', 'weekly'] as const) test(`worker quarantine re
     listDue: async (currentShard, _cursor, limit) => {
       const page = await f.store.listDue(currentShard, limit)
       const recipients = []
-      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now()) && !await f.checkpoints.isExhausted(candidate, f.now())) recipients.push(candidate)
+      for (const candidate of page.recipients) if (!await f.checkpoints.isQuarantined(candidate, f.now(), shard) && !await f.checkpoints.isExhausted(candidate, f.now(), shard)) recipients.push(candidate)
       return { recipients }
     },
     delivery: { authorize: async () => {
@@ -751,11 +751,11 @@ for (const frequency of ['daily', 'weekly'] as const) test(`worker quarantine re
   expect((await f.store.get('w', 'reader')).history).toMatchObject([{ id: interval, attempts: 1, status: 'failed', startedAt: claimAt }])
   const checkpoint = [...f.rows.values()].find((row) => row.entryType === 'inbox-digest-checkpoint')
   expect(checkpoint?.pending).toEqual([])
-  expect(await f.checkpoints.isQuarantined(recipient, f.now())).toBe(true)
+  expect(await f.checkpoints.isQuarantined(recipient, f.now(), shard)).toBe(true)
   expect(f.notifications()).toEqual([])
   f.context.reader.readSnapshot = read
   f.advance(86_400_000)
-  expect(await f.checkpoints.isQuarantined(recipient, f.now())).toBe(false)
+  expect(await f.checkpoints.isQuarantined(recipient, f.now(), shard)).toBe(false)
   expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 1, failed: 0 })
   expect((await f.store.get('w', 'reader')).history).toEqual([expect.objectContaining({ id: interval, attempts: 2, status: 'completed', startedAt: claimAt })])
   expect(f.notifications()).toHaveLength(1)
