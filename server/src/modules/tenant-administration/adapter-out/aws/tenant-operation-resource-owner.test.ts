@@ -428,12 +428,17 @@ describe('AwsTenantOperationResourceOwner', () => {
       })
 
       const position = first.nextJob.cursor.position
-      const replacement = position.endsWith('A') ? 'B' : 'A'
+      const originalBytes = Buffer.from(position, 'base64url')
+      const tamperedBytes = Buffer.from(originalBytes)
+      const lastByte = tamperedBytes.at(-1)
+      if (lastByte === undefined) throw new Error('Expected a nonempty encrypted cursor.')
+      tamperedBytes[tamperedBytes.length - 1] = lastByte ^ 1
+      expect(tamperedBytes.equals(originalBytes)).toBe(false)
       const tamperedJob: TenantOperationExecutionJob = {
         ...first.nextJob,
         cursor: {
           ...first.nextJob.cursor,
-          position: `${position.slice(0, -1)}${replacement}`,
+          position: tamperedBytes.toString('base64url'),
         },
       }
       await expect(owner.execute(tamperedJob, operation)).rejects.toMatchObject({
