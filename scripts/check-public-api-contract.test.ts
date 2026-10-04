@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   link,
   mkdir,
@@ -19,7 +20,7 @@ import {
 const checkerPath = resolve(import.meta.dir, "check-public-api-contract.ts");
 const repositoryRoot = resolve(import.meta.dir, "..");
 const temporaryDirectories: string[] = [];
-const canonicalRuntimeWrapper = `import publicApiOpenApiDocumentJson from '../openapi/public-api-v1.json'
+const canonicalRuntimeWrapper = `import publicApiOpenApiDocumentJson from '../openapi/public-api-v1.json' with { type: 'json' }
 
 /**
  * Public REST API major version.
@@ -42,6 +43,176 @@ export const PUBLIC_API_OPENAPI_DOCUMENT = publicApiOpenApiDocumentJson
  */
 export const publicApiOpenApiDocument = PUBLIC_API_OPENAPI_DOCUMENT
 `;
+
+/** Local repositories that model the publisher's two isolated checkouts. */
+type PublisherFixture = {
+  /** Temporary runner directory, also used for the isolated Bun home. */
+  root: string;
+  /** Checkout containing the only executable comparator and contract modules. */
+  base: string;
+  /** Checkout read exclusively as candidate data. */
+  candidate: string;
+};
+
+/** Reads one named step from the publisher workflow without duplicating its shell. */
+async function publisherStep(name: string): Promise<string> {
+  const workflow = await readFile(
+    join(repositoryRoot, ".github/workflows/public-api-contract.yml"), "utf8",
+  );
+  const step = workflow.split(`      - name: ${name}\n`)[1]?.split("\n      - name:")[0];
+  if (!step) throw new Error(`Missing publisher step: ${name}`);
+  return step;
+}
+
+/** Extracts the exact multiline shell or sparse-checkout input from a workflow step. */
+function publisherBlock(step: string, key: string): string {
+  const match = step.match(new RegExp(`^( +)${key}: \\|\\n((?:\\n|\\1  [^\\n]*\\n?)+)`, "m"));
+  if (!match?.[1] || !match[2]) throw new Error(`Missing publisher block: ${key}`);
+  const indentation = match[1].length + 2;
+  return match[2].split("\n").map((line) => line.slice(indentation)).join("\n");
+}
+
+/** Runs Git fixture operations with a local identity and no interactive hooks. */
+function fixtureGit(directory: string, arguments_: readonly string[], input?: string): string {
+  return execFileSync("git", [
+    "-c", "core.hooksPath=/dev/null", "-c", "user.name=Contract test",
+    "-c", "user.email=contract-test@example.invalid", "-C", directory, ...arguments_,
+  ], { encoding: "utf8", input, stdio: ["pipe", "pipe", "pipe"] }).trim();
+}
+
+/** Creates real non-cone sparse checkouts using the publisher's checked-in patterns. */
+async function publisherFixture(): Promise<PublisherFixture> {
+  const root = await mkdtemp(join(tmpdir(), "public-api-publisher-"));
+  temporaryDirectories.push(root);
+  const base = join(root, "contract-base");
+  const candidate = join(root, "contract-head");
+  for (const [directory, stepName] of [
+    [base, "Checkout trusted base"], [candidate, "Checkout candidate as data"],
+  ]) {
+    if (!directory || !stepName) throw new Error("Invalid sparse fixture");
+    const step = await publisherStep(stepName);
+    expect(step).toContain("sparse-checkout-cone-mode: false");
+    expect(step).toContain("persist-credentials: false");
+    fixtureGit(root, ["clone", "--shared", "--no-checkout", repositoryRoot, directory]);
+    fixtureGit(directory, ["sparse-checkout", "set", "--no-cone", "--stdin"],
+      publisherBlock(step, "sparse-checkout"));
+    fixtureGit(directory, ["checkout", "--detach", fixtureGit(repositoryRoot, ["rev-parse", "HEAD"])]);
+  }
+  return { root, base, candidate };
+}
+
+/** Executes the real comparison shell with pinned fixture OIDs and an isolated home. */
+async function comparePublisherFixture(fixture: PublisherFixture) {
+  const shell = publisherBlock(await publisherStep("Compare candidate with trusted contract"), "run");
+  return spawnSync("bash", ["-c", shell], {
+    cwd: fixture.base, encoding: "utf8",
+    env: {
+      PATH: `${resolve(process.execPath, "..")}:${process.env.PATH}`,
+      RUNNER_TEMP: fixture.root,
+      CONTRACT_BASE_DIRECTORY: fixture.base,
+      CONTRACT_HEAD_DIRECTORY: fixture.candidate,
+      CONTRACT_BASE_SHA: fixtureGit(fixture.base, ["rev-parse", "HEAD"]),
+      CONTRACT_HEAD_SHA: fixtureGit(fixture.candidate, ["rev-parse", "HEAD"]),
+    },
+  });
+}
+
+test("publisher sparse checkout resolves the complete trusted runtime and accepts canonical candidate data", async () => {
+  const fixture = await publisherFixture();
+  expect(fixtureGit(fixture.base, ["ls-files", "-t", "contracts/src/work-items.ts"])).toStartWith("H ");
+  expect(fixtureGit(fixture.base, ["ls-files", "-t", "contracts/src/work-item-configuration.ts"])).toStartWith("H ");
+  expect(fixtureGit(fixture.candidate, ["ls-files", "-t", "contracts/src/work-items.ts"])).toStartWith("S ");
+  await writeFile(join(fixture.candidate, "contracts/src/openapi.ts"), canonicalRuntimeWrapper);
+  fixtureGit(fixture.candidate, ["commit", "--allow-empty", "-am", "Canonical candidate fixture"]);
+  const result = await comparePublisherFixture(fixture);
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain("Compared trusted snapshot");
+});
+
+test("publisher reports the pending wrapper migration and never executes candidate source", async () => {
+  const fixture = await publisherFixture();
+  const source = join(fixture.candidate, "contracts/src/openapi.ts");
+  // Generated definitions are not the immutable wrapper, even with matching JSON.
+  await writeFile(source, `export const PUBLIC_API_OPENAPI_DOCUMENT = ${serializeCanonicalJson(PUBLIC_API_OPENAPI_DOCUMENT)};\n`);
+  fixtureGit(fixture.candidate, ["commit", "-am", "Legacy generated source fixture"]);
+  const legacy = await comparePublisherFixture(fixture);
+  expect(legacy.status).toBe(1);
+  expect(legacy.stderr).toContain("must be the trusted canonical JSON wrapper");
+  await writeFile(source, canonicalRuntimeWrapper.replace(" with { type: 'json' }", ""));
+  fixtureGit(fixture.candidate, ["commit", "-am", "Missing JSON import attribute fixture"]);
+  const missingAttribute = await comparePublisherFixture(fixture);
+  expect(missingAttribute.status).toBe(1);
+  expect(missingAttribute.stderr).toContain("must be the trusted canonical JSON wrapper");
+  await writeFile(source, `${canonicalRuntimeWrapper}\nthrow new Error('CANDIDATE_EXECUTED');\n`);
+  fixtureGit(fixture.candidate, ["commit", "-am", "Untrusted candidate fixture"]);
+  const result = await comparePublisherFixture(fixture);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("must be the trusted canonical JSON wrapper");
+  expect(result.stderr).not.toContain("CANDIDATE_EXECUTED");
+});
+
+test("publisher keeps trust-root rotations fail-closed", async () => {
+  const fixture = await publisherFixture();
+  await writeFile(join(fixture.candidate, ".github/workflows/public-api-contract.yml"), "# changed trust root\n");
+  fixtureGit(fixture.candidate, ["commit", "-am", "Trust-root fixture"]);
+  const result = await comparePublisherFixture(fixture);
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("requires an isolated trust-root rotation");
+});
+
+for (const scenario of ["success", "failure", "skipped", "stale", "read-failure", "publish-failure", "checkout-failure", "setup-failure"]) {
+  test(`publisher finalizer and job summary remain truthful: ${scenario}`, async () => {
+    const outcome = scenario === "failure" || scenario === "skipped" ? scenario : "success";
+    const root = await mkdtemp(join(tmpdir(), "public-api-finalizer-"));
+    temporaryDirectories.push(root);
+    const summaryPath = join(root, "summary.md");
+    const outputPath = join(root, "check.json");
+    const step = await publisherStep("Complete dedicated App check");
+    expect(step).toContain("if: always() && steps.check.outcome == 'success'");
+    expect(step).toContain("EVALUATION_OUTCOME: ${{ steps.evaluate.outcome }}");
+    // Only the network boundary is mocked; execute the checked-in finalizer verbatim.
+    await writeFile(join(root, "gh"), `#!/bin/bash
+set -euo pipefail
+case "$*" in
+  *"--method PATCH"*) cat >"$CHECK_OUTPUT"; [[ "$SCENARIO" != "publish-failure" ]] ;;
+  *"/pulls/"*) [[ "$SCENARIO" != "read-failure" ]] || exit 1
+    printf '{"base":{"sha":"base","ref":"main"},"head":{"sha":"head"},"state":"open"}' ;;
+  *"git/ref/heads/main"*) if [[ "$SCENARIO" == "stale" ]]; then printf 'new-base'; else printf 'base'; fi ;;
+  *) exit 99 ;;
+esac
+`, { mode: 0o755 });
+    const result = spawnSync("bash", ["-c", publisherBlock(step, "run")], {
+      encoding: "utf8",
+      env: {
+        PATH: `${root}:${process.env.PATH}`,
+        APP_TOKEN: "test-only", READ_TOKEN: "test-only",
+        BASE_SHA: "base", HEAD_SHA: "head", WORKFLOW_SOURCE_SHA: "base",
+        CHECK_ID: "1", PULL_REQUEST_NUMBER: "1", GITHUB_RUN_ID: "1",
+        GITHUB_SERVER_URL: "https://example.invalid", GITHUB_REPOSITORY: "test/repo",
+        CHECKOUT_BASE_OUTCOME: scenario === "checkout-failure" ? "failure" : "success",
+        CHECKOUT_CANDIDATE_OUTCOME: "success",
+        SETUP_BUN_OUTCOME: scenario === "setup-failure" ? "failure" : "success",
+        EVALUATION_OUTCOME: outcome, SCENARIO: scenario,
+        GITHUB_STEP_SUMMARY: summaryPath, CHECK_OUTPUT: outputPath,
+      },
+    });
+    const conclusion = scenario === "success" ? "success" : "failure";
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(scenario === "success" ? 0 : 1);
+    if (scenario === "publish-failure") {
+      expect(await Bun.file(summaryPath).exists()).toBe(false);
+      return;
+    }
+    const check = JSON.parse(await readFile(outputPath, "utf8"));
+    expect(check.conclusion).toBe(conclusion);
+    const summary = await readFile(summaryPath, "utf8");
+    expect(summary).toContain(`Public API compatibility: ${conclusion}`);
+    expect(summary).toContain(check.output.summary);
+    expect(summary).toContain(`comparison: \`${outcome}\``);
+    if (scenario !== "success") expect(summary).not.toContain("backward compatible");
+  });
+}
 
 afterEach(async () => {
   await Promise.all(
