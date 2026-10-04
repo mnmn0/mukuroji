@@ -30,6 +30,8 @@ export const Loading: Story = { args: { state: undefined, loading: true } }
 export const Japanese: Story = { args: { t: createTranslator('ja') } }
 /** Read-only guests are not offered consent mutations. */
 export const Guest: Story = { args: { canEdit: false } }
+/** Guests can inspect existing enabled consent without changing it. */
+export const GuestOptedIn: Story = { args: { ...OptedIn.args, canEdit: false } }
 /** Controls an acknowledgement separately from subsequent local edits. */
 function SaveDraftHarness() {
   const [state, setState] = useState<UpdateFeedDigestState>(meta.args.state)

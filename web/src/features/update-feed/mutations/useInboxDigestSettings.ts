@@ -54,5 +54,7 @@ export function useInboxDigestSettings(token: string | undefined, enabled: boole
     finally { busy.current = false; setPending(false) }
   }
   const retryableSaveFailure = !query.error && saveFailed && isAmbiguousInboxSaveFailure(error)
-  return { state: verificationRequired ? undefined : query.data, pending, loading: query.isLoading, error: query.error ?? error, retryableSaveFailure, draftReset, save, reload: () => { void reload() } }
+  /** Dismisses obsolete retry presentation without forgetting an ambiguous submitted save. */
+  const dismissSaveFailure = () => { if (retryableSaveFailure) { setSaveFailed(false); setError(undefined) } }
+  return { state: verificationRequired ? undefined : query.data, pending, loading: query.isLoading, error: query.error ?? error, retryableSaveFailure, draftReset, save, dismissSaveFailure, reload: () => { void reload() } }
 }
