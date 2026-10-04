@@ -42,28 +42,35 @@ export class DynamoDbInboxDigestCheckpoints implements InboxDigestCheckpointStor
   /** Suppresses an exhausted recipient until the next UTC day, retaining recovery evidence.
    * @param recipient - Candidate from the strongly checked due row.
    * @param now - Trusted clock.
+   * @param shard - Trusted source shard whose continuation is being processed.
    * @returns Whether today's terminal-failure row exists.
    */
-  async isQuarantined(recipient: InboxDigestRecipient, now: number): Promise<boolean> {
+  async isQuarantined(recipient: InboxDigestRecipient, now: number, shard: number): Promise<boolean> {
+    if (!integer(shard) || shard > 15 || !integer(now) || now > 8_640_000_000_000_000) throw invalid()
     const key = failureKey(recipient, now)
     const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
     if (Item === undefined) return false
-    if (Item.workspaceId !== key.workspaceId || Item.recordKey !== key.recordKey || Item.entryType !== 'inbox-digest-failure' || Item.schemaVersion !== 1 || !record(Item.recipient) || Item.recipient.workspaceId !== recipient.workspaceId || Item.recipient.memberKey !== recipient.memberKey) throw corrupt()
-    return true
+    try {
+      const { failedAt } = parseFailureEvidence(Item, key, 'inbox-digest-failure', recipient, now, shard)
+      if (failureKey(recipient, failedAt).recordKey !== key.recordKey) throw invalid()
+      return true
+    } catch { throw corrupt() }
   }
 
   /** Checks whether this logical admission stage already exhausted its worker budget.
    * @param candidate - Strongly checked source identity and receipt progress.
    * @param now - Trusted discovery clock for fresh candidates.
+   * @param shard - Trusted source shard whose continuation is being processed.
    * @returns Whether operator recovery is required for this interval/progress stage.
    */
-  async isExhausted(candidate: InboxDigestCandidate | InboxDigestRetry, now: number): Promise<boolean> {
+  async isExhausted(candidate: InboxDigestCandidate | InboxDigestRetry, now: number, shard: number): Promise<boolean> {
+    if (!integer(shard) || shard > 15 || !integer(now) || now > 8_640_000_000_000_000) throw invalid()
     const key = exhaustionKey(candidate, 'scheduledAt' in candidate ? candidate.scheduledAt : now, candidate.receiptAttempts ?? 0)
     const { Item } = await this.client.send(new GetCommand({ TableName: this.table, Key: key, ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
     if (Item === undefined) return false
     try {
-      const work = parsePending(Item.work)
-      if (!work.frequency || work.scheduledAt === undefined || Item.workspaceId !== key.workspaceId || Item.recordKey !== key.recordKey || Item.entryType !== 'inbox-digest-exhaustion' || Item.schemaVersion !== 1 || !validFailureReason(Item.reason) || Item.workerAttempts !== work.attempts + 1 || exhaustionKey({ ...work.recipient, frequency: work.frequency }, work.scheduledAt, work.receiptAttempts ?? 0).recordKey !== key.recordKey) throw invalid()
+      const { work } = parseFailureEvidence(Item, key, 'inbox-digest-exhaustion', candidate, now, shard)
+      if (exhaustionKey({ ...work.recipient, frequency: work.frequency }, work.scheduledAt, work.receiptAttempts ?? 0).recordKey !== key.recordKey) throw invalid()
       return true
     } catch { throw corrupt() }
   }
@@ -150,6 +157,14 @@ function parsePending(item: unknown): InboxDigestPending {
   if (item.receiptAttempts !== undefined && (!integer(item.receiptAttempts) || item.receiptAttempts > 3)) throw invalid()
   if (item.frequency !== undefined && ((item.frequency !== 'daily' && item.frequency !== 'weekly') || item.scheduledAt === undefined)) throw invalid()
   return { recipient: { workspaceId: item.recipient.workspaceId, memberKey: item.recipient.memberKey }, attempts: item.attempts, ...(item.scheduledAt === undefined ? {} : { scheduledAt: item.scheduledAt }), ...(item.frequency === undefined ? {} : { frequency: item.frequency }), ...(item.conflicts === undefined ? {} : { conflicts: item.conflicts }), ...(item.receiptAttempts === undefined ? {} : { receiptAttempts: item.receiptAttempts }) }
+}
+/** Validates the complete bodyless recovery envelope shared by both terminal row kinds. */
+function parseFailureEvidence(row: Record<string, unknown>, key: { /** Expected partition. */ workspaceId: string; /** Expected terminal key. */ recordKey: string }, kind: 'inbox-digest-failure' | 'inbox-digest-exhaustion', recipient: InboxDigestRecipient, now: number, shard: number) {
+  const work = parsePending(row.work)
+  const failedAt = typeof row.failedAt === 'string' ? Date.parse(row.failedAt) : NaN
+  if (!work.frequency || work.scheduledAt === undefined || !integer(failedAt) || failedAt > now || new Date(failedAt).toISOString() !== row.failedAt || work.scheduledAt > failedAt || row.workspaceId !== key.workspaceId || row.recordKey !== key.recordKey || row.entryType !== kind || row.schemaVersion !== 1 || row.shard !== shard || !record(row.recipient) || row.recipient.workspaceId !== recipient.workspaceId || row.recipient.memberKey !== recipient.memberKey || work.recipient.workspaceId !== recipient.workspaceId || work.recipient.memberKey !== recipient.memberKey || !validFailureReason(row.reason) || row.workerAttempts !== work.attempts + 1) throw invalid()
+  if (kind === 'inbox-digest-failure' ? row.expiresAt !== Math.floor(failedAt / 1000) + 30 * 86_400 : row.expiresAt !== undefined) throw invalid()
+  return { work: { ...work, frequency: work.frequency, scheduledAt: work.scheduledAt }, failedAt }
 }
 /** Binds terminal budgets to canonical identity and a bounded, strongly read receipt stage. */
 function exhaustionKey(candidate: InboxDigestCandidate, scheduledAt: number, progress: number) {
