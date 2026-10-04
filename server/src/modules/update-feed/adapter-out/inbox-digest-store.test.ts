@@ -193,7 +193,7 @@ for (const corrupt of [true, false]) test(`saved-definition SDK boundary corrupt
   const definitions = new DynamoDbSavedUpdateFeedsStore('planning', client)
   f.context.reader.readSavedFeeds = () => definitions.get('w', 'reader')
   const result = await runInboxDigestSchedule({ enabled: true, dependencies: { authorize: async () => f.context }, listCandidates: async () => ({ recipients: [{ ...recipient, frequency: 'daily' }] }) }, now)
-  expect(result.terminal).toEqual(corrupt ? [{ recipient, reason: 'corrupt-state' }] : [])
+  expect(result.terminal).toEqual(corrupt ? [{ recipient, frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'corrupt-state' }] : [])
   expect(result.failed).toEqual(corrupt ? [] : [{ ...recipient, frequency: 'daily', scheduledAt: now }])
   expect((await f.store.get('w', 'reader')).history).toEqual([])
   expect(f.notifications()).toHaveLength(0)
