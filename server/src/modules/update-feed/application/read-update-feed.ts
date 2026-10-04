@@ -3,7 +3,9 @@ import { PlanningError, type PlanningUpdateActivity } from '../../planning'
 
 /** Request-scoped ports bound to an authenticated Workspace principal. */
 export interface UpdateFeedReader {
-  /** Reads only this member's bounded saved collection for revision-pinned digest selection. */
+  /** Reads only this member's bounded saved collection for revision-pinned digest selection.
+   * @returns The current authenticated member's bounded saved-feed collection and revision for validating pinned selections.
+   */
   readSavedFeeds?(): Promise<import('@mukuroji/contracts').SavedUpdateFeeds>
   /** Emits expanded reasons only for clients that explicitly support the newer response. */
   expandedSignals?: boolean
