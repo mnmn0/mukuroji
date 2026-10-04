@@ -3,6 +3,15 @@ import { isNonnegativeSafeInteger, isRecord } from '../../../shared/api/jsonVali
 import { isUpdateFeedView, updateFeedTargetKey } from '../model/updateFeed'
 import { isEntry, requestUpdateFeed, UpdateFeedApiError } from './updateFeed'
 
+/** Identifies saves whose outcome may be unknown and can retain an explicit retry draft.
+ * @param error - Transport, response-validation or stable API failure.
+ * @returns False for known permanent failures and client-side rejection statuses.
+ */
+export function isAmbiguousInboxSaveFailure(error: unknown): boolean {
+  if (!(error instanceof UpdateFeedApiError)) return true
+  return error.status >= 500 && !['UpdateFeedDigestCorruptState', 'UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestRecipientMismatch', 'UpdateFeedReadStateCorrupt', 'SavedUpdateFeedsCorruptState', 'TenantAdministrationCorrupt'].includes(error.code)
+}
+
 /** Reads personal preview preferences and content-free history.
  * @param token - Current session.
  * @param signal - Cancellation when the ephemeral preview is discarded.

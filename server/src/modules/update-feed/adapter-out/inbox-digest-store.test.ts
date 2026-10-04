@@ -33,6 +33,7 @@ async function fixture() {
   let sdkFailure: ((command: unknown) => unknown) | undefined
   let beforeTransaction: (() => void) | undefined
   const indexed: Record<string, unknown>[] = []
+  let currentDueIndex = false
   /** Derives model coordinates from the known table schemas. */
   const coordinate = (table: string, value: Record<string, unknown>) => JSON.stringify([table, table === 'notifications' ? value.recipientKey : value.workspaceId, table === 'notifications' ? value.notificationKey : value.recordKey])
   rows.set(coordinate('members', membershipKey), { ...membershipKey, version: 2 })
@@ -68,6 +69,14 @@ async function fixture() {
       expect(command.input.IndexName).toBe(INBOX_DIGEST_INDEX.name)
       expect(command.input.Limit).toBeLessThanOrEqual(100)
       expect(command.input.ConsistentRead).toBeUndefined()
+      if (currentDueIndex) {
+        const values = command.input.ExpressionAttributeValues!
+        const due = [...rows.values()].filter((row) => row.inboxDigestShard === values[':shard'] && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= values[':due']).sort((a, b) => Number(a.inboxDigestDueAt) - Number(b.inboxDigestDueAt))
+        const cursor = command.input.ExclusiveStartKey
+        const after = cursor ? due.filter((row) => Number(row.inboxDigestDueAt) > Number(cursor.inboxDigestDueAt)) : due
+        const items = after.slice(0, command.input.Limit)
+        return { Items: items, ...(after.length > items.length ? { LastEvaluatedKey: items.at(-1) } : {}) }
+      }
       return { Items: indexed, ...(lastPage ? {} : { LastEvaluatedKey: { workspaceId: 'next', recordKey: 'next' } }) }
     }
     if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected SDK command')
@@ -96,6 +105,8 @@ async function fixture() {
   const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSavedFeeds: async (): Promise<SavedUpdateFeeds> => ({ revision: 1, feeds: [{ id: 'custom', name: 'Personal name', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }), readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
   return {
     store, rows, indexed, commands, coordinate, context,
+    /** Models a converged due index with its actual key condition and pagination. */
+    useCurrentDueIndex() { currentDueIndex = true },
     checkpoints: new DynamoDbInboxDigestCheckpoints('planning', client),
     /** Recreates checkpoint adapters while retaining durable SDK rows. */
     restartCheckpoints: () => new DynamoDbInboxDigestCheckpoints('planning', client),
@@ -139,6 +150,139 @@ for (const empty of [true, false]) test(`pruned ${empty ? 'empty' : 'nonempty'} 
   expect(f.commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(transactions)
   expect(await f.store.get('w', 'reader')).toEqual(before)
   expect(f.notifications()).toEqual(notifications)
+})
+
+test('denial backs off only the due index without revoked guards and later reauthorizes', async () => {
+  const f = await fixture()
+  const source = f.store.withCallerAuthorization([])
+  const before = structuredClone(f.metadata())
+  f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 99 })
+  const denied = { authorize: async () => undefined, deferDenied: source.deferDenied.bind(source) }
+  expect(await deliverInboxDigest(denied, recipient, now)).toBe('denied')
+  expect(f.metadata()).toEqual({ ...before, inboxDigestDueAt: now + 3_600_000 })
+  const write = f.commands.filter((command) => command instanceof TransactWriteCommand).at(-1)
+  expect(write instanceof TransactWriteCommand && write.input.TransactItems).toHaveLength(1)
+  const transactions = f.commands.filter((command) => command instanceof TransactWriteCommand).length
+  const restarted = source.withCallerAuthorization([])
+  for (let scan = 0; scan < 3; scan++) await restarted.deferDenied(recipient)
+  expect(f.commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(transactions)
+  f.indexed.push(before)
+  const shard = Number(String(before.inboxDigestShard).split('#')[1])
+  expect((await source.listDue(shard)).recipients).toEqual([])
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  f.advance(3_600_000)
+  expect((await source.listDue(shard)).recipients).toEqual([{ ...recipient, frequency: 'daily' }])
+  f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 2 })
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('denial maintenance preserves concurrent consent changes and retries a lost acknowledgment safely', async () => {
+  const f = await fixture()
+  const source = f.store.withCallerAuthorization([])
+  f.beforeTransaction(() => {
+    const row = f.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+    delete row.inboxDigestDueAt
+    delete row.inboxDigestShard
+  })
+  await expect(source.deferDenied(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect(f.metadata().preferences).toMatchObject({ enabled: false })
+  expect(f.metadata().inboxDigestDueAt).toBeUndefined()
+  await source.deferDenied(recipient)
+  const g = await fixture()
+  g.loseClaimResponse()
+  await expect(g.store.withCallerAuthorization([]).deferDenied(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  await g.store.withCallerAuthorization([]).deferDenied(recipient)
+  expect(g.metadata().inboxDigestDueAt).toBe(now + 3_600_000)
+  expect((await g.store.get('w', 'reader')).history).toEqual([])
+  expect(g.notifications()).toEqual([])
+})
+
+test('explicit fresh consent can supersede denial backoff without losing settings', async () => {
+  const f = await fixture()
+  await f.store.withCallerAuthorization([]).deferDenied(recipient)
+  const current = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...current, preferences: { enabled: true, frequency: 'weekly', views: ['at-risk'] } })
+  expect(f.metadata().inboxDigestDueAt).toBe(now)
+  expect(f.metadata().preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['at-risk'] })
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('worker denial backoff survives restart, frees converged due pages and later reauthorizes', async () => {
+  const f = await fixture()
+  f.useCurrentDueIndex()
+  const deniedBefore = structuredClone(f.metadata())
+  const shard = Number(String(deniedBefore.inboxDigestShard).split('#')[1])
+  const healthy = { workspaceId: 'w', memberKey: 'healthy-10' }
+  f.advance(1)
+  await f.store.replace(healthy.workspaceId, healthy.memberKey, { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent'] } })
+  const healthyRow = [...f.rows.values()].find((row) => row.memberKey === healthy.memberKey)!
+  expect(healthyRow.inboxDigestShard).toBe(deniedBefore.inboxDigestShard)
+  let denied = true
+  const authorized: string[] = []
+  const source = f.store.withCallerAuthorization([])
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async (currentShard, cursor) => {
+      const page = await source.listDue(currentShard, 1, cursor ? JSON.parse(cursor) : undefined)
+      return { recipients: page.recipients, ...(page.cursor ? { cursor: JSON.stringify(page.cursor) } : {}) }
+    },
+    delivery: {
+      deferDenied: (owner) => source.deferDenied(owner),
+      authorize: async (owner) => {
+        authorized.push(owner.memberKey)
+        if (owner.memberKey === recipient.memberKey && denied) return undefined
+        return { ...f.context, recipient: owner, reader: { ...f.context.reader, memberKey: owner.memberKey } }
+      },
+    },
+  }
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 0, failed: 0 })
+  expect(f.metadata()).toEqual({ ...deniedBefore, inboxDigestDueAt: f.now() + 3_600_000 })
+  dependencies.checkpoints = f.restartCheckpoints()
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 1, failed: 0 })
+  expect(f.notifications()).toHaveLength(1)
+  for (let scan = 0; scan < 3; scan++) {
+    dependencies.checkpoints = f.restartCheckpoints()
+    expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 0, delivered: 0 })
+  }
+  expect(authorized).toEqual(['reader', 'healthy-10'])
+  f.advance(3_600_000)
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 0 })
+  expect(f.metadata()).toEqual({ ...deniedBefore, inboxDigestDueAt: f.now() + 3_600_000 })
+  denied = false
+  f.advance(3_600_000)
+  dependencies.checkpoints = f.restartCheckpoints()
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, delivered: 1 })
+  expect(f.notifications()).toHaveLength(2)
+  expect(authorized).toEqual(['reader', 'healthy-10', 'reader', 'reader'])
+})
+
+test('worker retries a lost denial-maintenance acknowledgment after checkpoint restart without extending backoff', async () => {
+  const f = await fixture()
+  f.useCurrentDueIndex()
+  const before = structuredClone(f.metadata())
+  const shard = Number(String(before.inboxDigestShard).split('#')[1])
+  const source = f.store.withCallerAuthorization([])
+  let lose = true
+  const dependencies: InboxDigestWorkerDependencies = {
+    checkpoints: f.checkpoints, now: f.now,
+    listDue: async () => ({ recipients: (await source.listDue(shard)).recipients }),
+    delivery: { authorize: async () => undefined, deferDenied: async (owner) => {
+      if (lose) { lose = false; f.loseClaimResponse() }
+      await source.deferDenied(owner)
+    } },
+  }
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 1 })
+  expect(f.metadata()).toEqual({ ...before, inboxDigestDueAt: now + 3_600_000 })
+  f.advance(60_000)
+  dependencies.checkpoints = f.restartCheckpoints()
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 1, failed: 0 })
+  expect(f.metadata()).toEqual({ ...before, inboxDigestDueAt: now + 3_600_000 })
+  expect(await runInboxDigestWorker(dependencies, shard)).toMatchObject({ processed: 0, failed: 0 })
+  expect(f.notifications()).toEqual([])
 })
 
 test('atomic SDK completion binds authorization, missing META, preferences and deterministic Inbox insertion', async () => {

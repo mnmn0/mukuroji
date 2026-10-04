@@ -492,7 +492,7 @@ for (const outcome of ['matching', 'differing', 'newer-draft']) test(`Inbox fail
   }
 })
 
-for (const failure of ['network', '503', 'lost-ack', 'stale']) test(`Inbox transient save failure ${failure} keeps the draft and original CAS base`, async ({ page }, testInfo) => {
+for (const failure of ['network', '503', 'malformed', 'lost-ack', 'stale']) test(`Inbox transient save failure ${failure} keeps the draft and original CAS base`, async ({ page }, testInfo) => {
   const state = await mockFeed(page)
   await page.clock.install()
   const writes: number[] = []
@@ -504,6 +504,7 @@ for (const failure of ['network', '503', 'lost-ack', 'stale']) test(`Inbox trans
     if (writes.length !== 1) return route.fallback()
     if (failure === 'lost-ack') state.inbox = { ...state.inbox, revision: 1, preferences: input.preferences }
     if (failure === 'network' || failure === 'lost-ack') return route.abort('failed')
+    if (failure === 'malformed') return route.fulfill({ json: {} })
     return route.fulfill({ status: 503, json: { code: 'Unavailable' } })
   })
   await page.goto('/updates')
@@ -556,6 +557,131 @@ for (const failure of ['network', '503', 'lost-ack', 'stale']) test(`Inbox trans
     expect(state.inbox.preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['for-me', 'recent'] })
     await expect(panel.getByRole('alert')).toHaveCount(0)
   }
+})
+
+for (const code of ['UpdateFeedDigestCorruptState', 'UpdateFeedDigestStoragePermanent']) test(`Inbox permanent save failure ${code} requires reload even after a matching GET`, async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') { reads++; return route.fallback() }
+    puts++
+    state.inbox = { ...state.inbox, revision: 1, preferences: route.request().postDataJSON().preferences }
+    return route.fulfill({ status: 502, json: { code } })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect(panel.getByRole('alert')).not.toContainText('Your changes are kept')
+  await expect(panel.getByRole('button', { name: 'Reload', exact: true })).toBeEnabled()
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
+  const before = reads
+  await page.clock.fastForward(6_001)
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(before)
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Reload', exact: true })).toBeEnabled()
+  expect(puts).toBe(1)
+  await panel.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(panel.getByRole('alert')).toHaveCount(0)
+})
+
+for (const outcome of ['abort', '503', 'close-after-failure', 'reopen-pending', 'success', 'differing', 'denied']) test(`Inbox collapsed save ${outcome} preserves the owner and handles fresh verification`, async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const writes: number[] = []
+  let settled = false
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback()
+    writes.push(route.request().postDataJSON().expectedRevision)
+    if (writes.length > 1) return route.fallback()
+    await gate
+    if (outcome === 'success') await route.fallback()
+    else if (outcome === 'abort') await route.abort('failed')
+    else await route.fulfill({ status: outcome === 'denied' ? 403 : 503, json: {} })
+    settled = true
+  })
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  const cadence = panel.getByLabel('Interval', { exact: true })
+  await panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).check()
+  await cadence.selectOption('weekly')
+  await panel.getByLabel('Recent', { exact: true }).check()
+  await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect.poll(() => writes.length).toBe(1)
+  if (outcome === 'close-after-failure') {
+    release()
+    await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
+  }
+  await summary.click()
+  await expect(panel).toBeHidden()
+  if (outcome === 'reopen-pending') {
+    await summary.click()
+    await expect(cadence).toBeDisabled()
+  }
+  if (outcome === 'denied') state.inboxDenied = true
+  release()
+  await expect.poll(() => settled).toBe(true)
+  if (outcome === 'differing') state.inbox = { ...state.inbox, revision: 1 }
+  await page.clock.fastForward(6_001)
+  if (outcome !== 'reopen-pending') await summary.click()
+  if (outcome === 'denied') {
+    await expect(panel.locator('form')).toHaveCount(0)
+    state.inboxDenied = false
+    await page.clock.fastForward(6_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect(cadence).toHaveValue('daily')
+    await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).not.toBeChecked()
+  } else {
+    await expect(cadence).toHaveValue('weekly')
+    await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
+    await expect(panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })).toBeChecked()
+    const save = panel.getByRole('button', { name: 'Save Inbox settings' })
+    if (outcome === 'success') {
+      await expect(save).toBeDisabled()
+      await expect(panel.getByRole('alert')).toHaveCount(0)
+    } else if (outcome === 'differing') {
+      await expect(panel.getByRole('alert')).toContainText('Settings changed')
+      await expect(save).toBeDisabled()
+    } else {
+      await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
+      await expect(save).toBeEnabled()
+      expect(writes).toEqual([0])
+      await save.click()
+      await expect.poll(() => state.inbox.revision).toBe(1)
+      expect(writes).toEqual([0, 0])
+    }
+  }
+  expect(writes).toHaveLength(['success', 'differing', 'denied'].includes(outcome) ? 1 : 2)
+})
+
+test('Inbox GET denial clears an owned draft before a later verified reopening', async ({ page }) => {
+  const state = await mockFeed(page)
+  await page.clock.install()
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await summary.click()
+  state.inboxDenied = true
+  await page.clock.fastForward(6_001)
+  await summary.click()
+  await expect(panel.locator('form')).toHaveCount(0)
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await summary.click()
+  state.inboxDenied = false
+  await page.clock.fastForward(6_001)
+  await summary.click()
+  await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('daily')
+  await expect(panel.getByRole('button', { name: 'Save Inbox settings' })).toBeDisabled()
 })
 
 test('Inbox settings conflict requires reload and permission loss hides consent', async ({ page }) => {

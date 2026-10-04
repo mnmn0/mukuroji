@@ -37,7 +37,7 @@ export function createProductionInboxDigestWorkerHandler() {
       }
     }, locale)
     const result = await runInboxDigestWorkerInvocation({
-        checkpoints, delivery, now: Date.now,
+        checkpoints, delivery: { ...delivery, deferDenied: (recipient) => metadata.deferDenied(recipient) }, now: Date.now,
         async listDue(currentShard, cursor, limit) {
           const page = await metadata.listDue(currentShard, limit, decodeCursor(cursor, currentShard))
           const recipients = []
