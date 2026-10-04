@@ -78,8 +78,13 @@ export function SavedUpdateFeedsPanel({ collection, selectedId, options, options
   /** Commits the desired collection; failed CAS never closes or clears the draft. */
   const save = async () => {
     if (!editor) return
-    const others = editor.original.feeds.filter((feed) => feed.id !== editor.feed.id)
-    if (await onSave({ expectedRevision: editor.original.revision, feeds: editor.deleting ? others : [...others, editor.feed] })) { onSelect(editor.deleting ? '' : editor.feed.id); close() }
+    const feeds = editor.deleting ? editor.original.feeds.filter((feed) => feed.id !== editor.feed.id) : [...editor.original.feeds]
+    if (!editor.deleting) {
+      const index = editor.original.feeds.findIndex((feed) => feed.id === editor.feed.id)
+      if (index === -1) feeds.push(editor.feed)
+      else feeds[index] = editor.feed
+    }
+    if (await onSave({ expectedRevision: editor.original.revision, feeds })) { onSelect(editor.deleting ? '' : editor.feed.id); close() }
   }
   const conflict = error instanceof UpdateFeedApiError && error.status === 409
   const oversized = editor && Object.values(editor.feed.filters).some((values) => values.length > 20)

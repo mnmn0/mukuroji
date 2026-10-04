@@ -106,6 +106,40 @@ test('saved feeds survive reload, edit with CAS, retain conflicts and require ex
   expect(state.saved).toEqual({ revision: 3, feeds: [] })
 })
 
+test('editing saved feeds preserves collection order while creation appends and deletion removes only its target', async ({ page }) => {
+  const state = await mockFeed(page)
+  state.saved = { revision: 7, feeds: ['first', 'middle', 'last'].map((id) => ({
+    id, name: id, view: 'recent',
+    filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] },
+  })) }
+  await page.goto('/updates?feedId=first')
+  const selector = page.getByRole('combobox', { name: 'Saved feeds', exact: true })
+  for (const id of ['first', 'middle']) {
+    await selector.selectOption(id)
+    await page.getByRole('button', { name: 'Edit feed', exact: true }).click()
+    await page.getByLabel('Feed name', { exact: true }).fill(`${id} renamed`)
+    await page.getByRole('button', { name: 'Save feed', exact: true }).click()
+    await expect(selector).toBeFocused()
+    expect(state.saved.feeds.map((feed) => feed.id)).toEqual(['first', 'middle', 'last'])
+    await expect(selector.locator('option')).toHaveText(['Standard feeds', 'first renamed', id === 'middle' ? 'middle renamed' : 'middle', 'last'])
+  }
+  expect(state.saved.revision).toBe(9)
+  await page.reload()
+  await expect(selector.locator('option')).toHaveText(['Standard feeds', 'first renamed', 'middle renamed', 'last'])
+  await page.getByRole('button', { name: 'New feed', exact: true }).click()
+  await page.getByLabel('Feed name', { exact: true }).fill('new appended')
+  await page.getByRole('button', { name: 'Save feed', exact: true }).click()
+  await expect(selector).toBeFocused()
+  expect(state.saved.feeds.map((feed) => feed.name)).toEqual(['first renamed', 'middle renamed', 'last', 'new appended'])
+  await selector.selectOption('middle')
+  await page.getByRole('button', { name: 'Delete feed', exact: true }).click()
+  await expect(page.getByText('Delete the saved feed “middle renamed”? Reports and read states will be kept.')).toBeVisible()
+  await page.getByRole('button', { name: 'Delete feed', exact: true }).click()
+  await expect(selector).toBeFocused()
+  expect(state.saved).toMatchObject({ revision: 11, feeds: [{ id: 'first', name: 'first renamed' }, { id: 'last', name: 'last' }, { name: 'new appended' }] })
+  await expect(selector.locator('option')).toHaveText(['Standard feeds', 'first renamed', 'last', 'new appended'])
+})
+
 test('explicit read/unread survives a fresh page and refresh removes revoked content', async ({ page }) => {
   const state = await mockFeed(page)
   await page.goto('/updates')
