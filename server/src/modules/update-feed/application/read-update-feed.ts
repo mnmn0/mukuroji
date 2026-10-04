@@ -5,6 +5,12 @@ import { PlanningError } from '../../planning'
 export interface UpdateFeedReader {
   /** Current member identity, resolved by the server. */
   memberKey: string
+  /** Resolves an authorized target name from current directory/Planning data.
+   * @param target - Currently authorized target projection.
+   * @param snapshot - Current graph containing Initiative titles.
+   * @returns Current target display name.
+   */
+  describeTarget?(target: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot): string
   /** Reads the bounded Planning graph, never update history or annotations.
    * @returns Current bounded graph for the authenticated Workspace.
    */
@@ -53,6 +59,7 @@ export async function readUpdateFeed(
     if (summary.latestUpdate?.authorMemberKey.toLowerCase() === memberKey) reasons.push('latest-author')
     const latest = summary.latestUpdate
     const entry: UpdateFeedEntry = {
+      title: reader.describeTarget?.(summary, snapshot) ?? (summary.target.type === 'project' ? summary.target.projectId : summary.target.entityId),
       target: summary.target,
       health: latest?.health ?? 'unknown',
       updateState: summary.updateState,

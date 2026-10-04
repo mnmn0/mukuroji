@@ -579,7 +579,7 @@ import {
   type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
-import { parseUpdateFeedQuery, readUpdateFeed } from '../modules/update-feed'
+import { parseUpdateFeedQuery, readUpdateFeed, parseUpdateFeedReadState, setUpdateFeedReadState, withUpdateFeedReadState, type UpdateFeedReader } from '../modules/update-feed'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
@@ -1340,6 +1340,9 @@ const workItemDependencies: WorkItemDependencies = {
   get planning() {
     return requireAppDependencies().workItems.planning
   },
+  get updateFeedReadState() {
+    return requireAppDependencies().workItems.updateFeedReadState
+  },
   get requestIntake() {
     return requireAppDependencies().workItems.requestIntake
   },
@@ -1759,6 +1762,7 @@ const enterpriseRoutePermissionRules = [
     permission: 'planning.manage',
   },
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
+  { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-forms*', permission: 'requests.manage' },
@@ -7095,10 +7099,36 @@ routeApp.get('/api/planning/update-feed', async (c) => {
   if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    if ((c.req.queries('view')?.length ?? 0) > 1 || (c.req.queries('limit')?.length ?? 0) > 1) {
+    if (['view', 'limit', 'locale'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
       throw new PlanningError(400, 'UpdateFeedQueryAmbiguous', 'Feed query parameters must occur at most once.')
     }
-    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit')))
+    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit'), readLocale(c)))
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Persists the current member's explicit read state for one currently readable report. */
+routeApp.put('/api/planning/update-feed/read-state', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const initialPrincipal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const input = parseUpdateFeedReadState(await readPlanningJson<unknown>(c.req))
+    const authorizationRevision = await workItemDependencies.planning.getAuthorizationRevision(initialPrincipal.directoryId)
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if (principal.directoryId !== initialPrincipal.directoryId) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Workspace authorization changed.')
+    if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
+    const authorizedReader = await createPlanningUpdateFeedReader(principal)
+    const reader: UpdateFeedReader = { ...authorizedReader, readSnapshot: async () => {
+      const snapshot = await authorizedReader.readSnapshot()
+      if (snapshot.revision !== authorizationRevision) throw new PlanningError(409, 'UpdateFeedReadStateConflict', 'Target authorization changed. Refresh and retry.')
+      return snapshot
+    } }
+    const callerChecks = createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account')
+    if (callerChecks.length === 0) throw new PlanningError(503, 'UpdateFeedAuthorizationUnavailable', 'Caller authorization conditions are unavailable.')
+    const store = workItemDependencies.updateFeedReadState.withCallerAuthorization(callerChecks)
+    return c.json(await setUpdateFeedReadState(reader, store, principal.directoryId, input))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
@@ -19587,6 +19617,7 @@ function toWorkspaceAccessErrorResponse(c: Context, error: unknown) {
   }
 
   const status = error.status === 400 ||
+    error.status === 401 ||
     error.status === 413 ||
     error.status === 403 ||
     error.status === 404 ||
@@ -25948,11 +25979,18 @@ async function requirePlanningEntityPermission(
  * @param principal - Authenticated current Workspace principal.
  * @param view - Untrusted standard feed selector.
  * @param limit - Untrusted bounded response size.
+ * @param locale - Active display language for current Project titles.
  * @returns The authorized live feed, without loading Work Items or history.
  */
-async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string) {
+async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string, locale: Locale = 'ja') {
   parseUpdateFeedQuery(view, limit)
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  const reader = await createPlanningUpdateFeedReader(principal, locale)
+  return withUpdateFeedReadState(workItemDependencies.updateFeedReadState, principal.directoryId, principal.userKey, await readUpdateFeed(reader, view, limit))
+}
+
+/** Creates request-local target authorization shared by feed reads and read-state mutations. */
+async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, locale: Locale = 'ja'): Promise<UpdateFeedReader> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, locale, true)
   let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
   const readContext: TeamPermissionReadContext = {
     directory,
@@ -25966,8 +26004,14 @@ async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: stri
     const team = directory.teams.find((candidate) => candidate.id === scope.teamId)
     return team !== undefined && (scope.projectId === undefined || team.projects.some((project) => project.id === scope.projectId))
   }
-  return readUpdateFeed({
+  return {
     memberKey: principal.userKey,
+    describeTarget: (summary, snapshot) => {
+      const target = summary.target
+      return target.type === 'initiative'
+        ? snapshot.entities.find((entity) => entity.id === target.entityId)?.title ?? target.entityId
+        : directory.teams.find((team) => team.id === target.teamId)?.projects.find((project) => project.id === target.projectId)?.name ?? target.projectId
+    },
     readSnapshot: () => workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
     authorizeTarget: async (summary, snapshot) => {
       const target = summary.target
@@ -25992,7 +26036,7 @@ async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: stri
         throw error
       }
     },
-  }, view, limit)
+  }
 }
 
 /**
@@ -40286,14 +40330,17 @@ async function createDependencyFencedWorkItemAuthorizationSnapshot(
  *
  * @param principal - Principal whose endpoint-manager permissions were evaluated.
  * @param additionalMembers - Additional active members whose future permissions are required.
+ * @param includePrincipalMembership - Whether the caller has a persisted membership row; false for service-account feed state.
  * @returns Workspace member and optional enterprise CONTROL condition checks.
  */
 function createPlanningCallerAuthorizationConditionChecks(
   principal: WorkspacePrincipal,
   additionalMembers: readonly Pick<WorkspaceMember, 'memberKey' | 'version'>[] = [],
+  includePrincipalMembership = true,
 ): PlanningCallerAuthorizationConditionCheck[] {
   const members = new Map<string, Pick<WorkspaceMember, 'memberKey' | 'version'>>()
-  for (const member of [principal.workspaceMember, ...additionalMembers]) {
+  const principalMembers = includePrincipalMembership ? [principal.workspaceMember] : []
+  for (const member of [...principalMembers, ...additionalMembers]) {
     const memberKey = normalizeProjectMemberKey(member.memberKey)
     if (!members.has(memberKey)) members.set(memberKey, member)
   }

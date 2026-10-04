@@ -44,6 +44,7 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore } from '../../modules/update-feed'
 import {
   recordApiAccess,
   recordApiError,
@@ -543,6 +544,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
     workItemConfigurations: createWorkItemConfigurationClient(),
     planning: createPlanningClient(),
+    updateFeedReadState: new DynamoDbUpdateFeedReadStateStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
     requestIntake: createDefaultRequestIntakeClient(
       createProductionTenantAvailability(),
       async (entry) => await triage.prepareEntryAdmission(entry),
@@ -1691,6 +1696,7 @@ export function createTestAppDependencies(): AppDependencies {
       ...production.workItems,
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
       planning: new InMemoryPlanningClient(),
+      updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
       requestIntake,
@@ -1805,6 +1811,7 @@ export function overrideAppDependencies(
         ? { workItemConfigurations: overrides.workItemConfigurations }
         : {}),
       ...(overrides.planning ? { planning: overrides.planning } : {}),
+      ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.requestIntake ? { requestIntake: overrides.requestIntake } : {}),
       ...(overrides.triage ? { triage: overrides.triage } : {}),
       ...(overrides.analytics ? { analytics: overrides.analytics } : {}),

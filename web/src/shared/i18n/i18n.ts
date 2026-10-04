@@ -66,6 +66,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
   const navKeyMap: Record<SidebarNavId, MessageKey> = {
     home: 'sidebar.nav.home',
     focus: 'sidebar.nav.focus',
+    updates: 'sidebar.nav.updates',
     'my-tasks': 'sidebar.nav.myTasks',
     inbox: 'sidebar.nav.inbox',
     requests: 'sidebar.nav.requests',
@@ -155,6 +156,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
     nav: {
       home: t(navKeyMap.home),
       focus: t(navKeyMap.focus),
+      updates: t(navKeyMap.updates),
       'my-tasks': t(navKeyMap['my-tasks']),
       inbox: t(navKeyMap.inbox),
       requests: t(navKeyMap.requests),
