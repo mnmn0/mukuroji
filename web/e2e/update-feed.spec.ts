@@ -1463,7 +1463,7 @@ test('guests have no mutation controls and permission denial offers no reload lo
   state.inbox.preferences = structuredClone(state.digest.preferences)
   await page.goto('/updates')
   await expect(page.getByTestId('update-feed-row')).toHaveCount(3)
-  await expect(page.getByText('Guest access is read-only.')).toBeVisible()
+  await expect(page.getByText('Guest access is read-only.').and(page.locator(':visible'))).toBeVisible()
   await expect(page.getByRole('button', { name: /^Mark as/ })).toHaveCount(0)
   await page.locator('summary', { hasText: 'Digest preview' }).click()
   const digest = page.getByRole('region', { name: 'Digest preview', exact: true })
