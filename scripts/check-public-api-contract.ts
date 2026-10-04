@@ -363,7 +363,7 @@ const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SNAPSHOT_PATH = resolve(REPOSITORY_ROOT, SNAPSHOT_RELATIVE_PATH)
 const SCHEMA_TRAVERSAL_CONTEXTS =
   new WeakMap<IssueCollector, SchemaTraversalContext>()
-const CANONICAL_RUNTIME_SOURCE = `import publicApiOpenApiDocumentJson from '../openapi/public-api-v1.json'
+const CANONICAL_RUNTIME_SOURCE = `import publicApiOpenApiDocumentJson from '../openapi/public-api-v1.json' with { type: 'json' }
 
 /**
  * Public REST API major version.
