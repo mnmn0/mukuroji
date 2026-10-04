@@ -6965,13 +6965,17 @@ test.describe('authenticated task page', () => {
       leaveDialog,
     ])
     await expect(page).toHaveURL(/issueId=seo-research/)
-    // A URL commit can precede the keyed composer mount; establish B before returning to A.
-    await expect(page.getByTestId('task-detail-pane')).toContainText('SEO キーワードリサーチ')
+    // Match the detail heading, not another issue title in the relation controls.
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'SEO キーワードリサーチ', exact: true,
+    })).toBeVisible()
     await expect(page.locator('textarea[name="body"]')).toHaveValue('')
     await page.getByTestId('task-open-detail-wireframe').click()
     await expect(page).toHaveURL(/issueId=wireframe/)
     const replacementBody = page.locator('textarea[name="body"]')
-    await expect(page.getByTestId('task-detail-pane')).toContainText('新しいランディングページのワイヤーフレーム作成')
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: '新しいランディングページのワイヤーフレーム作成', exact: true,
+    })).toBeVisible()
     await expect(replacementBody).toHaveValue('')
     await replacementBody.fill('新しい Issue A のコメント')
     await page.evaluate(() => new Promise<void>((resolve) => {
@@ -7032,9 +7036,18 @@ test.describe('authenticated task page', () => {
       leaveDialog,
     ])
     await expect(page).toHaveURL(/issueId=seo-research/)
+    // Match the detail heading, not another issue title in the relation controls.
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: 'SEO キーワードリサーチ', exact: true,
+    })).toBeVisible()
+    await expect(page.locator('textarea[name="body"]')).toHaveValue('')
     await page.getByTestId('task-open-detail-wireframe').click()
     await expect(page).toHaveURL(/issueId=wireframe/)
     const replacementBody = page.locator('textarea[name="body"]')
+    await expect(page.getByTestId('task-detail-pane').getByRole('heading', {
+      name: '新しいランディングページのワイヤーフレーム作成', exact: true,
+    })).toBeVisible()
+    await expect(replacementBody).toHaveValue('')
     await replacementBody.fill('新しい Issue A の認証失効後も残すコメント')
 
     releaseOldComment?.()

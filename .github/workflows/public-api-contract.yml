@@ -163,6 +163,8 @@ jobs:
             .github/workflows/public-api-contract.yml
             contracts/openapi/public-api-v1.json
             contracts/src/openapi.ts
+            contracts/src/work-items.ts
+            contracts/src/work-item-configuration.ts
             scripts/check-public-api-contract.ts
           sparse-checkout-cone-mode: false
 
@@ -416,6 +418,18 @@ jobs:
             GH_TOKEN="$APP_TOKEN" gh api --method PATCH \
               "repos/$GITHUB_REPOSITORY/check-runs/$CHECK_ID" \
               --input -
+
+          # continue-on-error keeps the finalizer reachable; report raw outcomes,
+          # not the corrected step conclusions or the pre-finalizer job status.
+          # A failed check publication must not produce a success summary.
+          {
+            printf '## Public API compatibility: %s\n\n' "$conclusion"
+            printf '%s\n\n' "$summary"
+            printf 'Trusted base: `%s`\n\nCandidate: `%s`\n\n' "$BASE_SHA" "$HEAD_SHA"
+            printf 'Checkout base: `%s`; checkout candidate: `%s`; Bun setup: `%s`; comparison: `%s`.\n' \
+              "$CHECKOUT_BASE_OUTCOME" "$CHECKOUT_CANDIDATE_OUTCOME" \
+              "$SETUP_BUN_OUTCOME" "$EVALUATION_OUTCOME"
+          } >>"$GITHUB_STEP_SUMMARY"
 
           if [[ "$conclusion" != "success" ]]; then
             exit 1
