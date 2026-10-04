@@ -142,7 +142,7 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
       if (row.recordKey !== item.recordKey) throw corruptCandidate()
       if (state.preferences.enabled && row.inboxDigestShard === `inbox-digest#${shard}` && typeof row.inboxDigestDueAt === 'number' && row.inboxDigestDueAt <= now) {
         const retry = retryableReceipt(state)
-        recipients.push({ ...recipient, frequency: state.preferences.frequency, ...(retry ? { scheduledAt: Date.parse(`${retry.id.slice(retry.id.indexOf(':') + 1)}T00:00:00.000Z`) } : {}) })
+        recipients.push({ ...recipient, frequency: state.preferences.frequency, ...(retry ? { scheduledAt: Date.parse(`${retry.id.slice(retry.id.indexOf(':') + 1)}T00:00:00.000Z`), receiptAttempts: retry.attempts } : {}) })
       }
     }
     return { recipients, cursor: page.LastEvaluatedKey }

@@ -21,6 +21,7 @@ export type InboxDigestRetry = InboxDigestCandidate & {
 /** Trusted discovery binds the cadence before authorization or claim can fail. */
 export type InboxDigestCandidate = InboxDigestRecipient & {
   /** Current cadence observed by the strongly checked candidate source. */ frequency: 'daily' | 'weekly'
+  /** Strongly read receipt progress; absent means no receipt at discovery. */ receiptAttempts?: number
 }
 
 /** Content-free Inbox message; opening the Feed performs current authorization again. */
@@ -79,11 +80,20 @@ export type InboxDigestOutcome = 'disabled' | 'denied' | 'not-due' | 'delivered'
  * @returns Frequency-qualified interval key.
  */
 export function inboxDigestInterval(state: UpdateFeedDigestState, now: number): string {
+  return inboxDigestLogicalInterval(state.preferences.frequency, now)
+}
+
+/** Canonicalizes trusted discovery identity independently of mutable settings.
+ * @param frequency - Cadence observed by trusted candidate discovery.
+ * @param now - Original scheduling clock.
+ * @returns Cadence-qualified UTC date, Monday for weekly intervals.
+ */
+export function inboxDigestLogicalInterval(frequency: InboxDigestCandidate['frequency'], now: number): string {
   if (!Number.isSafeInteger(now) || now < 0 || now > 8_640_000_000_000_000) throw new Error('Invalid digest clock')
   const start = new Date(now)
   start.setUTCHours(0, 0, 0, 0)
-  if (state.preferences.frequency === 'weekly') start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
-  return `${state.preferences.frequency}:${start.toISOString().slice(0, 10)}`
+  if (frequency === 'weekly') start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
+  return `${frequency}:${start.toISOString().slice(0, 10)}`
 }
 
 /** Generates a due digest and atomically commits a bodyless Inbox link and receipt.
@@ -179,7 +189,7 @@ export type InboxDigestScheduleResult = {
   /** Failed candidates that must be retried separately from the continuation. */
   failed: InboxDigestRetry[]
   /** Terminal candidates requiring inspection, never automatic retry. */
-  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' }[]
+  terminal: { /** Server-resolved affected owner. */ recipient: InboxDigestRecipient; /** Original discovery cadence. */ frequency: InboxDigestCandidate['frequency']; /** Original trusted scheduling time. */ scheduledAt: number; /** Canonical cadence-qualified UTC interval. */ interval: string; /** Stable bodyless diagnostic category. */ reason: 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' }[]
   /** Next source checkpoint; must not discard failed candidates. */
   cursor?: string
 }
@@ -216,7 +226,8 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
   for (const candidate of page.recipients) {
     const recipient = { workspaceId: candidate.workspaceId, memberKey: candidate.memberKey }
     const scheduledAt = 'scheduledAt' in candidate ? candidate.scheduledAt : now
-    const key = JSON.stringify([recipient.workspaceId, recipient.memberKey])
+    const interval = inboxDigestLogicalInterval(candidate.frequency, scheduledAt)
+    const key = JSON.stringify([recipient.workspaceId, recipient.memberKey, interval])
     if (seen.has(key)) continue
     seen.add(key)
     result.processed++
@@ -224,7 +235,7 @@ export async function runInboxDigestSchedule(schedule: InboxDigestSchedule, now:
       if (await deliverInboxDigest(schedule.dependencies, recipient, now, scheduledAt, candidate.frequency) === 'delivered') result.delivered++
     } catch (error) {
       const reason = inboxDigestTerminalReason(error)
-      if (reason) result.terminal.push({ recipient, reason })
+      if (reason) result.terminal.push({ recipient, frequency: candidate.frequency, scheduledAt, interval, reason })
       else result.failed.push({ ...recipient, frequency: candidate.frequency, scheduledAt })
     }
   }
