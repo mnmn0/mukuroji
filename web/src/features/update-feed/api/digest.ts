@@ -59,11 +59,15 @@ export async function generateDigestPreview(token: string, locale: 'ja' | 'en'):
 /** Reconstructs metadata without retaining unknown server fields. */
 function readState(value: unknown): UpdateFeedDigestState {
   if (!isRecord(value) || !isNonnegativeSafeInteger(value.revision) || !preferences(value.preferences) || !Array.isArray(value.history) || value.history.length > 20 || !value.history.every(receipt) || new Set(value.history.map((item) => item.id)).size !== value.history.length) throw new UpdateFeedApiError(502)
-  return { revision: value.revision, preferences: { enabled: value.preferences.enabled, frequency: value.preferences.frequency, views: [...value.preferences.views] }, history: value.history.map(({ id, status, attempts, token, leaseUntil, count }) => ({ id, status, attempts, token, leaseUntil, count })) }
+  return { revision: value.revision, preferences: { enabled: value.preferences.enabled, frequency: value.preferences.frequency, views: [...value.preferences.views], ...(value.preferences.savedFeeds ? { savedFeeds: { revision: value.preferences.savedFeeds.revision, ids: [...value.preferences.savedFeeds.ids] } } : {}) }, history: value.history.map(({ id, status, attempts, token, leaseUntil, count }) => ({ id, status, attempts, token, leaseUntil, count })) }
 }
 /** Narrows the bounded set of standard views supported by the preview API. */
 function preferences(value: unknown): value is UpdateFeedDigestPreferences {
-  return isRecord(value) && typeof value.enabled === 'boolean' && (value.frequency === 'daily' || value.frequency === 'weekly') && Array.isArray(value.views) && value.views.length > 0 && value.views.length <= 6 && value.views.every(isUpdateFeedView) && new Set(value.views).size === value.views.length
+  if (!isRecord(value) || typeof value.enabled !== 'boolean' || (value.frequency !== 'daily' && value.frequency !== 'weekly') || !Array.isArray(value.views) || !value.views.every(isUpdateFeedView) || new Set(value.views).size !== value.views.length) return false
+  const saved = value.savedFeeds
+  if (saved !== undefined && (!isRecord(saved) || !isNonnegativeSafeInteger(saved.revision) || saved.revision < 1 || !Array.isArray(saved.ids) || saved.ids.length < 1 || saved.ids.length > 6 || !saved.ids.every((id: unknown) => typeof id === 'string' && id.length > 0 && id.length <= 512 && id.trim() === id && Array.from(id).every((char) => char.charCodeAt(0) > 31 && char.charCodeAt(0) !== 127)) || new Set(saved.ids).size !== saved.ids.length)) return false
+  const count = value.views.length + (isRecord(saved) && Array.isArray(saved.ids) ? saved.ids.length : 0)
+  return count > 0 && count <= 6
 }
 /** Validates content-free receipt fields before rendering. */
 function receipt(value: unknown): value is UpdateFeedDigestReceipt {

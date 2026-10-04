@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import { parseDigestState, emptyDigestState, type UpdateFeedDigestStore } from '../application/digest'
+import { digestSavedFeedsFence } from './saved-feeds-store'
 import { digestStorageFailure } from './digest-storage-failure'
 
 /** Composition-only binding for fresh caller authorization conditions. */
@@ -53,10 +54,12 @@ export class DynamoDbUpdateFeedDigestStore implements UpdateFeedDigestPersistenc
    * @param memberKey - Authenticated member identity.
    * @param input - Desired digest metadata and observed revision.
    * @param planningRevision - Optional content authorization fence.
+   * @param savedFeedsRevision - Optional confirmed personal collection fence.
    * @returns Committed bounded collection.
    */
-  async replace(workspaceId: string, memberKey: string, input: UpdateFeedDigestState, planningRevision?: number): Promise<UpdateFeedDigestState> {
+  async replace(workspaceId: string, memberKey: string, input: UpdateFeedDigestState, planningRevision?: number, savedFeedsRevision?: number): Promise<UpdateFeedDigestState> {
     const parsed = parseDigestState(input)
+    if (planningRevision !== undefined && parsed.preferences.savedFeeds?.revision !== savedFeedsRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest selection changed.')
     if (this.checks.length === 0) throw new PlanningError(503, 'UpdateFeedDigestAuthorizationUnavailable', 'Caller authorization is unavailable.')
     const result = { ...parsed, revision: parsed.revision + 1 }
     const fence: PlanningCallerAuthorizationConditionCheck[] = planningRevision === undefined ? [] : [{ ConditionCheck: {
@@ -69,6 +72,7 @@ export class DynamoDbUpdateFeedDigestStore implements UpdateFeedDigestPersistenc
         ExpressionAttributeValues: { ':entryType': 'planning-meta', ':schemaVersion': 1, ':revision': planningRevision },
       }),
     } }]
+    fence.push(...digestSavedFeedsFence(this.tableName, workspaceId, memberKey, savedFeedsRevision))
     try {
       await this.client.send(new TransactWriteCommand({ TransactItems: [{ Put: {
         TableName: this.tableName, Item: { workspaceId, recordKey: recordKey(memberKey), entryType: 'update-feed-digest', schemaVersion: 1, ...result },

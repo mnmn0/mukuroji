@@ -3,6 +3,10 @@ import { PlanningError, type PlanningUpdateActivity } from '../../planning'
 
 /** Request-scoped ports bound to an authenticated Workspace principal. */
 export interface UpdateFeedReader {
+  /** Reads only this member's bounded saved collection for revision-pinned digest selection.
+   * @returns The current authenticated member's bounded saved-feed collection and revision for validating pinned selections.
+   */
+  readSavedFeeds?(): Promise<import('@mukuroji/contracts').SavedUpdateFeeds>
   /** Emits expanded reasons only for clients that explicitly support the newer response. */
   expandedSignals?: boolean
   /** Supplies a deterministic clock for expiring recent signals. */
@@ -77,6 +81,21 @@ export async function readUpdateFeed(
   filters?: UpdateFeedFilters,
 ): Promise<UpdateFeedResponse> {
   const { view, limit } = parseUpdateFeedQuery(viewInput, limitInput)
+  return selectUpdateFeedProjection(await readUpdateFeedProjection(reader), view, String(limit), filters)
+}
+
+/** Request-local authorized entries and lazy current filter scopes, never persisted or shared. */
+export type UpdateFeedProjection = {
+  /** Planning revision governing the authorized projection. */ revision: number
+  /** At most 2000 authorized and enriched latest targets, before any source ranking. */ entries: readonly UpdateFeedEntry[]
+  /** Resolves each authorized target's filter scope at most once within this projection. */ scope(entry: UpdateFeedEntry): Promise<UpdateFeedFilterScope>
+}
+
+/** Authorizes and enriches the bounded graph once for one or more source selections.
+ * @param reader - Current principal-bound ports, not a cross-request cache.
+ * @returns A request-local projection with lazy per-target filter scope resolution.
+ */
+export async function readUpdateFeedProjection(reader: UpdateFeedReader): Promise<UpdateFeedProjection> {
   const snapshot = await reader.readSnapshot()
   if (snapshot.updateTargets.length > 2000) {
     throw new PlanningError(413, 'UpdateFeedTargetLimitExceeded', 'Feed target projection exceeds its bounded read limit.')
@@ -133,13 +152,38 @@ export async function readUpdateFeed(
       relevance: (reasons.includes('update-owner') ? reader.expandedSignals ? 8 : 2 : 0) + (reasons.includes('project-member') ? 4 : 0) + (reasons.includes('watching') ? 3 : 0) + (reasons.includes('recent-interaction') ? 2 : 0) + (reasons.includes('latest-author') ? 1 : 0),
       ...(reader.expandedSignals ? { attention: { score: (attentionReasons.includes('recent-comment') ? 2 : 0) + (attentionReasons.includes('recent-reaction') ? 1 : 0), reasons: attentionReasons } } : {}),
     }
-    if (!matchesView(entry, view)) continue
-    if (filters) {
-      const scope = await reader.filterScope?.(summary, snapshot) ?? { portfolioIds: [], ...(summary.target.type === 'project' ? summary.target : {}) }
-      if (!matchesFilters(entry, scope, filters)) continue
-    }
     const key = targetKey(entry)
     entries.set(key, entry)
+  }
+  const summaries = new Map(authorized.map((summary) => [targetKey(summary), summary]))
+  const scopes = new Map<string, Promise<UpdateFeedFilterScope>>()
+  return { revision: snapshot.revision, entries: [...entries.values()], scope: (entry) => {
+    const key = targetKey(entry)
+    const summary = summaries.get(key)
+    if (!summary) throw new PlanningError(409, 'UpdateFeedProjectionMismatch', 'Feed projection changed.')
+    let scope = scopes.get(key)
+    if (!scope) {
+      scope = reader.filterScope?.(summary, snapshot) ?? Promise.resolve({ portfolioIds: [], ...(summary.target.type === 'project' ? summary.target : {}) })
+      scopes.set(key, scope)
+    }
+    return scope
+  } }
+}
+
+/** Applies source predicates and ranking before bounding the response, reusing authorized work.
+ * @param projection - Current request's authorized/enriched targets and lazy scopes.
+ * @param viewInput - Standard source view.
+ * @param limitInput - Decimal response limit from 1 through 100.
+ * @param filters - Current validated personal source conditions.
+ * @returns Ranked source candidates with explicit truncation.
+ */
+export async function selectUpdateFeedProjection(projection: UpdateFeedProjection, viewInput?: string, limitInput?: string, filters?: UpdateFeedFilters): Promise<UpdateFeedResponse> {
+  const { view, limit } = parseUpdateFeedQuery(viewInput, limitInput)
+  const entries = new Map<string, UpdateFeedEntry>()
+  for (const entry of projection.entries) {
+    if (!matchesView(entry, view)) continue
+    if (filters && !matchesFilters(entry, await projection.scope(entry), filters)) continue
+    entries.set(targetKey(entry), entry)
   }
   const ranked = [...entries.values()].sort((a, b) =>
     (view === 'for-me' ? b.relevance - a.relevance : 0) ||
@@ -147,7 +191,7 @@ export async function readUpdateFeed(
     compareText(b.latestUpdate?.createdAt ?? '', a.latestUpdate?.createdAt ?? '') ||
     compareText(targetKey(a), targetKey(b)),
   )
-  return { view, revision: snapshot.revision, entries: ranked.slice(0, limit), total: ranked.length, truncated: ranked.length > limit }
+  return { view, revision: projection.revision, entries: ranked.slice(0, limit), total: ranked.length, truncated: ranked.length > limit }
 }
 
 /** Expires activity without accepting future timestamps from clock skew or corrupt sources. */

@@ -3,10 +3,16 @@ import { Link } from 'react-router'
 import type { UpdateFeedDigestPreferences, UpdateFeedDigestPreview, UpdateFeedDigestState } from '@mukuroji/contracts'
 import type { createTranslator } from '../../../shared/i18n/i18n'
 import { updateFeedTargetKey, updateFeedTargetPath, updateFeedViews } from '../model/updateFeed'
+import { validDigestSelection } from '../model/digestSelection'
+import { DigestSavedFeedSelection } from './DigestSavedFeedSelection'
 import { normalizeDigestPreferences, sameDigestPreferences } from '../model/digestPreferences'
 
 /** Pure manual-preview presentation with explicit user intent callbacks. */
 type DigestPanelProps = {
+  /** Current session-owned saved definitions; absent after lookup failure. */
+  savedFeeds?: import('@mukuroji/contracts').SavedUpdateFeeds
+  /** Current saved definition query readiness. */
+  savedStatus?: 'loading' | 'ready' | 'error'
   /** Explicit reload discards an unsaved draft. */
   draftReset?: number
   /** Stable focus destination when a focused control disappears. */
@@ -72,7 +78,7 @@ export function DigestPanel(props: DigestPanelProps) {
         </li>)}
       </ul> : <p className="mt-2 text-app-meta text-slate-500">{t('updates.digest.noHistory')}</p>}
     </> : null}
-    {state && preview && !failure ? <div className="mt-6" aria-label={t('updates.digest.result')}>
+    {state && preview && !failure && validDigestSelection(state.preferences, props.savedStatus && props.savedStatus !== 'ready' ? undefined : props.savedFeeds) ? <div className="mt-6" aria-label={t('updates.digest.result')}>
       <h3 className="text-sm font-semibold text-slate-800">{t('updates.digest.result')}</h3>
       <p role="status" className="mt-1 text-app-meta text-slate-600">{t(preview.replay ? 'updates.digest.replay' : 'updates.digest.generated')}</p>
       {preview.entries.length === 0 ? <p className="py-5 text-app-body text-slate-500">{t(preview.truncated ? 'updates.digest.boundedEmpty' : 'updates.digest.empty')}</p> : <ul className="mt-2 divide-y divide-slate-200">
@@ -88,19 +94,20 @@ export function DigestPanel(props: DigestPanelProps) {
 }
 
 /** Owns an unsaved draft scoped to its base revision while preserving keyboard focus. */
-function DigestForm({ state, pending, canEdit, failure, t, onSave, onGenerate, onDismiss, restoreFocus, onReload: propsReload }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
+function DigestForm({ state, savedFeeds, savedStatus, pending, canEdit, failure, t, onSave, onGenerate, onDismiss, restoreFocus, onReload: propsReload }: DigestPanelProps & { /** Required committed form seed. */ state: UpdateFeedDigestState }) {
   const id = useId()
   const form = useRef<HTMLFormElement>(null)
   const generateButton = useRef<HTMLButtonElement>(null)
   const restoreActionFocus = useRef(false)
   const [edit, setEdit] = useState<{ /** Revision at which editing began. */ revision: number; /** Unsaved preferences. */ preferences: UpdateFeedDigestPreferences }>()
   const draft = edit?.preferences ?? state.preferences
+  const valid = validDigestSelection(draft, savedStatus && savedStatus !== 'ready' ? undefined : savedFeeds)
   const dirty = !sameDigestPreferences(draft, state.preferences)
   // A satisfied draft no longer owns a base revision or a future value.
   if (edit && !dirty) setEdit(undefined)
   const stale = dirty && edit !== undefined && edit.revision !== state.revision
   const unavailable = pending || !canEdit || failure === 'denied'
-  const canSave = !unavailable && !stale && failure !== 'conflict' && dirty && draft.views.length > 0
+  const canSave = !unavailable && !stale && failure !== 'conflict' && dirty && valid
   /** Discards stale output immediately when the visible settings change. */
   const change = (next: UpdateFeedDigestPreferences) => { setEdit(sameDigestPreferences(next, state.preferences) ? undefined : { revision: dirty && edit ? edit.revision : state.revision, preferences: normalizeDigestPreferences(next) }); onDismiss() }
   // DOM focus must wait for React to commit the re-enabled fieldset.
@@ -143,11 +150,11 @@ function DigestForm({ state, pending, canEdit, failure, t, onSave, onGenerate, o
           {updateFeedViews.map((view) => <label key={view} className="flex min-h-11 items-center gap-3 pr-3 text-app-body"><input type="checkbox" className="size-4 accent-teal-700" checked={draft.views.includes(view)} onChange={(event) => change({ ...draft, views: event.target.checked ? [...draft.views, view] : draft.views.filter((selected) => selected !== view) })} />{t(`updates.view.${view}`)}</label>)}
         </div></fieldset>
       </div>
-      {draft.views.length === 0 ? <p role="alert" className="mt-2 text-app-meta text-amber-800">{t('updates.digest.chooseView')}</p> : null}
-      <p className="mt-2 text-app-meta text-slate-500">{t('updates.digest.standardOnly')}</p>
+      <DigestSavedFeedSelection collection={savedFeeds} status={savedStatus} preferences={draft} t={t} onChange={change} />
+      {!valid && !(savedStatus === 'loading' && draft.savedFeeds) ? <p role="alert" className="mt-2 text-app-meta text-amber-800">{t('updates.digest.chooseView')}</p> : null}
       <div className="mt-4 flex flex-wrap gap-3">
         <button type="submit" className={actionClass} disabled={!canSave}>{t('updates.digest.save')}</button>
-        <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict' || failure === 'interrupted'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
+        <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !valid || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict' || failure === 'interrupted'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
       </div>
       {dirty ? <p role="status" className="mt-2 text-app-meta text-slate-600">{t('updates.digest.unsaved')}</p> : null}
     </fieldset>
