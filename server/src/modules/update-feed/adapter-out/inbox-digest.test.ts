@@ -85,7 +85,7 @@ for (const corrupt of [true, false]) test(`actual read-state adapter corruption=
     return { ...context, readState }
   } } }, now)
   expect(result.failed).toEqual(corrupt ? [] : [{ ...candidate, scheduledAt: now }])
-  expect(result.terminal).toEqual(corrupt ? [{ recipient, reason: 'corrupt-state' }] : [])
+  expect(result.terminal).toEqual(corrupt ? [{ recipient, frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'corrupt-state' }] : [])
   expect(result.delivered).toBe(0)
   expect(f.inbox.size).toBe(0)
 })
@@ -98,7 +98,7 @@ for (const sameTeam of [true, false]) test(`Feed duplicate classification uses T
   if (!sameTeam && second.target.type === 'project') second.target.teamId = 'other-team'
   f.snapshot.updateTargets.push(second)
   const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: [candidate] }), dependencies: f.dependencies }, now)
-  expect(result).toMatchObject({ processed: 1, delivered: sameTeam ? 0 : 1, failed: [], terminal: sameTeam ? [{ recipient, reason: 'corrupt-state' }] : [] })
+  expect(result).toMatchObject({ processed: 1, delivered: sameTeam ? 0 : 1, failed: [], terminal: sameTeam ? [{ recipient, frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'corrupt-state' }] : [] })
   expect(f.inbox.size).toBe(sameTeam ? 0 : 1)
 })
 
@@ -233,7 +233,35 @@ test('a Planning change after recipient authorization invalidates the captured A
   expect(f.inbox.size).toBe(0)
 })
 
-test('scheduler is opt-in, bounds pages, deduplicates recipients and preserves failed checkpoints', async () => {
+for (const reverse of [false, true]) test(`scheduler preserves distinct logical intervals and cadence cancellation, reverse=${reverse}`, async () => {
+  const f = await fixture()
+  const monday = Date.parse('2026-10-05T12:00:00Z')
+  const candidates = [
+    { ...candidate, scheduledAt: monday - 86_400_000 },
+    { ...candidate, scheduledAt: monday - 86_400_000 + 1000 },
+    { ...candidate, scheduledAt: monday },
+    { ...candidate, frequency: 'weekly' as const, scheduledAt: monday },
+  ]
+  const result = await runInboxDigestSchedule({ enabled: true, dependencies: f.dependencies, listCandidates: async () => ({ recipients: reverse ? candidates.reverse() : candidates }) }, monday)
+  expect(result).toMatchObject({ processed: 3, delivered: 2, failed: [], terminal: [] })
+  expect(f.inbox.size).toBe(2)
+})
+
+for (const frequency of ['daily', 'weekly'] as const) for (const reverse of [false, true]) test(`terminal ${frequency} identity survives premetadata failure and dedup, reverse=${reverse}`, async () => {
+  const current = Date.parse('2026-10-05T12:00:00Z')
+  const older = current - (frequency === 'daily' ? 1 : 7) * 86_400_000
+  const items = [{ ...recipient, frequency, scheduledAt: older }, { ...recipient, frequency, scheduledAt: older + 1000 }, { ...recipient, frequency }]
+  let calls = 0
+  const result = await runInboxDigestSchedule({ enabled: true, listCandidates: async () => ({ recipients: reverse ? items.reverse() : items }), dependencies: { authorize: async () => { calls++; throw new PlanningError(502, 'UpdateFeedDigestCorruptState', 'Private raw failure') } } }, current)
+  expect(calls).toBe(2)
+  expect(result.failed).toEqual([])
+  expect(result.terminal).toHaveLength(2)
+  expect(result.terminal.map((item) => item.interval).sort()).toEqual([`${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`, `${frequency}:2026-10-05`])
+  for (const item of result.terminal) expect(item).toEqual({ recipient, frequency, scheduledAt: item.interval.endsWith('2026-10-05') ? current : older + (reverse ? 1000 : 0), interval: item.interval, reason: 'corrupt-state' })
+  expect(JSON.stringify(result)).not.toContain('Private raw failure')
+})
+
+test('scheduler is opt-in, bounds pages, deduplicates logical candidates and preserves failed checkpoints', async () => {
   const f = await fixture()
   let calls = 0
   const schedule = {
@@ -283,7 +311,7 @@ test('scheduler separates terminal candidates from transient retries in a mixed 
     if (owner.workspaceId === 'mismatch') return context
     return { ...context, recipient: owner, store: { ...context.store, get: () => context.store.get(recipient.workspaceId, recipient.memberKey), replace: (_workspaceId, memberKey, state) => context.store.replace(recipient.workspaceId, memberKey, state), complete: (_owner, state, revision, message) => context.store.complete(recipient, state, revision, message) } }
   } } }, now)
-  expect(result).toEqual({ processed: 8, delivered: 1, failed: [owners[1], owners[6]].map((owner) => ({ ...owner, frequency: 'daily', scheduledAt: now })), terminal: [{ recipient: owners[2], reason: 'exhausted' }, { recipient: owners[3], reason: 'corrupt-state' }, { recipient: owners[4], reason: 'recipient-mismatch' }, { recipient: owners[5], reason: 'storage-permanent' }, { recipient: owners[7], reason: 'invalid-input' }], cursor: 'next' })
+  expect(result).toEqual({ processed: 8, delivered: 1, failed: [owners[1], owners[6]].map((owner) => ({ ...owner, frequency: 'daily', scheduledAt: now })), terminal: [{ recipient: owners[2], frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'exhausted' }, { recipient: owners[3], frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'corrupt-state' }, { recipient: owners[4], frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'recipient-mismatch' }, { recipient: owners[5], frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'storage-permanent' }, { recipient: owners[7], frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'invalid-input' }], cursor: 'next' })
 })
 
 for (const invalid of ['limit', 'signals']) test(`real Feed ${invalid} invariant is terminal without scheduler retry`, async () => {
@@ -291,7 +319,7 @@ for (const invalid of ['limit', 'signals']) test(`real Feed ${invalid} invariant
   f.reader.expandedSignals = true
   f.reader.readSignals = async () => [{ target: { type: 'project', teamId: 'other', projectId: 'not-authorized' }, projectMember: false, watching: false }]
   const result = await runInboxDigestSchedule({ enabled: true, dependencies: f.dependencies, listCandidates: async () => ({ recipients: [candidate] }) }, now)
-  expect(result).toMatchObject({ delivered: 0, failed: [], terminal: [{ recipient, reason: invalid === 'limit' ? 'invalid-input' : 'corrupt-state' }] })
+  expect(result).toMatchObject({ delivered: 0, failed: [], terminal: [{ recipient, frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: invalid === 'limit' ? 'invalid-input' : 'corrupt-state' }] })
   expect(f.inbox.size).toBe(0)
 })
 
