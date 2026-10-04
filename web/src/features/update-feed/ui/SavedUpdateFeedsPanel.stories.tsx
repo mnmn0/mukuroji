@@ -9,6 +9,7 @@ const meta = {
   parameters: { layout: 'padded' },
   args: { collection: { revision: 0, feeds: [] }, selectedId: '', options: { teams: [{ id: 'team', name: 'Product team' }], projects: [{ teamId: 'team', projectId: 'project', name: 'Customer onboarding' }], portfolios: [{ id: 'portfolio', name: 'Customer outcomes' }], initiatives: [{ id: 'initiative', name: 'Reliability' }] }, failed: false, denied: false, optionsFailed: false, canEdit: true, pending: false, t: createTranslator('en'), onSelect: fn(), onEditingChange: fn(), onClearError: fn(), onReload: fn(), onSave: fn(async () => true) },
 } satisfies Meta<typeof SavedUpdateFeedsPanel>
+/** Configures saved-feed panel stories with shared controls and fixtures. */
 export default meta
 /** Story type shares the same production component and controls. */
 type Story = StoryObj<typeof meta>
