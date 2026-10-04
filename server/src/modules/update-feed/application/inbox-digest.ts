@@ -65,6 +65,8 @@ export type InboxDigestContext = {
 
 /** Bounded scheduler dependencies; no live worker is connected by this module. */
 export type InboxDigestDependencies = {
+  /** Optional scheduler-owned index maintenance after denial; never a revoked caller write. */
+  deferDenied?(recipient: InboxDigestRecipient): Promise<void>
   /** Resolves membership, planning.read and in-app opt-in now; denial returns undefined.
    * Infrastructure failures throw. Returned write guards must fence later revocation.
    */
@@ -110,7 +112,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   if (!Number.isSafeInteger(now) || now < 0 || now > 8_640_000_000_000_000) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest clock')
   if (!Number.isSafeInteger(scheduledAt) || scheduledAt < 0 || scheduledAt > now) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest scheduling time.')
   const context = await dependencies.authorize(recipient)
-  if (!context) return 'denied'
+  if (!context) { await dependencies.deferDenied?.(recipient); return 'denied' }
   if (context.reader.memberKey !== recipient.memberKey || context.recipient.memberKey !== recipient.memberKey || context.recipient.workspaceId !== recipient.workspaceId) throw new PlanningError(502, 'UpdateFeedDigestRecipientMismatch', 'Digest recipient mismatch')
   let state = await context.store.get(recipient.workspaceId, recipient.memberKey)
   // Historical work without an original cadence cannot safely reconstruct its interval.

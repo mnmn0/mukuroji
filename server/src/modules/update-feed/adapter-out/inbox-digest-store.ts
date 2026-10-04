@@ -118,6 +118,26 @@ export class DynamoDbInboxDigestStore implements InboxDigestStore {
     return this.write(recipient, state, guards, message, before.leaseUntil)
   }
 
+  /** Backs off denied discovery for one hour without changing consent or delivery history.
+   * This scheduler-owned operation deliberately uses no recipient authorization guards.
+   * @param input - Recipient from trusted due discovery, never public input.
+   * @returns Completion after a guarded due-index-only change; storage failures propagate.
+   */
+  async deferDenied(input: InboxDigestRecipient): Promise<void> {
+    const recipient = normalize(input)
+    const { Item: row } = await this.client.send(new GetCommand({ TableName: this.planningTable, Key: key(recipient), ConsistentRead: true })).catch((error: unknown) => digestStorageFailure(error))
+    if (!row) return
+    const state = parseRow(row, recipient)
+    const now = this.now()
+    if (!state.preferences.enabled || typeof row.inboxDigestDueAt !== 'number' || row.inboxDigestDueAt > now) return
+    await this.client.send(new TransactWriteCommand({ TransactItems: [{ Put: {
+      TableName: this.planningTable, Item: { ...row, inboxDigestDueAt: now + 3_600_000 },
+      ConditionExpression: '#revision = :revision AND #type = :type AND #schema = :schema AND #due = :due',
+      ExpressionAttributeNames: { '#revision': 'revision', '#type': 'entryType', '#schema': 'schemaVersion', '#due': 'inboxDigestDueAt' },
+      ExpressionAttributeValues: { ':revision': state.revision, ':type': 'update-feed-inbox-digest', ':schema': 1, ':due': row.inboxDigestDueAt },
+    } }] })).catch((error: unknown) => digestStorageFailure(error, 1))
+  }
+
   /** Queries one bounded sparse-index page and strongly rechecks every candidate.
    * @param shard - One of sixteen deterministic partitions.
    * @param limit - Maximum inspected index rows, 1–100.

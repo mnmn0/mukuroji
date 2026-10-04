@@ -138,6 +138,65 @@ for (const empty of [true, false]) test(`pruned ${empty ? 'empty' : 'nonempty'} 
   expect(f.notifications()).toEqual(notifications)
 })
 
+test('denial backs off only the due index without revoked guards and later reauthorizes', async () => {
+  const f = await fixture()
+  const source = f.store.withCallerAuthorization([])
+  const before = structuredClone(f.metadata())
+  f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 99 })
+  const denied = { authorize: async () => undefined, deferDenied: source.deferDenied.bind(source) }
+  expect(await deliverInboxDigest(denied, recipient, now)).toBe('denied')
+  expect(f.metadata()).toEqual({ ...before, inboxDigestDueAt: now + 3_600_000 })
+  const write = f.commands.filter((command) => command instanceof TransactWriteCommand).at(-1)
+  expect(write instanceof TransactWriteCommand && write.input.TransactItems).toHaveLength(1)
+  const transactions = f.commands.filter((command) => command instanceof TransactWriteCommand).length
+  const restarted = source.withCallerAuthorization([])
+  for (let scan = 0; scan < 3; scan++) await restarted.deferDenied(recipient)
+  expect(f.commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(transactions)
+  f.indexed.push(before)
+  const shard = Number(String(before.inboxDigestShard).split('#')[1])
+  expect((await source.listDue(shard)).recipients).toEqual([])
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  f.advance(3_600_000)
+  expect((await source.listDue(shard)).recipients).toEqual([{ ...recipient, frequency: 'daily' }])
+  f.rows.set(f.coordinate('members', membershipKey), { ...membershipKey, version: 2 })
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+test('denial maintenance preserves concurrent consent changes and retries a lost acknowledgment safely', async () => {
+  const f = await fixture()
+  const source = f.store.withCallerAuthorization([])
+  f.beforeTransaction(() => {
+    const row = f.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: false, frequency: 'daily', views: ['recent'] }
+    delete row.inboxDigestDueAt
+    delete row.inboxDigestShard
+  })
+  await expect(source.deferDenied(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect(f.metadata().preferences).toMatchObject({ enabled: false })
+  expect(f.metadata().inboxDigestDueAt).toBeUndefined()
+  await source.deferDenied(recipient)
+  const g = await fixture()
+  g.loseClaimResponse()
+  await expect(g.store.withCallerAuthorization([]).deferDenied(recipient)).rejects.toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+  await g.store.withCallerAuthorization([]).deferDenied(recipient)
+  expect(g.metadata().inboxDigestDueAt).toBe(now + 3_600_000)
+  expect((await g.store.get('w', 'reader')).history).toEqual([])
+  expect(g.notifications()).toEqual([])
+})
+
+test('explicit fresh consent can supersede denial backoff without losing settings', async () => {
+  const f = await fixture()
+  await f.store.withCallerAuthorization([]).deferDenied(recipient)
+  const current = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...current, preferences: { enabled: true, frequency: 'weekly', views: ['at-risk'] } })
+  expect(f.metadata().inboxDigestDueAt).toBe(now)
+  expect(f.metadata().preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['at-risk'] })
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
 test('atomic SDK completion binds authorization, missing META, preferences and deterministic Inbox insertion', async () => {
   const f = await fixture()
   expect(await f.run()).toBe('delivered')
