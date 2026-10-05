@@ -1,10 +1,21 @@
-import type { PlanningSnapshot, PlanningUpdateTargetSummary, UpdateFeedEntry, UpdateFeedResponse, UpdateFeedView } from '@mukuroji/contracts'
+import type { PlanningSnapshot, PlanningUpdateTargetSummary, UpdateFeedEntry, UpdateFeedFilters, UpdateFeedResponse, UpdateFeedView } from '@mukuroji/contracts'
 import { PlanningError } from '../../planning'
 
 /** Request-scoped ports bound to an authenticated Workspace principal. */
 export interface UpdateFeedReader {
   /** Current member identity, resolved by the server. */
   memberKey: string
+  /** Resolves a current authorized Team name for filter controls.
+   * @param teamId - Team scope of an already authorized target.
+   * @returns Current localized display name.
+   */
+  describeTeam?(teamId: string): string
+  /** Resolves current authorized filter scopes, without loading history.
+   * @param target - Authorized latest target.
+   * @param snapshot - Current bounded graph.
+   * @returns Current scope and readable Portfolio ancestors.
+   */
+  filterScope?(target: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot): Promise<UpdateFeedFilterScope>
   /** Resolves an authorized target name from current directory/Planning data.
    * @param target - Currently authorized target projection.
    * @param snapshot - Current graph containing Initiative titles.
@@ -23,17 +34,29 @@ export interface UpdateFeedReader {
   authorizeTarget(target: PlanningUpdateTargetSummary, snapshot: PlanningSnapshot): Promise<PlanningUpdateTargetSummary | undefined>
 }
 
+/** Current principal-visible dimensions used by saved filters. */
+export type UpdateFeedFilterScope = {
+  /** Current owning Team, when scoped. */
+  teamId?: string
+  /** Current Team-qualified Project scope. */
+  projectId?: string
+  /** Readable active Portfolio ancestors. */
+  portfolioIds: string[]
+}
+
 /**
  * Reads a bounded aggregate using current authorization on every request.
  * @param reader - Principal-bound snapshot and authorization ports.
  * @param viewInput - Untrusted standard view; defaults to recent.
  * @param limitInput - Untrusted decimal response limit from 1 through 100.
+ * @param filters - Validated personal conditions applied before ranking and response bounding.
  * @returns Authorized latest-target entries with explicit truncation and ranking reasons.
  */
 export async function readUpdateFeed(
   reader: UpdateFeedReader,
   viewInput?: string,
   limitInput?: string,
+  filters?: UpdateFeedFilters,
 ): Promise<UpdateFeedResponse> {
   const { view, limit } = parseUpdateFeedQuery(viewInput, limitInput)
   const snapshot = await reader.readSnapshot()
@@ -73,6 +96,10 @@ export async function readUpdateFeed(
       relevance: (reasons.includes('update-owner') ? 2 : 0) + (reasons.includes('latest-author') ? 1 : 0),
     }
     if (!matchesView(entry, view)) continue
+    if (filters) {
+      const scope = await reader.filterScope?.(summary, snapshot) ?? { portfolioIds: [], ...(summary.target.type === 'project' ? summary.target : {}) }
+      if (!matchesFilters(entry, scope, filters)) continue
+    }
     const key = targetKey(entry)
     entries.set(key, entry)
   }
@@ -82,6 +109,16 @@ export async function readUpdateFeed(
     compareText(targetKey(a), targetKey(b)),
   )
   return { view, revision: snapshot.revision, entries: ranked.slice(0, limit), total: ranked.length, truncated: ranked.length > limit }
+}
+
+/** Intersects dimensions while treating selected alternatives within each as a union. */
+function matchesFilters(entry: UpdateFeedEntry, scope: UpdateFeedFilterScope, filters: UpdateFeedFilters): boolean {
+  return (filters.teamIds.length === 0 || scope.teamId !== undefined && filters.teamIds.includes(scope.teamId)) &&
+    (filters.projects.length === 0 || filters.projects.some((project) => project.teamId === scope.teamId && project.projectId === scope.projectId)) &&
+    (filters.portfolioIds.length === 0 || filters.portfolioIds.some((id) => scope.portfolioIds.includes(id))) &&
+    (filters.initiativeIds.length === 0 || entry.target.type === 'initiative' && filters.initiativeIds.includes(entry.target.entityId)) &&
+    (filters.health.length === 0 || filters.health.includes(entry.health)) &&
+    (filters.updateStates.length === 0 || filters.updateStates.includes(entry.updateState))
 }
 
 /**

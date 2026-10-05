@@ -59,3 +59,67 @@ export type UpdateFeedResponse = {
   /** Explicitly signals that additional matches were omitted by the limit. */
   truncated: boolean
 }
+
+/** Personal saved filters: alternatives within a dimension, intersection across dimensions. */
+export type UpdateFeedFilters = {
+  /** Current Team scopes; empty means unrestricted. */
+  teamIds: string[]
+  /** Team-qualified Project targets/scopes; empty means unrestricted. */
+  projects: { /** Owning Team. */ teamId: string; /** Project within that Team. */ projectId: string }[]
+  /** Current Portfolio ancestors; empty means unrestricted. */
+  portfolioIds: string[]
+  /** Exact Initiative targets; empty means unrestricted. */
+  initiativeIds: string[]
+  /** Reported health values, independent of submission freshness. */
+  health: PlanningHealth[]
+  /** Current submission freshness values. */
+  updateStates: PlanningUpdateState[]
+}
+
+/** A member-owned filter definition, never a copy of report content. */
+export type SavedUpdateFeed = {
+  /** Stable member-local identifier. */
+  id: string
+  /** User-provided display name. */
+  name: string
+  /** Standard view and ranking to refine. */
+  view: UpdateFeedView
+  /** Explicit bounded dimensions. */
+  filters: UpdateFeedFilters
+}
+
+/** Bounded personal collection, replaced with compare-and-swap for CRUD. */
+export type SavedUpdateFeeds = {
+  /** Revision zero denotes an empty unsaved collection. */
+  revision: number
+  /** At most twenty member-owned definitions. */
+  feeds: SavedUpdateFeed[]
+}
+
+/** Desired personal collection and last observed revision. */
+export type ReplaceSavedUpdateFeedsInput = {
+  /** Last observed revision, guarding concurrent sessions. */
+  expectedRevision: number
+  /** Complete desired collection: add, edit, or omit a definition to delete it. */
+  feeds: SavedUpdateFeed[]
+}
+
+/** A currently readable logical selector and its current display name. */
+export type UpdateFeedNamedOption = {
+  /** Logical identifier, never a persistence key. */
+  id: string
+  /** Current authorized display label. */
+  name: string
+}
+
+/** Current authorized options drawn from the bounded target graph. */
+export type UpdateFeedFilterOptions = {
+  /** Team scopes containing readable targets. */
+  teams: UpdateFeedNamedOption[]
+  /** Qualified Project scopes containing readable targets. */
+  projects: { /** Owning Team. */ teamId: string; /** Local Project identifier. */ projectId: string; /** Current authorized name. */ name: string }[]
+  /** Readable active Portfolio ancestors of these targets. */
+  portfolios: UpdateFeedNamedOption[]
+  /** Readable configured Initiative targets. */
+  initiatives: UpdateFeedNamedOption[]
+}
