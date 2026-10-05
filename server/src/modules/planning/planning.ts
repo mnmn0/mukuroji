@@ -81,6 +81,7 @@ import {
 import {
   bindPlanningRevisionFenceBarrierDocumentClient,
 } from '../../infrastructure/runtime/planning-revision-fence-barrier'
+import { advancePlanningUpdateActivity, readPlanningUpdateActivity, type PlanningUpdateActivity } from './planning-update-activity'
 
 const META_RECORD_KEY = 'META'
 const META_WORKSPACE_KEY_PREFIX = 'FENCE#'
@@ -89,6 +90,7 @@ const DEPENDENCY_RECORD_PREFIX = 'DEPENDENCY#'
 const WORK_ITEM_DEPENDENCY_RECORD_PREFIX = 'WORK_ITEM_DEPENDENCY#'
 const LINK_RECORD_PREFIX = 'LINK#'
 const UPDATE_TARGET_RECORD_PREFIX = 'UPDATE_TARGET#'
+const UPDATE_ACTIVITY_RECORD_PREFIX = 'UPDATE_ACTIVITY#'
 const UPDATE_RECORD_PREFIX = 'UPDATE#'
 const UPDATE_ID_RECORD_PREFIX = 'UPDATE_ID#'
 const UPDATE_COMMENT_RECORD_PREFIX = 'UPDATE_COMMENT#'
@@ -292,6 +294,11 @@ export type PlanningAuthorizationState = {
 
 /** Planning domain を読み書きする client contract です。 */
 export type PlanningClient = {
+  /** Reads bounded compact activity without scanning immutable updates or annotations.
+   * @param workspaceId - Authenticated Workspace.
+   * @returns Current target activity projections, requiring per-target authorization before use.
+   */
+  getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]>
   /** Workspace planning snapshot を返します。 */
   get(workspaceId: string, workItemState: PlanningWorkItemState): Promise<PlanningSnapshot>
   /** 外部 authorization transaction を束縛する global revision を返します。 */
@@ -589,6 +596,8 @@ type PlanningMutationResult = {
 
 /** Storage 非依存の Planning mutation 実装です。 */
 abstract class BasePlanningClient implements PlanningClient {
+  /** Reads compact source-owned activity; callers must authorize targets before exposing signals. */
+  abstract getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]>
   /** Timestamp を生成する clock です。 */
   private readonly now: () => Date
 
@@ -1888,6 +1897,28 @@ function isPlanningTransactWriteItem(
 
 /** Test / local domain 利用向けの in-memory Planning client です。 */
 export class InMemoryPlanningClient extends BasePlanningClient {
+  /** Compact activity isolated by Workspace and qualified target. */
+  private readonly updateActivities = new Map<string, PlanningUpdateActivity>()
+
+  /** Returns copies of bounded compact activity without annotation history reads.
+   * @param workspaceId - Owning Workspace.
+   * @returns Current source-owned activity projections.
+   */
+  async getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]> {
+    const prefix = `${JSON.stringify(workspaceId)}:`
+    const activities = [...this.updateActivities].filter(([key]) => key.startsWith(prefix)).map(([, value]) => structuredClone(value))
+    if (activities.length > PLANNING_READ_LIMIT) throw new PlanningError(413, 'PlanningActivityLimitExceeded', 'Planning activity exceeds the bounded read limit.')
+    return activities
+  }
+
+  /** Records current-version activity in the same synchronous source mutation step. */
+  private recordUpdateActivity(workspaceId: string, annotation: PlanningUpdateComment | PlanningUpdateReaction, kind: 'comment' | 'reaction') {
+    const target = this.states.get(workspaceId)?.updateTargets.find((item) => planningUpdateTargetsEqual(item.target, annotation.target))
+    if (!target || target.archivedAt || target.latestVersion !== annotation.updateVersion) return
+    const key = `${JSON.stringify(workspaceId)}:${createPlanningUpdateTargetRecordSuffix(annotation.target)}`
+    const actor = 'authorMemberKey' in annotation ? annotation.authorMemberKey : annotation.memberKey
+    this.updateActivities.set(key, advancePlanningUpdateActivity(this.updateActivities.get(key), annotation.target, annotation.updateVersion, kind, actor, annotation.createdAt))
+  }
   /** Workspace ID ごとの永続化 state です。 */
   private readonly states = new Map<string, PlanningWorkspaceState>()
   /** Workspace / target ごとの append-only update history です。 */
@@ -1961,6 +1992,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
       throw conflict('PlanningUpdateCommentExists', 'Planning update comment already exists.')
     }
     this.updateComments.set(key, [...comments, structuredClone(comment)])
+    this.recordUpdateActivity(workspaceId, comment, 'comment')
   }
 
   /** In-memory comments の cursor page を返します。 */
@@ -2018,6 +2050,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
       throw conflict('PlanningUpdateReactionExists', 'Planning update reaction already exists.')
     }
     this.updateReactions.set(key, [...reactions, structuredClone(reaction)])
+    this.recordUpdateActivity(workspaceId, reaction, 'reaction')
   }
 
   /** In-memory reaction collection から current member reaction を削除します。 */
@@ -2103,6 +2136,53 @@ export class InMemoryPlanningClient extends BasePlanningClient {
 
 /** DynamoDB の Planning table を利用する client です。 */
 export class DynamoDbPlanningClient extends BasePlanningClient {
+  /** Reads bounded activity projections with strict identity and pagination checks.
+   * @param workspaceId - Authenticated owning Workspace.
+   * @returns Compact activity without annotation/history reads.
+   */
+  async getUpdateActivities(workspaceId: string): Promise<PlanningUpdateActivity[]> {
+    await this.ensureTable()
+    const activities: PlanningUpdateActivity[] = []
+    const identities = new Set<string>()
+    let cursor: Record<string, unknown> | undefined
+    let bytes = 0
+    let pages = 0
+    try {
+      do {
+        const response = await this.documentClient.send(new QueryCommand({ TableName: this.tableName, KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)', ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': UPDATE_ACTIVITY_RECORD_PREFIX }, ConsistentRead: true, Limit: PLANNING_READ_LIMIT + 1 - activities.length, ...(cursor ? { ExclusiveStartKey: cursor } : {}) }))
+        for (const row of response.Items ?? []) {
+          const activity = readStoredPlanningUpdateActivity(row, workspaceId)
+          const identity = createPlanningUpdateTargetRecordSuffix(activity.target)
+          if (identities.has(identity)) throw persistenceInvalid('Duplicate activity projection.')
+          identities.add(identity)
+          activities.push(activity)
+          bytes += Buffer.byteLength(JSON.stringify(row), 'utf8')
+        }
+        cursor = response.LastEvaluatedKey
+        pages += 1
+        if (activities.length > PLANNING_READ_LIMIT || bytes > MAX_PLANNING_SNAPSHOT_BYTES || cursor && (pages >= 20 || !response.Items?.length)) throw new PlanningError(413, 'PlanningActivityLimitExceeded', 'Planning activity exceeds the bounded read limit.')
+      } while (cursor)
+      return activities
+    } catch (error) { throw toPersistenceError(error) }
+  }
+
+  /** Prepares a fenced compact activity write without overwriting the canonical target. */
+  private async prepareUpdateActivity(workspaceId: string, target: PlanningUpdateTarget, version: number, activity: { /** Added annotation kind. */ kind: 'comment' | 'reaction'; /** Server-resolved actor. */ memberKey: string; /** Source timestamp. */ at: string }): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    const targetKey = createPlanningUpdateTargetRecordKey(target)
+    const recordKey = `${UPDATE_ACTIVITY_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}`
+    const source = await this.documentClient.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey: targetKey }, ConsistentRead: true }))
+    if (!source.Item) return []
+    if (source.Item.workspaceId !== workspaceId || source.Item.entryType !== 'planning-update-target') throw persistenceInvalid('Invalid activity source target.')
+    let current: StoredPlanningUpdateTarget
+    try { current = readStoredPlanningUpdateTarget(source.Item) } catch { throw persistenceInvalid('Invalid activity source target.') }
+    if (!planningUpdateTargetsEqual(current.target, target)) throw persistenceInvalid('Mismatched activity source target.')
+    if (current.latestVersion !== version || current.archivedAt) return []
+    const stored = await this.documentClient.send(new GetCommand({ TableName: this.tableName, Key: { workspaceId, recordKey }, ConsistentRead: true }))
+    if (stored.Item && stored.Item.recordKey !== recordKey) throw persistenceInvalid('Mismatched activity identity.')
+    const previous = stored.Item === undefined ? undefined : readStoredPlanningUpdateActivity(stored.Item, workspaceId)
+    const next = advancePlanningUpdateActivity(previous, target, version, activity.kind, activity.memberKey, activity.at)
+    return [{ ConditionCheck: { TableName: this.tableName, Key: { workspaceId, recordKey: targetKey }, ConditionExpression: '#version = :version AND #type = :type AND attribute_not_exists(archivedAt)', ExpressionAttributeNames: { '#version': 'latestVersion', '#type': 'entryType' }, ExpressionAttributeValues: { ':version': version, ':type': 'planning-update-target' } } }, { Put: { TableName: this.tableName, Item: { workspaceId, recordKey, entryType: 'planning-update-activity', schemaVersion: 1, ...next }, ConditionExpression: previous ? '#revision = :revision AND #schema = :schema AND #type = :type' : 'attribute_not_exists(recordKey)', ...(previous ? { ExpressionAttributeNames: { '#revision': 'revision', '#schema': 'schemaVersion', '#type': 'entryType' }, ExpressionAttributeValues: { ':revision': previous.revision, ':schema': 1, ':type': 'planning-update-activity' } } : {}) } }]
+  }
   /** Planning rows を保存する DynamoDB table 名です。 */
   private readonly tableName: string
   /** Canonical Work Item rows を条件検証する DynamoDB table 名です。 */
@@ -2274,6 +2354,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       createPlanningUpdateCommentIdRow(workspaceId, comment),
       transactionContribution,
       authorizationConditionChecks,
+      { kind: 'comment', memberKey: comment.authorMemberKey, at: comment.createdAt },
     )
   }
 
@@ -2349,6 +2430,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       undefined,
       transactionContribution,
       authorizationConditionChecks,
+      { kind: 'reaction', memberKey: reaction.memberKey, at: reaction.createdAt },
     )
   }
 
@@ -2490,8 +2572,10 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     uniquenessRow?: Record<string, unknown>,
     transactionContribution?: PlanningMutationTransactionContribution,
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    activity?: { /** Added annotation kind. */ kind: 'comment' | 'reaction'; /** Authenticated actor. */ memberKey: string; /** Source timestamp. */ at: string },
   ) {
     await this.ensureTable()
+    const activityWrites = activity ? await this.prepareUpdateActivity(workspaceId, target, updateVersion, activity).catch((error: unknown) => { throw toPersistenceError(error) }) : []
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -2520,12 +2604,14 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
                 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
             },
           },
+          ...activityWrites,
           ...(transactionContribution === undefined
             ? []
             : [transactionContribution.transactWriteItem]),
         ],
       }))
     } catch (error) {
+      if (activityWrites.length && isNamedError(error, 'TransactionCanceledException') && (!isRecord(error) || !Array.isArray(error.CancellationReasons) || error.CancellationReasons.length !== 2 + authorizationConditionChecks.length + (uniquenessRow ? 1 : 0) + activityWrites.length + (transactionContribution ? 1 : 0))) throw toPersistenceError(error)
       if (isPlanningTransactionConditionalFailureAt(error, 0)) {
         throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
       }
@@ -2543,7 +2629,9 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       ) {
         throw conflict(duplicateCode, duplicateMessage)
       }
-      const transactionContributionIndex = rowIndex + 1
+      const activityIndex = rowIndex + 1
+      if (activityWrites.some((_, index) => isPlanningTransactionConditionalFailureAt(error, activityIndex + index))) throw conflict('PlanningUpdateActivityConflict', 'Update activity or the latest version changed. Retry with current authorization.')
+      const transactionContributionIndex = activityIndex + activityWrites.length
       if (
         transactionContribution &&
         isPlanningTransactionConditionalFailureAt(error, transactionContributionIndex)
@@ -5139,6 +5227,13 @@ function validateStoredPlanningUpdateTarget(target: StoredPlanningUpdateTarget) 
     readTimestamp(target.archivedAt, 'Update target archived timestamp')
   }
   readTimestamp(target.updatedAt, 'Update target timestamp')
+}
+
+/** Strictly decodes one compact activity row and its Workspace/target identity. */
+function readStoredPlanningUpdateActivity(row: Record<string, unknown>, workspaceId: string): PlanningUpdateActivity {
+  const value = readPlanningUpdateActivity(row)
+  if (!value || row.workspaceId !== workspaceId || row.entryType !== 'planning-update-activity' || row.schemaVersion !== 1 || row.recordKey !== `${UPDATE_ACTIVITY_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(value.target)}`) throw persistenceInvalid('Invalid Planning activity projection.')
+  return value
 }
 
 /**

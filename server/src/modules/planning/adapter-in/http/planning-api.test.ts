@@ -21,6 +21,7 @@ import {
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../../../authentication'
+import { CollaborationError } from '../../../collaboration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
@@ -445,13 +446,23 @@ test('aggregates latest Project and Initiative updates without history reads and
     if (projectionRead) perTargetAuthorizationReads++
     return readAccesses(...args)
   }
-  const response = await planningApiRequest('/api/planning/update-feed?view=for-me')
+  const response = await planningApiRequest('/api/planning/update-feed?view=for-me&relevance=2')
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({ total: 2, truncated: false, entries: [
-    { target: { type: 'initiative' }, reasons: ['update-owner', 'latest-author'] },
-    { target: { type: 'project' }, reasons: ['update-owner', 'latest-author'] },
+    { target: { type: 'initiative' }, reasons: ['update-owner', 'project-member', 'latest-author'] },
+    { target: { type: 'project' }, reasons: ['update-owner', 'project-member', 'latest-author'] },
   ] })
   expect(perTargetAuthorizationReads).toBe(0)
+  const legacy = await planningApiRequest('/api/planning/update-feed?view=for-me')
+  expect(legacy.status).toBe(200)
+  const legacyBody = await legacy.json()
+  expect(legacyBody).toMatchObject({ total: 2, entries: [
+    { reasons: ['update-owner', 'latest-author'], relevance: 3 },
+    { reasons: ['update-owner', 'latest-author'], relevance: 3 },
+  ] })
+  expect(legacyBody.entries.every((entry: Record<string, unknown>) => entry.attention === undefined)).toBe(true)
+  expect((await planningApiRequest('/api/planning/update-feed?relevance=3')).status).toBe(400)
+  expect((await planningApiRequest('/api/planning/update-feed?relevance=2&relevance=2')).status).toBe(400)
   const english = await planningApiRequest('/api/planning/update-feed?view=recent&locale=en')
   expect(await english.json()).toMatchObject({ entries: [expect.anything(), { title: 'English project' }] })
   const japanese = await planningApiRequest('/api/planning/update-feed?view=recent&locale=ja')
@@ -513,9 +524,9 @@ test('aggregates latest Project and Initiative updates without history reads and
   }
   identity.getSnapshot = async (workspaceId) => ({ ...await readIdentity(workspaceId), roleAssignments: [assignment] })
   setTestAppDependencies({ enterpriseIdentity: identity })
-  const enterpriseFeed = await planningApiRequest('/api/planning/update-feed')
+  const enterpriseFeed = await planningApiRequest('/api/planning/update-feed?relevance=2')
   expect(enterpriseFeed.status).toBe(200)
-  expect(await enterpriseFeed.json()).toMatchObject({ total: 2 })
+  expect(await enterpriseFeed.json()).toMatchObject({ total: 2, entries: [{ reasons: expect.arrayContaining(['project-member']) }, { reasons: expect.arrayContaining(['project-member']) }] })
   const viewerChoice = await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, read: false, expectedRevision: 1 })
   expect(viewerChoice.status).toBe(200)
   expect(await viewerChoice.json()).toEqual({ read: false, revision: 2 })
@@ -526,6 +537,37 @@ test('aggregates latest Project and Initiative updates without history reads and
   expect(archived.status).toBe(200)
   expect(await archived.json()).toMatchObject({ entries: [], total: 0 })
   expect((await planningApiRequest('/api/planning/update-feed/read-state', 'PUT', { ...readInput, expectedRevision: 2 })).status).toBe(404)
+})
+
+test('relevance uses current explicit membership and watches without treating admin visibility as membership', async () => {
+  configureFakeProjectClients(true, { projectAccesses: [], workspaceRole: 'owner', cognitoUserGroups: ['mukuroji-system-admins'], systemAdminMemberKeys: ['demo@example.com'] })
+  const planning = new InMemoryPlanningClient()
+  const target: PlanningUpdateTarget = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+  await planning.configureUpdateCadence('user#demo@example.com', { target, expectedRevision: 0, cadence: { updateOwnerMemberKey: 'other@example.com', cadence: { unit: 'week', count: 1 }, timeZone: 'UTC', nextDueAt: '2026-08-10T00:00:00.000Z', reminderHoursBefore: 24 } }, { workItems: [] })
+  let watching = true
+  let reads = 0
+  const collaboration = createCollaborationStub({ getMemberSubscribedScopes: async (member, scopes) => { expect(member).toBe('demo@example.com'); expect(scopes).toHaveLength(1); reads++; return watching ? [...scopes] : [] } })
+  setTestAppDependencies({ planning, collaboration })
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me&relevance=2')).json()).toMatchObject({ entries: [{ reasons: ['watching'], relevance: 3 }] })
+  watching = false
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me&relevance=2')).json()).toMatchObject({ entries: [], total: 0 })
+  configureFakeProjectClients(false, { workspaceRole: 'member', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  setTestAppDependencies({ planning, collaboration })
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me&relevance=2')).json()).toMatchObject({ entries: [{ reasons: ['project-member'], relevance: 4 }] })
+  for (const code of ['WatcherReadRetryable', 'InvalidCollaborationRecord']) {
+    setTestAppDependencies({ planning, collaboration: createCollaborationStub({ getMemberSubscribedScopes: async () => { throw new CollaborationError(503, code, 'Internal storage detail') } }) })
+    const failure = await planningApiRequest('/api/planning/update-feed?view=for-me&relevance=2')
+    expect(failure.status).toBe(503)
+    expect(await failure.json()).toEqual({ code, message: 'Feed watcher signals are unavailable.' })
+    const legacy = await planningApiRequest('/api/planning/update-feed?view=for-me')
+    expect(legacy.status).toBe(200)
+    expect(await legacy.json()).toMatchObject({ entries: [], total: 0 })
+  }
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [] })
+  setTestAppDependencies({ planning, collaboration })
+  const before = reads
+  expect(await (await planningApiRequest('/api/planning/update-feed?view=for-me&relevance=2')).json()).toMatchObject({ entries: [], total: 0 })
+  expect(reads).toBe(before)
 })
 
 test('filters legacy Planning update targets by their Team-qualified Project ACL', async () => {
@@ -889,10 +931,10 @@ test('keeps filtered Planning history within the requested limit while advancing
   const movedFeed = await planningApiRequest('/api/planning/update-feed')
   expect(movedFeed.status).toBe(200)
   expect(await movedFeed.json()).toMatchObject({ entries: [], total: 0 })
-  const ownedMovedFeed = await planningApiRequest('/api/planning/update-feed?view=for-me')
+  const ownedMovedFeed = await planningApiRequest('/api/planning/update-feed?view=for-me&relevance=2')
   expect(ownedMovedFeed.status).toBe(200)
   const ownedMovedBody = await ownedMovedFeed.json()
-  expect(ownedMovedBody).toMatchObject({ total: 1, entries: [{ health: 'unknown', reasons: ['update-owner'], relevance: 2 }] })
+  expect(ownedMovedBody).toMatchObject({ total: 1, entries: [{ health: 'unknown', reasons: ['update-owner', 'project-member'], relevance: 12, attention: { score: 0, reasons: [] } }] })
   expect(ownedMovedBody.entries[0]).not.toHaveProperty('latestUpdate')
   expect(movedGraphBody.updateTargets.find((updateTarget) =>
     updateTarget.target.type === 'initiative' &&

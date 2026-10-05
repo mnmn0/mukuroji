@@ -7,6 +7,7 @@ import {
 } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
+  BatchGetCommand,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
@@ -635,6 +636,12 @@ export interface CollaborationClient {
   getWatcherState(input: GetWatcherStateInput): Promise<CollaborationWatcherState>
   /** Reads one exact member watcher row without scanning the watcher scope. */
   getMemberWatcherState(input: GetWatcherStateInput): Promise<CollaborationMemberWatcherState>
+  /** Reads subscriptions for one member across at most 2,000 authorized scopes, without watcher scans.
+   * @param memberKey - Authenticated member.
+   * @param entityKeys - Server-built currently authorized entity scopes.
+   * @returns Subscribed scope identities only.
+   */
+  getMemberSubscribedScopes(memberKey: string, entityKeys: readonly string[]): Promise<string[]>
   /** 手動または自動 watcher を保存します。 */
   subscribe(
     input: UpdateWatcherInput & { expectedSubscribed: boolean },
@@ -4054,6 +4061,48 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           }
         : {}),
     } satisfies CollaborationWatcherState
+  }
+
+  /** Reads at most 2,000 exact member keys in strongly consistent batches with bounded retries.
+   * @param memberKey - Server-resolved current member.
+   * @param entityKeys - Server-built authorized target scopes.
+   * @returns Current subscribed scopes, never partial success on exhaustion.
+   */
+  async getMemberSubscribedScopes(memberKey: string, entityKeys: readonly string[]): Promise<string[]> {
+    if (entityKeys.length > 2000) throw new CollaborationError(413, 'WatcherReadLimitExceeded', 'Watcher scope limit exceeded.')
+    const member = normalizeMemberKey(memberKey)
+    const recordKey = watcherRecordKey(member)
+    const scopes = [...new Set(entityKeys.map((key) => requireText(key, 'Collaboration entity key')))]
+    if (!scopes.length) return []
+    await this.ensureLocalTable()
+    const subscribed: string[] = []
+    try {
+      for (let offset = 0; offset < scopes.length; offset += 100) {
+        let pending = scopes.slice(offset, offset + 100)
+        const seen = new Set<string>()
+        for (let attempt = 0; pending.length && attempt < 3; attempt += 1) {
+          const requested = new Set(pending)
+          const response = await this.documentClient.send(new BatchGetCommand({ RequestItems: { [this.tableName]: { ConsistentRead: true, Keys: pending.map((entityKey) => ({ entityKey, recordKey })) } } }))
+          for (const row of response.Responses?.[this.tableName] ?? []) {
+            const watcher = toStoredWatcher(row)
+            if (!requested.has(watcher.entityKey) || watcher.recordKey !== recordKey || watcher.memberKey !== member || seen.has(watcher.entityKey)) throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Watcher batch identity is invalid.')
+            seen.add(watcher.entityKey)
+            if (watcher.state === 'subscribed') subscribed.push(watcher.entityKey)
+          }
+          pending = (response.UnprocessedKeys?.[this.tableName]?.Keys ?? []).map((key) => {
+            if (typeof key.entityKey !== 'string' || key.recordKey !== recordKey || !requested.has(key.entityKey) || seen.has(key.entityKey)) throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Unprocessed watcher identity is invalid.')
+            return key.entityKey
+          })
+          if (new Set(pending).size !== pending.length) throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Duplicate unprocessed watcher identity.')
+          if (pending.length && attempt < 2) await new Promise((resolve) => setTimeout(resolve, 10 * 2 ** attempt))
+        }
+        if (pending.length) throw new CollaborationError(503, 'WatcherReadRetryable', 'Watcher reads could not be completed.')
+      }
+      return subscribed
+    } catch (error) {
+      if (error instanceof CollaborationError) throw error
+      throw new CollaborationError(503, 'WatcherReadRetryable', 'Watcher reads are temporarily unavailable.')
+    }
   }
 
   /** Reads one exact member watcher row without calculating scope-wide counts. */

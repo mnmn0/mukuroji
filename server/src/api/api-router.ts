@@ -7103,10 +7103,12 @@ routeApp.get('/api/planning/update-feed', async (c) => {
   if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    if (['view', 'limit', 'locale', 'feedId'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
+    if (['view', 'limit', 'locale', 'feedId', 'relevance'].some((key) => (c.req.queries(key)?.length ?? 0) > 1)) {
       throw new PlanningError(400, 'UpdateFeedQueryAmbiguous', 'Feed query parameters must occur at most once.')
     }
-    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit'), readLocale(c), c.req.query('feedId')))
+    const relevance = c.req.query('relevance')
+    if (relevance !== undefined && relevance !== '2') throw new PlanningError(400, 'UpdateFeedRelevanceInvalid', 'Unsupported feed relevance version.')
+    return c.json(await readPlanningUpdateFeed(principal, c.req.query('view'), c.req.query('limit'), readLocale(c), c.req.query('feedId'), relevance === '2'))
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
@@ -26019,19 +26021,20 @@ async function requirePlanningEntityPermission(
  * @param limit - Untrusted bounded response size.
  * @param locale - Active display language for current Project titles.
  * @param feedId - Optional member-owned saved definition identifier.
+ * @param expandedSignals - Whether the client opted into expanded relevance reasons.
  * @returns The authorized live feed, without loading Work Items or history.
  */
-async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string, locale: Locale = 'ja', feedId?: string) {
+async function readPlanningUpdateFeed(principal: WorkspacePrincipal, view?: string, limit?: string, locale: Locale = 'ja', feedId?: string, expandedSignals = false) {
   parseUpdateFeedQuery(view, limit)
   const definition = feedId === undefined ? undefined : (await workItemDependencies.savedUpdateFeeds.get(principal.directoryId, principal.userKey)).feeds.find((feed) => feed.id === feedId)
   if (feedId !== undefined && !definition) throw new PlanningError(404, 'SavedUpdateFeedNotFound', 'Saved feed was not found.')
   if (definition && view !== undefined && definition.view !== view) throw new PlanningError(409, 'SavedUpdateFeedsConflict', 'Saved feed changed. Reload before opening it.')
-  const reader = await createPlanningUpdateFeedReader(principal, locale)
+  const reader = await createPlanningUpdateFeedReader(principal, locale, expandedSignals)
   return withUpdateFeedReadState(workItemDependencies.updateFeedReadState, principal.directoryId, principal.userKey, await readUpdateFeed(reader, definition?.view ?? view, limit, definition?.filters))
 }
 
 /** Creates request-local target authorization shared by feed reads and read-state mutations. */
-async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, locale: Locale = 'ja'): Promise<UpdateFeedReader> {
+async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, locale: Locale = 'ja', expandedSignals = false): Promise<UpdateFeedReader> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, locale, true)
   let projectAccesses: Promise<ProjectAccessEntry[]> | undefined
   const readContext: TeamPermissionReadContext = {
@@ -26062,6 +26065,33 @@ async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, loc
   }
   return {
     memberKey: principal.userKey,
+    expandedSignals,
+    readSignals: async (targets, snapshot) => {
+      const keys = targets.map(({ target }) => createPlanningUpdateCollaborationEntityKey(principal.directoryId, createPlanningUpdatePublicTargetKey(target)))
+      const [accesses, subscribed, activities] = await Promise.all([
+        principal.enterpriseLegacyProjectAccessSuppressed ? [] : principal.legacyProjectScopeAccesses ?? workspaceDependencies.projectDirectory.getProjectAccessList(principal.directoryId, principal.userKey),
+        workItemDependencies.collaboration.getMemberSubscribedScopes(principal.userKey, keys).catch((error: unknown) => {
+          if (error instanceof CollaborationError) throw new PlanningError(error.status, error.code, 'Feed watcher signals are unavailable.')
+          throw error
+        }),
+        workItemDependencies.planning.getUpdateActivities(principal.directoryId),
+      ])
+      const watches = new Set(subscribed)
+      const activityByTarget = new Map(activities.map((activity) => [createPlanningUpdatePublicTargetKey(activity.target), activity]))
+      /** Counts explicit current Project grants, excluding broad Workspace/Team/admin visibility. */
+      const isProjectMember = (scope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined): boolean => {
+        if (!scope?.teamId || !scope.projectId) return false
+        const { teamId, projectId } = scope
+        if (accesses.some((access) => access.role !== undefined && planningProjectAccessMatchesQualifiedScope(access, directory, teamId, projectId))) return true
+        const evaluation = principal.enterpriseAuthorizationEvaluation
+        if (!evaluation || evaluation.principal.kind === 'break-glass') return false
+        return evaluateEnterpriseAccess({ permission: 'planning.read', principal: { ...evaluation.principal, systemAdministrator: false, includeWorkspaceRolePermissions: false, directPermissions: [] }, assignments: evaluation.assignments.filter((assignment) => assignment.scope.kind === 'project'), groupMappings: evaluation.groupMappings.filter((mapping) => mapping.scope.kind === 'project'), customRoles: evaluation.snapshot.customRoles, resource: { workspaceId: principal.directoryId, kind: 'project', targetId: scope.projectId, parentTeamId: scope.teamId }, projectScopeOwnerTeamId: resolveProjectAccessTeamId({ projectId: scope.projectId }, directory) }).allowed
+      }
+      return targets.map(({ target }, index) => {
+        const scope = target.type === 'project' ? target : snapshot.entities.find((entity) => entity.id === target.entityId)
+        return { target, projectMember: isProjectMember(scope), watching: watches.has(keys[index] ?? ''), activity: activityByTarget.get(createPlanningUpdatePublicTargetKey(target)) }
+      })
+    },
     filterScope: (summary, snapshot) => resolveUpdateFeedFilterScope(summary, snapshot, readableScope),
     describeTeam: (teamId) => directory.teams.find((team) => team.id === teamId)?.name ?? teamId,
     describeTarget: (summary, snapshot) => {

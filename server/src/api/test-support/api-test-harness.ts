@@ -606,6 +606,7 @@ function createCollaborationStub(
     removeReaction: unsupported,
     getWatcherState: unsupported,
     getMemberWatcherState: unsupported,
+    async getMemberSubscribedScopes() { return [] },
     subscribe: unsupported,
     unsubscribe: unsupported,
     heartbeatPresence: unsupported,
