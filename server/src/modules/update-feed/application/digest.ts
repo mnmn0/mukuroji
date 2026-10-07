@@ -35,12 +35,13 @@ export function emptyDigestState(): UpdateFeedDigestState {
  */
 export function parseDigestPreferences(value: unknown): UpdateFeedDigestPreferences {
   if (!record(value) || typeof value.enabled !== 'boolean' || (value.frequency !== 'daily' && value.frequency !== 'weekly') || !Array.isArray(value.views) || value.views.length < 1 || value.views.length > 6) throw invalid()
+  const order = ['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue']
   const views = value.views.map((view: unknown) => {
     if (typeof view !== 'string' || !['for-me', 'recent', 'at-risk', 'missing', 'stale', 'overdue'].includes(view)) throw invalid()
     return parseUpdateFeedQuery(view).view
   })
   if (new Set(views).size !== views.length) throw invalid()
-  return { enabled: value.enabled, frequency: value.frequency, views }
+  return { enabled: value.enabled, frequency: value.frequency, views: views.sort((a, b) => order.indexOf(a) - order.indexOf(b)) }
 }
 
 /** Validates the complete bodyless row, failing closed on malformed persistence.
@@ -106,7 +107,7 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
     const stableReader: UpdateFeedReader = { ...reader, readSnapshot: async () => initialSnapshot }
     const entries = new Map<string, UpdateFeedDigestPreview['entries'][number]>()
     let truncated = false
-    for (const view of state.preferences.views) {
+    for (const view of parseDigestPreferences(state.preferences).views) {
       const feed = await readUpdateFeed(stableReader, view, '100')
       truncated ||= feed.truncated
       for (const entry of feed.entries) {
