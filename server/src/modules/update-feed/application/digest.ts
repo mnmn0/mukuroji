@@ -53,6 +53,10 @@ export function parseDigestState(value: unknown): UpdateFeedDigestState {
   const history: UpdateFeedDigestReceipt[] = value.history.map((row: unknown) => {
     if (!record(row) || typeof row.id !== 'string' || !/^(daily|weekly):\d{4}-\d{2}-\d{2}$/.test(row.id) || !['pending', 'completed', 'failed'].includes(String(row.status)) || !integer(row.attempts) || row.attempts < 1 || row.attempts > 3 || typeof row.token !== 'string' || !/^[a-zA-Z0-9-]{1,64}$/.test(row.token) || !integer(row.leaseUntil) || !integer(row.count) || row.count > 50) throw invalid()
     if (row.status !== 'pending' && row.status !== 'completed' && row.status !== 'failed') throw invalid()
+    const date = row.id.slice(row.id.indexOf(':') + 1)
+    const timestamp = Date.parse(`${date}T00:00:00.000Z`)
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 10) !== date) throw invalid()
+    if (row.id.startsWith('weekly:') && new Date(timestamp).getUTCDay() !== 1) throw invalid()
     return { id: row.id, status: row.status, attempts: row.attempts, token: row.token, leaseUntil: row.leaseUntil, count: row.count }
   })
   if (new Set(history.map((row) => row.id)).size !== history.length) throw invalid()
@@ -81,17 +85,20 @@ export async function replaceDigestPreferences(store: UpdateFeedDigestStore, wor
  * @param store - Caller-bound atomic digest persistence.
  * @param workspaceId - Authenticated Workspace.
  * @param now - Server clock; injectable for deterministic tests.
+ * @param scheduledAt - Trusted logical scheduler time; leases still use the current clock.
  * @returns Ephemeral content which is never persisted or sent.
  */
-export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readState: UpdateFeedReadStateStore, store: UpdateFeedDigestStore, workspaceId: string, now = Date.now()): Promise<UpdateFeedDigestPreview> {
+export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readState: UpdateFeedReadStateStore, store: UpdateFeedDigestStore, workspaceId: string, now = Date.now(), scheduledAt = now): Promise<UpdateFeedDigestPreview> {
   if (!integer(now) || now > 8_640_000_000_000_000) throw invalid()
+  if (!integer(scheduledAt) || scheduledAt > now) throw invalid()
   const memberKey = reader.memberKey
   let state = await store.get(workspaceId, memberKey)
   if (!state.preferences.enabled) throw new PlanningError(409, 'UpdateFeedDigestDisabled', 'Enable manual digest previews first.')
-  const start = new Date(now)
+  const start = new Date(scheduledAt)
   start.setUTCHours(0, 0, 0, 0)
   if (state.preferences.frequency === 'weekly') start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7)
   const id = `${state.preferences.frequency}:${start.toISOString().slice(0, 10)}`
+  if (isDigestIntervalExpired(state, id)) throw new PlanningError(409, 'UpdateFeedDigestIntervalExpired', 'Digest interval is outside retained history.')
   const existing = state.history.find((receipt) => receipt.id === id)
   const replay = existing?.status === 'completed'
   if (!replay && existing?.status === 'pending' && existing.leaseUntil > now) throw conflict()
@@ -99,7 +106,7 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
   const token = randomUUID()
   if (!replay) {
     const receipt: UpdateFeedDigestReceipt = { id, status: 'pending', attempts: (existing?.attempts ?? 0) + 1, token, leaseUntil: now + 60_000, count: 0 }
-    state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].slice(-20) })
+    state = await store.replace(workspaceId, memberKey, { ...state, history: [...state.history.filter((item) => item.id !== id), receipt].sort((a, b) => compareIntervals(a.id, b.id)).slice(-20) })
   }
   try {
     // A fresh projection is loaded for each attempt/replay; no historical report scan.
@@ -147,6 +154,19 @@ export async function previewUpdateFeedDigest(reader: UpdateFeedReader, readStat
     }
     throw error
   }
+}
+
+/** Rejects work below the durable retained-history boundary; normal writes never move it backward.
+ * @param state - Validated bodyless metadata whose history is preserved by settings writes.
+ * @param id - Validated logical interval identity.
+ * @returns Whether the interval predates every receipt in a full retention window.
+ */
+export function isDigestIntervalExpired(state: UpdateFeedDigestState, id: string): boolean {
+  return state.history.length === 20 && state.history.every((receipt) => compareIntervals(receipt.id, id) > 0)
+}
+/** Orders retention by logical date, with cadence as a deterministic same-date tie breaker. */
+function compareIntervals(a: string, b: string): number {
+  return a.slice(a.indexOf(':') + 1).localeCompare(b.slice(b.indexOf(':') + 1)) || a.localeCompare(b)
 }
 
 /** Narrows an untrusted object without assertions. */

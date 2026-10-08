@@ -46,7 +46,7 @@ test('uses one consistent member-owned key and rejects malformed schema, identit
   expect(await store.get('w', ' Reader ')).toEqual({ revision: 1, feeds: [feed] })
   await store.get('w', 'reader')
   expect(keys[0]).toEqual(keys[1])
-  for (mode of ['schema', 'identity', 'definition']) await expect(store.get('w', 'reader')).rejects.toMatchObject({ status: 502 })
+  for (mode of ['schema', 'identity', 'definition']) await expect(store.get('w', 'reader')).rejects.toMatchObject({ status: 502, code: 'SavedUpdateFeedsCorruptState' })
   mode = 'missing'
   expect(await store.get('w', 'reader')).toEqual({ revision: 0, feeds: [] })
 })
@@ -72,4 +72,12 @@ test('atomically guards personal CAS and caller revocation without writing repor
   await expect(bound.replace('w', 'reader', input)).rejects.toMatchObject({ status: 503 })
   codes = ['ConditionalCheckFailed']
   await expect(bound.replace('w', 'reader', input)).rejects.toMatchObject({ status: 502 })
+})
+
+test('unknown SDK failures remain retryable storage failures, distinct from persisted corruption', async () => {
+  const store = new DynamoDbSavedUpdateFeedsStore('planning', clientFor(async (command) => {
+    expect(command).toBeInstanceOf(GetCommand)
+    throw new Error('private transport detail')
+  }))
+  await expect(store.get('w', 'reader')).rejects.toMatchObject({ code: 'SavedUpdateFeedsStorageFailure' })
 })
