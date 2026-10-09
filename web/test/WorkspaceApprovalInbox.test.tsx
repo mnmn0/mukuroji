@@ -253,7 +253,7 @@ describe('Workspace approval Inbox', () => {
     expect(html).toContain('data-testid="notification-load-more"')
   })
 
-  test('renders an explicit empty state when Home has no Now or Next preview', () => {
+  test('keeps waiting work visible when Home has no Now or Next work', () => {
     const emptyFocusQueue = {
       ...focusQueueResponseFixture,
       sections: focusQueueResponseFixture.sections.map((group) => ({
@@ -273,7 +273,9 @@ describe('Workspace approval Inbox', () => {
       </MemoryRouter>,
     )
 
-    expect(html).toContain('Nothing needs action now or next.')
+    expect(html).toContain('Wait for legal approval')
+    expect(html).toContain('All<span class="text-xs tabular-nums">1</span>')
+    expect(html).not.toContain('Unblock the release approval flow')
     expect(html).toContain('data-testid="workspace-home-my-tasks"')
     expect(html).toContain('href="/my-tasks"')
     expect(html).toContain('href="/focus?section=now"')
@@ -331,8 +333,8 @@ describe('Workspace approval Inbox', () => {
       </MemoryRouter>,
     )
 
-    expect(html).toContain('Nothing needs action now or next.')
-    expect(html).toContain('Nothing is waiting.')
+    expect(html).toContain('Nothing needs action right now. Find your next work in My Tasks.')
+    expect(html).toContain('All<span class="text-xs tabular-nums">0</span>')
     expect(html).not.toContain('No tasks have been registered yet.')
     expect(html).not.toContain('Focus data is unavailable.')
   })
@@ -354,6 +356,7 @@ describe('Workspace approval Inbox', () => {
             items: waitingReasons.map((reason, index) => ({
               ...waitingItem,
               id: `${waitingItem.id}-${index}`,
+              workItem: { ...waitingItem.workItem, id: `${waitingItem.workItem.id}-${index}` },
               actionability: { actionable: false, reasons: [reason] },
             })),
           }
