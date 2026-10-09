@@ -285,9 +285,9 @@ test('scheduler is opt-in, bounds pages, deduplicates logical candidates and pre
   await expect(runInboxDigestSchedule({ ...schedule, listCandidates: async () => ({ recipients: Array.from({ length: 101 }, () => candidate) }) }, now)).rejects.toThrow('Invalid digest candidate page')
 })
 
-test('notification TTL is interval-start epoch seconds plus 365 days, stable for weekly retries', () => {
+test('notification TTL is first-claim epoch seconds plus 365 days, stable for weekly retries', () => {
   for (const id of ['daily:2026-10-03', 'weekly:2026-09-28']) {
-    const occurredAt = `${id.split(':')[1]}T00:00:00.000Z`
+    const occurredAt = '2026-10-03T18:45:00.000Z'
     const message: InboxDigestMessage = { id: `update-feed-digest:${id}`, occurredAt, deepLink: '/updates' }
     const first = createInboxDigestNotification(recipient, message)
     expect(first.expiresAt).toBe(Date.parse(occurredAt) / 1000 + 365 * 86400)

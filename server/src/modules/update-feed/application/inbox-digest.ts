@@ -26,7 +26,7 @@ export type InboxDigestCandidate = InboxDigestRecipient & {
 export type InboxDigestMessage = {
   /** Deterministic recipient-scoped interval identity. */
   id: string
-  /** UTC interval start, stable across retries and response loss. */
+  /** First claim time, stable across retries and response loss. */
   occurredAt: string
   /** Existing authenticated Feed route, with no cached report identifiers or bodies. */
   deepLink: '/updates'
@@ -63,6 +63,8 @@ export type InboxDigestContext = {
 
 /** Bounded scheduler dependencies; no live worker is connected by this module. */
 export type InboxDigestDependencies = {
+  /** Optional scheduler-owned index maintenance after denial; never a revoked caller write. */
+  deferDenied?(recipient: InboxDigestRecipient): Promise<void>
   /** Resolves membership, planning.read and in-app opt-in now; denial returns undefined.
    * Infrastructure failures throw. Returned write guards must fence later revocation.
    */
@@ -108,20 +110,31 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   if (!Number.isSafeInteger(now) || now < 0 || now > 8_640_000_000_000_000) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest clock')
   if (!Number.isSafeInteger(scheduledAt) || scheduledAt < 0 || scheduledAt > now) throw new PlanningError(400, 'UpdateFeedDigestInvalid', 'Invalid digest scheduling time.')
   const context = await dependencies.authorize(recipient)
-  if (!context) return 'denied'
+  if (!context) { await dependencies.deferDenied?.(recipient); return 'denied' }
   if (context.reader.memberKey !== recipient.memberKey || context.recipient.memberKey !== recipient.memberKey || context.recipient.workspaceId !== recipient.workspaceId) throw new PlanningError(502, 'UpdateFeedDigestRecipientMismatch', 'Digest recipient mismatch')
-  const state = await context.store.get(recipient.workspaceId, recipient.memberKey)
+  let state = await context.store.get(recipient.workspaceId, recipient.memberKey)
   // Historical work without an original cadence cannot safely reconstruct its interval.
   if ((frequency !== undefined && frequency !== state.preferences.frequency) || (frequency === undefined && scheduledAt !== now)) return 'cancelled'
-  const id = inboxDigestInterval(state, scheduledAt)
+  let id = inboxDigestInterval(state, scheduledAt)
   if (!state.preferences.enabled) return 'disabled'
   if (isDigestIntervalExpired(state, id)) return 'cancelled'
-  const receipt = state.history.find((item) => item.id === id)
-  if (receipt?.status === 'completed') return 'not-due'
-  if (receipt?.status === 'pending' && receipt.leaseUntil > now) {
+  // An old interval may still own a live claim across midnight/Monday. Reconcile
+  // expired claims durably before selecting a new interval, including attempt three.
+  if (state.history.some((item) => item.status === 'pending' && item.leaseUntil > now)) {
     if (frequency !== undefined || scheduledAt < now) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest interval is still leased.')
     return 'not-due'
   }
+  if (state.history.some((item) => item.status === 'pending')) {
+    state = await context.store.replace(recipient.workspaceId, recipient.memberKey, { ...state, history: state.history.map((item) => item.status === 'pending' ? { ...item, status: 'failed', leaseUntil: 0 } : item) })
+  }
+  let receipt = state.history.find((item) => item.id === id)
+  // Only exhausted failed intervals may advance; unfinished logical retries stay pinned.
+  if (receipt?.status === 'failed' && receipt.attempts >= 3 && id !== inboxDigestInterval(state, now)) {
+    scheduledAt = now
+    id = inboxDigestInterval(state, now)
+    receipt = state.history.find((item) => item.id === id)
+  }
+  if (receipt?.status === 'completed' || (receipt?.status === 'pending' && receipt.leaseUntil > now)) return 'not-due'
   // Reject clock rollback rather than re-emitting an interval pruned from history.
   if (state.history.some((item) => item.id.slice(item.id.indexOf(':') + 1) > new Date(now).toISOString().slice(0, 10))) return 'not-due'
   const store: UpdateFeedDigestStore = {
@@ -132,7 +145,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
       if (completed?.status !== 'completed') throw new Error('Digest completion missing')
       const message: InboxDigestMessage | undefined = completed.count === 0 ? undefined : {
         id: `update-feed-digest:${id}`,
-        occurredAt: `${id.slice(id.indexOf(':') + 1)}T00:00:00.000Z`,
+        occurredAt: new Date(completed.startedAt ?? now).toISOString(),
         deepLink: '/updates',
       }
       return context.store.complete(recipient, next, planningRevision, message)
