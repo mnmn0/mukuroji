@@ -229,7 +229,7 @@ test('a Planning change after recipient authorization invalidates the captured A
   const context = await f.dependencies.authorize(recipient)
   if (!context) throw new Error('Fixture authorization missing')
   f.snapshot.revision++
-  await expect(deliverInboxDigest({ authorize: async () => context }, recipient, now)).rejects.toThrow('Digest authorization changed')
+  await expect(deliverInboxDigest({ authorize: async () => context }, recipient, now)).rejects.toMatchObject({ status: 409, code: 'UpdateFeedDigestConflict' })
   expect(f.inbox.size).toBe(0)
 })
 
