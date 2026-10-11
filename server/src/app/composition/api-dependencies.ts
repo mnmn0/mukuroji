@@ -44,7 +44,7 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
-import { DynamoDbSavedUpdateFeedsStore, InMemorySavedUpdateFeedsStore, DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore } from '../../modules/update-feed'
+import { DynamoDbInboxDigestStore, DynamoDbSavedUpdateFeedsStore, InMemorySavedUpdateFeedsStore, DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore } from '../../modules/update-feed'
 import {
   recordApiAccess,
   recordApiError,
@@ -554,6 +554,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     ),
     updateFeedDigest: new DynamoDbUpdateFeedDigestStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    inboxDigestSettings: new DynamoDbInboxDigestStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      loadServerConfig().environment.NOTIFICATIONS_TABLE_NAME ?? 'mukuroji-notifications-local',
       createDynamoDbDocumentClient(),
     ),
     requestIntake: createDefaultRequestIntakeClient(
@@ -1707,6 +1712,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
+      inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
       requestIntake,
@@ -1824,6 +1830,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
+      ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),
       ...(overrides.requestIntake ? { requestIntake: overrides.requestIntake } : {}),
       ...(overrides.triage ? { triage: overrides.triage } : {}),
       ...(overrides.analytics ? { analytics: overrides.analytics } : {}),

@@ -3,12 +3,37 @@ import { isNonnegativeSafeInteger, isRecord } from '../../../shared/api/jsonVali
 import { isUpdateFeedView, updateFeedTargetKey } from '../model/updateFeed'
 import { isEntry, requestUpdateFeed, UpdateFeedApiError } from './updateFeed'
 
+/** Identifies saves whose outcome may be unknown and can retain an explicit retry draft.
+ * @param error - Transport, response-validation or stable API failure.
+ * @returns False for known permanent failures and client-side rejection statuses.
+ */
+export function isAmbiguousInboxSaveFailure(error: unknown): boolean {
+  if (!(error instanceof UpdateFeedApiError)) return true
+  return error.status >= 500 && !['UpdateFeedDigestCorruptState', 'UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestRecipientMismatch', 'UpdateFeedReadStateCorrupt', 'SavedUpdateFeedsCorruptState', 'TenantAdministrationCorrupt'].includes(error.code)
+}
+
 /** Reads personal preview preferences and content-free history.
  * @param token - Current session.
  * @param signal - Cancellation when the ephemeral preview is discarded.
  * @returns Validated personal state.
  */
 export async function getDigestState(token: string, signal?: AbortSignal): Promise<UpdateFeedDigestState> { return readState(await requestUpdateFeed(token, '/digest', { signal })) }
+
+/** Reads delivery consent independently of preview preferences.
+ * @param token - Current session.
+ * @returns Validated delivery metadata.
+ */
+export async function getInboxDigestState(token: string): Promise<UpdateFeedDigestState> { return readState(await requestUpdateFeed(token, '/digest/inbox')) }
+
+/** Saves explicit Inbox consent without activating a scheduler or sending content.
+ * @param token - Current session.
+ * @param expectedRevision - Observed settings revision.
+ * @param preferences - Explicit consent and cadence.
+ * @returns Committed delivery metadata.
+ */
+export async function saveInboxDigestPreferences(token: string, expectedRevision: number, preferences: UpdateFeedDigestPreferences): Promise<UpdateFeedDigestState> {
+  return readState(await requestUpdateFeed(token, '/digest/inbox', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expectedRevision, preferences }) }))
+}
 
 /** Saves manual preview preferences with optimistic concurrency.
  * @param token - Current session.

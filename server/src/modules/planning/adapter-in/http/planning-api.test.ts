@@ -21,6 +21,9 @@ import {
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../../../authentication'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDbInboxDigestStore } from '../../../update-feed'
 import { CollaborationError } from '../../../collaboration'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
@@ -64,6 +67,46 @@ test('manual digest preferences and preview use authenticated identity and rejec
   configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
   expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(403)
   expect((await planningApiRequest(`${path}/preview`, 'POST', {})).status).toBe(403)
+})
+
+test('Inbox consent defaults off, stays separate from previews, ignores client identity and uses CAS', async () => {
+  configureFakeProjectClients(true)
+  const path = '/api/planning/update-feed/digest/inbox'
+  expect((await (await planningApiRequest(path)).json()).preferences.enabled).toBe(false)
+  const settings = { expectedRevision: 0, preferences: { enabled: true, frequency: 'daily', views: ['recent'] }, workspaceId: 'attacker', memberKey: 'attacker' }
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(200)
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(409)
+  expect((await (await planningApiRequest('/api/planning/update-feed/digest')).json()).preferences.enabled).toBe(false)
+  expect((await planningApiRequest(path, 'PUT', { expectedRevision: 1, preferences: { ...settings.preferences, enabled: false } })).status).toBe(200)
+  expect((await (await planningApiRequest(path)).json()).history).toEqual([])
+  configureFakeProjectClients(false, { workspaceRole: 'guest', role: 'viewer', projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }] })
+  expect((await planningApiRequest(path, 'PUT', settings)).status).toBe(403)
+})
+
+test('Inbox metadata HTTP boundary preserves stable storage failure categories without private details', async () => {
+  configureFakeProjectClients(true)
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
+  let failure: unknown
+  let item: Record<string, unknown> | undefined
+  // The isolated SDK overload is the only assertion; no transport is invoked.
+  client.send = (async () => { if (failure) throw failure; return { Item: item } }) as DynamoDBDocumentClient['send']
+  setTestAppDependencies({ inboxDigestSettings: new DynamoDbInboxDigestStore('planning', 'notifications', client) })
+  const path = '/api/planning/update-feed/digest/inbox'
+  expect(await (await planningApiRequest(path)).json()).toMatchObject({ revision: 0, preferences: { enabled: false } })
+  const settings = { expectedRevision: 0, preferences: { enabled: false, frequency: 'daily', views: ['recent'] } }
+  for (const method of ['GET', 'PUT']) {
+    failure = Object.assign(new Error('private SDK detail'), { name: 'ThrottlingException' })
+    let response = await planningApiRequest(path, method, method === 'PUT' ? settings : undefined)
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ code: 'UpdateFeedDigestRetryable' })
+    failure = undefined
+    item = { schemaVersion: 999, secret: 'private stored detail' }
+    response = await planningApiRequest(path, method, method === 'PUT' ? settings : undefined)
+    expect(response.status).toBe(502)
+    const body = await response.json()
+    expect(body).toMatchObject({ code: 'UpdateFeedDigestCorruptState' })
+    expect(JSON.stringify(body)).not.toContain('private')
+  }
 })
 
 test('personal saved-feed CRUD requires current authentication, rejects guests and preserves CAS', async () => {

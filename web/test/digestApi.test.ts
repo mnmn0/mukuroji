@@ -1,11 +1,18 @@
 import { afterEach, expect, test } from 'bun:test'
-import { generateDigestPreview, getDigestState, saveDigestPreferences } from '../src/features/update-feed/api/digest'
+import { generateDigestPreview, getDigestState, isAmbiguousInboxSaveFailure, saveDigestPreferences } from '../src/features/update-feed/api/digest'
+import { UpdateFeedApiError } from '../src/features/update-feed/api/updateFeed'
 import { updateFeedFixture } from '../src/features/update-feed/fixtures'
 
 const originalFetch = globalThis.fetch
 afterEach(() => { globalThis.fetch = originalFetch })
 const state = { revision: 1, preferences: { enabled: true, frequency: 'daily', views: ['recent'] }, history: [] }
 const preview = { id: 'daily:2026-10-03', replay: false, entries: updateFeedFixture.entries.slice(0, 1), truncated: false, transport: 'preview' }
+
+test('Inbox save classification separates stable permanent failures from uncertain acknowledgments', () => {
+  for (const code of ['UpdateFeedDigestCorruptState', 'UpdateFeedDigestStoragePermanent', 'UpdateFeedDigestRecipientMismatch', 'UpdateFeedReadStateCorrupt', 'SavedUpdateFeedsCorruptState', 'TenantAdministrationCorrupt']) expect(isAmbiguousInboxSaveFailure(new UpdateFeedApiError(502, code))).toBe(false)
+  for (const status of [400, 401, 403, 409]) expect(isAmbiguousInboxSaveFailure(new UpdateFeedApiError(status))).toBe(false)
+  for (const error of [new TypeError('Network failure'), new UpdateFeedApiError(503, 'UpdateFeedDigestRetryable'), new UpdateFeedApiError(502)]) expect(isAmbiguousInboxSaveFailure(error)).toBe(true)
+})
 
 test('validates personal metadata and reconstructs only bounded bodyless fields', async () => {
   globalThis.fetch = async () => Response.json({ ...state, secret: 'not retained' })

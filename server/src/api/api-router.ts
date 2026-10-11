@@ -1349,6 +1349,9 @@ const workItemDependencies: WorkItemDependencies = {
   get updateFeedDigest() {
     return requireAppDependencies().workItems.updateFeedDigest
   },
+  get inboxDigestSettings() {
+    return requireAppDependencies().workItems.inboxDigestSettings
+  },
   get requestIntake() {
     return requireAppDependencies().workItems.requestIntake
   },
@@ -1771,6 +1774,7 @@ const enterpriseRoutePermissionRules = [
   { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/saved', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/digest', permission: 'planning.read' },
+  { method: 'PUT', pathPattern: '/api/planning/update-feed/digest/inbox', permission: 'planning.read' },
   { method: 'POST', pathPattern: '/api/planning/update-feed/digest/preview', permission: 'planning.read' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
@@ -7126,6 +7130,28 @@ routeApp.get('/api/planning/update-feed/digest', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     return c.json(await workItemDependencies.updateFeedDigest.get(principal.directoryId, principal.userKey))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
+})
+
+/** Reads delivery consent independently of manual-preview preferences. */
+routeApp.get('/api/planning/update-feed/digest/inbox', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    return c.json(await workItemDependencies.inboxDigestSettings.get(principal.directoryId, principal.userKey))
+  } catch (error) { return toPlanningErrorResponse(c, error) }
+})
+
+/** Saves delivery consent only; no worker is activated and no notification is sent. */
+routeApp.put('/api/planning/update-feed/digest/inbox', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
+    const store = workItemDependencies.inboxDigestSettings.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'))
+    return c.json(await replaceDigestPreferences(store, principal.directoryId, principal.userKey, await readPlanningJson<unknown>(c.req)))
   } catch (error) { return toPlanningErrorResponse(c, error) }
 })
 
