@@ -1,5 +1,6 @@
 import type { UpdateFeedDigestState } from '@mukuroji/contracts'
 import { PlanningError } from '../../planning'
+import { TenantAdministrationError } from '../../tenant-administration'
 import { isDigestIntervalExpired, previewUpdateFeedDigest, type UpdateFeedDigestStore } from './digest'
 import type { UpdateFeedReader } from './read-update-feed'
 import type { UpdateFeedReadStateStore } from './read-state'
@@ -20,6 +21,7 @@ export type InboxDigestRetry = InboxDigestCandidate & {
 /** Trusted discovery binds the cadence before authorization or claim can fail. */
 export type InboxDigestCandidate = InboxDigestRecipient & {
   /** Current cadence observed by the strongly checked candidate source. */ frequency: 'daily' | 'weekly'
+  /** Strongly read receipt progress; absent means no receipt at discovery. */ receiptAttempts?: number
 }
 
 /** Content-free Inbox message; opening the Feed performs current authorization again. */
@@ -153,7 +155,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   }
   const reader: UpdateFeedReader = { ...context.reader, readSnapshot: async () => {
     const snapshot = await context.reader.readSnapshot()
-    if (snapshot.revision !== context.authorizationRevision) throw new Error('Digest authorization changed')
+    if (snapshot.revision !== context.authorizationRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest authorization changed')
     return snapshot
   } }
   const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now, scheduledAt)
@@ -199,6 +201,7 @@ export type InboxDigestScheduleResult = {
  * @returns Bodyless operator category, or undefined for retryable/unknown failures.
  */
 export function inboxDigestTerminalReason(error: unknown): 'exhausted' | 'corrupt-state' | 'storage-permanent' | 'recipient-mismatch' | 'invalid-input' | undefined {
+  if (error instanceof TenantAdministrationError && error.code === 'TenantAdministrationCorrupt') return 'corrupt-state'
   if (!(error instanceof PlanningError)) return undefined
   if (error.code === 'UpdateFeedDigestAttemptsExhausted') return 'exhausted'
   if (error.code === 'UpdateFeedDigestRecipientMismatch') return 'recipient-mismatch'
