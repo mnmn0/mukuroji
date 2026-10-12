@@ -6,7 +6,7 @@ import { updateFeedViews } from './updateFeed'
  * @returns Preferences in the standard generation source order.
  */
 export function normalizeDigestPreferences(preferences: UpdateFeedDigestPreferences): UpdateFeedDigestPreferences {
-  return { ...preferences, views: updateFeedViews.filter((view) => preferences.views.includes(view)) }
+  return { ...preferences, views: updateFeedViews.filter((view) => preferences.views.includes(view)), ...(preferences.savedFeeds ? { savedFeeds: { revision: preferences.savedFeeds.revision, ids: [...preferences.savedFeeds.ids].sort() } } : {}) }
 }
 
 /** Compares semantic selections without treating input order as an edit.

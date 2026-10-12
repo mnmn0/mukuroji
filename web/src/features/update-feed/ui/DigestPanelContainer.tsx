@@ -3,6 +3,7 @@ import { UpdateFeedApiError } from '../api/updateFeed'
 import { useDigestPreview } from '../mutations/useDigestPreview'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { DigestPanel } from './DigestPanel'
+import { useSavedUpdateFeeds } from '../queries/useSavedUpdateFeeds'
 
 /** Session and permission inputs supplied by the owning Workspace page. */
 type DigestPanelContainerProps = {
@@ -37,6 +38,7 @@ export function DigestPanelContainer(props: DigestPanelContainerProps) {
 /** Connects safe presentation categories to the session-owned controller. */
 function DigestContent({ token, enabled, canEdit, locale, guard, restoreFocus, contentKey, open }: DigestPanelContainerProps & { /** Disclosure state, separate from controller lifetime. */ open: boolean; /** Stable fallback for removed controls. */ restoreFocus(): void }) {
   const controller = useDigestPreview(token, enabled && open, locale, guard)
+  const saved = useSavedUpdateFeeds(token, enabled && open, guard)
   const { dismiss, invalidateContent } = controller
   // Cancel owned browser requests/timers and clear ephemeral content before paint;
   // unrelated Feed scope changes must preserve the personal settings form and focus.
@@ -45,5 +47,5 @@ function DigestContent({ token, enabled, canEdit, locale, guard, restoreFocus, c
   const error = controller.error
   if (!open) return null
   const failure = error instanceof UpdateFeedApiError && (error.status === 401 || error.status === 403) ? 'denied' : controller.refreshFailed ? 'refresh' : error instanceof UpdateFeedApiError && error.code === 'UpdateFeedDigestAttemptsExhausted' ? 'exhausted' : error instanceof UpdateFeedApiError && error.status === 409 ? 'conflict' : error ? 'error' : controller.interrupted ? 'interrupted' : undefined
-  return <DigestPanel {...controller} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={controller.reload} onDismiss={controller.dismiss} />
+  return <DigestPanel {...controller} savedFeeds={saved.data} savedStatus={saved.isLoading || saved.isValidating ? 'loading' : saved.error ? 'error' : saved.data ? 'ready' : 'loading'} restoreFocus={restoreFocus} failure={failure} canEdit={canEdit} t={createTranslator(locale)} onSave={controller.save} onGenerate={controller.generate} onReload={() => { controller.reload(); void saved.mutate().catch(() => undefined) }} onDismiss={controller.dismiss} />
 }

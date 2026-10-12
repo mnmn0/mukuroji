@@ -80,6 +80,181 @@ async function mockFeed(page: Page, guest = false, expiresAt?: number) {
   return state
 }
 
+for (const source of ['ready', 'changed', 'unavailable', 'denied']) test(`Inbox guest reads custom selection only from ${source} definitions without PUT`, async ({ page }) => {
+  const state = await mockFeed(page, true)
+  await page.clock.install()
+  const filters = { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] }
+  state.saved = { revision: source === 'changed' ? 2 : 1, feeds: [{ id: 'private-source-id', name: 'My saved risk source', view: 'at-risk', filters }] }
+  state.inbox.preferences = { enabled: true, frequency: 'weekly', views: [], savedFeeds: { revision: 1, ids: ['private-source-id'] } }
+  let puts = 0
+  await page.route('**/api/planning/update-feed/digest/inbox', async (route) => { if (route.request().method() === 'PUT') puts++; await route.fallback() })
+  if (source === 'unavailable') await page.route('**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 503, json: {} }))
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
+  await expect(panel.getByText('Weekly', { exact: true })).toBeVisible()
+  if (source === 'ready' || source === 'denied') await expect(panel.getByText('My saved risk source', { exact: true })).toBeVisible()
+  else {
+    await expect(panel.getByText('Saved feeds are unavailable.', { exact: true })).toBeVisible()
+    await expect(panel.getByText('My saved risk source', { exact: true })).toHaveCount(0)
+  }
+  await expect(panel).not.toContainText('private-source-id')
+  await expect(panel.locator('form, input, select')).toHaveCount(0)
+  expect(puts).toBe(0)
+  if (source === 'denied') {
+    await page.route('**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 403, json: {} }))
+    await page.clock.fastForward(6_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect(page.locator('summary', { hasText: 'Inbox digest settings' })).toHaveCount(0)
+    await expect(page.getByText('My saved risk source', { exact: true })).toHaveCount(0)
+    expect(puts).toBe(0)
+    return
+  }
+  state.inboxDenied = true
+  await page.reload()
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  await expect(panel.getByRole('alert')).toBeVisible()
+  await expect(panel.locator('dl')).toHaveCount(0)
+  expect(puts).toBe(0)
+})
+
+for (const inbox of [false, true]) test(`${inbox ? 'Inbox' : 'preview'} saves canonical custom IDs without treating reselection as an edit`, async ({ page }) => {
+  const state = await mockFeed(page)
+  const filters = { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] }
+  state.saved = { revision: 1, feeds: [{ id: 'z-risk', name: 'Risk source', view: 'at-risk', filters }, { id: 'a-recent', name: 'Recent source', view: 'recent', filters }] }
+  const target = inbox ? state.inbox : state.digest
+  target.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['z-risk', 'a-recent'] } }
+  await page.goto('/updates')
+  const title = inbox ? 'Inbox digest settings' : 'Digest preview'
+  await page.locator('summary', { hasText: title }).click()
+  const panel = page.getByRole('region', { name: title, exact: true })
+  const save = panel.getByRole('button', { name: inbox ? 'Save Inbox settings' : 'Save preview settings' })
+  await panel.getByLabel('Risk source', { exact: true }).uncheck()
+  await panel.getByLabel('Risk source', { exact: true }).check()
+  await expect(save).toBeDisabled()
+  await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
+  await save.click()
+  await expect.poll(() => (inbox ? state.inbox : state.digest).preferences.savedFeeds?.ids).toEqual(['a-recent', 'z-risk'])
+  await expect(save).toBeDisabled()
+})
+
+for (const outcome of ['success', 'deleted', '503', '401']) test(`pending custom definitions preserve selection and withdrawal before ${outcome}`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.saved = { revision: 1, feeds: [{ id: 'private-custom-id', name: 'Current custom source', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }
+  state.digest.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['private-custom-id'] } }
+  state.inbox.preferences = structuredClone(state.digest.preferences)
+  let release = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/planning/update-feed/saved', async (route) => {
+    await gate
+    if (outcome === '503' || outcome === '401') return route.fulfill({ status: Number(outcome), json: {} })
+    await route.fulfill({ json: outcome === 'deleted' ? { revision: 2, feeds: [] } : state.saved })
+  })
+  await page.goto('/updates')
+  await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const preview = page.getByRole('region', { name: 'Digest preview', exact: true })
+  const inbox = page.getByRole('region', { name: 'Inbox digest settings' })
+  for (const panel of [preview, inbox]) {
+    await expect(panel.getByText('Loading saved feeds…')).toBeVisible()
+    await expect(panel.getByRole('button', { name: 'Clear custom selection' })).toHaveCount(0)
+    await expect(panel.getByRole('alert')).toHaveCount(0)
+    await expect(panel).not.toContainText('private-custom-id')
+  }
+  await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  await inbox.getByRole('checkbox', { name: 'Receive update digests in Inbox' }).uncheck()
+  await inbox.getByRole('button', { name: 'Save Inbox settings' }).click()
+  await expect.poll(() => state.inbox.preferences.enabled).toBe(false)
+  expect(state.inbox.preferences.savedFeeds?.ids).toEqual(['private-custom-id'])
+  release()
+  if (outcome === '401') {
+    await expect(preview).toHaveCount(0)
+    await expect(inbox).toHaveCount(0)
+  } else {
+    for (const panel of [preview, inbox]) {
+      await expect(panel.getByText('Loading saved feeds…')).toHaveCount(0)
+      await expect(panel.getByRole('button', { name: 'Clear custom selection' })).toBeVisible()
+      if (outcome === 'success') await expect(panel.getByLabel('Current custom source', { exact: true })).toBeChecked()
+      else await expect(panel).not.toContainText('Current custom source')
+    }
+    if (outcome === 'success') await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeEnabled()
+    else await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  }
+  expect(state.digestRequests).toBe(0)
+})
+
+for (const failure of ['503', 'abort']) test(`saved lookup ${failure} still permits keyboard consent withdrawal without exposing custom IDs`, async ({ page }) => {
+  const state = await mockFeed(page)
+  state.inbox.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['private-custom-id'] } }
+  state.digest.preferences = structuredClone(state.inbox.preferences)
+  await page.route('**/api/planning/update-feed/saved', (route) => failure === 'abort' ? route.abort('failed') : route.fulfill({ status: 503, json: { code: 'SavedUpdateFeedsUnavailable' } }))
+  await page.goto('/updates')
+  const summary = page.locator('summary', { hasText: 'Inbox digest settings' })
+  await summary.focus()
+  await page.keyboard.press('Enter')
+  const panel = page.getByRole('region', { name: 'Inbox digest settings' })
+  const consent = panel.getByRole('checkbox', { name: 'Receive update digests in Inbox' })
+  await expect(consent).toBeChecked()
+  await expect(panel).not.toContainText('private-custom-id')
+  await consent.focus()
+  await page.keyboard.press('Space')
+  const save = panel.getByRole('button', { name: 'Save Inbox settings' })
+  await expect(save).toBeEnabled()
+  await save.focus()
+  await page.keyboard.press('Enter')
+  await expect(consent).not.toBeChecked()
+  await expect.poll(() => state.inbox.preferences.enabled).toBe(false)
+  expect(state.inbox.preferences.savedFeeds).toEqual({ revision: 1, ids: ['private-custom-id'] })
+  expect(state.digestRequests).toBe(0)
+  await page.locator('summary', { hasText: 'Digest preview' }).click()
+  const preview = page.getByRole('region', { name: 'Digest preview', exact: true })
+  await expect(preview.getByRole('button', { name: 'Generate preview' })).toBeDisabled()
+  await expect(preview.getByLabel('Current preview', { exact: true })).toHaveCount(0)
+  await expect(preview).not.toContainText('private-custom-id')
+})
+
+test('saved lookup permission denial keeps digest controls unavailable', async ({ page }) => {
+  await mockFeed(page)
+  await page.route('**/api/planning/update-feed/saved', (route) => route.fulfill({ status: 403, json: { code: 'WorkspacePermissionDenied' } }))
+  await page.goto('/updates')
+  await expect(page.getByRole('heading', { name: 'Updates', exact: true })).toBeVisible()
+  await expect(page.locator('summary', { hasText: 'Inbox digest settings' })).toHaveCount(0)
+  await expect(page.locator('summary', { hasText: 'Digest preview' })).toHaveCount(0)
+})
+
+for (const inbox of [false, true]) test(`${inbox ? 'Inbox' : 'preview'} custom digest selection pins revision and hides deleted selections`, async ({ page }, testInfo) => {
+  const state = await mockFeed(page)
+  state.saved = { revision: 1, feeds: [{ id: 'private-selection-id', name: 'My portfolio risks', view: 'at-risk', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }
+  await page.goto('/updates')
+  const title = inbox ? 'Inbox digest settings' : 'Digest preview'
+  await page.locator('summary', { hasText: title }).click()
+  const panel = page.getByRole('region', { name: title, exact: true })
+  await panel.getByLabel('My portfolio risks', { exact: true }).check()
+  await panel.getByLabel('For me', { exact: true }).uncheck()
+  await panel.getByLabel(inbox ? 'Receive update digests in Inbox when delivery becomes available' : 'Enable manual previews').check()
+  const save = panel.getByRole('button', { name: inbox ? 'Save Inbox settings' : 'Save preview settings' })
+  await save.click()
+  await expect(save).toBeDisabled()
+  expect((inbox ? state.inbox : state.digest).preferences).toMatchObject({ views: [], savedFeeds: { revision: 1, ids: ['private-selection-id'] } })
+  expect(state.digestRequests).toBe(0)
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('custom-digest-mobile.png'), fullPage: true })
+  state.saved = { revision: 2, feeds: [] }
+  await page.reload()
+  await page.locator('summary', { hasText: title }).click()
+  await expect(panel.getByText('Saved feeds changed or are unavailable. Clear this selection and choose again.')).toBeVisible()
+  await expect(panel).not.toContainText('private-selection-id')
+  await expect(panel).not.toContainText('My portfolio risks')
+  await expect(save).toBeDisabled()
+  await panel.getByRole('button', { name: 'Clear custom selection' }).click()
+  await panel.getByLabel('Recent', { exact: true }).check()
+  await save.click()
+  await expect(save).toBeDisabled()
+  expect((inbox ? state.inbox : state.digest).preferences.savedFeeds).toBeUndefined()
+  expect(state.digestRequests).toBe(0)
+})
+
 for (const action of ['save-enabled', 'save-disabled', 'error']) for (const outside of [false, true]) test(`inactive Inbox action ${action} restores focus on return with outside focus ${outside}`, async ({ page }) => {
   const state = await mockFeed(page)
   state.inbox.preferences.enabled = true
@@ -292,11 +467,11 @@ test('Inbox consent is lazy, off by default, independent from previews and retai
   const panel = page.getByRole('region', { name: 'Inbox digest settings' })
   const consent = panel.getByLabel('Receive update digests in Inbox when delivery becomes available')
   await expect(consent).not.toBeChecked()
-  await expect(panel.getByText(/Automatic delivery is not active yet/)).toBeVisible()
+  await expect(panel.getByText(/Automatic delivery also requires operator activation/)).toBeVisible()
   await consent.check()
   await panel.getByLabel('Interval', { exact: true }).selectOption('weekly')
   await panel.getByRole('button', { name: 'Save Inbox settings' }).click()
-  await expect(panel.getByText('Delivery preference saved. Automatic delivery is not active.')).toBeVisible()
+  await expect(panel.getByText('Delivery preference saved. This does not activate automatic delivery.')).toBeVisible()
   expect(state.digest.preferences.enabled).toBe(false)
   expect(state.digestRequests).toBe(0)
   await page.reload()
@@ -472,11 +647,13 @@ for (const failure of ['abort', '503']) for (const outside of [false, true]) tes
   await save.focus()
   await page.keyboard.press('Enter')
   await expect.poll(() => waiting).toBe(true)
+  await expect(panel.locator('button[type="submit"]')).toBeDisabled()
   await page.evaluate(() => {
     Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => false })
     window.dispatchEvent(new Event('blur'))
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur()
   })
+  expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
   release()
   await expect(panel.getByRole('alert')).toContainText('Your changes are kept')
   await expect(save).toBeEnabled()
@@ -498,7 +675,7 @@ for (const enabled of [false, true]) test(`Inbox guest can read saved consent en
   await page.goto('/updates')
   await page.locator('summary', { hasText: 'Inbox digest settings' }).click()
   const panel = page.getByRole('region', { name: 'Inbox digest settings', exact: true })
-  await expect(panel.getByRole('status')).toHaveText(enabled ? 'Delivery preference saved. Automatic delivery is not active.' : 'Inbox digests are off.')
+  await expect(panel.getByRole('status')).toHaveText(enabled ? 'Delivery preference saved. This does not activate automatic delivery.' : 'Inbox digests are off.')
   await expect(panel.getByText('Daily', { exact: true })).toBeVisible()
   await expect(panel.getByText('For me', { exact: true })).toBeVisible()
   await expect(panel.locator('form, input, select')).toHaveCount(0)
@@ -1078,8 +1255,10 @@ test('Feed scope invalidation does not swallow a concurrent settings save confli
 
 test('save conflict and focus refresh preserve unsaved cadence until explicit reload', async ({ page }) => {
   const state = await mockFeed(page)
+  await page.clock.install()
+  let reads = 0
   let puts = 0
-  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'PUT') puts++; await route.fallback() })
+  await page.route('**/api/planning/update-feed/digest', async (route) => { if (route.request().method() === 'GET') reads++; if (route.request().method() === 'PUT') puts++; await route.fallback() })
   state.digest.preferences.enabled = true
   await page.goto('/updates')
   const summary = page.locator('summary', { hasText: 'Digest preview' })
@@ -1098,7 +1277,10 @@ test('save conflict and focus refresh preserve unsaved cadence until explicit re
   await panel.locator('form').evaluate((form) => form.requestSubmit())
   await expect(panel.getByRole('alert')).toContainText('Settings changed')
   expect(puts).toBe(1)
+  const previousReads = reads
+  await page.clock.fastForward(6_001)
   await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect.poll(() => reads).toBeGreaterThan(previousReads)
   await expect(panel.getByLabel('Interval', { exact: true })).toHaveValue('weekly')
   await expect(panel.getByLabel('Recent', { exact: true })).toBeChecked()
   await panel.getByRole('button', { name: 'Reload', exact: true }).focus()
@@ -1406,6 +1588,8 @@ for (const mode of ['visible', 'pending', 'draft']) test(`read-state changes inv
 
 test('guests have no mutation controls and permission denial offers no reload loop', async ({ page }) => {
   const state = await mockFeed(page, true)
+  state.digest.preferences = { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['private-guest-selection'] } }
+  state.inbox.preferences = structuredClone(state.digest.preferences)
   await page.goto('/updates')
   await expect(page.getByTestId('update-feed-row')).toHaveCount(3)
   await expect(page.getByText('Guest access is read-only.').and(page.locator(':visible'))).toBeVisible()
@@ -1420,6 +1604,8 @@ test('guests have no mutation controls and permission denial offers no reload lo
   await expect(inbox.getByText('Guest access is read-only.')).toBeVisible()
   await expect(inbox.locator('form')).toHaveCount(0)
   await expect(inbox.getByRole('button', { name: /Save Inbox settings|Clear custom selection/ })).toHaveCount(0)
+  await expect(digest).not.toContainText('private-guest-selection')
+  await expect(inbox).not.toContainText('private-guest-selection')
   await page.screenshot({ path: '/tmp/issue241-feed-guest.png', fullPage: true })
   state.forbidden = true
   await page.getByLabel('Feed', { exact: true }).selectOption('recent')

@@ -44,9 +44,11 @@ export interface InboxDigestStore extends UpdateFeedDigestStore {
    * @param state - Completed metadata carrying the observed claim revision.
    * @param planningRevision - Current content authorization fence.
    * @param message - Bodyless notification, absent for an empty digest.
+   * @param savedFeedsRevision - Confirmed owner collection revision for custom sources,
+   * transactionally fenced with completion; omitted for standard-only selections.
    * @returns Committed incremented metadata; failure must leave both rows unchanged.
    */
-  complete(recipient: InboxDigestRecipient, state: UpdateFeedDigestState, planningRevision: number, message: InboxDigestMessage | undefined): Promise<UpdateFeedDigestState>
+  complete(recipient: InboxDigestRecipient, state: UpdateFeedDigestState, planningRevision: number, message: InboxDigestMessage | undefined, savedFeedsRevision?: number): Promise<UpdateFeedDigestState>
 }
 
 /** Fresh recipient authorization and existing Feed/read-state ports. */
@@ -141,8 +143,8 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
   if (state.history.some((item) => item.id.slice(item.id.indexOf(':') + 1) > new Date(now).toISOString().slice(0, 10))) return 'not-due'
   const store: UpdateFeedDigestStore = {
     get: async () => state,
-    replace: (workspaceId, memberKey, next, planningRevision) => {
-      if (planningRevision === undefined) return context.store.replace(workspaceId, memberKey, next)
+    replace: (workspaceId, memberKey, next, planningRevision, savedFeedsRevision) => {
+      if (planningRevision === undefined) return context.store.replace(workspaceId, memberKey, next, undefined, savedFeedsRevision)
       const completed = next.history.find((item) => item.id === id)
       if (completed?.status !== 'completed') throw new Error('Digest completion missing')
       const message: InboxDigestMessage | undefined = completed.count === 0 ? undefined : {
@@ -150,7 +152,7 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
         occurredAt: new Date(completed.startedAt ?? now).toISOString(),
         deepLink: '/updates',
       }
-      return context.store.complete(recipient, next, planningRevision, message)
+      return context.store.complete(recipient, next, planningRevision, message, savedFeedsRevision)
     },
   }
   const reader: UpdateFeedReader = { ...context.reader, readSnapshot: async () => {
@@ -158,8 +160,18 @@ export async function deliverInboxDigest(dependencies: InboxDigestDependencies, 
     if (snapshot.revision !== context.authorizationRevision) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest authorization changed')
     return snapshot
   } }
-  const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now, scheduledAt)
-  return result.entries.length === 0 ? 'empty' : 'delivered'
+  try {
+    const result = await previewUpdateFeedDigest(reader, context.readState, store, recipient.workspaceId, now, scheduledAt)
+    return result.entries.length === 0 ? 'empty' : 'delivered'
+  } catch (error) {
+    if (!(error instanceof PlanningError) || error.code !== 'UpdateFeedDigestSelectionStale') throw error
+    const current = await context.store.get(recipient.workspaceId, recipient.memberKey)
+    if (!current.preferences.enabled) return 'disabled'
+    // Preserve a concurrent explicit reselection; only withdraw the exact stale consent.
+    if (JSON.stringify(current.preferences) !== JSON.stringify(state.preferences)) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest settings changed during reselection handling.')
+    await context.store.replace(recipient.workspaceId, recipient.memberKey, { ...current, preferences: { ...current.preferences, enabled: false } })
+    return 'disabled'
+  }
 }
 
 /** One bounded candidate page from a due index or explicitly configured recipient set. */

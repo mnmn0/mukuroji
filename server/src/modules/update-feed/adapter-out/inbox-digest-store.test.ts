@@ -1,4 +1,6 @@
 import { expect, test } from 'bun:test'
+import { createHash } from 'node:crypto'
+import type { SavedUpdateFeeds } from '@mukuroji/contracts'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { PlanningError, type PlanningCallerAuthorizationConditionCheck } from '../../planning'
@@ -8,6 +10,7 @@ import { emptyDigestState } from '../application/digest'
 import { deliverInboxDigest, inboxDigestTerminalReason, runInboxDigestSchedule, type InboxDigestContext } from '../application/inbox-digest'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 import { DynamoDbInboxDigestStore, INBOX_DIGEST_INDEX } from './inbox-digest-store'
+import { DynamoDbSavedUpdateFeedsStore } from './saved-feeds-store'
 import { DynamoDbInboxDigestCheckpoints } from './inbox-digest-checkpoint'
 import { runInboxDigestWorker, type InboxDigestWorkerDependencies } from '../application/inbox-digest-worker'
 
@@ -99,7 +102,7 @@ async function fixture() {
   await store.replace('w', 'reader', { ...emptyDigestState(), preferences: { enabled: true, frequency: 'daily', views: ['recent', 'at-risk'] } })
   const snapshot = await new InMemoryPlanningClient().get('w', { workItems: [] })
   snapshot.updateTargets = [{ target: { type: 'project', teamId: 'team', projectId: 'project' }, latestVersion: 1, updateState: 'current', updatedAt: new Date(now).toISOString(), latestUpdate: { id: 'report', version: 1, health: 'at-risk', risk: 'none', summary: 'Private content', authorMemberKey: 'reader', coveredDueAt: new Date(now).toISOString(), createdAt: new Date(now).toISOString(), progressSnapshot: { percent: 20, linkedWorkItemCount: 1 }, capturedScope: { teamId: 'team', projectId: 'project' } } }]
-  const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
+  const context: InboxDigestContext = { recipient, authorizationRevision: 0, store, readState: new InMemoryUpdateFeedReadStateStore(), reader: { memberKey: 'reader', readSavedFeeds: async (): Promise<SavedUpdateFeeds> => ({ revision: 1, feeds: [{ id: 'custom', name: 'Personal name', view: 'recent', filters: { teamIds: [], projects: [], portfolioIds: [], initiativeIds: [], health: [], updateStates: [] } }] }), readSnapshot: async () => snapshot, authorizeTarget: async (target: typeof snapshot.updateTargets[number]) => target } }
   return {
     store, rows, indexed, commands, coordinate, context,
     /** Models a converged due index with its actual key condition and pagination. */
@@ -294,6 +297,132 @@ test('atomic SDK completion binds authorization, missing META, preferences and d
   expect(JSON.stringify(f.notifications())).not.toContain('Private content')
   expect(f.metadata().inboxDigestDueAt).toBe(Date.parse('2026-10-04T00:00:00Z'))
   expect(await f.run()).toBe('not-due')
+})
+
+test('saved-feed revision is fenced atomically with Inbox delivery, including changes after the final read', async () => {
+  for (const change of [false, true]) {
+    const f = await fixture()
+    const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+    f.rows.set(f.coordinate('planning', definition), definition)
+    const state = await f.store.get('w', 'reader')
+    await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+    if (change) f.beforeTransaction(() => {
+      const transaction = f.commands.at(-1)
+      if (transaction instanceof TransactWriteCommand && transaction.input.TransactItems?.some((item) => item.Put?.TableName === 'notifications')) f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 2 })
+    })
+    if (change) {
+      await expect(f.run()).rejects.toMatchObject({ status: 409 })
+      expect(f.notifications()).toHaveLength(0)
+    } else {
+      expect(await f.run()).toBe('delivered')
+      expect(f.notifications()).toHaveLength(1)
+      expect(JSON.stringify(f.notifications())).not.toContain('Personal name')
+    }
+  }
+})
+
+for (const corrupt of [true, false]) test(`saved-definition SDK boundary corruption=${corrupt} is classified through real scheduled delivery`, async () => {
+  const f = await fixture()
+  const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+  f.rows.set(f.coordinate('planning', definition), definition)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+  const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
+  // The SDK's overloaded transport is the only test-only assertion here.
+  client.send = (async (command: unknown) => {
+    expect(command).toBeInstanceOf(GetCommand)
+    if (!corrupt) throw new Error('Unknown SDK failure')
+    return { Item: { ...definition, feeds: [{ id: 'invalid' }] } }
+  }) as DynamoDBDocumentClient['send']
+  const definitions = new DynamoDbSavedUpdateFeedsStore('planning', client)
+  f.context.reader.readSavedFeeds = () => definitions.get('w', 'reader')
+  const result = await runInboxDigestSchedule({ enabled: true, dependencies: { authorize: async () => f.context }, listCandidates: async () => ({ recipients: [{ ...recipient, frequency: 'daily' }] }) }, now)
+  expect(result.terminal).toEqual(corrupt ? [{ recipient, frequency: 'daily', scheduledAt: now, interval: 'daily:2026-10-03', reason: 'corrupt-state' }] : [])
+  expect(result.failed).toEqual(corrupt ? [] : [{ ...recipient, frequency: 'daily', scheduledAt: now }])
+  expect((await f.store.get('w', 'reader')).history).toEqual([])
+  expect(f.notifications()).toHaveLength(0)
+})
+
+for (const change of ['edited', 'deleted']) for (const during of [false, true]) test(`${change} definitions disable stale delivery once, during generation ${during}, until explicit reselection`, async () => {
+  const f = await fixture()
+  const definition = { workspaceId: 'w', recordKey: `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update('reader').digest('hex')}`, revision: 1, schemaVersion: 1, entryType: 'update-feed-definitions' }
+  const original = await f.context.reader.readSavedFeeds!()
+  let collection = original
+  let reads = 0
+  f.rows.set(f.coordinate('planning', definition), definition)
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } }, undefined, 1)
+  const indexedBeforeChange = structuredClone(f.metadata())
+  f.context.reader.readSavedFeeds = async () => {
+    if (++reads === (during ? 2 : 1)) {
+      collection = { revision: 2, feeds: change === 'deleted' ? [] : original.feeds.map((feed) => ({ ...feed, name: 'Edited private definition' })) }
+      f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 2 })
+    }
+    return collection
+  }
+  expect(await f.run()).toBe('disabled')
+  const paused = await f.store.get('w', 'reader')
+  expect(paused.preferences.enabled).toBe(false)
+  expect(paused.preferences.savedFeeds?.revision).toBe(1)
+  expect(paused.history).toHaveLength(during ? 1 : 0)
+  if (during) expect(paused.history[0]).toMatchObject({ status: 'failed', attempts: 1 })
+  expect(f.metadata().inboxDigestShard).toBeUndefined()
+  expect(f.metadata().inboxDigestDueAt).toBeUndefined()
+  f.indexed.push(indexedBeforeChange)
+  const shard = Number(String(indexedBeforeChange.inboxDigestShard).split('#')[1])
+  expect((await f.store.listDue(shard)).recipients).toEqual([]) // Stale GSI results are strongly rechecked.
+  const queries = reads
+  for (let repetition = 0; repetition < 4; repetition++) expect(await f.run()).toBe('disabled')
+  expect(reads).toBe(queries)
+  expect(await f.store.get('w', 'reader')).toEqual(paused)
+  expect(f.notifications()).toHaveLength(0)
+  collection = { ...original, revision: 3 }
+  f.rows.set(f.coordinate('planning', definition), { ...definition, revision: 3 })
+  expect(await f.run()).toBe('disabled') // Restoring a definition never restores withdrawn consent.
+  await f.store.replace('w', 'reader', { ...paused, preferences: { ...paused.preferences, enabled: true, savedFeeds: { revision: 3, ids: ['custom'] } } }, undefined, 3)
+  expect(await f.run()).toBe('delivered')
+  expect(f.notifications()).toHaveLength(1)
+})
+
+for (const withdrawal of [false, true]) test(`stale selection handling preserves concurrent explicit consent change, withdrawal ${withdrawal}`, async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = async () => {
+    const current = await f.store.get('w', 'reader')
+    await f.store.replace('w', 'reader', { ...current, preferences: { enabled: !withdrawal, frequency: 'weekly', views: ['recent'] } })
+    return { revision: 2, feeds: [] }
+  }
+  if (withdrawal) expect(await f.run()).toBe('disabled')
+  else await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect((await f.store.get('w', 'reader')).preferences).toEqual({ enabled: !withdrawal, frequency: 'weekly', views: ['recent'] })
+  expect(f.notifications()).toHaveLength(0)
+  expect(await f.run()).toBe(withdrawal ? 'disabled' : 'delivered')
+})
+
+test('missing definition reader is an availability failure, never silent consent withdrawal', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = undefined
+  await expect(f.run()).rejects.toMatchObject({ status: 503, code: 'UpdateFeedDigestAuthorizationUnavailable' })
+  expect((await f.store.get('w', 'reader')).preferences.enabled).toBe(true)
+  expect(f.notifications()).toHaveLength(0)
+})
+
+test('stale-selection disable is CAS-fenced against a reselection at the write boundary', async () => {
+  const f = await fixture()
+  const state = await f.store.get('w', 'reader')
+  await f.store.replace('w', 'reader', { ...state, preferences: { enabled: true, frequency: 'daily', views: [], savedFeeds: { revision: 1, ids: ['custom'] } } })
+  f.context.reader.readSavedFeeds = async () => ({ revision: 2, feeds: [] })
+  f.beforeTransaction(() => {
+    const row = f.metadata()
+    row.revision = Number(row.revision) + 1
+    row.preferences = { enabled: true, frequency: 'weekly', views: ['recent'] }
+  })
+  await expect(f.run()).rejects.toMatchObject({ code: 'UpdateFeedDigestConflict' })
+  expect((await f.store.get('w', 'reader')).preferences).toEqual({ enabled: true, frequency: 'weekly', views: ['recent'] })
+  expect(f.notifications()).toHaveLength(0)
 })
 
 test('lost transaction response and concurrent attempts preserve a single durable Inbox row', async () => {

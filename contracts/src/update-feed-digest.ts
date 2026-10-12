@@ -1,16 +1,21 @@
 import type { UpdateFeedEntry, UpdateFeedView } from './update-feed'
 
-/** UTC calendar interval used by the preview-only digest. */
+/** UTC calendar interval used by separately stored preview and Inbox preferences. */
 export type UpdateFeedDigestFrequency = 'daily' | 'weekly'
 
 /** Personal generation preferences; these never enable a live schedule. */
 export type UpdateFeedDigestPreferences = {
-  /** Opt-in for manual preview generation only. */
+  /** Enables this collection's use; Inbox consent is separate and never activates a worker. */
   enabled: boolean
   /** UTC day or Monday-based UTC week. */
   frequency: UpdateFeedDigestFrequency
-  /** Union of at most six unique standard views. */
+  /** Unique standard views; combined with saved definitions, select one through six sources. */
   views: UpdateFeedView[]
+  /** Optional member-owned definitions, pinned until explicit reselection; combined source cap is six. */
+  savedFeeds?: {
+    /** Positive saved-collection revision confirmed by the member. */ revision: number
+    /** Unique member-local identifiers, never copied names or filter scopes. */ ids: string[]
+  }
 }
 
 /** Content-free bounded generation receipt, never a cached notification body. */

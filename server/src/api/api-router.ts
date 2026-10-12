@@ -7151,7 +7151,7 @@ routeApp.put('/api/planning/update-feed/digest/inbox', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
     const store = workItemDependencies.inboxDigestSettings.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'))
-    return c.json(await replaceDigestPreferences(store, principal.directoryId, principal.userKey, await readPlanningJson<unknown>(c.req)))
+    return c.json(await replaceDigestPreferences(store, principal.directoryId, principal.userKey, await readPlanningJson<unknown>(c.req), workItemDependencies.savedUpdateFeeds))
   } catch (error) { return toPlanningErrorResponse(c, error) }
 })
 
@@ -7163,7 +7163,7 @@ routeApp.put('/api/planning/update-feed/digest', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     if (principal.workspaceRole === 'guest') throw new WorkspaceAccessError(403, 'WorkspaceRoleDenied', 'Guest members have read-only Workspace access.')
     const store = workItemDependencies.updateFeedDigest.withCallerAuthorization(createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'))
-    return c.json(await replaceDigestPreferences(store, principal.directoryId, principal.userKey, await readPlanningJson<unknown>(c.req)))
+    return c.json(await replaceDigestPreferences(store, principal.directoryId, principal.userKey, await readPlanningJson<unknown>(c.req), workItemDependencies.savedUpdateFeeds))
   } catch (error) { return toPlanningErrorResponse(c, error) }
 })
 
@@ -26174,6 +26174,7 @@ async function createPlanningUpdateFeedReader(principal: WorkspacePrincipal, loc
         ? snapshot.entities.find((entity) => entity.id === target.entityId)?.title ?? target.entityId
         : directory.teams.find((team) => team.id === target.teamId)?.projects.find((project) => project.id === target.projectId)?.name ?? target.projectId
     },
+    readSavedFeeds: () => workItemDependencies.savedUpdateFeeds.get(principal.directoryId, principal.userKey),
     readSnapshot: () => workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
     authorizeTarget: async (summary, snapshot) => {
       const target = summary.target

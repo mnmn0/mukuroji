@@ -101,6 +101,18 @@ export class InMemorySavedUpdateFeedsStore implements SavedUpdateFeedsPersistenc
 
 /** Derives a member-specific noncanonical key with no user-supplied physical key. */
 function recordKey(memberKey: string) { return `UPDATE_FEED_DEFINITIONS#${createHash('sha256').update(memberKey.trim().toLowerCase()).digest('hex')}` }
+/** Fences a digest's explicitly confirmed personal definitions in the same transaction.
+ * @param tableName - Existing Planning table.
+ * @param workspaceId - Authenticated Workspace.
+ * @param memberKey - Authenticated owner.
+ * @param revision - Optional confirmed collection revision.
+ * @returns A typed revision guard, absent for standard-only selections.
+ */
+export function digestSavedFeedsFence(tableName: string, workspaceId: string, memberKey: string, revision?: number): PlanningCallerAuthorizationConditionCheck[] {
+  if (revision === undefined) return []
+  if (!Number.isSafeInteger(revision) || revision < 1) throw new PlanningError(409, 'UpdateFeedDigestConflict', 'Digest selection changed.')
+  return [{ ConditionCheck: { TableName: tableName, Key: { workspaceId, recordKey: recordKey(memberKey) }, ConditionExpression: '#revision = :revision AND #schema = :schema AND #type = :type', ExpressionAttributeNames: { '#revision': 'revision', '#schema': 'schemaVersion', '#type': 'entryType' }, ExpressionAttributeValues: { ':revision': revision, ':schema': 1, ':type': 'update-feed-definitions' } } }]
+}
 /** Classifies full transaction reason vectors and rejects malformed persistence. */
 function storageFailure(error: unknown, size = 0): never {
   const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined

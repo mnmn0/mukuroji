@@ -8,6 +8,25 @@ import { InMemoryPlanningClient } from '../../planning/planning'
 import { InMemoryUpdateFeedReadStateStore } from './read-state-store'
 
 /** Replaces only the overloaded SDK transport to inspect real command inputs. */
+test('preview completion fences selected saved definitions in the same transaction', async () => {
+  let revision = 4
+  const store = new DynamoDbUpdateFeedDigestStore('planning', clientFor(async (command) => {
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
+    const items = command.input.TransactItems ?? []
+    const guard = items.at(-1)?.ConditionCheck
+    expect(guard?.Key?.workspaceId).toBe('w')
+    expect(String(guard?.Key?.recordKey)).toStartWith('UPDATE_FEED_DEFINITIONS#')
+    expect(guard?.ExpressionAttributeValues).toEqual({ ':revision': 4, ':schema': 1, ':type': 'update-feed-definitions' })
+    if (revision !== 4) throw Object.assign(new Error('Changed selection'), { name: 'TransactionCanceledException', CancellationReasons: items.map((_, index) => ({ Code: index === items.length - 1 ? 'ConditionalCheckFailed' : 'None' })) })
+    return {}
+  }), checks)
+  const state = { ...emptyDigestState(), preferences: { ...emptyDigestState().preferences, savedFeeds: { revision: 4, ids: ['personal'] } } }
+  expect((await store.replace('w', 'reader', state, 7, 4)).revision).toBe(1)
+  revision = 5
+  await expect(store.replace('w', 'reader', state, 7, 4)).rejects.toMatchObject({ status: 409 })
+})
+
+/** Replaces only the overloaded SDK transport to inspect real command inputs. */
 function clientFor(send: (command: unknown) => Promise<unknown>): DynamoDBDocumentClient {
   const client = DynamoDBDocumentClient.from(new DynamoDBClient({ region: 'test' }))
   // SDK overload replacement is isolated to this fake; command inputs are asserted below.
