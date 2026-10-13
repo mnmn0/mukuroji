@@ -37,7 +37,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "2.1.0",
+    "@modelcontextprotocol/client": "2.2.0",
     "@types/bun": "latest",
     "pdfjs-dist": "^6.1.200"
   }
