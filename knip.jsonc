@@ -8,11 +8,13 @@
     "dist/**",
     "storybook-static/**",
     "web/dist/**",
+    // Served verbatim by Vite and referenced from HTML or the manifest, never imported.
+    "web/public/**",
     "web/storybook-static/**"
   ],
   "workspaces": {
     ".": {
-      "entry": ["playwright.config.ts", "scripts/**/*.ts"]
+      "entry": ["playwright.config.ts", "playwright.pwa.config.ts", "scripts/**/*.ts"]
     },
     "contracts": {
       "entry": ["src/index.ts"]

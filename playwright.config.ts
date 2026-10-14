@@ -26,6 +26,8 @@ const config = defineConfig({
   projects: [
     {
       name: 'chromium',
+      // PWA specs need a production build and run from playwright.pwa.config.ts.
+      testIgnore: /pwa\.spec\.ts$/,
       use: { ...devices['Desktop Chrome'] },
     },
   ],

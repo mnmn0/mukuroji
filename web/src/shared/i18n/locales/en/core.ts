@@ -3,6 +3,9 @@
  */
 export const coreMessages = {
   'app.title': 'mukuroji',
+  'app.update.available': 'A new version is available. Reload to update.',
+  'app.update.reload': 'Reload',
+  'app.update.dismiss': 'Later',
   'language.aria': 'Select display language',
   'sidebar.nav.focus': 'Focus',
   'sidebar.nav.updates': 'Updates',
