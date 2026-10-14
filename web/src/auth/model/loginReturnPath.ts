@@ -45,3 +45,21 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
     return '/dashboard'
   }
 }
+
+/**
+ * Builds the login URL for a protected route opened without a usable session.
+ *
+ * The requested location is carried in `returnTo` only when the login page would accept it
+ * unchanged, so arbitrary input is never echoed into the URL and disallowed paths keep the
+ * plain login URL.
+ *
+ * @param requestedPath - Path, search, and hash of the protected route the user opened.
+ * @returns `/` with a `returnTo` query for an allowed path, or `/` otherwise.
+ */
+export function buildLoginRedirectPath(requestedPath: string) {
+  if (resolveSafeLoginReturnPath(requestedPath) !== requestedPath) {
+    return '/'
+  }
+
+  return `/?returnTo=${encodeURIComponent(requestedPath)}`
+}
