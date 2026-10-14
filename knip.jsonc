@@ -8,6 +8,8 @@
     "dist/**",
     "storybook-static/**",
     "web/dist/**",
+    // Served verbatim by Vite and referenced from HTML or the manifest, never imported.
+    "web/public/**",
     "web/storybook-static/**"
   ],
   "workspaces": {

@@ -41,11 +41,48 @@ export function getInitialLocale(): Locale {
   return resolveLocale(window.navigator.language)
 }
 
+/** Listeners notified when the saved locale preference may have changed. */
+const localePreferenceListeners = new Set<() => void>()
+
 /**
  * ユーザーが選択した locale をブラウザに保存します。
  */
 export function setLocalePreference(locale: Locale) {
   window.localStorage.setItem(storageKey, locale)
+
+  for (const listener of localePreferenceListeners) {
+    listener()
+  }
+}
+
+/**
+ * Subscribes to locale preference changes from this tab or another tab.
+ *
+ * Use with `useSyncExternalStore` and `getInitialLocale` for UI that lives outside the routes
+ * that own the locale state.
+ *
+ * @param listener - Callback invoked when the saved locale may have changed.
+ * @returns Unsubscribe function.
+ */
+export function subscribeToLocalePreference(listener: () => void): () => void {
+  /**
+   * Forwards cross-tab updates to the saved locale key.
+   *
+   * @param event - Storage event raised by another tab.
+   */
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === storageKey) {
+      listener()
+    }
+  }
+
+  localePreferenceListeners.add(listener)
+  window.addEventListener('storage', handleStorage)
+
+  return () => {
+    localePreferenceListeners.delete(listener)
+    window.removeEventListener('storage', handleStorage)
+  }
 }
 
 /**

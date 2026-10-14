@@ -42,6 +42,15 @@ describe('selectRequestStrategy', () => {
     }
   })
 
+  test('serves the offline page resources from the shell cache', () => {
+    for (const path of ['/offline.css', '/offline.js', '/pwa-192x192.png']) {
+      expect(selectRequestStrategy(request({ url: `${origin}${path}`, mode: 'no-cors' }), origin))
+        .toBe('cache-first-offline-resource')
+    }
+    expect(selectRequestStrategy(request({ url: `${origin}/offline.js?v=2` }), origin)).toBe('passthrough')
+    expect(selectRequestStrategy(request({ url: `${origin}/pwa-512x512.png` }), origin)).toBe('passthrough')
+  })
+
   test('never intercepts API, public API, or developer platform requests', () => {
     for (const path of ['/api/auth/me', '/api/work-items?cursor=a', '/v1/work-items', '/developer/api-keys']) {
       expect(selectRequestStrategy(request({ url: `${origin}${path}` }), origin)).toBe('passthrough')

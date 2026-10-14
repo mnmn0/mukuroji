@@ -12,6 +12,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   production build かつ secure context の場合だけ `window.load` 後に登録します。開発 server では登録しません。
 - install: browser 標準の install UI (Chromium の address bar / menu、iOS Safari の「ホーム画面に追加」) を使います。
   `beforeinstallprompt` を使う独自の install 導線は後続範囲です。
+- 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。
 
@@ -22,6 +23,7 @@ worker が保存するのは tenant に依存しない静的 build 成果物だ�
 | Request | 扱い |
 | --- | --- |
 | 同一 origin の navigation | network-first。保存しない。network 失敗時だけ `/offline.html` を返す |
+| `/offline.css`、`/offline.js`、`/pwa-192x192.png` (query なし、GET) | install 時に `/offline.html` と一緒に precache し、cache-first で返す |
 | 同一 origin の `/assets/*` (query なし、GET) | cache-first。200 の `basic` response だけを最大 120 件保存 |
 | `/api/*`、`/v1/*`、`/developer/*`、その他 | 介入しない |
 | GET 以外、`Range` 付き、cross-origin | 介入しない |
@@ -39,8 +41,9 @@ frontend の配信基盤 (CDK 外) は次を満たしてください。
 
 - `/sw.js` を `Cache-Control: no-cache` (または `max-age=0`) で配信する。長期 cache すると更新が届きません。
 - `/manifest.webmanifest` を `application/manifest+json` で配信する。
-- `/sw.js`、`/manifest.webmanifest`、`/offline.html`、icon を SPA の index.html fallback 対象から除外する。
-- CSP を導入する場合は `worker-src 'self'` と `manifest-src 'self'` を許可する。
+- `/sw.js`、`/manifest.webmanifest`、`/offline.html`、`/offline.css`、`/offline.js`、icon を SPA の index.html fallback 対象から除外する。
+- CSP を導入する場合は `worker-src 'self'` と `manifest-src 'self'` を許可する。`offline.html` は inline の
+  script / style を持たないため、`script-src 'self'` と `style-src 'self'` のままで再試行と自動再読み込みが動きます。
 
 ## Icon の生成
 

@@ -8,6 +8,17 @@
 /** Same-origin path of the static page shown when a navigation cannot reach the network. */
 export const offlineFallbackPath = '/offline.html'
 
+/**
+ * Static files the offline page loads. They are precached with the page and served from the
+ * cache so the offline screen keeps its style, icon, and retry script without a network.
+ * Keeping them out of the HTML also lets a strict `script-src 'self'` / `style-src 'self'` CSP apply.
+ */
+export const offlineShellResourcePaths: readonly string[] = [
+  '/offline.css',
+  '/offline.js',
+  '/pwa-192x192.png',
+]
+
 /** Path prefix of Vite's content-hashed build output. */
 export const hashedAssetPathPrefix = '/assets/'
 
@@ -37,9 +48,14 @@ export function isSkipWaitingMessage(data: unknown): boolean {
  *
  * - `network-first-navigation`: always fetch the page, fall back to the offline page only on network failure.
  * - `cache-first-asset`: serve immutable hashed build output from the cache, filling it on first use.
+ * - `cache-first-offline-resource`: serve a precached file used by the offline page.
  * - `passthrough`: do not intercept; the browser handles the request as if no worker existed.
  */
-export type RequestStrategy = 'network-first-navigation' | 'cache-first-asset' | 'passthrough'
+export type RequestStrategy =
+  | 'network-first-navigation'
+  | 'cache-first-asset'
+  | 'cache-first-offline-resource'
+  | 'passthrough'
 
 /** Subset of a fetch request that decides its caching strategy. */
 export type RequestDescriptor = {
@@ -84,8 +100,16 @@ export function selectRequestStrategy(
     return 'network-first-navigation'
   }
 
-  if (url.pathname.startsWith(hashedAssetPathPrefix) && url.search === '') {
+  if (url.search !== '') {
+    return 'passthrough'
+  }
+
+  if (url.pathname.startsWith(hashedAssetPathPrefix)) {
     return 'cache-first-asset'
+  }
+
+  if (offlineShellResourcePaths.includes(url.pathname)) {
+    return 'cache-first-offline-resource'
   }
 
   return 'passthrough'

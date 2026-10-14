@@ -5,6 +5,7 @@ import {
   isSkipWaitingMessage,
   maxCachedAssetEntries,
   offlineFallbackPath,
+  offlineShellResourcePaths,
   selectEvictedEntries,
   selectRequestStrategy,
   selectStaleCaches,
@@ -24,7 +25,7 @@ const cachePrefix = 'mukuroji-'
  */
 const cacheLayoutVersion = 'v1'
 
-/** Cache holding the static offline fallback page. */
+/** Cache holding the static offline fallback page and the files it loads. */
 const shellCacheName = `${cachePrefix}shell-${cacheLayoutVersion}`
 
 /** Cache holding content-hashed build assets. */
@@ -64,18 +65,27 @@ self.addEventListener('fetch', (event) => {
 
   if (strategy === 'cache-first-asset') {
     event.respondWith(fetchHashedAsset(event, request))
+    return
+  }
+
+  if (strategy === 'cache-first-offline-resource') {
+    event.respondWith(fetchOfflineResource(request))
   }
 })
 
 /**
- * Stores the offline fallback page fetched directly from the network.
+ * Stores the offline fallback page and the files it loads, fetched directly from the network.
  *
- * @returns A promise that settles once the page is cached.
+ * @returns A promise that settles once every file is cached.
  */
 async function precacheOfflineFallback(): Promise<void> {
   const cache = await caches.open(shellCacheName)
 
-  await cache.add(new Request(offlineFallbackPath, { cache: 'reload' }))
+  await cache.addAll(
+    [offlineFallbackPath, ...offlineShellResourcePaths].map(
+      (path) => new Request(path, { cache: 'reload' }),
+    ),
+  )
 }
 
 /**
@@ -113,6 +123,18 @@ async function fetchNavigation(request: Request): Promise<Response> {
 
     throw error
   }
+}
+
+/**
+ * Serves a file used by the offline page from the shell cache, falling back to the network.
+ *
+ * @param request - Same-origin GET request for an offline page resource.
+ * @returns The precached response, or the network response when the cache misses.
+ */
+async function fetchOfflineResource(request: Request): Promise<Response> {
+  const cached = await caches.match(request, { cacheName: shellCacheName })
+
+  return cached ?? fetch(request)
 }
 
 /**

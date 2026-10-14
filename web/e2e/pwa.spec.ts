@@ -98,6 +98,12 @@ test('オフライン時のページ遷移は静的なオフラインページ�
 
   await expect(page.getByRole('heading', { level: 1, name: /オフラインです/ })).toBeVisible()
   await expect(page.getByRole('button', { name: '再試行 / Retry' })).toBeVisible()
+  // The icon, stylesheet, and script come from the shell cache, not inline markup or the network.
+  await expect.poll(() => page.locator('main img').evaluate((image) => {
+    return image instanceof HTMLImageElement ? image.naturalWidth : 0
+  })).toBeGreaterThan(0)
+  await expect(page.getByRole('button', { name: '再試行 / Retry' })).toHaveCSS('min-height', '44px')
+  expect(await page.locator('script:not([src]), style').count()).toBe(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
     page.viewportSize()?.width ?? 0,
   )
@@ -130,10 +136,12 @@ test('service workerはページやAPI応答を保存せず、静的なbuild成�
     return paths
   })
 
-  expect(cachedPaths).toContain('/offline.html')
+  const offlineShellPaths = ['/offline.html', '/offline.css', '/offline.js', '/pwa-192x192.png']
+
+  expect(cachedPaths).toEqual(expect.arrayContaining(offlineShellPaths))
   expect(cachedPaths.some((path) => path.startsWith('/assets/'))).toBe(true)
 
   for (const path of cachedPaths) {
-    expect(path === '/offline.html' || path.startsWith('/assets/'), path).toBe(true)
+    expect(offlineShellPaths.includes(path) || path.startsWith('/assets/'), path).toBe(true)
   }
 })
