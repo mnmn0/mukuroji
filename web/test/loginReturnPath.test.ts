@@ -60,6 +60,7 @@ describe('resolveSafeLoginReturnPath', () => {
 describe('buildLoginRedirectPath', () => {
   test('carries allowed workspace locations to the login page', () => {
     expect(buildLoginRedirectPath('/my-tasks')).toBe('/?returnTo=%2Fmy-tasks')
+    expect(buildLoginRedirectPath('/updates?feed=saved-1')).toBe('/?returnTo=%2Fupdates%3Ffeed%3Dsaved-1')
     expect(buildLoginRedirectPath('/teams/core-team/issues?issueId=issue-34#activity')).toBe(
       '/?returnTo=%2Fteams%2Fcore-team%2Fissues%3FissueId%3Dissue-34%23activity',
     )
