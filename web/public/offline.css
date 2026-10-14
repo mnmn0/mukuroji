@@ -6,4 +6,4 @@ h1 { font-size: 1.25rem; margin: 16px 0 8px; }
 p { margin: 0 0 8px; line-height: 1.6; color: #43515a; }
 p[lang="en"] { font-size: 0.875rem; }
 button { margin-top: 16px; min-height: 44px; width: 100%; border: 0; border-radius: 8px; background: #0f766e; color: #ffffff; font: inherit; font-weight: 600; cursor: pointer; }
-button:focus-visible { outline: 3px solid #5eead4; outline-offset: 2px; }
+button:focus-visible { outline: 3px solid #0f766e; outline-offset: 2px; }

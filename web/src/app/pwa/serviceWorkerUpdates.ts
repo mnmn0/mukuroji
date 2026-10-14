@@ -160,6 +160,11 @@ export function createServiceWorkerUpdateController(
   }
 
   return {
+    /**
+     * Registers the root-scoped worker and starts observing its updates.
+     *
+     * @returns A promise that settles once the registration is observed.
+     */
     async register() {
       const registration = await dependencies.container.register(serviceWorkerScriptUrl, {
         scope: '/',
@@ -168,6 +173,12 @@ export function createServiceWorkerUpdateController(
 
       observe(registration)
     },
+    /**
+     * Subscribes to update availability changes.
+     *
+     * @param listener - Callback invoked when the snapshot may have changed.
+     * @returns Unsubscribe function.
+     */
     subscribe(listener) {
       listeners.add(listener)
 
@@ -175,9 +186,15 @@ export function createServiceWorkerUpdateController(
         listeners.delete(listener)
       }
     },
+    /**
+     * Reads whether an update is waiting and has not been dismissed.
+     *
+     * @returns `true` while the update notice should be shown.
+     */
     getSnapshot() {
       return waitingWorker !== null && waitingWorker !== dismissedWorker
     },
+    /** Activates the waiting worker and reloads once it controls the page. */
     applyUpdate() {
       if (waitingWorker === null || reloadRequested) {
         return
@@ -197,6 +214,7 @@ export function createServiceWorkerUpdateController(
       })
       waitingWorker.postMessage(skipWaitingMessage)
     },
+    /** Hides the notice until a newer worker installs. */
     dismiss() {
       if (waitingWorker === null) {
         return

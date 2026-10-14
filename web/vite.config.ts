@@ -18,6 +18,12 @@ function selfContainedServiceWorker(): Plugin {
   return {
     name: 'mukuroji-self-contained-service-worker',
     apply: 'build',
+    /**
+     * Validates the emitted worker chunk before files are written.
+     *
+     * @param _options - Output options, unused.
+     * @param bundle - Emitted chunks and assets keyed by file name.
+     */
     generateBundle(_options, bundle) {
       const worker = Object.values(bundle).find(
         (output) => output.type === 'chunk' && output.isEntry && output.name === serviceWorkerEntryName,

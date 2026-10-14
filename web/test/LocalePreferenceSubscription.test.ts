@@ -67,7 +67,7 @@ describe('subscribeToLocalePreference', () => {
     expect(notifications).toBe(1)
   })
 
-  test('notifies subscribers when another tab saves the locale key only', () => {
+  test('notifies subscribers when another tab saves the locale key or clears storage', () => {
     let notifications = 0
     const unsubscribe = subscribeToLocalePreference(() => {
       notifications += 1
@@ -77,8 +77,12 @@ describe('subscribeToLocalePreference', () => {
     fakeWindow.dispatchEvent(Object.assign(new Event('storage'), { key: 'mukuroji.auth' }))
     expect(notifications).toBe(1)
 
+    // `localStorage.clear()` in another tab reports a null key and may drop the saved locale.
+    fakeWindow.dispatchEvent(Object.assign(new Event('storage'), { key: null }))
+    expect(notifications).toBe(2)
+
     unsubscribe()
     fakeWindow.dispatchEvent(Object.assign(new Event('storage'), { key: 'mukuroji.locale' }))
-    expect(notifications).toBe(1)
+    expect(notifications).toBe(2)
   })
 })

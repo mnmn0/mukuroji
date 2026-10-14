@@ -66,12 +66,13 @@ export function setLocalePreference(locale: Locale) {
  */
 export function subscribeToLocalePreference(listener: () => void): () => void {
   /**
-   * Forwards cross-tab updates to the saved locale key.
+   * Forwards cross-tab updates to the saved locale key, including `localStorage.clear()`,
+   * which reports a `null` key.
    *
    * @param event - Storage event raised by another tab.
    */
   const handleStorage = (event: StorageEvent) => {
-    if (event.key === storageKey) {
+    if (event.key === storageKey || event.key === null) {
       listener()
     }
   }

@@ -81,13 +81,17 @@ class FakeContainer implements ServiceWorkerContainerHandle {
   readonly registrations: Array<{ scriptUrl: string, options: { scope: string, updateViaCache: 'none' } }> = []
   /** Registered controller-change listeners. */
   readonly controllerListeners: Array<() => void> = []
+  /** Registration returned by every `register` call. */
+  private readonly registration: FakeRegistration
 
   /**
    * Creates a container that resolves registration with the given fake.
    *
    * @param registration - Registration returned by `register`.
    */
-  constructor(private readonly registration: FakeRegistration) {}
+  constructor(registration: FakeRegistration) {
+    this.registration = registration
+  }
 
   /** @inheritdoc */
   register(
