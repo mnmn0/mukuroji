@@ -76,8 +76,10 @@ self.addEventListener('activate', (event) => {
 
 ```sh
 bun run web:test      # request 振り分け、cache 削除、更新 controller、通知 UI
-bun run web:e2e       # mobile-pwa project が production preview で manifest、offline fallback、cache 内容を検証
+bun run web:e2e       # 通常の E2E の後に PWA の E2E も実行
+bun run web:e2e:pwa   # production preview で manifest、offline fallback、cache 内容を検証
 ```
 
-`mobile-pwa` project は Pixel 7 相当の viewport / touch で `web/e2e/pwa.spec.ts` を実行し、
-`web:build` 後の `web:preview` に対して動きます。
+`web:e2e:pwa` は `playwright.pwa.config.ts` の `mobile-pwa` project で、Pixel 7 相当の viewport / touch で
+`web/e2e/pwa.spec.ts` を実行します。`web:build` 後の `web:preview` に対して動くため設定を分けています。
+`web:e2e:desktop` や `playwright test` は dev server だけを起動し、production build を必要としません。

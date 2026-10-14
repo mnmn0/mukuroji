@@ -12,7 +12,7 @@
   ],
   "workspaces": {
     ".": {
-      "entry": ["playwright.config.ts", "scripts/**/*.ts"]
+      "entry": ["playwright.config.ts", "playwright.pwa.config.ts", "scripts/**/*.ts"]
     },
     "contracts": {
       "entry": ["src/index.ts"]
