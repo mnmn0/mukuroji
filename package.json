@@ -35,6 +35,8 @@
     "web:lint:ci": "bun --filter web lint:ci",
     "web:test": "bun --filter web test",
     "web:build": "bun --filter web build",
+    "web:preview": "bun --filter web preview",
+    "pwa:icons": "bun scripts/generate-pwa-icons.ts",
     "web:e2e": "playwright test",
     "web:storybook": "bun --filter web storybook",
     "web:build-storybook": "bun --filter web build-storybook",

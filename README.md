@@ -15,6 +15,7 @@ SLO、alarm、incident response、migration、deploy、restore drill の運用�
 [`docs/operational-readiness.md`](docs/operational-readiness.md) を参照してください。
 Bedrock model allowlist、Lambda/local認証、live evaluationの運用契約は
 [`docs/ai-assistance.md`](docs/ai-assistance.md)を参照してください。
+installable PWA の cache 安全境界と hosting 要件は [`docs/pwa.md`](docs/pwa.md) を参照してください。
 
 ## セットアップ
 
