@@ -184,6 +184,13 @@ export function createServiceWorkerUpdateController(
       }
 
       reloadRequested = true
+
+      // Another tab may already have activated this worker, so no controllerchange will follow here.
+      if (waitingWorker.state === 'activating' || waitingWorker.state === 'activated') {
+        dependencies.reload()
+        return
+      }
+
       // Listening only after the user accepts keeps the first install's clients.claim() from reloading.
       dependencies.container.addEventListener('controllerchange', () => {
         dependencies.reload()

@@ -10,8 +10,10 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   192px / 512px / maskable 512px の PNG icon と、マイタスク・インボックス・フォーカスへの shortcut を持ちます。
 - `web/src/service-worker/sw.ts`: Vite の別 entry として build し、site root の `/sw.js` に出力します。
   production build かつ secure context の場合だけ `window.load` 後に登録します。開発 server では登録しません。
+- install: browser 標準の install UI (Chromium の address bar / menu、iOS Safari の「ホーム画面に追加」) を使います。
+  `beforeinstallprompt` を使う独自の install 導線は後続範囲です。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
-  利用者が承認した時だけ有効化して再読み込みします。ページが visible に戻るたびに更新を確認します。
+  利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。
 
 ## Cache の安全境界
 

@@ -199,6 +199,22 @@ describe('createServiceWorkerUpdateController', () => {
     expect(reloads()).toBe(1)
   })
 
+  test('reloads directly when another tab already activated the update', async () => {
+    const { controller, registration, container, reloads } = setup()
+    container.controller = {}
+    await controller.register()
+    const worker = new FakeWorker()
+    registration.findUpdate(worker)
+    worker.transition('installed')
+    worker.transition('activated')
+
+    controller.applyUpdate()
+
+    expect(reloads()).toBe(1)
+    expect(worker.messages).toEqual([])
+    expect(container.controllerListeners).toHaveLength(0)
+  })
+
   test('surfaces a worker that was already waiting at registration', async () => {
     const { controller, registration, container } = setup()
     container.controller = {}
