@@ -286,6 +286,46 @@ describe('audit export service', () => {
     expect((await service.listExports('ws-1')).map((listed) => listed.status)).toEqual(['failed'])
   })
 
+  test('does not write a part or the job when reading runs past the deadline', async () => {
+    let current = new Date('2026-07-18T00:00:00.000Z')
+    const store = createMemoryStore()
+    const reader = createReader(events(30))
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue() {} },
+      readEvents: async (query) => {
+        // The step starts before the deadline but its reads finish after it.
+        current = new Date('2026-07-19T00:00:01.000Z')
+        return await reader(query)
+      },
+      now: () => current,
+      createId: () => '1'.repeat(32),
+      eventsPerPart: 10,
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    current = new Date('2026-07-18T23:59:00.000Z')
+    const before = await store.readJob('ws-1', job.exportId)
+    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await store.readJob('ws-1', job.exportId)).toEqual(before)
+    expect((await service.getExport('ws-1', job.exportId)).failure?.code).toBe('AuditExportProcessingTimedOut')
+  })
+
+  test('treats a key whose stored job is past its API lifetime as expired', async () => {
+    let current = fixedNow()
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store: createMemoryStore(),
+      queue: { async enqueue() {} },
+      readEvents: createReader([]),
+      now: () => current,
+    })
+    await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'old-key' })
+    current = new Date(fixedNow().getTime() + 8 * 86_400_000)
+    await expect(service.prepareExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'old-key' }))
+      .rejects.toMatchObject({ status: 409, code: 'AuditExportIdempotencyKeyExpired' })
+  })
+
   test('retries transient read failures through the queue', async () => {
     const service = createAuditExportService({
       settleSeconds: 0,
