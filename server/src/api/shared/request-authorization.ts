@@ -191,6 +191,7 @@ const enterpriseRoutePermissionRules = [
     permission: 'security.manage',
   },
   { method: 'GET', pathPattern: '/api/audit/events/export', permission: 'audit.export' },
+  { method: '*', pathPattern: '/api/audit/exports*', permission: 'audit.export' },
   { method: 'GET', pathPattern: '/api/audit/*', permission: 'audit.read' },
   { method: 'POST', pathPattern: '/api/analytics/query', permission: 'work-items.read' },
   { method: 'POST', pathPattern: '/api/analytics/evidence', permission: 'work-items.read' },

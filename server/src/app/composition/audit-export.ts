@@ -1,0 +1,38 @@
+import { S3Client } from '@aws-sdk/client-s3'
+import { createSqsClient } from '../../infrastructure/aws/sqs-client'
+import {
+  loadServerConfig,
+  readServerEnvironment,
+  type ServerEnvironment,
+} from '../../infrastructure/config/server-config'
+import { S3AuditExportStore } from '../../modules/audit/adapter-out/s3/s3-audit-export-store'
+import { SqsAuditExportQueue } from '../../modules/audit/adapter-out/sqs/sqs-audit-export-queue'
+import {
+  createAuditExportService,
+  type AuditExportEventReader,
+  type AuditExportService,
+} from '../../modules/audit/audit-export'
+
+/**
+ * Creates the audit export service when its bucket and queue are configured.
+ *
+ * @param readEvents - Audit event reader shared with the synchronous API.
+ * @param environment - Runtime environment that names the bucket and queue.
+ * @returns The service, or undefined when asynchronous export is not deployed.
+ */
+export function createConfiguredAuditExportService(
+  readEvents: AuditExportEventReader,
+  environment: ServerEnvironment = readServerEnvironment(),
+): AuditExportService | undefined {
+  const bucketName = environment.AUDIT_EXPORT_BUCKET_NAME?.trim()
+  const queueUrl = environment.AUDIT_EXPORT_QUEUE_URL?.trim()
+  if (!bucketName || !queueUrl) return undefined
+  return createAuditExportService({
+    store: new S3AuditExportStore({
+      client: new S3Client({ region: loadServerConfig(environment).awsRegion }),
+      bucketName,
+    }),
+    queue: new SqsAuditExportQueue(createSqsClient(), queueUrl),
+    readEvents,
+  })
+}

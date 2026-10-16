@@ -314,6 +314,7 @@ function bindApiRuntimeConfiguration(
     workspaceSearchTable,
   } = input.dataStores;
   const {
+    auditExportBucket,
     fileBucket,
     fileProofingTable,
     workItemImportBucket,
@@ -342,6 +343,7 @@ function bindApiRuntimeConfiguration(
     workspaceDirectoryId,
   } = input.parameters;
   const {
+    auditExportQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
@@ -503,6 +505,8 @@ function bindApiRuntimeConfiguration(
         workItemConfigurationTable.tableName,
       WORK_ITEM_IMPORT_BUCKET_NAME: workItemImportBucket.bucketName,
       WORK_ITEM_IMPORT_QUEUE_URL: workItemImportQueue.queueUrl,
+      AUDIT_EXPORT_BUCKET_NAME: auditExportBucket.bucketName,
+      AUDIT_EXPORT_QUEUE_URL: auditExportQueue.queueUrl,
     },
     {
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET:
@@ -584,6 +588,7 @@ export function buildApiRuntime(
     workspaceSearchTable,
   } = input.dataStores;
   const {
+    auditExportBucket,
     fileBucket,
     fileProofingTable,
     workItemImportBucket,
@@ -600,6 +605,7 @@ export function buildApiRuntime(
     cognitoUserPoolArn,
   } = input.parameters;
   const {
+    auditExportQueue,
     webhookDeliveryQueue,
     workItemImportQueue,
   } = input.workerChannels;
@@ -853,6 +859,7 @@ export function buildApiRuntime(
         new iam.PolicyStatement({
           actions: ['sqs:SendMessage'],
           resources: [
+            auditExportQueue.queueArn,
             webhookDeliveryQueue.queueArn,
             workItemImportQueue.queueArn,
           ],
@@ -1053,6 +1060,23 @@ export function buildApiRuntime(
         's3:PutObject',
       ],
       resources: [workItemImportBucket.arnForObjects('work-item-imports/*')],
+    }),
+  );
+  apiFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['s3:GetObject', 's3:PutObject'],
+      resources: [auditExportBucket.arnForObjects('audit-exports/*')],
+    }),
+  );
+  apiFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['s3:ListBucket'],
+      resources: [auditExportBucket.bucketArn],
+      conditions: {
+        StringLike: {
+          's3:prefix': ['audit-exports/*'],
+        },
+      },
     }),
   );
   apiFunction.addToRolePolicy(

@@ -19,6 +19,10 @@ export type WorkerChannels = {
   readonly workItemImportDlq: sqs.Queue;
   /** Queue that carries resumable Work Item imports. */
   readonly workItemImportQueue: sqs.Queue;
+  /** Dead-letter queue for asynchronous audit export steps. */
+  readonly auditExportDlq: sqs.Queue;
+  /** Queue that carries asynchronous audit export steps. */
+  readonly auditExportQueue: sqs.Queue;
 };
 
 /**
@@ -62,6 +66,24 @@ export function buildWorkerChannels(scope: cdk.Stack): WorkerChannels {
     retentionPeriod: cdk.Duration.days(14),
     visibilityTimeout: cdk.Duration.minutes(90),
   });
+  const auditExportDlq = new sqs.Queue(scope, 'AuditExportDlq', {
+    encryption: sqs.QueueEncryption.SQS_MANAGED,
+    enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retentionPeriod: cdk.Duration.days(14),
+  });
+  const auditExportQueue = new sqs.Queue(scope, 'AuditExportQueue', {
+    deadLetterQueue: {
+      maxReceiveCount: 5,
+      queue: auditExportDlq,
+    },
+    encryption: sqs.QueueEncryption.SQS_MANAGED,
+    enforceSSL: true,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retentionPeriod: cdk.Duration.days(4),
+    // Six times the five-minute worker timeout, as AWS recommends for SQS event sources.
+    visibilityTimeout: cdk.Duration.minutes(30),
+  });
   const connectorSyncDlq = new sqs.Queue(scope, 'ConnectorSyncDlq', {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
     enforceSSL: true,
@@ -94,5 +116,7 @@ export function buildWorkerChannels(scope: cdk.Stack): WorkerChannels {
     webhookDeliveryQueue,
     workItemImportDlq,
     workItemImportQueue,
+    auditExportDlq,
+    auditExportQueue,
   };
 }

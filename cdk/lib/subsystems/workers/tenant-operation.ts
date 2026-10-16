@@ -448,6 +448,8 @@ function buildTenantOperationCapabilityFunction(
         input.dataStores.workItemConfigurationTable.tableName,
       WORK_ITEM_IMPORT_BUCKET_NAME:
         input.fileStorage.workItemImportBucket.bucketName,
+      AUDIT_EXPORT_BUCKET_NAME:
+        input.fileStorage.auditExportBucket.bucketName,
       WORK_ITEMS_TABLE_NAME: input.dataStores.workItemsTable.tableName,
     },
   });
@@ -554,6 +556,11 @@ function grantTenantResourceOwner(
         input.fileStorage.workItemImportBucket.arnForObjects('work-item-imports/*'),
       ],
     }));
+    grantAuditExportList(target, input.fileStorage.auditExportBucket, false);
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject', 's3:GetObjectVersion'],
+      resources: [input.fileStorage.auditExportBucket.arnForObjects('audit-exports/*')],
+    }));
     target.addToRolePolicy(new iam.PolicyStatement({
       actions: ['s3:GetObject', 's3:PutObject'],
       resources: [input.tenantExportBucket.arnForObjects('tenant-exports/*')],
@@ -603,6 +610,11 @@ function grantTenantResourceOwner(
         input.fileStorage.workItemImportBucket.arnForObjects('work-item-imports/*'),
       ],
     }));
+    grantAuditExportList(target, input.fileStorage.auditExportBucket, true);
+    target.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+      resources: [input.fileStorage.auditExportBucket.arnForObjects('audit-exports/*')],
+    }));
     return;
   }
   if (owner === 'secrets') {
@@ -642,6 +654,30 @@ function grantTenantResourceOwner(
     conditions: {
       StringLike: {
         's3:prefix': ['work-item-imports/*'],
+      },
+    },
+  }));
+  grantAuditExportList(target, input.fileStorage.auditExportBucket, true);
+}
+
+/**
+ * Grants listing of the tenant audit export namespace.
+ *
+ * @param target Resource-owner Lambda that inspects audit exports.
+ * @param bucket Audit export bucket.
+ * @param includeVersions Whether object versions must also be listed.
+ */
+function grantAuditExportList(
+  target: lambdaNodejs.NodejsFunction,
+  bucket: s3.IBucket,
+  includeVersions: boolean,
+): void {
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: includeVersions ? ['s3:ListBucket', 's3:ListBucketVersions'] : ['s3:ListBucket'],
+    resources: [bucket.bucketArn],
+    conditions: {
+      StringLike: {
+        's3:prefix': ['audit-exports/*'],
       },
     },
   }));

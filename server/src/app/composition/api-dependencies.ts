@@ -166,6 +166,7 @@ import {
   InMemoryCapacityPlanningRepository,
   type CapacityPlanningDataSource,
 } from '../../modules/capacity-planning'
+import { createConfiguredAuditExportService } from './audit-export'
 
 /**
  * Projects shared idempotency reservation and transaction-completion capabilities
@@ -499,11 +500,14 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const enterpriseIdentityClient = createEnterpriseIdentityClient()
   const { tenantAdministration, workspaceAccess } =
     createProductionTenantWorkspaceAccess()
+  const auditEvents = createAuditEventsClient()
+  const auditExports = createConfiguredAuditExportService((query) => auditEvents.query(query))
   return {
     customers: new DynamoDbCustomerClient(),
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
-    auditEvents: createAuditEventsClient(),
+    auditEvents,
+    ...(auditExports ? { auditExports } : {}),
     workspaceAccess,
     enterpriseIdentity: createEnterpriseIdentityCapabilities(enterpriseIdentityClient),
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
@@ -1779,6 +1783,7 @@ export function overrideAppDependencies(
         ? { projectDirectory: overrides.projectDirectory }
         : {}),
       ...(overrides.auditEvents ? { auditEvents: overrides.auditEvents } : {}),
+      ...(overrides.auditExports ? { auditExports: overrides.auditExports } : {}),
       ...(overrides.workspaceAccess
         ? { workspaceAccess: overrides.workspaceAccess }
         : {}),

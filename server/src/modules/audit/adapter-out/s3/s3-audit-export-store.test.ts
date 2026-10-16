@@ -1,0 +1,139 @@
+import { describe, expect, test } from 'bun:test'
+import {
+  GetObjectCommand,
+  ListObjectsV2Command,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3'
+import { createAuditExportWorkspacePrefix, type AuditExportJob } from '../../audit-export'
+import { S3AuditExportStore } from './s3-audit-export-store'
+
+/** S3 failure with the name and status the SDK reports. */
+function awsError(name: string, status: number) {
+  return Object.assign(new Error(name), { name, $metadata: { httpStatusCode: status } })
+}
+
+/**
+ * Creates a store backed by an in-memory S3 fake that enforces conditional writes.
+ *
+ * @returns The store, its objects, and the recorded put commands.
+ */
+function createStore() {
+  const objects = new Map<string, { body: string; etag: string }>()
+  const puts: PutObjectCommand['input'][] = []
+  let etagSequence = 0
+  const client = new S3Client({ region: 'us-east-1', credentials: { accessKeyId: 'test', secretAccessKey: 'test' } })
+  Object.assign(client, {
+    async send(command: unknown) {
+      if (command instanceof PutObjectCommand) {
+        const input = command.input
+        puts.push(input)
+        const key = input.Key ?? ''
+        const existing = objects.get(key)
+        if (input.IfNoneMatch === '*' && existing) throw awsError('PreconditionFailed', 412)
+        if (input.IfMatch !== undefined && existing?.etag !== input.IfMatch) throw awsError('PreconditionFailed', 412)
+        const body = input.Body
+        objects.set(key, {
+          body: typeof body === 'string' ? body : new TextDecoder().decode(body instanceof Uint8Array ? body : new Uint8Array()),
+          etag: `"etag-${++etagSequence}"`,
+        })
+        return {}
+      }
+      if (command instanceof GetObjectCommand) {
+        const object = objects.get(command.input.Key ?? '')
+        if (!object) throw awsError('NoSuchKey', 404)
+        return { ETag: object.etag, Body: { transformToString: async () => object.body } }
+      }
+      if (command instanceof ListObjectsV2Command) {
+        const prefix = command.input.Prefix ?? ''
+        const directories = new Set(
+          [...objects.keys()]
+            .filter((key) => key.startsWith(prefix))
+            .map((key) => `${prefix}${key.slice(prefix.length).split('/')[0]}/`),
+        )
+        return { CommonPrefixes: [...directories].map((Prefix) => ({ Prefix })), IsTruncated: false }
+      }
+      throw new Error('Unexpected S3 command.')
+    },
+  })
+  return { store: new S3AuditExportStore({ client, bucketName: 'exports' }), objects, puts }
+}
+
+/** Builds a job document. */
+function job(exportId: string, createdAt: string, workspaceId = 'ws-1'): AuditExportJob {
+  return {
+    schemaVersion: 1,
+    workspaceId,
+    exportId,
+    status: 'queued',
+    filters: { eventTypes: ['work-item.updated'] },
+    requestFingerprint: 'fingerprint',
+    snapshotAt: createdAt,
+    requestedBy: { userKey: 'admin@example.com', displayName: 'admin@example.com' },
+    createdAt,
+    updatedAt: createdAt,
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    eventCount: 0,
+    parts: [],
+  }
+}
+
+describe('S3AuditExportStore', () => {
+  test('creates a job once and replaces it only with the current ETag', async () => {
+    const { store, puts } = createStore()
+    const first = job('a'.repeat(32), '2026-07-18T00:00:00.000Z')
+
+    expect(await store.createJob(first)).toBe('created')
+    expect(await store.createJob(first)).toBe('exists')
+    const stored = await store.readJob('ws-1', first.exportId)
+    expect(stored?.job).toEqual(first)
+
+    const running: AuditExportJob = { ...first, status: 'running' }
+    expect(await store.replaceJob(running, stored?.version ?? '')).toBe(true)
+    expect(await store.replaceJob({ ...first, status: 'failed' }, stored?.version ?? '')).toBe(false)
+    expect((await store.readJob('ws-1', first.exportId))?.job.status).toBe('running')
+    expect(puts.every((input) => input.ServerSideEncryption === 'AES256')).toBe(true)
+    expect(puts[0]?.Key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${first.exportId}/job.json`)
+    expect(puts[0]?.Key).not.toContain('ws-1')
+  })
+
+  test('returns undefined for a missing job and rejects malformed stored jobs', async () => {
+    const { store, objects } = createStore()
+    const exportId = 'b'.repeat(32)
+
+    expect(await store.readJob('ws-1', exportId)).toBeUndefined()
+    objects.set(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`, { body: '{"status":"done"}', etag: '"x"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow(TypeError)
+    await expect(store.readJob('ws-1', '../other')).rejects.toThrow('32 lowercase hexadecimal digits')
+  })
+
+  test('lists only the Workspace jobs, newest first', async () => {
+    const { store } = createStore()
+    await store.createJob(job('1'.repeat(32), '2026-07-16T00:00:00.000Z'))
+    await store.createJob(job('2'.repeat(32), '2026-07-18T00:00:00.000Z'))
+    await store.createJob(job('3'.repeat(32), '2026-07-17T00:00:00.000Z', 'ws-2'))
+
+    expect((await store.listJobs('ws-1', 20)).map((entry) => entry.exportId)).toEqual(['2'.repeat(32), '1'.repeat(32)])
+    expect(await store.listJobs('ws-1', 1)).toHaveLength(1)
+  })
+
+  test('writes checksummed parts and presigns downloads inside the export namespace', async () => {
+    const { store, puts } = createStore()
+    const exportId = 'c'.repeat(32)
+
+    const part = await store.putPart('ws-1', exportId, 1, '{"eventId":"e1"}\n')
+
+    expect(part.key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/part-00001.ndjson`)
+    expect(part.byteLength).toBe(17)
+    expect(part.sha256).toMatch(/^[0-9a-f]{64}$/)
+    expect(puts.at(-1)).toMatchObject({ ChecksumSHA256: Buffer.from(part.sha256, 'hex').toString('base64') })
+    await expect(store.putPart('ws-1', exportId, 0, '')).rejects.toThrow(RangeError)
+
+    const url = new URL(await store.createPartDownloadUrl({ ...part, index: 1, eventCount: 1 }))
+    expect(url.pathname).toBe(`/${part.key}`)
+    expect(url.searchParams.get('X-Amz-Expires')).toBe('300')
+    expect(url.searchParams.get('response-content-disposition')).toContain('mukuroji-audit-part-00001.ndjson')
+    await expect(store.createPartDownloadUrl({ ...part, key: 'workspaces/x/files/a', index: 1, eventCount: 1 }))
+      .rejects.toThrow('outside the export namespace')
+  })
+})

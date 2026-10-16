@@ -150,7 +150,26 @@ GET /api/audit/events?actorId=...&targetType=...&targetId=...&eventType=...&from
 GET /api/audit/events/export?actorId=...&from=...&to=...
 ```
 
-system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返す。上限到達時に後続 cursor が残る場合は `X-Audit-Truncated: true` と `X-Audit-Next-Cursor` を返し、呼び出し側が続きの export を取得できるようにする。将来は大規模な export を非同期 S3 job へ分離する。
+system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返す。上限到達時に後続 cursor が残る場合は `X-Audit-Truncated: true` と `X-Audit-Next-Cursor` を返し、呼び出し側が続きの export を取得できるようにする。1,000 件を超える export は次の非同期 S3 job を使う。
+
+### 非同期 audit export job
+
+```text
+POST /api/audit/exports                       # body: { actorId?, actorKind?, entityType?, entityId?, targetType?, targetId?, eventTypes?, from?, to? }
+GET  /api/audit/exports                       # 期限内の最新 20 件
+GET  /api/audit/exports/:exportId
+GET  /api/audit/exports/:exportId/download    # completed の part ごとの署名付き URL
+```
+
+system admin または `audit.export` 権限を要求する。`Idempotency-Key` を指定した場合、export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。`queued` の既存 job への再要求は、enqueue に失敗した前回試行を救済するため再度 enqueue する。
+
+- job は要求時刻を `snapshotAt` として固定し、`to` を snapshot 時刻で上限化するため、export 中に追加された event は含めない。
+- `AuditExportQueue` の message ごとに worker Lambda が最大 5,000 件を `part-NNNNN.ndjson` として書き、cursor を job に保存して次の step を enqueue する。合計上限は 1,000,000 件で、超えた場合は `AuditExportTooLarge` で `failed` にする。
+- job state は `audit-exports/<sha256(workspaceId)>/<exportId>/job.json` に置き、作成は `If-None-Match`、更新は ETag の `If-Match` で条件付き書き込みにする。重複 delivery は条件付き書き込みの競合として `skipped` になり、part は同じ内容で上書きされるだけになる。
+- part は SHA-256 checksum 付きで保存し、job は件数・byte 長・checksum を記録する。download URL の有効期限は 300 秒。
+- job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。
+- 行 projection は同期 export と同じ public DTO を使う。
+- export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。
 
 ### Public response projection
 

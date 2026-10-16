@@ -62,6 +62,8 @@ export type FileStorageResources = {
   readonly malwareProtectionRole: iam.Role;
   /** Versioned bucket that stores Work Item import sources. */
   readonly workItemImportBucket: s3.Bucket;
+  /** Private bucket that stores asynchronous audit export jobs and NDJSON parts. */
+  readonly auditExportBucket: s3.Bucket;
 };
 
 /**
@@ -290,6 +292,46 @@ export function buildFileStorage(
     versioned: true,
   });
 
+  const auditExportAccessLogsBucket = new s3.Bucket(
+    scope,
+    'AuditExportAccessLogsBucket',
+    {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      lifecycleRules: [{
+        expiration: cdk.Duration.days(90),
+        id: 'ExpireAuditExportAccessLogs',
+        noncurrentVersionExpiration: cdk.Duration.days(90),
+      }],
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      versioned: true,
+    },
+  );
+  // Audit export jobs and parts are derived, short-lived copies of the audit log.
+  // Objects expire one day after the seven-day download window ends.
+  const auditExportBucket = new s3.Bucket(scope, 'AuditExportBucket', {
+    blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    encryption: s3.BucketEncryption.S3_MANAGED,
+    enforceSSL: true,
+    lifecycleRules: [
+      {
+        abortIncompleteMultipartUploadAfter: cdk.Duration.days(1),
+        id: 'AbortIncompleteAuditExportUploads',
+      },
+      {
+        expiration: cdk.Duration.days(8),
+        id: 'ExpireAuditExports',
+        prefix: 'audit-exports/',
+      },
+    ],
+    objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    serverAccessLogsBucket: auditExportAccessLogsBucket,
+    serverAccessLogsPrefix: 'audit-export/',
+  });
+
   const malwareProtectionRole = new iam.Role(scope, 'FileMalwareProtectionRole', {
     assumedBy: new iam.ServicePrincipal('malware-protection-plan.guardduty.amazonaws.com'),
     description: 'Allows GuardDuty Malware Protection to scan and tag mukuroji files.',
@@ -459,6 +501,7 @@ export function buildFileStorage(
     malwareProtectionPlan,
     malwareProtectionRole,
     workItemImportBucket,
+    auditExportBucket,
   };
 }
 

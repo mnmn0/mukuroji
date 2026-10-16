@@ -98,6 +98,15 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<AuditExportBucketC2429A66.Arn>/audit-exports/*]',
+    [
+      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'AuditExportWorkerFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     [
       'ApiFunction/ServiceRole/DefaultPolicy/Resource',

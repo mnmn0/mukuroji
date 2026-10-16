@@ -33,6 +33,7 @@ import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operati
 import { buildTriageScheduleWorker } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from '../subsystems/workers/work-item-import';
+import { buildAuditExportWorker } from '../subsystems/workers/audit-export';
 
 /**
  * Composes the Mukuroji application infrastructure from subsystem builders.
@@ -112,6 +113,13 @@ export class MukurojiStack extends cdk.Stack {
       fileStorage,
       lambdaBuildPaths,
       parameters,
+      runtimeControls,
+      workerChannels,
+    });
+    buildAuditExportWorker(this, {
+      dataStores,
+      fileStorage,
+      lambdaBuildPaths,
       runtimeControls,
       workerChannels,
     });

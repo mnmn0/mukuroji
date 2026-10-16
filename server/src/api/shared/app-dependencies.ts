@@ -42,6 +42,9 @@ export const workspaceDependencies: WorkspaceDependencies = {
   get auditEvents() {
     return requireAppDependencies().workspace.auditEvents
   },
+  get auditExports() {
+    return requireAppDependencies().workspace.auditExports
+  },
   get workspaceAccess() {
     return requireAppDependencies().workspace.workspaceAccess
   },
