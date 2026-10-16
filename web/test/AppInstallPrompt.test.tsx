@@ -130,10 +130,12 @@ describe('app badge', () => {
     expect(resolveAppBadgeCount(false, 4)).toBe(0)
   })
 
-  test('tells other tabs about a loaded zero but not about a sign-out, which already did', () => {
+  test('clears for a loaded zero and leaves the shared badge alone on a signed-out page', () => {
     expect(resolveAppBadgeAction(true, undefined)).toEqual({ kind: 'keep' })
-    expect(resolveAppBadgeAction(true, 0)).toEqual({ kind: 'clear', notifyTabs: true })
-    expect(resolveAppBadgeAction(false, 3)).toEqual({ kind: 'clear', notifyTabs: false })
+    expect(resolveAppBadgeAction(true, 0)).toEqual({ kind: 'clear' })
+    // A fresh signed-out tab must not clear another tab's count; sign-out clears in clearAuthSession.
+    expect(resolveAppBadgeAction(false, 3)).toEqual({ kind: 'keep' })
+    expect(resolveAppBadgeAction(false, undefined)).toEqual({ kind: 'keep' })
     expect(resolveAppBadgeAction(true, 3)).toEqual({ kind: 'show', count: 3 })
   })
 
@@ -281,6 +283,24 @@ describe('hasStoredAuthSession', () => {
       expect(hasStoredAuthSession('token-a')).toBe(false)
       // Checking never clears storage.
       expect(values.has('mukuroji.auth')).toBe(true)
+    } finally {
+      Reflect.set(globalThis, 'window', previousWindow)
+    }
+  })
+})
+
+describe('hasStoredAuthSession across stores', () => {
+  test('finds a session-only token even when another remembered session is in localStorage', () => {
+    const session = (accessToken: string, remember: boolean) => JSON.stringify({ accessToken, expiresAt: Date.now() + 60_000, tokenType: 'Bearer', remember })
+    const previousWindow = Reflect.get(globalThis, 'window')
+    Reflect.set(globalThis, 'window', {
+      localStorage: { getItem: () => session('token-remembered', true) },
+      sessionStorage: { getItem: () => session('token-tab', false) },
+    })
+    try {
+      expect(hasStoredAuthSession('token-tab')).toBe(true)
+      expect(hasStoredAuthSession('token-remembered')).toBe(true)
+      expect(hasStoredAuthSession('token-other')).toBe(false)
     } finally {
       Reflect.set(globalThis, 'window', previousWindow)
     }

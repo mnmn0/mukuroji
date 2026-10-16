@@ -25,6 +25,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   （remember した session は tab 間で共有されるため、別 tab の sign-out で破棄された session の未読数は戻しません）。
   読み込みに成功した未読 0 で badge を消した場合も同じ通知を送り、受け取った tab は未読数を取得し直してから再表示します。
   同じ tab で sign-out 直後に sign-in した場合も、消去の完了後に新しい session が未読数を再表示します。
+  session のない画面（sign-in 前に開いた tab など）は badge に触れず、他の tab の未読数を消しません。再表示の可否は localStorage と sessionStorage の両方で、その tab の token を個別に確認します。
   未読数の読み込み中や失敗時は前回の badge をそのまま残します。
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
   install の説明では badge を「対応した端末では」と条件付きで案内します。

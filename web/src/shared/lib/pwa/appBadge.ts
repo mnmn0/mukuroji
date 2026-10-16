@@ -130,10 +130,8 @@ export type AppBadgeAction =
     kind: 'keep'
   }
   | {
-    /** Clear the badge. */
+    /** Clear the badge and tell other tabs, so a still-signed-in one can republish its count. */
     kind: 'clear'
-    /** Whether to tell other tabs so a still-signed-in one can republish its count. */
-    notifyTabs: boolean
   }
   | {
     /** Show a positive count. */
@@ -147,14 +145,15 @@ export type AppBadgeAction =
  *
  * @param signedIn - Whether this tab has a session.
  * @param loadedCount - Unread count from the latest successful load, if any.
- * @returns `keep` while unknown, `clear` for zero (telling other tabs only while signed in,
- * since a sign-out already told them), or `show` for a positive count.
+ * @returns `keep` while signed out or while the count is unknown, `clear` (telling other tabs)
+ * for a loaded zero, or `show` for a positive count.
  */
 export function resolveAppBadgeAction(signedIn: boolean, loadedCount: number | undefined): AppBadgeAction {
-  const count = resolveAppBadgeCount(signedIn, loadedCount)
-  if (count === undefined) return { kind: 'keep' }
-  if (count <= 0) return { kind: 'clear', notifyTabs: signedIn }
-  return { kind: 'show', count }
+  // A page without a session leaves the shared badge alone: sign-out already cleared it in
+  // clearAuthSession, and a fresh signed-out tab must not clear another tab's count.
+  if (!signedIn || loadedCount === undefined) return { kind: 'keep' }
+  if (loadedCount <= 0) return { kind: 'clear' }
+  return { kind: 'show', count: loadedCount }
 }
 
 /**

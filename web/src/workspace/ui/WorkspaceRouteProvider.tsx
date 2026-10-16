@@ -299,25 +299,33 @@ export function WorkspaceRouteProvider() {
   // the count is loading or failed, and clear it only for a loaded zero or a signed-out session.
   const badgeAction = resolveAppBadgeAction(Boolean(accessToken), loadedInboxCount)
   const badgeCount = badgeAction.kind === 'show' ? badgeAction.count : undefined
-  const badgeClear = badgeAction.kind === 'clear' ? (badgeAction.notifyTabs ? 'notify' : 'local') : undefined
+  const badgeCleared = badgeAction.kind === 'clear'
   useEffect(() => {
-    // The badge is shared by every tab: a loaded zero clears it and tells the others, while a
-    // sign-out already did both in clearAuthSession.
-    if (badgeClear === 'notify') void clearAppBadgeAndNotifyTabs()
-    if (badgeClear === 'local') syncAppBadge(0)
-  }, [badgeClear])
+    // The badge is shared by every tab: a loaded zero clears it and tells the others. A sign-out
+    // already did both in clearAuthSession, and a signed-out page leaves the badge alone.
+    if (badgeCleared) void clearAppBadgeAndNotifyTabs()
+  }, [badgeCleared])
   useEffect(() => {
     if (badgeCount === undefined) return undefined
     syncAppBadge(badgeCount)
     // Another tab cleared the shared badge. This tab republishes only while its own session
     // is still stored, and with a fresh count, since a remembered session may be shared.
-    return subscribeAppBadgeCleared(() => {
+    let active = true
+    const unsubscribe = subscribeAppBadgeCleared(() => {
       if (!accessToken || !hasStoredAuthSession(accessToken)) return
       refreshInboxCount().then(
-        (fresh) => { if (typeof fresh === 'number') syncAppBadge(fresh) },
+        (fresh) => {
+          // The session may have ended while the count was loading.
+          if (!active || !hasStoredAuthSession(accessToken) || typeof fresh !== 'number') return
+          syncAppBadge(fresh)
+        },
         () => undefined,
       )
     })
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [accessToken, badgeCount, refreshInboxCount])
   const userLabel =
     user?.attributes.email ??

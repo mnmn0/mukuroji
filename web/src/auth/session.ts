@@ -61,8 +61,12 @@ export function getAuthSession() {
  */
 export function hasStoredAuthSession(accessToken: string): boolean {
   if (typeof window === 'undefined') return false
-  const session = readSession(window.localStorage) ?? readSession(window.sessionStorage)
-  return session !== null && session.accessToken === accessToken && session.expiresAt > Date.now()
+  // Each store is checked on its own: another tab's remembered session in localStorage must
+  // not hide this tab's session-only token in sessionStorage.
+  return [window.localStorage, window.sessionStorage].some((storage) => {
+    const session = readSession(storage)
+    return session !== null && session.accessToken === accessToken && session.expiresAt > Date.now()
+  })
 }
 
 /**
