@@ -19,6 +19,7 @@ async function mockCollections(page: Page, canWrite = true) {
   const state = {
     collections: [] as (WorkItemCollection & { items: WorkItemCollectionEntry[] })[],
     createKeys: [] as string[],
+    searches: [] as unknown[],
   }
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'collections-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
@@ -28,7 +29,15 @@ async function mockCollections(page: Page, canWrite = true) {
   await page.route('**/api/teams/projects**', (route) => route.fulfill({ json: { teams: projectDirectoryFixtures } }))
   await page.route('**/api/projects/quick-access', (route) => route.fulfill({ json: { items: [], revision: 0 } }))
   await page.route('**/api/notifications/unread-count', (route) => route.fulfill({ json: { unreadCount: 0 } }))
-  await page.route('**/api/work-items', (route) => route.fulfill({ json: { workItems } }))
+  await page.route((url) => url.pathname === '/api/search', (route) => {
+    const filters = JSON.parse(new URL(route.request().url()).searchParams.get('filters') ?? '{}')
+    state.searches.push(filters)
+    const keyword = String(filters.keyword ?? '').toLowerCase()
+    const results = workItems
+      .filter((workItem) => workItem.title.toLowerCase().includes(keyword))
+      .map((workItem) => ({ id: `team/${workItem.teamId}/issue/${workItem.id}`, entityType: 'work-item', teamId: workItem.teamId, title: workItem.title, url: `/teams/${workItem.teamId}/issues?issueId=${workItem.id}`, highlights: [] }))
+    return route.fulfill({ json: { schemaVersion: 1, results } })
+  })
   await page.route((url) => url.pathname === '/api/collections' || url.pathname.startsWith('/api/collections/'), async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -100,11 +109,14 @@ test('Issue #238: places a Work Item in a Collection without copying it', async 
   expect(state.createKeys).toHaveLength(1)
   expect(state.createKeys[0]).not.toBe('')
 
+  await page.getByLabel('Find Work Items to add').fill('onboarding')
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
+  await expect.poll(() => state.searches).toEqual([{ keyword: 'onboarding', entityTypes: ['work-item'] }])
   await page.getByLabel('Add a Work Item').selectOption({ label: 'Reduce onboarding friction (core-team / onboarding)' })
   await page.getByRole('button', { name: 'Add', exact: true }).click()
   const items = page.getByTestId('collection-items')
   await expect(items.getByRole('link', { name: 'Reduce onboarding friction' })).toHaveAttribute('href', '/teams/core-team/issues?issueId=onboarding')
-  await expect(page.getByLabel('Add a Work Item').locator('option', { hasText: 'Reduce onboarding friction' })).toHaveCount(0)
+  await expect(page.getByText('No Work Items to add match this search.')).toBeVisible()
 
   await page.getByRole('button', { name: 'Remove from Collection: Reduce onboarding friction' }).click()
   await expect(page.getByText('This Collection has no Work Items yet.')).toBeVisible()

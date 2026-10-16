@@ -12,6 +12,12 @@ import { CollectionError, isStoredCollection, type StoredCollection } from '../d
 /** Sort-key prefix of Collection rows in the Planning table. */
 const COLLECTION_RECORD_PREFIX = 'COLLECTION#'
 
+/** Sort-key prefix of deletion markers; it does not share the Collection row prefix. */
+const COLLECTION_TOMBSTONE_PREFIX = 'COLLECTION_DELETED#'
+
+/** Entry type stored on deletion markers. */
+const COLLECTION_TOMBSTONE_ENTRY_TYPE = 'work-item-collection-tombstone'
+
 /** Sort key of the per-Workspace Collection counter row. */
 const COLLECTION_COUNT_RECORD_KEY = 'COLLECTION_COUNT'
 
@@ -105,7 +111,25 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   }
 
   /**
+   * Checks for the deletion marker of a Collection.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns Whether the Collection was deleted.
+   */
+  async wasDeleted(workspaceId: string, collectionId: string): Promise<boolean> {
+    const { Item: row } = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: tombstoneKey(collectionId) },
+      ConsistentRead: true,
+    })).catch((error: unknown) => storageFailure(error))
+    return row !== undefined
+  }
+
+  /**
    * Writes a Collection with a revision condition and the caller conditions.
+   *
+   * A creation also adjusts the Workspace counter and requires that no deletion marker exists.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param collection - Complete next state.
@@ -113,7 +137,9 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   async put(workspaceId: string, collection: StoredCollection, expectedRevision: number): Promise<void> {
     this.requireChecks()
-    const counter = expectedRevision === 0 ? [this.counterUpdate(workspaceId, 1)] : []
+    const counter = expectedRevision === 0
+      ? [this.counterUpdate(workspaceId, 1), this.notDeletedCheck(workspaceId, collection.collectionId)]
+      : []
     try {
       await this.client.send(new TransactWriteCommand({
         TransactItems: [{
@@ -152,10 +178,37 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
             Key: { workspaceId, recordKey: recordKey(collectionId) },
             ...revisionCondition(expectedRevision),
           },
-        }, this.counterUpdate(workspaceId, -1), ...this.checks],
+        }, this.counterUpdate(workspaceId, -1), {
+          Put: {
+            TableName: this.tableName,
+            Item: {
+              workspaceId,
+              recordKey: tombstoneKey(collectionId),
+              entryType: COLLECTION_TOMBSTONE_ENTRY_TYPE,
+              collectionId,
+            },
+          },
+        }, ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, this.checks.length + 2, 2)
+      storageFailure(error, this.checks.length + 3, 3)
+    }
+  }
+
+  /**
+   * Builds the condition that a Collection being created was never deleted.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns Transaction condition check.
+   */
+  private notDeletedCheck(workspaceId: string, collectionId: string) {
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: tombstoneKey(collectionId) },
+        ConditionExpression: 'attribute_not_exists(recordKey)',
+      },
     }
   }
 
@@ -195,6 +248,8 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
 export class InMemoryCollectionsStore implements CollectionsPersistence {
   /** Collections keyed by Workspace and Collection. */
   private readonly collections = new Map<string, StoredCollection>()
+  /** Keys of deleted Collections. */
+  private readonly deleted = new Set<string>()
 
   /**
    * Returns this store; condition checks are verified by the DynamoDB adapter tests.
@@ -232,6 +287,17 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
   }
 
   /**
+   * Checks whether a Collection was deleted.
+   *
+   * @param workspaceId - Test Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns Whether the Collection was deleted.
+   */
+  async wasDeleted(workspaceId: string, collectionId: string): Promise<boolean> {
+    return this.deleted.has(memoryKey(workspaceId, collectionId))
+  }
+
+  /**
    * Writes a Collection with optimistic concurrency.
    *
    * @param workspaceId - Test Workspace.
@@ -240,7 +306,7 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
    */
   async put(workspaceId: string, collection: StoredCollection, expectedRevision: number): Promise<void> {
     const key = memoryKey(workspaceId, collection.collectionId)
-    if ((this.collections.get(key)?.revision ?? 0) !== expectedRevision) throw conflict()
+    if ((this.collections.get(key)?.revision ?? 0) !== expectedRevision || (expectedRevision === 0 && this.deleted.has(key))) throw conflict()
     if (expectedRevision === 0 && (await this.list(workspaceId)).length >= COLLECTION_LIMIT) throw limitReached()
     this.collections.set(key, structuredClone(collection))
   }
@@ -256,6 +322,7 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
     const key = memoryKey(workspaceId, collectionId)
     if (this.collections.get(key)?.revision !== expectedRevision) throw conflict()
     this.collections.delete(key)
+    this.deleted.add(key)
   }
 }
 
@@ -267,6 +334,16 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
  */
 function recordKey(collectionId: string): string {
   return `${COLLECTION_RECORD_PREFIX}${collectionId}`
+}
+
+/**
+ * Derives the Planning table sort key of a deletion marker.
+ *
+ * @param collectionId - Collection identifier.
+ * @returns Sort key.
+ */
+function tombstoneKey(collectionId: string): string {
+  return `${COLLECTION_TOMBSTONE_PREFIX}${collectionId}`
 }
 
 /**

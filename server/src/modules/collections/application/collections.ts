@@ -30,7 +30,20 @@ export interface CollectionsStore {
    */
   get(workspaceId: string, collectionId: string): Promise<StoredCollection | undefined>
   /**
+   * Checks whether a Collection was deleted.
+   *
+   * Deletion leaves a permanent marker so that replaying the original creation request
+   * cannot bring the Collection back.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns Whether the Collection was deleted.
+   */
+  wasDeleted(workspaceId: string, collectionId: string): Promise<boolean>
+  /**
    * Writes a Collection when its stored revision still matches.
+   *
+   * Creating (`expectedRevision` 0) also fails when the Collection was deleted.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param collection - Complete next state.
@@ -38,7 +51,7 @@ export interface CollectionsStore {
    */
   put(workspaceId: string, collection: StoredCollection, expectedRevision: number): Promise<void>
   /**
-   * Deletes a Collection when its stored revision still matches.
+   * Deletes a Collection when its stored revision still matches and records the deletion.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param collectionId - Collection identifier.
@@ -111,6 +124,7 @@ export async function createCollection(
     .digest('hex')
   const existing = await store.get(context.workspaceId, collectionId)
   if (existing) return replayCreatedCollection(existing, context.actor, createFingerprint)
+  if (await store.wasDeleted(context.workspaceId, collectionId)) throw createdCollectionDeleted()
   const collection: StoredCollection = {
     collectionId,
     name: input.name,
@@ -129,6 +143,9 @@ export async function createCollection(
       ? await store.get(context.workspaceId, collectionId)
       : undefined
     if (raced) return replayCreatedCollection(raced, context.actor, createFingerprint)
+    if (error instanceof CollectionError && error.status === 409 && await store.wasDeleted(context.workspaceId, collectionId)) {
+      throw createdCollectionDeleted()
+    }
     throw error
   }
   return toPublicCollection(collection)
@@ -325,6 +342,15 @@ function replayCreatedCollection(existing: StoredCollection, actor: string, crea
     throw new CollectionError(409, 'CollectionIdempotencyConflict', 'The idempotency key was used for a different request.')
   }
   return toPublicCollection(existing)
+}
+
+/**
+ * Creates the error returned when a creation is replayed after the Collection was deleted.
+ *
+ * @returns A 409 Collection error.
+ */
+function createdCollectionDeleted(): CollectionError {
+  return new CollectionError(409, 'CollectionDeleted', 'The Collection created by this request was deleted. Use a new idempotency key to create another.')
 }
 
 /**

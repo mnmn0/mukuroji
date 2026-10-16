@@ -11,6 +11,7 @@ import {
   parseExpectedRevisionQuery,
   parseUpdateCollectionInput,
   readCollectionIdentifier,
+  readWorkItemReferenceIdentifier,
   removeCollectionItem,
   updateCollection,
   type CollectionMutationContext,
@@ -120,8 +121,8 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticate(c, 'write')
       const collectionId = readCollectionIdentifier(c.req.param('collectionId'), 'InvalidCollectionId')
-      const teamId = readCollectionIdentifier(c.req.param('teamId'), 'InvalidCollectionWorkItem')
-      const issueId = readCollectionIdentifier(c.req.param('issueId'), 'InvalidCollectionWorkItem')
+      const teamId = readWorkItemReferenceIdentifier(c.req.param('teamId'))
+      const issueId = readWorkItemReferenceIdentifier(c.req.param('issueId'))
       return c.json(await addCollectionItem(
         writeStore(principal),
         mutationContext(principal),
@@ -140,8 +141,8 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticate(c, 'write')
       const collectionId = readCollectionIdentifier(c.req.param('collectionId'), 'InvalidCollectionId')
-      const teamId = readCollectionIdentifier(c.req.param('teamId'), 'InvalidCollectionWorkItem')
-      const issueId = readCollectionIdentifier(c.req.param('issueId'), 'InvalidCollectionWorkItem')
+      const teamId = readWorkItemReferenceIdentifier(c.req.param('teamId'))
+      const issueId = readWorkItemReferenceIdentifier(c.req.param('issueId'))
       return c.json(await removeCollectionItem(
         writeStore(principal),
         mutationContext(principal),

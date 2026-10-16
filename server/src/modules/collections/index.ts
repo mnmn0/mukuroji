@@ -23,4 +23,5 @@ export {
   parseExpectedRevisionQuery,
   parseUpdateCollectionInput,
   readCollectionIdentifier,
+  readWorkItemReferenceIdentifier,
 } from './domain/collections'
