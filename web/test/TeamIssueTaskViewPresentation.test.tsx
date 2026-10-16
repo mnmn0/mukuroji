@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { DEFAULT_WORK_ITEM_TYPE, type WorkItemConfiguration } from '@mukuroji/contracts'
 import { teamIssueFixtures } from '../src/issues/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import { TeamIssueScreen } from '../src/pages/workspace/TeamIssuePage'
+import { TeamIssueScreen } from '../src/issues/ui/TeamIssueScreen'
 import { createBuiltInTaskViewDefinition } from '../src/task-views/model/taskViewSurfaceState'
 import {
   teamWorkItemConfigurationFixture,
