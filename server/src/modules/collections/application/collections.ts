@@ -228,21 +228,18 @@ export async function addCollectionItem(
   if (!await readWorkItem(teamId, issueId)) {
     throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
   }
-  const current = await requireCollection(store, context.workspaceId, collectionId)
-  if (current.items.some((item) => item.teamId === teamId && item.issueId === issueId)) {
-    return toPublicCollection(current)
-  }
-  if (current.items.length >= COLLECTION_ITEM_LIMIT) {
-    throw new CollectionError(409, 'CollectionItemLimitReached', `A Collection can hold up to ${COLLECTION_ITEM_LIMIT} Work Items.`)
-  }
-  const next: StoredCollection = {
-    ...current,
-    items: [{ teamId, issueId, addedAt: context.now, addedBy: context.actor }, ...current.items],
-    updatedAt: context.now,
-    revision: current.revision + 1,
-  }
-  await store.put(context.workspaceId, next, current.revision)
-  return toPublicCollection(next)
+  return await applyItemChange(store, context.workspaceId, collectionId, (current) => {
+    if (current.items.some((item) => item.teamId === teamId && item.issueId === issueId)) return undefined
+    if (current.items.length >= COLLECTION_ITEM_LIMIT) {
+      throw new CollectionError(409, 'CollectionItemLimitReached', `A Collection can hold up to ${COLLECTION_ITEM_LIMIT} Work Items.`)
+    }
+    return {
+      ...current,
+      items: [{ teamId, issueId, addedAt: context.now, addedBy: context.actor }, ...current.items],
+      updatedAt: context.now,
+      revision: current.revision + 1,
+    }
+  })
 }
 
 /**
@@ -270,12 +267,46 @@ export async function removeCollectionItem(
   if (!await readWorkItem(teamId, issueId)) {
     throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
   }
-  const current = await requireCollection(store, context.workspaceId, collectionId)
-  const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
-  if (items.length === current.items.length) return toPublicCollection(current)
-  const next: StoredCollection = { ...current, items, updatedAt: context.now, revision: current.revision + 1 }
-  await store.put(context.workspaceId, next, current.revision)
-  return toPublicCollection(next)
+  return await applyItemChange(store, context.workspaceId, collectionId, (current) => {
+    const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
+    if (items.length === current.items.length) return undefined
+    return { ...current, items, updatedAt: context.now, revision: current.revision + 1 }
+  })
+}
+
+/** Attempts for a set-like item change that races another writer. */
+const ITEM_CHANGE_ATTEMPTS = 3
+
+/**
+ * Applies a set-like item change, rereading and reapplying it after a concurrent write.
+ *
+ * Adding or removing one reference does not depend on the rest of the Collection, so a
+ * revision conflict is retried against the current state; a concurrent identical change
+ * then becomes a no-op instead of a reported failure.
+ *
+ * @param store - Collection persistence.
+ * @param workspaceId - Server-resolved Workspace.
+ * @param collectionId - Collection identifier.
+ * @param change - Returns the next state, or undefined when the change is already applied.
+ * @returns The Collection after the change.
+ */
+async function applyItemChange(
+  store: CollectionsStore,
+  workspaceId: string,
+  collectionId: string,
+  change: (current: StoredCollection) => StoredCollection | undefined,
+): Promise<WorkItemCollection> {
+  for (let attempt = 1; ; attempt += 1) {
+    const current = await requireCollection(store, workspaceId, collectionId)
+    const next = change(current)
+    if (!next) return toPublicCollection(current)
+    try {
+      await store.put(workspaceId, next, current.revision)
+      return toPublicCollection(next)
+    } catch (error) {
+      if (!(error instanceof CollectionError && error.code === 'CollectionConflict') || attempt >= ITEM_CHANGE_ATTEMPTS) throw error
+    }
+  }
 }
 
 /**
