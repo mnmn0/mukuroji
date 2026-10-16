@@ -8,7 +8,7 @@
     if (preference === 'light' || preference === 'dark' || preference === 'system') {
       document.documentElement.dataset.theme = preference
     }
-  } catch (error) {
+  } catch {
     // Storage is unavailable; the application applies the default theme when it starts.
   }
 })()
