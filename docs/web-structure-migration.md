@@ -45,30 +45,52 @@
 1. **route component が `pages/` の外にある。**
    `documents/DocumentPage.tsx`、`documents/SharedDocumentPage.tsx`、`requests/PublicRequestFormPage.tsx`、`requests/RequestIntakePage.tsx`、`search/SearchPage.tsx` は router が直接参照する画面です。
    `web/AGENTS.md` では route component は `pages/` に置きます。
+   このうち 4 file には隣接する `*.stories.tsx` があり、story も page を import するため、移動は story と一緒に行います。
 2. **領域直下に責務の分からない file がある。**
-   `analytics/liveQuery.ts`、`automation/managementData.ts`、`files/pdfRuntime.ts`、`workload/api.ts`、`auth/session.ts` などは、`api/`、`queries/`、`model/` のいずれかへ移せます。
+   `analytics/liveQuery.ts`、`automation/managementData.ts`、`workload/api.ts` は、`api/`、`queries/`、`model/` のいずれかへ移せます。
+   次の 2 file は既存の layer に当てはまらないため、置き場所を先に決めます。
+   - `files/pdfRuntime.ts` は PDF.js の worker 設定と読み込みだけを持ち、業務知識を持ちません。`shared/lib/` の「業務領域に依存しない小さなライブラリ関数」に当たるため、`shared/lib/pdf/` へ移します。
+   - `auth/session.ts` は `localStorage` / `sessionStorage` への認証 session の永続化です。通信ではないため `api/` ではなく、副作用を持つため `model/` でもありません。
+     `web/AGENTS.md` の領域内 layer にはブラウザ storage の置き場所がないため、移動前に `web/AGENTS.md` へ置き場所（例: `entities/auth/storage/`）を追加する別 PR が必要です。それまでは現在の場所に残します。
 3. **同じ業務データを複数の領域が持っている。**
    `issues`、`tasks`、`work-items` は、いずれも canonical Work Item の取得・表示・更新を扱います。
    entity へ移すときに一つの `entities/work-item` へ統合します。
 4. **`entities/` がない。**
    多くの領域から使われる `projects`、`work-items`、`workspace`、`auth` は、現在は feature と同じ階層にあります。
+   ただし、このうち `projects`、`workspace`、`issues`、`tasks`、`work-items` は feature 候補の領域を import しています（例: `issues` と `tasks` から `task-views`、`workspace` から `notifications` と `commands`、`work-items` から `developer-platform`）。
+   そのまま `entities/` へ移すと、`entities` から `features` への依存を禁止するルールに違反します。
+5. **routing 用の layout と provider が `app/` の外にある。**
+   `workspace/ui/WorkspaceRoute.tsx`、`workspace/ui/WorkspaceRouteProvider.tsx`、`commands/ui/WorkspaceCommandMenu.tsx` の `WorkspaceCommandMenuLayout` は router が複数画面で共有する layout / provider です。
+   `web/AGENTS.md` ではこれらを `app/layouts/` と `app/providers/` に置きます。
 
 ## 移行の順序
 
 一度に全フォルダを移動せず、次の順序で小さな PR に分けます。
 各 PR は `bun run dependencies:check` と `bun run knip:check` を通し、移動以外の変更を混ぜません。
 
+`web/AGENTS.md` の「移行方針」は、最初の移行対象を `getProjectDirectory` とその `useSWR` 呼び出しの `api/` / `queries/` への分離としています。
+この文書の手順はその後に行うフォルダ移動の順序であり、その分離を置き換えません。
+
+0. **`getProjectDirectory` を分離する。**
+   `web/AGENTS.md` の「移行方針」に従い、fetch を `projects/api/`、`useSWR` と SWR key を `projects/queries/` へ移します。
+   取得処理の変更を含むため、フォルダ移動の PR とは分けます。
 1. **route component を `pages/` へ移す。**
-   差分 1 の 5 file を対応する `pages/<boundary>/` へ移します。
-   画面固有の取得処理は、移動と同時に `queries/` または `mutations/` へ切り出します。
+   差分 1 の 5 file と、隣接する story を対応する `pages/<boundary>/` へ移します。
+   移動だけの PR とし、画面固有の取得処理の `queries/` / `mutations/` への切り出しは、移動後の別 PR で行います。
 2. **領域直下の file を下位 layer へ移す。**
-   差分 2 の file を、責務に応じて `api/`、`queries/`、`model/` へ移します。
+   差分 2 の file を、責務に応じて `api/`、`queries/`、`model/`、`shared/lib/` へ移します。
+   `auth/session.ts` は置き場所が `web/AGENTS.md` に追加されるまで移しません。
 3. **利用元が pages だけの領域を `features/` へ移す。**
    `analytics`、`automation`、`security`、`workload` は他の領域から import されないため、移動の影響が page と story に限られます。
 4. **利用元が少数の領域を `features/` へ移す。**
    `triage`、`customers`、`bulk-operations`、`notifications`、`developer-platform`、`commands`、`search`、`requests`、`documents`、`planning`、`task-views` の順に移します。
-5. **共有される業務データを `entities/` へ移す。**
-   `files`、`auth`、`projects`、`workspace` を移し、最後に `issues`、`tasks`、`work-items` を `entities/work-item` へ統合します。
+5. **routing 用の layout と provider を `app/` へ移す。**
+   差分 5 の layout を `app/layouts/`、provider を `app/providers/` へ移します。
+   `workspace` を `entities/` へ移す前に行い、`entities/workspace` に routing の責務が残らないようにします。
+6. **共有される業務データを `entities/` へ移す。**
+   移す前に、差分 4 の feature への依存を解消します。
+   feature の UI や処理を組み立てている部分は、`pages/` または対応する `features/` 側へ移すか、entity が受け取る props / callback に置き換えます。
+   依存が解消された領域から順に、`files`、`auth`、`projects`、`workspace` を移し、最後に `issues`、`tasks`、`work-items` を `entities/work-item` へ統合します。
 
 ## 移動時の確認
 
