@@ -419,3 +419,17 @@ test('rejects a key whose export expired and maps audit-writer conflicts to 409'
   const corrupted = await request()
   expect(corrupted.status).toBeGreaterThanOrEqual(500)
 })
+
+test('shows the requester by member name instead of the login key', async () => {
+  configureExports()
+  const created = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'display-name' },
+    body: JSON.stringify({ filters: {} }),
+  })
+  expect(created.status).toBe(202)
+  const body = await created.json()
+  // The public view omits the login key, so the display name must not repeat it.
+  expect(body.export.requestedBy).toEqual({ displayName: 'Demo User' })
+  expect(JSON.stringify(body)).not.toContain('demo@example.com')
+})

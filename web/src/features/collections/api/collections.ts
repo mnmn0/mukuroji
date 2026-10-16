@@ -1,5 +1,6 @@
 import {
   SEARCH_SCHEMA_VERSION,
+  type AddWorkItemCollectionItemResponse,
   type CreateWorkItemCollectionInput,
   type UpdateWorkItemCollectionInput,
   type WorkItemCollection,
@@ -169,10 +170,35 @@ export async function deleteCollection(accessToken: string, collectionId: string
  * @param collectionId - Collection identifier.
  * @param teamId - Team that owns the Work Item.
  * @param issueId - Work Item identifier.
- * @returns The Collection after the change.
+ * @returns The Collection after the change and the added Work Item.
  */
-export async function addCollectionItem(accessToken: string, collectionId: string, teamId: string, issueId: string): Promise<WorkItemCollection> {
-  return readCollection(await requestJson(itemPath(collectionId, teamId, issueId), accessToken, { method: 'PUT' }))
+export async function addCollectionItem(
+  accessToken: string,
+  collectionId: string,
+  teamId: string,
+  issueId: string,
+): Promise<AddWorkItemCollectionItemResponse> {
+  const data = await requestJson(itemPath(collectionId, teamId, issueId), accessToken, { method: 'PUT' })
+  const collection = readCollection(data)
+  // The returned Work Item must be the one that was added to this Collection.
+  if (
+    collection.collectionId !== collectionId || !isRecord(data) || !isCollectionEntry(data.item) ||
+    data.item.teamId !== teamId || data.item.issueId !== issueId
+  ) {
+    throw invalidResponse()
+  }
+  const { item } = data
+  return {
+    ...collection,
+    item: {
+      teamId: item.teamId,
+      issueId: item.issueId,
+      title: item.title,
+      statusCategory: item.statusCategory,
+      ...(item.assignedProjectId === undefined ? {} : { assignedProjectId: item.assignedProjectId }),
+      addedAt: item.addedAt,
+    },
+  }
 }
 
 /**

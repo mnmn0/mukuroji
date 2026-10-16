@@ -49,7 +49,7 @@ Workspace あたりの Collection は 200 件までです。保存済み row の
 | `PATCH` | `/api/collections/:collectionId` | 名前・説明の変更 |
 | `DELETE` | `/api/collections/:collectionId?expectedRevision=` | Collection 削除 |
 | `GET` | `/api/collections/:collectionId/items` | 読める Work Item の一覧（追加が新しい順） |
-| `PUT` | `/api/collections/:collectionId/items/:teamId/:issueId` | Work Item の追加 |
+| `PUT` | `/api/collections/:collectionId/items/:teamId/:issueId` | Work Item の追加（Collection と、読める形の追加 Work Item `item` を返す） |
 | `DELETE` | `/api/collections/:collectionId/items/:teamId/:issueId` | Work Item の参照削除 |
 
 ## 今後の段階
@@ -62,4 +62,4 @@ Issue #238 の残りは別の PR で扱います。
 - Search / saved view / Report での location filter / group
 - 通知・activity・audit での重複防止と、Work Item 削除時の参照 cleanup
 
-名前・説明の更新は、要求した内容がすでに保存されている場合は書き込まずに現在の Collection を返します。応答が失われた更新の再送が `409` にならないためです。作成の再送は live row と削除 marker が両方ある場合 `502 CollectionCorruptState` を返します。Web の候補検索が上限の 100 page を読んでも候補を 1 件も見つけられなかった場合は「該当なし」ではなく失敗として表示します。
+名前・説明の更新は、要求した内容がすでに保存されている場合は書き込まずに現在の Collection を返します。応答が失われた更新の再送が `409` にならないためです。作成の再送は live row と削除 marker が両方ある場合 `502 CollectionCorruptState` を返します。Web は追加・削除が成功すると、続く Item 一覧の再取得を待たずに応答から選択中 Collection の Item cache を更新するため、再取得に失敗しても削除した Work Item が残ったり、追加した Work Item が欠けて候補に出続けたりしません。Web の候補検索が上限の 100 page を読んでも候補を 1 件も見つけられなかった場合は「該当なし」ではなく失敗として表示します。

@@ -114,7 +114,7 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - `memberUserId` と `jobRoleId` の少なくとも一方が必要である。ロールだけの Contributor は、担当者が未定の段階の計画に使う。
 - 同じメンバーは 1 つの Work Item に 1 回だけ設定できる。Contributor は最大 20 件。
 - 更新では `contributorAssignments` に完全な置換リストを送る。既存の Contributor は `assignmentId` を付けて残し、新規の Contributor は `assignmentId` を省略する。存在しない `assignmentId` は拒否する。フィールドを省略した更新は保存済みの Contributor を変更しない。
-- 新しく追加するメンバーは active な non-guest member でなければならない。検証時に読んだ member row の version・status・role を Work Item 書き込みと同じ transaction の `ConditionCheck` で固定するため、検証後 commit 前に無効化されたメンバーは保存せず `409 WorkItemAuthorizationChanged` を返す。追加後に無効化されたメンバーは、他の変更をしても残せる。再割り当ては別の flow で扱う。
+- 新しく追加するメンバーは active な non-guest member でなければならない。検証時に読んだ member row の version・status・role を Work Item 書き込みと同じ transaction の `ConditionCheck` で固定するため、検証後 commit 前に無効化されたメンバーは保存せず `409 WorkItemAuthorizationChanged` を返す。追加後に無効化されたメンバーは、元の `assignmentId` を付けて送れば他の変更をしても残せる。`assignmentId` を省略して同じメンバーを送り直した場合や、既存の `assignmentId` に別のメンバーを設定した場合は新しい割り当てとして再検証する。再割り当ては別の flow で扱う。
 - archive 済みのジョブロールは既存の Contributor に残せるが、新しく設定できない。
 - Contributor の変更は `work-item.updated` audit event の `contributorAssignments` field change として記録する。
 - Public API は `contributorAssignments` を受け付けず、返さない。

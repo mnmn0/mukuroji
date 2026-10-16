@@ -372,27 +372,47 @@ function createCallerAuthorizationConditionEntries(
 }
 
 /**
- * Drops later authorization checks that target a row an earlier check already guards.
+ * Combines caller authorization checks with the adapter-built fences, one check per row.
  *
  * DynamoDB rejects a transaction that names one item twice. That happens when the actor
- * adds themselves as a contributor while an authorization snapshot also fences their
- * membership row; both checks pin the row's version, so keeping the first is enough.
+ * adds themselves as a contributor while an authorization snapshot already fences their
+ * membership row. The snapshot check wins: it pins the membership version observed at
+ * authorization, so a membership change after that still fails the write. Because every
+ * membership change bumps the version, pinning it also keeps the status and role that
+ * the caller's check validated at that version.
  *
- * @param entries - Named authorization checks in transaction order.
- * @returns Entries with at most one check per table and key, in their original order.
+ * @param callerEntries - Checks supplied by the application caller, in transaction order.
+ * @param fenceEntries - Snapshot and Planning fences built by the adapter, in transaction order.
+ * @returns Caller checks for rows no fence covers, followed by every fence.
  */
-function dedupeAuthorizationConditionEntries(
-  entries: readonly WorkItemAuthorizationConditionEntry[],
+function mergeAuthorizationConditionEntries(
+  callerEntries: readonly WorkItemAuthorizationConditionEntry[],
+  fenceEntries: readonly WorkItemAuthorizationConditionEntry[],
 ): WorkItemAuthorizationConditionEntry[] {
-  const seen = new Set<string>()
-  return entries.filter((entry) => {
-    const condition = entry.transactWriteItem.ConditionCheck
-    if (!condition?.TableName || !condition.Key) return true
-    const key = JSON.stringify([condition.TableName, condition.Key])
+  const seen = new Set(fenceEntries.flatMap((entry) => {
+    const key = readConditionCheckRowKey(entry)
+    return key === undefined ? [] : [key]
+  }))
+  const keptCallerEntries = callerEntries.filter((entry) => {
+    const key = readConditionCheckRowKey(entry)
+    if (key === undefined) return true
     if (seen.has(key)) return false
     seen.add(key)
     return true
   })
+  return [...keptCallerEntries, ...fenceEntries]
+}
+
+/**
+ * Identifies the row a ConditionCheck guards.
+ *
+ * @param entry - Named authorization check.
+ * @returns A stable table-and-key string, or undefined when the item is not a keyed ConditionCheck.
+ */
+function readConditionCheckRowKey(entry: WorkItemAuthorizationConditionEntry): string | undefined {
+  const condition = entry.transactWriteItem.ConditionCheck
+  if (!condition?.TableName || !condition.Key) return undefined
+  return JSON.stringify([condition.TableName, condition.Key])
 }
 
 /**
@@ -1718,10 +1738,10 @@ export class DynamoDbTeamIssuesClient {
       ? readTriageAcceptanceInstant(triageAcceptance.occurredAt)
       : new Date().toISOString()
     const configurationConditionChecks = input.configurationConditionChecks ?? []
-    const authorizationConditionEntries = dedupeAuthorizationConditionEntries([
-      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
-      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
-    ])
+    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+      createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+    )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -2304,11 +2324,13 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     const configurationConditionChecks = input.configurationConditionChecks ?? []
-    const authorizationConditionEntries = dedupeAuthorizationConditionEntries([
-      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
-      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
-      ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
-    ])
+    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+      createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      [
+        ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+        ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
+      ],
+    )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )

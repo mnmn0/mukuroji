@@ -1,4 +1,9 @@
-import type { WorkItemCollection, WorkItemCollectionsResponse } from '@mukuroji/contracts'
+import type {
+  WorkItemCollection,
+  WorkItemCollectionEntry,
+  WorkItemCollectionItemsResponse,
+  WorkItemCollectionsResponse,
+} from '@mukuroji/contracts'
 import { useEffect, useRef, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import { createMutationRequestContext, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
@@ -89,6 +94,29 @@ export function useCollectionActions(
     return updated
   }
 
+  /**
+   * Writes a successful item change into the selected Collection's cached items before
+   * revalidation, so a failed item refresh cannot keep a removed Work Item on screen or
+   * leave an added one missing and still offered as a candidate.
+   *
+   * @param token - Bearer token that keys the cached items.
+   * @param updated - Collection returned by the mutation.
+   * @param change - Builds the next item list from the cached one.
+   */
+  const cacheItems = async (
+    token: string,
+    updated: WorkItemCollection,
+    change: (items: readonly WorkItemCollectionEntry[]) => WorkItemCollectionEntry[],
+  ): Promise<void> => {
+    await mutate(
+      [COLLECTIONS_QUERY_KEY, token, 'items', updated.collectionId],
+      (current: WorkItemCollectionItemsResponse | undefined) => current
+        ? { collection: updated, items: change(current.items) }
+        : current,
+      { revalidate: false },
+    )
+  }
+
   return {
     pending,
     error,
@@ -172,7 +200,15 @@ export function useCollectionActions(
      * @returns The Collection after the change, or undefined on failure.
      */
     addItem: (collectionId: string, teamId: string, issueId: string) =>
-      run(async (token) => await cacheCollection(token, await addCollectionItem(token, collectionId, teamId, issueId))),
+      run(async (token) => {
+        const { item, ...updated } = await addCollectionItem(token, collectionId, teamId, issueId)
+        // Most recently added first, matching the item list order.
+        await cacheItems(token, updated, (items) => [
+          item,
+          ...items.filter((entry) => entry.teamId !== teamId || entry.issueId !== issueId),
+        ])
+        return await cacheCollection(token, updated)
+      }),
     /**
      * Removes a Work Item reference from a Collection.
      *
@@ -182,6 +218,10 @@ export function useCollectionActions(
      * @returns The Collection after the change, or undefined on failure.
      */
     removeItem: (collectionId: string, teamId: string, issueId: string) =>
-      run(async (token) => await cacheCollection(token, await removeCollectionItem(token, collectionId, teamId, issueId))),
+      run(async (token) => {
+        const updated = await removeCollectionItem(token, collectionId, teamId, issueId)
+        await cacheItems(token, updated, (items) => items.filter((entry) => entry.teamId !== teamId || entry.issueId !== issueId))
+        return await cacheCollection(token, updated)
+      }),
   }
 }

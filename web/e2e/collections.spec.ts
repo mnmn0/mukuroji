@@ -22,6 +22,7 @@ async function mockCollections(page: Page, canWrite = true) {
     deleteNextCreate: false,
     renameBeforeNextPatch: undefined as string | undefined,
     denyItems: false,
+    failItems: false,
     patches: [] as unknown[],
     searches: [] as unknown[],
   }
@@ -69,15 +70,18 @@ async function mockCollections(page: Page, canWrite = true) {
       if (request.method() === 'PUT') {
         const workItem = workItems.find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
         if (!workItem) return route.fulfill({ status: 404, json: { code: 'CollectionWorkItemNotFound' } })
-        collection.items.unshift({ teamId, issueId, title: workItem.title, statusCategory: workItem.statusCategory === 'started' ? 'started' : 'unstarted', ...(workItem.assignedProjectId ? { assignedProjectId: workItem.assignedProjectId } : {}), addedAt: '2026-10-16T00:00:00.000Z' })
-      } else {
-        collection.items = collection.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
+        const item: WorkItemCollectionEntry = { teamId, issueId, title: workItem.title, statusCategory: workItem.statusCategory === 'started' ? 'started' : 'unstarted', ...(workItem.assignedProjectId ? { assignedProjectId: workItem.assignedProjectId } : {}), addedAt: '2026-10-16T00:00:00.000Z' }
+        collection.items.unshift(item)
+        collection.revision += 1
+        return route.fulfill({ json: { ...toPublicCollection(collection), item } })
       }
+      collection.items = collection.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
       collection.revision += 1
       return route.fulfill({ json: toPublicCollection(collection) })
     }
     if (itemsSegment === 'items') {
       if (state.denyItems) return route.fulfill({ status: 403, json: { code: 'CollectionAccessDenied', message: 'Denied.' } })
+      if (state.failItems) return route.fulfill({ status: 503, json: { code: 'CollectionUnavailable', message: 'Unavailable.' } })
       return route.fulfill({ json: { collection: toPublicCollection(collection), items: collection.items } })
     }
     if (request.method() === 'PATCH') {
@@ -225,4 +229,33 @@ test('Issue #238: a 403 on refresh hides the previously loaded Work Items', asyn
   await page.getByRole('button', { name: 'Remove from Collection: Reduce onboarding friction (core-team / onboarding)' }).click()
   await expect(page.getByText('Work Items could not be loaded.')).toBeVisible()
   await expect(page.getByRole('link', { name: 'Update the pricing page' })).toHaveCount(0)
+})
+
+test('Issue #238: item changes stay applied when the following item refresh fails', async ({ page }) => {
+  const state = await mockCollections(page)
+  state.collections.push({
+    collectionId: 'c1',
+    name: 'Q4 launch',
+    createdBy: 'demo@example.com',
+    createdAt: '2026-10-16T00:00:00.000Z',
+    updatedAt: '2026-10-16T00:00:00.000Z',
+    revision: 1,
+    items: [{ teamId: 'core-team', issueId: 'onboarding', title: 'Reduce onboarding friction', statusCategory: 'started', assignedProjectId: 'refero', addedAt: '2026-10-16T00:00:00.000Z' }],
+  })
+  await page.goto('/collections?collectionId=c1')
+  const items = page.getByTestId('collection-items')
+  await expect(items.getByRole('link', { name: 'Reduce onboarding friction' })).toBeVisible()
+  await page.getByLabel('Find Work Items to add').fill('pricing')
+  await page.getByRole('button', { name: 'Search', exact: true }).click()
+  await page.getByLabel('Add a Work Item').selectOption({ label: 'Update the pricing page (core-team / pricing)' })
+
+  // Every item refresh after the changes fails; the confirmed changes must still show.
+  state.failItems = true
+  await page.getByRole('button', { name: 'Add', exact: true }).click()
+  await expect(items.getByRole('link', { name: 'Update the pricing page' })).toBeVisible()
+  await expect(page.getByText('No Work Items to add match this search.')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Remove from Collection: Reduce onboarding friction (core-team / onboarding)' }).click()
+  await expect(items.getByRole('link', { name: 'Reduce onboarding friction' })).toHaveCount(0)
+  await expect(items.getByRole('link', { name: 'Update the pricing page' })).toBeVisible()
 })
