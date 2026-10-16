@@ -16,6 +16,9 @@ import { isAutomationValue } from './automation-value'
 import { validateRecurringSchedule } from './recurring-schedule'
 import { normalizeAutomationWorkItemSchedule } from './work-item-schedule-validation'
 
+/** Longest routing Team ID; matches the Triage identifier boundary and canonical Team IDs. */
+const TRIAGE_ROUTING_TEAM_ID_MAX_LENGTH = 200
+
 /**
  * Validates and normalizes an untrusted Automation template definition.
  *
@@ -264,7 +267,7 @@ export function validateCreateAutomationInboundWebhookEndpointInput(
   }
   const routing = requireRecord(input.triageRouting, 'Inbound webhook Triage routing')
   assertOnlyKeys(routing, ['teamId'], 'Inbound webhook Triage routing')
-  return { name, purpose, triageRouting: { teamId: requireBoundedText(routing.teamId, 'Triage routing Team ID', 128) } }
+  return { name, purpose, triageRouting: { teamId: requireBoundedText(routing.teamId, 'Triage routing Team ID', TRIAGE_ROUTING_TEAM_ID_MAX_LENGTH) } }
 }
 
 /**

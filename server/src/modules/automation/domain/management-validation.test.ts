@@ -59,7 +59,12 @@ describe('Automation management validation domain', () => {
       .toEqual({ name: 'CI' })
     expect(validateCreateAutomationInboundWebhookEndpointInput({ name: 'Support', purpose: 'triage', triageRouting: { teamId: 'support' } }))
       .toEqual({ name: 'Support', purpose: 'triage', triageRouting: { teamId: 'support' } })
+    // Routing accepts the same 200-character Team IDs as the Triage identifier boundary.
+    const longTeamId = 't'.repeat(200)
+    expect(validateCreateAutomationInboundWebhookEndpointInput({ name: 'Support', purpose: 'triage', triageRouting: { teamId: longTeamId } }))
+      .toEqual({ name: 'Support', purpose: 'triage', triageRouting: { teamId: longTeamId } })
     for (const invalid of [
+      { name: 'Support', purpose: 'triage', triageRouting: { teamId: 't'.repeat(201) } },
       { name: 'Support', purpose: 'triage' },
       { name: 'Support', purpose: 'triage', triageRouting: { teamId: 'support', ownerUserId: 'x' } },
       { name: 'CI', triageRouting: { teamId: 'support' } },
