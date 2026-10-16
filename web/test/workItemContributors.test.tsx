@@ -116,7 +116,7 @@ describe('WorkItemContributorsEditor', () => {
       />,
     )
     expect(markup).toContain('Contributors')
-    expect(markup).toContain('Sato')
+    expect(markup).toContain('Sato (sato@example.com)')
     expect(markup).toContain('Owner')
     expect(markup).toContain('Undecided (planned by job role)')
     expect(markup).toContain('Writer')
