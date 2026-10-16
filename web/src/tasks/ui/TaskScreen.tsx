@@ -3447,6 +3447,7 @@ export function TaskScreen({
               />
             ) : taskAction ? (
               <TaskActionFeedback
+                announcementKey={taskAction}
                 dismissLabel={t('tasks.action.dismiss')}
                 kind={taskAction.kind}
                 message={isRestoringTask

@@ -24,12 +24,12 @@ export function LiveAnnouncer() {
     <div className="sr-only" data-testid="live-announcer">
       <div aria-atomic="true" aria-live="polite" data-testid="live-announcer-polite">
         {announcements.polite ? (
-          <p key={announcements.polite.id}>{announcements.polite.message}</p>
+          <p data-announcement-id={announcements.polite.id} key={announcements.polite.id}>{announcements.polite.message}</p>
         ) : null}
       </div>
       <div aria-atomic="true" aria-live="assertive" data-testid="live-announcer-assertive">
         {announcements.assertive ? (
-          <p key={announcements.assertive.id}>{announcements.assertive.message}</p>
+          <p data-announcement-id={announcements.assertive.id} key={announcements.assertive.id}>{announcements.assertive.message}</p>
         ) : null}
       </div>
     </div>
