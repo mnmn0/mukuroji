@@ -450,4 +450,3 @@ describe('inbound webhook endpoint compatibility', () => {
     expect(listed).toEqual([{ ...legacy, purpose: 'automation' }])
   })
 })
-
