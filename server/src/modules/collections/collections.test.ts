@@ -98,6 +98,8 @@ test('treats a retried delete after a lost response as already done', async () =
   const created = await createCollection(store, context, { name: 'Launch' }, 'key')
   await deleteCollection(store, 'w', created.collectionId, 1)
   await expect(deleteCollection(store, 'w', created.collectionId, 1)).resolves.toBeUndefined()
+  // A stale delete of another revision is not the lost-response retry.
+  await expect(deleteCollection(store, 'w', created.collectionId, 2)).rejects.toMatchObject({ status: 404, code: 'CollectionNotFound' })
   await expect(deleteCollection(store, 'w', 'missing', 1)).rejects.toMatchObject({ status: 404, code: 'CollectionNotFound' })
 })
 

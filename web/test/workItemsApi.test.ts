@@ -95,6 +95,10 @@ describe('canonical Work Item API', () => {
       [{ ...contributor, status: 'blocked' }],
       [{ ...contributor, plannedEffortMinutes: 1.5 }],
       [{ assignmentId: 'c'.repeat(32), status: 'planned' }],
+      // The canonical contract bounds effort, the list size, and assignment ID uniqueness.
+      [{ ...contributor, plannedEffortMinutes: 60_001 }],
+      Array.from({ length: 21 }, (_, index) => ({ ...contributor, assignmentId: index.toString(16).padStart(32, '0') })),
+      [contributor, contributor],
     ]) {
       expect(isCanonicalWorkItem({ ...valid, contributorAssignments })).toBeFalse()
     }

@@ -27,6 +27,9 @@ const COLLECTION_TOMBSTONE_ENTRY_TYPE = 'work-item-collection-tombstone'
 /** Sort key of the per-Workspace Collection counter row. */
 const COLLECTION_COUNT_RECORD_KEY = 'COLLECTION_COUNT'
 
+/** Entry type stored on the per-Workspace Collection counter row. */
+const COLLECTION_COUNT_ENTRY_TYPE = 'work-item-collection-count'
+
 /** Entry type stored on Collection rows. */
 const COLLECTION_ENTRY_TYPE = 'work-item-collection'
 
@@ -140,11 +143,12 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       row.recordKey !== tombstoneKey(collectionId) ||
       row.entryType !== COLLECTION_TOMBSTONE_ENTRY_TYPE ||
       row.collectionId !== collectionId ||
-      !isCollectionCreateFingerprint(row.createFingerprint)
+      !isCollectionCreateFingerprint(row.createFingerprint) ||
+      typeof row.deletedRevision !== 'number' || !Number.isSafeInteger(row.deletedRevision) || row.deletedRevision < 1
     ) {
       throw new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
     }
-    return { createFingerprint: row.createFingerprint }
+    return { createFingerprint: row.createFingerprint, deletedRevision: row.deletedRevision }
   }
 
   /**
@@ -180,7 +184,13 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         }, ...counter, ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, 1 + counter.length + this.checks.length, 1 + counter.length, expectedRevision === 0 ? 'create' : 'update')
+      const transactionSize = 1 + counter.length + this.checks.length
+      // A failed counter condition means either a full Workspace or an invalid counter row;
+      // read the row to report which.
+      if (expectedRevision === 0 && isOnlyConditionFailure(error, transactionSize, 1)) {
+        throw await this.classifyCounterFailure(workspaceId)
+      }
+      storageFailure(error, transactionSize, 1 + counter.length, expectedRevision === 0 ? 'create' : 'update')
     }
   }
 
@@ -211,6 +221,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
               entryType: COLLECTION_TOMBSTONE_ENTRY_TYPE,
               collectionId,
               createFingerprint: deletion.createFingerprint,
+              deletedRevision: deletion.deletedRevision,
             },
             // An existing marker next to a live row is contradictory state; never overwrite it.
             ConditionExpression: 'attribute_not_exists(recordKey)',
@@ -220,6 +231,24 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     } catch (error) {
       storageFailure(error, this.checks.length + 3, 3, 'delete')
     }
+  }
+
+  /**
+   * Explains why the creation counter condition failed.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @returns `CollectionLimitReached` for a valid full counter, otherwise `CollectionCorruptState`.
+   */
+  private async classifyCounterFailure(workspaceId: string): Promise<CollectionError> {
+    const { Item: row } = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
+      ConsistentRead: true,
+    })).catch((error: unknown) => storageFailure(error))
+    const count: unknown = row?.count
+    const isFullCounter = row?.entryType === COLLECTION_COUNT_ENTRY_TYPE &&
+      typeof count === 'number' && Number.isSafeInteger(count) && count >= COLLECTION_LIMIT
+    return isFullCounter ? limitReached() : new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
   }
 
   /**
@@ -260,7 +289,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType' },
         ExpressionAttributeValues: {
           ':delta': delta,
-          ':entryType': 'work-item-collection-count',
+          ':entryType': COLLECTION_COUNT_ENTRY_TYPE,
           ':zero': 0,
           ...(delta === 1 ? { ':limit': COLLECTION_LIMIT } : {}),
         },
@@ -443,6 +472,7 @@ function conflict(): CollectionError {
  * @param transactionSize - Number of items in the failed transaction, if any.
  * @param authorizationStart - Index of the first caller authorization condition check.
  * @param operation - Write kind; it decides what a failed item after the main row means.
+ *   A creation's counter failure is classified by the caller before this runs.
  * @returns Never; always throws a Collection error.
  */
 function storageFailure(
@@ -465,7 +495,6 @@ function storageFailure(
      */
     const onlyFailed = (index: number) =>
       codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' && codes[index] === 'ConditionalCheckFailed'
-    if (operation === 'create' && onlyFailed(1)) throw limitReached()
     // Item 1 is the deletion marker check on an update; on a delete, items 1 and 2 are the
     // counter decrement and the marker write. Their failure means contradictory stored state.
     if ((operation === 'update' && onlyFailed(1)) || (operation === 'delete' && (onlyFailed(1) || onlyFailed(2)))) {
@@ -500,4 +529,21 @@ function limitReached(): CollectionError {
  */
 function retryable(): CollectionError {
   return new CollectionError(503, 'CollectionRetryable', 'Collection storage is temporarily unavailable.')
+}
+
+/**
+ * Checks whether a transaction failed only on one condition after the main row.
+ *
+ * @param error - Thrown SDK error.
+ * @param transactionSize - Number of items in the transaction.
+ * @param index - Item whose condition failed.
+ * @returns Whether that item alone failed while the main row condition held.
+ */
+function isOnlyConditionFailure(error: unknown, transactionSize: number, index: number): boolean {
+  if (typeof error !== 'object' || error === null || !('name' in error) || error.name !== 'TransactionCanceledException') return false
+  if (!('CancellationReasons' in error) || !Array.isArray(error.CancellationReasons)) return false
+  const codes = error.CancellationReasons.map((reason: unknown) =>
+    typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
+  return codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' &&
+    codes.every((code, position) => position === index ? code === 'ConditionalCheckFailed' : code !== 'ConditionalCheckFailed')
 }

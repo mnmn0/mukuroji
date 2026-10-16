@@ -90,6 +90,17 @@ export function buildAuditExportWorker(
     actions: ['s3:GetObject', 's3:PutObject'],
     resources: [auditExportBucket.arnForObjects('audit-exports/*')],
   }));
+  // Without ListBucket, S3 answers a missing job.json with 403 instead of NoSuchKey, and a
+  // step for an expired or closed job would retry into the DLQ instead of being skipped.
+  workerFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['s3:ListBucket'],
+    resources: [auditExportBucket.bucketArn],
+    conditions: {
+      StringLike: {
+        's3:prefix': ['audit-exports/*'],
+      },
+    },
+  }));
   // Steps stop for closing or closed tenants so exports cannot outlive tenant closure.
   workerFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem'],
