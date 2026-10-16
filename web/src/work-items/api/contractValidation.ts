@@ -509,6 +509,27 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isApprovalSummary(value.approvalSummary, value.createdAt)
 }
 
+/** Server-generated contributor assignment IDs: 32 lowercase hexadecimal digits. */
+const CONTRIBUTOR_ASSIGNMENT_ID_PATTERN = /^[0-9a-f]{32}$/u
+
+/** Work Item configuration ID grammar used for job roles. */
+const CONTRIBUTOR_JOB_ROLE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu
+
+/**
+ * Checks that a contributor member ID is in the normalized form the server stores.
+ *
+ * @param value - Candidate member ID.
+ * @returns Whether it is non-empty, trimmed, lower-case, at most 256 characters, and printable.
+ */
+function isCanonicalContributorMemberId(value: unknown): value is string {
+  if (typeof value !== 'string' || !value || value.length > 256 || value !== value.trim().toLowerCase()) return false
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    if (codePoint < 0x20 || codePoint === 0x7f) return false
+  }
+  return true
+}
+
 /**
  * Returns whether a value is a list of contributor assignments.
  *
@@ -523,9 +544,9 @@ function isContributorAssignmentList(value: unknown): value is WorkItemContribut
     hasUniqueContributorMembers(value) &&
     value.every((entry) =>
     isRecord(entry) &&
-    typeof entry.assignmentId === 'string' &&
-    isOptionalString(entry.memberUserId) &&
-    isOptionalString(entry.jobRoleId) &&
+    typeof entry.assignmentId === 'string' && CONTRIBUTOR_ASSIGNMENT_ID_PATTERN.test(entry.assignmentId) &&
+    (entry.memberUserId === undefined || isCanonicalContributorMemberId(entry.memberUserId)) &&
+    (entry.jobRoleId === undefined || (typeof entry.jobRoleId === 'string' && CONTRIBUTOR_JOB_ROLE_ID_PATTERN.test(entry.jobRoleId))) &&
     (entry.memberUserId !== undefined || entry.jobRoleId !== undefined) &&
     (entry.plannedEffortMinutes === undefined ||
       (Number.isSafeInteger(entry.plannedEffortMinutes) &&

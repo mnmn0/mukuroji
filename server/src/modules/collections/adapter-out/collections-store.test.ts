@@ -85,6 +85,8 @@ test('maps a failed counter condition on creation to the limit only for a valid 
   }), checks)
   const full = { workspaceId: 'w', recordKey: 'COLLECTION_COUNT', entryType: 'work-item-collection-count', count: 200 }
   await expect(storeWithCounter(full).put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
+  // A concurrent delete freed a slot after the failed write: retry, not corruption.
+  await expect(storeWithCounter({ ...full, count: 199 }).put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
   // A negative or foreign counter row is corrupt state, not a full Workspace.
   for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }, undefined]) {
     await expect(storeWithCounter(counter).put('w', collection, 0)).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })

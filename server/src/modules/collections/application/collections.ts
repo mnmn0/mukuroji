@@ -125,8 +125,10 @@ export async function createCollection(
     .update(JSON.stringify([input.name, input.description ?? '']))
     .digest('hex')
   const existing = await store.get(context.workspaceId, collectionId)
-  if (existing) return replayCreatedCollection(existing, context.actor, createFingerprint)
   const deletion = await store.readDeletion(context.workspaceId, collectionId)
+  // A live row next to its deletion marker is contradictory; never replay it as created.
+  if (existing && deletion) throw corruptState()
+  if (existing) return replayCreatedCollection(existing, context.actor, createFingerprint)
   if (deletion) throw replayDeletedCollection(deletion, createFingerprint)
   const collection: StoredCollection = {
     collectionId,
@@ -171,8 +173,13 @@ export async function updateCollection(
   input: UpdateWorkItemCollectionInput,
 ): Promise<WorkItemCollection> {
   const current = await requireCollection(store, context.workspaceId, collectionId)
-  if (current.revision !== input.expectedRevision) throw conflict()
   const description = input.description === undefined ? current.description : input.description
+  // A retry after a lost response finds its own change already applied; report it as done
+  // instead of a conflict. Nothing changes, so no write is needed.
+  if (current.name === (input.name ?? current.name) && (current.description ?? '') === (description ?? '')) {
+    return toPublicCollection(current)
+  }
+  if (current.revision !== input.expectedRevision) throw conflict()
   const next: StoredCollection = {
     collectionId: current.collectionId,
     name: input.name ?? current.name,
@@ -424,4 +431,13 @@ function conflict(): CollectionError {
  */
 function laterInstant(now: string, stored: string): string {
   return Date.parse(stored) > Date.parse(now) ? stored : now
+}
+
+/**
+ * Creates the error for contradictory persisted Collection state.
+ *
+ * @returns A 502 Collection error.
+ */
+function corruptState(): CollectionError {
+  return new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
 }

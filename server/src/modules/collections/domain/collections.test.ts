@@ -47,6 +47,8 @@ test('rejects stored Collections with more references than the item limit', () =
   expect(isStoredCollection({ ...stored, createFingerprint: '' })).toBe(false)
   expect(isStoredCollection({ ...stored, createFingerprint: 'F'.repeat(64) })).toBe(false)
   expect(isStoredCollection({ ...stored, createFingerprint: 'f'.repeat(63) })).toBe(false)
+  // The next change writes revision + 1, so the stored revision must leave room for it.
+  expect(isStoredCollection({ ...stored, revision: Number.MAX_SAFE_INTEGER })).toBe(false)
   // Creators and adders are server-resolved member keys.
   expect(isStoredCollection({ ...stored, createdBy: '' })).toBe(false)
   expect(isStoredCollection({ ...stored, createdBy: ' reader' })).toBe(false)

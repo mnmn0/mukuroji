@@ -10,6 +10,7 @@ import {
   updateCollection,
   type ReadCollectionWorkItem,
 } from './application/collections'
+import type { StoredCollection } from './domain/collections'
 
 const context = { workspaceId: 'w', actor: 'reader', now: '2026-10-16T00:00:00.000Z' }
 
@@ -155,4 +156,43 @@ test('treats an overlapping identical add or remove as a no-op instead of a conf
   store.race = () => removeCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)
   expect((await removeCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)).revision).toBe(3)
   expect((await listCollectionEntries(store, 'w', collectionId, readWorkItem)).items).toEqual([])
+})
+
+test('replays a metadata update whose change is already applied instead of reporting a conflict', async () => {
+  const store = new InMemoryCollectionsStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  const renamed = await updateCollection(store, context, collectionId, { expectedRevision: 1, name: 'Launch plan' })
+  expect(renamed.revision).toBe(2)
+  // The response was lost; the same request is retried with the old revision.
+  expect(await updateCollection(store, context, collectionId, { expectedRevision: 1, name: 'Launch plan' })).toMatchObject({ name: 'Launch plan', revision: 2 })
+  // A different stale change still conflicts.
+  await expect(updateCollection(store, context, collectionId, { expectedRevision: 1, name: 'Other' }))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
+})
+
+/** Store whose reads return a restored live row even after its deletion marker was written. */
+class RestoredCollectionsStore extends InMemoryCollectionsStore {
+  /** Live row put back by a restore, if any. */
+  restored: StoredCollection | undefined
+
+  /**
+   * Reads the restored row when one is set, otherwise the stored Collection.
+   *
+   * @param workspaceId - Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns The Collection, or undefined.
+   */
+  override async get(workspaceId: string, collectionId: string) {
+    return this.restored?.collectionId === collectionId ? structuredClone(this.restored) : await super.get(workspaceId, collectionId)
+  }
+}
+
+test('refuses to replay a creation whose live row also has a deletion marker', async () => {
+  const store = new RestoredCollectionsStore()
+  const created = await createCollection(store, context, { name: 'Launch' }, 'key')
+  const live = await store.get('w', created.collectionId)
+  await deleteCollection(store, 'w', created.collectionId, 1)
+  // A restore puts the live row back next to its marker.
+  store.restored = live
+  await expect(createCollection(store, context, { name: 'Launch' }, 'key')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
 })
