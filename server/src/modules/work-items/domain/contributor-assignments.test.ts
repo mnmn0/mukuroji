@@ -121,6 +121,7 @@ describe('isStoredContributorAssignmentList', () => {
     ['an invalid status', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'blocked' }]],
     ['invalid effort', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'planned', plannedEffortMinutes: '60' }]],
     ['a duplicate assignment ID', [...existing, { ...existing[0], memberUserId: 'sam@example.com' }]],
+    ['an unknown stored field', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'planned', note: 'x' }]],
     ['a duplicate member', [...existing, { assignmentId: 'c'.repeat(32), memberUserId: 'Alex@example.com', status: 'planned' }]],
   ])('rejects %s', (_label, value) => {
     expect(isStoredContributorAssignmentList(value)).toBe(false)
