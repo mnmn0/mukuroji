@@ -96,6 +96,19 @@ describe('S3AuditExportStore', () => {
     expect(puts.every((input) => !input.Key?.includes('ws-1'))).toBe(true)
   })
 
+  test('propagates S3 409 conflicts instead of reporting an existing or changed job', async () => {
+    const client = new S3Client({ region: 'us-east-1', credentials: { accessKeyId: 'test', secretAccessKey: 'test' } })
+    Object.assign(client, {
+      async send() {
+        throw awsError('ConditionalRequestConflict', 409)
+      },
+    })
+    const store = new S3AuditExportStore({ client, bucketName: 'exports' })
+    const conflicted = job('a'.repeat(32), '2026-07-18T00:00:00.000Z')
+    await expect(store.createJob(conflicted)).rejects.toMatchObject({ name: 'ConditionalRequestConflict' })
+    await expect(store.replaceJob(conflicted, '"etag-1"')).rejects.toMatchObject({ name: 'ConditionalRequestConflict' })
+  })
+
   test('returns undefined for a missing job and rejects malformed stored jobs', async () => {
     const { store, objects } = createStore()
     const exportId = 'b'.repeat(32)

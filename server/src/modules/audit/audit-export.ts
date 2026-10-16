@@ -479,7 +479,8 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      * already used for a different export, so callers can record the request first.
      *
      * @param request - Workspace, requester, filters, and idempotency key.
-     * @returns The export identifier, the normalized filters, and their fingerprint.
+     * @returns The export identifier, the normalized filters, their fingerprint, and whether
+     * the job still exists.
      */
     async prepareExport(request: AuditExportRequest & { readonly idempotencyKey: string }) {
       const filters = normalizeAuditExportFilters(request.filters, now())
@@ -497,7 +498,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           'Idempotency-Key was already used for a different audit export.',
         )
       }
-      return { exportId, filters, requestFingerprint: createRequestFingerprint(filters) }
+      return { exportId, filters, requestFingerprint: createRequestFingerprint(filters), jobExists: existing !== undefined }
     },
 
     /**
@@ -605,7 +606,9 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           }
         }
       } catch (error) {
-        if (error instanceof TypeError || error instanceof RangeError) {
+        // Only filters the query layer rejects are terminal. Other TypeErrors, such as a
+        // malformed persisted audit row, propagate so the message retries and reaches the DLQ.
+        if ((error instanceof TypeError || error instanceof RangeError) && !areQueryFiltersValid(job)) {
           return await finish(job, version, failJob(job, now(), 'AuditExportQueryInvalid', 'Audit export filters could not be evaluated.'))
         }
         throw error
@@ -814,6 +817,22 @@ function capAtSnapshot(to: string | undefined, snapshotAt: string) {
  */
 function isExpired(job: AuditExportJob, current: Date) {
   return Date.parse(job.expiresAt) <= current.getTime()
+}
+
+/**
+ * Checks whether a job's stored filters are accepted by the audit query layer.
+ *
+ * @param job - Stored job.
+ * @returns Whether the filters are valid.
+ */
+function areQueryFiltersValid(job: AuditExportJob): boolean {
+  try {
+    assertValidAuditQueryFilters({ workspaceId: job.workspaceId, ...job.filters, to: capAtSnapshot(job.filters.to, job.snapshotAt) })
+    return true
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) return false
+    throw error
+  }
 }
 
 /**

@@ -225,11 +225,18 @@ describe('audit export service', () => {
       settleSeconds: 0,
       store,
       queue: { async enqueue() {} },
-      readEvents: async () => { throw new TypeError('Invalid cursor.') },
+      readEvents: async () => { throw new TypeError('Audit event is malformed.') },
       now: fixedNow,
       createId: () => 'e'.repeat(32),
     })
     const invalidJob = (await invalid.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })).job
+    // A malformed persisted row with valid filters retries so the DLQ can surface it.
+    await expect(invalid.processExport('ws-1', invalidJob.exportId)).rejects.toThrow('Audit event is malformed.')
+    expect((await invalid.getExport('ws-1', invalidJob.exportId)).status).toBe('queued')
+    // Filters the query layer rejects (for example, stored before validation existed) are terminal.
+    const storedInvalid = store.jobs.get(`ws-1/${invalidJob.exportId}`)
+    if (!storedInvalid) throw new Error('missing job')
+    storedInvalid.job = { ...storedInvalid.job, filters: { eventTypes: [' '] } }
     expect(await invalid.processExport('ws-1', invalidJob.exportId)).toBe('failed')
     expect((await invalid.getExport('ws-1', invalidJob.exportId)).failure?.code).toBe('AuditExportQueryInvalid')
 
