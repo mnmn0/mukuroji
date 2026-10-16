@@ -5262,7 +5262,7 @@ test.describe('authenticated task page', () => {
     })
     const patchBodies: unknown[] = []
     page.on('request', (request) => {
-      if (request.method() === 'PATCH' && /\/api\/teams\/core-team\/issues\/wireframe$/u.test(request.url())) {
+      if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues/wireframe')) {
         patchBodies.push(request.postDataJSON())
       }
     })
