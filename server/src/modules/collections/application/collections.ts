@@ -240,7 +240,7 @@ export async function addCollectionItem(
     return {
       ...current,
       items: [{ teamId, issueId, addedAt: context.now, addedBy: context.actor }, ...current.items],
-      updatedAt: context.now,
+      updatedAt: laterInstant(context.now, current.updatedAt),
       revision: current.revision + 1,
     }
   })
@@ -274,7 +274,7 @@ export async function removeCollectionItem(
   return await applyItemChange(store, context.workspaceId, collectionId, (current) => {
     const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
     if (items.length === current.items.length) return undefined
-    return { ...current, items, updatedAt: context.now, revision: current.revision + 1 }
+    return { ...current, items, updatedAt: laterInstant(context.now, current.updatedAt), revision: current.revision + 1 }
   })
 }
 
@@ -400,4 +400,18 @@ function replayDeletedCollection(deletion: CollectionDeletion, createFingerprint
  */
 function conflict(): CollectionError {
   return new CollectionError(409, 'CollectionConflict', 'The Collection changed. Reload and try again.')
+}
+
+/**
+ * Picks the later of two ISO instants.
+ *
+ * A retry after a lost race rebuilds on a state written after this request started, so
+ * `updatedAt` must not move back behind that newer change.
+ *
+ * @param now - Time of the current request.
+ * @param stored - `updatedAt` of the state being replaced.
+ * @returns The later instant.
+ */
+function laterInstant(now: string, stored: string): string {
+  return Date.parse(stored) > Date.parse(now) ? stored : now
 }

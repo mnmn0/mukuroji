@@ -185,6 +185,13 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
   const { collection, t } = props
   // The Collection as it was when editing began; item-only revisions keep the draft.
   const [editBase, setEditBase] = useState<WorkItemCollection | undefined>(undefined)
+  // After a failed save the Collection is reloaded; that reloaded state becomes the new base,
+  // so saving again after the conflict message applies the draft instead of conflicting forever.
+  const [rebaseAfterFailure, setRebaseAfterFailure] = useState(false)
+  if (rebaseAfterFailure && editBase && editBase !== collection) {
+    setEditBase(collection)
+    setRebaseAfterFailure(false)
+  }
   const editing = editBase !== undefined
   const [name, setName] = useState(collection.name)
   const [description, setDescription] = useState(collection.description ?? '')
@@ -215,13 +222,25 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
     if (!name.trim() || !editBase) return
     // Another editor's metadata change keeps the stale revision so the save reports a conflict.
     const metadataChanged = editBase.name !== collection.name || (editBase.description ?? '') !== (collection.description ?? '')
-    if (await props.onRename(metadataChanged ? editBase : collection, name.trim(), description.trim())) setEditBase(undefined)
+    setRebaseAfterFailure(false)
+    if (await props.onRename(metadataChanged ? editBase : collection, name.trim(), description.trim())) {
+      setEditBase(undefined)
+    } else {
+      setRebaseAfterFailure(true)
+    }
+  }
+
+  /** Leaves editing without saving. */
+  const cancelEditing = () => {
+    setRebaseAfterFailure(false)
+    setEditBase(undefined)
   }
 
   /** Starts editing from the current name and description. */
   const startEditing = () => {
     setName(collection.name)
     setDescription(collection.description ?? '')
+    setRebaseAfterFailure(false)
     setEditBase(collection)
   }
 
@@ -247,7 +266,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
           </label>
           <div className="flex flex-wrap gap-2">
             <button className="workbench-button-primary min-h-10 px-4" disabled={props.pending || !name.trim()} type="submit">{t('collections.detail.save')}</button>
-            <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setEditBase(undefined)} type="button">{t('collections.detail.cancel')}</button>
+            <button className="workbench-button-secondary min-h-10 px-4" onClick={cancelEditing} type="button">{t('collections.detail.cancel')}</button>
           </div>
         </form>
       ) : (
