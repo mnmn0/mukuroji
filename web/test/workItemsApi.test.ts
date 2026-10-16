@@ -77,6 +77,29 @@ describe('canonical Work Item API', () => {
     }
   })
 
+  test('validates contributor assignments at the response boundary', () => {
+    const contributor = {
+      assignmentId: 'a'.repeat(32),
+      memberUserId: 'suzuki@example.com',
+      jobRoleId: 'designer',
+      plannedEffortMinutes: 90,
+      status: 'in-progress',
+    }
+    const valid = createWorkItem({ dueDate: '2026-07-12', schedule: createDefaultTestSchedule('2026-07-12') })
+    expect(isCanonicalWorkItem(valid)).toBeTrue()
+    expect(isCanonicalWorkItem({ ...valid, contributorAssignments: [contributor] })).toBeTrue()
+    expect(isCanonicalWorkItem({ ...valid, contributorAssignments: [{ assignmentId: 'b'.repeat(32), jobRoleId: 'qa', status: 'planned' }] })).toBeTrue()
+
+    for (const contributorAssignments of [
+      {},
+      [{ ...contributor, status: 'blocked' }],
+      [{ ...contributor, plannedEffortMinutes: 1.5 }],
+      [{ assignmentId: 'c'.repeat(32), status: 'planned' }],
+    ]) {
+      expect(isCanonicalWorkItem({ ...valid, contributorAssignments })).toBeFalse()
+    }
+  })
+
   test('requires complete definitions for missing fields in a type-change preview', () => {
     const definition = {
       id: 'risk-level',

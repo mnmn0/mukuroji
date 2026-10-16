@@ -3,9 +3,11 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type CustomFieldValue,
   type WorkflowStatusCategory,
+  type WorkItemContributorAssignment,
   type WorkItemPriority,
   type WorkItemSchedule,
 } from '@mukuroji/contracts'
+import { isStoredContributorAssignmentList } from './domain/contributor-assignments'
 import {
   deriveWorkItemScheduleDueDate,
   isCanonicalWorkItemSchedule,
@@ -45,6 +47,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   description?: string
   /** 担当 Workspace member key です。 */
   assigneeUserId: string
+  /** Contributors carrying out the work; absent when none. */
+  contributorAssignments?: WorkItemContributorAssignment[]
   /** Work Item を作成した Workspace member key です。 */
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
@@ -125,6 +129,8 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     isNonEmptyString(value.title) &&
     (value.description === undefined || typeof value.description === 'string') &&
     isNonEmptyString(value.assigneeUserId) &&
+    (value.contributorAssignments === undefined ||
+      isStoredContributorAssignmentList(value.contributorAssignments)) &&
     isNonEmptyString(value.creatorMemberKey) &&
     (value.sourceRequestId === undefined || isNonEmptyString(value.sourceRequestId)) &&
     (value.sourceTriageEntryId === undefined ||

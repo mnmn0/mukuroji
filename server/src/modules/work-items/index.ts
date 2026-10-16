@@ -9,6 +9,12 @@ export {
   type WorkItemScheduleConfirmationReservationRequest,
 } from './application/use-cases/confirm-work-item-schedule-change'
 export {
+  WorkItemContributorAssignmentError,
+  listAddedContributorMembers,
+  normalizeContributorAssignments,
+  type ContributorAssignmentNormalizationContext,
+} from './domain/contributor-assignments'
+export {
   createResourceId,
 } from './domain/resource-id'
 export {

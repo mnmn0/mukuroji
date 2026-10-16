@@ -56,6 +56,7 @@ import {
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
+import { WorkItemContributorsEditor } from '../../work-items/ui/WorkItemContributorsEditor'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
@@ -995,8 +996,16 @@ export function TaskDetailPane({
                   </select>
                 </label>
                 <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-                  {t('issues.create.assignee')}
+                  {t('workItems.owner.label')}
+                  <span
+                    aria-hidden="true"
+                    className="text-xs font-normal text-[var(--workbench-muted)]"
+                    id={`${editorFormId}-owner-help`}
+                  >
+                    {t('workItems.owner.help')}
+                  </span>
                   <select
+                    aria-describedby={`${editorFormId}-owner-help`}
                     className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                     defaultValue={assigneeUserId}
                     form={editorFormId}
@@ -1026,6 +1035,19 @@ export function TaskDetailPane({
                   </select>
                 </label>
               </div>
+              <WorkItemContributorsEditor
+                assignments={(issue ?? currentTask).contributorAssignments}
+                jobRoles={resolvedConfiguration?.jobRoles ?? []}
+                locale={locale}
+                memberOptions={assigneeOptions}
+                ownerUserId={(issue ?? currentTask).assigneeUserId}
+                {...(onUpdateIssue && !isReadOnly
+                  ? {
+                      onSave: (contributorAssignments) =>
+                        onUpdateIssue(currentTask.teamId, currentTask.id, { contributorAssignments }),
+                    }
+                  : {})}
+              />
               {customerImpact ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
             </section>
           </fieldset>

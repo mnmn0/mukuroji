@@ -43,6 +43,7 @@ CDK は table を `PAY_PER_REQUEST`、PITR enabled、`Retain` で作成する。
 | `revision` | yes | 作成時 `1`、更新成功ごとに `1` 増加する正の整数。 |
 | `workflow` | yes | 解決済み scope で使用する workflow definition。 |
 | `customFields` | yes | Scope に適用する custom field definition の配列。 |
+| `jobRoles` | no | Contributor を計画するジョブロールの配列。最大 100 件。各要素は stable `id`、表示名 `name`、任意の `archived` を持つ。 |
 | `updatedAt` | no | 永続化済み configuration の最終更新を表す UTC ISO 8601 timestamp。built-in default では省略する。 |
 
 未知の `schemaVersion`、不正 revision、scope key と payload の不一致を黙って読み飛ばさない。API は stable error を返し、管理 mutation と Work Item mutation を停止する。
@@ -100,6 +101,14 @@ Definition 保存前に次を検証する。
 - In-use status を hard delete しない。
 
 Work Item の `workflowStatusId` が workflow 上の正本で、`statusCategory` は list/filter/report 用に同じ mutation で保存する projection である。`workflowSchemaVersion` は検証に使用した configuration schema version を表す。作成時は指定 status が無ければ `initialStatusId` を適用する。更新時は現在 status から遷移先への明示 transition が無ければ保存しない。
+
+## Job role
+
+Job role は Work Item の Contributor を、担当メンバーが決まる前から計画するための役割である。`id` は custom field と同じ文字種の stable ID で、表示名を保存 key にしない。
+
+- 名称変更は `name` だけを変更する。保存済み Contributor は `id` で参照するため影響を受けない。
+- 使わなくなったロールは削除せず `archived: true` にする。archive 済みロールは既存の Contributor に残せるが、新しい Contributor には設定できない。
+- Configuration から削除されたロールを参照する Contributor は読み取りでは保持し、画面では「不明なジョブロール」と表示する。
 
 ## Custom field
 

@@ -7,6 +7,7 @@ import {
   type CustomFieldDefinition,
   type ScheduleDependencyConstraint,
   type ScheduleDependencyType,
+  type WorkItemContributorAssignment,
   type WorkItemDependencyEndpoint,
   type WorkItemSchedule,
   type WorkItemScheduleChangePreview,
@@ -469,6 +470,7 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     typeof value.teamId === 'string' &&
     typeof value.title === 'string' &&
     typeof value.assigneeUserId === 'string' &&
+    (value.contributorAssignments === undefined || isContributorAssignmentList(value.contributorAssignments)) &&
     typeof value.creatorMemberKey === 'string' &&
     typeof value.workflowStatusId === 'string' &&
     isOptionalString(value.workItemTypeId) &&
@@ -503,6 +505,26 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isOptionalString(value.archivedAt) &&
     isOptionalString(value.archivedBy) &&
     isApprovalSummary(value.approvalSummary, value.createdAt)
+}
+
+/**
+ * Returns whether a value is a list of contributor assignments.
+ *
+ * @param value - Candidate `contributorAssignments` value.
+ * @returns Whether every entry names a member or job role with a valid status and effort.
+ */
+function isContributorAssignmentList(value: unknown): value is WorkItemContributorAssignment[] {
+  return Array.isArray(value) && value.every((entry) =>
+    isRecord(entry) &&
+    typeof entry.assignmentId === 'string' &&
+    isOptionalString(entry.memberUserId) &&
+    isOptionalString(entry.jobRoleId) &&
+    (entry.memberUserId !== undefined || entry.jobRoleId !== undefined) &&
+    (entry.plannedEffortMinutes === undefined ||
+      (Number.isSafeInteger(entry.plannedEffortMinutes) &&
+        typeof entry.plannedEffortMinutes === 'number' &&
+        entry.plannedEffortMinutes >= 0)) &&
+    (entry.status === 'planned' || entry.status === 'in-progress' || entry.status === 'done'))
 }
 
 /** Returns whether a value is one compact committed Work Item schedule. */

@@ -36,6 +36,7 @@ import {
   isCanonicalWorkItemArchiveWindow,
   isCanonicalWorkItemRecord,
 } from '../../canonical-work-item'
+import { isStoredContributorAssignmentList } from '../../domain/contributor-assignments'
 import { createResourceId } from '../../domain/resource-id'
 import {
   deriveWorkItemScheduleDueDate,
@@ -81,6 +82,7 @@ import type {
   TriageEntryEvent,
   WorkflowStatusCategory,
   WorkItemPriority,
+  WorkItemContributorAssignment,
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemTriageContextEventSnapshot,
@@ -470,6 +472,8 @@ type TeamIssueItem = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId: string
+  /** Contributors carrying out the work, separate from the accountable owner; absent when none. */
+  contributorAssignments?: WorkItemContributorAssignment[]
   /**
    * Issue 作成者の Workspace member key です。
    */
@@ -740,6 +744,8 @@ export type CreateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
+  /** Contributor assignments already normalized by the API handler. */
+  contributorAssignments?: unknown
   /** Explicit canonical schedule required for every new Work Item. */
   schedule: unknown
   /**
@@ -892,6 +898,8 @@ export type PublicUpdateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
+  /** Complete replacement contributor list already normalized by the API handler. */
+  contributorAssignments?: unknown
   /** Complete replacement schedule shared by every task view. */
   schedule?: unknown
   /**
@@ -1619,6 +1627,9 @@ export class DynamoDbTeamIssuesClient {
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
+    const contributorAssignments = input.contributorAssignments === undefined
+      ? []
+      : readNormalizedContributorAssignments(input.contributorAssignments)
     const schedule = readWorkItemScheduleInput(input.schedule)
     const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readWorkItemPriority(input.priority)
@@ -1748,6 +1759,9 @@ export class DynamoDbTeamIssuesClient {
       if (description) {
         item.description = description
       }
+      if (contributorAssignments.length > 0) {
+        item.contributorAssignments = contributorAssignments
+      }
 
       if (assignedProjectId) {
         item.assignedProjectId = assignedProjectId
@@ -1780,6 +1794,7 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
+          'contributorAssignments',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -2334,6 +2349,17 @@ export class DynamoDbTeamIssuesClient {
       setExpressions.push('#assigneeUserId = :assigneeUserId')
     }
 
+    if ('contributorAssignments' in input) {
+      const contributorAssignments = readNormalizedContributorAssignments(input.contributorAssignments)
+      expressionAttributeNames['#contributorAssignments'] = 'contributorAssignments'
+      if (contributorAssignments.length > 0) {
+        expressionAttributeValues[':contributorAssignments'] = contributorAssignments
+        setExpressions.push('#contributorAssignments = :contributorAssignments')
+      } else {
+        removeExpressions.push('#contributorAssignments')
+      }
+    }
+
     if ('workflowStatusId' in input) {
       expressionAttributeNames['#workflowStatusId'] = 'workflowStatusId'
       expressionAttributeValues[':workflowStatusId'] = readWorkflowStatusId(input.workflowStatusId)
@@ -2517,6 +2543,7 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
+          'contributorAssignments',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -3549,6 +3576,10 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.description = item.description
   }
 
+  if (item.contributorAssignments && item.contributorAssignments.length > 0) {
+    issue.contributorAssignments = item.contributorAssignments
+  }
+
   if (item.archivedAt) {
     issue.archivedAt = item.archivedAt
     issue.archivedBy = item.archivedBy
@@ -4172,6 +4203,22 @@ export function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | 
   }
 
   return normalizeCognitoUserId(value)
+}
+
+/**
+ * Reads contributor assignments that the API handler has already normalized.
+ *
+ * The adapter re-checks the stored shape so an unvalidated caller cannot persist a
+ * malformed list.
+ *
+ * @param value - Normalized contributor assignment list.
+ * @returns The list, unchanged.
+ */
+function readNormalizedContributorAssignments(value: unknown): WorkItemContributorAssignment[] {
+  if (!isStoredContributorAssignmentList(value)) {
+    throw new ProjectDataError(400, 'InvalidContributorAssignments', 'Contributor assignments are invalid.')
+  }
+  return value
 }
 
 /**

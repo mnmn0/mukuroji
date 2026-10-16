@@ -12,6 +12,8 @@ import {
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
+  type WorkItemContributorAssignment,
+  type WorkItemJobRoleDefinition,
   type WorkItemRelation,
   type CanonicalWorkItem,
   type WorkItemSchedule,
@@ -68,6 +70,7 @@ import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
+import { isStoredContributorAssignmentList } from '../../modules/work-items/domain/contributor-assignments'
 import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
@@ -1282,6 +1285,10 @@ function configureFakeProjectClients(
     profileError?: Error
     /** 指定した active member を Workspace guest として返します。 */
     guestWorkspaceMemberKeys?: string[]
+    /** Job roles returned by the resolved Work Item configuration. */
+    jobRoles?: WorkItemJobRoleDefinition[]
+    /** Contributors stored on the first fake Team Work Item and on detail reads. */
+    issueContributorAssignments?: WorkItemContributorAssignment[]
     inactiveWorkspaceMemberKeys?: string[]
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
@@ -1375,6 +1382,8 @@ function configureFakeProjectClients(
       planningRevisionFence?: UpdateTeamIssueRequestBody['planningRevisionFence']
       /** Updated Team-local Work Item identifier. */
       issueId: string
+      /** Contributor list supplied to the adapter, when the update changes it. */
+      contributorAssignments?: unknown
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -1593,6 +1602,9 @@ function configureFakeProjectClients(
         : `Work Item ${index}`,
       description: '初回体験の摩擦を下げる。',
       assigneeUserId: 'sato@example.com',
+      ...(index === 0 && options.issueContributorAssignments
+        ? { contributorAssignments: options.issueContributorAssignments }
+        : {}),
       creatorMemberKey: 'demo@example.com',
       workflowSchemaVersion: 1 as const,
       workflowStatusId: 'in-progress',
@@ -1838,6 +1850,16 @@ function configureFakeProjectClients(
       },
     },
     workItemConfigurations: createFakeWorkItemConfigurationClient({
+      ...(options.jobRoles
+        ? {
+            async getTeamConfiguration(_workspaceId: string, teamId: string) {
+              return {
+                configuration: { ...createTestWorkItemConfiguration('team', teamId), jobRoles: options.jobRoles },
+                inheritedFrom: 'default' as const,
+              }
+            },
+          }
+        : {}),
       async listRelations() {
         return {
           relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
@@ -2478,6 +2500,9 @@ function configureFakeProjectClients(
             title: '初回オンボーディングの離脱要因を減らす',
             description: '初回体験の摩擦を下げる。',
             assigneeUserId: options.detailAssigneeUserId ?? 'sato@example.com',
+            ...(options.issueContributorAssignments
+              ? { contributorAssignments: options.issueContributorAssignments }
+              : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId,
@@ -2535,6 +2560,9 @@ function configureFakeProjectClients(
             title: String(input.title),
             description: typeof input.description === 'string' ? input.description : undefined,
             assigneeUserId: String(input.assigneeUserId),
+            ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
+              ? { contributorAssignments: input.contributorAssignments }
+              : {}),
             creatorMemberKey: actorUserId,
             workflowSchemaVersion: 1,
             workflowStatusId: String(input.workflowStatusId),
@@ -2561,6 +2589,7 @@ function configureFakeProjectClients(
           authorizationSnapshot: input.authorizationSnapshot,
           planningRevisionFence: input.planningRevisionFence,
           issueId,
+          ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
         })
         calls.issueUpdates.push({
           actorUserId,
@@ -2591,6 +2620,9 @@ function configureFakeProjectClients(
               : undefined,
             title: typeof input.title === 'string' ? input.title : '初回オンボーディングの離脱要因を減らす',
             assigneeUserId: typeof input.assigneeUserId === 'string' ? input.assigneeUserId : 'sato@example.com',
+            ...(isStoredContributorAssignmentList(input.contributorAssignments) && input.contributorAssignments.length > 0
+              ? { contributorAssignments: input.contributorAssignments }
+              : {}),
             creatorMemberKey: 'demo@example.com',
             workflowSchemaVersion: 1,
             workflowStatusId: typeof input.workflowStatusId === 'string'

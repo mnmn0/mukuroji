@@ -1742,6 +1742,15 @@ async function mockAuthenticatedTaskPage(
       const updatedIssue = {
         ...issue,
         ...patch,
+        ...(patch.contributorAssignments
+          ? {
+              contributorAssignments: patch.contributorAssignments.map((assignment, index) => ({
+                ...assignment,
+                assignmentId: assignment.assignmentId ??
+                  `${issue.revision + 1}${index}`.padStart(32, '0'),
+              })),
+            }
+          : {}),
         assignedProjectId: body.assignedProjectId === null
           ? undefined
           : body.assignedProjectId ?? issue.assignedProjectId,
@@ -5239,6 +5248,48 @@ test.describe('authenticated task page', () => {
       requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
     }))
     await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
+  })
+
+  test('Issue #239: 責任者とは別に Contributor を計画して保存する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        jobRoles: [
+          { id: 'designer', name: 'デザイナー' },
+          { id: 'legacy-writer', name: 'ライター', archived: true },
+        ],
+      },
+    })
+    const patchBodies: unknown[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'PATCH' && /\/api\/teams\/core-team\/issues\/wireframe$/u.test(request.url())) {
+        patchBodies.push(request.postDataJSON())
+      }
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const contributors = detailPane.getByTestId('work-item-contributors')
+
+    const owner = detailPane.getByRole('combobox', { name: '責任者', exact: true })
+    await expect(owner).toHaveAccessibleDescription('結果に最終責任を持つ 1 人です。作業の分担は Contributor に設定します。')
+    await expect(contributors).toContainText('Contributor はまだいません。')
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await contributors.getByRole('button', { name: 'Contributor を追加' }).click()
+    const row = contributors.getByTestId('work-item-contributor-row')
+    await expect(row.locator('select').nth(1).locator('option')).toHaveText(['なし', 'デザイナー'])
+    await row.locator('select').nth(1).selectOption('designer')
+    await row.locator('input').fill('1.5')
+    await contributors.getByRole('button', { name: 'Contributor を保存' }).click()
+
+    await expect(contributors.getByTestId('work-item-contributor-list')).toContainText('未定（ジョブロールで計画）')
+    await expect(contributors).toContainText('デザイナー')
+    await expect(contributors).toContainText('合計 1.5 時間')
+    expect(patchBodies).toEqual([
+      {
+        contributorAssignments: [{ jobRoleId: 'designer', plannedEffortMinutes: 90, status: 'planned' }],
+        expectedRevision: expect.any(Number),
+      },
+    ])
   })
 
   test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {

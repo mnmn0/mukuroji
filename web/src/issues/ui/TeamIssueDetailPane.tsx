@@ -62,6 +62,7 @@ import {
   resolveIssueTitle,
 } from '../model/teamIssueDisplay'
 import { IssuePriorityBadge } from './TeamIssueBadges'
+import { WorkItemContributorsEditor } from '../../work-items/ui/WorkItemContributorsEditor'
 import {
   type CanManageWorkItemDependencyEndpoint,
   type TeamIssueScreenProps,
@@ -779,8 +780,16 @@ function IssueDetailContent({
                   </select>
                 </label>
                 <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-                  {t('issues.create.assignee')}
+                  {t('workItems.owner.label')}
+                  <span
+                    aria-hidden="true"
+                    className="text-xs font-normal text-[var(--workbench-muted)]"
+                    id={`${editorFormId}-owner-help`}
+                  >
+                    {t('workItems.owner.help')}
+                  </span>
                   <select
+                    aria-describedby={`${editorFormId}-owner-help`}
                     className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                     defaultValue={issue.assigneeUserId}
                     form={editorFormId}
@@ -810,6 +819,16 @@ function IssueDetailContent({
                   </select>
                 </label>
               </div>
+              <WorkItemContributorsEditor
+                assignments={issue.contributorAssignments}
+                jobRoles={configuration?.jobRoles ?? []}
+                locale={locale}
+                memberOptions={assigneeOptions}
+                ownerUserId={issue.assigneeUserId}
+                {...(onUpdateIssue && !isIssueReadOnly
+                  ? { onSave: (contributorAssignments) => onUpdateIssue(issue.id, { contributorAssignments }) }
+                  : {})}
+              />
             </section>
           </fieldset>
         )
