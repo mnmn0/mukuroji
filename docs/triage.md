@@ -171,10 +171,12 @@ replay、active tenant の検証を通る。その後:
 - delivery receipt は Triage の受け付けとは別の transaction で確定するため、`triage` endpoint の receipt と
   同じ transaction で、opaque endpoint ID と delivery key の digest を key にした recovery marker も保存する
   （receipt と同じ 400 日 TTL）。Revoke は opaque lookup と secret を削除するが marker は残すため、receipt の
-  確定後に Triage の受け付けが失敗し、再送までに endpoint が pause または revoke されても、同じ
-  `Idempotency-Key` と receipt が受け付けた raw body と SHA-256 が一致する再送は Entry の作成を完了する。
-  Raw body は receipt の確定時に署名検証済みで、digest の一致がその body への束縛になるため、secret の削除後も
-  署名を検証し直さない。Marker の無い delivery、body が一致しない再送、新しい delivery は従来どおり
+  確定後に Triage の受け付けが失敗し、再送までに secret が rotate されたり endpoint が pause または revoke
+  されたりしても、同じ `Idempotency-Key` と receipt が受け付けた raw body と SHA-256 が一致する再送は Entry の
+  作成を完了する。この照合は endpoint の状態にかかわらず、現在の secret による署名検証より前に行う。
+  Raw body は receipt の確定時に署名検証済みで、digest の一致がその body への束縛になるため、rotate 後や
+  secret の削除後も署名を検証し直さない。Marker の無い delivery、body が一致しない再送、新しい delivery は
+  照合後に従来どおり現在の secret で署名を検証し、inactive な endpoint では
   `404 AutomationInboundWebhookNotFound` または `423 AutomationInboundWebhookPaused` で拒否する。
 - Triage の受け付けで起きた失敗は、DynamoDB の throttling などの基盤エラーも含めて Triage の error envelope
   （`code` と `message`）で返し、基盤エラーは再試行可能な `503 TriageUnavailable` にする。

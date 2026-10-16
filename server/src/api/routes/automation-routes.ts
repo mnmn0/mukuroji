@@ -2171,35 +2171,42 @@ async function admitTriageWebhookEntry(
 }
 
 /**
- * Finishes a Triage delivery that was accepted before its endpoint stopped accepting deliveries.
+ * Finishes a Triage delivery whose receipt already committed, whatever the endpoint's state.
  *
  * A committed receipt is the server's acceptance of that delivery, so a retry completes its
- * Triage entry even after the endpoint is paused or revoked and its signing secret deleted.
- * The retry must carry the same idempotency key and the exact raw body the receipt accepted;
- * the body was authenticated when the receipt committed, and a SHA-256 match binds the retry
- * to it. Any other request, including every new delivery, gets no recovery.
+ * Triage entry even after the endpoint's secret is rotated, or the endpoint is paused or
+ * revoked and its secret deleted. The retry must carry the same idempotency key and the exact
+ * raw body the receipt accepted; the body was authenticated when the receipt committed, and a
+ * SHA-256 match binds the retry to it. Any other request, including every new delivery, gets
+ * no recovery and goes through current-secret verification.
  *
  * @param c - Hono request context.
  * @param opaqueEndpointId - Public endpoint identifier from the request path.
- * @returns The admission response, or undefined when no accepted delivery matches.
+ * @returns The admission response when an accepted delivery matches; otherwise the raw body,
+ *   when this check had to read it, for normal verification.
  */
-async function completeAcceptedTriageWebhookDelivery(c: Context, opaqueEndpointId: string) {
+async function completeAcceptedTriageWebhookDelivery(
+  c: Context,
+  opaqueEndpointId: string,
+): Promise<{ completed?: Response; rawBody?: Uint8Array }> {
   const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
-  if (!idempotencyKey || idempotencyKey.length > 256) return undefined
+  if (!idempotencyKey || idempotencyKey.length > 256) return {}
   const accepted = await automationDependencies.inboundWebhooks.resolveAcceptedTriageWebhookDelivery(
     opaqueEndpointId,
     idempotencyKey,
   )
   const teamId = accepted?.endpoint.triageRouting?.teamId
-  if (!accepted || !teamId) return undefined
+  if (!accepted || !teamId) return {}
   const rawBody = await readAutomationInboundWebhookBody(c.req.raw)
-  if (createHash('sha256').update(rawBody).digest('hex') !== accepted.bodyFingerprint) return undefined
+  if (createHash('sha256').update(rawBody).digest('hex') !== accepted.bodyFingerprint) return { rawBody }
   try {
     const envelope = readWebhookTriageEnvelope(parseAutomationInboundWebhookJson(rawBody))
     await enforceActiveTenantForWorkspace(accepted.endpoint.workspaceId)
-    return await admitTriageWebhookEntry(c, accepted.endpoint, teamId, envelope, idempotencyKey, accepted)
+    return {
+      completed: await admitTriageWebhookEntry(c, accepted.endpoint, teamId, envelope, idempotencyKey, accepted),
+    }
   } catch (error) {
-    if (error instanceof TriageError) return toTriageErrorResponse(c, error)
+    if (error instanceof TriageError) return { completed: toTriageErrorResponse(c, error) }
     throw error
   }
 }
@@ -2420,12 +2427,11 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       const endpoint = await automationDependencies.inboundWebhooks.resolveInboundWebhookEndpoint(
         opaqueEndpointId,
       )
-      if (!endpoint || endpoint.status !== 'active') {
-        // Only a delivery whose receipt already committed may finish after the endpoint stops
-        // accepting; a new delivery to a paused or revoked endpoint is rejected below.
-        const completed = await completeAcceptedTriageWebhookDelivery(c, opaqueEndpointId)
-        if (completed) return completed
-      }
+      // A delivery whose receipt already committed finishes before current-secret verification,
+      // so a later rotation, pause, or revocation cannot strand it. Every other request,
+      // including any new delivery, is verified or rejected below.
+      const recovery = await completeAcceptedTriageWebhookDelivery(c, opaqueEndpointId)
+      if (recovery.completed) return recovery.completed
       if (!endpoint || endpoint.status === 'provisioning' || endpoint.status === 'revoked') {
         throw automationInboundWebhookNotFound()
       }
@@ -2445,7 +2451,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       }
 
       const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
-      const rawBody = await readAutomationInboundWebhookBody(c.req.raw)
+      const rawBody = recovery.rawBody ?? await readAutomationInboundWebhookBody(c.req.raw)
       const signatureTimestamp = readAutomationInboundWebhookTimestamp(
         c.req.header('X-Mukuroji-Timestamp'),
       )

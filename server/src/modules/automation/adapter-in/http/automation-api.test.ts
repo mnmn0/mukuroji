@@ -3162,3 +3162,135 @@ test('finishes an accepted Triage delivery after its endpoint is revoked', async
   expect(altered.status).toBe(404)
   expect(admissions).toHaveLength(1)
 })
+
+test('finishes an accepted Triage delivery after the endpoint secret is rotated', async () => {
+  configureFakeProjectClients(true)
+  const endpoint = createInboundWebhookEndpointRecord({
+    name: 'Status page',
+    purpose: 'triage',
+    triageRouting: { teamId: 'core-team' },
+    secretGeneration: 2,
+  })
+  const previousSecret = Buffer.from('previous-secret', 'utf8')
+  const currentSecret = Buffer.from('current-secret', 'utf8')
+  const body = JSON.stringify({ eventId: 'evt-1', title: 'Checkout errors', body: 'Customers see 500.', requester: { name: 'Status page' } })
+  const admissions: string[] = []
+  const recordedBodies: string[] = []
+  const unexpected = async (): Promise<never> => {
+    throw new Error('Unexpected Triage client call.')
+  }
+  setTestAppDependencies({
+    inboundWebhooks: createAutomationInboundWebhookPort({
+      async resolveInboundWebhookEndpoint() {
+        return structuredClone(endpoint)
+      },
+      async resolveAcceptedTriageWebhookDelivery(_opaqueEndpointId, idempotencyKey) {
+        if (idempotencyKey !== 'accepted-key') return undefined
+        return {
+          endpoint: structuredClone(endpoint),
+          eventId: 'event-accepted',
+          bodyFingerprint: createHash('sha256').update(body).digest('hex'),
+          acceptedAt: '2026-10-16T00:00:00.000Z',
+        }
+      },
+      async recordInboundWebhookDelivery(_endpoint, input) {
+        recordedBodies.push(input.bodyFingerprint)
+        throw new AutomationError(
+          'conflict',
+          'AutomationInboundWebhookIdempotencyConflict',
+          'Idempotency key was already used with a different request body.',
+        )
+      },
+    }),
+    automationInboundWebhookSecrets: {
+      async provision() { throw new Error('unexpected') },
+      async get() { return currentSecret },
+      async delete() { throw new Error('unexpected') },
+    },
+    tenantLifecycleEnforcement: { async assertActive() {} },
+    triage: {
+      listEntries: unexpected,
+      getEntry: unexpected,
+      getEntryForMutation: unexpected,
+      applyAction: unexpected,
+      getActionReceipt: unexpected,
+      applyBulkAction: unexpected,
+      getConfiguration: unexpected,
+      getConfigurationUpdateReceipt: unexpected,
+      updateConfiguration: unexpected,
+      createManualHandoff: unexpected,
+      listWorkItemSources: unexpected,
+      async createWebhookEntry(_workspaceId, _teamId, _endpoint, input) {
+        admissions.push(input.eventId)
+        return {
+          entry: {
+            schemaVersion: 1,
+            id: 'triage-webhook-1',
+            workspaceId: endpoint.workspaceId,
+            source: { kind: 'webhook', sourceId: `${endpoint.id}:evt-1`, connectorId: endpoint.id },
+            sourcePreview: { title: 'Checkout errors', body: 'Customers see 500.', attachmentCount: 0, commentCount: 0, watcherCount: 0, sanitized: true, truncated: false },
+            requester: { displayName: 'Status page', guest: true },
+            receivedAt: '2026-10-16T00:00:00.000Z',
+            lastActivityAt: '2026-10-16T00:00:00.000Z',
+            state: 'pending',
+            routing: { reason: 'Received by inbound webhook.', candidates: [] },
+            teamId: 'core-team',
+            permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: '2026-10-16T00:00:00.000Z' },
+            retention: { expiresAt: '2027-10-16T00:00:00.000Z' },
+            capabilities: { canAssign: true, canAcceptCreate: true, canAcceptLink: true, canMarkDuplicate: true, canDecline: true, canSnooze: true, canRequestInformation: false, canReply: false, canViewInternalContext: true },
+            events: [],
+            revision: 1,
+            createdAt: '2026-10-16T00:00:00.000Z',
+            updatedAt: '2026-10-16T00:00:00.000Z',
+          },
+          replayed: false,
+        }
+      },
+    },
+  })
+  /**
+   * Sends a delivery signed with the given secret.
+   *
+   * @param secret - Signing secret.
+   * @param idempotencyKey - Sender idempotency key.
+   * @param requestBody - Raw JSON body.
+   * @returns The response.
+   */
+  const deliver = (secret: Buffer, idempotencyKey: string, requestBody: string) => {
+    const timestamp = String(Math.floor(Date.now() / 1_000))
+    const signature = `sha256=${createHmac('sha256', secret).update(`${timestamp}.`, 'utf8').update(requestBody, 'utf8').digest('hex')}`
+    return app.request(`/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+        'X-Mukuroji-Signature': signature,
+        'X-Mukuroji-Timestamp': timestamp,
+      },
+      body: requestBody,
+    })
+  }
+
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    // The accepted delivery's retry is still signed with the secret from before the rotation.
+    const completed = await deliver(previousSecret, 'accepted-key', body)
+    expect(completed.status).toBe(202)
+    expect(await completed.json()).toEqual({ eventId: 'event-accepted', triageEntryId: 'triage-webhook-1' })
+    expect(admissions).toEqual(['evt-1'])
+
+    // A new delivery signed with the old secret fails verification.
+    const fresh = await deliver(previousSecret, 'new-key', body)
+    expect(fresh.status).toBe(401)
+    // A different body under the accepted key goes through normal verification with its bytes intact.
+    const altered = JSON.stringify({ eventId: 'evt-1', title: 'Altered', body: 'x', requester: { name: 'Status page' } })
+    const conflict = await deliver(currentSecret, 'accepted-key', altered)
+    expect(conflict.status).toBe(409)
+    expect(recordedBodies).toEqual([createHash('sha256').update(altered).digest('hex')])
+    expect(admissions).toHaveLength(1)
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
+})

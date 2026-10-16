@@ -613,14 +613,14 @@ describe('audit export completeness barrier', () => {
     // The index is missing the third event, so the consistent count disagrees.
     expect(await service.processExport('ws-1', job.exportId)).toBe('restarted')
     const restarted = await service.getExport('ws-1', job.exportId)
-    expect(restarted).toMatchObject({ status: 'queued', eventCount: 0, durableEventCount: 0, parts: [], scanAttempt: 2 })
+    expect(restarted).toMatchObject({ status: 'queued', eventCount: 0, parts: [], scanAttempt: 2 })
     expect(restarted.verification).toBeUndefined()
     expect(queued.at(-1)).toEqual({ delaySeconds: 30 })
 
     index.visible = base
     expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
     const done = await service.getExport('ws-1', job.exportId)
-    expect(done).toMatchObject({ status: 'completed', eventCount: 6, durableEventCount: 6, scanAttempt: 2 })
+    expect(done).toMatchObject({ status: 'completed', eventCount: 6, scanAttempt: 2 })
     expect(done.verification).toBeUndefined()
   })
 
@@ -657,19 +657,49 @@ describe('audit export completeness barrier', () => {
     expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
     expect(counts.map((query) => query.cursor)).toEqual([undefined, '1', '2'])
     expect(counts.every((query) => query.to === job.snapshotAt && query.workspaceId === 'ws-1')).toBe(true)
-    // Events whose TTL can pass before the processing deadline are left out of the count.
+    // Events whose TTL can pass before the processing deadline are left out of the snapshot.
     expect(counts[0]?.durableAfter).toBe(Date.parse('2026-07-19T00:00:00.000Z') / 1000)
   })
 
-  test('ignores events that TTL may delete during the job on both sides of the check', async () => {
+  test('reads the consistent count in small per-step bites', async () => {
+    const counts: AuditEventCountQuery[] = []
+    const { service, base, index, job } = await lagging({
+      countEvents: async (query) => {
+        counts.push(query)
+        const page = Number(query.cursor ?? '0')
+        return page < 24 ? { count: page === 0 ? 6 : 0, nextCursor: String(page + 1) } : { count: 0 }
+      },
+    })
+    index.visible = base
+
+    // 25 count pages take three steps of at most ten pages, well below the scan budget.
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(counts).toHaveLength(10)
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(counts).toHaveLength(20)
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(counts).toHaveLength(25)
+  })
+
+  test('leaves events that TTL may delete during the job out of the export and the count', async () => {
     const store = createMemoryStore()
-    const all = events(4).map((event, position) => position === 0 ? { ...event, expiresAt: 1_784_419_200 } : event)
+    // The first event expires exactly at the processing deadline, the second has no TTL.
+    const all = events(4).map((event, position) => {
+      if (position === 0) return { ...event, expiresAt: 1_784_419_200 }
+      if (position === 1) {
+        const { expiresAt: _expiresAt, ...held } = event
+        void _expiresAt
+        return held
+      }
+      return event
+    })
     const service = createAuditExportService({
       settleSeconds: 0,
       store,
       queue: { async enqueue() {} },
+      // The index never received the expiring event, and TTL then deleted it from the base
+      // table, so a check that counted it on neither side could not notice the miss.
       readEvents: createReader(all),
-      // TTL already deleted the expiring event from the base table after the scan read it.
       countEvents: createCounter(all.slice(1)),
       now: fixedNow,
       createId: () => '6'.repeat(32),
@@ -677,7 +707,10 @@ describe('audit export completeness barrier', () => {
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
 
     expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
-    expect(await service.getExport('ws-1', job.exportId)).toMatchObject({ eventCount: 4, durableEventCount: 3 })
+    expect(await service.getExport('ws-1', job.exportId)).toMatchObject({ eventCount: 3 })
+    const written = [...store.parts.values()].join('')
+    expect(written).not.toContain(all[0]?.eventId ?? 'missing')
+    expect(written).toContain(all[1]?.eventId ?? 'missing')
   })
 })
 
