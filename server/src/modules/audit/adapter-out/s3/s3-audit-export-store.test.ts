@@ -145,6 +145,15 @@ describe('S3AuditExportStore', () => {
       objects.set(jobPath, { body: JSON.stringify(mismatched), etag: '"q"' })
       await expect(store.readJob('ws-1', exportId)).rejects.toThrow('status does not match its cursor')
     }
+    // A queued job has no progress yet.
+    const queuedWithProgress = {
+      ...job(exportId, '2026-07-18T00:00:00.000Z'),
+      status: 'queued',
+      eventCount: 5,
+      parts: [{ index: 1, key: 'k', eventCount: 5, byteLength: 1, sha256: 'a'.repeat(64) }],
+    }
+    objects.set(jobPath, { body: JSON.stringify(queuedWithProgress), etag: '"p"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('already has progress')
     // The stored identity must match the key it was read from.
     objects.set(jobPath, { body: JSON.stringify(job('c'.repeat(32), '2026-07-18T00:00:00.000Z')), etag: '"u"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('does not match its storage key')
@@ -153,6 +162,8 @@ describe('S3AuditExportStore', () => {
     // The worker enforces the event limit from the job total, so it must match the parts.
     const understated = {
       ...job(exportId, '2026-07-18T00:00:00.000Z'),
+      status: 'running',
+      nextCursor: 'cursor-1',
       eventCount: 1,
       parts: [{ index: 0, key: 'k', eventCount: 5, byteLength: 1, sha256: 'a'.repeat(64) }],
     }
