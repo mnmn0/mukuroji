@@ -628,4 +628,6 @@ export const workItemsMessages = {
   'workItems.configuration.jobRoles.archived': 'Archived',
   'workItems.configuration.jobRoles.remove': 'Remove',
   'workItems.configuration.jobRoles.empty': 'No job roles yet.',
+  'workItems.contributors.error.invalid-draft': 'The contributor draft could not be read. Edit it again.',
+  'workItems.contributors.pendingSave': 'Save changes to save the contributor changes as well.',
 } as const

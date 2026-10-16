@@ -62,7 +62,11 @@ import {
   resolveIssueTitle,
 } from '../model/teamIssueDisplay'
 import { IssuePriorityBadge } from './TeamIssueBadges'
-import { WorkItemContributorsEditor } from '../../work-items/ui/WorkItemContributorsEditor'
+import { readContributorDraftSubmission } from '../../work-items/model/contributorAssignments'
+import {
+  WorkItemContributorsEditor,
+  type ContributorDraftSubmitError,
+} from '../../work-items/ui/WorkItemContributorsEditor'
 import {
   type CanManageWorkItemDependencyEndpoint,
   type TeamIssueScreenProps,
@@ -528,6 +532,7 @@ function IssueDetailContent({
   }
   const editorFormId = useId()
   const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
+  const [contributorDraftError, setContributorDraftError] = useState<ContributorDraftSubmitError>()
 
   /** Submits the visible Team Issue controls through the external editor form. */
   const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
@@ -571,6 +576,13 @@ function IssueDetailContent({
       ))
       return
     }
+    const contributorSubmission = readContributorDraftSubmission(formData)
+    if (contributorSubmission && 'error' in contributorSubmission) {
+      setContributorDraftError(contributorSubmission)
+      return
+    }
+    setContributorDraftError(undefined)
+    const contributorDraft = contributorSubmission
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
       const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
@@ -620,6 +632,9 @@ function IssueDetailContent({
 
     if (hasOverviewSection && assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
       nextIssueInput.assigneeUserId = selectedAssigneeUserId
+    }
+    if (contributorDraft) {
+      nextIssueInput.contributorAssignments = contributorDraft.assignments
     }
 
     void onUpdateIssue(issue.id, nextIssueInput).catch(() => undefined)
@@ -821,13 +836,14 @@ function IssueDetailContent({
               </div>
               <WorkItemContributorsEditor
                 assignments={issue.contributorAssignments}
+                formId={editorFormId}
                 jobRoles={configuration?.jobRoles ?? []}
+                key={editorIdentity + ':contributors'}
                 locale={locale}
                 memberOptions={assigneeOptions}
                 ownerUserId={issue.assigneeUserId}
-                {...(onUpdateIssue && !isIssueReadOnly
-                  ? { onSave: (contributorAssignments) => onUpdateIssue(issue.id, { contributorAssignments }) }
-                  : {})}
+                readOnly={isIssueReadOnly}
+                {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
               />
             </section>
           </fieldset>

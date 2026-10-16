@@ -5279,17 +5279,21 @@ test.describe('authenticated task page', () => {
     await expect(row.locator('select').nth(1).locator('option')).toHaveText(['なし', 'デザイナー'])
     await row.locator('select').nth(1).selectOption('designer')
     await row.locator('input').fill('1.5')
-    await contributors.getByRole('button', { name: 'Contributor を保存' }).click()
+    // Contributors are saved with the rest of the form, so an unsaved title edit is kept.
+    await detailPane.locator('input[name="title"]').fill('Contributor と一緒に保存する')
+    await expect(contributors).toContainText('「変更を保存」で Contributor の変更も保存されます。')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
 
     await expect(contributors.getByTestId('work-item-contributor-list')).toContainText('未定（ジョブロールで計画）')
     await expect(contributors).toContainText('デザイナー')
     await expect(contributors).toContainText('合計 1.5 時間')
-    expect(patchBodies).toEqual([
-      {
-        contributorAssignments: [{ jobRoleId: 'designer', plannedEffortMinutes: 90, status: 'planned' }],
-        expectedRevision: expect.any(Number),
-      },
-    ])
+    await expect(detailPane.locator('input[name="title"]')).toHaveValue('Contributor と一緒に保存する')
+    expect(patchBodies).toHaveLength(1)
+    expect(patchBodies[0]).toMatchObject({
+      title: 'Contributor と一緒に保存する',
+      contributorAssignments: [{ jobRoleId: 'designer', plannedEffortMinutes: 90, status: 'planned' }],
+      expectedRevision: expect.any(Number),
+    })
   })
 
   test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {

@@ -56,7 +56,11 @@ import {
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
-import { WorkItemContributorsEditor } from '../../work-items/ui/WorkItemContributorsEditor'
+import { readContributorDraftSubmission } from '../../work-items/model/contributorAssignments'
+import {
+  WorkItemContributorsEditor,
+  type ContributorDraftSubmitError,
+} from '../../work-items/ui/WorkItemContributorsEditor'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
@@ -332,6 +336,7 @@ export function TaskDetailPane({
     collaborationRoute?.onCollaborationTabChange,
   )
   const editorFormId = useId()
+  const [contributorDraftError, setContributorDraftError] = useState<ContributorDraftSubmitError>()
   const scheduleFormId = useId()
   const {
     data: triageSourcesPages,
@@ -789,6 +794,13 @@ export function TaskDetailPane({
       ))
       return
     }
+    const contributorSubmission = readContributorDraftSubmission(formData)
+    if (contributorSubmission && 'error' in contributorSubmission) {
+      setContributorDraftError(contributorSubmission)
+      return
+    }
+    setContributorDraftError(undefined)
+    const contributorDraft = contributorSubmission
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
       const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
@@ -838,6 +850,9 @@ export function TaskDetailPane({
 
     if (hasOverviewSection && assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
       nextIssueInput.assigneeUserId = selectedAssigneeUserId
+    }
+    if (contributorDraft) {
+      nextIssueInput.contributorAssignments = contributorDraft.assignments
     }
 
     void submitIssueUpdate(nextIssueInput)
@@ -1037,16 +1052,14 @@ export function TaskDetailPane({
               </div>
               <WorkItemContributorsEditor
                 assignments={(issue ?? currentTask).contributorAssignments}
+                formId={editorFormId}
                 jobRoles={resolvedConfiguration?.jobRoles ?? []}
+                key={`contributors:${editorIdentity}`}
                 locale={locale}
                 memberOptions={assigneeOptions}
                 ownerUserId={(issue ?? currentTask).assigneeUserId}
-                {...(onUpdateIssue && !isReadOnly
-                  ? {
-                      onSave: (contributorAssignments) =>
-                        onUpdateIssue(currentTask.teamId, currentTask.id, { contributorAssignments }),
-                    }
-                  : {})}
+                readOnly={isReadOnly}
+                {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
               />
               {customerImpact ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
             </section>

@@ -628,4 +628,6 @@ export const workItemsMessages = {
   'workItems.configuration.jobRoles.archived': 'Archive',
   'workItems.configuration.jobRoles.remove': '削除',
   'workItems.configuration.jobRoles.empty': 'ジョブロールはまだありません。',
+  'workItems.contributors.error.invalid-draft': 'Contributor の入力を読み取れませんでした。編集し直してください。',
+  'workItems.contributors.pendingSave': '「変更を保存」で Contributor の変更も保存されます。',
 } as const

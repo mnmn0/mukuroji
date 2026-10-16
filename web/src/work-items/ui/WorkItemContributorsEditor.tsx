@@ -7,11 +7,13 @@ import { useId, useState } from 'react'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { ProjectMember } from '../../projects/api/members'
 import {
+  CONTRIBUTOR_DRAFT_FORM_FIELD,
   contributionStatuses,
   createEmptyContributorDraftRow,
   formatPlannedEffortHours,
   listSelectableJobRoles,
   parseContributorDraftRows,
+  serializeContributorDraftRows,
   sumContributorPlannedEffort,
   toContributorDraftRows,
   type ContributorDraftError,
@@ -32,26 +34,50 @@ export type WorkItemContributorsEditorProps = {
   memberOptions: readonly Pick<ProjectMember, 'email' | 'id' | 'name'>[]
   /** Workspace user ID of the accountable owner, shown to keep the roles distinct. */
   ownerUserId: string
-  /** Saves a complete replacement contributor list; omit for read-only display. */
+  /**
+   * Editor form that submits the open draft with its other changes. When set, the
+   * draft travels in a hidden field and this section has no save button of its own.
+   */
+  formId?: string
+  /** Draft error reported by the owning form's submit handler. */
+  submitError?: ContributorDraftSubmitError
+  /** Saves a complete replacement contributor list on its own, outside any editor form. */
   onSave?: (assignments: WorkItemContributorAssignmentInput[]) => Promise<void>
+  /** Shows contributors without edit controls. */
+  readOnly?: boolean
+}
+
+/**
+ * Draft problem shown next to the contributor rows.
+ */
+export type ContributorDraftSubmitError = {
+  /** Why the draft cannot be saved. */
+  error: ContributorDraftError
+  /** Row that caused the problem, when one row is at fault. */
+  rowKey?: string
 }
 
 /**
  * Shows the contributors who share a Work Item and edits them as one replacement list.
  *
  * The accountable owner is edited elsewhere; this editor only manages contributors,
- * so adding contributors never changes who is accountable.
+ * so adding contributors never changes who is accountable. Inside a Work Item editor
+ * the draft is saved together with the form's other changes, so saving contributors
+ * never discards unsaved edits elsewhere in the form.
  *
  * @param props - Stored contributors, selectable members and job roles, and the save callback.
  * @returns The contributor section.
  */
 export function WorkItemContributorsEditor({
   assignments,
+  formId,
   jobRoles,
   locale,
   memberOptions,
   onSave,
   ownerUserId,
+  readOnly = false,
+  submitError,
 }: WorkItemContributorsEditorProps) {
   const t = createTranslator(locale)
   const headingId = useId()
@@ -60,6 +86,8 @@ export function WorkItemContributorsEditor({
   const [isSaving, setIsSaving] = useState(false)
   const [nextRowNumber, setNextRowNumber] = useState(1)
   const totalMinutes = sumContributorPlannedEffort(assignments)
+  const canEdit = !readOnly && (formId !== undefined || onSave !== undefined)
+  const visibleError = draftError ?? (rows ? submitError : undefined)
   const memberName = (memberUserId: string) => {
     const member = memberOptions.find((candidate) => candidate.id === memberUserId)
     return member?.name ?? member?.email ?? memberUserId
@@ -157,7 +185,7 @@ export function WorkItemContributorsEditor({
               ))}
             </ul>
           )}
-          {onSave ? (
+          {canEdit ? (
             <button className="workbench-button-secondary h-8 justify-self-start px-3 text-sm" onClick={startEditing} type="button">
               {t('workItems.contributors.edit')}
             </button>
@@ -169,7 +197,7 @@ export function WorkItemContributorsEditor({
             const rowLabel = `${t('workItems.contributors.title')} ${index + 1}`
             const storedJobRoleId = (assignments ?? []).find((assignment) =>
               assignment.assignmentId === row.assignmentId)?.jobRoleId
-            const hasRowError = draftError?.rowKey === row.key
+            const hasRowError = visibleError?.rowKey === row.key
             return (
               <fieldset
                 aria-invalid={hasRowError || undefined}
@@ -247,10 +275,20 @@ export function WorkItemContributorsEditor({
               </fieldset>
             )
           })}
-          {draftError ? (
+          {formId ? (
+            <input
+              form={formId}
+              name={CONTRIBUTOR_DRAFT_FORM_FIELD}
+              type="hidden"
+              value={serializeContributorDraftRows(rows)}
+            />
+          ) : null}
+          {visibleError ? (
             <p className="text-sm font-semibold text-[var(--workbench-danger)]" role="alert">
-              {t(`workItems.contributors.error.${draftError.error}`)}
+              {t(`workItems.contributors.error.${visibleError.error}`)}
             </p>
+          ) : formId ? (
+            <p className="text-xs text-[var(--workbench-muted)]">{t('workItems.contributors.pendingSave')}</p>
           ) : null}
           <div className="flex flex-wrap gap-2">
             <button
@@ -263,14 +301,16 @@ export function WorkItemContributorsEditor({
             >
               {t('workItems.contributors.add')}
             </button>
-            <button
-              className="workbench-button-primary h-8 px-3 text-sm"
-              disabled={isSaving}
-              onClick={() => void save()}
-              type="button"
-            >
-              {isSaving ? t('workItems.contributors.saving') : t('workItems.contributors.save')}
-            </button>
+            {onSave && !formId ? (
+              <button
+                className="workbench-button-primary h-8 px-3 text-sm"
+                disabled={isSaving}
+                onClick={() => void save()}
+                type="button"
+              >
+                {isSaving ? t('workItems.contributors.saving') : t('workItems.contributors.save')}
+              </button>
+            ) : null}
             <button
               className="workbench-button-secondary h-8 px-3 text-sm"
               disabled={isSaving}

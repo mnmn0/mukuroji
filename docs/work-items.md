@@ -126,6 +126,7 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - automation、template、bulk action からの設定
 - member 無効化や Team 移動時の再割り当て
 - 通知の分離
+- Work Item の CSV export / import（Contributor は出力・取り込みしない）
 
 ## Read model
 

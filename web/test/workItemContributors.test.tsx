@@ -7,6 +7,8 @@ import {
   listSelectableJobRoles,
   parseContributorDraftRows,
   parsePlannedEffortHours,
+  readContributorDraftSubmission,
+  serializeContributorDraftRows,
   sumContributorPlannedEffort,
   toContributorDraftRows,
 } from '../src/work-items/model/contributorAssignments'
@@ -73,6 +75,28 @@ describe('contributor draft model', () => {
     expect(listSelectableJobRoles(jobRoles, 'legacy-writer').map((jobRole) => jobRole.id))
       .toEqual(['designer', 'legacy-writer'])
     expect(sumContributorPlannedEffort(assignments)).toBe(330)
+  })
+})
+
+describe('contributor draft form submission', () => {
+  test('is absent while no draft is open and parses an open draft', () => {
+    expect(readContributorDraftSubmission(new FormData())).toBeUndefined()
+    const formData = new FormData()
+    formData.set('contributorAssignmentsDraft', serializeContributorDraftRows(toContributorDraftRows(assignments)))
+    expect(readContributorDraftSubmission(formData)).toEqual({
+      assignments: [
+        { assignmentId: 'a'.repeat(32), memberUserId: 'sato@example.com', jobRoleId: 'legacy-writer', plannedEffortMinutes: 90, status: 'in-progress' },
+        { assignmentId: 'b'.repeat(32), jobRoleId: 'designer', plannedEffortMinutes: 240, status: 'planned' },
+      ],
+    })
+  })
+
+  test('rejects a tampered draft', () => {
+    for (const value of ['{', '{}', JSON.stringify([{ key: 'x', memberUserId: 1 }])]) {
+      const formData = new FormData()
+      formData.set('contributorAssignmentsDraft', value)
+      expect(readContributorDraftSubmission(formData)).toEqual({ error: 'invalid-draft' })
+    }
   })
 })
 

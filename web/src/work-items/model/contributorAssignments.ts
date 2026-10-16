@@ -7,6 +7,9 @@ import {
   type WorkItemJobRoleDefinition,
 } from '@mukuroji/contracts'
 
+/** Form field that carries an open contributor draft with the Work Item editor form. */
+export const CONTRIBUTOR_DRAFT_FORM_FIELD = 'contributorAssignmentsDraft'
+
 /** Contribution statuses in the order they are offered. */
 export const contributionStatuses: readonly WorkItemContributionStatus[] = ['planned', 'in-progress', 'done']
 
@@ -32,6 +35,7 @@ export type ContributorDraftRow = {
  * Reason a contributor draft cannot be saved.
  */
 export type ContributorDraftError =
+  | 'invalid-draft'
   | 'missing-member-or-role'
   | 'invalid-effort'
   | 'duplicate-member'
@@ -173,4 +177,53 @@ export function sumContributorPlannedEffort(
   assignments: readonly WorkItemContributorAssignment[] | undefined,
 ): number {
   return (assignments ?? []).reduce((total, assignment) => total + (assignment.plannedEffortMinutes ?? 0), 0)
+}
+
+/**
+ * Serializes draft rows for the editor form's hidden field.
+ *
+ * @param rows - Rows being edited.
+ * @returns JSON text of the rows.
+ */
+export function serializeContributorDraftRows(rows: readonly ContributorDraftRow[]): string {
+  return JSON.stringify(rows)
+}
+
+/**
+ * Reads an open contributor draft submitted with the Work Item editor form.
+ *
+ * @param formData - Submitted editor form data.
+ * @returns The request list or a draft error, or undefined when no draft is open.
+ */
+export function readContributorDraftSubmission(formData: FormData): ContributorDraftParseResult | undefined {
+  const value = formData.get(CONTRIBUTOR_DRAFT_FORM_FIELD)
+  if (typeof value !== 'string') return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    return { error: 'invalid-draft' }
+  }
+  if (!Array.isArray(parsed) || !parsed.every(isContributorDraftRow)) {
+    return { error: 'invalid-draft' }
+  }
+  return parseContributorDraftRows(parsed)
+}
+
+/**
+ * Checks the shape of one serialized draft row.
+ *
+ * @param value - Parsed JSON entry.
+ * @returns Whether the entry is a draft row.
+ */
+function isContributorDraftRow(value: unknown): value is ContributorDraftRow {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const assignmentId: unknown = Reflect.get(value, 'assignmentId')
+  const status: unknown = Reflect.get(value, 'status')
+  return typeof Reflect.get(value, 'key') === 'string' &&
+    (assignmentId === undefined || typeof assignmentId === 'string') &&
+    typeof Reflect.get(value, 'memberUserId') === 'string' &&
+    typeof Reflect.get(value, 'jobRoleId') === 'string' &&
+    typeof Reflect.get(value, 'plannedEffortHours') === 'string' &&
+    contributionStatuses.some((candidate) => candidate === status)
 }
