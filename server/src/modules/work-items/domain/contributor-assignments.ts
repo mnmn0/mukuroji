@@ -15,6 +15,12 @@ const CONTRIBUTOR_ASSIGNMENT_FIELDS = new Set([
   'status',
 ])
 
+/** Grammar of configuration identifiers, matching the Work Item configuration validator. */
+const JOB_ROLE_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu
+
+/** Longest accepted member identifier. */
+const MEMBER_USER_ID_MAX_LENGTH = 256
+
 /** Shape of server-generated assignment identifiers. */
 const ASSIGNMENT_ID_PATTERN = /^[0-9a-f]{32}$/u
 
@@ -175,8 +181,9 @@ function isStoredContributorAssignment(value: unknown): value is WorkItemContrib
   const status: unknown = Reflect.get(value, 'status')
   return typeof assignmentId === 'string' &&
     ASSIGNMENT_ID_PATTERN.test(assignmentId) &&
-    (memberUserId === undefined || (typeof memberUserId === 'string' && memberUserId.length > 0)) &&
-    (jobRoleId === undefined || (typeof jobRoleId === 'string' && jobRoleId.length > 0)) &&
+    (memberUserId === undefined || isCanonicalMemberUserId(memberUserId)) &&
+    // Roles removed from the configuration stay valid on stored rows if their ID is well formed.
+    (jobRoleId === undefined || (typeof jobRoleId === 'string' && JOB_ROLE_ID_PATTERN.test(jobRoleId))) &&
     (memberUserId !== undefined || jobRoleId !== undefined) &&
     (plannedEffortMinutes === undefined || isPlannedEffort(plannedEffortMinutes)) &&
     CONTRIBUTION_STATUSES.some((candidate) => candidate === status)
@@ -208,10 +215,27 @@ function readExistingAssignment(
  */
 function readOptionalMemberUserId(value: unknown): string | undefined {
   if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string' || !value.trim() || value.length > 256) {
+  const memberUserId = typeof value === 'string' ? value.trim().toLowerCase() : undefined
+  if (memberUserId === undefined || !isCanonicalMemberUserId(memberUserId)) {
     throw new WorkItemContributorAssignmentError('Contributor member ID is invalid.')
   }
-  return value.trim().toLowerCase()
+  return memberUserId
+}
+
+/**
+ * Checks that a member identifier is in the normalized form the request reader produces.
+ *
+ * @param value - Candidate member identifier.
+ * @returns Whether the value is non-empty, trimmed, lowercase, bounded, and free of control characters.
+ */
+function isCanonicalMemberUserId(value: unknown): value is string {
+  if (typeof value !== 'string' || !value || value.length > MEMBER_USER_ID_MAX_LENGTH) return false
+  if (value !== value.trim().toLowerCase()) return false
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    if (codePoint < 0x20 || codePoint === 0x7f) return false
+  }
+  return true
 }
 
 /**

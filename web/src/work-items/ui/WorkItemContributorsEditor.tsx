@@ -88,10 +88,22 @@ export function WorkItemContributorsEditor({
   const totalMinutes = sumContributorPlannedEffort(assignments)
   const canEdit = !readOnly && (formId !== undefined || onSave !== undefined)
   const visibleError = draftError ?? (rows ? submitError : undefined)
+  /**
+   * Resolves the display label of a contributor.
+   *
+   * @param memberUserId - Workspace member ID of the contributor.
+   * @returns The member's name or email, or the raw ID when the member is unknown.
+   */
   const memberName = (memberUserId: string) => {
     const member = memberOptions.find((candidate) => candidate.id === memberUserId)
     return member?.name ?? member?.email ?? memberUserId
   }
+  /**
+   * Resolves the display label of a job role.
+   *
+   * @param jobRoleId - Configured job role ID.
+   * @returns The role's name, or a localized "unknown role" label when it is no longer configured.
+   */
   const jobRoleName = (jobRoleId: string) =>
     jobRoles.find((jobRole) => jobRole.id === jobRoleId)?.name ?? t('workItems.contributors.jobRoleUnknown')
 
