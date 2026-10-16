@@ -2095,23 +2095,26 @@ async function deliverTriageWebhook(
       eventId: event.eventId,
       auditMutation: createAuditEventTransactPut(auditTableName, event),
     })
-    const receipt = await workItemDependencies.triage.createWebhookEntry(
-      endpoint.workspaceId,
-      teamId,
-      { id: endpoint.id, name: endpoint.name },
-      envelope,
-      {
-        // Delivery keys may be up to 256 characters; the Triage receipt stores a fixed-length digest.
-        key: createHash('sha256').update(`${endpoint.id}\0${delivery.idempotencyKey}`).digest('hex'),
-        fingerprint: createTriageInputFingerprint(envelope),
-      },
-      {
-        // A redelivery of an admitted event replays its entry even if the Team changed since.
-        validateNewEntry: () => requireActiveTriageRoutingTeam(endpoint.workspaceId, teamId),
+    let receipt
+    try {
+      receipt = await workItemDependencies.triage.createWebhookEntry(
+        endpoint.workspaceId,
+        teamId,
+        { id: endpoint.id, name: endpoint.name },
+        envelope,
+        {
+          // Delivery keys may be up to 256 characters; the Triage receipt stores a fixed-length digest.
+          key: createHash('sha256').update(`${endpoint.id}\0${delivery.idempotencyKey}`).digest('hex'),
+          fingerprint: createTriageInputFingerprint(envelope),
+        },
         // A retry after a failed admission keeps the time the delivery was first accepted.
-        ...(recorded.acceptedAt ? { receivedAt: recorded.acceptedAt } : {}),
-      },
-    )
+        // The admission validator checks the routing Team with a commit-time condition.
+        recorded.acceptedAt ? { receivedAt: recorded.acceptedAt } : {},
+      )
+    } catch (error) {
+      // Admission failures, including infrastructure errors, use the Triage error envelope.
+      return toTriageErrorResponse(c, error)
+    }
     const response: AutomationInboundWebhookDeliveryResponse = { eventId: recorded.eventId, triageEntryId: receipt.entry.id }
     return c.json(response, 202)
   } catch (error) {

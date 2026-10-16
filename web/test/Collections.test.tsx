@@ -98,6 +98,8 @@ describe('CollectionsWorkspace', () => {
 
   test('edits descriptions in a multi-line field so line breaks survive', () => {
     expect(render({ selectedId: undefined })).toContain('<textarea')
+    // The read-only view keeps line breaks and wraps long words.
+    expect(render()).toMatch(/<p class="[^"]*whitespace-pre-wrap break-words[^"]*">Q4 launch work<\/p>/u)
   })
 
   test('hides every change control for view-only members', () => {
@@ -135,6 +137,8 @@ describe('toCollectionCandidates', () => {
       { ...base, id: 'team/core/issue/', entityType: 'work-item', teamId: 'core' },
       { ...base, id: 'team/other/issue/x', entityType: 'work-item', teamId: 'core' },
       { ...base, id: 'team/core/issue/x', entityType: 'work-item' },
+      { id: 'team/core/issue/y', entityType: 'work-item', teamId: 'core', title: 42 },
+      null,
     ])).toEqual([{ teamId: 'チーム/a', issueId: '課題/1', title: 'T' }])
   })
 })

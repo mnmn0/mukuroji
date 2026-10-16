@@ -35,6 +35,9 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
+import { readOptionalPositiveQueryInteger } from '../shared/input-parsing'
+import { toWorkspaceSearchErrorResponse } from '../shared/search-access'
+import { searchWorkspaceForPrincipal } from './search-routes'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 
 /** Maximum length of a client idempotency key. */
@@ -59,6 +62,31 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
       })
     } catch (error) {
       return toCollectionErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Searches Work Items that can be added to a Collection.
+   *
+   * Candidate search follows the Collection permission (`work-items.read`) instead of the
+   * Workspace-wide search permission, and returns only Work Items the caller can read.
+   */
+  routeApp.get('/api/collections/candidates', async (c) => {
+    let principal: WorkspacePrincipal
+    try {
+      principal = await authenticate(c, 'read')
+    } catch (error) {
+      return toCollectionErrorResponse(c, error)
+    }
+    try {
+      const keyword = c.req.query('keyword')?.trim() ?? ''
+      if (!keyword) return c.json({ code: 'InvalidCollectionCandidateQuery', message: 'keyword is required.' }, 400)
+      return c.json(await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, {
+        limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit'),
+        cursor: c.req.query('cursor'),
+      }))
+    } catch (error) {
+      return toWorkspaceSearchErrorResponse(c, error)
     }
   })
 

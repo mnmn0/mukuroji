@@ -76,8 +76,6 @@ export type TriageActor = {
 
 /** Options for admitting a Triage entry from an inbound webhook delivery. */
 export type TriageWebhookAdmissionOptions = {
-  /** Checks run only when no entry exists for the source yet. */
-  validateNewEntry?: () => Promise<void>
   /** ISO time the delivery was first accepted; the entry's received time and deadlines start here. */
   receivedAt?: string
 }

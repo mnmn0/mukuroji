@@ -116,7 +116,7 @@ export function CollectionsWorkspace(props: CollectionsWorkspaceProps) {
 
       <section className="workbench-panel grid content-start gap-4 p-5">
         {selected ? (
-          <CollectionDetail key={`${selected.collectionId}:${selected.revision}`} {...props} collection={selected} />
+          <CollectionDetail key={selected.collectionId} {...props} collection={selected} />
         ) : selectedId && collections !== undefined ? (
           // A bookmarked or stale selection that the loaded list does not contain.
           <p className="text-sm font-medium text-[var(--workbench-danger)]" role="alert">{t('collections.select.missing')}</p>
@@ -179,7 +179,9 @@ function CreateCollectionForm({ onCreate, pending, t }: Pick<CollectionsWorkspac
  */
 function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkItemCollection }) {
   const { collection, t } = props
-  const [editing, setEditing] = useState(false)
+  // The Collection as it was when editing began; item-only revisions keep the draft.
+  const [editBase, setEditBase] = useState<WorkItemCollection | undefined>(undefined)
+  const editing = editBase !== undefined
   const [name, setName] = useState(collection.name)
   const [description, setDescription] = useState(collection.description ?? '')
   const [candidateKey, setCandidateKey] = useState('')
@@ -206,8 +208,17 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
    */
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!name.trim()) return
-    if (await props.onRename(collection, name.trim(), description.trim())) setEditing(false)
+    if (!name.trim() || !editBase) return
+    // Another editor's metadata change keeps the stale revision so the save reports a conflict.
+    const metadataChanged = editBase.name !== collection.name || (editBase.description ?? '') !== (collection.description ?? '')
+    if (await props.onRename(metadataChanged ? editBase : collection, name.trim(), description.trim())) setEditBase(undefined)
+  }
+
+  /** Starts editing from the current name and description. */
+  const startEditing = () => {
+    setName(collection.name)
+    setDescription(collection.description ?? '')
+    setEditBase(collection)
   }
 
   /** Adds the chosen candidate. */
@@ -232,18 +243,18 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
           </label>
           <div className="flex flex-wrap gap-2">
             <button className="workbench-button-primary min-h-10 px-4" disabled={props.pending || !name.trim()} type="submit">{t('collections.detail.save')}</button>
-            <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setEditing(false)} type="button">{t('collections.detail.cancel')}</button>
+            <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setEditBase(undefined)} type="button">{t('collections.detail.cancel')}</button>
           </div>
         </form>
       ) : (
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
             <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{collection.name}</h2>
-            {collection.description ? <p className="mt-1 text-sm text-[var(--workbench-muted)]">{collection.description}</p> : null}
+            {collection.description ? <p className="mt-1 whitespace-pre-wrap break-words text-sm text-[var(--workbench-muted)]">{collection.description}</p> : null}
           </div>
           {props.canEdit ? (
             <div className="flex flex-wrap gap-2">
-              <button className="workbench-button-secondary min-h-10 px-3" disabled={props.pending} onClick={() => setEditing(true)} type="button">{t('collections.detail.edit')}</button>
+              <button className="workbench-button-secondary min-h-10 px-3" disabled={props.pending} onClick={startEditing} type="button">{t('collections.detail.edit')}</button>
               <button
                 className="workbench-button-secondary min-h-10 px-3"
                 disabled={props.pending}

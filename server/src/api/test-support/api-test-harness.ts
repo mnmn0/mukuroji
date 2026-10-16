@@ -229,8 +229,25 @@ function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
   return { client }
 }
 
+/** Test overrides for an inbound webhook endpoint; Team routing comes only with the Triage purpose. */
+type InboundWebhookEndpointRecordOverrides =
+  Partial<Omit<AutomationInboundWebhookEndpointRecord, 'purpose' | 'triageRouting'>> & (
+    | {
+      /** Automation purpose, the default. */
+      purpose?: 'automation'
+      /** Automation-purpose endpoints carry no Team routing. */
+      triageRouting?: never
+    }
+    | {
+      /** Triage purpose. */
+      purpose: 'triage'
+      /** Fixed Team routing of the Triage endpoint. */
+      triageRouting: { teamId: string }
+    }
+  )
+
 function createInboundWebhookEndpointRecord(
-  overrides: Partial<AutomationInboundWebhookEndpointRecord> = {},
+  overrides: InboundWebhookEndpointRecordOverrides = {},
 ): AutomationInboundWebhookEndpointRecord {
   return {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,

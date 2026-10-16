@@ -2437,18 +2437,27 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
-  test('runs the new-entry check only before admitting a fresh webhook entry', async () => {
-    const harness = createHarness([{}])
+  test('stores a webhook entry admitted after its retention ended only in redacted form', async () => {
+    const harness = createHarness([{}, {}, {}])
     try {
-      await expect(harness.client.createWebhookEntry(
+      await harness.client.createWebhookEntry(
         'workspace-1',
         'support',
         { id: 'webhook-1', name: 'Status page' },
-        { eventId: 'evt-2', title: 'T', body: 'B', requesterDisplayName: 'Status page' },
-        { key: 'delivery-2', fingerprint: createTriageInputFingerprint({ eventId: 'evt-2' }) },
-        { validateNewEntry: async () => { throw new Error('Team was archived') } },
-      )).rejects.toThrow('Team was archived')
-      expect(harness.commands).toHaveLength(1)
+        {
+          eventId: 'evt-old',
+          title: 'Old checkout errors',
+          body: 'Secret customer details.',
+          requesterDisplayName: 'Alice Requester',
+        },
+        { key: 'delivery-old', fingerprint: createTriageInputFingerprint({ eventId: 'evt-old' }) },
+        { receivedAt: '2020-01-01T00:00:00.000Z' },
+      )
+      const transactItems = JSON.stringify(harness.commands[2]?.input.TransactItems)
+      expect(transactItems).not.toContain('Secret customer details.')
+      expect(transactItems).not.toContain('Old checkout errors')
+      expect(transactItems).not.toContain('Alice Requester')
+      expect(transactItems).toContain('"redactedAt":"2026-08-09T00:00:00.000Z"')
     } finally {
       harness.restore()
     }

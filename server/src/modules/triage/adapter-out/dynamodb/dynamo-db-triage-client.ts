@@ -1518,7 +1518,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param endpoint - Verified inbound webhook endpoint.
    * @param input - Validated webhook envelope.
    * @param idempotency - Replay protection bound to the envelope.
-   * @param options - Admission-only checks and the time the delivery was first accepted.
+   * @param options - The time the delivery was first accepted.
    * @returns The created or replayed entry receipt.
    */
   async createWebhookEntry(
@@ -1530,7 +1530,6 @@ export class DynamoDbTriageClient implements TriageClient {
     options: TriageWebhookAdmissionOptions = {},
   ): Promise<TriageMutationReceipt> {
     return this.admitSourceEntry({
-      ...(options.validateNewEntry ? { validateNewEntry: options.validateNewEntry } : {}),
       ...(options.receivedAt ? { receivedAt: options.receivedAt } : {}),
       workspaceId,
       teamId,
@@ -1558,21 +1557,20 @@ export class DynamoDbTriageClient implements TriageClient {
     operation: string
     authorizationConditionChecks?: TriageAuthorizationConditionChecks
     validateAdmission?: (admission: Awaited<ReturnType<DynamoDbTriageClient['prepareEntryAdmission']>>) => void
-    validateNewEntry?: () => Promise<void>
     receivedAt?: string
   }): Promise<TriageMutationReceipt> {
     const { workspaceId, teamId, sourceKind, sourceId, idempotency } = request
     const existing = await this.readSourceClaim(workspaceId, sourceKind, sourceId)
     if (existing) return this.replaySourceClaim(existing, idempotency.fingerprint, teamId)
-    // Checks of current state apply only to fresh admissions; a committed source replays as is.
-    await request.validateNewEntry?.()
     // A delivery accepted earlier keeps its original received time, SLA, and retention start.
     const now = request.receivedAt ? requireIsoInstant(request.receivedAt, 'Webhook received time') : this.now().toISOString()
     const baseEntry = request.createEntry(this.id(), now)
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const admission = await this.prepareEntryAdmission(baseEntry)
       request.validateAdmission?.(admission)
-      const entry = admission.entry
+      // A delivery admitted after its inherited retention ended is stored already redacted,
+      // so content past its deadline is never newly written at rest.
+      const entry = redactExpiredTriageEntry(admission.entry, this.now().toISOString())
       const admissionItems = admission.transactItems
       const transactItems = dedupeTriageConditionChecks([
         ...(request.authorizationConditionChecks ?? []),

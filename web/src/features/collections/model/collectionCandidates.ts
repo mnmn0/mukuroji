@@ -1,4 +1,4 @@
-import type { WorkspaceSearchResult } from '@mukuroji/contracts'
+import { isRecord } from '../../../shared/api/jsonValidation'
 
 /** Work Item that can be added to a Collection. */
 export type CollectionCandidate = {
@@ -17,18 +17,20 @@ export type CollectionCandidate = {
  * read from the result itself, so identifiers that contain `/` still split correctly;
  * any other result is skipped.
  *
- * @param results - Workspace search results.
+ * @param results - Workspace search results; malformed entries are skipped.
  * @returns Work Items that can be offered for adding.
  */
-export function toCollectionCandidates(results: readonly WorkspaceSearchResult[]): CollectionCandidate[] {
+export function toCollectionCandidates(results: readonly unknown[]): CollectionCandidate[] {
   const candidates: CollectionCandidate[] = []
   for (const result of results) {
-    if (result.entityType !== 'work-item' || !result.teamId) continue
-    const prefix = `team/${result.teamId}/issue/`
-    if (!result.id.startsWith(prefix)) continue
-    const issueId = result.id.slice(prefix.length)
+    if (!isRecord(result) || result.entityType !== 'work-item') continue
+    const { id, teamId, title } = result
+    if (typeof id !== 'string' || typeof teamId !== 'string' || !teamId || typeof title !== 'string') continue
+    const prefix = `team/${teamId}/issue/`
+    if (!id.startsWith(prefix)) continue
+    const issueId = id.slice(prefix.length)
     if (!issueId) continue
-    candidates.push({ teamId: result.teamId, issueId, title: result.title })
+    candidates.push({ teamId, issueId, title })
   }
   return candidates
 }
