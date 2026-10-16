@@ -2,7 +2,7 @@ import type { WorkItemCollection, WorkItemCollectionEntry } from '@mukuroji/cont
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import type { MessageKey } from '../../../shared/i18n/i18n'
-import type { CollectionCandidate } from '../model/collectionCandidates'
+import { collectionCandidateKey, type CollectionCandidate } from '../model/collectionCandidates'
 
 /** Props accepted by the Collections workspace. */
 export type CollectionsWorkspaceProps = {
@@ -12,6 +12,8 @@ export type CollectionsWorkspaceProps = {
   collections: WorkItemCollection[] | undefined
   /** Whether the latest Collection list request failed, including a refresh of loaded data. */
   collectionsFailed: boolean
+  /** Whether the caller is not allowed to view Collections; retrying cannot help. */
+  accessDenied?: boolean
   /** Reloads the Collection list. */
   onRetryCollections: () => void
   /** Selected Collection identifier. */
@@ -63,6 +65,17 @@ export type CollectionsWorkspaceProps = {
 export function CollectionsWorkspace(props: CollectionsWorkspaceProps) {
   const { t, collections, selectedId } = props
   const selected = collections?.find((collection) => collection.collectionId === selectedId)
+
+  if (props.accessDenied) {
+    return (
+      <section aria-labelledby="collections-list-title" className="workbench-panel grid content-start gap-3 p-4" data-testid="collections-workspace">
+        <h2 className="text-base font-semibold text-[var(--workbench-text)]" id="collections-list-title">
+          {t('collections.list.title')}
+        </h2>
+        <p className="text-sm font-medium text-[var(--workbench-danger)]" role="alert">{t('collections.denied')}</p>
+      </section>
+    )
+  }
 
   return (
     <div className="grid gap-5 lg:grid-cols-[minmax(240px,320px)_minmax(0,1fr)]" data-testid="collections-workspace">
@@ -168,8 +181,8 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
   const [description, setDescription] = useState(collection.description ?? '')
   const [candidateKey, setCandidateKey] = useState('')
   const [keyword, setKeyword] = useState(props.candidateQuery)
-  const listedKeys = new Set((props.items ?? []).map((item) => candidateValue(item.teamId, item.issueId)))
-  const candidates = (props.candidates ?? []).filter((candidate) => !listedKeys.has(candidateValue(candidate.teamId, candidate.issueId)))
+  const listedKeys = new Set((props.items ?? []).map((item) => collectionCandidateKey(item.teamId, item.issueId)))
+  const candidates = (props.candidates ?? []).filter((candidate) => !listedKeys.has(collectionCandidateKey(candidate.teamId, candidate.issueId)))
 
   /**
    * Searches candidates for the entered keyword.
@@ -196,7 +209,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
 
   /** Adds the chosen candidate. */
   const add = () => {
-    const candidate = candidates.find((entry) => candidateValue(entry.teamId, entry.issueId) === candidateKey)
+    const candidate = candidates.find((entry) => collectionCandidateKey(entry.teamId, entry.issueId) === candidateKey)
     if (!candidate) return
     props.onAddItem(candidate.teamId, candidate.issueId)
     setCandidateKey('')
@@ -271,7 +284,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
               <select className="workbench-input min-h-10 px-3" onChange={(event) => setCandidateKey(event.target.value)} value={candidateKey}>
                 <option value="">{t('collections.add.placeholder')}</option>
                 {candidates.map((candidate) => (
-                  <option key={candidateValue(candidate.teamId, candidate.issueId)} value={candidateValue(candidate.teamId, candidate.issueId)}>
+                  <option key={collectionCandidateKey(candidate.teamId, candidate.issueId)} value={collectionCandidateKey(candidate.teamId, candidate.issueId)}>
                     {`${candidate.title} (${candidate.teamId} / ${candidate.issueId})`}
                   </option>
                 ))}
@@ -295,7 +308,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
       ) : (
         <ul className="grid gap-2" data-testid="collection-items">
           {props.items.map((item) => (
-            <li className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] px-3 py-2" key={candidateValue(item.teamId, item.issueId)}>
+            <li className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] px-3 py-2" key={collectionCandidateKey(item.teamId, item.issueId)}>
               <div className="min-w-0">
                 <Link className="text-sm font-semibold text-[var(--workbench-text)] underline-offset-2 hover:underline" to={props.workItemHref(item.teamId, item.issueId)}>
                   {item.title}
@@ -348,14 +361,3 @@ const statusMessageKeys = {
   completed: 'collections.status.completed',
   canceled: 'collections.status.canceled',
 } satisfies Record<WorkItemCollectionEntry['statusCategory'], MessageKey>
-
-/**
- * Encodes a Work Item reference as a select value.
- *
- * @param teamId - Team that owns the Work Item.
- * @param issueId - Work Item identifier.
- * @returns Stable value for the pair.
- */
-function candidateValue(teamId: string, issueId: string): string {
-  return JSON.stringify([teamId, issueId])
-}

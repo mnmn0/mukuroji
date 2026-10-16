@@ -39,6 +39,8 @@ export const collectionsMessages = {
   'collections.status.started': '進行中',
   'collections.status.completed': '完了',
   'collections.status.canceled': '中止',
+  'collections.error.createdDeleted': 'その操作で作成した Collection は削除されています。もう一度「作成」を押すと新しく作成します。',
+  'collections.denied': 'Collection を表示する権限がありません。',
   'collections.error.conflict': 'コレクションが更新されています。最新の内容を読み込みました。もう一度操作してください。',
   'collections.error.notFound': 'Work Item またはコレクションが見つかりません。',
   'collections.error.limit': '上限に達しているため追加できません。',

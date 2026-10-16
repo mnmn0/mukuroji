@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { CollectionApiError } from '../../features/collections/api/collections'
+import { collectionCandidateKey } from '../../features/collections/model/collectionCandidates'
 import { resolveCollectionErrorMessageKey } from '../../features/collections/model/collectionErrors'
 import { useCollectionActions } from '../../features/collections/mutations/useCollectionActions'
 import { useCollectionCandidates, useCollectionItems, useCollections } from '../../features/collections/queries/useCollections'
@@ -34,10 +35,12 @@ function CollectionsSession() {
   const canEdit = workspace.canMutateTeamConfiguration && collections.data?.canWrite === true
   const items = useCollectionItems(workspace.accessToken, selectedId, workspace.canLoadWorkspaceData)
   const [candidateQuery, setCandidateQuery] = useState('')
+  const listedItems = items.data?.collection.collectionId === selectedId ? items.data?.items : undefined
   const candidates = useCollectionCandidates(
     workspace.accessToken,
     candidateQuery,
-    workspace.canLoadWorkspaceData && canEdit && Boolean(selectedId),
+    (listedItems ?? []).map((item) => collectionCandidateKey(item.teamId, item.issueId)),
+    workspace.canLoadWorkspaceData && canEdit && Boolean(selectedId) && listedItems !== undefined,
   )
   const actions = useCollectionActions(workspace.accessToken, workspace.guardEnterpriseSession)
   const actionError = actions.error instanceof CollectionApiError
@@ -53,9 +56,10 @@ function CollectionsSession() {
           candidatesFailed={Boolean(candidates.error)}
           canEdit={canEdit}
           collections={collections.data?.collections}
+          accessDenied={collections.error instanceof CollectionApiError && collections.error.status === 403}
           collectionsFailed={Boolean(collections.error)}
           errorMessage={actionError ? t(actionError) : undefined}
-          items={items.data?.collection.collectionId === selectedId ? items.data?.items : undefined}
+          items={listedItems}
           itemsFailed={Boolean(items.error)}
           onAddItem={(teamId, issueId) => {
             if (selectedId) void actions.addItem(selectedId, teamId, issueId)
