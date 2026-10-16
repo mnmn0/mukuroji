@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import { createMutationRequestContext, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
 import {
+  CollectionApiError,
   addCollectionItem,
   createCollection,
   deleteCollection,
@@ -53,10 +54,9 @@ export function useCollectionActions(
       if (active.current) setError(failure)
       return undefined
     } finally {
+      // Revalidate without replacing cached data, so loaded state stays visible meanwhile.
       await mutate(
         (key) => Array.isArray(key) && key[0] === COLLECTIONS_QUERY_KEY && key[1] === accessToken,
-        undefined,
-        { revalidate: true },
       ).catch(() => undefined)
       busy.current = false
       if (active.current) setPending(false)
@@ -83,6 +83,11 @@ export function useCollectionActions(
       const { context } = createContext.current
       const created = await run(async (token) => {
         const collection = await createCollection(token, { name, ...(description ? { description } : {}) }, context)
+          .catch((failure: unknown) => {
+            // The key's Collection was deleted; the next explicit attempt must use a new key.
+            if (failure instanceof CollectionApiError && failure.code === 'CollectionDeleted') createContext.current = undefined
+            throw failure
+          })
         // Show the new Collection right away, even if the following list refresh fails.
         await mutate(
           [COLLECTIONS_QUERY_KEY, token, 'list'],

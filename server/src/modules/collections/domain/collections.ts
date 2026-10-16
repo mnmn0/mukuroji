@@ -1,5 +1,6 @@
 import {
   COLLECTION_DESCRIPTION_MAX_LENGTH,
+  COLLECTION_ITEM_LIMIT,
   COLLECTION_NAME_MAX_LENGTH,
   type CreateWorkItemCollectionInput,
   type UpdateWorkItemCollectionInput,
@@ -168,7 +169,7 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     typeof value.updatedAt === 'string' &&
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
     typeof value.createFingerprint === 'string' &&
-    Array.isArray(value.items) && value.items.every(isStoredCollectionItem)
+    Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem)
 }
 
 /**

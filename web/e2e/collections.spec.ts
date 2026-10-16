@@ -19,6 +19,7 @@ async function mockCollections(page: Page, canWrite = true) {
   const state = {
     collections: [] as (WorkItemCollection & { items: WorkItemCollectionEntry[] })[],
     createKeys: [] as string[],
+    deleteNextCreate: false,
     searches: [] as unknown[],
   }
   await page.addInitScript(() => {
@@ -46,6 +47,10 @@ async function mockCollections(page: Page, canWrite = true) {
     if (!collectionId) {
       if (request.method() === 'POST') {
         state.createKeys.push(request.headers()['idempotency-key'] ?? '')
+        if (state.deleteNextCreate) {
+          state.deleteNextCreate = false
+          return route.fulfill({ status: 409, json: { code: 'CollectionDeleted', message: 'Deleted.' } })
+        }
         const input = request.postDataJSON()
         const created = { collectionId: `c${state.collections.length + 1}`, name: input.name, ...(input.description ? { description: input.description } : {}), createdBy: 'demo@example.com', createdAt: '2026-10-16T00:00:00.000Z', updatedAt: '2026-10-16T00:00:00.000Z', revision: 1, items: [] }
         state.collections.push(created)
@@ -134,4 +139,17 @@ test('Issue #238: members without Work Item write permission see Collections rea
   await expect(page.getByText('You have view-only access, so Collections cannot be changed.')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Create' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Delete Collection' })).toHaveCount(0)
+})
+
+test('Issue #238: a create replay of a deleted Collection gets a new key on the next attempt', async ({ page }) => {
+  const state = await mockCollections(page)
+  state.deleteNextCreate = true
+  await page.goto('/collections')
+  await page.getByLabel('Name').fill('Q4 launch')
+  await page.getByRole('button', { name: 'Create' }).click()
+  await expect(page.getByText('The Collection created by that request was deleted.')).toBeVisible()
+  await page.getByRole('button', { name: 'Create' }).click()
+  await expect(page).toHaveURL(/collectionId=c1/u)
+  expect(state.createKeys).toHaveLength(2)
+  expect(state.createKeys[1]).not.toBe(state.createKeys[0])
 })

@@ -39,6 +39,8 @@ export const collectionsMessages = {
   'collections.status.started': 'In progress',
   'collections.status.completed': 'Done',
   'collections.status.canceled': 'Canceled',
+  'collections.error.createdDeleted': 'The Collection created by that request was deleted. Select Create again to make a new one.',
+  'collections.denied': 'You do not have permission to view Collections.',
   'collections.error.conflict': 'The Collection changed. The latest version is loaded; try again.',
   'collections.error.notFound': 'The Work Item or Collection was not found.',
   'collections.error.limit': 'The limit has been reached, so nothing more can be added.',
