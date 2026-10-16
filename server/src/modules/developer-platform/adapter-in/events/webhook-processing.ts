@@ -498,7 +498,7 @@ async function processWebhookProjectionMessage(
     apiVersion: '2026-07-01',
     occurredAt: event.occurredAt,
     workspaceId: event.workspaceId,
-    data: toAuditEventView(event),
+    data: toPublicWebhookEventData(event),
   }
   const resourceScope = readWebhookEventResourceScope(envelope)
   if (!resourceScope) {
@@ -1852,4 +1852,27 @@ function chunkValues<Value>(values: readonly Value[], size: number) {
 
 function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined
+}
+
+/**
+ * Change fields kept in the internal audit trail but left out of public webhook events,
+ * because the Public API contract does not expose them.
+ */
+const PUBLIC_WEBHOOK_EXCLUDED_CHANGE_FIELDS = ['contributorAssignments']
+
+/**
+ * Projects an audit event into public webhook data without non-public change fields.
+ *
+ * @param event - Normalized audit event.
+ * @returns The audit view with changes to non-public fields removed.
+ */
+export function toPublicWebhookEventData(event: AuditEventV1): ReturnType<typeof toAuditEventView> {
+  const view = toAuditEventView(event)
+  if (!view.changes) return view
+  return {
+    ...view,
+    changes: view.changes.filter((change) => !PUBLIC_WEBHOOK_EXCLUDED_CHANGE_FIELDS.some((field) =>
+      change.field === field || change.field.startsWith(`${field}.`)
+    )),
+  }
 }

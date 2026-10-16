@@ -47,8 +47,14 @@ export async function readContributorAssignmentChange(
     }
     throw error
   }
-  for (const memberUserId of listAddedContributorMembers(contributorAssignments, existing)) {
-    await requireActiveWorkspaceAssignee(directoryId, memberUserId)
+  // Members are independent, so they are checked a few at a time instead of one by one.
+  const addedMembers = listAddedContributorMembers(contributorAssignments, existing)
+  for (let start = 0; start < addedMembers.length; start += CONTRIBUTOR_MEMBER_CHECK_CONCURRENCY) {
+    await Promise.all(addedMembers.slice(start, start + CONTRIBUTOR_MEMBER_CHECK_CONCURRENCY)
+      .map((memberUserId) => requireActiveWorkspaceAssignee(directoryId, memberUserId)))
   }
   return contributorAssignments
 }
+
+/** Contributor member checks run at once; each makes a member and a profile lookup. */
+const CONTRIBUTOR_MEMBER_CHECK_CONCURRENCY = 5
