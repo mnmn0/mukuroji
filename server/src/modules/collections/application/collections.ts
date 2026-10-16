@@ -254,10 +254,13 @@ export async function addCollectionItem(
     if (current.items.length >= COLLECTION_ITEM_LIMIT) {
       throw new CollectionError(409, 'CollectionItemLimitReached', `A Collection can hold up to ${COLLECTION_ITEM_LIMIT} Work Items.`)
     }
+    // A retry rebuilds on newer state, so the new item must not look older than items already
+    // there; most recently added first stays true.
+    const addedAt = laterInstant(context.now, current.updatedAt)
     return {
       ...current,
-      items: [{ teamId, issueId, addedAt: context.now, addedBy: context.actor }, ...current.items],
-      updatedAt: laterInstant(context.now, current.updatedAt),
+      items: [{ teamId, issueId, addedAt, addedBy: context.actor }, ...current.items],
+      updatedAt: addedAt,
       revision: current.revision + 1,
     }
   })

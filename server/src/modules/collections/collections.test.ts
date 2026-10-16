@@ -141,6 +141,10 @@ test('keeps a newer updatedAt when a retry rebuilds on a later concurrent change
   const added = await addCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)
   expect(added.revision).toBe(3)
   expect(added.updatedAt).toBe(later.now)
+  // The retried item is the most recently added one and is not dated before the item it follows.
+  const items = (await store.get('w', collectionId))?.items ?? []
+  expect(items.map((item) => item.issueId)).toEqual(['a', 'b'])
+  expect(items[0]?.addedAt).toBe(later.now)
 
   store.race = () => addCollectionItem(store, later, collectionId, 't', 'c', readWorkItem)
   const removed = await removeCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)

@@ -116,7 +116,23 @@ export function useCollectionActions(
      * @returns The updated Collection, or undefined on failure.
      */
     rename: (collection: WorkItemCollection, name: string, description: string) =>
-      run((token) => updateCollection(token, collection.collectionId, { expectedRevision: collection.revision, name, description })),
+      run(async (token) => {
+        const updated = await updateCollection(token, collection.collectionId, { expectedRevision: collection.revision, name, description })
+        // Apply the saved state right away, so a failed list refresh cannot show the old revision.
+        await mutate(
+          [COLLECTIONS_QUERY_KEY, token, 'list'],
+          (current: WorkItemCollectionsResponse | undefined) => current
+            ? {
+                ...current,
+                collections: current.collections
+                  .map((entry) => entry.collectionId === updated.collectionId ? updated : entry)
+                  .sort((left, right) => left.name.localeCompare(right.name)),
+              }
+            : current,
+          { revalidate: false },
+        )
+        return updated
+      }),
     /**
      * Deletes a Collection.
      *
