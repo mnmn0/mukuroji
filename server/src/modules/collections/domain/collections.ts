@@ -169,7 +169,8 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     typeof value.updatedAt === 'string' &&
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
     typeof value.createFingerprint === 'string' &&
-    Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem)
+    Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&
+    hasUniqueReferences(value.items)
 }
 
 /**
@@ -202,6 +203,16 @@ function isStoredCollectionItem(value: unknown): value is StoredCollectionItem {
     isWorkItemReferenceIdentifier(value.issueId) &&
     typeof value.addedAt === 'string' &&
     typeof value.addedBy === 'string'
+}
+
+/**
+ * Checks that each Work Item is referenced at most once, as re-adding is a no-op.
+ *
+ * @param items - Validated stored references.
+ * @returns Whether no `(teamId, issueId)` pair repeats.
+ */
+function hasUniqueReferences(items: readonly StoredCollectionItem[]): boolean {
+  return new Set(items.map((item) => JSON.stringify([item.teamId, item.issueId]))).size === items.length
 }
 
 /**

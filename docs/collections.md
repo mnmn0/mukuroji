@@ -24,7 +24,7 @@ Collection は workflow、assignee、status を持たず、Work Item の所有 T
 ## 保存
 
 Collection は既存の Planning table に `COLLECTION#<collectionId>` row として保存し、参照する Work Item の `teamId` / `issueId` を最大 200 件まで row 内に持ちます。
-Workspace あたりの Collection は 200 件までです。保存済み row の参照が 200 件を超えている場合は破損として扱い、読み取りを `502 CollectionCorruptState` で止めます。上限は `COLLECTION_COUNT` counter row を作成・削除と同じ transaction で条件付き更新して強制し、同時作成でも超えません。
+Workspace あたりの Collection は 200 件までです。保存済み row の参照が 200 件を超えている場合や同じ Work Item を重複して参照している場合は破損として扱い、読み取りを `502 CollectionCorruptState` で止めます。上限は `COLLECTION_COUNT` counter row を作成・削除と同じ transaction で条件付き更新して強制し、同時作成でも超えません。
 
 - 作成は `Idempotency-Key` header を必須とし、同じ key の再送は最初に作った Collection を返します。作成時の request fingerprint を row に保存するため、その後に名前変更や Work Item の追加があっても再送は成功します。
 - 削除すると同じ transaction で `COLLECTION_DELETED#<collectionId>` marker を残します。削除後に元の作成 request を再送しても Collection は復活せず、`409 CollectionDeleted` を返します。Web はこの応答で保持していた idempotency key を破棄し、次の作成操作は新しい key で送ります。作成 transaction は marker が無いことを条件に含めます。
@@ -35,6 +35,7 @@ Workspace あたりの Collection は 200 件までです。保存済み row の
 ## 削除と cleanup
 
 - Collection を削除しても、参照していた Work Item は変更されません。
+- URL の `collectionId` が一覧に無い Collection（削除済みや存在しない ID）を指す場合、Web は Item を読み込まず、存在しない旨を表示します。
 - Work Item が削除された場合や閲覧できなくなった場合、Collection に残った参照は一覧で省かれます。参照の掃除は一覧の read 時に行わず、Item 上限の計算には含まれます。削除済み Work Item の参照を掃除する処理は、今後の段階で Work Item 削除時の cleanup として追加します。
 - Tenant closure は Planning table の Workspace partition 全体を削除するため、Collection row と削除 marker も一緒に削除されます。
 

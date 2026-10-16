@@ -33,7 +33,9 @@ function CollectionsSession() {
   const collections = useCollections(workspace.accessToken, workspace.canLoadWorkspaceData)
   const selectedId = params.get('collectionId') ?? collections.data?.collections[0]?.collectionId
   const canEdit = workspace.canMutateTeamConfiguration && collections.data?.canWrite === true
-  const items = useCollectionItems(workspace.accessToken, selectedId, workspace.canLoadWorkspaceData)
+  // Only load items for a Collection the list contains; an unknown selection shows a notice instead.
+  const selectedExists = collections.data?.collections.some((collection) => collection.collectionId === selectedId) === true
+  const items = useCollectionItems(workspace.accessToken, selectedExists ? selectedId : undefined, workspace.canLoadWorkspaceData)
   const [candidateQuery, setCandidateQuery] = useState('')
   const listedItems = items.data?.collection.collectionId === selectedId ? items.data?.items : undefined
   const candidates = useCollectionCandidates(
