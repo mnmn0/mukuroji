@@ -48,6 +48,10 @@ const AUDIT_EXPORT_IDEMPOTENCY_KEY_MAX_LENGTH = 255
 
 /** Maximum number of part download links returned by one download request. */
 export const AUDIT_EXPORT_DOWNLOAD_LINKS_PER_PAGE = 100
+/** Filter fields an export job may store. */
+const AUDIT_EXPORT_FILTER_KEYS = new Set([
+  'actorId', 'actorKind', 'entityType', 'entityId', 'targetType', 'targetId', 'eventTypes', 'from', 'to',
+])
 /** Shape of every export identifier. */
 const AUDIT_EXPORT_ID_PATTERN = /^[0-9a-f]{32}$/u
 
@@ -938,6 +942,9 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
  * @returns Validated filters.
  */
 function parseFilters(filters: Record<string, unknown>): AuditExportFilters {
+  // A stored key this version does not know could be a restriction that would otherwise be dropped.
+  const unknownKey = Object.keys(filters).find((key) => !AUDIT_EXPORT_FILTER_KEYS.has(key))
+  if (unknownKey !== undefined) throw new TypeError(`Audit export filters contain an unknown field: ${unknownKey}.`)
   const optional = (key: string) => {
     const value = filters[key]
     return value === undefined ? {} : { [key]: requireString(value, `filters.${key}`) }

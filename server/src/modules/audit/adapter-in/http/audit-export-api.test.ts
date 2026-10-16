@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { afterEach, expect, test } from 'bun:test'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
-import type { AuditEventQuery, AuditEventV1 } from '../../audit'
+import { AuditEventIdempotencyConflictError, type AuditEventQuery, type AuditEventV1 } from '../../audit'
 import {
   createAuditExportService,
   type AuditExportJob,
@@ -155,6 +155,15 @@ test('rejects Workspace members without audit export rights', async () => {
 test('rejects malformed filters and unknown exports', async () => {
   configureExports()
 
+  // An unfiltered export must be requested explicitly.
+  const missingFilters = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'missing-filters' },
+    body: JSON.stringify({}),
+  })
+  expect(missingFilters.status).toBe(400)
+  expect(await missingFilters.json()).toMatchObject({ code: 'InvalidAuditExportRequest' })
+
   const unknownFilter = await app.request('/api/audit/exports', {
     method: 'POST',
     headers: adminHeaders(),
@@ -292,10 +301,10 @@ test('reports asynchronous export as unavailable when it is not deployed', async
 test('rejects a key whose export expired and maps audit-writer conflicts to 409', async () => {
   configureFakeProjectClients(true, {})
   const stored = new Map<string, AuditEventV1>()
-  let rejectWrites = false
+  let rejectWrites: Error | undefined
   const auditEvents = {
     async putEvent(accessEvent: AuditEventV1) {
-      if (rejectWrites) throw new TypeError('Audit event idempotency key conflicts with an existing event.')
+      if (rejectWrites) throw rejectWrites
       stored.set(accessEvent.eventId, accessEvent)
     },
     async getEvent(_workspaceId: string, eventId: string) {
@@ -338,8 +347,13 @@ test('rejects a key whose export expired and maps audit-writer conflicts to 409'
 
   // A writer-side fingerprint conflict is the stable export conflict, not a 5xx.
   stored.clear()
-  rejectWrites = true
+  rejectWrites = new AuditEventIdempotencyConflictError()
   const conflicted = await request()
   expect(conflicted.status).toBe(409)
   expect(await conflicted.json()).toMatchObject({ code: 'AuditExportIdempotencyConflict' })
+
+  // A malformed stored audit row is a server failure, not a client conflict.
+  rejectWrites = new TypeError('Audit event is malformed.')
+  const corrupted = await request()
+  expect(corrupted.status).toBeGreaterThanOrEqual(500)
 })
