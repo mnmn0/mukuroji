@@ -25,7 +25,7 @@
 | `search` | api, queries, model, ui + 直下 1 page | app, commands, task-views | `features/search` と `pages/` |
 | `commands` | ui | app, task-views, tasks, workspace | `features/command-menu` |
 | `customers` | api, queries, mutations, ui | tasks, triage | `features/customers` |
-| `notifications` | api, queries, mutations, model, ui | workspace | `features/notifications` |
+| `notifications` | api, queries, mutations, model, ui | workspace | `entities/notification` と `features/notification-preferences` へ分割 |
 | `bulk-operations` | api, model, ui | tasks | `features/bulk-operations` |
 | `analytics` | api, queries, model, ui + 直下 1 file | pages のみ | `features/analytics` |
 | `automation` | api, queries, mutations, model, ui + 直下 1 file | pages のみ | `features/automation-management` |
@@ -62,6 +62,19 @@
 5. **routing 用の layout と provider が `app/` の外にある。**
    `workspace/ui/WorkspaceRoute.tsx`、`workspace/ui/WorkspaceRouteProvider.tsx`、`commands/ui/WorkspaceCommandMenu.tsx` の `WorkspaceCommandMenuLayout` は router が複数画面で共有する layout / provider です。
    `web/AGENTS.md` ではこれらを `app/layouts/` と `app/providers/` に置きます。
+   ただし、どちらもそのまま移せる薄い layout / provider ではありません。
+   `WorkspaceCommandMenuLayout` は command menu の feature 本体と同じ file にあり、`WorkspaceRouteProvider` は project、notification、auth、AI の query を自ら呼んでいます。
+6. **feature 候補の領域同士が内部実装を import している。**
+   `web/AGENTS.md` は feature から別 feature の page や内部 UI を直接 import することを禁止していますが、`.dependency-cruiser.cjs` には feature 同士の依存を検査するルールがありません。
+   現在は次の import があります。
+   - `triage`、`search`、`requests`、`documents`、`planning` から `features/ai-assistance` の `ui/`、`mutations/`、`model/`
+   - `triage` から `customers/api`、`task-views` から `search/api/errors`、`commands` から `search/api`
+   - `task-views` から `commands/ui/WorkspaceCommandMenuContext`
+   これらを残したまま `features/` へ移すと、移動後に禁止された依存がそのまま残ります。
+7. **notification の業務データと設定 UI が一つの領域にある。**
+   受信箱と未読数は workspace の layout / provider と inbox page の両方が使う業務データです。
+   一方、通知設定の編集は設定画面だけが使う業務操作です。
+   一つの feature として移すと、`entities` へ移る workspace 側から feature を参照することになるため、受信箱・未読数の取得と表示を `entities/notification`、通知設定の管理を `features/notification-preferences` に分けます。
 
 ## 移行の順序
 
@@ -82,20 +95,31 @@
    `auth/session.ts` は置き場所が `web/AGENTS.md` に追加されるまで移しません。
 3. **利用元が pages だけの領域を `features/` へ移す。**
    `analytics`、`automation`、`security`、`workload` は他の領域から import されないため、移動の影響が page と story に限られます。
-4. **利用元が少数の領域を `features/` へ移す。**
-   `triage`、`customers`、`bulk-operations`、`notifications`、`developer-platform`、`commands`、`search`、`requests`、`documents`、`planning`、`task-views` の順に移します。
-5. **routing 用の layout と provider を `app/` へ移す。**
-   差分 5 の layout を `app/layouts/`、provider を `app/providers/` へ移します。
+4. **feature 候補の領域同士の依存を解消する。**
+   移動の前に、差分 6 の import を一つずつ解消します。移動を伴わない PR とし、領域ごとに分けて構いません。
+   - 複数の領域から使われる API や error（`customers/api`、`search/api/errors`）は、entity または共通の `api/` へ移します。
+   - `features/ai-assistance` の UI を組み込んでいる箇所は、page が AI の component を組み立てて props / slot として渡す形にするか、`features/ai-assistance` の public な入口（`index.ts`）だけを参照する形にします。
+   - `WorkspaceCommandMenuContext` のように画面をまたいで共有する UI 状態は、`app/providers/` に置き、feature は callback を受け取る形にします。
+   最後に、feature から別 feature の public な入口以外への依存を禁止するルールを `.dependency-cruiser.cjs` へ追加し、以降の移動で依存が戻らないようにします。
+5. **利用元が少数の領域を `features/` へ移す。**
+   `triage`、`customers`、`bulk-operations`、`developer-platform`、`commands`、`search`、`requests`、`documents`、`planning`、`task-views` の順に移します。
+   `notifications` は差分 7 のとおり分割し、通知設定の管理だけをこの段階で `features/notification-preferences` へ移します。
+6. **routing 用の layout と provider を分割し、`app/` へ移す。**
+   差分 5 の file は移動だけでは済まないため、先に分割します。
+   - `WorkspaceCommandMenuLayout` を command menu の feature 本体から別 file へ切り出します。
+   - `WorkspaceRouteProvider` が呼んでいる project、notification、auth、AI の query は、それぞれの entity / feature の query hook に移し、provider はそれらを組み立てて context に渡すだけにします。
+   分割を移動とは別の PR で行い、薄くなった layout を `app/layouts/`、provider を `app/providers/` へ移す PR は移動だけにします。
    `workspace` を `entities/` へ移す前に行い、`entities/workspace` に routing の責務が残らないようにします。
-6. **共有される業務データを `entities/` へ移す。**
+7. **共有される業務データを `entities/` へ移す。**
    移す前に、差分 4 の feature への依存を解消します。
    feature の UI や処理を組み立てている部分は、`pages/` または対応する `features/` 側へ移すか、entity が受け取る props / callback に置き換えます。
-   依存が解消された領域から順に、`files`、`auth`、`projects`、`workspace` を移し、最後に `issues`、`tasks`、`work-items` を `entities/work-item` へ統合します。
+   依存が解消された領域から順に、`files`、`notifications` の残り（受信箱と未読数、`entities/notification`）、`auth`、`projects`、`workspace` を移し、最後に `issues`、`tasks`、`work-items` を `entities/work-item` へ統合します。
 
 ## 移動時の確認
 
 - `.dependency-cruiser.cjs` の既存ルールは、`pages`、`shared`、`model`、`api` の境界を検査します。
   `entities/` を作るときは、`entities` から `features` と `pages` への依存を禁止するルールを同じ PR で追加します。
+  feature 同士のルールは手順 4 で追加します。
 - 移動だけの PR では、移動前後で文の内容が変わらないことを確認します。
   変わるのは import の path と、別 module から参照されるようになった宣言の `export` だけにします。
 - 新しく export した宣言には TSDoc を付けます。
