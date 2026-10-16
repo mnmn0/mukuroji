@@ -270,6 +270,14 @@ test('pages download links for exports with many parts', async () => {
     expect(invalid.status).toBe(400)
   }
   expect(accessEvents.at(-1)).toMatchObject({ metadata: { exportId: job.exportId, fromPart: 100, partCount: 50 } })
+
+  // One client key reused while following nextPart is scoped per page.
+  const keyed = { ...adminHeaders(), 'Idempotency-Key': 'download-key' }
+  const firstKeyed = await app.request(`/api/audit/exports/${job.exportId}/download`, { headers: keyed })
+  const secondKeyed = await app.request(`/api/audit/exports/${job.exportId}/download?fromPart=100`, { headers: keyed })
+  expect([firstKeyed.status, secondKeyed.status]).toEqual([200, 200])
+  const [firstEvent, secondEvent] = accessEvents.slice(-2)
+  expect(firstEvent?.idempotencyKeyHash).not.toBe(secondEvent?.idempotencyKeyHash)
 })
 
 test('reports asynchronous export as unavailable when it is not deployed', async () => {
