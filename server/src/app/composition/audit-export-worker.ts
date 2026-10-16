@@ -12,7 +12,10 @@ export function createProductionAuditExportWorkerHandler() {
   const auditEvents = createAuditEventsClient()
   const tenantGate = createProductionTenantFeatureGate()
   const service = createConfiguredAuditExportService(
-    (query) => auditEvents.query(query),
+    {
+      readEvents: (query) => auditEvents.query(query),
+      countEvents: (query) => auditEvents.countEventsConsistently(query),
+    },
     undefined,
     (workspaceId) => tenantGate.isEnabled(workspaceId),
   )

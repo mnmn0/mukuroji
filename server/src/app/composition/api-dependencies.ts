@@ -501,7 +501,10 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   const { tenantAdministration, workspaceAccess } =
     createProductionTenantWorkspaceAccess()
   const auditEvents = createAuditEventsClient()
-  const auditExports = createConfiguredAuditExportService((query) => auditEvents.query(query))
+  const auditExports = createConfiguredAuditExportService({
+    readEvents: (query) => auditEvents.query(query),
+    countEvents: (query) => auditEvents.countEventsConsistently(query),
+  })
   return {
     customers: new DynamoDbCustomerClient(),
     dashboardSummary: new DynamoDbDashboardSummaryClient(),
