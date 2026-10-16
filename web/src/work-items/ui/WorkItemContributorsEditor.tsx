@@ -10,6 +10,7 @@ import {
   CONTRIBUTOR_DRAFT_FORM_FIELD,
   contributionStatuses,
   createEmptyContributorDraftRow,
+  formatContributorMemberLabel,
   formatPlannedEffortHours,
   listSelectableJobRoles,
   parseContributorDraftRows,
@@ -232,7 +233,7 @@ export function WorkItemContributorsEditor({
                       <option value={row.memberUserId}>{row.memberUserId}</option>
                     ) : null}
                     {memberOptions.map((member) => (
-                      <option key={member.id} value={member.id}>{member.name ?? member.email}</option>
+                      <option key={member.id} value={member.id}>{formatContributorMemberLabel(member)}</option>
                     ))}
                   </select>
                 </label>

@@ -53,7 +53,9 @@ export type WorkItemContributorAssignment = {
 /**
  * Contributor assignment submitted by a client; the server assigns `assignmentId` when omitted.
  */
-export type WorkItemContributorAssignmentInput = Omit<WorkItemContributorAssignment, 'assignmentId'> & {
+export type WorkItemContributorAssignmentInput = Omit<WorkItemContributorAssignment, 'assignmentId' | 'status'> & {
   /** Identifier of an existing assignment to keep; omit for a new assignment. */
   assignmentId?: string
+  /** Progress of this contribution; the server uses `planned` when omitted. */
+  status?: WorkItemContributionStatus
 }
