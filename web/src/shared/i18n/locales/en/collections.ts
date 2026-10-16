@@ -11,6 +11,7 @@ export const collectionsMessages = {
   'collections.create.name': 'Name',
   'collections.create.description': 'Description (optional)',
   'collections.create.submit': 'Create',
+  'collections.select.missing': 'This Collection does not exist or was deleted. Choose another Collection.',
   'collections.select.prompt': 'Choose a Collection from the list.',
   'collections.detail.edit': 'Edit name and description',
   'collections.detail.save': 'Save',

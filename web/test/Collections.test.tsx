@@ -90,6 +90,16 @@ describe('CollectionsWorkspace', () => {
     expect(markup).not.toContain('view-only access')
   })
 
+  test('reports a selected Collection that the list does not contain', () => {
+    const markup = render({ selectedId: 'deleted', items: undefined })
+    expect(markup).toContain('role="alert">This Collection does not exist or was deleted.')
+    expect(markup).not.toContain('Choose a Collection from the list.')
+  })
+
+  test('edits descriptions in a multi-line field so line breaks survive', () => {
+    expect(render({ selectedId: undefined })).toContain('<textarea')
+  })
+
   test('hides every change control for view-only members', () => {
     const markup = render({ canEdit: false })
     expect(markup).toContain('You have view-only access')
@@ -134,6 +144,8 @@ describe('Collection API', () => {
     globalThis.fetch = async () => new Response(JSON.stringify({ collections: [], canWrite: 'yes' }))
     await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
     globalThis.fetch = async () => new Response(JSON.stringify({ collections: [{ name: 'Missing ID' }], canWrite: true }))
+    await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => new Response(JSON.stringify({ collections: [{ ...collection, revision: 0 }], canWrite: true }))
     await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
     globalThis.fetch = async () => new Response(JSON.stringify({ code: 'CollectionNotFound', message: 'Not found' }), { status: 404 })
     const failure = await getCollectionItems('token', 'c1').catch((error: unknown) => error)

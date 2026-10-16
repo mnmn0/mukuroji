@@ -117,6 +117,9 @@ export function CollectionsWorkspace(props: CollectionsWorkspaceProps) {
       <section className="workbench-panel grid content-start gap-4 p-5">
         {selected ? (
           <CollectionDetail key={`${selected.collectionId}:${selected.revision}`} {...props} collection={selected} />
+        ) : selectedId && collections !== undefined ? (
+          // A bookmarked or stale selection that the loaded list does not contain.
+          <p className="text-sm font-medium text-[var(--workbench-danger)]" role="alert">{t('collections.select.missing')}</p>
         ) : (
           <p className="text-sm text-[var(--workbench-muted)]">{t('collections.select.prompt')}</p>
         )}
@@ -159,7 +162,7 @@ function CreateCollectionForm({ onCreate, pending, t }: Pick<CollectionsWorkspac
       </label>
       <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
         {t('collections.create.description')}
-        <input className="workbench-input min-h-10 px-3" maxLength={1000} onChange={(event) => setDescription(event.target.value)} value={description} />
+        <textarea className="workbench-input min-h-20 px-3 py-2" maxLength={1000} onChange={(event) => setDescription(event.target.value)} rows={3} value={description} />
       </label>
       <button className="workbench-button-primary min-h-10 px-4" disabled={pending || !name.trim()} type="submit">
         {t('collections.create.submit')}
@@ -225,7 +228,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
           </label>
           <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
             {t('collections.create.description')}
-            <input className="workbench-input min-h-10 px-3" maxLength={1000} onChange={(event) => setDescription(event.target.value)} value={description} />
+            <textarea className="workbench-input min-h-20 px-3 py-2" maxLength={1000} onChange={(event) => setDescription(event.target.value)} rows={3} value={description} />
           </label>
           <div className="flex flex-wrap gap-2">
             <button className="workbench-button-primary min-h-10 px-4" disabled={props.pending || !name.trim()} type="submit">{t('collections.detail.save')}</button>

@@ -32,4 +32,6 @@ test('rejects stored Collections with more references than the item limit', () =
   }
   expect(isStoredCollection(stored)).toBe(true)
   expect(isStoredCollection({ ...stored, items: [...stored.items, item(COLLECTION_ITEM_LIMIT)] })).toBe(false)
+  // Re-adding is a no-op, so a repeated (teamId, issueId) is corrupt state.
+  expect(isStoredCollection({ ...stored, items: [item(1), item(2), item(1)] })).toBe(false)
 })

@@ -11,6 +11,7 @@ export const collectionsMessages = {
   'collections.create.name': '名前',
   'collections.create.description': '説明（任意）',
   'collections.create.submit': '作成',
+  'collections.select.missing': 'この Collection は存在しないか、削除されました。別の Collection を選んでください。',
   'collections.select.prompt': '左の一覧からコレクションを選んでください。',
   'collections.detail.edit': '名前と説明を編集',
   'collections.detail.save': '保存',
