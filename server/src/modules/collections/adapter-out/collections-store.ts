@@ -246,9 +246,11 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       ConsistentRead: true,
     })).catch((error: unknown) => storageFailure(error))
     const count: unknown = row?.count
-    const isFullCounter = row?.entryType === COLLECTION_COUNT_ENTRY_TYPE &&
-      typeof count === 'number' && Number.isSafeInteger(count) && count >= COLLECTION_LIMIT
-    return isFullCounter ? limitReached() : new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
+    const isValidCounter = row?.entryType === COLLECTION_COUNT_ENTRY_TYPE &&
+      typeof count === 'number' && Number.isSafeInteger(count) && count >= 0
+    if (!isValidCounter) return new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
+    // A concurrent delete can free a slot between the failed write and this read; retry then.
+    return count >= COLLECTION_LIMIT ? limitReached() : conflict()
   }
 
   /**

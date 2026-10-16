@@ -54,9 +54,11 @@ export function useCollectionActions(
       if (active.current) setError(failure)
       return undefined
     } finally {
-      // Revalidate without replacing cached data, so loaded state stays visible meanwhile.
+      // Revalidate the list and item queries without replacing cached data, so loaded state
+      // stays visible meanwhile. Candidate searches are not revalidated: every keyword and
+      // excluded-item set is its own key, and the next search derives a fresh one anyway.
       await mutate(
-        (key) => Array.isArray(key) && key[0] === COLLECTIONS_QUERY_KEY && key[1] === accessToken,
+        (key) => Array.isArray(key) && key[0] === COLLECTIONS_QUERY_KEY && key[1] === accessToken && key[2] !== 'candidates',
       ).catch(() => undefined)
       busy.current = false
       if (active.current) setPending(false)
@@ -124,6 +126,14 @@ export function useCollectionActions(
     remove: async (collection: WorkItemCollection) =>
       (await run(async (token) => {
         await deleteCollection(token, collection.collectionId, collection.revision)
+        // Evict the confirmed deletion right away, so a failed list refresh cannot reselect it.
+        await mutate(
+          [COLLECTIONS_QUERY_KEY, token, 'list'],
+          (current: WorkItemCollectionsResponse | undefined) => current
+            ? { ...current, collections: current.collections.filter((entry) => entry.collectionId !== collection.collectionId) }
+            : current,
+          { revalidate: false },
+        )
         return true
       })) === true,
     /**

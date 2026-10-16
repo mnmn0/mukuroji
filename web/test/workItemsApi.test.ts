@@ -101,6 +101,11 @@ describe('canonical Work Item API', () => {
       [contributor, contributor],
       // One member cannot hold two assignments, even under distinct assignment IDs.
       [contributor, { ...contributor, assignmentId: 'd'.repeat(32) }],
+      // Identifiers must use the grammar the server stores.
+      [{ ...contributor, assignmentId: 'not-hex' }],
+      [{ ...contributor, memberUserId: '' , jobRoleId: undefined }],
+      [{ ...contributor, memberUserId: 'Suzuki@Example.com' }],
+      [{ ...contributor, jobRoleId: '-bad-' }],
     ]) {
       expect(isCanonicalWorkItem({ ...valid, contributorAssignments })).toBeFalse()
     }

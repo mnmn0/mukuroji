@@ -107,9 +107,20 @@ export async function searchCollectionCandidates(token: string, keyword: string,
       candidates.push(candidate)
       if (candidates.length >= COLLECTION_CANDIDATE_LIMIT) break
     }
-    if (!response.nextCursor || seenCursors.has(response.nextCursor)) break
+    if (!response.nextCursor || seenCursors.has(response.nextCursor)) return candidates
     seenCursors.add(response.nextCursor)
     cursor = response.nextCursor
   }
+  // Stopping at the page cap while results remain must not look like "no matches".
+  if (candidates.length === 0) throw new CollectionCandidateSearchTruncatedError()
   return candidates
+}
+
+/** Raised when candidate search stops at its page cap before finding any addable Work Item. */
+class CollectionCandidateSearchTruncatedError extends Error {
+  /** Creates the error. */
+  constructor() {
+    super('Work Item search stopped before finding a candidate. Use a more specific keyword.')
+    this.name = 'CollectionCandidateSearchTruncatedError'
+  }
 }
