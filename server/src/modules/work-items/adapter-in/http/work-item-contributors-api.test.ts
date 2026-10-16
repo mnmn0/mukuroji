@@ -229,3 +229,105 @@ test('reports a stale revision before validating contributor assignment IDs', as
   expect(response.status).toBe(409)
   expect(await response.json()).toMatchObject({ code: 'WorkItemRevisionConflict' })
 })
+
+/**
+ * Lists the Workspace member rows that a set of ConditionChecks fences.
+ *
+ * @param checks - Transaction items supplied to the Work Item adapter.
+ * @returns Record keys of the guarded Workspace member rows, in order.
+ */
+function fencedMemberRecordKeys(checks: readonly { ConditionCheck?: { Key?: Record<string, unknown> } }[] | undefined) {
+  return (checks ?? []).flatMap((check) => {
+    const recordKey = check.ConditionCheck?.Key?.recordKey
+    return typeof recordKey === 'string' && recordKey.startsWith('MEMBER#') ? [recordKey] : []
+  })
+}
+
+/**
+ * Lists the configuration rows that a set of ConditionChecks fences.
+ *
+ * @param checks - Transaction items supplied to the Work Item adapter.
+ * @returns Record keys of the guarded configuration rows, in order.
+ */
+function fencedConfigurationRecordKeys(checks: readonly { ConditionCheck?: { Key?: Record<string, unknown> } }[] | undefined) {
+  return (checks ?? []).flatMap((check) => {
+    const recordKey = check.ConditionCheck?.Key?.recordKey
+    return recordKey === 'CONFIG' || recordKey === 'CONFIG_WRITE_LOCK' ? [recordKey] : []
+  })
+}
+
+test('fences newly added contributor members in the Work Item write', async () => {
+  const updates: unknown[] = []
+  const creates: unknown[] = []
+  configureFakeProjectClients(true, {
+    jobRoles,
+    issueContributorAssignments: [storedContributor],
+    issueUpdateHook: (input) => {
+      updates.push(fencedMemberRecordKeys(input.authorizationConditionChecks))
+    },
+    issueCreateHook: (input) => {
+      creates.push(fencedMemberRecordKeys(input.authorizationConditionChecks))
+    },
+  })
+
+  const updated = await patchWorkItem({
+    contributorAssignments: [
+      { assignmentId: storedContributor.assignmentId, memberUserId: 'suzuki@example.com', jobRoleId: 'legacy-writer', status: 'done' },
+      { memberUserId: 'sato@example.com', jobRoleId: 'qa' },
+    ],
+  })
+  expect(updated.status).toBe(200)
+  // Only the added member is fenced; the kept contributor is not re-checked.
+  expect(updates).toEqual([['MEMBER#sato@example.com']])
+
+  const created = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Plan the launch',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      contributorAssignments: [{ memberUserId: 'suzuki@example.com', jobRoleId: 'designer' }],
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
+      priority: 'medium',
+      workflowStatusId: 'todo',
+    }),
+  })
+  expect(created.status).toBe(201)
+  expect(creates).toEqual([['MEMBER#suzuki@example.com']])
+})
+
+test('rejects a contributor deactivated before the membership fence is built', async () => {
+  const updates: unknown[] = []
+  configureFakeProjectClients(true, {
+    jobRoles,
+    deactivatedBeforeFenceMemberKeys: ['sato@example.com'],
+    issueUpdateHook: (input) => {
+      updates.push(input)
+    },
+  })
+
+  const response = await patchWorkItem({ contributorAssignments: [{ memberUserId: 'sato@example.com' }] })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'WorkspaceAssigneeInactive' })
+  expect(updates).toEqual([])
+})
+
+test('fences contributor job roles to the configuration revision they were validated against', async () => {
+  const updates: unknown[] = []
+  configureFakeProjectClients(true, {
+    jobRoles,
+    issueUpdateHook: (input) => {
+      updates.push(fencedConfigurationRecordKeys(input.configurationConditionChecks))
+    },
+  })
+
+  const response = await patchWorkItem({ contributorAssignments: [{ jobRoleId: 'designer' }] })
+
+  expect(response.status).toBe(200)
+  // A configuration save holds CONFIG_WRITE_LOCK while it scans contributor usage and bumps
+  // CONFIG's revision when it commits, so either check fails a concurrent role assignment.
+  expect(updates).toHaveLength(1)
+  expect(updates[0]).toEqual(expect.arrayContaining(['CONFIG_WRITE_LOCK', 'CONFIG']))
+})
