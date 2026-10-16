@@ -158,15 +158,16 @@ system admin を要求する。target filter がある場合は `TargetOccurredA
 POST /api/audit/exports                       # body: { "filters": { actorId?, actorKind?, entityType?, entityId?, targetType?, targetId?, eventTypes?, from?, to? } }
 GET  /api/audit/exports                       # 期限内の最新 20 件
 GET  /api/audit/exports/:exportId
-GET  /api/audit/exports/:exportId/download    # completed の part ごとの署名付き URL
+GET  /api/audit/exports/:exportId/download    # completed の part ごとの署名付き URL（?fromPart= で 100 件ずつ）
 ```
 
 system admin または `audit.export` 権限を要求する。
 
 - request body は `filters` だけを持つ JSON object とする。body がない場合、JSON が壊れている場合、`filters` 以外の field がある場合は `400 InvalidAuditExportRequest` を返し、絞り込みのない export に広げない。全件を出す場合は `{"filters":{}}` を明示する。
 - filter は同期 audit query と同じ規則で作成時に検証する（`eventTypes` は空でない最大 20 件など）。worker で初めて失敗する job は作らない。
-- `Idempotency-Key` を指定した場合、export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。
-- `queued` の既存 job への再要求は、enqueue に失敗した前回試行を救済するため再度 enqueue する。`Idempotency-Key` なしの要求で enqueue に失敗した job は、再試行で別の job が作られるため `AuditExportEnqueueFailed` で `failed` にする。
+- `Idempotency-Key` は必須で、ない場合は `400 IdempotencyKeyRequired` を返す。export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。
+- 要求は job を作る前に `audit.export-requested` として記録する。audit 書き込みに失敗した場合は job を作らずに失敗を返すため、記録のない export は実行されない。
+- 同じ key の再要求は、job の作成、index marker の作成、enqueue のどこで前回失敗していても同じ job を再利用して不足分をやり直す。`queued` の job は再度 enqueue する。
 
 job と worker の動作は次のとおり。
 
@@ -176,12 +177,12 @@ job と worker の動作は次のとおり。
 - 合計上限は 1,000,000 件で、超えた場合は `AuditExportTooLarge` で `failed` にする。
 - job state は `audit-exports/<sha256(workspaceId)>/<exportId>/job.json` に置き、作成は `If-None-Match`、更新は ETag の `If-Match` で条件付き書き込みにする。
 - part は内容の SHA-256 を含む `part-NNNNN-<digest>.ndjson` として保存する。同じ step が重複して実行されても、条件付き書き込みに勝った job が参照する object を上書きできない。job は件数・byte 長・checksum を記録する。
-- download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒。
+- download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒。1 回の応答は最大 100 part で、続きがある場合は `nextPart` を返し、`?fromPart=<nextPart>` で次の page を取得する。Lambda の同期応答上限を超えないようにするため。
 - worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かずに停止する。tenant closure が export namespace を削除した後に object を作り直さない。
 - 読めない queue message は失敗として返し、redrive policy で DLQ に送る。
-- job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。
+- job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。`AuditExportQueue` の message 保持期間は job の寿命より長い 8 日とし、worker が長時間止まっても job が `queued` / `running` のまま message だけが消えないようにする。
 - 行 projection は同期 export と同じ public DTO を使う。
-- export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。`Idempotency-Key` 付きの replay は同じ event を同じ request identity で書き直すため、audit writer が重複として扱う。audit 書き込みに失敗した後の retry でも記録が残る。
+- export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。replay は同じ event を同じ request identity で書き直すため、audit writer が重複として扱う。`exportId`、`filtered`、`fromPart`、`partCount`、`eventCount` は public metadata として audit query と export に含める。
 
 ### Public response projection
 
