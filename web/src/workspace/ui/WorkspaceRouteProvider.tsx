@@ -432,8 +432,6 @@ export function WorkspaceRouteProvider() {
   /** Clears the current session and replaces browser history with the public entry route. */
   const handleLogout = useCallback(() => {
     clearAuthSession()
-    // The badge belongs to the whole installed app, so clear it on a confirmed sign-out only.
-    syncAppBadge(0)
     navigate('/', { replace: true })
   }, [navigate])
 
@@ -445,7 +443,6 @@ export function WorkspaceRouteProvider() {
 
     if (action.clearSession) {
       clearAuthSession()
-      syncAppBadge(0)
     }
 
     navigate(action.redirectTo, { replace: true })

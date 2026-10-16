@@ -18,7 +18,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   `role="status"` で通知してフォーカスを移します。承認後に `appinstalled` が届いた場合も、インストール済みの通知へフォーカスを保ちます（表示言語を切り替えてもフォーカスは移しません）。browser が dialog を開けなかった場合は
   例外を出さずに失敗を通知し、browser のメニューからのインストールを案内します。
 - badge: install 済み app の icon に受信箱の未読数を Badging API (`navigator.setAppBadge`) で表示します。
-  数値だけを渡すため Workspace の内容は露出せず、読み込みに成功した未読 0 と sign out（session の破棄）で消去します。badge は installed app 全体で 1 つなので、
+  数値だけを渡すため Workspace の内容は露出せず、読み込みに成功した未読 0 と、session を破棄するすべての経路（`clearAuthSession`）で消去します。badge は installed app 全体で 1 つなので、
   複数 window の 1 つが閉じても消去しません。
   未読数の読み込み中や失敗時は前回の badge をそのまま残します。
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、

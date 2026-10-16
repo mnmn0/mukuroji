@@ -1,3 +1,5 @@
+import { syncAppBadge } from '../shared/lib/pwa/appBadge'
+
 /**
  * ブラウザに保存する Cognito 認証セッションです。
  */
@@ -65,6 +67,8 @@ export function saveAuthSession(session: AuthSession) {
 export function clearAuthSession() {
   window.localStorage.removeItem(storageKey)
   window.sessionStorage.removeItem(storageKey)
+  // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it.
+  syncAppBadge(0)
 }
 
 function readSession(storage: Storage) {

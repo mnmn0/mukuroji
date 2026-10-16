@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { clearAuthSession } from '../src/auth/session'
 import { resolveAppBadgeCount, syncAppBadge } from '../src/shared/lib/pwa/appBadge'
 import { createAppInstallPromptStore } from '../src/shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../src/shared/ui/AppInstallCard'
@@ -140,5 +141,27 @@ describe('app badge', () => {
     syncAppBadge(2, undefined)
     await Promise.resolve()
     expect(calls).toEqual(['set:3', 'clear', 'clear'])
+  })
+})
+
+describe('clearAuthSession', () => {
+  test('clears the app badge on every session destruction', async () => {
+    const calls: string[] = []
+    const storage = { removeItem: () => undefined }
+    const previousWindow = Reflect.get(globalThis, 'window')
+    const previousNavigator = Reflect.get(globalThis, 'navigator')
+    Reflect.set(globalThis, 'window', { localStorage: storage, sessionStorage: storage })
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { clearAppBadge: async () => { calls.push('clear') } },
+    })
+    try {
+      clearAuthSession()
+      await Promise.resolve()
+      expect(calls).toEqual(['clear'])
+    } finally {
+      Reflect.set(globalThis, 'window', previousWindow)
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: previousNavigator })
+    }
   })
 })
