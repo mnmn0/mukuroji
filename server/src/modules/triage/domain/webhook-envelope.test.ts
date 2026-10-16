@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { readWebhookTriageEnvelope } from './webhook-envelope'
+import { isTriageTeamIdentifier, readWebhookTriageEnvelope } from './webhook-envelope'
 
 test('normalizes the envelope content', () => {
   expect(readWebhookTriageEnvelope({
@@ -31,5 +31,13 @@ test('rejects routing, owner, and other fields the payload must not control', ()
     null,
   ]) {
     expect(() => readWebhookTriageEnvelope(value)).toThrow()
+  }
+})
+
+test('accepts only Team IDs that Triage can store', () => {
+  for (const teamId of ['core-team', 'support.v2', 'a:b_c-1']) expect(isTriageTeamIdentifier(teamId)).toBe(true)
+  // A Team generated from a non-Latin name cannot own Triage entries, so routing to it is refused.
+  for (const teamId of ['', '新規チーム-2', '-leading', 'with space', 'a'.repeat(201)]) {
+    expect(isTriageTeamIdentifier(teamId)).toBe(false)
   }
 })

@@ -53,7 +53,7 @@ test('writes require caller checks and carry a revision condition', async () => 
   const store = unbound.withCallerAuthorization(checks)
   await store.put('w', collection, 0)
   await store.put('w', { ...collection, revision: 2 }, 1)
-  await store.delete('w', 'c1', 2, { createFingerprint: 'f'.repeat(64) })
+  await store.delete('w', 'c1', 2, { createFingerprint: 'f'.repeat(64), deletedRevision: 2 })
   expect(transactions).toEqual([
     [
       { Put: expect.objectContaining({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: expect.objectContaining({ workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }) }) },
@@ -69,20 +69,26 @@ test('writes require caller checks and carry a revision condition', async () => 
     [
       { Delete: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION#c1' }, ExpressionAttributeValues: { ':revision': 2, ':entryType': 'work-item-collection' } }) },
       { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ExpressionAttributeValues: expect.objectContaining({ ':delta': -1 }) }) },
-      { Put: { TableName: 'planning', Item: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1', entryType: 'work-item-collection-tombstone', collectionId: 'c1', createFingerprint: 'f'.repeat(64) }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
+      { Put: { TableName: 'planning', Item: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1', entryType: 'work-item-collection-tombstone', collectionId: 'c1', createFingerprint: 'f'.repeat(64), deletedRevision: 2 }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       ...checks,
     ],
   ])
 })
 
-test('maps a failed counter condition on creation to the Workspace limit', async () => {
-  const store = new DynamoDbCollectionsStore('planning', clientFor(async () => {
+test('maps a failed counter condition on creation to the limit only for a valid full counter', async () => {
+  const storeWithCounter = (counter: Record<string, unknown> | undefined) => new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
+    if (command instanceof GetCommand) return counter ? { Item: counter } : {}
     throw Object.assign(new Error('cancelled'), {
       name: 'TransactionCanceledException',
       CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
     })
   }), checks)
-  await expect(store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
+  const full = { workspaceId: 'w', recordKey: 'COLLECTION_COUNT', entryType: 'work-item-collection-count', count: 200 }
+  await expect(storeWithCounter(full).put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
+  // A negative or foreign counter row is corrupt state, not a full Workspace.
+  for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }, undefined]) {
+    await expect(storeWithCounter(counter).put('w', collection, 0)).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  }
 })
 
 test('reports a creation blocked by a deletion marker as a conflict and reads the marker', async () => {
@@ -92,6 +98,7 @@ test('reports a creation blocked by a deletion marker as a conflict and reads th
     entryType: 'work-item-collection-tombstone',
     collectionId: 'c1',
     createFingerprint: 'f'.repeat(64),
+    deletedRevision: 2,
   }
   const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
     if (command instanceof GetCommand) {
@@ -103,7 +110,7 @@ test('reports a creation blocked by a deletion marker as a conflict and reads th
     })
   }), checks)
   await expect(store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
-  expect(await store.readDeletion('w', 'c1')).toEqual({ createFingerprint: 'f'.repeat(64) })
+  expect(await store.readDeletion('w', 'c1')).toEqual({ createFingerprint: 'f'.repeat(64), deletedRevision: 2 })
   expect(await store.readDeletion('w', 'c2')).toBeUndefined()
 })
 
@@ -114,6 +121,7 @@ test('fails closed on a malformed deletion marker instead of accepting it', asyn
     entryType: 'work-item-collection-tombstone',
     collectionId: 'c1',
     createFingerprint: 'f'.repeat(64),
+    deletedRevision: 2,
   }
   for (const item of [
     { recordKey: 'COLLECTION_DELETED#c1' },
@@ -121,6 +129,8 @@ test('fails closed on a malformed deletion marker instead of accepting it', asyn
     { ...valid, entryType: 'work-item-collection' },
     { ...valid, collectionId: 'c2' },
     { ...valid, createFingerprint: 'not-a-digest' },
+    { ...valid, deletedRevision: 0 },
+    { ...valid, deletedRevision: undefined },
   ]) {
     const store = new DynamoDbCollectionsStore('planning', clientFor(async () => ({ Item: item })), checks)
     await expect(store.readDeletion('w', 'c1')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
@@ -136,7 +146,7 @@ test('requires an existing positive counter before a deletion decrements it', as
       CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
     })
   }), checks)
-  await expect(store.delete('w', 'c1', 1, { createFingerprint: 'f'.repeat(64) }))
+  await expect(store.delete('w', 'c1', 1, { createFingerprint: 'f'.repeat(64), deletedRevision: 2 }))
     .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   expect(transactions).toEqual([[
     expect.anything(),
@@ -157,7 +167,7 @@ test('fails closed when a live Collection row also has a deletion marker', async
   await expect(failing(['None', 'ConditionalCheckFailed', 'None']).put('w', { ...collection, revision: 2 }, 1))
     .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   // Delete: the marker write (item 2) finds an existing marker.
-  await expect(failing(['None', 'None', 'ConditionalCheckFailed', 'None']).delete('w', 'c1', 1, { createFingerprint: 'f'.repeat(64) }))
+  await expect(failing(['None', 'None', 'ConditionalCheckFailed', 'None']).delete('w', 'c1', 1, { createFingerprint: 'f'.repeat(64), deletedRevision: 2 }))
     .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
 })
 

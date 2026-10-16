@@ -203,11 +203,18 @@ export async function deleteCollection(
   expectedRevision: number,
 ): Promise<void> {
   const current = await store.get(workspaceId, collectionId)
-  // A retry after a lost response finds only the deletion marker; deleting is already done.
-  if (!current && await store.readDeletion(workspaceId, collectionId)) return
-  if (!current) throw new CollectionError(404, 'CollectionNotFound', 'The Collection was not found.')
+  if (!current) {
+    // A retry after a lost response finds only the deletion marker of the revision it deleted;
+    // a stale delete of another revision is not reported as done.
+    const deletion = await store.readDeletion(workspaceId, collectionId)
+    if (deletion?.deletedRevision === expectedRevision) return
+    throw new CollectionError(404, 'CollectionNotFound', 'The Collection was not found.')
+  }
   if (current.revision !== expectedRevision) throw conflict()
-  await store.delete(workspaceId, collectionId, expectedRevision, { createFingerprint: current.createFingerprint })
+  await store.delete(workspaceId, collectionId, expectedRevision, {
+    createFingerprint: current.createFingerprint,
+    deletedRevision: current.revision,
+  })
 }
 
 /**

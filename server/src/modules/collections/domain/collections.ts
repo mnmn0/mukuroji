@@ -53,6 +53,8 @@ export type StoredCollection = WorkItemCollection & {
 export type CollectionDeletion = {
   /** Fingerprint of the request that created the deleted Collection. */
   createFingerprint: string
+  /** Revision the deletion removed; only a retry of that delete is reported as done. */
+  deletedRevision: number
 }
 
 /**

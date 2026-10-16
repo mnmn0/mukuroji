@@ -59,3 +59,10 @@ export type WorkItemContributorAssignmentInput = Omit<WorkItemContributorAssignm
   /** Progress of this contribution; the server uses `planned` when omitted. */
   status?: WorkItemContributionStatus
 }
+
+/**
+ * Contributor assignment submitted when creating a Work Item.
+ *
+ * A new Work Item has no existing assignments to keep, so `assignmentId` is not accepted.
+ */
+export type WorkItemContributorAssignmentCreateInput = Omit<WorkItemContributorAssignmentInput, 'assignmentId'>
