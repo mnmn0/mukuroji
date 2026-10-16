@@ -9,6 +9,7 @@ import type {
 } from './schedule-dependencies'
 import type {
   WorkItemContributorAssignment,
+  WorkItemContributorAssignmentCreateInput,
   WorkItemContributorAssignmentInput,
 } from './work-item-contributors'
 import type {
@@ -548,8 +549,8 @@ export type CreateWorkItemInput = {
    * Workspace user ID of the single accountable owner.
    */
   assigneeUserId: string
-  /** Contributors to plan for the new Work Item. */
-  contributorAssignments?: WorkItemContributorAssignmentInput[]
+  /** Contributors to plan for the new Work Item; new assignments never carry an ID. */
+  contributorAssignments?: WorkItemContributorAssignmentCreateInput[]
   /** Stable Work Item Type selected for the new Work Item. */
   workItemTypeId?: string
   /**
