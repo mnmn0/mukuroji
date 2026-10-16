@@ -2859,6 +2859,7 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
     const signingSecret = Buffer.from('server-issued-secret', 'utf8')
     const deliveries: Parameters<TestAutomationInboundWebhookPort['recordInboundWebhookDelivery']>[1][] = []
     const created: { teamId: string; input: CreateWebhookTriageEntryInput }[] = []
+    const admissions: { key: string; receivedAt: string | undefined }[] = []
     const now = '2026-10-16T00:00:00.000Z'
     const entry: TriageEntry = {
       schemaVersion: 1,
@@ -2890,7 +2891,7 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
         },
         async recordInboundWebhookDelivery(_endpoint, input) {
           deliveries.push(input)
-          return { eventId: input.eventId, replayed: false }
+          return { eventId: input.eventId, replayed: false, acceptedAt: '2026-10-15T23:00:00.000Z' }
         },
       }),
       automationInboundWebhookSecrets: {
@@ -2911,10 +2912,11 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
         updateConfiguration: unexpected,
         createManualHandoff: unexpected,
         listWorkItemSources: unexpected,
-        async createWebhookEntry(_workspaceId, teamId, _endpoint, input, _idempotency, validateNewEntry) {
+        async createWebhookEntry(_workspaceId, teamId, _endpoint, input, idempotency, options) {
           // Mirrors the store: a committed source replays before any current-state check.
           if (created.some((item) => item.input.eventId === input.eventId)) return { entry, replayed: true }
-          await validateNewEntry?.()
+          await options?.validateNewEntry?.()
+          admissions.push({ key: idempotency.key, receivedAt: options?.receivedAt })
           created.push({ teamId, input })
           return { entry, replayed: false }
         },
@@ -2950,6 +2952,8 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
     expect(response.status).toBe(202)
     expect(await response.json()).toEqual({ eventId: deliveries[0]?.eventId, triageEntryId: 'triage-webhook-1' })
     expect(created).toEqual([{ teamId: 'core-team', input: { eventId: 'evt-1', title: 'Checkout errors', body: 'Customers see 500.', requesterDisplayName: 'Status page' } }])
+    // The Triage receipt gets a fixed-length key digest and the delivery's first accepted time.
+    expect(admissions).toEqual([{ key: expect.stringMatching(/^[0-9a-f]{64}$/u), receivedAt: '2026-10-15T23:00:00.000Z' }])
     const auditItem = JSON.stringify(deliveries[0]?.auditMutation)
     expect(auditItem).toContain('triage.webhook-received')
     expect(auditItem).not.toContain('webhook.received"')

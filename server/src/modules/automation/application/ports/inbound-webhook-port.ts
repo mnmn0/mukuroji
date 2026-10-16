@@ -110,6 +110,8 @@ export type AutomationInboundWebhookDeliveryResult = {
   eventId: string
   /** Whether an existing delivery receipt was replayed. */
   replayed: boolean
+  /** ISO time the delivery was first accepted; kept across replays when the receipt records it. */
+  acceptedAt?: string
 }
 
 /** Durable endpoint, delivery, and secret-cleanup capability for inbound webhooks. */

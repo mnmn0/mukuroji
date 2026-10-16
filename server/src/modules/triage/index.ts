@@ -25,6 +25,7 @@ export {
   type ResolveTriageWorkItemAction,
   type TriageActor,
   type TriageWebhookEndpointReference,
+  type TriageWebhookAdmissionOptions,
   type TriageAuthorizationConditionChecks,
   type TriageAuditContextFactory,
   type TriageClient,

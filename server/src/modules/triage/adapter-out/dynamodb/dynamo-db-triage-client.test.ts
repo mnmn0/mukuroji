@@ -2416,6 +2416,7 @@ describe('DynamoDbTriageClient source admission', () => {
           requesterEmail: 'alerts@example.com',
         },
         { key: 'delivery-1', fingerprint: createTriageInputFingerprint({ eventId: 'evt-1' }) },
+        { receivedAt: '2026-08-01T00:00:00.000Z' },
       )
 
       expect(receipt.replayed).toBe(false)
@@ -2427,6 +2428,8 @@ describe('DynamoDbTriageClient source admission', () => {
         permission: { canReply: false },
         teamId: 'support',
         state: 'pending',
+        // The entry starts from the time the delivery was first accepted.
+        receivedAt: '2026-08-01T00:00:00.000Z',
       })
       expect(JSON.stringify(transactItems)).toContain('webhook-ingest')
     } finally {
@@ -2443,7 +2446,7 @@ describe('DynamoDbTriageClient source admission', () => {
         { id: 'webhook-1', name: 'Status page' },
         { eventId: 'evt-2', title: 'T', body: 'B', requesterDisplayName: 'Status page' },
         { key: 'delivery-2', fingerprint: createTriageInputFingerprint({ eventId: 'evt-2' }) },
-        async () => { throw new Error('Team was archived') },
+        { validateNewEntry: async () => { throw new Error('Team was archived') } },
       )).rejects.toThrow('Team was archived')
       expect(harness.commands).toHaveLength(1)
     } finally {
