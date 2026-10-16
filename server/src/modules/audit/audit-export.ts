@@ -37,6 +37,8 @@ export const AUDIT_EXPORT_MAX_PARTS = 10_000
  * write, so bounding the last write bounds how long any artifact can outlive its job.
  */
 export const AUDIT_EXPORT_PROCESSING_HOURS = 24
+/** Seconds before a step retries while the tenant is not active (the SQS maximum delay). */
+const AUDIT_EXPORT_INACTIVE_TENANT_RETRY_SECONDS = 900
 /** Days a job and its artifacts remain downloadable. */
 export const AUDIT_EXPORT_RETENTION_DAYS = 7
 /** Events read from the audit index per query page. */
@@ -544,16 +546,24 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      */
     async processExport(workspaceId: string, exportId: string): Promise<AuditExportStepResult> {
       if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) return 'skipped'
-      if (dependencies.isTenantActive && !await dependencies.isTenantActive(workspaceId)) return 'skipped'
+      const tenantActive = dependencies.isTenantActive ? await dependencies.isTenantActive(workspaceId) : true
       const stored = await dependencies.store.readJob(workspaceId, exportId)
       if (!stored || stored.job.workspaceId !== workspaceId) return 'skipped'
       const { job, version } = stored
       if (job.status === 'completed' || job.status === 'failed') return 'skipped'
       const current = now()
+      if (!tenantActive) {
+        // A closing tenant may still be restored, so keep the job resumable without writing.
+        // Once closure deletes the export namespace the job is gone, and past the processing
+        // deadline nothing would be written anyway, so the chain ends.
+        if (isExpired(job, current) || isPastProcessingDeadline(job, current)) return 'skipped'
+        await dependencies.queue.enqueue(job.workspaceId, job.exportId, AUDIT_EXPORT_INACTIVE_TENANT_RETRY_SECONDS)
+        return 'deferred'
+      }
       if (isExpired(job, current)) {
         return await finish(job, version, failJob(job, current, 'AuditExportExpired', 'Audit export expired before it completed.'))
       }
-      if (Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000 <= current.getTime()) {
+      if (isPastProcessingDeadline(job, current)) {
         return await finish(job, version, failJob(
           job,
           current,
@@ -804,6 +814,17 @@ function capAtSnapshot(to: string | undefined, snapshotAt: string) {
  */
 function isExpired(job: AuditExportJob, current: Date) {
   return Date.parse(job.expiresAt) <= current.getTime()
+}
+
+/**
+ * Checks whether a job has passed its processing deadline.
+ *
+ * @param job - Stored job.
+ * @param current - Current time.
+ * @returns Whether the job may no longer write parts.
+ */
+function isPastProcessingDeadline(job: AuditExportJob, current: Date) {
+  return Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000 <= current.getTime()
 }
 
 /**
