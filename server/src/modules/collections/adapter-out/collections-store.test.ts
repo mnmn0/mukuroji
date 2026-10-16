@@ -126,6 +126,25 @@ test('fails closed on a malformed deletion marker instead of accepting it', asyn
   }
 })
 
+test('requires an existing positive counter before a deletion decrements it', async () => {
+  const transactions: unknown[] = []
+  const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
+    if (command instanceof TransactWriteCommand) transactions.push(command.input.TransactItems)
+    throw Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
+    })
+  }), checks)
+  await expect(store.delete('w', 'c1', 1, { createFingerprint: 'f'.repeat(64) }))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  expect(transactions).toEqual([[
+    expect.anything(),
+    { Update: expect.objectContaining({ ConditionExpression: '#count > :zero AND #entryType = :entryType' }) },
+    expect.anything(),
+    ...checks,
+  ]])
+})
+
 test('maps a failed caller authorization check to 403 instead of a conflict', async () => {
   const store = new DynamoDbCollectionsStore('planning', clientFor(async () => {
     throw Object.assign(new Error('cancelled'), {

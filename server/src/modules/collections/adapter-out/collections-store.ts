@@ -178,7 +178,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         }, ...counter, ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, 1 + counter.length + this.checks.length, 1 + counter.length, counter.length > 0)
+      storageFailure(error, 1 + counter.length + this.checks.length, 1 + counter.length, counter.length > 0 ? 'create' : 'update')
     }
   }
 
@@ -214,7 +214,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         }, ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, this.checks.length + 3, 3)
+      storageFailure(error, this.checks.length + 3, 3, 'delete')
     }
   }
 
@@ -248,12 +248,16 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         TableName: this.tableName,
         Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
         UpdateExpression: 'ADD #count :delta SET #entryType = :entryType',
-        ...(delta === 1 ? { ConditionExpression: 'attribute_not_exists(#count) OR #count < :limit' } : {}),
+        // A decrement needs an existing positive counter; otherwise the partition is corrupt and
+        // a counter created at -1 would let the Workspace exceed the limit.
+        ConditionExpression: delta === 1
+          ? 'attribute_not_exists(#count) OR #count < :limit'
+          : '#count > :zero AND #entryType = :entryType',
         ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType' },
         ExpressionAttributeValues: {
           ':delta': delta,
           ':entryType': 'work-item-collection-count',
-          ...(delta === 1 ? { ':limit': COLLECTION_LIMIT } : {}),
+          ...(delta === 1 ? { ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
         },
       },
     }
@@ -433,18 +437,25 @@ function conflict(): CollectionError {
  * @param error - Thrown SDK error.
  * @param transactionSize - Number of items in the failed transaction, if any.
  * @param authorizationStart - Index of the first caller authorization condition check.
- * @param countsCreation - Whether item 1 is the creation counter update.
+ * @param operation - Write kind; for `create` and `delete`, item 1 is the counter update.
  * @returns Never; always throws a Collection error.
  */
-function storageFailure(error: unknown, transactionSize = 0, authorizationStart = transactionSize, countsCreation = false): never {
+function storageFailure(
+  error: unknown,
+  transactionSize = 0,
+  authorizationStart = transactionSize,
+  operation: 'create' | 'update' | 'delete' = 'update',
+): never {
   const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
   if (name === 'TransactionCanceledException' && typeof error === 'object' && error !== null && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
     const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
     if (codes.length === transactionSize && codes.slice(authorizationStart).includes('ConditionalCheckFailed')) {
       throw new CollectionError(403, 'CollectionAuthorizationChanged', 'Your Workspace access changed. Sign in again or ask an administrator.')
     }
-    if (countsCreation && codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' && codes[1] === 'ConditionalCheckFailed') {
-      throw limitReached()
+    const counterFailed = codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' && codes[1] === 'ConditionalCheckFailed'
+    if (operation === 'create' && counterFailed) throw limitReached()
+    if (operation === 'delete' && counterFailed) {
+      throw new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
     }
     if (transactionSize > 0 && codes.length === transactionSize && codes.includes('ConditionalCheckFailed')) {
       throw new CollectionError(409, 'CollectionConflict', 'The Collection or your permissions changed. Reload and try again.')
