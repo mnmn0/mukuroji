@@ -180,6 +180,10 @@ job と worker の動作は次のとおり。
 - download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒。1 回の応答は最大 100 part で、続きがある場合は `nextPart` を返し、`?fromPart=<nextPart>` で次の page を取得する。Lambda の同期応答上限を超えないようにするため。
 - worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かずに停止する。tenant closure が export namespace を削除した後に object を作り直さない。
 - 読めない queue message は失敗として返し、redrive policy で DLQ に送る。
+- job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。bucket lifecycle は各 object の最終書き込みから 8 日で削除するため、artifact は作成から最長 9 日で消える。
+- 1 job の part は 10,000 個まで。選択的な filter で小さな part が続いて上限に達した場合は `AuditExportTooManyParts` で失敗し、filter や期間を絞った再依頼を求める。
+- `from` が依頼時刻より未来の filter は `400 InvalidAuditExportFilters` で拒否する（worker は上限を snapshot 時刻に揃えるため一致し得ない）。
+- `audit.export-requested` event は key から導出した export ID による `audit-export-request:<exportId>` を audit の冪等 key とし、正規化した filter の digest（`filtersDigest`）を含める。同じ key を別の audit 操作に使っても衝突せず、job 作成前に失敗した後で filter を変えて再送すると audit 側で競合になる。
 - job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。`AuditExportQueue` の message 保持期間は job の寿命より長い 8 日とし、worker が長時間止まっても job が `queued` / `running` のまま message だけが消えないようにする。
 - 行 projection は同期 export と同じ public DTO を使う。
 - export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。replay は同じ event を同じ request identity で書き直すため、audit writer が重複として扱う。`exportId`、`filtered`、`fromPart`、`partCount`、`eventCount` は public metadata として audit query と export に含める。

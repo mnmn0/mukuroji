@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { afterEach, expect, test } from 'bun:test'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
 import type { AuditEventQuery, AuditEventV1 } from '../../audit'
@@ -131,7 +132,7 @@ test('requests, reports, and downloads an asynchronous audit export', async () =
     'audit.export-requested',
     'audit.export-downloaded',
   ])
-  expect(accessEvents[0]).toMatchObject({ metadata: { exportId: job.exportId, filtered: true } })
+  expect(accessEvents[0]).toMatchObject({ metadata: { exportId: job.exportId, filtered: true, filtersDigest: expect.stringMatching(/^[0-9a-f]{64}$/u) } })
   // The replay repeats the event under the same identity and fingerprint, which the
   // idempotent audit writer collapses instead of rejecting as a conflicting reuse.
   for (const field of ['eventId', 'eventType', 'requestFingerprint', 'metadata'] as const) {
@@ -205,6 +206,22 @@ test('requires an idempotency key and records the request before creating the jo
   expect(await reused.json()).toMatchObject({ code: 'AuditExportIdempotencyConflict' })
   expect(accessEvents).toHaveLength(1)
   expect(queued).toHaveLength(1)
+
+  // The audit identity is scoped to export requests, not the raw header shared with other operations.
+  const auditKeyHash = (key: string) => createHash('sha256')
+    .update(`audit-idempotency-v1\0${accessEvents[0]?.workspaceId}\0${accessEvents[0]?.actor.id}\0${key}`)
+    .digest('hex')
+  const exportId = (await created.json()).export.exportId
+  expect(accessEvents[0]?.idempotencyKeyHash).toBe(auditKeyHash(`audit-export-request:${exportId}`))
+  expect(accessEvents[0]?.idempotencyKeyHash).not.toBe(auditKeyHash('export-a'))
+
+  const future = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'export-future' },
+    body: JSON.stringify({ filters: { from: '2999-01-01T00:00:00.000Z' } }),
+  })
+  expect(future.status).toBe(400)
+  expect(await future.json()).toMatchObject({ code: 'InvalidAuditExportFilters' })
 
   // A failed audit write leaves no job behind; the retry with the same key creates it.
   const failing = configureExports()

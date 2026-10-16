@@ -40,6 +40,7 @@ export {
   type PreviewWorkItemDependencyScheduleChangeInput,
   type WorkItemDependencyScheduleState,
 } from './domain/work-item-schedule-dependencies'
+export { isStoredContributorAssignmentList } from './domain/contributor-assignments'
 export {
   isCanonicalWorkItemRecord,
   isCanonicalWorkItemRelationIds,
