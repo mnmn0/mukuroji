@@ -180,7 +180,7 @@ job と worker の動作は次のとおり。
 - download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒。1 回の応答は最大 100 part で、続きがある場合は `nextPart` を返し、`?fromPart=<nextPart>` で次の page を取得する。Lambda の同期応答上限を超えないようにするため。
 - worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かない。closing は取り消されて active に戻り得るため、job が残っていれば 15 分後に同じ step を再投入して再開できる状態を保つ。tenant closure が export namespace を削除した後は job が存在しないため chain は終わり、object を作り直さない。処理期限を過ぎた job も再投入しない。
 - 読めない queue message は失敗として返し、redrive policy で DLQ に送る。
-- job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。bucket lifecycle は各 object の最終書き込みから 8 日で current version を削除し、noncurrent version をさらに 1 日後に消すため、artifact は作成から最長約 10 日で消える。
+- job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。期限後に遅れて届いた message でも worker は失敗状態を書き込まず（`job.json` を書き換えると lifecycle の期限が延びるため）、API が期限を過ぎた未完了の job を読み取り時に `failed` として返す。bucket lifecycle は各 object の最終書き込みから 8 日で current version を削除し、noncurrent version をさらに 1 日後に消すため、artifact は作成から最長約 10 日で消える。
 - 1 job の part は 10,000 個まで。選択的な filter で小さな part が続いて上限に達した場合は `AuditExportTooManyParts` で失敗し、filter や期間を絞った再依頼を求める。
 - `from` が依頼時刻より未来の filter は `400 InvalidAuditExportFilters` で拒否する（worker は上限を snapshot 時刻に揃えるため一致し得ない）。
 - `audit.export-requested` event は key から導出した export ID による `audit-export-request:<exportId>` を audit の冪等 key とし、正規化した filter の digest（`filtersDigest`）を含める。同じ key を別の audit 操作に使っても衝突せず、job 作成前に失敗した後で filter を変えて再送すると audit 側で競合になる。
