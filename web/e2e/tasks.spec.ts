@@ -5296,6 +5296,25 @@ test.describe('authenticated task page', () => {
     })
   })
 
+  test('Issue #239: overview を持たない Work Item Type でも Contributor を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        jobRoles: [{ id: 'designer', name: 'デザイナー' }],
+        workItemTypes: [{
+          ...DEFAULT_WORK_ITEM_TYPE,
+          detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'overview'),
+        }],
+      },
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    await expect(detailPane.getByRole('combobox', { name: '責任者', exact: true })).toHaveCount(0)
+    const contributors = detailPane.getByTestId('work-item-contributors')
+    await expect(contributors).toContainText('Contributor はまだいません。')
+    await expect(contributors.getByRole('button', { name: 'Contributor を編集' })).toBeVisible()
+  })
+
   test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const detailPane = page.getByTestId('task-detail-pane')

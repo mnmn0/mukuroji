@@ -971,6 +971,21 @@ export function TaskDetailPane({
     </section>
   ) : null
 
+  /** Renders the Work Item-wide contributor editor; shown even when a type omits the overview section. */
+  const renderContributorsEditor = (): ReactNode => (
+    <WorkItemContributorsEditor
+      assignments={(issue ?? currentTask).contributorAssignments}
+      formId={editorFormId}
+      jobRoles={resolvedConfiguration?.jobRoles ?? []}
+      key={`contributors:${editorIdentity}`}
+      locale={locale}
+      memberOptions={contributorOptions}
+      ownerUserId={(issue ?? currentTask).assigneeUserId}
+      readOnly={isReadOnly}
+      {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
+    />
+  )
+
   /** Renders one configured Work Item detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
     switch (section) {
@@ -1052,17 +1067,7 @@ export function TaskDetailPane({
                   </select>
                 </label>
               </div>
-              <WorkItemContributorsEditor
-                assignments={(issue ?? currentTask).contributorAssignments}
-                formId={editorFormId}
-                jobRoles={resolvedConfiguration?.jobRoles ?? []}
-                key={`contributors:${editorIdentity}`}
-                locale={locale}
-                memberOptions={contributorOptions}
-                ownerUserId={(issue ?? currentTask).assigneeUserId}
-                readOnly={isReadOnly}
-                {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
-              />
+              {renderContributorsEditor()}
               {customerImpact ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
             </section>
           </fieldset>
@@ -1471,6 +1476,7 @@ export function TaskDetailPane({
         {renderedDetailSectionOrder.map((section) => (
           <Fragment key={section}>{renderDetailSection(section)}</Fragment>
         ))}
+        {!hasOverviewSection ? renderContributorsEditor() : null}
         {!hasCustomFieldSection && hasCustomFields ? (
           <fieldset
             className="contents"
