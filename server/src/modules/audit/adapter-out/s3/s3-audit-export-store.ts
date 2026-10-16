@@ -311,14 +311,18 @@ function readAwsFailure(error: unknown) {
 }
 
 /**
- * Checks whether a conditional write lost a race or found an existing object.
+ * Checks whether a conditional write found its precondition unmet.
+ *
+ * Only 412 means the `If-None-Match` / `If-Match` condition failed. A 409
+ * `ConditionalRequestConflict` is a concurrent operation that S3 asks callers to retry,
+ * so it propagates instead of being reported as an existing or changed object.
  *
  * @param error - Unknown thrown value.
- * @returns `true` for precondition and conditional-request conflicts.
+ * @returns `true` for precondition failures.
  */
 function isConditionalWriteFailure(error: unknown) {
   const { name, status } = readAwsFailure(error)
-  return name === 'PreconditionFailed' || name === 'ConditionalRequestConflict' || status === 412 || status === 409
+  return name === 'PreconditionFailed' || status === 412
 }
 
 /**
