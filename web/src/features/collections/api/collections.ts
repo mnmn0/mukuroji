@@ -232,7 +232,7 @@ function isCollection(value: unknown): value is WorkItemCollection {
     typeof value.createdBy === 'string' &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
-    typeof value.revision === 'number' && Number.isSafeInteger(value.revision)
+    typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1
 }
 
 /**
