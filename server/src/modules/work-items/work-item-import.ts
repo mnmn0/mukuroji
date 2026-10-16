@@ -7,6 +7,7 @@ import type {
   ImportReport,
 } from '@mukuroji/contracts'
 import { WORK_ITEM_IMPORT_MAX_BYTES } from './work-item-transfer'
+import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Import source object を自動削除するまでの既定日数です。 */
 export const WORK_ITEM_IMPORT_SOURCE_RETENTION_DAYS = 15
@@ -917,8 +918,9 @@ function readQueueMessage(body: string | undefined): WorkItemImportQueueMessage 
 function tryReadQueueMessage(body: string | undefined) {
   if (!body) return undefined
   try {
-    const value = JSON.parse(body) as Record<string, unknown>
+    const value: unknown = JSON.parse(body)
     if (
+      !isRecord(value) ||
       !isIdentifier(value.workspaceId) ||
       !isIdentifier(value.jobId) ||
       Object.keys(value).some((key) => key !== 'workspaceId' && key !== 'jobId')

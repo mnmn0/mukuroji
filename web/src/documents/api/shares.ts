@@ -1,6 +1,7 @@
 import type { CreateDocumentShareInput, CreateDocumentShareResponse, DocumentMemberShare, DocumentPublicShare, RevokeDocumentShareInput, DocumentSharesResponse } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Share dialog が扱う canonical member/public share です。
@@ -171,7 +172,8 @@ async function readJson(response: Response) {
   }
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw new DocumentsApiError(
       response.status,
@@ -182,7 +184,7 @@ async function readJson(response: Response) {
 }
 
 function createApiErrorFromBody(status: number, value: unknown) {
-  const record = asRecord(value)
+  const record = readRecord(value)
 
   return new DocumentsApiError(
     status,
@@ -191,12 +193,6 @@ function createApiErrorFromBody(status: number, value: unknown) {
       : 'Unable to complete the document request.',
     typeof record.code === 'string' ? record.code : undefined,
   )
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object'
-    ? (value as Record<string, unknown>)
-    : {}
 }
 
 function trimTrailingSlash(value: string) {

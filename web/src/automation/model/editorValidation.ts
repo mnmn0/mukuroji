@@ -20,6 +20,7 @@ import {
 } from '@mukuroji/contracts'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { createRecurringSchedule, type RecurringScheduleInput } from './recurringSchedule'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const automationScheduleWeekdays: readonly WorkItemScheduleWeekday[] = [
   'monday',
@@ -387,10 +388,6 @@ function isConfigurationId(value: string) {
 function isDisplayName(value: string) {
   const normalized = value.trim()
   return normalized.length > 0 && normalized.length <= 160
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**

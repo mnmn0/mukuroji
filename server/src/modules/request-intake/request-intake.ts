@@ -79,6 +79,7 @@ import {
   type TriageAdmissionTransactionContribution,
   type TriageAuditOutboxConfiguration,
 } from '../triage'
+import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Request intake queue GSI の既定名です。 */
 export const REQUEST_QUEUE_INDEX_NAME = 'RequestQueueIndex'
@@ -1162,8 +1163,8 @@ function requireSafeNavigationUrl(value: unknown, label: string) {
 }
 
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw invalidInput(`${label} must be an object.`)
-  return value as Record<string, unknown>
+  if (!isRecord(value)) throw invalidInput(`${label} must be an object.`)
+  return value
 }
 
 function requireArray(value: unknown, label: string) {
@@ -3592,8 +3593,8 @@ function readReplyReceipt(value: unknown): StoredReplyReceipt {
 }
 
 function readDuplicatePointer(value: unknown, now: Date) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const record = value as Record<string, unknown>
+  if (!isRecord(value)) return undefined
+  const record = value
   if (
     record.entryType !== 'duplicate-pointer' ||
     typeof record.submissionId !== 'string' ||
@@ -4013,8 +4014,8 @@ function stableHash(value: unknown) {
 
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
+  if (isRecord(value)) {
+    return `{${Object.entries(value)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
       .join(',')}}`

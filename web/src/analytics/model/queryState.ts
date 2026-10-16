@@ -8,6 +8,7 @@ import {
   analyticsCalendarDateBoundaryToInstant,
   formatAnalyticsCalendarDate,
 } from './timeZone'
+import { isRecord, readRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Analytics workbench を URL から復元する versioned state です。
@@ -124,8 +125,8 @@ export function createAnalyticsQueryInput(
  */
 export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
   const searchParams = new URLSearchParams({ v: analyticsRouteVersion })
-  const filter = asRecord(state.filter)
-  const period = asRecord(filter.period)
+  const filter = readRecord(state.filter)
+  const period = readRecord(filter.period)
 
   setValue(searchParams, 'report', state.reportId)
   setValue(searchParams, 'snapshot', state.snapshotId)
@@ -294,8 +295,8 @@ function stableStringify(value: unknown): string {
     return `[${value.map(stableStringify).join(',')}]`
   }
 
-  if (typeof value === 'object' && value !== null) {
-    return `{${Object.entries(value as Record<string, unknown>)
+  if (isRecord(value)) {
+    return `{${Object.entries(value)
       .filter(([, item]) => item !== undefined)
       .sort(([first], [second]) => first.localeCompare(second))
       .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
@@ -303,12 +304,6 @@ function stableStringify(value: unknown): string {
   }
 
   return JSON.stringify(value)
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
-    : {}
 }
 
 function readStringArray(value: unknown) {

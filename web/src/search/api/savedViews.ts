@@ -1,5 +1,5 @@
 import { type CreateSavedWorkspaceViewInput, type SavedWorkspaceView, type UpdateSavedWorkspaceViewInput } from '@mukuroji/contracts'
-import { isOptionalString } from '../../shared/api/jsonValidation'
+import { isOptionalString, readRecord } from '../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceSearchApiError, resolveSearchApiBaseUrl } from './errors'
 
@@ -121,7 +121,7 @@ export async function deleteSavedWorkspaceView(
  * @throws WorkspaceSearchApiError when the body is not a saved-view page.
  */
 function readSavedViewsPage(value: unknown) {
-  const record = asRecord(value)
+  const record = readRecord(value)
 
   if (!Array.isArray(record.views) || !isOptionalString(record.nextCursor)) {
     throw new WorkspaceSearchApiError(502, 'Saved view response was invalid.', 'InvalidSavedViewResponse')
@@ -141,7 +141,7 @@ function readSavedViewsPage(value: unknown) {
  * @throws WorkspaceSearchApiError when the body is not a saved view.
  */
 function readSavedView(value: unknown) {
-  if (typeof asRecord(value).id !== 'string') {
+  if (typeof readRecord(value).id !== 'string') {
     throw new WorkspaceSearchApiError(502, 'Saved view response was invalid.', 'InvalidSavedViewResponse')
   }
 
@@ -163,7 +163,7 @@ async function requestJson<TResponse>(
   const body = await readJson(response)
 
   if (!response.ok) {
-    const error = asRecord(body)
+    const error = readRecord(body)
     throw new WorkspaceSearchApiError(
       response.status,
       typeof error.message === 'string' ? error.message : 'Unable to complete the search request.',
@@ -182,12 +182,10 @@ async function readJson(response: Response) {
   }
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     throw new WorkspaceSearchApiError(response.status, 'Search API returned invalid JSON.', 'InvalidSearchResponse')
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
-}

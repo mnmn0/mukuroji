@@ -110,6 +110,7 @@ import {
   type EnterpriseSessionValidation,
   type EvaluateEnterpriseAccessInput,
 } from './domain/enterprise-authorization'
+import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 export {
   canAssignEnterpriseRole,
@@ -6077,8 +6078,8 @@ function canonicalEnterpriseJson(value: unknown): string {
       entry === undefined ? 'null' : canonicalEnterpriseJson(entry)
     ).join(',')}]`
   }
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
+  if (isRecord(value)) {
+    return `{${Object.entries(value)
       .filter(([, entry]) => entry !== undefined)
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, entry]) =>

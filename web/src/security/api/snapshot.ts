@@ -7,6 +7,7 @@ import type { EnterpriseProvisioningLog, EnterpriseScimConfiguration } from './p
 import type { EnterpriseAssignableRoleIds, EnterprisePermissionDefinition, EnterpriseRoleDefinition } from './roles'
 import type { EnterpriseServiceAccount } from './serviceAccounts'
 import type { EnterpriseSessionPolicy } from './sessionPolicy'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Enterprise security 管理 API が返す操作権限です。
@@ -243,10 +244,6 @@ function readErrorMessage(data: unknown) {
   return isRecord(data) && typeof data.message === 'string'
     ? data.message
     : 'Enterprise security request failed.'
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function isEnterpriseSecurityCapabilities(

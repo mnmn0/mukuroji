@@ -2030,7 +2030,7 @@ function readConnectorOAuthStatePreviousSigningSecrets(
 ) {
   if (!value?.trim()) return []
   try {
-    const parsed = JSON.parse(value) as unknown
+    const parsed: unknown = JSON.parse(value)
     if (
       !Array.isArray(parsed) ||
       parsed.length > 3 ||
@@ -2057,7 +2057,7 @@ export function readConnectorSyncOriginPreviousSigningSecrets(
 ) {
   if (!value?.trim()) return []
   try {
-    const parsed = JSON.parse(value) as unknown
+    const parsed: unknown = JSON.parse(value)
     if (!Array.isArray(parsed) || parsed.length > 3) throw new TypeError()
     const secrets = parsed.map((secret) => {
       if (typeof secret !== 'string') throw new TypeError()
@@ -2078,7 +2078,7 @@ export function readConnectorSyncOriginPreviousSigningSecrets(
 function hasConfiguredConnectorProviders(value: string | undefined) {
   if (!value) return false
   try {
-    const parsed = JSON.parse(value) as unknown
+    const parsed: unknown = JSON.parse(value)
     return !Array.isArray(parsed) || parsed.length > 0
   } catch {
     return true
@@ -2811,7 +2811,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       },
       authenticateManagement: authenticateDeveloperManagement,
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
-      openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT as unknown as Record<string, unknown>,
+      openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,
       get cursorSecret() {
         return getPublicApiCursorSecret()
       },

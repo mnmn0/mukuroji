@@ -1,4 +1,5 @@
 import type { SearchViewLayout, WorkspaceSearchResult } from '@mukuroji/contracts'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 const resultFieldAliases: Record<string, string> = {
   assignee: 'assigneeUserId',
@@ -65,7 +66,7 @@ export function resolveWorkspaceSearchResultFieldValue(
   }
 
   const resultField = resultFieldAliases[field] ?? field
-  const builtInValue = (result as unknown as Record<string, unknown>)[resultField]
+  const builtInValue = readRecord(result)[resultField]
   return builtInValue ?? result.customFields?.[field]
 }
 

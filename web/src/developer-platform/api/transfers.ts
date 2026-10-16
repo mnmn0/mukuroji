@@ -9,6 +9,7 @@ import type {
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { DeveloperExportFormat } from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Work Item export response と download metadata です。
@@ -198,7 +199,7 @@ function createDeveloperExportFile(
           ? workItem.customFieldValues[
               header.slice('customFieldValues.'.length)
             ]
-          : (workItem as unknown as Record<string, unknown>)[header]
+          : readRecord(workItem)[header]
 
         return escapeDeveloperExportCsvValue(
           serializeDeveloperExportCell(value),

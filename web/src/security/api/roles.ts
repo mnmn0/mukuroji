@@ -1,5 +1,6 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { EnterpriseSecurityApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 /**
  * 現在の principal が用途・scope ごとに割り当て可能な role ID 一覧です。
@@ -307,10 +308,6 @@ function readErrorMessage(data: unknown) {
   return isRecord(data) && typeof data.message === 'string'
     ? data.message
     : 'Enterprise security request failed.'
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function readJson<T>(response: Response): Promise<T> {

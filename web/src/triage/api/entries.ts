@@ -17,6 +17,7 @@ import {
   readTriageWorkItemSourcePage,
 } from './contractValidation'
 import { TriageApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const triageApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
 const defaultTriageApiErrorMessage = 'Unable to complete the Team triage operation.'
@@ -267,11 +268,6 @@ function readApiError(value: unknown) {
     ? value.code
     : undefined
   return { code, message }
-}
-
-/** Checks whether a value is a non-array object. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Creates the encoded API path for one Team. */

@@ -2482,9 +2482,9 @@ export class DynamoDbTeamIssuesClient {
 
         const value = expressionAttributeValues[`:${field}`]
         if (value !== undefined) {
-          ;(afterIssue as unknown as Record<string, unknown>)[field] = value
+          Reflect.set(afterIssue, field, value)
         } else if (removeExpressions.includes(placeholder)) {
-          delete (afterIssue as unknown as Record<string, unknown>)[field]
+          Reflect.deleteProperty(afterIssue, field)
         }
       }
       const auditBeforeIssue = {

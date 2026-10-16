@@ -39,6 +39,7 @@ import {
 } from '../../../enterprise-identity'
 import { createEnterpriseCognitoInspectionCache } from '../../../enterprise-identity'
 import { createEnterpriseSsoAuthenticationMethod } from '../../../enterprise-identity'
+import { isRecord } from '../../../../infrastructure/runtime/value-guards'
 
 /**
  * API Gateway WebSocket event の request context です。
@@ -985,11 +986,11 @@ function getCallbackEndpoint(event: WebSocketEvent) {
 }
 
 function toRealtimeSessionItem(value: unknown): RealtimeSessionItem | undefined {
-  if (!value || typeof value !== 'object') {
+  if (!isRecord(value)) {
     return undefined
   }
 
-  const item = value as Record<string, unknown>
+  const item = value
 
   if (
     typeof item.connectionId !== 'string' ||

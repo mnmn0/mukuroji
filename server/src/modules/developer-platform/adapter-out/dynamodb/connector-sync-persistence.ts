@@ -1628,7 +1628,7 @@ function requireSigningSecret(value: string) {
 function readPreviousSigningSecrets(value: string | undefined) {
   if (!value?.trim()) return []
   try {
-    const parsed = JSON.parse(value) as unknown
+    const parsed: unknown = JSON.parse(value)
     if (
       !Array.isArray(parsed) ||
       parsed.length > 3 ||

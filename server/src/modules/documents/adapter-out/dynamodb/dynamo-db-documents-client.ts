@@ -5819,7 +5819,8 @@ function createIdempotentTemplateBlockId(
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
-  const entries = Object.entries(value as Record<string, unknown>)
+  if (!isRecord(value)) return JSON.stringify(value)
+  const entries = Object.entries(value)
     .filter(([, entry]) => entry !== undefined)
     .sort(([left], [right]) => left.localeCompare(right))
   return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`).join(',')}}`
@@ -7185,18 +7186,15 @@ function applyStoredVersionDelta(
     document.revision =
       delta.version.revision
   }
-  const mutableDocument =
-    document as unknown as Record<string, unknown>
   for (
     const [field, value] of Object.entries(
       delta.changedFields ?? {},
     )
   ) {
-    mutableDocument[field] =
-      structuredClone(value)
+    Reflect.set(document, field, structuredClone(value))
   }
   for (const field of delta.removedFields ?? []) {
-    delete mutableDocument[field]
+    Reflect.deleteProperty(document, field)
   }
   document.revision = delta.version.revision
   validateDocumentPayload(document)

@@ -4802,7 +4802,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     )
     if (records.length > 1) throw persistenceInvalid('Developer lookup is not unique.')
     return records[0]
-      ? readStoredRecordLocator(clone(records[0]) as unknown as Record<string, unknown>, lookupKey)
+      ? readStoredRecordLocator(clone(records[0]), lookupKey)
       : undefined
   }
 
@@ -4828,7 +4828,7 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     const selected = remaining.slice(0, request.limit)
     const locators = selected.map((record) =>
       readStoredRecordLocator(
-        clone(record) as unknown as Record<string, unknown>,
+        clone(record),
         request.lookupKey,
       )
     )
@@ -8513,10 +8513,11 @@ function isRecordExpired(record: DeveloperPlatformRecord, now: Date) {
 }
 
 function readStoredRecordLocator(
-  value: Record<string, unknown>,
+  value: unknown,
   expectedLookupKey: string,
 ): DeveloperPlatformRecordLocator {
   if (
+    !isRecord(value) ||
     typeof value.workspaceId !== 'string' ||
     typeof value.recordKey !== 'string' ||
     value.lookupKey !== expectedLookupKey ||
@@ -8590,7 +8591,8 @@ function cloneJsonValue(value: unknown) {
     if (encoded === undefined) {
       throw new Error('JSON value is undefined.')
     }
-    return JSON.parse(encoded) as unknown
+    const parsed: unknown = JSON.parse(encoded)
+    return parsed
   } catch (error) {
     throw invalid('DeveloperJsonInvalid', 'Value must be JSON serializable.', error)
   }
@@ -8697,7 +8699,8 @@ function createDefaultKmsEnvelopeClient(): KmsEnvelopeClient {
   const loadSdk = async () => {
     loadedSdk ??= (async () => {
       const packageName = ['@aws-sdk', 'client-kms'].join('/')
-      const sdk = await import(packageName) as Record<string, unknown>
+      const sdk: unknown = await import(packageName)
+      if (!isRecord(sdk)) throw new Error('AWS KMS client is unavailable.')
       const KmsClient = sdk.KMSClient
       if (typeof KmsClient !== 'function') throw new Error('AWS KMS client is unavailable.')
       const client = new (
