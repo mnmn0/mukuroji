@@ -23,6 +23,20 @@ export const AUDIT_EXPORT_PART_BYTE_BUDGET = 32 * 1024 * 1024
 export const AUDIT_EXPORT_SETTLE_SECONDS = 30
 /** Largest number of events one export job may contain. */
 export const AUDIT_EXPORT_MAX_EVENTS = 1_000_000
+/**
+ * Largest number of parts one export job may contain.
+ *
+ * Highly selective filters can close a part after only a few matches, so the event
+ * limit alone does not bound the part list stored in the job.
+ */
+export const AUDIT_EXPORT_MAX_PARTS = 10_000
+/**
+ * Hours a job may spend processing before it fails.
+ *
+ * The bucket lifecycle expires each object a fixed number of days after its own
+ * write, so bounding the last write bounds how long any artifact can outlive its job.
+ */
+export const AUDIT_EXPORT_PROCESSING_HOURS = 24
 /** Days a job and its artifacts remain downloadable. */
 export const AUDIT_EXPORT_RETENTION_DAYS = 7
 /** Events read from the audit index per query page. */
@@ -311,6 +325,8 @@ export type AuditExportServiceDependencies = {
   readonly settleSeconds?: number
   /** Maximum events per export; overridable for tests. */
   readonly maxEvents?: number
+  /** Overrides the part limit for tests. */
+  readonly maxParts?: number
 }
 
 /**
@@ -351,6 +367,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
   const createId = dependencies.createId ?? (() => randomUUID().replaceAll('-', ''))
   const eventsPerPart = dependencies.eventsPerPart ?? AUDIT_EXPORT_EVENTS_PER_PART
   const maxEvents = dependencies.maxEvents ?? AUDIT_EXPORT_MAX_EVENTS
+  const maxParts = dependencies.maxParts ?? AUDIT_EXPORT_MAX_PARTS
   const pagesPerStep = dependencies.pagesPerStep ?? AUDIT_EXPORT_PAGES_PER_STEP
   const partByteBudget = dependencies.partByteBudget ?? AUDIT_EXPORT_PART_BYTE_BUDGET
   const settleSeconds = dependencies.settleSeconds ?? AUDIT_EXPORT_SETTLE_SECONDS
@@ -381,8 +398,8 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      * @returns The job and whether this call created it.
      */
     async requestExport(request: AuditExportRequest) {
-      const filters = normalizeAuditExportFilters(request.filters)
       const requestedAt = now()
+      const filters = normalizeAuditExportFilters(request.filters, requestedAt)
       const snapshotAt = requestedAt.toISOString()
       const idempotencyKey = request.idempotencyKey === undefined ? undefined : requireIdempotencyKey(request.idempotencyKey)
       const exportId = idempotencyKey
@@ -460,10 +477,10 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      * already used for a different export, so callers can record the request first.
      *
      * @param request - Workspace, requester, filters, and idempotency key.
-     * @returns The export identifier and the normalized filters.
+     * @returns The export identifier, the normalized filters, and their fingerprint.
      */
     async prepareExport(request: AuditExportRequest & { readonly idempotencyKey: string }) {
-      const filters = normalizeAuditExportFilters(request.filters)
+      const filters = normalizeAuditExportFilters(request.filters, now())
       const idempotencyKey = requireIdempotencyKey(request.idempotencyKey)
       const exportId = deriveAuditExportId(request.workspaceId, request.requestedBy.userKey, idempotencyKey)
       const existing = await dependencies.store.readJob(request.workspaceId, exportId)
@@ -478,7 +495,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           'Idempotency-Key was already used for a different audit export.',
         )
       }
-      return { exportId, filters }
+      return { exportId, filters, requestFingerprint: createRequestFingerprint(filters) }
     },
 
     /**
@@ -536,6 +553,14 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       if (isExpired(job, current)) {
         return await finish(job, version, failJob(job, current, 'AuditExportExpired', 'Audit export expired before it completed.'))
       }
+      if (Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000 <= current.getTime()) {
+        return await finish(job, version, failJob(
+          job,
+          current,
+          'AuditExportProcessingTimedOut',
+          `Audit export did not finish within ${AUDIT_EXPORT_PROCESSING_HOURS} hours. Request it again.`,
+        ))
+      }
       const settleRemainingSeconds = Math.ceil(
         (Date.parse(job.snapshotAt) + settleSeconds * 1000 - current.getTime()) / 1000,
       )
@@ -582,6 +607,15 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           now(),
           'AuditExportTooLarge',
           `Audit export exceeds ${maxEvents} events. Narrow the filters or period.`,
+        ))
+      }
+
+      if (events.length > 0 && job.parts.length >= maxParts) {
+        return await finish(job, version, failJob(
+          job,
+          now(),
+          'AuditExportTooManyParts',
+          `Audit export exceeds ${maxParts} parts. Narrow the filters or period.`,
         ))
       }
 
@@ -672,12 +706,16 @@ function createRequestFingerprint(filters: AuditExportFilters): string {
 }
 
 /**
- * Validates export filters and caps the upper bound at the request time.
+ * Validates export filters against the request time.
+ *
+ * The worker caps the upper bound at the snapshot time, so a lower bound after the
+ * request time could never match and is rejected here instead of failing the job.
  *
  * @param filters - Filters parsed from the request.
+ * @param requestedAt - Request time that becomes the snapshot time.
  * @returns Filters with empty values removed.
  */
-export function normalizeAuditExportFilters(filters: AuditExportFilters): AuditExportFilters {
+export function normalizeAuditExportFilters(filters: AuditExportFilters, requestedAt: Date): AuditExportFilters {
   if (Boolean(filters.entityType) !== Boolean(filters.entityId)) {
     throw new AuditExportError(400, 'InvalidAuditExportFilters', 'entityType and entityId must be supplied together.')
   }
@@ -691,6 +729,9 @@ export function normalizeAuditExportFilters(filters: AuditExportFilters): AuditE
   }
   if (filters.from && filters.to && Date.parse(filters.from) > Date.parse(filters.to)) {
     throw new AuditExportError(400, 'InvalidAuditExportFilters', 'from must not be later than to.')
+  }
+  if (filters.from && Date.parse(filters.from) > requestedAt.getTime()) {
+    throw new AuditExportError(400, 'InvalidAuditExportFilters', 'from must not be in the future.')
   }
   const normalized: AuditExportFilters = Object.fromEntries(
     Object.entries(filters).filter(([, value]) =>
