@@ -17,7 +17,7 @@ export const collectionsMessages = {
   'collections.detail.save': 'Save',
   'collections.detail.cancel': 'Cancel',
   'collections.detail.delete': 'Delete Collection',
-  'collections.detail.deleteConfirm': 'Delete this Collection? The Work Items in it are not deleted.',
+  'collections.detail.deleteConfirm': 'Delete the Collection “{name}”? The Work Items in it are not deleted.',
   'collections.items.title': 'Work Items',
   'collections.items.loading': 'Loading Work Items.',
   'collections.items.failed': 'Work Items could not be loaded.',

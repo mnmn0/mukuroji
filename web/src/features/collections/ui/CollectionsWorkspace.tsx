@@ -104,6 +104,10 @@ export function CollectionsWorkspace(props: CollectionsWorkspaceProps) {
                   type="button"
                 >
                   {collection.name}
+                  {/* Names are not unique, so the creator and creation date tell equal names apart. */}
+                  <span className="mt-0.5 block truncate text-xs font-normal text-[var(--workbench-muted)]">
+                    {describeCollectionOrigin(collection)}
+                  </span>
                 </button>
               </li>
             ))}
@@ -259,7 +263,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
                 className="workbench-button-secondary min-h-10 px-3"
                 disabled={props.pending}
                 onClick={() => {
-                  if (window.confirm(t('collections.detail.deleteConfirm'))) props.onDelete(collection)
+                  if (window.confirm(t('collections.detail.deleteConfirm').replace('{name}', `${collection.name} (${describeCollectionOrigin(collection)})`))) props.onDelete(collection)
                 }}
                 type="button"
               >
@@ -375,3 +379,13 @@ const statusMessageKeys = {
   completed: 'collections.status.completed',
   canceled: 'collections.status.canceled',
 } satisfies Record<WorkItemCollectionEntry['statusCategory'], MessageKey>
+
+/**
+ * Describes who created a Collection and when, to tell Collections with equal names apart.
+ *
+ * @param collection - Collection to describe.
+ * @returns The creator and the UTC creation date.
+ */
+function describeCollectionOrigin(collection: Pick<WorkItemCollection, 'createdBy' | 'createdAt'>): string {
+  return `${collection.createdBy} · ${collection.createdAt.slice(0, 10)}`
+}

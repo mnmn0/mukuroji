@@ -103,6 +103,11 @@ describe('CollectionsWorkspace', () => {
     expect(render()).toMatch(/<p class="[^"]*whitespace-pre-wrap break-words[^"]*">Q4 launch work<\/p>/u)
   })
 
+  test('tells Collections with the same name apart by creator and date', () => {
+    const markup = render()
+    expect(markup).toContain(">Launch<span class=\"mt-0.5 block truncate text-xs font-normal text-[var(--workbench-muted)]\">demo@example.com · 2026-10-16</span>")
+  })
+
   test('hides every change control for view-only members', () => {
     const markup = render({ canEdit: false })
     expect(markup).toContain('You have view-only access')

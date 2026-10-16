@@ -145,6 +145,8 @@ test('Issue #238: members without Work Item write permission see Collections rea
   state.collections.push({ collectionId: 'c1', name: 'Q4 launch', createdBy: 'demo@example.com', createdAt: '2026-10-16T00:00:00.000Z', updatedAt: '2026-10-16T00:00:00.000Z', revision: 1, items: [] })
   await page.goto('/collections')
   await expect(page.getByText('You have view-only access, so Collections cannot be changed.')).toBeVisible()
+  // The implicit first selection is pinned in the URL so later list changes cannot switch it.
+  await expect(page).toHaveURL(/collectionId=c1/u)
   await expect(page.getByRole('button', { name: 'Create' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Delete Collection' })).toHaveCount(0)
 })
