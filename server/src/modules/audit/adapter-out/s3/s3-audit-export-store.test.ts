@@ -136,6 +136,11 @@ describe('S3AuditExportStore', () => {
     const widened = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters: {} }
     objects.set(jobPath, { body: JSON.stringify(widened), etag: '"v"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('do not match their fingerprint')
+    // The stored identity must match the key it was read from.
+    objects.set(jobPath, { body: JSON.stringify(job('c'.repeat(32), '2026-07-18T00:00:00.000Z')), etag: '"u"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('does not match its storage key')
+    objects.set(`${createAuditExportWorkspacePrefix('ws-2')}${exportId}/job.json`, { body: JSON.stringify(job(exportId, '2026-07-18T00:00:00.000Z')), etag: '"t"' })
+    await expect(store.readJob('ws-2', exportId)).rejects.toThrow('does not match its storage key')
   })
 
   test('lists only the Workspace jobs, newest first', async () => {
