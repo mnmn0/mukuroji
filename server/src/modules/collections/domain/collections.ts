@@ -182,7 +182,7 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     typeof value.name === 'string' && value.name.length > 0 && value.name === value.name.trim() &&
     value.name.length <= COLLECTION_NAME_MAX_LENGTH && !hasControlCharacter(value.name) &&
     (value.description === undefined || isStoredDescription(value.description)) &&
-    typeof value.createdBy === 'string' &&
+    isStoredMemberKey(value.createdBy) &&
     isStoredInstant(value.createdAt) &&
     isStoredInstant(value.updatedAt) &&
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
@@ -221,7 +221,7 @@ function isStoredCollectionItem(value: unknown): value is StoredCollectionItem {
     isWorkItemReferenceIdentifier(value.teamId) &&
     isWorkItemReferenceIdentifier(value.issueId) &&
     isStoredInstant(value.addedAt) &&
-    typeof value.addedBy === 'string'
+    isStoredMemberKey(value.addedBy)
 }
 
 /**
@@ -332,4 +332,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  */
 function invalidInput(): CollectionError {
   return new CollectionError(400, 'InvalidCollectionInput', 'The Collection request is invalid.')
+}
+
+/**
+ * Checks that a persisted member key could have been written by the server.
+ *
+ * @param value - Persisted value.
+ * @returns Whether it is a non-empty, trimmed, printable key of reasonable length.
+ */
+function isStoredMemberKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 &&
+    value === value.trim() && !hasControlCharacter(value)
 }

@@ -57,18 +57,19 @@ test('writes require caller checks and carry a revision condition', async () => 
   expect(transactions).toEqual([
     [
       { Put: expect.objectContaining({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: expect.objectContaining({ workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }) }) },
-      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: 'attribute_not_exists(#count) OR #count < :limit', ExpressionAttributeValues: expect.objectContaining({ ':delta': 1, ':limit': 200 }) }) },
+      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: 'attribute_not_exists(recordKey) OR (#entryType = :entryType AND #count >= :zero AND #count < :limit)', ExpressionAttributeValues: expect.objectContaining({ ':delta': 1, ':limit': 200, ':zero': 0 }) }) },
       { ConditionCheck: { TableName: 'planning', Key: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       ...checks,
     ],
     [
       { Put: expect.objectContaining({ ExpressionAttributeValues: { ':revision': 1, ':entryType': 'work-item-collection' } }) },
+      { ConditionCheck: { TableName: 'planning', Key: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       ...checks,
     ],
     [
       { Delete: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION#c1' }, ExpressionAttributeValues: { ':revision': 2, ':entryType': 'work-item-collection' } }) },
       { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ExpressionAttributeValues: expect.objectContaining({ ':delta': -1 }) }) },
-      { Put: { TableName: 'planning', Item: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1', entryType: 'work-item-collection-tombstone', collectionId: 'c1', createFingerprint: 'f'.repeat(64) } } },
+      { Put: { TableName: 'planning', Item: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1', entryType: 'work-item-collection-tombstone', collectionId: 'c1', createFingerprint: 'f'.repeat(64) }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       ...checks,
     ],
   ])
@@ -145,11 +146,26 @@ test('requires an existing positive counter before a deletion decrements it', as
   ]])
 })
 
+test('fails closed when a live Collection row also has a deletion marker', async () => {
+  const failing = (reasons: string[]) => new DynamoDbCollectionsStore('planning', clientFor(async () => {
+    throw Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: reasons.map((Code) => ({ Code })),
+    })
+  }), checks)
+  // Update: the marker check (item 1) fails while the revision held.
+  await expect(failing(['None', 'ConditionalCheckFailed', 'None']).put('w', { ...collection, revision: 2 }, 1))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  // Delete: the marker write (item 2) finds an existing marker.
+  await expect(failing(['None', 'None', 'ConditionalCheckFailed', 'None']).delete('w', 'c1', 1, { createFingerprint: 'f'.repeat(64) }))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
 test('maps a failed caller authorization check to 403 instead of a conflict', async () => {
   const store = new DynamoDbCollectionsStore('planning', clientFor(async () => {
     throw Object.assign(new Error('cancelled'), {
       name: 'TransactionCanceledException',
-      CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+      CancellationReasons: [{ Code: 'None' }, { Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
     })
   }), checks)
   await expect(store.put('w', collection, 1)).rejects.toMatchObject({ status: 403, code: 'CollectionAuthorizationChanged' })
@@ -159,7 +175,7 @@ test('maps a failed condition to a conflict', async () => {
   const store = new DynamoDbCollectionsStore('planning', clientFor(async () => {
     throw Object.assign(new Error('cancelled'), {
       name: 'TransactionCanceledException',
-      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
     })
   }), checks)
   await expect(store.put('w', collection, 1)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })

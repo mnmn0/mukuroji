@@ -240,14 +240,15 @@ function readAuditExportFilters(body: unknown): AuditExportFilters {
     const value: unknown = Reflect.get(filters, field)
     if (value === undefined) continue
     if (field === 'eventTypes') {
-      if (!Array.isArray(value) || value.length > 50 || !value.every((entry) => typeof entry === 'string' && entry.length <= 128)) {
+      if (!Array.isArray(value) || value.length > 50 || !value.every((entry) => typeof entry === 'string' && utf8Length(entry) <= 128)) {
         throw new AuditExportError(400, 'InvalidAuditExportFilters', 'eventTypes must be up to 50 strings.')
       }
       result.eventTypes = value
       continue
     }
-    if (typeof value !== 'string' || value.length > 512) {
-      throw new AuditExportError(400, 'InvalidAuditExportFilters', `${field} must be a string.`)
+    // Bytes, not code units: a type and ID pair forms one DynamoDB key, which allows 2,048 bytes.
+    if (typeof value !== 'string' || utf8Length(value) > 512) {
+      throw new AuditExportError(400, 'InvalidAuditExportFilters', `${field} must be a string of at most 512 UTF-8 bytes.`)
     }
     result[field] = value
   }
@@ -485,4 +486,14 @@ export function registerAuditRoutes(routeApp: Hono): void {
       return c.json({ export: toAuditExportView(job), ...page })
     }),
   }))
+}
+
+/**
+ * Measures a string as stored in a DynamoDB key.
+ *
+ * @param value - Text to measure.
+ * @returns UTF-8 byte length.
+ */
+function utf8Length(value: string): number {
+  return new TextEncoder().encode(value).byteLength
 }

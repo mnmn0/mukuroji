@@ -241,6 +241,16 @@ test('rejects malformed filters and unknown exports', async () => {
   expect(tooManyTypes.status).toBe(400)
   expect(await tooManyTypes.json()).toMatchObject({ code: 'InvalidAuditExportFilters' })
 
+  // 400 three-byte characters fit 512 code units but not a 2,048-byte composite key pair.
+  const multibyte = '名'.repeat(400)
+  const oversizedKey = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'oversized-key' },
+    body: JSON.stringify({ filters: { entityType: multibyte, entityId: multibyte } }),
+  })
+  expect(oversizedKey.status).toBe(400)
+  expect(await oversizedKey.json()).toMatchObject({ code: 'InvalidAuditExportFilters' })
+
   const missing = await app.request(`/api/audit/exports/${'f'.repeat(32)}`, { headers: adminHeaders() })
   expect(missing.status).toBe(404)
 })

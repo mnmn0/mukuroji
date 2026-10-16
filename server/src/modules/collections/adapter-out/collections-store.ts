@@ -158,9 +158,11 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   async put(workspaceId: string, collection: StoredCollection, expectedRevision: number): Promise<void> {
     this.requireChecks()
+    // Every write requires that no deletion marker exists, so a restored live row next to its
+    // marker fails closed instead of being changed after its deletion.
     const counter = expectedRevision === 0
       ? [this.counterUpdate(workspaceId, 1), this.notDeletedCheck(workspaceId, collection.collectionId)]
-      : []
+      : [this.notDeletedCheck(workspaceId, collection.collectionId)]
     try {
       await this.client.send(new TransactWriteCommand({
         TransactItems: [{
@@ -178,7 +180,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         }, ...counter, ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, 1 + counter.length + this.checks.length, 1 + counter.length, counter.length > 0 ? 'create' : 'update')
+      storageFailure(error, 1 + counter.length + this.checks.length, 1 + counter.length, expectedRevision === 0 ? 'create' : 'update')
     }
   }
 
@@ -210,6 +212,8 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
               collectionId,
               createFingerprint: deletion.createFingerprint,
             },
+            // An existing marker next to a live row is contradictory state; never overwrite it.
+            ConditionExpression: 'attribute_not_exists(recordKey)',
           },
         }, ...this.checks],
       }))
@@ -251,13 +255,14 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         // A decrement needs an existing positive counter; otherwise the partition is corrupt and
         // a counter created at -1 would let the Workspace exceed the limit.
         ConditionExpression: delta === 1
-          ? 'attribute_not_exists(#count) OR #count < :limit'
+          ? 'attribute_not_exists(recordKey) OR (#entryType = :entryType AND #count >= :zero AND #count < :limit)'
           : '#count > :zero AND #entryType = :entryType',
         ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType' },
         ExpressionAttributeValues: {
           ':delta': delta,
           ':entryType': 'work-item-collection-count',
-          ...(delta === 1 ? { ':limit': COLLECTION_LIMIT } : { ':zero': 0 }),
+          ':zero': 0,
+          ...(delta === 1 ? { ':limit': COLLECTION_LIMIT } : {}),
         },
       },
     }
@@ -437,7 +442,7 @@ function conflict(): CollectionError {
  * @param error - Thrown SDK error.
  * @param transactionSize - Number of items in the failed transaction, if any.
  * @param authorizationStart - Index of the first caller authorization condition check.
- * @param operation - Write kind; for `create` and `delete`, item 1 is the counter update.
+ * @param operation - Write kind; it decides what a failed item after the main row means.
  * @returns Never; always throws a Collection error.
  */
 function storageFailure(
@@ -452,9 +457,18 @@ function storageFailure(
     if (codes.length === transactionSize && codes.slice(authorizationStart).includes('ConditionalCheckFailed')) {
       throw new CollectionError(403, 'CollectionAuthorizationChanged', 'Your Workspace access changed. Sign in again or ask an administrator.')
     }
-    const counterFailed = codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' && codes[1] === 'ConditionalCheckFailed'
-    if (operation === 'create' && counterFailed) throw limitReached()
-    if (operation === 'delete' && counterFailed) {
+    /**
+     * Checks whether only a condition after the main row failed.
+     *
+     * @param index - Transaction item index.
+     * @returns Whether that item failed while the main row condition held.
+     */
+    const onlyFailed = (index: number) =>
+      codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' && codes[index] === 'ConditionalCheckFailed'
+    if (operation === 'create' && onlyFailed(1)) throw limitReached()
+    // Item 1 is the deletion marker check on an update; on a delete, items 1 and 2 are the
+    // counter decrement and the marker write. Their failure means contradictory stored state.
+    if ((operation === 'update' && onlyFailed(1)) || (operation === 'delete' && (onlyFailed(1) || onlyFailed(2)))) {
       throw new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
     }
     if (transactionSize > 0 && codes.length === transactionSize && codes.includes('ConditionalCheckFailed')) {

@@ -21,6 +21,7 @@ async function mockCollections(page: Page, canWrite = true) {
     createKeys: [] as string[],
     deleteNextCreate: false,
     renameBeforeNextPatch: undefined as string | undefined,
+    denyItems: false,
     patches: [] as unknown[],
     searches: [] as unknown[],
   }
@@ -76,6 +77,7 @@ async function mockCollections(page: Page, canWrite = true) {
       return route.fulfill({ json: toPublicCollection(collection) })
     }
     if (itemsSegment === 'items') {
+      if (state.denyItems) return route.fulfill({ status: 403, json: { code: 'CollectionAccessDenied', message: 'Denied.' } })
       return route.fulfill({ json: { collection: toPublicCollection(collection), items: collection.items } })
     }
     if (request.method() === 'PATCH') {
@@ -200,4 +202,27 @@ test('Issue #238: saving again after a metadata conflict applies the draft', asy
     expect.objectContaining({ expectedRevision: 1, name: 'Q4 launch plan' }),
     expect.objectContaining({ expectedRevision: 2, name: 'Q4 launch plan' }),
   ])
+})
+
+test('Issue #238: a 403 on refresh hides the previously loaded Work Items', async ({ page }) => {
+  const state = await mockCollections(page)
+  const entry = (issueId: string, title: string): WorkItemCollectionEntry => ({ teamId: 'core-team', issueId, title, statusCategory: 'started', addedAt: '2026-10-16T00:00:00.000Z' })
+  state.collections.push({
+    collectionId: 'c1',
+    name: 'Q4 launch',
+    createdBy: 'demo@example.com',
+    createdAt: '2026-10-16T00:00:00.000Z',
+    updatedAt: '2026-10-16T00:00:00.000Z',
+    revision: 1,
+    items: [entry('onboarding', 'Reduce onboarding friction'), entry('pricing', 'Update the pricing page')],
+  })
+  await page.goto('/collections?collectionId=c1')
+  const items = page.getByTestId('collection-items')
+  await expect(items.getByRole('link', { name: 'Update the pricing page' })).toBeVisible()
+
+  // The caller loses read access; the refresh after this change returns 403.
+  state.denyItems = true
+  await page.getByRole('button', { name: 'Remove from Collection: Reduce onboarding friction (core-team / onboarding)' }).click()
+  await expect(page.getByText('Work Items could not be loaded.')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Update the pricing page' })).toHaveCount(0)
 })
