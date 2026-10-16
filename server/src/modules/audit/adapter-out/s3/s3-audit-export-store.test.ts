@@ -117,6 +117,10 @@ describe('S3AuditExportStore', () => {
     objects.set(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`, { body: '{"status":"done"}', etag: '"x"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow(TypeError)
     await expect(store.readJob('ws-1', '../other')).rejects.toThrow('32 lowercase hexadecimal digits')
+    // An unknown stored filter key could be a restriction; fail closed instead of dropping it.
+    const unknownFilter = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters: { eventTypez: ['x'] } }
+    objects.set(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`, { body: JSON.stringify(unknownFilter), etag: '"y"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('unknown field: eventTypez')
   })
 
   test('lists only the Workspace jobs, newest first', async () => {

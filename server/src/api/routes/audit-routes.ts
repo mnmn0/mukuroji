@@ -6,6 +6,7 @@ import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import {
   auditEventsToNdjson,
+  AuditEventIdempotencyConflictError,
   createAuditEvent,
   calculateAuditExpiresAt,
   getConfiguredAuditRetentionDays,
@@ -220,7 +221,11 @@ function readAuditExportFilters(body: unknown): AuditExportFilters {
       `Unsupported field: ${unknownTopLevelField}. Put export filters inside "filters".`,
     )
   }
-  const filters: unknown = Reflect.get(body, 'filters') ?? {}
+  // An export of everything must be requested explicitly with {"filters":{}}.
+  if (!Object.hasOwn(body, 'filters')) {
+    throw new AuditExportError(400, 'InvalidAuditExportRequest', 'Request body must contain "filters"; use {"filters":{}} to export everything.')
+  }
+  const filters: unknown = Reflect.get(body, 'filters')
   if (typeof filters !== 'object' || filters === null || Array.isArray(filters)) {
     throw new AuditExportError(400, 'InvalidAuditExportFilters', 'filters must be a JSON object.')
   }
@@ -334,8 +339,10 @@ async function recordAuditExportAction(
   try {
     await workspaceDependencies.auditEvents.putEvent(event)
   } catch (error) {
-    // The audit writer reports a reused key with a different request as a TypeError.
-    if (error instanceof TypeError && eventType === 'audit.export-requested') throw auditExportIdempotencyConflict()
+    // Only the writer's typed conflict is a reused key; malformed stored rows stay server errors.
+    if (error instanceof AuditEventIdempotencyConflictError && eventType === 'audit.export-requested') {
+      throw auditExportIdempotencyConflict()
+    }
     throw error
   }
 }

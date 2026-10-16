@@ -310,7 +310,9 @@ export function buildFileStorage(
     },
   );
   // Audit export jobs and parts are derived, short-lived copies of the audit log.
-  // Objects expire one day after the seven-day download window ends.
+  // Objects expire one day after the seven-day download window ends. The bucket is
+  // versioned like the other tenant-data buckets, because tenant closure deletes every
+  // object version; replaced or expired versions are removed one day later.
   const auditExportBucket = new s3.Bucket(scope, 'AuditExportBucket', {
     blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     encryption: s3.BucketEncryption.S3_MANAGED,
@@ -323,11 +325,18 @@ export function buildFileStorage(
       {
         expiration: cdk.Duration.days(8),
         id: 'ExpireAuditExports',
+        noncurrentVersionExpiration: cdk.Duration.days(1),
+        prefix: 'audit-exports/',
+      },
+      {
+        expiredObjectDeleteMarker: true,
+        id: 'RemoveExpiredAuditExportDeleteMarkers',
         prefix: 'audit-exports/',
       },
     ],
     objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    versioned: true,
     serverAccessLogsBucket: auditExportAccessLogsBucket,
     serverAccessLogsPrefix: 'audit-export/',
   });

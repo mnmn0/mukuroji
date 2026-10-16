@@ -163,7 +163,7 @@ GET  /api/audit/exports/:exportId/download    # completed の part ごとの署�
 
 system admin または `audit.export` 権限を要求する。
 
-- request body は `filters` だけを持つ JSON object とする。body がない場合、JSON が壊れている場合、`filters` 以外の field がある場合は `400 InvalidAuditExportRequest` を返し、絞り込みのない export に広げない。全件を出す場合は `{"filters":{}}` を明示する。
+- request body は `filters` だけを持つ JSON object とする。body がない場合、JSON が壊れている場合、`filters` がない場合、`filters` 以外の field がある場合は `400 InvalidAuditExportRequest` を返し、絞り込みのない export に広げない。全件を出す場合は `{"filters":{}}` を明示する。
 - filter は同期 audit query と同じ規則で作成時に検証する（`eventTypes` は空でない最大 20 件など）。worker で初めて失敗する job は作らない。
 - `Idempotency-Key` は必須で、ない場合は `400 IdempotencyKeyRequired` を返す。export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。
 - 要求は job を作る前に `audit.export-requested` として記録する。audit 書き込みに失敗した場合は job を作らずに失敗を返すため、記録のない export は実行されない。
@@ -180,15 +180,16 @@ job と worker の動作は次のとおり。
 - download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒。1 回の応答は最大 100 part で、続きがある場合は `nextPart` を返し、`?fromPart=<nextPart>` で次の page を取得する。Lambda の同期応答上限を超えないようにするため。
 - worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かない。closing は取り消されて active に戻り得るため、job が残っていれば 15 分後に同じ step を再投入して再開できる状態を保つ。tenant closure が export namespace を削除した後は job が存在しないため chain は終わり、object を作り直さない。処理期限を過ぎた job も再投入しない。
 - 読めない queue message は失敗として返し、redrive policy で DLQ に送る。
-- job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。bucket lifecycle は各 object の最終書き込みから 8 日で削除するため、artifact は作成から最長 9 日で消える。
+- job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。bucket lifecycle は各 object の最終書き込みから 8 日で current version を削除し、noncurrent version をさらに 1 日後に消すため、artifact は作成から最長約 10 日で消える。
 - 1 job の part は 10,000 個まで。選択的な filter で小さな part が続いて上限に達した場合は `AuditExportTooManyParts` で失敗し、filter や期間を絞った再依頼を求める。
 - `from` が依頼時刻より未来の filter は `400 InvalidAuditExportFilters` で拒否する（worker は上限を snapshot 時刻に揃えるため一致し得ない）。
 - `audit.export-requested` event は key から導出した export ID による `audit-export-request:<exportId>` を audit の冪等 key とし、正規化した filter の digest（`filtersDigest`）を含める。同じ key を別の audit 操作に使っても衝突せず、job 作成前に失敗した後で filter を変えて再送すると audit 側で競合になる。
-- job が消えた後に同じ `Idempotency-Key` で再送された場合、記録済みの `audit.export-requested` が job の寿命（7 日）より古ければ `409 AuditExportIdempotencyKeyExpired` で拒否し、新しい snapshot の export を作らない。同じ key で filter が異なる場合は audit writer の競合も含めて `409 AuditExportIdempotencyConflict` を返す。
+- job が消えた後に同じ `Idempotency-Key` で再送された場合、記録済みの `audit.export-requested` が job の寿命（7 日）より古ければ `409 AuditExportIdempotencyKeyExpired` で拒否し、新しい snapshot の export を作らない。同じ key で filter が異なる場合は、audit writer が冪等 key の競合として返す `AuditEventIdempotencyConflictError` も含めて `409 AuditExportIdempotencyConflict` を返す。それ以外の audit 書き込み失敗は 409 にせず 5xx として返す。
 - S3 の条件付き書き込みは 412 だけを既存 / 変更済みとして扱い、409 `ConditionalRequestConflict` は再試行対象としてそのまま失敗させる。
+- 保存済み job の filter に未知の key がある場合は壊れた job として読み込みを拒否し、未知の条件を黙って捨てた広い export を作らない。
 - worker は保存済み filter を query 層が拒否する場合だけ `AuditExportQueryInvalid` で終了し、壊れた audit row などそれ以外の失敗は再試行させて DLQ に届ける。
 - `audit.export-downloaded` event は、`Idempotency-Key` があれば `audit-export-download:<exportId>:<fromPart>:<key hash>` を audit の冪等 key とし、同じ key で `nextPart` を辿っても page ごとに別 event になる。key が無い download は発行のたびに記録する。
-- job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。`AuditExportQueue` の message 保持期間は job の寿命より長い 8 日とし、worker が長時間止まっても job が `queued` / `running` のまま message だけが消えないようにする。
+- job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。`AuditExportBucket` は versioning を有効にし、tenant closure はすべての version を削除する。lifecycle は noncurrent version を 1 日で、期限切れの delete marker も削除する。`AuditExportQueue` の message 保持期間は job の寿命より長い 8 日とし、worker が長時間止まっても job が `queued` / `running` のまま message だけが消えないようにする。
 - 行 projection は同期 export と同じ public DTO を使う。
 - export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。replay は同じ event を同じ request identity で書き直すため、audit writer が重複として扱う。`exportId`、`filtered`、`fromPart`、`partCount`、`eventCount` は public metadata として audit query と export に含める。
 
