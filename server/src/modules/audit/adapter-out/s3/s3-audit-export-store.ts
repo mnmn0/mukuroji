@@ -72,17 +72,23 @@ export class S3AuditExportStore implements AuditExportStore {
       if (!isConditionalWriteFailure(error)) throw error
       outcome = 'exists'
     }
-    // The marker key derives from the stored job, so a replay rewrites the same marker and
-    // repairs one lost when a previous attempt failed between the two writes.
+    // The marker key derives from the stored job, so a replay repairs a marker lost when a
+    // previous attempt failed between the two writes. The write is create-only: replacing an
+    // existing marker would restart its lifecycle clock.
     const indexed = outcome === 'created' ? job : (await this.readJob(job.workspaceId, job.exportId))?.job
     if (indexed) {
-      await this.client.send(new PutObjectCommand({
-        Bucket: this.bucketName,
-        Key: indexKey(indexed),
-        Body: new Uint8Array(),
-        ContentLength: 0,
-        ServerSideEncryption: 'AES256',
-      }))
+      try {
+        await this.client.send(new PutObjectCommand({
+          Bucket: this.bucketName,
+          Key: indexKey(indexed),
+          Body: new Uint8Array(),
+          ContentLength: 0,
+          IfNoneMatch: '*',
+          ServerSideEncryption: 'AES256',
+        }))
+      } catch (error) {
+        if (!isConditionalWriteFailure(error)) throw error
+      }
     }
     return outcome
   }
