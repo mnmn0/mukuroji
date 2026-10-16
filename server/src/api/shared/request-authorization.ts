@@ -34,6 +34,7 @@ import {
   workItemDependencies,
   workspaceDependencies,
 } from './app-dependencies'
+import { toProjectPrincipal } from './authentication-session'
 import {
   assertEnterpriseRuntimeCognitoProviders,
   type CognitoAccessTokenClaims,
@@ -73,7 +74,6 @@ import { getEnv } from './runtime-config'
 import { decodeJwtPayload, readNumericClaim } from './token-claims'
 import { isRecord } from './value-guards'
 import { loadAuthorizedTeamIssue } from './work-item-access'
-import { toProjectPrincipal } from './work-item-configuration'
 
 const ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS = [
   'teams.read',

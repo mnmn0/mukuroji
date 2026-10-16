@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import type { Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import { createRealtimeTicketRouter } from '../../modules/realtime'
@@ -44,10 +43,11 @@ export function registerRealtimeRoutes(routeApp: Hono): void {
       const issuedAt = readNumericClaim(tokenClaims?.iat) ?? Math.floor(Date.now() / 1_000)
       const authenticatedAt = readNumericClaim(tokenClaims?.auth_time) ?? issuedAt
       const tokenExpiresAt = readNumericClaim(tokenClaims?.exp) ?? issuedAt + 60 * 60
+      const authenticationSessionId = createEnterpriseAuthenticationSessionId(accessToken)
       const verifiedAuthenticationMethods =
         await workspaceDependencies.enterpriseSessionActivity.getAuthenticationMethods(
           principal.directoryId,
-          createHash('sha256').update(accessToken).digest('base64url'),
+          authenticationSessionId,
         )
 
       return await workItemDependencies.realtimeTickets.createTicket({
@@ -69,7 +69,7 @@ export function registerRealtimeRoutes(routeApp: Hono): void {
         ),
         authenticatedAt,
         tokenExpiresAt,
-        authenticationSessionId: createEnterpriseAuthenticationSessionId(accessToken),
+        authenticationSessionId,
         authenticationMethods: [
           ...new Set([
             ...readCognitoAuthenticationMethods(tokenClaims),

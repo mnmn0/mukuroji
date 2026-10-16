@@ -16,6 +16,7 @@ import {
 import { EnterpriseIdentityError } from '../../modules/enterprise-identity'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { createAuthenticationResponse } from '../shared/authentication-session'
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import {
   isEnterpriseSsoConfigured,
@@ -29,7 +30,6 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { createAuthenticationResponse } from '../shared/work-item-configuration'
 import {
   createWorkspaceMutationContextForActor,
   toWorkspaceAccessErrorResponse,
