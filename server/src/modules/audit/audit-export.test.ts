@@ -374,17 +374,28 @@ describe('audit export step safety', () => {
     expect(reads).toHaveLength(1)
   })
 
-  test('stops without writing for closing or closed tenants', async () => {
+  test('defers without writing while the tenant is inactive and resumes when it is restored', async () => {
     const reads: AuditEventQuery[] = []
-    const { service, store, job } = await requested({
-      isTenantActive: async () => false,
+    let active = false
+    const { service, store, queued, job } = await requested({
+      isTenantActive: async () => active,
       readEvents: createReader(events(2), reads),
     })
 
-    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await service.processExport('ws-1', job.exportId)).toBe('deferred')
+    expect(queued.at(-1)).toEqual({ exportId: job.exportId, delaySeconds: 900 })
     expect(reads).toEqual([])
     expect(store.parts.size).toBe(0)
     expect((await service.getExport('ws-1', job.exportId)).status).toBe('queued')
+
+    // A reversible closure step restored the tenant; the kept message resumes the job.
+    active = true
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+
+    // After closure deletes the export namespace the job is gone and the chain ends.
+    store.jobs.clear()
+    active = false
+    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
   })
 
   test('checkpoints a selective scan after the page budget even without matches', async () => {
