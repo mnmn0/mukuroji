@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { clearAuthSession } from '../src/auth/session'
+import { clearAuthSession, hasStoredAuthSession } from '../src/auth/session'
 import {
   clearAppBadgeForEndedSession,
   resolveAppBadgeCount,
@@ -176,7 +176,7 @@ describe('app badge across tabs', () => {
     return { openChannel, openCount: () => open.size }
   }
 
-  test('lets signed-in tabs republish after another session clears the badge', () => {
+  test('lets signed-in tabs republish after another session clears the badge', async () => {
     const hub = createChannelHub()
     const calls: string[] = []
     const navigator = {
@@ -189,7 +189,7 @@ describe('app badge across tabs', () => {
     hub.openChannel().postMessage({ type: 'other' })
     expect(republished).toEqual([])
 
-    clearAppBadgeForEndedSession(navigator, hub.openChannel)
+    await clearAppBadgeForEndedSession(navigator, hub.openChannel)
     expect(calls).toEqual(['clear'])
     // The page that cleared the badge shares this module's page ID, so it ignores its own notice.
     expect(republished).toEqual([])
@@ -206,9 +206,58 @@ describe('app badge across tabs', () => {
     unsubscribe()
   })
 
-  test('works without BroadcastChannel', () => {
+  test('sends the notice only after the clear settles, even when it fails', async () => {
+    const order: string[] = []
+    let finishClear: () => void = () => undefined
+    const navigator = {
+      clearAppBadge: () => new Promise<void>((_resolve, reject) => {
+        finishClear = () => {
+          order.push('cleared')
+          reject(new Error('not allowed'))
+        }
+      }),
+    }
+    const channel: AppBadgeChannel = {
+      onmessage: null,
+      postMessage: () => { order.push('notice') },
+      close: () => undefined,
+    }
+    const pending = clearAppBadgeForEndedSession(navigator, () => channel)
+    await Promise.resolve()
+    expect(order).toEqual([])
+    finishClear()
+    await pending
+    expect(order).toEqual(['cleared', 'notice'])
+  })
+
+  test('works without BroadcastChannel', async () => {
     expect(() => subscribeAppBadgeCleared(() => undefined, () => undefined)()).not.toThrow()
-    expect(() => clearAppBadgeForEndedSession({}, () => undefined)).not.toThrow()
+    await expect(clearAppBadgeForEndedSession({}, () => undefined)).resolves.toBeUndefined()
+  })
+})
+
+describe('hasStoredAuthSession', () => {
+  test('requires the same unexpired token in storage', () => {
+    const values = new Map<string, string>()
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      removeItem: (key: string) => { values.delete(key) },
+    }
+    const previousWindow = Reflect.get(globalThis, 'window')
+    Reflect.set(globalThis, 'window', { localStorage: storage, sessionStorage: { getItem: () => null } })
+    try {
+      expect(hasStoredAuthSession('token-a')).toBe(false)
+      values.set('mukuroji.auth', JSON.stringify({ accessToken: 'token-a', expiresAt: Date.now() + 60_000, tokenType: 'Bearer', remember: true }))
+      expect(hasStoredAuthSession('token-a')).toBe(true)
+      // A shared remembered session signed out elsewhere, or replaced by another sign-in.
+      expect(hasStoredAuthSession('token-b')).toBe(false)
+      values.set('mukuroji.auth', JSON.stringify({ accessToken: 'token-a', expiresAt: Date.now() - 1, tokenType: 'Bearer', remember: true }))
+      expect(hasStoredAuthSession('token-a')).toBe(false)
+      // Checking never clears storage.
+      expect(values.has('mukuroji.auth')).toBe(true)
+    } finally {
+      Reflect.set(globalThis, 'window', previousWindow)
+    }
   })
 })
 

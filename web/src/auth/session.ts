@@ -51,6 +51,21 @@ export function getAuthSession() {
 }
 
 /**
+ * Checks, without side effects, that a stored unexpired session still holds this token.
+ *
+ * A tab keeps its token in memory, so another tab's sign-out of a shared remembered
+ * session is visible only in storage.
+ *
+ * @param accessToken - Token the caller is using.
+ * @returns Whether storage still holds an unexpired session with that token.
+ */
+export function hasStoredAuthSession(accessToken: string): boolean {
+  if (typeof window === 'undefined') return false
+  const session = readSession(window.localStorage) ?? readSession(window.sessionStorage)
+  return session !== null && session.accessToken === accessToken && session.expiresAt > Date.now()
+}
+
+/**
  * ユーザーの保持設定に合わせて認証セッションを保存します。
  */
 export function saveAuthSession(session: AuthSession) {
@@ -69,7 +84,7 @@ export function clearAuthSession() {
   window.sessionStorage.removeItem(storageKey)
   // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
   // other tabs that are still signed in republish their own count.
-  clearAppBadgeForEndedSession()
+  void clearAppBadgeForEndedSession()
 }
 
 function readSession(storage: Storage) {

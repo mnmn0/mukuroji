@@ -45,16 +45,22 @@ export type AppBadgeChannel = {
  * Clears the app badge when this page's session ends and tells the other tabs.
  *
  * The OS badge is shared by every window of the installed app, while sessions can live
- * per tab. Other tabs that are still signed in republish their own count on the notice.
+ * per tab. Other tabs that are still signed in republish their own count on the notice,
+ * which is sent only after the clear settles so their update lands last.
  *
  * @param target - Navigator to use; defaults to the page's navigator.
  * @param openChannel - Opens the broadcast channel; defaults to `BroadcastChannel`.
+ * @returns Resolves once the notice was sent; never rejects.
  */
-export function clearAppBadgeForEndedSession(
+export async function clearAppBadgeForEndedSession(
   target: AppBadgeNavigator | undefined = readNavigator(),
   openChannel: () => AppBadgeChannel | undefined = openBroadcastChannel,
-): void {
-  syncAppBadge(0, target)
+): Promise<void> {
+  try {
+    await target?.clearAppBadge?.()
+  } catch {
+    // Badge failures never affect sign-out.
+  }
   const channel = openChannel()
   if (!channel) return
   try {

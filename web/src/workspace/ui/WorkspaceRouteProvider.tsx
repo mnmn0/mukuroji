@@ -29,7 +29,7 @@ import {
   type EnterpriseSessionErrorAction,
 } from '../../auth/enterpriseSessionErrors'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
-import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
+import { clearAuthSession, getAuthSession, hasStoredAuthSession, type AuthSession } from '../../auth/session'
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
@@ -296,9 +296,12 @@ export function WorkspaceRouteProvider() {
     if (badgeCount === undefined) return undefined
     syncAppBadge(badgeCount)
     if (badgeCount === 0) return undefined
-    // Another tab's sign-out clears the shared badge; this signed-in tab republishes its count.
-    return subscribeAppBadgeCleared(() => syncAppBadge(badgeCount))
-  }, [badgeCount])
+    // Another tab's sign-out clears the shared badge; this tab republishes its count only
+    // while its own session is still stored, since a remembered session may be shared.
+    return subscribeAppBadgeCleared(() => {
+      if (accessToken && hasStoredAuthSession(accessToken)) syncAppBadge(badgeCount)
+    })
+  }, [accessToken, badgeCount])
   const userLabel =
     user?.attributes.email ??
     user?.attributes.name ??
