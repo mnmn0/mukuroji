@@ -372,8 +372,11 @@ export const workspaceMessages = {
   'workspace.settings.description':
     'Manage this browser’s display language and text size, and review the signed-in account.',
   'workspace.settings.install.title': 'Install as an app',
-  'workspace.settings.install.description': 'Install mukuroji to open it in its own window and see the unread Inbox count on its icon.',
+  'workspace.settings.install.description': 'Install mukuroji to open it in its own window. Where the device supports app badges, its icon also shows the unread Inbox count.',
   'workspace.settings.install.action': 'Install',
+  'workspace.settings.install.pending': 'Waiting for the browser…',
+  'workspace.settings.install.accepted': 'Installing mukuroji. It opens in its own window once the browser finishes.',
+  'workspace.settings.install.dismissed': 'Installation was cancelled. You can install later from the browser menu.',
   'workspace.settings.install.installed': 'mukuroji is installed as an app.',
   'workspace.settings.displayTitle': 'Display',
   'workspace.settings.displayDescription':

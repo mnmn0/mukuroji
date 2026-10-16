@@ -35,12 +35,15 @@ describe('app install prompt', () => {
     expect(event.defaultPrevented).toBe(true)
     expect(store.getSnapshot()).toBe('available')
 
-    expect(await store.prompt()).toBe('accepted')
+    const pending = store.prompt()
+    expect(store.getSnapshot()).toBe('prompting')
+    expect(await store.prompt()).toBe('unavailable')
+    expect(await pending).toBe('accepted')
     expect(shown.count).toBe(1)
     expect(await store.prompt()).toBe('unavailable')
     target.dispatchEvent(new Event('appinstalled'))
     expect(store.getSnapshot()).toBe('installed')
-    expect(statuses).toEqual(['available', 'unavailable', 'installed'])
+    expect(statuses).toEqual(['available', 'prompting', 'unavailable', 'installed'])
   })
 
   test('reports a dismissed dialog and ignores events without the prompt API', async () => {
@@ -65,6 +68,9 @@ describe('AppInstallCard', () => {
     title: 'Install as an app',
     description: 'Install mukuroji.',
     installLabel: 'Install',
+    pendingLabel: 'Waiting for the browser',
+    acceptedMessage: 'Installing.',
+    dismissedMessage: 'Installation was cancelled.',
     installedMessage: 'Installed.',
     onInstall: () => undefined,
   }
@@ -75,6 +81,16 @@ describe('AppInstallCard', () => {
     const installed = renderToStaticMarkup(<AppInstallCard {...props} status="installed" />)
     expect(installed).toContain('Installed.')
     expect(installed).not.toContain('<button')
+  })
+
+  test('keeps an inert button while the dialog is open and announces the result', () => {
+    const prompting = renderToStaticMarkup(<AppInstallCard {...props} status="prompting" />)
+    expect(prompting).toContain('aria-disabled="true"')
+    expect(prompting).toContain('>Waiting for the browser</button>')
+    const dismissed = renderToStaticMarkup(<AppInstallCard {...props} outcome="dismissed" status="unavailable" />)
+    expect(dismissed).toContain('role="status"')
+    expect(dismissed).toContain('Installation was cancelled.')
+    expect(dismissed).not.toContain('<button')
   })
 })
 

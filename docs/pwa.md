@@ -14,9 +14,12 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   Chromium が `beforeinstallprompt` を発火した場合は設定画面に「アプリとしてインストール」を表示します。
   `main.tsx` の起動時に event を捕捉して browser の mini-infobar を抑止し、利用者が押した時に一度だけ dialog を出します。
   `appinstalled` 後と standalone 表示中は「インストール済み」を表示し、対応しない browser では何も表示しません。
+  dialog 表示中は button を `aria-disabled` のまま残してフォーカスを失わせず、閉じた後は承認 / キャンセルの結果を
+  `role="status"` で通知してフォーカスを移します。
 - badge: install 済み app の icon に受信箱の未読数を Badging API (`navigator.setAppBadge`) で表示します。
   数値だけを渡すため Workspace の内容は露出せず、未読 0、sign out、Workspace 画面の unmount で消去します。
-  対応しない browser と API の失敗は無視します。
+  対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
+  install の説明では badge を「対応した端末では」と条件付きで案内します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。

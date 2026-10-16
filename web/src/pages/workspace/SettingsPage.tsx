@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
@@ -25,6 +25,7 @@ export function SettingsPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const appInstall = useAppInstallPrompt()
+  const [installOutcome, setInstallOutcome] = useState<'accepted' | 'dismissed'>()
   const developerPlatformInitialSection =
     searchParams.get('developerSection') === 'connectors'
       ? 'connectors'
@@ -36,12 +37,20 @@ export function SettingsPage() {
         <WorkspaceSettingsView
           appInstallSection={(
             <AppInstallCard
+              acceptedMessage={t('workspace.settings.install.accepted')}
               description={t('workspace.settings.install.description')}
+              dismissedMessage={t('workspace.settings.install.dismissed')}
               installedMessage={t('workspace.settings.install.installed')}
               installLabel={t('workspace.settings.install.action')}
+              outcome={installOutcome}
+              pendingLabel={t('workspace.settings.install.pending')}
               status={appInstall.status}
               title={t('workspace.settings.install.title')}
-              onInstall={() => { void appInstall.install() }}
+              onInstall={() => {
+                void appInstall.install().then((outcome) => {
+                  if (outcome !== 'unavailable') setInstallOutcome(outcome)
+                })
+              }}
             />
           )}
           configurationSections={workspace.accessToken ? (

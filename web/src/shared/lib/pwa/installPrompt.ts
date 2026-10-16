@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
-/** Whether the app can be installed from inside the page. */
-export type AppInstallStatus = 'unavailable' | 'available' | 'installed'
+/** Whether the app can be installed from inside the page; `prompting` while the browser dialog is open. */
+export type AppInstallStatus = 'unavailable' | 'available' | 'prompting' | 'installed'
 
 /** Result of asking the browser to show its install dialog. */
 export type AppInstallOutcome = 'accepted' | 'dismissed' | 'unavailable'
@@ -56,6 +56,7 @@ export function createAppInstallPromptStore(
   const listeners = new Set<() => void>()
   let deferred: DeferredInstallPrompt | undefined
   let installed = false
+  let prompting = false
   let started = false
 
   /** Notifies every subscriber. */
@@ -89,16 +90,24 @@ export function createAppInstallPromptStore(
     },
     getSnapshot() {
       if (installed) return 'installed'
+      if (prompting) return 'prompting'
       return deferred ? 'available' : 'unavailable'
     },
     async prompt() {
       const pending = deferred
-      if (!pending) return 'unavailable'
+      if (!pending || prompting) return 'unavailable'
+      // The prompt can be used once; keep reporting `prompting` until the user decides.
       deferred = undefined
+      prompting = true
       notify()
-      await pending.prompt()
-      const choice = await pending.userChoice
-      return isRecord(choice) && choice.outcome === 'accepted' ? 'accepted' : 'dismissed'
+      try {
+        await pending.prompt()
+        const choice = await pending.userChoice
+        return isRecord(choice) && choice.outcome === 'accepted' ? 'accepted' : 'dismissed'
+      } finally {
+        prompting = false
+        notify()
+      }
     },
   }
 }
