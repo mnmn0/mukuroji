@@ -285,7 +285,7 @@ function toCollectionErrorResponse(context: Context, error: unknown) {
     return context.json({ code: 'CollectionUnavailable', message: 'Collection data is unavailable.' }, 503)
   }
   if (error.status >= 500) console.error(error)
-  const status = error.status === 400 || error.status === 404 || error.status === 409 || error.status === 503
+  const status = error.status === 400 || error.status === 403 || error.status === 404 || error.status === 409 || error.status === 503
     ? error.status
     : 502
   return context.json({ code: error.code, message: error.message }, status)

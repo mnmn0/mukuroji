@@ -81,6 +81,16 @@ test('maps a failed counter condition on creation to the Workspace limit', async
   await expect(store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
 })
 
+test('maps a failed caller authorization check to 403 instead of a conflict', async () => {
+  const store = new DynamoDbCollectionsStore('planning', clientFor(async () => {
+    throw Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
+    })
+  }), checks)
+  await expect(store.put('w', collection, 1)).rejects.toMatchObject({ status: 403, code: 'CollectionAuthorizationChanged' })
+})
+
 test('maps a failed condition to a conflict', async () => {
   const store = new DynamoDbCollectionsStore('planning', clientFor(async () => {
     throw Object.assign(new Error('cancelled'), {

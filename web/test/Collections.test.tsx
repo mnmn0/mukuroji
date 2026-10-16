@@ -65,8 +65,8 @@ describe('CollectionsWorkspace', () => {
     expect(markup).toContain('href="/teams/core-team/issues?issueId=onboarding"')
     expect(markup).toContain('In progress · refero')
     expect(markup).toContain('Only Work Items you can view are shown.')
-    expect(markup).toContain('>Pricing page</option>')
-    expect(markup).not.toContain('>Reduce onboarding friction</option>')
+    expect(markup).toContain('>Pricing page (core-team / pricing)</option>')
+    expect(markup).not.toContain('>Reduce onboarding friction (core-team / onboarding)</option>')
     expect(markup).toContain('aria-label="Remove from Collection: Reduce onboarding friction"')
   })
 
@@ -111,6 +111,7 @@ describe('Collection API', () => {
     expect(resolveCollectionErrorMessageKey(409, 'CollectionConflict')).toBe('collections.error.conflict')
     expect(resolveCollectionErrorMessageKey(409, 'CollectionItemLimitReached')).toBe('collections.error.limit')
     expect(resolveCollectionErrorMessageKey(404, 'CollectionWorkItemNotFound')).toBe('collections.error.notFound')
+    expect(resolveCollectionErrorMessageKey(403, 'CollectionAuthorizationChanged')).toBe('collections.error.denied')
     expect(resolveCollectionErrorMessageKey(undefined, undefined)).toBe('collections.error.generic')
   })
 })

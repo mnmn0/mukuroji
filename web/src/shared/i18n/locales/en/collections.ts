@@ -38,6 +38,7 @@ export const collectionsMessages = {
   'collections.error.conflict': 'The Collection changed. The latest version is loaded; try again.',
   'collections.error.notFound': 'The Work Item or Collection was not found.',
   'collections.error.limit': 'The limit has been reached, so nothing more can be added.',
+  'collections.error.denied': 'You do not have permission for this action. Your Workspace access may have changed.',
   'collections.error.generic': 'The action could not be completed. Try again later.',
   'collections.readOnly': 'You have view-only access, so Collections cannot be changed.',
 } as const

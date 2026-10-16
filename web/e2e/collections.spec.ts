@@ -100,7 +100,7 @@ test('Issue #238: places a Work Item in a Collection without copying it', async 
   expect(state.createKeys).toHaveLength(1)
   expect(state.createKeys[0]).not.toBe('')
 
-  await page.getByLabel('Add a Work Item').selectOption({ label: 'Reduce onboarding friction' })
+  await page.getByLabel('Add a Work Item').selectOption({ label: 'Reduce onboarding friction (core-team / onboarding)' })
   await page.getByRole('button', { name: 'Add', exact: true }).click()
   const items = page.getByTestId('collection-items')
   await expect(items.getByRole('link', { name: 'Reduce onboarding friction' })).toHaveAttribute('href', '/teams/core-team/issues?issueId=onboarding')

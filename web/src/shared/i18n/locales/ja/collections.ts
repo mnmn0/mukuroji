@@ -38,6 +38,7 @@ export const collectionsMessages = {
   'collections.error.conflict': 'コレクションが更新されています。最新の内容を読み込みました。もう一度操作してください。',
   'collections.error.notFound': 'Work Item またはコレクションが見つかりません。',
   'collections.error.limit': '上限に達しているため追加できません。',
+  'collections.error.denied': 'この操作の権限がありません。Workspace の権限が変わった可能性があります。',
   'collections.error.generic': '操作を完了できませんでした。時間をおいて再度お試しください。',
   'collections.readOnly': '閲覧のみの権限のため、コレクションは変更できません。',
 } as const

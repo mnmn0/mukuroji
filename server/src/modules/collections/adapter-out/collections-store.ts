@@ -131,7 +131,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         }, ...counter, ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, 1 + counter.length + this.checks.length, counter.length > 0)
+      storageFailure(error, 1 + counter.length + this.checks.length, 1 + counter.length, counter.length > 0)
     }
   }
 
@@ -155,7 +155,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         }, this.counterUpdate(workspaceId, -1), ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, this.checks.length + 2)
+      storageFailure(error, this.checks.length + 2, 2)
     }
   }
 
@@ -330,13 +330,17 @@ function conflict(): CollectionError {
  *
  * @param error - Thrown SDK error.
  * @param transactionSize - Number of items in the failed transaction, if any.
+ * @param authorizationStart - Index of the first caller authorization condition check.
  * @param countsCreation - Whether item 1 is the creation counter update.
  * @returns Never; always throws a Collection error.
  */
-function storageFailure(error: unknown, transactionSize = 0, countsCreation = false): never {
+function storageFailure(error: unknown, transactionSize = 0, authorizationStart = transactionSize, countsCreation = false): never {
   const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
   if (name === 'TransactionCanceledException' && typeof error === 'object' && error !== null && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
     const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
+    if (codes.length === transactionSize && codes.slice(authorizationStart).includes('ConditionalCheckFailed')) {
+      throw new CollectionError(403, 'CollectionAuthorizationChanged', 'Your Workspace access changed. Sign in again or ask an administrator.')
+    }
     if (countsCreation && codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' && codes[1] === 'ConditionalCheckFailed') {
       throw limitReached()
     }

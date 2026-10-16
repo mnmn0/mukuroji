@@ -248,7 +248,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
               <option value="">{t('collections.add.placeholder')}</option>
               {candidates.map((candidate) => (
                 <option key={candidateValue(candidate.teamId, candidate.issueId)} value={candidateValue(candidate.teamId, candidate.issueId)}>
-                  {candidate.title}
+                  {`${candidate.title} (${candidate.teamId} / ${candidate.issueId})`}
                 </option>
               ))}
             </select>
