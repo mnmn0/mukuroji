@@ -30,6 +30,7 @@ import {
   createApiMutationContext,
   type ProjectPrincipal,
   toProjectDataErrorResponse,
+  type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 
@@ -387,7 +388,7 @@ function auditExportIdempotencyConflict(): AuditExportError {
 async function handleAuditExportJobRequest(
   c: Context,
   run: (
-    principal: ProjectPrincipal,
+    principal: WorkspacePrincipal,
     service: NonNullable<typeof workspaceDependencies.auditExports>,
   ) => Promise<Response>,
 ) {
@@ -439,7 +440,12 @@ export function registerAuditRoutes(routeApp: Hono): void {
       }
       const request = {
         workspaceId: principal.directoryId,
-        requestedBy: { userKey: principal.userKey, displayName: principal.userKey },
+        // Like other actor snapshots, show the member's name and fall back to the key only
+        // when the member has none.
+        requestedBy: {
+          userKey: principal.userKey,
+          displayName: principal.workspaceMember.name?.trim() || principal.userKey,
+        },
         filters,
         idempotencyKey,
       }

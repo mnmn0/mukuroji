@@ -107,6 +107,12 @@ describe('listAddedContributorMembers', () => {
     ])
     expect(listAddedContributorMembers(next, existing)).toEqual(['sam@example.com'])
   })
+
+  test('treats a stored member resubmitted without its assignment ID as a new assignment', () => {
+    const next = normalize([{ memberUserId: 'alex@example.com', jobRoleId: 'qa' }])
+    expect(next[0]?.assignmentId).not.toBe('a'.repeat(32))
+    expect(listAddedContributorMembers(next, existing)).toEqual(['alex@example.com'])
+  })
 })
 
 describe('isStoredContributorAssignmentList', () => {

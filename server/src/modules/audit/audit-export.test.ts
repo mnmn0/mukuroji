@@ -769,6 +769,54 @@ describe('audit export continuation recovery', () => {
     expect((await service.getExport('ws-1', job.exportId)).eventCount).toBe(20)
   })
 
+  test('a resume whose send fails stays visible to the next read until a send succeeds', async () => {
+    const store = createMemoryStore()
+    let current = fixedNow()
+    let sendFails = false
+    const queued: string[] = []
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: {
+        async enqueue(_workspaceId, exportId) {
+          if (sendFails) throw new Error('SQS unavailable')
+          queued.push(exportId)
+        },
+      },
+      readEvents: createReader(events(30)),
+      countEvents: createCounter(events(30)),
+      now: () => current,
+      createId: () => '2'.repeat(32),
+      eventsPerPart: 10,
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    sendFails = true
+    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    queued.length = 0
+
+    // The resume claims the job, but its send fails too.
+    current = new Date(fixedNow().getTime() + 21 * 60_000)
+    await expect(service.getExport('ws-1', job.exportId)).rejects.toThrow('SQS unavailable')
+    expect((await store.readJob('ws-1', job.exportId))?.job.continuationPending).toBe(true)
+
+    // A read moments later still sees the job as stale and sends the continuation.
+    sendFails = false
+    current = new Date(current.getTime() + 1_000)
+    await service.getExport('ws-1', job.exportId)
+    expect(queued).toEqual([job.exportId])
+    expect((await store.readJob('ws-1', job.exportId))?.job.continuationPending).toBeUndefined()
+
+    // Once sent, further reads within the stale period do not send again.
+    await service.getExport('ws-1', job.exportId)
+    expect(await service.listExports('ws-1')).toHaveLength(1)
+    expect(queued).toHaveLength(1)
+
+    // The next step commits and keeps no marker.
+    expect(await service.processExport('ws-1', job.exportId, 'message-2')).toBe('advanced')
+    expect((await store.readJob('ws-1', job.exportId))?.job).toMatchObject({ eventCount: 20, lastStepMessageId: 'message-2' })
+    expect((await store.readJob('ws-1', job.exportId))?.job.continuationPending).toBeUndefined()
+  })
+
   test('does not resume a job past its processing deadline', async () => {
     const store = createMemoryStore()
     let current = fixedNow()

@@ -140,6 +140,12 @@ test('requires newly added contributors to be active non-guest members', async (
   })
   expect(kept.status).toBe(200)
   expect(updates).toHaveLength(1)
+
+  // Dropping the assignment ID makes it a new assignment, so the deactivated member is checked again.
+  const readded = await patchWorkItem({ contributorAssignments: [{ memberUserId: 'suzuki@example.com' }] })
+  expect(readded.status).toBe(409)
+  expect(await readded.json()).toMatchObject({ code: 'WorkspaceAssigneeInactive' })
+  expect(updates).toHaveLength(1)
 })
 
 test('creates a Work Item with planned contributors', async () => {
