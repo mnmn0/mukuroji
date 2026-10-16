@@ -1,13 +1,13 @@
 import { expect, test } from 'bun:test'
 import { COLLECTION_ITEM_LIMIT } from '@mukuroji/contracts'
-import { InMemoryCollectionsStore } from '../adapter-out/collections-store'
+import { InMemoryCollectionsStore } from './adapter-out/collections-store'
 import {
   addCollectionItem,
   createCollection,
   listCollectionEntries,
   removeCollectionItem,
   type ReadCollectionWorkItem,
-} from './collections'
+} from './application/collections'
 
 const context = { workspaceId: 'w', actor: 'reader', now: '2026-10-16T00:00:00.000Z' }
 
