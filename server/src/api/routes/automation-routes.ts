@@ -90,6 +90,7 @@ import {
 } from '../../modules/planning'
 import {
   createTriageInputFingerprint,
+  isTriageTeamIdentifier,
   readWebhookTriageEnvelope,
   TriageError,
 } from '../../modules/triage'
@@ -2019,6 +2020,15 @@ function automationValuesEqual(first: unknown, second: unknown): boolean {
  * @param teamId - Routing Team.
  */
 async function requireActiveTriageRoutingTeam(workspaceId: string, teamId: string): Promise<void> {
+  // Triage rejects Team IDs outside its identifier grammar, so such a Team could never
+  // receive a delivered entry; refuse the endpoint instead of accepting dead deliveries.
+  if (!isTriageTeamIdentifier(teamId)) {
+    throw new AutomationError(
+      'invalid-input',
+      'AutomationInboundWebhookTriageTeamUnsupported',
+      'Triage cannot route entries to this Team ID.',
+    )
+  }
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', true)
   if (!directory.teams.some((team) => team.id === teamId)) {
     throw new AutomationError(

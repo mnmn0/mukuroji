@@ -8,6 +8,20 @@ const ENVELOPE_KEYS = new Set(['eventId', 'title', 'body', 'requester'])
 const REQUESTER_KEYS = new Set(['name', 'email'])
 
 /**
+ * Checks that a Team ID can own Triage entries.
+ *
+ * Triage stores Team IDs in its record keys and accepts only this identifier grammar, so a
+ * Team whose ID falls outside it (for example one generated from a non-Latin name) cannot
+ * receive Triage entries.
+ *
+ * @param teamId - Candidate Team ID.
+ * @returns Whether Triage accepts the Team ID.
+ */
+export function isTriageTeamIdentifier(teamId: string): boolean {
+  return teamId.length > 0 && teamId.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(teamId)
+}
+
+/**
  * Validates the JSON envelope a Triage-purpose inbound webhook delivers.
  *
  * The envelope carries only the content of the entry. Routing, owner, SLA, and every
