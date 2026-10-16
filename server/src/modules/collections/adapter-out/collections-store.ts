@@ -89,6 +89,10 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       })).catch((error: unknown) => storageFailure(error))
       for (const row of page.Items ?? []) collections.push(readRow(workspaceId, row))
+      if (collections.length > COLLECTION_LIMIT) {
+        // The counter keeps a Workspace at the limit, so more rows mean a corrupt partition.
+        throw new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
+      }
       exclusiveStartKey = page.LastEvaluatedKey
     } while (exclusiveStartKey)
     return collections

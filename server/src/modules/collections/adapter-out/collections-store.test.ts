@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
+import { COLLECTION_LIMIT } from '@mukuroji/contracts'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import type { StoredCollection } from '../domain/collections'
 import { DynamoDbCollectionsStore } from './collections-store'
@@ -140,4 +141,17 @@ test('reads only the Workspace partition, pages through results, and rejects cor
   expect((await store.list('w')).map((stored) => stored.collectionId)).toEqual(['c1', 'c2'])
   expect(await store.get('w', 'missing')).toBeUndefined()
   await expect(store.get('w', 'c1')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
+test('fails closed when the partition holds more Collections than the Workspace limit', async () => {
+  const rows = Array.from({ length: COLLECTION_LIMIT + 1 }, (_, index) => ({
+    ...collection,
+    collectionId: `c${index}`,
+    workspaceId: 'w',
+    recordKey: `COLLECTION#c${index}`,
+    entryType: 'work-item-collection',
+    schemaVersion: 1,
+  }))
+  const store = new DynamoDbCollectionsStore('planning', clientFor(async () => ({ Items: rows })))
+  await expect(store.list('w')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
 })
