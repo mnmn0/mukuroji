@@ -41,11 +41,14 @@ export function AppInstallCard(props: AppInstallCardProps) {
   const { description, installLabel, installedMessage, onInstall, outcome, pendingLabel, status, title } = props
   const resultRef = useRef<HTMLParagraphElement>(null)
   const showsButton = status === 'available' || status === 'prompting'
-  const result = status === 'installed' || showsButton || outcome === undefined
+  // After an accepted dialog the store turns `installed`; keep announcing through that transition.
+  const result = showsButton || outcome === undefined
     ? undefined
-    : outcome === 'accepted' ? props.acceptedMessage : outcome === 'failed' ? props.failedMessage : props.dismissedMessage
-  // Keyed by the outcome, not the translated text, so a language change does not steal focus.
-  const resultKey = result === undefined ? undefined : outcome
+    : status === 'installed'
+      ? installedMessage
+      : outcome === 'accepted' ? props.acceptedMessage : outcome === 'failed' ? props.failedMessage : props.dismissedMessage
+  // Keyed by the outcome and status, not the translated text, so a language change does not steal focus.
+  const resultKey = result === undefined ? undefined : `${outcome}:${status}`
 
   useEffect(() => {
     // The install button disappears once the dialog closes, so keep focus on the result.

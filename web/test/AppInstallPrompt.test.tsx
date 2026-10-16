@@ -107,6 +107,10 @@ describe('AppInstallCard', () => {
     expect(dismissed).not.toContain('<button')
     expect(renderToStaticMarkup(<AppInstallCard {...props} outcome="failed" status="unavailable" />))
       .toContain('The browser could not open its install dialog.')
+    // An accepted dialog followed by `appinstalled` keeps an announced, focusable result.
+    const installedAfterAccept = renderToStaticMarkup(<AppInstallCard {...props} outcome="accepted" status="installed" />)
+    expect(installedAfterAccept).toContain('role="status"')
+    expect(installedAfterAccept).toContain('Installed.')
   })
 })
 
