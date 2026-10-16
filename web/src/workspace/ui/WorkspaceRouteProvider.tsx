@@ -35,9 +35,8 @@ import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
 import {
   clearAppBadgeAndNotifyTabs,
+  keepAppBadgePublished,
   resolveAppBadgeAction,
-  subscribeAppBadgeCleared,
-  syncAppBadge,
 } from '../../shared/lib/pwa/appBadge'
 import {
   aiAssistanceUiEnabled,
@@ -306,26 +305,14 @@ export function WorkspaceRouteProvider() {
     if (badgeCleared) void clearAppBadgeAndNotifyTabs()
   }, [badgeCleared])
   useEffect(() => {
-    if (badgeCount === undefined) return undefined
-    syncAppBadge(badgeCount)
-    // Another tab cleared the shared badge. This tab republishes only while its own session
-    // is still stored, and with a fresh count, since a remembered session may be shared.
-    let active = true
-    const unsubscribe = subscribeAppBadgeCleared(() => {
-      if (!accessToken || !hasStoredAuthSession(accessToken)) return
-      refreshInboxCount().then(
-        (fresh) => {
-          // The session may have ended while the count was loading.
-          if (!active || !hasStoredAuthSession(accessToken) || typeof fresh !== 'number') return
-          syncAppBadge(fresh)
-        },
-        () => undefined,
-      )
+    if (badgeCount === undefined || !accessToken) return undefined
+    // Publishes only while this tab's session is still stored, since a remembered session
+    // may be shared and signed out in another tab, and republishes after other tabs clear.
+    return keepAppBadgePublished({
+      count: badgeCount,
+      isSessionStored: () => hasStoredAuthSession(accessToken),
+      refreshCount: () => refreshInboxCount(),
     })
-    return () => {
-      active = false
-      unsubscribe()
-    }
   }, [accessToken, badgeCount, refreshInboxCount])
   const userLabel =
     user?.attributes.email ??

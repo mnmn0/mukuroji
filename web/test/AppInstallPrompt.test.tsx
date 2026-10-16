@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { clearAuthSession, hasStoredAuthSession } from '../src/auth/session'
 import {
   clearAppBadgeAndNotifyTabs,
+  keepAppBadgePublished,
   resolveAppBadgeAction,
   resolveAppBadgeCount,
   subscribeAppBadgeCleared,
@@ -256,6 +257,53 @@ describe('app badge across tabs', () => {
     await pending
     expect(republished).toEqual(['new session'])
     unsubscribe()
+  })
+
+  test('never publishes a polled count after the shared session was signed out elsewhere', () => {
+    const shown: number[] = []
+    const stop = keepAppBadgePublished({
+      count: 4,
+      isSessionStored: () => false,
+      refreshCount: async () => 4,
+      sync: (count) => shown.push(count),
+      subscribeCleared: () => () => undefined,
+    })
+    expect(shown).toEqual([])
+    stop()
+  })
+
+  test('republishes after a clear notice, reapplying the known count when the reload fails', async () => {
+    const shown: number[] = []
+    let notifyCleared: () => void = () => undefined
+    let refresh: () => Promise<unknown> = async () => 6
+    const stop = keepAppBadgePublished({
+      count: 4,
+      isSessionStored: () => true,
+      refreshCount: () => refresh(),
+      sync: (count) => shown.push(count),
+      subscribeCleared: (listener) => {
+        notifyCleared = listener
+        return () => undefined
+      },
+    })
+    expect(shown).toEqual([4])
+    notifyCleared()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(shown).toEqual([4, 6])
+    // A failed reload must not leave the badge cleared until the count changes.
+    refresh = async () => {
+      throw new Error('offline')
+    }
+    notifyCleared()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(shown).toEqual([4, 6, 4])
+    stop()
+    notifyCleared()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(shown).toEqual([4, 6, 4])
   })
 
   test('works without BroadcastChannel', async () => {

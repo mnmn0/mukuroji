@@ -111,6 +111,57 @@ export function subscribeAppBadgeCleared(
   }
 }
 
+/** Inputs for keeping one tab's positive count on the shared app badge. */
+export type KeepAppBadgePublishedOptions = {
+  /** Positive unread count this tab last loaded. */
+  count: number
+  /** Whether this tab's session is still stored; a remembered session may be shared by tabs. */
+  isSessionStored: () => boolean
+  /** Reloads the unread count; resolves with the fresh count when it is known. */
+  refreshCount: () => Promise<unknown>
+  /** Shows a count on the badge; defaults to `syncAppBadge`. */
+  sync?: (count: number) => void
+  /** Subscribes to clear notices; defaults to `subscribeAppBadgeCleared`. */
+  subscribeCleared?: (listener: () => void) => () => void
+}
+
+/**
+ * Shows this tab's count on the shared app badge and republishes it after another clear.
+ *
+ * Every publication first checks that the session is still stored, so a tab whose shared
+ * session was signed out elsewhere never restores the badge. After a clear notice the tab
+ * reloads its count; when that reload fails it reapplies the count it already knows, since
+ * a same-valued later load would not publish again.
+ *
+ * @param options - Count, session check, and refresh.
+ * @returns Stops publishing; pending reloads are ignored afterwards.
+ */
+export function keepAppBadgePublished(options: KeepAppBadgePublishedOptions): () => void {
+  const sync = options.sync ?? ((count: number) => syncAppBadge(count))
+  const subscribeCleared = options.subscribeCleared ?? ((listener: () => void) => subscribeAppBadgeCleared(listener))
+  let active = true
+  /**
+   * Shows a count while this tab is still active and signed in.
+   *
+   * @param count - Count to show.
+   */
+  const publish = (count: number) => {
+    if (active && options.isSessionStored()) sync(count)
+  }
+  publish(options.count)
+  const unsubscribe = subscribeCleared(() => {
+    if (!options.isSessionStored()) return
+    options.refreshCount().then(
+      (fresh) => publish(typeof fresh === 'number' ? fresh : options.count),
+      () => publish(options.count),
+    )
+  })
+  return () => {
+    active = false
+    unsubscribe()
+  }
+}
+
 /**
  * Chooses what the app badge should show for the current session.
  *
