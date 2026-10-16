@@ -5365,6 +5365,24 @@ test.describe('authenticated task page', () => {
     await expect(row.locator('input')).toHaveValue('2')
   })
 
+  test('Issue #239: 取り消した Contributor 下書きの保存エラーを再表示しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: { ...defaultWorkItemConfiguration, jobRoles: [{ id: 'designer', name: 'デザイナー' }] },
+    })
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const contributors = detailPane.getByTestId('work-item-contributors')
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await contributors.getByRole('button', { name: 'Contributor を追加' }).click()
+    // An empty row cannot be saved, so the form reports it next to the contributors.
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+    await expect(contributors).toContainText('メンバーかジョブロールのどちらかを選んでください。')
+    await contributors.getByRole('button', { name: 'キャンセル' }).click()
+    // A new draft starts without the abandoned draft's error.
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await expect(contributors).not.toContainText('メンバーかジョブロールのどちらかを選んでください。')
+  })
+
   test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const detailPane = page.getByTestId('task-detail-pane')

@@ -539,12 +539,20 @@ export function resolveWorkItemPersonOptions(
  * belong to the Work Item's Project.
  *
  * @param workspaceMembers - Workspace members.
- * @returns Contributor options keyed by the member's user ID.
+ * @returns Contributor options keyed by the member's Workspace member key.
  */
 export function resolveWorkItemContributorOptions(
   workspaceMembers: readonly WorkspaceMember[],
 ) {
-  return resolveWorkItemPersonOptions(workspaceMembers.filter((member) => member.role !== 'guest'))
+  // The server resolves contributors by the immutable Workspace member key, which can differ
+  // from the member's current email for directory-managed members; the email stays for display.
+  return workspaceMembers
+    .filter((member) => member.status === 'active' && member.role !== 'guest')
+    .map((member) => ({
+      email: member.email,
+      id: member.memberKey,
+      name: member.name ?? member.email,
+    }))
 }
 
 const customFieldValidationMessageKeys: Record<CustomFieldValidationCode, MessageKey> = {
