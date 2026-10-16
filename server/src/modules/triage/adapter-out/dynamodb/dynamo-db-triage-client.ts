@@ -1517,6 +1517,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param endpoint - Verified inbound webhook endpoint.
    * @param input - Validated webhook envelope.
    * @param idempotency - Replay protection bound to the envelope.
+   * @param validateNewEntry - Checks run only before admitting a new entry.
    * @returns The created or replayed entry receipt.
    */
   async createWebhookEntry(
@@ -1525,8 +1526,10 @@ export class DynamoDbTriageClient implements TriageClient {
     endpoint: TriageWebhookEndpointReference,
     input: CreateWebhookTriageEntryInput,
     idempotency: TriageIdempotency,
+    validateNewEntry?: () => Promise<void>,
   ): Promise<TriageMutationReceipt> {
     return this.admitSourceEntry({
+      ...(validateNewEntry ? { validateNewEntry } : {}),
       workspaceId,
       teamId,
       sourceKind: 'webhook',
@@ -1553,10 +1556,13 @@ export class DynamoDbTriageClient implements TriageClient {
     operation: string
     authorizationConditionChecks?: TriageAuthorizationConditionChecks
     validateAdmission?: (admission: Awaited<ReturnType<DynamoDbTriageClient['prepareEntryAdmission']>>) => void
+    validateNewEntry?: () => Promise<void>
   }): Promise<TriageMutationReceipt> {
     const { workspaceId, teamId, sourceKind, sourceId, idempotency } = request
     const existing = await this.readSourceClaim(workspaceId, sourceKind, sourceId)
     if (existing) return this.replaySourceClaim(existing, idempotency.fingerprint, teamId)
+    // Checks of current state apply only to fresh admissions; a committed source replays as is.
+    await request.validateNewEntry?.()
     const now = this.now().toISOString()
     const baseEntry = request.createEntry(this.id(), now)
     for (let attempt = 0; attempt < 3; attempt += 1) {

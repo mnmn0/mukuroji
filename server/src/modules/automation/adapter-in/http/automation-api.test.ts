@@ -2911,7 +2911,10 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
         updateConfiguration: unexpected,
         createManualHandoff: unexpected,
         listWorkItemSources: unexpected,
-        async createWebhookEntry(_workspaceId, teamId, _endpoint, input) {
+        async createWebhookEntry(_workspaceId, teamId, _endpoint, input, _idempotency, validateNewEntry) {
+          // Mirrors the store: a committed source replays before any current-state check.
+          if (created.some((item) => item.input.eventId === input.eventId)) return { entry, replayed: true }
+          await validateNewEntry?.()
           created.push({ teamId, input })
           return { entry, replayed: false }
         },
@@ -2961,6 +2964,22 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
     }))
     expect(hijack.status).toBe(400)
     expect(await hijack.json()).toMatchObject({ code: 'InvalidTriageWebhookEnvelope' })
+    expect(created).toHaveLength(1)
+
+    // After the routing Team disappears, a redelivery of the admitted event still returns
+    // its entry, while a new event fails closed.
+    endpoint.triageRouting = { teamId: 'removed-team' }
+    const replay = await deliver(JSON.stringify({
+      eventId: 'evt-1',
+      title: 'Checkout errors',
+      body: 'Customers see 500.',
+      requester: { name: 'Status page' },
+    }))
+    expect(replay.status).toBe(202)
+    expect(await replay.json()).toMatchObject({ triageEntryId: 'triage-webhook-1' })
+    const fresh = await deliver(JSON.stringify({ eventId: 'evt-3', title: 'New', body: 'x', requester: { name: 'Status page' } }))
+    expect(fresh.status).toBe(400)
+    expect(await fresh.json()).toMatchObject({ code: 'AutomationInboundWebhookTriageTeamNotFound' })
     expect(created).toHaveLength(1)
   } finally {
     if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
