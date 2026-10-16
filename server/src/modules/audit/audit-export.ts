@@ -1016,6 +1016,12 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
       sha256: requireString(part.sha256, 'part.sha256'),
     }
   })
+  // Only a running job continues from a cursor, and it always has one; any other combination
+  // would restart the query or resume a finished job, so it is corrupt.
+  const nextCursor = record.nextCursor === undefined ? undefined : requireString(record.nextCursor, 'nextCursor')
+  if ((status === 'running') !== (nextCursor !== undefined && nextCursor !== '')) {
+    throw new TypeError('Audit export job status does not match its cursor.')
+  }
   // The event limit is enforced from the job total, so it must account for every part.
   if (parsedParts.reduce((total, part) => total + part.eventCount, 0) !== eventCount) {
     throw new TypeError('Audit export job event count does not match its parts.')
@@ -1037,7 +1043,7 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     expiresAt,
     eventCount,
     parts: parsedParts,
-    ...(record.nextCursor === undefined ? {} : { nextCursor: requireString(record.nextCursor, 'nextCursor') }),
+    ...(nextCursor === undefined ? {} : { nextCursor }),
     ...(failure
       ? { failure: { code: requireString(failure.code, 'failure.code'), message: requireString(failure.message, 'failure.message') } }
       : {}),

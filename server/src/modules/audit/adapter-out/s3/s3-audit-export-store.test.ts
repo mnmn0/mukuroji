@@ -84,7 +84,7 @@ describe('S3AuditExportStore', () => {
     const stored = await store.readJob('ws-1', first.exportId)
     expect(stored?.job).toEqual(first)
 
-    const running: AuditExportJob = { ...first, status: 'running' }
+    const running: AuditExportJob = { ...first, status: 'running', nextCursor: 'cursor-1' }
     expect(await store.replaceJob(running, stored?.version ?? '')).toBe(true)
     expect(await store.replaceJob({ ...first, status: 'failed' }, stored?.version ?? '')).toBe(false)
     expect((await store.readJob('ws-1', first.exportId))?.job.status).toBe('running')
@@ -136,6 +136,15 @@ describe('S3AuditExportStore', () => {
     const widened = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters: {} }
     objects.set(jobPath, { body: JSON.stringify(widened), etag: '"v"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('do not match their fingerprint')
+    // Only a running job has a cursor, and a running job always has one.
+    for (const mismatched of [
+      { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'running' },
+      { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'running', nextCursor: '' },
+      { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'completed', nextCursor: 'cursor-1' },
+    ]) {
+      objects.set(jobPath, { body: JSON.stringify(mismatched), etag: '"q"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow('status does not match its cursor')
+    }
     // The stored identity must match the key it was read from.
     objects.set(jobPath, { body: JSON.stringify(job('c'.repeat(32), '2026-07-18T00:00:00.000Z')), etag: '"u"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('does not match its storage key')
