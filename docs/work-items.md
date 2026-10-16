@@ -118,6 +118,9 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - archive 済みのジョブロールは既存の Contributor に残せるが、新しく設定できない。
 - Contributor の変更は `work-item.updated` audit event の `contributorAssignments` field change として記録する。
 - Public API は `contributorAssignments` を受け付けず、返さない。
+- 職種は archive で廃止する。contributor が参照している職種を設定から削除・改名する保存は `409 WorkItemConfigurationInUse` で拒否する。
+- 保存済み contributor の member ID は trim・小文字化済み・256 文字以内・制御文字なし、職種 ID は設定 ID の文法に従う必要があり、外れた row は読み取り時に失敗する。
+- contributor を変更する更新で `expectedRevision` が古い場合は、assignment ID の検証より先に `409 WorkItemRevisionConflict` を返す。
 
 まだ実装していない範囲は次のとおり。
 
