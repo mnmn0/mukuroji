@@ -15,12 +15,12 @@ import { CollectionError, toPublicCollection, type CollectionDeletion, type Stor
  */
 export interface CollectionsStore {
   /**
-   * Lists every Collection in a Workspace.
+   * Lists the metadata of every Collection in a Workspace, without reading their references.
    *
    * @param workspaceId - Server-resolved Workspace.
-   * @returns Stored Collections in any order.
+   * @returns Collection metadata in any order.
    */
-  list(workspaceId: string): Promise<StoredCollection[]>
+  listSummaries(workspaceId: string): Promise<WorkItemCollection[]>
   /**
    * Reads one Collection.
    *
@@ -44,13 +44,16 @@ export interface CollectionsStore {
   /**
    * Writes a Collection when its stored revision still matches.
    *
-   * Creating (`expectedRevision` 0) also fails when the Collection was deleted.
+   * Creating (`expectedRevision` 0) also fails when the Collection was deleted. With a
+   * `workItemFence`, the write also fails with `409 CollectionWorkItemChanged` unless the
+   * canonical Work Item still exists at the observed revision.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param collection - Complete next state.
    * @param expectedRevision - Stored revision, or 0 to create.
+   * @param workItemFence - Work Item whose readability authorized the change.
    */
-  put(workspaceId: string, collection: StoredCollection, expectedRevision: number): Promise<void>
+  put(workspaceId: string, collection: StoredCollection, expectedRevision: number, workItemFence?: CollectionWorkItemFence): Promise<void>
   /**
    * Deletes a Collection when its stored revision still matches and records the deletion.
    *
@@ -75,13 +78,31 @@ export type CollectionMutationContext = {
 /** Readable canonical Work Item fields shown in a Collection. */
 export type ReadableCollectionWorkItem = Omit<WorkItemCollectionEntry, 'addedAt'>
 
+/** Readable Work Item together with the canonical revision its readability was checked at. */
+export type ObservedCollectionWorkItem = {
+  /** Fields shown in a Collection. */
+  entry: ReadableCollectionWorkItem
+  /** Canonical Work Item revision read during the check. */
+  revision: number
+}
+
+/** Canonical Work Item state that a reference change requires to be unchanged when it commits. */
+export type CollectionWorkItemFence = {
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Work Item identifier. */
+  issueId: string
+  /** Canonical revision observed by the readability check. */
+  revision: number
+}
+
 /**
  * Reads a Work Item for the caller.
  *
  * Returns undefined when the Work Item does not exist or the caller cannot read it,
  * and throws for unexpected failures.
  */
-export type ReadCollectionWorkItem = (teamId: string, issueId: string) => Promise<ReadableCollectionWorkItem | undefined>
+export type ReadCollectionWorkItem = (teamId: string, issueId: string) => Promise<ObservedCollectionWorkItem | undefined>
 
 /** Number of Work Item reads issued at once while listing a Collection. */
 const ITEM_READ_CONCURRENCY = 10
@@ -94,7 +115,7 @@ const ITEM_READ_CONCURRENCY = 10
  * @returns Collection metadata without references.
  */
 export async function listCollections(store: CollectionsStore, workspaceId: string): Promise<WorkItemCollection[]> {
-  const collections = await store.list(workspaceId)
+  const collections = await store.listSummaries(workspaceId)
   return collections
     .map(toPublicCollection)
     .sort((left, right) => left.name.localeCompare(right.name) || left.collectionId.localeCompare(right.collectionId))
@@ -231,7 +252,8 @@ const COLLECTION_ROW_BYTE_LIMIT = 350_000
  * Adds a Work Item reference to a Collection.
  *
  * The caller must already be able to read the Work Item; that check is done by
- * `readWorkItem`. Adding an existing reference is a no-op.
+ * `readWorkItem`, and the write requires the Work Item to still be at the revision that
+ * check read. Adding an existing reference is a no-op.
  *
  * @param store - Collection persistence.
  * @param context - Caller and clock.
@@ -249,10 +271,7 @@ export async function addCollectionItem(
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
 ): Promise<WorkItemCollection> {
-  if (!await readWorkItem(teamId, issueId)) {
-    throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
-  }
-  return await applyItemChange(store, context.workspaceId, collectionId, (current) => {
+  return await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
     if (current.items.some((item) => item.teamId === teamId && item.issueId === issueId)) return undefined
     if (current.items.length >= COLLECTION_ITEM_LIMIT) {
       throw new CollectionError(409, 'CollectionItemLimitReached', `A Collection can hold up to ${COLLECTION_ITEM_LIMIT} Work Items.`)
@@ -279,7 +298,8 @@ export async function addCollectionItem(
  * Removes a Work Item reference from a Collection; the Work Item itself is not changed.
  *
  * The caller must be able to read the Work Item, so a hidden reference can be neither
- * removed nor probed. Removing a reference that is not present is a no-op.
+ * removed nor probed; the write requires the Work Item to still be at the revision that
+ * check read. Removing a reference that is not present is a no-op.
  *
  * @param store - Collection persistence.
  * @param context - Caller and clock.
@@ -297,10 +317,7 @@ export async function removeCollectionItem(
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
 ): Promise<WorkItemCollection> {
-  if (!await readWorkItem(teamId, issueId)) {
-    throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
-  }
-  return await applyItemChange(store, context.workspaceId, collectionId, (current) => {
+  return await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
     const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
     if (items.length === current.items.length) return undefined
     return { ...current, items, updatedAt: laterInstant(context.now, current.updatedAt), revision: current.revision + 1 }
@@ -313,13 +330,19 @@ const ITEM_CHANGE_ATTEMPTS = 3
 /**
  * Applies a set-like item change, rereading and reapplying it after a concurrent write.
  *
- * Adding or removing one reference does not depend on the rest of the Collection, so a
- * revision conflict is retried against the current state; a concurrent identical change
+ * Each attempt first checks that the caller can read the Work Item and then writes with a
+ * fence on the Work Item revision that check observed, so a Work Item deleted or moved out
+ * of the caller's reach in between never has its reference changed. Adding or removing one
+ * reference does not depend on the rest of the Collection, so a revision conflict or a
+ * changed Work Item is retried against the current state; a concurrent identical change
  * then becomes a no-op instead of a reported failure.
  *
  * @param store - Collection persistence.
  * @param workspaceId - Server-resolved Workspace.
  * @param collectionId - Collection identifier.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item identifier.
+ * @param readWorkItem - Caller-scoped Work Item reader.
  * @param change - Returns the next state, or undefined when the change is already applied.
  * @returns The Collection after the change.
  */
@@ -327,17 +350,24 @@ async function applyItemChange(
   store: CollectionsStore,
   workspaceId: string,
   collectionId: string,
+  teamId: string,
+  issueId: string,
+  readWorkItem: ReadCollectionWorkItem,
   change: (current: StoredCollection) => StoredCollection | undefined,
 ): Promise<WorkItemCollection> {
   for (let attempt = 1; ; attempt += 1) {
+    const observed = await readWorkItem(teamId, issueId)
+    if (!observed) throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
     const current = await requireCollection(store, workspaceId, collectionId)
     const next = change(current)
     if (!next) return toPublicCollection(current)
     try {
-      await store.put(workspaceId, next, current.revision)
+      await store.put(workspaceId, next, current.revision, { teamId, issueId, revision: observed.revision })
       return toPublicCollection(next)
     } catch (error) {
-      if (!(error instanceof CollectionError && error.code === 'CollectionConflict') || attempt >= ITEM_CHANGE_ATTEMPTS) throw error
+      const retryable = error instanceof CollectionError &&
+        (error.code === 'CollectionConflict' || error.code === 'CollectionWorkItemChanged')
+      if (!retryable || attempt >= ITEM_CHANGE_ATTEMPTS) throw error
     }
   }
 }
@@ -367,7 +397,7 @@ export async function listCollectionEntries(
     const results = await Promise.all(batch.map((item) => readWorkItem(item.teamId, item.issueId)))
     results.forEach((workItem, offset) => {
       const item = batch[offset]
-      if (workItem && item) entries[start + offset] = { ...workItem, addedAt: item.addedAt }
+      if (workItem && item) entries[start + offset] = { ...workItem.entry, addedAt: item.addedAt }
     })
   }
   return {

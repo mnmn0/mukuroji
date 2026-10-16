@@ -564,6 +564,14 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     collections: new DynamoDbCollectionsStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
+      [],
+      (workspaceId, fence) => createWorkItemRevisionConditionCheck(
+        loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ?? 'mukuroji-team-issues-local',
+        workspaceId,
+        fence.teamId,
+        fence.issueId,
+        fence.revision,
+      ),
     ),
     updateFeedDigest: new DynamoDbUpdateFeedDigestStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
