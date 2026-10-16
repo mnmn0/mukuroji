@@ -10,7 +10,7 @@ import {
   syncAppBadge,
   type AppBadgeChannel,
 } from '../src/shared/lib/pwa/appBadge'
-import { createAppInstallPromptStore } from '../src/shared/lib/pwa/installPrompt'
+import { createAppInstallPromptStore, resolveAppInstallAnnouncement } from '../src/shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../src/shared/ui/AppInstallCard'
 
 /**
@@ -120,6 +120,17 @@ describe('AppInstallCard', () => {
     const installedAfterAccept = renderToStaticMarkup(<AppInstallCard {...props} outcome="accepted" status="installed" />)
     expect(installedAfterAccept).toContain('role="status"')
     expect(installedAfterAccept).toContain('Installed.')
+  })
+
+  test('announces an install from the browser menu but not an app that was already installed', () => {
+    // Installed from the browser menu while the card was shown: announce without a card outcome.
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'available', status: 'installed' })).toBe('installed')
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'unavailable', status: 'installed' })).toBe('installed')
+    // Already running installed when the card mounted: no announcement and no focus move.
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'installed', status: 'installed' })).toBeUndefined()
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'available', status: 'available' })).toBeUndefined()
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'available', status: 'installed', outcome: 'accepted' })).toBe('installed')
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'available', status: 'unavailable', outcome: 'dismissed' })).toBe('dismissed')
   })
 })
 

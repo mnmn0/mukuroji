@@ -159,3 +159,31 @@ function isDeferredInstallPrompt(event: Event): event is DeferredInstallPrompt {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+/** Result the install card announces; `installed` also covers installs from the browser menu. */
+export type AppInstallAnnouncement = 'installed' | 'accepted' | 'dismissed' | 'failed'
+
+/**
+ * Chooses which install result the card announces as a live status.
+ *
+ * A dialog outcome from the card is always announced. An installation started elsewhere,
+ * such as from the browser menu, is announced when the status turns `installed` while the
+ * card is shown; an app that was already installed when the card mounted is not announced,
+ * so opening settings in a standalone window does not move focus.
+ *
+ * @param input - Status when the card mounted, the current status, and the card's latest outcome.
+ * @returns The announcement, or undefined when nothing new happened.
+ */
+export function resolveAppInstallAnnouncement(input: {
+  /** Status when the card mounted. */
+  initialStatus: AppInstallStatus
+  /** Current status. */
+  status: AppInstallStatus
+  /** Result of the latest dialog shown from the card, if any. */
+  outcome?: Exclude<AppInstallOutcome, 'unavailable'>
+}): AppInstallAnnouncement | undefined {
+  const { initialStatus, outcome, status } = input
+  if (status === 'available' || status === 'prompting') return undefined
+  if (status === 'installed') return outcome !== undefined || initialStatus !== 'installed' ? 'installed' : undefined
+  return outcome
+}

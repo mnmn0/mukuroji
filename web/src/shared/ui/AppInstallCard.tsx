@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
-import type { AppInstallOutcome, AppInstallStatus } from '../lib/pwa/installPrompt'
+import { useEffect, useRef, useState } from 'react'
+import { resolveAppInstallAnnouncement, type AppInstallOutcome, type AppInstallStatus } from '../lib/pwa/installPrompt'
 
 /** Props of the app install card. */
 export type AppInstallCardProps = {
@@ -41,12 +41,15 @@ export function AppInstallCard(props: AppInstallCardProps) {
   const { description, installLabel, installedMessage, onInstall, outcome, pendingLabel, status, title } = props
   const resultRef = useRef<HTMLParagraphElement>(null)
   const showsButton = status === 'available' || status === 'prompting'
-  // After an accepted dialog the store turns `installed`; keep announcing through that transition.
-  const result = showsButton || outcome === undefined
+  // Remember the status at mount, so an install from the browser menu is announced while an
+  // app that already runs installed is not.
+  const [initialStatus] = useState(status)
+  const announcement = resolveAppInstallAnnouncement({ initialStatus, status, ...(outcome ? { outcome } : {}) })
+  const result = announcement === undefined
     ? undefined
-    : status === 'installed'
+    : announcement === 'installed'
       ? installedMessage
-      : outcome === 'accepted' ? props.acceptedMessage : outcome === 'failed' ? props.failedMessage : props.dismissedMessage
+      : announcement === 'accepted' ? props.acceptedMessage : announcement === 'failed' ? props.failedMessage : props.dismissedMessage
   // Keyed by the outcome and status, not the translated text, so a language change does not steal focus.
   const resultKey = result === undefined ? undefined : `${outcome}:${status}`
 
