@@ -1407,9 +1407,17 @@ export type DeletePublicWorkItemRequest = {
 }
 
 /**
+ * Public API が返す Work Item です。
+ *
+ * Contributors are managed only through the Workspace API, so public responses never
+ * contain `contributorAssignments`.
+ */
+export type PublicWorkItem = Omit<CanonicalWorkItem, 'contributorAssignments'>
+
+/**
  * Public Work Item list endpoint の cursor page です。
  */
-export type PublicWorkItemPage = CursorPage<CanonicalWorkItem>
+export type PublicWorkItemPage = CursorPage<PublicWorkItem>
 
 /**
  * Developer settings UI で actor に許可する管理操作です。
