@@ -415,11 +415,11 @@ export function BulkOperationToolbar({
   return (
     <section className="workbench-toolbar mt-3 px-3 py-3" data-testid="bulk-operation-toolbar">
       <div className="flex flex-wrap items-center gap-2">
-        <label className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]">
+        <label className="inline-flex min-h-9 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-surface px-3 text-sm font-semibold text-[var(--workbench-text)]">
           <input
             aria-label={t('bulk.selectVisible')}
             checked={allVisibleSelected}
-            className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
+            className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary-text)]"
             disabled={readOnly || visibleItems.length === 0 || busyState !== undefined}
             onChange={(event) => onVisibleSelectionChange(
               visibleItems.map((item) => item.selectionKey),
@@ -438,8 +438,8 @@ export function BulkOperationToolbar({
             aria-pressed={action === candidate}
             className={`min-h-9 max-[720px]:min-h-11 rounded-md border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${selectedItems.length === 0 ? 'max-[760px]:hidden' : ''} ${
               action === candidate
-                ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] text-[var(--workbench-primary)]'
-                : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-text)] hover:border-[var(--workbench-primary)]'
+                ? 'border-[var(--workbench-primary)] bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
+                : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-text)] hover:border-[var(--workbench-primary)]'
             }`}
             disabled={
               !mutationsAvailable || selectedItems.length === 0 || busyState !== undefined
@@ -466,7 +466,7 @@ export function BulkOperationToolbar({
               <label className="grid min-w-48 gap-1 text-xs font-semibold text-[var(--workbench-muted)]" htmlFor={fieldId}>
                 {t('bulk.edit.field')}
                 <select
-                  className="workbench-input h-9 bg-white px-3 text-sm"
+                  className="workbench-input h-9 bg-surface px-3 text-sm"
                   id={fieldId}
                   onChange={(event) => {
                     setEditField(event.target.value as BulkEditField)
@@ -484,7 +484,7 @@ export function BulkOperationToolbar({
                 {t('bulk.edit.value')}
                 {editField === 'priority' ? (
                   <select
-                    className="workbench-input h-9 bg-white px-3 text-sm"
+                    className="workbench-input h-9 bg-surface px-3 text-sm"
                     id={valueId}
                     onChange={(event) => {
                       setEditValue(event.target.value)
@@ -533,7 +533,7 @@ export function BulkOperationToolbar({
             <label className="grid min-w-64 flex-1 gap-1 text-xs font-semibold text-[var(--workbench-muted)]" htmlFor={targetProjectId}>
               {t('bulk.move.targetProject')}
               <select
-                className="workbench-input h-9 bg-white px-3 text-sm"
+                className="workbench-input h-9 bg-surface px-3 text-sm"
                 id={targetProjectId}
                 onChange={(event) => {
                   setMoveProjectId(event.target.value)
@@ -549,7 +549,7 @@ export function BulkOperationToolbar({
             </label>
           ) : null}
           {action === 'archive' ? (
-            <p className="min-w-64 flex-1 text-sm font-semibold text-amber-800">
+            <p className="min-w-64 flex-1 text-sm font-semibold text-fg-amber-800">
               {t('bulk.archive.description')}
             </p>
           ) : null}

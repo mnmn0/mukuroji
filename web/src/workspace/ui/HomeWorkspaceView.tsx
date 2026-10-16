@@ -74,11 +74,11 @@ export function HomeWorkspaceView({
   return (
     <div className="mx-auto grid w-full max-w-[1440px] gap-7">
       <div className="grid items-start gap-6 min-[1180px]:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
-        <section className="min-w-0 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+        <section className="min-w-0 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-5 py-5">
             <div className="min-w-0">
               <h2 className="flex items-center gap-2.5 text-base font-semibold text-[var(--workbench-text)]">
-                <CheckCircleIcon className="h-5 w-5 shrink-0 fill-none stroke-current stroke-2 text-[var(--workbench-primary)]" />
+                <CheckCircleIcon className="h-5 w-5 shrink-0 fill-none stroke-current stroke-2 text-[var(--workbench-primary-text)]" />
                 {t('workspace.home.focusTitle')}
               </h2>
               <p className="mt-1.5 text-xs leading-5 text-[var(--workbench-muted)]">
@@ -115,7 +115,7 @@ export function HomeWorkspaceView({
               <div className="grid gap-3 px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]">
                 <p>{t('workspace.home.emptyNext')}</p>
                 <Link
-                  className="inline-flex min-h-[44px] w-fit items-center rounded-lg border border-[var(--workbench-border)] bg-white px-3 font-bold text-[var(--workbench-primary)] no-underline hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]"
+                  className="inline-flex min-h-[44px] w-fit items-center rounded-lg border border-[var(--workbench-border)] bg-surface px-3 font-bold text-[var(--workbench-primary-text)] no-underline hover:border-tone-99d7cf hover:bg-[var(--workbench-surface-muted)]"
                   data-testid="workspace-home-my-tasks"
                   to={workspaceNavPaths['my-tasks']}
                 >
@@ -126,7 +126,7 @@ export function HomeWorkspaceView({
           </div>
         </section>
 
-        <section className="min-w-0 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+        <section className="min-w-0 overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-5 py-5">
             <div className="min-w-0">
               <h2 className="flex items-center gap-2.5 text-base font-semibold text-[var(--workbench-text)]">
@@ -138,7 +138,7 @@ export function HomeWorkspaceView({
               </p>
             </div>
             <Link
-              className="inline-flex min-h-[44px] items-center gap-1 text-xs font-semibold text-[var(--workbench-primary)] no-underline hover:underline hover:underline-offset-4"
+              className="inline-flex min-h-[44px] items-center gap-1 text-xs font-semibold text-[var(--workbench-primary-text)] no-underline hover:underline hover:underline-offset-4"
               data-testid="workspace-home-focus-waiting"
               to={`${workspaceNavPaths.focus}?section=waiting`}
             >
@@ -148,7 +148,7 @@ export function HomeWorkspaceView({
           <div className="divide-y divide-[var(--workbench-border)]">
             {attentionTasks.map((item) => (
               <button
-                className="block w-full min-w-0 px-5 py-4 text-left transition-colors hover:bg-[var(--workbench-surface-muted)] focus-visible:-outline-offset-2 disabled:hover:bg-white"
+                className="block w-full min-w-0 px-5 py-4 text-left transition-colors hover:bg-[var(--workbench-surface-muted)] focus-visible:-outline-offset-2 disabled:hover:bg-surface"
                 disabled={!onOpenTask || !isOpenableWorkspaceTask(item.workItem)}
                 key={item.id}
                 onClick={() => onOpenTask?.(item.workItem)}

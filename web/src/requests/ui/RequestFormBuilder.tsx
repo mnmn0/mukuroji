@@ -335,7 +335,7 @@ export function RequestFormBuilder({
           <h3 className="text-lg font-semibold text-[var(--workbench-text)]">
             {t('requests.builder.locale')}
           </h3>
-          <div className="inline-flex overflow-hidden rounded-lg border border-[var(--workbench-border-strong)] bg-white">
+          <div className="inline-flex overflow-hidden rounded-lg border border-[var(--workbench-border-strong)] bg-surface">
             {model.locales.map((candidate) => (
               <button
                 aria-pressed={editingLocale === candidate}
@@ -765,7 +765,7 @@ export function RequestFormBuilder({
       </fieldset>
 
       {localValidationError || errorMessage ? (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
           {localValidationError ? t('requests.builder.invalidDraft') : errorMessage}
         </p>
       ) : null}
@@ -834,7 +834,7 @@ function RoutingRulesEditor({
       {rules.length === 0 ? (
         <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] p-4 text-sm font-medium text-[var(--workbench-muted)]">{t('requests.builder.routingRulesEmpty')}</p>
       ) : rules.map((rule, index) => (
-        <article className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-white p-4" data-testid={`request-routing-rule-${rule.id}`} key={rule.id}>
+        <article className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-surface p-4" data-testid={`request-routing-rule-${rule.id}`} key={rule.id}>
           <div className="flex items-end gap-3">
             <BuilderLabel label={t('requests.builder.ruleName')} span="min-w-0 flex-1">
               <input className="workbench-input min-h-10 px-3" required value={rule.name} onChange={(event) => onChange(rules.map((candidate) => candidate.id === rule.id ? { ...candidate, name: event.target.value } : candidate))} />
@@ -1041,7 +1041,7 @@ function FieldEditor({
   const supportsPattern = supportsLength
 
   return (
-    <article className="rounded-lg border border-[var(--workbench-border)] bg-white" data-testid={`request-field-${field.id}`}>
+    <article className="rounded-lg border border-[var(--workbench-border)] bg-surface" data-testid={`request-field-${field.id}`}>
       <div className="grid grid-cols-[40px_minmax(180px,1fr)_minmax(150px,0.7fr)_auto] items-end gap-3 border-b border-[var(--workbench-border)] p-3 max-[760px]:grid-cols-[40px_minmax(0,1fr)_auto]">
         <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--workbench-surface-muted)] text-xs font-bold text-[var(--workbench-muted)]">
           {index + 1}

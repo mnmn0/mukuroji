@@ -30,7 +30,7 @@ export function ResponsiveDisclosure({ children, label, summary }: ResponsiveDis
         onClick={() => setExpanded((value) => !value)}
         type="button"
       >
-        <SlidersIcon className="h-4 w-4 shrink-0 fill-none stroke-current stroke-2 text-[var(--workbench-primary)]" />
+        <SlidersIcon className="h-4 w-4 shrink-0 fill-none stroke-current stroke-2 text-[var(--workbench-primary-text)]" />
         <span className="min-w-0 flex-1">
           <span className="block">{label}</span>
           {summary ? <span className="mt-0.5 block text-xs font-normal text-[var(--workbench-muted)]">{summary}</span> : null}

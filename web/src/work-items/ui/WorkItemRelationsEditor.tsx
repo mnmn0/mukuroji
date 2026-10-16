@@ -196,11 +196,11 @@ export function WorkItemRelationsEditor({
       </div>
 
       {isLoading ? (
-        <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-6 text-center text-sm font-medium text-[var(--workbench-muted)]">
+        <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-surface px-4 py-6 text-center text-sm font-medium text-[var(--workbench-muted)]">
           {t('workItems.relations.loading')}
         </p>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+        <div className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
           {relations.length > 0 ? (
             <ul className="divide-y divide-[var(--workbench-border)]">
               {relations.map((relation) => {
@@ -301,7 +301,7 @@ export function WorkItemRelationsEditor({
       )}
 
       {errorMessage || localErrorMessage ? (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
           {localErrorMessage ?? errorMessage}
         </p>
       ) : null}

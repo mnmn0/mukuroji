@@ -358,7 +358,7 @@ export function MyTasksWorkspaceView({
               aria-label={column.label}
               className={`min-h-[420px] min-w-[260px] rounded-lg border transition-colors ${
                 isDropTarget
-                  ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40'
+                  ? 'border-tone-99d7cf bg-tone-e5f7f4 ring-2 ring-tone-99d7cf/40'
                   : 'border-transparent bg-[var(--workbench-surface-muted)]'
               }`}
               data-testid={`my-tasks-column-${createWorkspaceTaskTestToken(column.key)}`}
@@ -441,7 +441,7 @@ export function MyTasksWorkspaceView({
                   )
                 })}
                 {columnTasks.length === 0 ? (
-                  <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+                  <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-surface px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
                     {t('tasks.board.empty')}
                   </p>
                 ) : null}
@@ -450,7 +450,7 @@ export function MyTasksWorkspaceView({
           )
         })}
         {visibleStatusColumns.length === 0 && configurationUnavailableTasks.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-white px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+          <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] bg-surface px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
             {t('tasks.board.empty')}
           </p>
         ) : null}

@@ -110,7 +110,7 @@ export function EnterpriseSsoCallbackPage() {
           <p
             className={`mt-3 text-sm font-medium leading-6 ${
               failed
-                ? 'text-red-700'
+                ? 'text-fg-red-700'
                 : 'text-[var(--workbench-muted)]'
             }`}
             role={failed ? 'alert' : 'status'}

@@ -86,17 +86,17 @@ const projectToneClassNames: Record<
   NonNullable<ProjectDirectoryRow['tone']>,
   string
 > = {
-  blue: 'border-blue-200 bg-blue-100 text-blue-700',
-  green: 'border-emerald-200 bg-emerald-100 text-emerald-700',
-  purple: 'border-violet-200 bg-violet-100 text-violet-700',
-  yellow: 'border-amber-200 bg-amber-100 text-amber-700',
+  blue: 'border-blue-200 bg-blue-100 text-fg-blue-700',
+  green: 'border-emerald-200 bg-emerald-100 text-fg-emerald-700',
+  purple: 'border-violet-200 bg-violet-100 text-fg-violet-700',
+  yellow: 'border-amber-200 bg-amber-100 text-fg-amber-700',
 }
 
 const statusClassNames: Record<ProjectDirectoryStatus, string> = {
-  active: 'border-sky-200 bg-sky-50 text-sky-700',
-  attention: 'border-amber-200 bg-amber-50 text-amber-800',
-  completed: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  'not-started': 'border-slate-200 bg-slate-50 text-slate-600',
+  active: 'border-sky-200 bg-sky-50 text-fg-sky-700',
+  attention: 'border-amber-200 bg-amber-50 text-fg-amber-800',
+  completed: 'border-emerald-200 bg-emerald-50 text-fg-emerald-700',
+  'not-started': 'border-slate-200 bg-slate-50 text-fg-slate-600',
 }
 
 const statusMessageKeys: Record<ProjectDirectoryStatus, MessageKey> = {
@@ -108,19 +108,19 @@ const statusMessageKeys: Record<ProjectDirectoryStatus, MessageKey> = {
 
 /** Badge tokens for Project update freshness, kept separate from reported health. */
 const planningUpdateStateClassNames: Record<PlanningUpdateState, string> = {
-  'not-configured': 'border-slate-200 bg-slate-50 text-slate-600',
-  missing: 'border-slate-300 bg-white text-slate-700',
-  current: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  stale: 'border-amber-200 bg-amber-50 text-amber-800',
-  overdue: 'border-red-200 bg-red-50 text-red-700',
+  'not-configured': 'border-slate-200 bg-slate-50 text-fg-slate-600',
+  missing: 'border-slate-300 bg-surface text-fg-slate-700',
+  current: 'border-emerald-200 bg-emerald-50 text-fg-emerald-700',
+  stale: 'border-amber-200 bg-amber-50 text-fg-amber-800',
+  overdue: 'border-red-200 bg-red-50 text-fg-red-700',
 }
 
 /** Badge tokens for latest reported Project health. */
 const planningUpdateHealthClassNames: Record<PlanningHealth, string> = {
-  unknown: 'border-slate-200 bg-slate-50 text-slate-600',
-  'on-track': 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  'at-risk': 'border-amber-200 bg-amber-50 text-amber-800',
-  'off-track': 'border-red-200 bg-red-50 text-red-700',
+  unknown: 'border-slate-200 bg-slate-50 text-fg-slate-600',
+  'on-track': 'border-emerald-200 bg-emerald-50 text-fg-emerald-700',
+  'at-risk': 'border-amber-200 bg-amber-50 text-fg-amber-800',
+  'off-track': 'border-red-200 bg-red-50 text-fg-red-700',
 }
 
 /** Finds one Team-qualified Project update target. */
@@ -307,8 +307,8 @@ export function ProjectDirectoryView({
             aria-pressed={filters.quickAccessOnly}
             className={`inline-flex min-h-10 items-center gap-2 rounded-lg border px-3 text-sm font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)] focus:ring-offset-2 ${
               filters.quickAccessOnly
-                ? 'border-amber-300 bg-amber-50 text-amber-800'
-                : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+                ? 'border-amber-300 bg-amber-50 text-fg-amber-800'
+                : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
             }`}
             disabled={isQuickAccessUnavailable}
             title={isQuickAccessUnavailable
@@ -327,7 +327,7 @@ export function ProjectDirectoryView({
             </p>
             {hasActiveFilters ? (
               <button
-                className="min-h-10 rounded-lg px-3 text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)]"
+                className="min-h-10 rounded-lg px-3 text-sm font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)]"
                 type="button"
                 onClick={onClearFilters}
               >
@@ -489,8 +489,8 @@ function ProjectDirectoryListRow({
         aria-pressed={project.isQuickAccess}
         className={`grid h-10 w-10 place-items-center rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)] focus:ring-offset-2 ${
           project.isQuickAccess
-            ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'
-            : 'text-slate-400 hover:bg-slate-100 hover:text-amber-600'
+            ? 'bg-amber-50 text-fg-amber-600 hover:bg-amber-100'
+            : 'text-fg-slate-400 hover:bg-slate-100 hover:text-fg-amber-600'
         }`}
         disabled={isQuickAccessSaving || isQuickAccessUnavailable}
         title={isQuickAccessUnavailable
@@ -541,7 +541,7 @@ function ProjectDirectoryListRow({
             {onOpenPlanningUpdate ? (
               <button
                 aria-label={t('planning.action.openUpdateDetails')}
-                className="min-h-8 min-w-0 truncate rounded-md px-1 text-left text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)]"
+                className="min-h-8 min-w-0 truncate rounded-md px-1 text-left text-xs font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)]"
                 type="button"
                 onClick={onOpenPlanningUpdate}
               >
@@ -619,7 +619,7 @@ function ProjectDirectoryListRow({
             t('projects.directory.archive.label'),
             { name: project.projectName },
           )}
-          className="grid h-10 w-10 place-items-center rounded-lg text-[var(--workbench-muted)] transition-colors hover:bg-red-50 hover:text-red-700 focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)] focus:ring-offset-2 max-[760px]:row-start-1 max-[760px]:col-start-3"
+          className="grid h-10 w-10 place-items-center rounded-lg text-[var(--workbench-muted)] transition-colors hover:bg-red-50 hover:text-fg-red-700 focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)] focus:ring-offset-2 max-[760px]:row-start-1 max-[760px]:col-start-3"
           type="button"
           onClick={onArchiveProject}
         >
@@ -655,7 +655,7 @@ function ProjectAssigneeSummary({ project, t }: ProjectAssigneeSummaryProps) {
         <>
           <span
             aria-hidden="true"
-            className="grid h-7 w-7 flex-none place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-[10px] font-bold text-[var(--workbench-primary)]"
+            className="grid h-7 w-7 flex-none place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-[10px] font-bold text-[var(--workbench-primary-text)]"
           >
             {createPersonInitials(firstAssignee.label)}
           </span>
@@ -703,7 +703,7 @@ function ProjectDirectoryEmptyState({
       <div className="max-w-md">
         <span
           aria-hidden="true"
-          className="mx-auto grid h-12 w-12 place-items-center rounded-xl border border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]"
+          className="mx-auto grid h-12 w-12 place-items-center rounded-xl border border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]"
         >
           <FolderIcon />
         </span>
@@ -790,7 +790,7 @@ function ProjectArchiveDialog({
             )}
           </p>
           {error ? (
-            <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+            <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
               {t('projects.directory.archive.error')}
             </p>
           ) : null}

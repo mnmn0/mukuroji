@@ -41,7 +41,7 @@ type DigestPanelProps = {
   onDismiss(): void
 }
 
-const actionClass = 'min-h-11 rounded-md border border-slate-300 px-3 text-app-meta font-semibold text-slate-800 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-50'
+const actionClass = 'min-h-11 rounded-md border border-slate-300 px-3 text-app-meta font-semibold text-fg-slate-800 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-700 disabled:opacity-50'
 
 /** Renders metadata, settings and ephemeral preview without a delivery action.
  * @param props - Validated state and explicit callbacks.
@@ -64,31 +64,31 @@ export function DigestPanel(props: DigestPanelProps) {
     return () => { window.removeEventListener('focus', restore); document.removeEventListener('visibilitychange', restore) }
   })
   return <section onFocusCapture={(event) => { focused.current = event.target }} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) focused.current = null }} aria-label={t('updates.digest.title')} className="min-w-0 border-y border-slate-200 py-4">
-    <p className="mb-4 text-app-meta font-semibold text-teal-800">{t('updates.digest.previewOnly')}</p>
+    <p className="mb-4 text-app-meta font-semibold text-fg-teal-800">{t('updates.digest.previewOnly')}</p>
     {loading ? <p role="status">{t('updates.loading')}</p> : null}
     {failure ? <div role="alert" className="mb-4 flex flex-wrap items-center gap-3 border-l-2 border-amber-500 pl-3"><p>{t(`updates.digest.${failure}`)}</p>{failure !== 'denied' ? <button className={actionClass} disabled={pending} onClick={onReload}>{t('workspace.error.retry')}</button> : null}</div> : null}
-    {!canEdit ? <p className="text-app-meta text-slate-600">{t('updates.readOnly')}</p> : null}
+    {!canEdit ? <p className="text-app-meta text-fg-slate-600">{t('updates.readOnly')}</p> : null}
     {state && failure !== 'denied' ? <>
       {canEdit ? <DigestForm key={props.draftReset} {...props} state={state} /> : null}
-      <h3 className="mt-6 text-sm font-semibold text-slate-800">{t('updates.digest.history')}</h3>
+      <h3 className="mt-6 text-sm font-semibold text-fg-slate-800">{t('updates.digest.history')}</h3>
       {state.history.length ? <ul className="mt-2 divide-y divide-slate-200">
-        {[...state.history].reverse().map((receipt) => <li key={receipt.id} className="flex flex-wrap justify-between gap-x-4 gap-y-1 py-3 text-app-meta text-slate-600">
+        {[...state.history].reverse().map((receipt) => <li key={receipt.id} className="flex flex-wrap justify-between gap-x-4 gap-y-1 py-3 text-app-meta text-fg-slate-600">
           <span>{t(receipt.id.startsWith('weekly:') ? 'updates.digest.weekly' : 'updates.digest.daily')} · {receipt.id.split(':')[1]}</span>
           <span>{t(`updates.digest.status.${receipt.status}`)} · {t('updates.digest.attempts').replace('{count}', String(receipt.attempts))}{receipt.status === 'completed' ? ` · ${t('updates.count').replace('{count}', String(receipt.count))}` : ''}</span>
         </li>)}
-      </ul> : <p className="mt-2 text-app-meta text-slate-500">{t('updates.digest.noHistory')}</p>}
+      </ul> : <p className="mt-2 text-app-meta text-fg-slate-500">{t('updates.digest.noHistory')}</p>}
     </> : null}
     {state && preview && !failure && validDigestSelection(state.preferences, props.savedStatus && props.savedStatus !== 'ready' ? undefined : props.savedFeeds) ? <div className="mt-6" aria-label={t('updates.digest.result')}>
-      <h3 className="text-sm font-semibold text-slate-800">{t('updates.digest.result')}</h3>
-      <p role="status" className="mt-1 text-app-meta text-slate-600">{t(preview.replay ? 'updates.digest.replay' : 'updates.digest.generated')}</p>
-      {preview.entries.length === 0 ? <p className="py-5 text-app-body text-slate-500">{t(preview.truncated ? 'updates.digest.boundedEmpty' : 'updates.digest.empty')}</p> : <ul className="mt-2 divide-y divide-slate-200">
+      <h3 className="text-sm font-semibold text-fg-slate-800">{t('updates.digest.result')}</h3>
+      <p role="status" className="mt-1 text-app-meta text-fg-slate-600">{t(preview.replay ? 'updates.digest.replay' : 'updates.digest.generated')}</p>
+      {preview.entries.length === 0 ? <p className="py-5 text-app-body text-fg-slate-500">{t(preview.truncated ? 'updates.digest.boundedEmpty' : 'updates.digest.empty')}</p> : <ul className="mt-2 divide-y divide-slate-200">
         {preview.entries.map((entry) => <li key={updateFeedTargetKey(entry.target)} className="min-w-0 py-4">
-          <Link className="inline-flex min-h-11 max-w-full items-center break-words font-semibold text-teal-800 underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-teal-700" to={updateFeedTargetPath(entry.target)}>{entry.title}</Link>
-          <p className="whitespace-pre-wrap break-words text-app-body text-slate-700">{entry.latestUpdate?.summary}</p>
-          <p className="mt-2 text-app-meta text-slate-600">{t(`planning.health.${entry.health}`)} · {t(`planning.updateState.${entry.updateState}`)}</p>
+          <Link className="inline-flex min-h-11 max-w-full items-center break-words font-semibold text-fg-teal-800 underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-teal-700" to={updateFeedTargetPath(entry.target)}>{entry.title}</Link>
+          <p className="whitespace-pre-wrap break-words text-app-body text-fg-slate-700">{entry.latestUpdate?.summary}</p>
+          <p className="mt-2 text-app-meta text-fg-slate-600">{t(`planning.health.${entry.health}`)} · {t(`planning.updateState.${entry.updateState}`)}</p>
         </li>)}
       </ul>}
-      {preview.truncated && preview.entries.length > 0 ? <p role="status" className="mt-3 text-app-meta text-slate-600">{t('updates.digest.truncated').replace('{count}', String(preview.entries.length))}</p> : null}
+      {preview.truncated && preview.entries.length > 0 ? <p role="status" className="mt-3 text-app-meta text-fg-slate-600">{t('updates.digest.truncated').replace('{count}', String(preview.entries.length))}</p> : null}
     </div> : null}
   </section>
 }
@@ -138,25 +138,25 @@ function DigestForm({ state, savedFeeds, savedStatus, pending, canEdit, failure,
   return <form ref={form} onBlurCapture={(event) => { if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) restoreActionFocus.current = false }} onSubmit={(event) => { event.preventDefault(); if (canSave) void perform(save) }}>
     {stale && failure !== 'conflict' ? <div role="alert"><p>{t('updates.digest.conflict')}</p><button type="button" className={actionClass} disabled={pending} onClick={propsReload}>{t('workspace.error.retry')}</button></div> : null}
     <fieldset disabled={unavailable} className="min-w-0">
-      <legend className="text-sm font-semibold text-slate-800">{t('updates.digest.settings')}</legend>
+      <legend className="text-sm font-semibold text-fg-slate-800">{t('updates.digest.settings')}</legend>
       <label className="mt-2 flex min-h-11 items-center gap-3 text-app-body"><input type="checkbox" checked={draft.enabled} onChange={(event) => change({ ...draft, enabled: event.target.checked })} className="size-4 accent-teal-700" />{t('updates.digest.enabled')}</label>
       <div className="mt-3 grid gap-4 sm:grid-cols-[minmax(140px,200px)_1fr]">
-        <div><label htmlFor={`${id}-frequency`} className="mb-1 block text-app-meta font-semibold text-slate-600">{t('updates.digest.frequency')}</label>
-          <select id={`${id}-frequency`} className="min-h-11 w-full rounded-md border border-slate-300 bg-white px-3" value={draft.frequency} onChange={(event) => { if (event.target.value === 'daily' || event.target.value === 'weekly') change({ ...draft, frequency: event.target.value }) }}>
+        <div><label htmlFor={`${id}-frequency`} className="mb-1 block text-app-meta font-semibold text-fg-slate-600">{t('updates.digest.frequency')}</label>
+          <select id={`${id}-frequency`} className="min-h-11 w-full rounded-md border border-slate-300 bg-surface px-3" value={draft.frequency} onChange={(event) => { if (event.target.value === 'daily' || event.target.value === 'weekly') change({ ...draft, frequency: event.target.value }) }}>
             <option value="daily">{t('updates.digest.daily')}</option><option value="weekly">{t('updates.digest.weekly')}</option>
-          </select><p className="mt-1 text-app-meta text-slate-500">{t('updates.digest.utc')}</p>
+          </select><p className="mt-1 text-app-meta text-fg-slate-500">{t('updates.digest.utc')}</p>
         </div>
-        <fieldset className="min-w-0"><legend className="text-app-meta font-semibold text-slate-600">{t('updates.digest.views')}</legend><div className="grid grid-cols-1 sm:grid-cols-2">
+        <fieldset className="min-w-0"><legend className="text-app-meta font-semibold text-fg-slate-600">{t('updates.digest.views')}</legend><div className="grid grid-cols-1 sm:grid-cols-2">
           {updateFeedViews.map((view) => <label key={view} className="flex min-h-11 items-center gap-3 pr-3 text-app-body"><input type="checkbox" className="size-4 accent-teal-700" checked={draft.views.includes(view)} onChange={(event) => change({ ...draft, views: event.target.checked ? [...draft.views, view] : draft.views.filter((selected) => selected !== view) })} />{t(`updates.view.${view}`)}</label>)}
         </div></fieldset>
       </div>
       <DigestSavedFeedSelection collection={savedFeeds} status={savedStatus} preferences={draft} t={t} onChange={change} />
-      {!valid && !(savedStatus === 'loading' && draft.savedFeeds) ? <p role="alert" className="mt-2 text-app-meta text-amber-800">{t('updates.digest.chooseView')}</p> : null}
+      {!valid && !(savedStatus === 'loading' && draft.savedFeeds) ? <p role="alert" className="mt-2 text-app-meta text-fg-amber-800">{t('updates.digest.chooseView')}</p> : null}
       <div className="mt-4 flex flex-wrap gap-3">
         <button type="submit" className={actionClass} disabled={!canSave}>{t('updates.digest.save')}</button>
-        <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-teal-800`} disabled={unavailable || dirty || !valid || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict' || failure === 'interrupted'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
+        <button ref={generateButton} type="button" className={`${actionClass} border-teal-700 text-fg-teal-800`} disabled={unavailable || dirty || !valid || !state.preferences.enabled || failure === 'exhausted' || failure === 'conflict' || failure === 'interrupted'} onClick={() => { void perform(onGenerate) }}>{t(pending ? 'updates.digest.working' : 'updates.digest.generate')}</button>
       </div>
-      {dirty ? <p role="status" className="mt-2 text-app-meta text-slate-600">{t('updates.digest.unsaved')}</p> : null}
+      {dirty ? <p role="status" className="mt-2 text-app-meta text-fg-slate-600">{t('updates.digest.unsaved')}</p> : null}
     </fieldset>
   </form>
 }

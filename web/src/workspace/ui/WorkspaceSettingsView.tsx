@@ -5,6 +5,10 @@ import {
   type FontSizePreference,
 } from '../../shared/lib/preferences/fontSize'
 import {
+  themePreferenceOptions,
+  type ThemePreference,
+} from '../../shared/lib/preferences/theme'
+import {
   localeOptions,
   type Locale,
   type MessageKey,
@@ -27,8 +31,12 @@ export type WorkspaceSettingsViewProps = {
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   /** Callback that persists locale changes. */
   onLocaleChange?: (locale: Locale) => void
+  /** Callback that persists color theme changes. */
+  onThemePreferenceChange: (preference: ThemePreference) => void
   /** Localized message resolver. */
   t: (key: MessageKey) => string
+  /** Currently selected color theme. */
+  themePreference: ThemePreference
   /** Current user's display label. */
   userLabel: string
 }
@@ -37,6 +45,12 @@ const fontSizePreferenceLabelKeys: Record<FontSizePreference, MessageKey> = {
   compact: 'workspace.settings.fontSize.compact',
   standard: 'workspace.settings.fontSize.standard',
   comfortable: 'workspace.settings.fontSize.comfortable',
+}
+
+const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
+  light: 'workspace.settings.theme.light',
+  dark: 'workspace.settings.theme.dark',
+  system: 'workspace.settings.theme.system',
 }
 
 /**
@@ -52,7 +66,9 @@ export function WorkspaceSettingsView({
   notificationSettingsSection,
   onFontSizePreferenceChange,
   onLocaleChange,
+  onThemePreferenceChange,
   t,
+  themePreference,
   userLabel,
 }: WorkspaceSettingsViewProps) {
   return (
@@ -74,7 +90,7 @@ export function WorkspaceSettingsView({
             </div>
             <div
               aria-label={t('workspace.settings.fontSizeTitle')}
-              className="inline-flex min-h-10 overflow-hidden rounded-lg border border-[var(--workbench-border-strong)] bg-white"
+              className="inline-flex min-h-10 overflow-hidden rounded-lg border border-[var(--workbench-border-strong)] bg-surface"
               data-testid="font-size-preference-control"
               role="group"
             >
@@ -84,7 +100,7 @@ export function WorkspaceSettingsView({
                   className={`px-4 text-sm font-semibold transition-colors duration-150 ${
                     fontSizePreference === preference
                       ? 'bg-[var(--workbench-primary)] text-white'
-                      : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]'
+                      : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]'
                   }`}
                   data-testid={`font-size-preference-${preference}`}
                   key={preference}
@@ -92,6 +108,40 @@ export function WorkspaceSettingsView({
                   type="button"
                 >
                   {t(fontSizePreferenceLabelKeys[preference])}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 px-5 py-5">
+            <div className="min-w-0 max-w-[640px]">
+              <h3 className="text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workspace.settings.themeTitle')}
+              </h3>
+              <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+                {t('workspace.settings.themeDescription')}
+              </p>
+            </div>
+            <div
+              aria-label={t('workspace.settings.themeTitle')}
+              className="inline-flex min-h-10 overflow-hidden rounded-lg border border-[var(--workbench-border-strong)] bg-surface"
+              data-testid="theme-preference-control"
+              role="group"
+            >
+              {themePreferenceOptions.map((preference) => (
+                <button
+                  aria-pressed={themePreference === preference}
+                  className={`px-4 text-sm font-semibold transition-colors duration-150 ${
+                    themePreference === preference
+                      ? 'bg-[var(--workbench-primary)] text-white'
+                      : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]'
+                  }`}
+                  data-testid={`theme-preference-${preference}`}
+                  key={preference}
+                  onClick={() => onThemePreferenceChange(preference)}
+                  type="button"
+                >
+                  {t(themePreferenceLabelKeys[preference])}
                 </button>
               ))}
             </div>
@@ -136,7 +186,7 @@ export function WorkspaceSettingsView({
       />
 
       <Link
-        className="workbench-panel group flex min-w-0 items-center justify-between gap-5 border-[#99d7cf] bg-[#f3fbfa] p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
+        className="workbench-panel group flex min-w-0 items-center justify-between gap-5 border-tone-99d7cf bg-tone-f3fbfa p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
         data-testid="enterprise-security-settings-link"
         to="/settings/security"
       >
@@ -153,7 +203,7 @@ export function WorkspaceSettingsView({
         </span>
         <span
           aria-hidden="true"
-          className="grid h-11 w-11 flex-none place-items-center rounded-full border border-[#99d7cf] bg-white text-lg font-semibold text-[var(--workbench-primary)] transition-transform group-hover:translate-x-0.5"
+          className="grid h-11 w-11 flex-none place-items-center rounded-full border border-tone-99d7cf bg-surface text-lg font-semibold text-[var(--workbench-primary-text)] transition-transform group-hover:translate-x-0.5"
         >
           →
         </span>

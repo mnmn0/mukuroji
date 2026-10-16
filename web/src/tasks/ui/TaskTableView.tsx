@@ -505,8 +505,8 @@ export function TaskTableView({
         {tableAction ? (
           <p
             className={`border-b px-5 py-3 text-sm font-semibold ${tableAction.kind === 'error'
-              ? 'border-red-200 bg-red-50 text-red-700'
-              : 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'}`}
+              ? 'border-red-200 bg-red-50 text-fg-red-700'
+              : 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'}`}
             data-testid="task-table-action-feedback"
             role={tableAction.kind === 'error' ? 'alert' : 'status'}
           >
@@ -552,7 +552,7 @@ export function TaskTableView({
                       )}
                     </th>
                   ))}
-                  <th className="px-3 py-2.5 text-center text-[#8f99a8]" scope="col">
+                  <th className="px-3 py-2.5 text-center text-fg-8f99a8" scope="col">
                     <span className="sr-only">{t('tasks.action.more')}</span>
                     <MoreHorizontalIcon className="mx-auto h-5 w-5" />
                   </th>
@@ -563,7 +563,7 @@ export function TaskTableView({
               {taskErrorMessage ? (
                 <tr>
                   <td
-                    className="break-words px-5 py-7 text-sm font-semibold text-red-700"
+                    className="break-words px-5 py-7 text-sm font-semibold text-fg-red-700"
                     colSpan={tableColumnCount}
                     data-testid="tasks-error"
                   >
@@ -615,7 +615,7 @@ export function TaskTableView({
               ) : (
                 <tr>
                   <td
-                    className="px-5 py-7 text-sm font-medium text-[#5f6874]"
+                    className="px-5 py-7 text-sm font-medium text-fg-5f6874"
                     colSpan={tableColumnCount}
                     data-testid="tasks-empty"
                   >
@@ -629,7 +629,7 @@ export function TaskTableView({
         <div className="grid grid-cols-[1fr_auto] items-center border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-3 text-sm font-medium">
           {onCreateTaskOpen ? (
             <button
-              className="inline-flex items-center gap-2 text-[var(--workbench-primary)] transition hover:text-[var(--workbench-primary-hover)]"
+              className="inline-flex items-center gap-2 text-[var(--workbench-primary-text)] transition hover:text-[var(--workbench-primary-text-hover)]"
               onClick={() => onCreateTaskOpen({ projectId, source: 'table' })}
               type="button"
             >
@@ -637,7 +637,7 @@ export function TaskTableView({
               {t('tasks.addTask')}
             </button>
           ) : <span />}
-          <span className="text-[#5f6874]" data-testid="tasks-count">
+          <span className="text-fg-5f6874" data-testid="tasks-count">
             {t('tasks.count').replace('{count}', String(tasks.length))}
           </span>
         </div>
@@ -670,7 +670,7 @@ function TaskTableGroupRow({
       <th
         className={secondary
           ? 'bg-slate-50 px-7 py-2 text-left text-xs font-semibold text-[var(--workbench-muted)]'
-          : 'border-y border-[var(--workbench-border)] bg-[#f2f8f7] px-5 py-2.5 text-left text-sm font-bold text-[var(--workbench-text)]'}
+          : 'border-y border-[var(--workbench-border)] bg-tone-f2f8f7 px-5 py-2.5 text-left text-sm font-bold text-[var(--workbench-text)]'}
         colSpan={columnCount}
         scope="rowgroup"
       >
@@ -763,7 +763,7 @@ function TaskTableRow({
 
   return (
     <tr
-      className={`cursor-pointer border-b border-[#e4e7ec] text-sm font-medium text-[#1c1d1f] last:border-b-0 ${
+      className={`cursor-pointer border-b border-tone-e4e7ec text-sm font-medium text-fg-1c1d1f last:border-b-0 ${
         selectedForDetail ? 'workbench-row-selected' : 'hover:bg-[var(--workbench-surface-muted)]'
       }`}
       data-row-index={rowIndex}
@@ -800,7 +800,7 @@ function TaskTableRow({
                 <input
                   aria-label={taskTitle}
                   checked={selected}
-                  className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
+                  className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary-text)]"
                   onChange={(event) => onTaskSelectionChange(createTaskKey(task), event.target.checked)}
                   disabled={selectionReadOnly}
                   type="checkbox"
@@ -817,7 +817,7 @@ function TaskTableRow({
                   />
                 ) : (
                   <button
-                    className={`min-w-0 text-left font-semibold text-[var(--workbench-text)] transition hover:text-[var(--workbench-primary)] ${
+                    className={`min-w-0 text-left font-semibold text-[var(--workbench-text)] transition hover:text-[var(--workbench-primary-text)] ${
                       wrapText ? 'whitespace-normal break-words' : 'truncate'
                     }`}
                     data-testid={`task-open-detail-${task.id}`}
@@ -830,7 +830,7 @@ function TaskTableRow({
                 {canEditTask ? (
                   <button
                     aria-label={`${t('tasks.detail.title')}: ${taskTitle}`}
-                    className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+                    className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
                     data-testid={`task-open-detail-${task.id}`}
                     onClick={() => onSelectTask(task)}
                     type="button"
@@ -867,7 +867,7 @@ function TaskTableRow({
             </td>
           )
           case 'assignee': return (
-            <td {...columnCellProps} className={`${wrapText ? 'break-words' : 'truncate'} ${cellPadding} text-[#505967]`} key={field}>
+            <td {...columnCellProps} className={`${wrapText ? 'break-words' : 'truncate'} ${cellPadding} text-fg-505967`} key={field}>
               <div className="flex min-w-0 items-center gap-2">
                 {showAssigneeAvatar ? <WorkItemAssigneeAvatar label={assigneeLabel} /> : null}
                 {canEditTask && inlineAssigneeOptions.length > 0 ? (
@@ -914,8 +914,8 @@ function TaskTableRow({
               {...columnCellProps}
               className={`whitespace-normal break-words ${cellPadding} ${
                 resolveWorkflowStatusCategory(task) === 'completed'
-                  ? 'text-[#8f99a8] line-through'
-                  : overdue ? 'text-red-700' : 'text-[#505967]'
+                  ? 'text-fg-8f99a8 line-through'
+                  : overdue ? 'text-fg-red-700' : 'text-fg-505967'
               }`}
               key={field}
             >
@@ -959,12 +959,12 @@ function TaskTableRow({
             </td>
           )
           case 'project': return (
-            <td {...columnCellProps} className={`${cellPadding} ${wrapText ? 'break-words' : 'truncate'} text-[#505967]`} key={field}>
+            <td {...columnCellProps} className={`${cellPadding} ${wrapText ? 'break-words' : 'truncate'} text-fg-505967`} key={field}>
               {task.assignedProjectId ?? '—'}
             </td>
           )
           case 'team': return (
-            <td {...columnCellProps} className={`${cellPadding} ${wrapText ? 'break-words' : 'truncate'} text-[#505967]`} key={field}>
+            <td {...columnCellProps} className={`${cellPadding} ${wrapText ? 'break-words' : 'truncate'} text-fg-505967`} key={field}>
               {task.teamId}
             </td>
           )
@@ -994,7 +994,7 @@ function TaskTableRow({
           default: {
             const customFieldId = field.slice('custom:'.length)
             return (
-              <td {...columnCellProps} className={`${cellPadding} ${wrapText ? 'break-words' : 'truncate'} text-[#505967]`} key={field}>
+              <td {...columnCellProps} className={`${cellPadding} ${wrapText ? 'break-words' : 'truncate'} text-fg-505967`} key={field}>
                 {customFieldEntries.get(customFieldId) ?? '—'}
               </td>
             )
@@ -1006,7 +1006,7 @@ function TaskTableRow({
         {onCreateTaskOpen ? (
           <button
             aria-label={`${t('tasks.addTask')}: ${taskTitle}`}
-            className="grid h-9 w-9 place-items-center rounded text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[var(--workbench-surface-muted)] max-[640px]:h-11 max-[640px]:w-11"
+            className="grid h-9 w-9 place-items-center rounded text-lg font-semibold text-[var(--workbench-primary-text)] hover:bg-[var(--workbench-surface-muted)] max-[640px]:h-11 max-[640px]:w-11"
             data-testid={`task-row-add-${task.id}`}
             onClick={() => onCreateTaskOpen({
               ...(task.assigneeUserId ? { assigneeUserId: task.assigneeUserId } : {}),
@@ -1025,7 +1025,7 @@ function TaskTableRow({
         {onTaskActionMenuOpen ? (
           <button
             aria-label={`${t('tasks.action.more')}: ${taskTitle}`}
-            className="grid h-9 w-9 place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+            className="grid h-9 w-9 place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] max-[640px]:h-11 max-[640px]:w-11"
             data-task-action="context-menu"
             data-task-open-variant="context-menu"
             data-task-team-id={task.teamId}

@@ -314,7 +314,7 @@ export function WorkItemExternalLinksPanel({
 
   return (
     <section
-      className="border-t border-[var(--workbench-border)] bg-white px-6 py-6"
+      className="border-t border-[var(--workbench-border)] bg-surface px-6 py-6"
       data-testid="work-item-external-links-panel"
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
@@ -348,7 +348,7 @@ export function WorkItemExternalLinksPanel({
 
       {operationError ? (
         <p
-          className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700"
+          className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700"
           role="alert"
         >
           {operationError}
@@ -357,7 +357,7 @@ export function WorkItemExternalLinksPanel({
 
       {isAdding && canManage && onCreate ? (
         <form
-          className="mt-4 grid gap-3 rounded-lg border border-[#99d7cf] bg-[#f4fbfa] p-4"
+          className="mt-4 grid gap-3 rounded-lg border border-tone-99d7cf bg-tone-f4fbfa p-4"
           onSubmit={(event) => void handleCreate(event)}
         >
           <div className="grid grid-cols-2 gap-3 max-[520px]:grid-cols-1">
@@ -444,7 +444,7 @@ export function WorkItemExternalLinksPanel({
         </div>
       ) : errorMessage ? (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
-          <p className="text-sm font-semibold text-red-800">{errorMessage}</p>
+          <p className="text-sm font-semibold text-fg-red-800">{errorMessage}</p>
           {onRetry ? (
             <button className="workbench-button-secondary min-h-9 px-3" onClick={() => void onRetry()} type="button">
               {labels.retry}
@@ -455,8 +455,8 @@ export function WorkItemExternalLinksPanel({
         <>
           {canManage && connectedInstallations.length === 0 ? (
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-              <h3 className="text-sm font-semibold text-amber-900">{labels.noInstallationsTitle}</h3>
-              <p className="mt-1 text-xs font-medium leading-5 text-amber-800">{labels.noInstallationsDescription}</p>
+              <h3 className="text-sm font-semibold text-fg-amber-900">{labels.noInstallationsTitle}</h3>
+              <p className="mt-1 text-xs font-medium leading-5 text-fg-amber-800">{labels.noInstallationsDescription}</p>
             </div>
           ) : null}
 
@@ -478,7 +478,7 @@ export function WorkItemExternalLinksPanel({
 
                 return (
                   <article
-                    className="rounded-lg border border-[var(--workbench-border)] bg-white p-4"
+                    className="rounded-lg border border-[var(--workbench-border)] bg-surface p-4"
                     data-testid={`external-link-${link.id}`}
                     key={link.id}
                   >
@@ -489,7 +489,7 @@ export function WorkItemExternalLinksPanel({
                           <span className="workbench-badge-primary">{labels.resourceTypeLabels[link.resourceType]}</span>
                         </div>
                         <a
-                          className="mt-2 block break-all text-sm font-semibold text-[var(--workbench-primary)] underline decoration-[#99d7cf] underline-offset-2"
+                          className="mt-2 block break-all text-sm font-semibold text-[var(--workbench-primary-text)] underline decoration-fg-99d7cf underline-offset-2"
                           href={link.externalUrl}
                           rel="noreferrer"
                           target="_blank"
@@ -525,7 +525,7 @@ export function WorkItemExternalLinksPanel({
                           ))}
                         </select>
                         {canManage && installation?.status !== 'connected' ? (
-                          <span className="font-medium normal-case leading-5 text-amber-800">
+                          <span className="font-medium normal-case leading-5 text-fg-amber-800">
                             {labels.reconnectRequired}
                           </span>
                         ) : null}
@@ -536,7 +536,7 @@ export function WorkItemExternalLinksPanel({
                         </p>
                         {canManage && onUnlink ? (
                           <button
-                            className="min-h-9 rounded-md border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:opacity-50"
+                            className="min-h-9 rounded-md border border-red-200 bg-surface px-3 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:opacity-50"
                             disabled={busy}
                             onClick={() => {
                               const name = link.displayKey ?? link.externalId
@@ -568,7 +568,7 @@ export function WorkItemExternalLinksPanel({
               className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3"
               role="alert"
             >
-              <p className="text-sm font-semibold text-red-800">
+              <p className="text-sm font-semibold text-fg-red-800">
                 {loadMoreErrorMessage}
               </p>
               {onRetry ? (

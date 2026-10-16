@@ -23,11 +23,11 @@ export function NotFoundPage({ initialLocale }: NotFoundPageProps = {}) {
       {({ t }) => (
         <div className="mx-auto grid min-h-[calc(100svh-230px)] w-full max-w-[1120px] items-center gap-10 px-5 py-14 sm:px-8 lg:grid-cols-[0.82fr_1.18fr] lg:gap-16 lg:py-20">
           <div aria-hidden="true" className="relative select-none overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-sidebar)] px-7 py-12 text-center sm:px-10 sm:py-16">
-            <div className="absolute inset-x-0 top-0 h-1 bg-[#91d8ce]" />
+            <div className="absolute inset-x-0 top-0 h-1 bg-tone-91d8ce" />
             <span className="block font-mono text-[clamp(5rem,17vw,10rem)] font-bold leading-none tracking-[-0.08em] text-white">
               404
             </span>
-            <span className="mt-5 inline-flex rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 font-mono text-xs text-[#c3d0cc]">
+            <span className="mt-5 inline-flex rounded-full border border-white/15 bg-surface/[0.06] px-3 py-1 font-mono text-xs text-fg-c3d0cc">
               route_not_found
             </span>
           </div>
@@ -41,7 +41,7 @@ export function NotFoundPage({ initialLocale }: NotFoundPageProps = {}) {
               {t('public.notFound.description')}
             </p>
 
-            <div className="mt-6 rounded-lg border border-[var(--workbench-border)] bg-white px-4 py-3">
+            <div className="mt-6 rounded-lg border border-[var(--workbench-border)] bg-surface px-4 py-3">
               <span className="block text-app-micro font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                 {t('public.notFound.requestedPath')}
               </span>
@@ -60,16 +60,16 @@ export function NotFoundPage({ initialLocale }: NotFoundPageProps = {}) {
             </div>
 
             <div className="mt-9 grid gap-3 sm:grid-cols-2">
-              <Link className="workbench-panel group p-4 no-underline hover:border-[#99d7cf]" to="/privacy">
-                <strong className="block text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary)]">
+              <Link className="workbench-panel group p-4 no-underline hover:border-tone-99d7cf" to="/privacy">
+                <strong className="block text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary-text)]">
                   {t('public.notFound.privacyTitle')}
                 </strong>
                 <span className="mt-1 block text-app-meta leading-5 text-[var(--workbench-muted)]">
                   {t('public.notFound.privacyDescription')}
                 </span>
               </Link>
-              <Link className="workbench-panel group p-4 no-underline hover:border-[#99d7cf]" to="/terms">
-                <strong className="block text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary)]">
+              <Link className="workbench-panel group p-4 no-underline hover:border-tone-99d7cf" to="/terms">
+                <strong className="block text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary-text)]">
                   {t('public.notFound.termsTitle')}
                 </strong>
                 <span className="mt-1 block text-app-meta leading-5 text-[var(--workbench-muted)]">

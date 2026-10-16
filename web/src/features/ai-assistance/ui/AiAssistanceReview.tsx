@@ -137,7 +137,7 @@ export function AiAssistanceReview({
     >
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2 text-[var(--workbench-primary)]">
+          <div className="flex items-center gap-2 text-[var(--workbench-primary-text)]">
             <ShieldIcon className="h-5 w-5 fill-none stroke-current stroke-2" />
             <h2 className="text-app-body font-semibold" id={reviewTitleId}>
               {t(isGenerating ? 'ai.activity.status.running' : content?.availability === 'available' && !hasUnsafeCitation && !decision ? 'ai.activity.reviewTitle' : 'ai.review.title')}
@@ -167,7 +167,7 @@ export function AiAssistanceReview({
               {generatingLabel ?? t('ai.search.generating')}
             </span>
             <ol className="flex flex-wrap items-center gap-3 text-xs">
-              <li aria-current="step" className="flex items-center gap-2 font-semibold text-blue-700"><span aria-hidden="true" className="size-2 rounded-full bg-blue-600 motion-safe:animate-pulse" />{t('ai.activity.generateStep')}</li>
+              <li aria-current="step" className="flex items-center gap-2 font-semibold text-fg-blue-700"><span aria-hidden="true" className="size-2 rounded-full bg-blue-600 motion-safe:animate-pulse" />{t('ai.activity.generateStep')}</li>
               <li className="text-[var(--workbench-muted)]">→ {t('ai.activity.reviewStep')}</li>
             </ol>
             {onCancelGeneration ? (
@@ -313,7 +313,7 @@ function AiCitationList({ citations, t, titleId }: AiCitationListProps) {
         <ol className="divide-y divide-[var(--workbench-border)] border-y border-[var(--workbench-border)]">
           {citations.map((citation) => (
             <li className="grid gap-1 py-3" key={citation.id}>
-              <a className="inline-flex min-h-[44px] items-center gap-2 font-semibold text-[var(--workbench-primary)] underline-offset-2 hover:underline" href={citation.href} rel="noreferrer" target="_blank">
+              <a className="inline-flex min-h-[44px] items-center gap-2 font-semibold text-[var(--workbench-primary-text)] underline-offset-2 hover:underline" href={citation.href} rel="noreferrer" target="_blank">
                 <span>{citation.label}</span>
                 <ExternalLinkIcon className="h-4 w-4 fill-none stroke-current stroke-2" />
               </a>
@@ -359,8 +359,8 @@ function FeedbackButton({ active, disabled, label, onClick }: FeedbackButtonProp
       aria-pressed={active}
       className={`min-h-[44px] rounded-md border px-3 text-app-caption font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
         active
-          ? 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'
-          : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+          ? 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
+          : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
       }`}
       disabled={disabled}
       onClick={onClick}

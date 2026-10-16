@@ -1729,7 +1729,7 @@ export function DocumentScreen({
 
         {actionErrorMessage ? (
           <div
-            className="flex flex-none items-center gap-3 border-b border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-800"
+            className="flex flex-none items-center gap-3 border-b border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-fg-red-800"
             role="alert"
           >
             <span className="min-w-0 flex-1">
@@ -2610,7 +2610,7 @@ function DocumentWorkspace({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex flex-none items-start gap-3 border-b border-[var(--workbench-border)] bg-white px-[clamp(20px,3vw,36px)] py-4">
+      <div className="flex flex-none items-start gap-3 border-b border-[var(--workbench-border)] bg-surface px-[clamp(20px,3vw,36px)] py-4">
         <span className="mt-1 text-2xl" aria-hidden="true">
           {localDocument.kind === 'whiteboard' ? '⌘' : '▤'}
         </span>
@@ -2811,14 +2811,14 @@ function DocumentHeader({
       />
       <button
         aria-label={t('documents.tree.open')}
-        className="grid h-10 w-10 flex-none place-items-center rounded-md border border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:text-[var(--workbench-primary)] min-[1100px]:hidden"
+        className="grid h-10 w-10 flex-none place-items-center rounded-md border border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:text-[var(--workbench-primary-text)] min-[1100px]:hidden"
         onClick={onTreeOpen}
         type="button"
       >
         ☰
       </button>
       <div className="min-w-0 flex-1">
-        <p className="m-0 text-[11px] font-bold uppercase tracking-[0.08em] text-[var(--workbench-primary)]">
+        <p className="m-0 text-[11px] font-bold uppercase tracking-[0.08em] text-[var(--workbench-primary-text)]">
           mukuroji · {t('documents.title')}
         </p>
         <p className="m-0 mt-1 truncate text-sm font-semibold text-[var(--workbench-text)]">
@@ -2834,7 +2834,7 @@ function DocumentHeader({
           >
             {uniquePresence.slice(0, 4).map((entry) => (
               <span
-                className="grid h-8 w-8 place-items-center rounded-full border-2 border-white bg-[#e5f7f4] text-[11px] font-bold text-[var(--workbench-primary)]"
+                className="grid h-8 w-8 place-items-center rounded-full border-2 border-surface bg-tone-e5f7f4 text-[11px] font-bold text-[var(--workbench-primary-text)]"
                 key={entry.userId}
                 style={{ color: entry.color }}
                 title={entry.displayName}
@@ -2843,7 +2843,7 @@ function DocumentHeader({
               </span>
             ))}
             {uniquePresence.length > 4 ? (
-              <span className="grid h-8 w-8 place-items-center rounded-full border-2 border-white bg-[var(--workbench-surface-muted)] text-[10px] font-bold text-[var(--workbench-muted)]">
+              <span className="grid h-8 w-8 place-items-center rounded-full border-2 border-surface bg-[var(--workbench-surface-muted)] text-[10px] font-bold text-[var(--workbench-muted)]">
                 +{uniquePresence.length - 4}
               </span>
             ) : null}
@@ -2854,9 +2854,9 @@ function DocumentHeader({
                 ? t('documents.favorite.remove')
                 : t('documents.favorite.add')
             }
-            className={`grid h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-white ${
+            className={`grid h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface ${
               selectedDocument.favorite
-                ? 'text-amber-500'
+                ? 'text-fg-amber-500'
                 : 'text-[var(--workbench-muted)]'
             }`}
             disabled={!onFavoriteChange}
@@ -2878,7 +2878,7 @@ function DocumentHeader({
           <button
             aria-label={t('documents.context.aria')}
             aria-pressed={Boolean(contextTab)}
-            className="grid h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:text-[var(--workbench-primary)]"
+            className="grid h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:text-[var(--workbench-primary-text)]"
             onClick={() => onContextOpen(contextTab ?? 'activity')}
             type="button"
           >
@@ -2908,7 +2908,7 @@ function DocumentHeader({
               </button>
               {isExportMenuOpen ? (
                 <div
-                  className="absolute right-0 top-11 z-30 w-40 rounded-lg border border-[var(--workbench-border)] bg-white p-1.5 shadow-xl"
+                  className="absolute right-0 top-11 z-30 w-40 rounded-lg border border-[var(--workbench-border)] bg-surface p-1.5 shadow-xl"
                   role="menu"
                 >
                   {exportFormats.map((format) => (
@@ -2942,7 +2942,7 @@ function DocumentHeader({
           ) : onArchive ? (
             <button
               aria-label={t('documents.action.archive')}
-              className="hidden h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:text-[var(--workbench-danger)] lg:grid"
+              className="hidden h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:text-[var(--workbench-danger)] lg:grid"
               onClick={() => void onArchive()}
               type="button"
             >
@@ -2966,7 +2966,7 @@ function DocumentHeader({
             aria-expanded={isActionMenuOpen}
             aria-haspopup="menu"
             aria-label={t('documents.action.more')}
-            className="grid h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-white text-lg font-bold text-[var(--workbench-muted)]"
+            className="grid h-9 w-9 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface text-lg font-bold text-[var(--workbench-muted)]"
             onClick={() => setIsActionMenuOpen((current) => !current)}
             type="button"
           >
@@ -2974,7 +2974,7 @@ function DocumentHeader({
           </button>
           {isActionMenuOpen ? (
             <div
-              className="absolute right-0 top-11 z-40 min-w-52 rounded-lg border border-[var(--workbench-border)] bg-white p-1.5 shadow-xl"
+              className="absolute right-0 top-11 z-40 min-w-52 rounded-lg border border-[var(--workbench-border)] bg-surface p-1.5 shadow-xl"
               role="menu"
             >
               {onShareOpen ? (
@@ -3056,7 +3056,7 @@ function DocumentHeader({
             {userLabel}
           </p>
         </div>
-        <span className="grid h-9 w-9 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-xs font-bold text-[var(--workbench-primary)]">
+        <span className="grid h-9 w-9 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)]">
           {userInitial}
         </span>
         {onLogout ? (

@@ -348,7 +348,7 @@ export function WhiteboardCanvas({
 
   return (
     <div
-      className="relative h-full min-h-[560px] overflow-hidden bg-[#f8faf9]"
+      className="relative h-full min-h-[560px] overflow-hidden bg-tone-f8faf9"
       data-testid="whiteboard-canvas"
       onKeyDown={(event) => {
         if (
@@ -369,7 +369,7 @@ export function WhiteboardCanvas({
         >
           {whiteboardTools.map((type) => (
             <button
-              className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+              className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
               key={type}
               onClick={() => addElement(type)}
               title={t(`documents.whiteboard.${type}`)}
@@ -384,7 +384,7 @@ export function WhiteboardCanvas({
           <span className="mx-1 h-7 w-px flex-none bg-[var(--workbench-border)]" />
           <button
             aria-pressed={isMultiSelectEnabled}
-            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
             onClick={() =>
               setIsMultiSelectEnabled((current) => !current)
             }
@@ -397,7 +397,7 @@ export function WhiteboardCanvas({
             </span>
           </button>
           <button
-            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] disabled:cursor-not-allowed disabled:opacity-40"
             disabled={selectedObjectIds.length < 2}
             onClick={createConnector}
             title={t('documents.whiteboard.connector')}
@@ -425,7 +425,7 @@ export function WhiteboardCanvas({
       ) : null}
       {editable && isWorkItemComposerOpen ? (
         <form
-          className="absolute left-1/2 top-20 z-30 grid w-[min(360px,calc(100%-32px))] -translate-x-1/2 gap-3 rounded-xl border border-[var(--workbench-border)] bg-white p-4 shadow-[0_16px_44px_rgba(23,32,29,0.18)]"
+          className="absolute left-1/2 top-20 z-30 grid w-[min(360px,calc(100%-32px))] -translate-x-1/2 gap-3 rounded-xl border border-[var(--workbench-border)] bg-surface p-4 shadow-[0_16px_44px_rgba(23,32,29,0.18)]"
           onSubmit={(event) => {
             event.preventDefault()
             createWorkItemObject()
@@ -599,7 +599,7 @@ export function WhiteboardReadOnly({
   }
 
   return (
-    <div className="mx-auto aspect-[14/9] w-full max-w-[1120px] overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-[#f8faf9] shadow-sm">
+    <div className="mx-auto aspect-[14/9] w-full max-w-[1120px] overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-tone-f8faf9 shadow-sm">
       <WhiteboardSvg
         connectors={normalizedContent.connectors}
         frames={normalizedContent.frames}
@@ -936,15 +936,15 @@ function WhiteboardObjectNode({
       >
         <div className="flex h-full w-full flex-col justify-center overflow-hidden p-4 font-sans">
           {object.type === 'work-item' && workItemPath ? (
-            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-[#0f766e]">
+            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-fg-0f766e">
               {t('documents.whiteboard.work-item')}
             </span>
           ) : null}
-          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-[#17201d]">
+          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-fg-17201d">
             {text}
           </span>
           {object.type === 'work-item' ? (
-            <span className="mt-2 text-xs font-semibold text-[#65716d]">
+            <span className="mt-2 text-xs font-semibold text-fg-65716d">
               {t('documents.whiteboard.openWorkItem')}
             </span>
           ) : null}
@@ -1019,7 +1019,7 @@ function WhiteboardInspector({
             ] as const).map(([key, deltaX, deltaY, glyph]) => (
               <button
                 aria-label={t(`documents.whiteboard.${key}`)}
-                className="grid h-10 place-items-center rounded-md border border-[var(--workbench-border)] bg-white text-sm font-bold text-[var(--workbench-muted)] hover:text-[var(--workbench-primary)]"
+                className="grid h-10 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface text-sm font-bold text-[var(--workbench-muted)] hover:text-[var(--workbench-primary-text)]"
                 key={key}
                 onClick={() => onMoveObject(deltaX, deltaY)}
                 type="button"
@@ -1044,7 +1044,7 @@ function WhiteboardInspector({
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('documents.whiteboard.color')}
             <input
-              className="h-10 w-full rounded-md border border-[var(--workbench-border)] bg-white"
+              className="h-10 w-full rounded-md border border-[var(--workbench-border)] bg-surface"
               onChange={(event) =>
                 onObjectChange({
                   ...object,

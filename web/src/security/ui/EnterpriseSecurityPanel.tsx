@@ -320,7 +320,7 @@ function EnterpriseSecurityPanelContent({
         <h2 className="text-lg font-semibold text-[var(--workbench-text)]">
           {t('security.title')}
         </h2>
-        <p className="text-sm font-semibold text-red-700" role="alert">
+        <p className="text-sm font-semibold text-fg-red-700" role="alert">
           {loadErrorMessage}
         </p>
         <button
@@ -604,7 +604,7 @@ function EnterpriseSecurityPanelContent({
           className="mx-5 mt-5 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3"
           role="alert"
         >
-          <p className="text-sm font-semibold text-amber-900">
+          <p className="text-sm font-semibold text-fg-amber-900">
             {loadErrorMessage} {t('security.error.stale')}
           </p>
           <button
@@ -632,7 +632,7 @@ function EnterpriseSecurityPanelContent({
               aria-selected={selectedTab === tab}
               className={`min-h-10 whitespace-nowrap border-b-2 px-4 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-55 ${
                 selectedTab === tab
-                  ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary)]'
+                  ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary-text)]'
                   : 'border-transparent text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'
               }`}
               data-testid={`security-tab-${tab}`}
@@ -656,7 +656,7 @@ function EnterpriseSecurityPanelContent({
           className="mx-5 mt-5 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3"
           role="alert"
         >
-          <p className="text-sm font-semibold text-red-700">
+          <p className="text-sm font-semibold text-fg-red-700">
             {mutationErrorMessage}
           </p>
           <button

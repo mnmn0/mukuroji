@@ -612,11 +612,11 @@ export function IssueConversationTab({
   return (
     <section
       aria-label={t('collaboration.tabs.conversation')}
-      className={`bg-white ${className}`}
+      className={`bg-surface ${className}`}
       data-testid="issue-conversation-tab"
     >
       {deepLinkExhausted ? (
-        <p className="m-5 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+        <p className="m-5 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-fg-amber-800" role="status">
           {t('collaboration.deepLink.exhausted')}
         </p>
       ) : null}
@@ -662,7 +662,7 @@ export function IssueConversationTab({
             </p>
             <textarea
               aria-label={t('collaboration.composer.label')}
-              className="workbench-input min-h-20 w-full resize-y bg-white px-3 py-2.5 text-sm leading-6"
+              className="workbench-input min-h-20 w-full resize-y bg-surface px-3 py-2.5 text-sm leading-6"
               readOnly
               value={rootDraft.bodyMarkdown}
             />
@@ -680,7 +680,7 @@ export function IssueConversationTab({
           </p>
         )}
         {typingPresence.length > 0 ? (
-          <p className="mt-2 text-xs font-semibold text-[#16766f]" aria-live="polite">
+          <p className="mt-2 text-xs font-semibold text-fg-16766f" aria-live="polite">
             {formatTypingLabel(typingPresence.map((presence) => presence.memberKey), members, t)}
           </p>
         ) : null}
@@ -694,19 +694,19 @@ export function IssueConversationTab({
           key={`retained-draft-${draft === retainedEditDraft ? 'edit' : 'reply'}-${draft.commentId}`}
           role="status"
         >
-          <p className="text-xs font-semibold text-amber-900">
+          <p className="text-xs font-semibold text-fg-amber-900">
             {t('collaboration.composer.targetUnavailable')}
           </p>
           <textarea
             aria-label={t(draft === retainedEditDraft
               ? 'collaboration.edit.label'
               : 'collaboration.reply.label')}
-            className="workbench-input min-h-20 w-full resize-y bg-white px-3 py-2.5 text-sm leading-6"
+            className="workbench-input min-h-20 w-full resize-y bg-surface px-3 py-2.5 text-sm leading-6"
             readOnly
             value={draft.bodyMarkdown}
           />
           <button
-              className="min-h-[44px] justify-self-start rounded px-3 text-xs font-semibold text-amber-900 underline underline-offset-2"
+              className="min-h-[44px] justify-self-start rounded px-3 text-xs font-semibold text-fg-amber-900 underline underline-offset-2"
             onClick={() => draft === retainedEditDraft
               ? handleEditingChange(undefined, true)
               : handleReplyingChange(undefined, true)}
@@ -719,9 +719,9 @@ export function IssueConversationTab({
 
       {controller.hasLoadError ? (
         <div className="mx-5 mt-4 flex items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2.5">
-          <p className="text-sm font-semibold text-red-700">{t('collaboration.error.load')}</p>
+          <p className="text-sm font-semibold text-fg-red-700">{t('collaboration.error.load')}</p>
           <button
-            className="text-xs font-bold text-red-700 underline underline-offset-2"
+            className="text-xs font-bold text-fg-red-700 underline underline-offset-2"
             onClick={() => void controller.refresh()}
             type="button"
           >
@@ -730,7 +730,7 @@ export function IssueConversationTab({
         </div>
       ) : null}
       {controller.hasMutationError ? (
-        <p className="mx-5 mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-red-700" role="alert">
+        <p className="mx-5 mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-semibold text-fg-red-700" role="alert">
           {t(controller.mutationErrorStatus === 409
             ? 'collaboration.error.conflict'
             : 'collaboration.error.mutation')}
@@ -766,8 +766,8 @@ export function IssueConversationTab({
               <article
               className={`overflow-hidden rounded-md border ${
                 thread.root.resolvedAt
-                  ? 'border-[#99d7cf] bg-[#f4fbfa]'
-                  : 'border-[var(--workbench-border)] bg-white'
+                  ? 'border-tone-99d7cf bg-tone-f4fbfa'
+                  : 'border-[var(--workbench-border)] bg-surface'
               }`}
               data-testid={`comment-thread-${thread.root.id}`}
               key={thread.root.id}
@@ -904,7 +904,7 @@ export function IssueConversationTab({
                   </div>
                   {hasResolutionError ? (
                     <p
-                      className="border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700"
+                      className="border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-fg-red-700"
                       role="alert"
                     >
                       {t(
@@ -923,7 +923,7 @@ export function IssueConversationTab({
                 open={threadDetailsOpen}
               >
                 {thread.root.resolvedAt ? (
-                  <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2 border-b border-[#c6e8e3] bg-[#e5f7f4] px-3 py-2 text-xs font-semibold text-[#116b63] marker:hidden">
+                  <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2 border-b border-tone-c6e8e3 bg-tone-e5f7f4 px-3 py-2 text-xs font-semibold text-fg-116b63 marker:hidden">
                     <CheckCircleIcon className="h-4 w-4 fill-none stroke-current stroke-[1.8]" />
                     <span>{t('collaboration.thread.resolved')}</span>
                     <span className="ml-auto text-[0.68rem] text-[var(--workbench-muted)]">
@@ -963,7 +963,7 @@ export function IssueConversationTab({
                 t={t}
               />
               {thread.replies.length > 0 || replyPagination?.hasMore ? (
-                <div className="ml-5 border-l-2 border-[#c6e8e3] bg-[#fbfcfd]">
+                <div className="ml-5 border-l-2 border-tone-c6e8e3 bg-tone-fbfcfd">
                   {thread.replies.map((reply) => (
                     <CommentCard
                       artifacts={artifacts}
@@ -1011,7 +1011,7 @@ export function IssueConversationTab({
                   ))}
                   {replyPagination?.hasMore ? (
                     <button
-                      className="mx-3 mb-3 mt-2 text-xs font-semibold text-[#16766f] underline decoration-[#99d7cf] underline-offset-2 disabled:opacity-60"
+                      className="mx-3 mb-3 mt-2 text-xs font-semibold text-fg-16766f underline decoration-fg-99d7cf underline-offset-2 disabled:opacity-60"
                       disabled={replyPagination.isLoading}
                       onClick={() => void controller.loadMoreReplies(thread.root.id)}
                       type="button"
@@ -1248,7 +1248,7 @@ function CommentCard({
     <div
       className={`min-w-0 p-3 outline-none transition ${
         isReply ? 'border-t border-[var(--workbench-border)] first:border-t-0' : ''
-      } ${focused ? 'bg-[#e5f7f4] ring-2 ring-inset ring-[#72c9bf]' : ''}`}
+      } ${focused ? 'bg-tone-e5f7f4 ring-2 ring-inset ring-tone-72c9bf' : ''}`}
       data-focused={focused || undefined}
       id={createCommentAnchorId(comment.id)}
       tabIndex={-1}
@@ -1261,7 +1261,7 @@ function CommentCard({
               {formatMemberName(author, authorMemberKey)}
             </p>
             {author?.status === 'deactivated' || !author ? (
-              <span className="rounded bg-[#eef2f5] px-1.5 py-0.5 text-[0.65rem] font-semibold text-[var(--workbench-muted)]">
+              <span className="rounded bg-tone-eef2f5 px-1.5 py-0.5 text-[0.65rem] font-semibold text-[var(--workbench-muted)]">
                 {t('collaboration.member.inactive')}
               </span>
             ) : null}
@@ -1287,7 +1287,7 @@ function CommentCard({
           {isEditing && editDraft && isEditDraftWritable(editDraft, controller, readOnlyMessage) ? (
             <div className="mt-2">
               {hasEditConflict ? (
-                <div className="mb-2 grid gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950" role="status">
+                <div className="mb-2 grid gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-fg-amber-950" role="status">
                   <p className="font-semibold">{t('collaboration.error.conflictLatest')}</p>
                   <SafeCommentBody bodyMarkdown={bodyMarkdown} />
                   <button
@@ -1366,7 +1366,7 @@ function CommentCard({
                   <button
                     aria-expanded={isReactionMenuOpen}
                     aria-label={t('collaboration.reaction.add')}
-                    className="grid h-7 w-7 place-items-center rounded-full border border-[var(--workbench-border)] bg-white text-sm text-[var(--workbench-muted)] transition hover:border-[#99d7cf] hover:bg-[#e5f7f4]"
+                    className="grid h-7 w-7 place-items-center rounded-full border border-[var(--workbench-border)] bg-surface text-sm text-[var(--workbench-muted)] transition hover:border-tone-99d7cf hover:bg-tone-e5f7f4"
                     onClick={() => onReactionMenuChange(isReactionMenuOpen ? undefined : comment.id)}
                     type="button"
                   >
@@ -1375,7 +1375,7 @@ function CommentCard({
                   {isReactionMenuOpen ? (
                     <div
                       aria-label={t('collaboration.reaction.menu')}
-                      className="absolute bottom-9 left-0 z-20 flex gap-1 rounded-md border border-[var(--workbench-border)] bg-white p-1.5 shadow-[0_12px_30px_rgba(38,51,63,0.16)]"
+                      className="absolute bottom-9 left-0 z-20 flex gap-1 rounded-md border border-[var(--workbench-border)] bg-surface p-1.5 shadow-[0_12px_30px_rgba(38,51,63,0.16)]"
                       role="menu"
                     >
                       {supportedReactions.map((emoji) => {
@@ -1452,7 +1452,7 @@ function CommentCard({
 
           {isConfirmingDelete ? (
             <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2">
-              <p className="mr-auto text-xs font-semibold text-red-700">{t('collaboration.delete.confirm')}</p>
+              <p className="mr-auto text-xs font-semibold text-fg-red-700">{t('collaboration.delete.confirm')}</p>
               <button
                 className="text-xs font-semibold text-[var(--workbench-muted)]"
                 onClick={() => onDeleteConfirmationChange(undefined)}
@@ -1480,7 +1480,7 @@ function CommentCard({
           ) : null}
 
           {isReplying && replyDraft && isReplyDraftWritable(replyDraft, controller, readOnlyMessage) ? (
-            <div className="mt-3 rounded-md border border-[#c6e8e3] bg-[#f4fbfa] p-3">
+            <div className="mt-3 rounded-md border border-tone-c6e8e3 bg-tone-f4fbfa p-3">
               <CommentComposer
                 draft={replyDraft}
                 externallySubmitting={pendingSlotLifetimes.reply !== undefined}
@@ -1571,10 +1571,10 @@ function AcceptedResolutionSummary({
 
   return (
     <div
-      className="border-b border-[#c6e8e3] border-l-[3px] border-l-[var(--workbench-primary)] bg-[#f4fbfa] px-3 py-3"
+      className="border-b border-tone-c6e8e3 border-l-[3px] border-l-[var(--workbench-primary)] bg-tone-f4fbfa px-3 py-3"
       data-testid="accepted-resolution-summary"
     >
-      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[#116b63]">
+      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-fg-116b63">
         <CheckCircleIcon className="h-4 w-4 fill-none stroke-current stroke-[1.8]" />
         <span>{t('collaboration.resolution.accepted')}</span>
         <time
@@ -1596,7 +1596,7 @@ function AcceptedResolutionSummary({
       </p>
       <div className="mt-1 flex flex-wrap items-center gap-x-3">
         <a
-          className="inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+          className="inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
           href={createResolutionSourcePermalink(resolution)}
           onClick={(event) => {
             event.preventDefault()
@@ -1607,7 +1607,7 @@ function AcceptedResolutionSummary({
         </a>
         {canEdit ? (
           <button
-            className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+            className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
             onClick={(event) => onEdit(event.currentTarget)}
             type="button"
           >
@@ -1617,7 +1617,7 @@ function AcceptedResolutionSummary({
         <button
           aria-controls={createResolutionHistoryPanelId(resolution.sourceRootCommentId)}
           aria-expanded={historyIsOpen}
-          className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+          className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
           id={createResolutionHistoryButtonId(resolution.sourceRootCommentId)}
           onClick={onToggleHistory}
           type="button"
@@ -1635,7 +1635,7 @@ function AcceptedResolutionSummary({
           aria-labelledby={createResolutionHistoryButtonId(
             resolution.sourceRootCommentId,
           )}
-          className="border-t border-[#c6e8e3] pt-1"
+          className="border-t border-tone-c6e8e3 pt-1"
           id={createResolutionHistoryPanelId(resolution.sourceRootCommentId)}
         >
           <h4 className="py-2 text-xs font-semibold text-[var(--workbench-text)]">
@@ -1646,11 +1646,11 @@ function AcceptedResolutionSummary({
               className="flex flex-wrap items-center justify-between gap-3 border-y border-red-200 bg-red-50 py-2"
               role="alert"
             >
-              <p className="text-xs font-semibold text-red-700">
+              <p className="text-xs font-semibold text-fg-red-700">
                 {t('collaboration.resolution.history.error')}
               </p>
               <button
-                className="min-h-[44px] text-xs font-bold text-red-700 underline underline-offset-2"
+                className="min-h-[44px] text-xs font-bold text-fg-red-700 underline underline-offset-2"
                 onClick={() => void onRetryHistory()}
                 type="button"
               >
@@ -1669,7 +1669,7 @@ function AcceptedResolutionSummary({
               {t('collaboration.resolution.history.empty')}
             </p>
           ) : (
-            <ol className="divide-y divide-[#c6e8e3] border-y border-[#c6e8e3]">
+            <ol className="divide-y divide-tone-c6e8e3 border-y border-tone-c6e8e3">
               {priorResolutions.map((item) => (
                 <li className="py-2" key={`${item.id}:${item.state}`}>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1704,7 +1704,7 @@ function AcceptedResolutionSummary({
                     </p>
                   ) : null}
                   <a
-                    className="inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+                    className="inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
                     href={createResolutionSourcePermalink(item)}
                     onClick={(event) => {
                       event.preventDefault()
@@ -1719,7 +1719,7 @@ function AcceptedResolutionSummary({
           )}
           {!history.hasLoadError && !history.isLoading && history.hasMore ? (
             <button
-              className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2 disabled:opacity-60"
+              className="min-h-[44px] text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2 disabled:opacity-60"
               disabled={history.isLoadingMore}
               onClick={() => void onLoadMoreHistory()}
               type="button"
@@ -1758,7 +1758,7 @@ function CapturedResolutionSource({
   t,
 }: CapturedResolutionSourceProps) {
   return (
-    <div className="mt-2 border-l-[3px] border-[#99d7cf] pl-3">
+    <div className="mt-2 border-l-[3px] border-tone-99d7cf pl-3">
       <p className="text-[0.68rem] font-semibold text-[var(--workbench-muted)]">
         {t('collaboration.resolution.capturedReply').replace(
           '{revision}',
@@ -1890,7 +1890,7 @@ function CommentFileAttachments({
         <>
           {canGrantGuestAccess ? (
             <label
-              className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-[var(--workbench-border)] bg-white px-2 text-[0.68rem] font-semibold text-[var(--workbench-muted)]"
+              className="inline-flex min-h-7 items-center gap-1.5 rounded-md border border-[var(--workbench-border)] bg-surface px-2 text-[0.68rem] font-semibold text-[var(--workbench-muted)]"
               htmlFor={`comment-guest-access-${comment.id}`}
             >
               <input
@@ -1905,7 +1905,7 @@ function CommentFileAttachments({
           ) : null}
           <button
             aria-controls={`comment-file-input-${comment.id}`}
-            className="min-h-7 rounded-md px-2 text-[0.68rem] font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4] disabled:opacity-50"
+            className="min-h-7 rounded-md px-2 text-[0.68rem] font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4 disabled:opacity-50"
             disabled={artifacts.isMutating}
             onClick={() => inputRef.current?.click()}
             type="button"
@@ -2127,7 +2127,7 @@ function CommentComposer({
         </ComposerToolButton>
         <button
           aria-pressed={isPreviewing}
-          className="ml-auto min-h-[44px] min-w-[44px] rounded px-2 py-1 text-[0.68rem] font-semibold text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)]"
+          className="ml-auto min-h-[44px] min-w-[44px] rounded px-2 py-1 text-[0.68rem] font-semibold text-[var(--workbench-muted)] transition hover:bg-surface hover:text-[var(--workbench-text)]"
           onClick={() => setIsPreviewing((current) => !current)}
           type="button"
         >
@@ -2135,7 +2135,7 @@ function CommentComposer({
         </button>
       </div>
       {isPreviewing ? (
-        <div className="min-h-20 rounded-md border border-[var(--workbench-border)] bg-white px-3 py-2.5">
+        <div className="min-h-20 rounded-md border border-[var(--workbench-border)] bg-surface px-3 py-2.5">
           {currentBodyMarkdown.trim() ? (
             <SafeCommentBody bodyMarkdown={currentBodyMarkdown} />
           ) : (
@@ -2167,7 +2167,7 @@ function CommentComposer({
           {mentionQuery !== undefined && mentionSuggestions.length > 0 ? (
             <div
               aria-label={t('collaboration.mention.suggestions')}
-              className="absolute inset-x-0 top-full z-20 mt-1 max-h-52 overflow-y-auto rounded-md border border-[var(--workbench-border)] bg-white p-1.5 shadow-[0_12px_30px_rgba(38,51,63,0.16)]"
+              className="absolute inset-x-0 top-full z-20 mt-1 max-h-52 overflow-y-auto rounded-md border border-[var(--workbench-border)] bg-surface p-1.5 shadow-[0_12px_30px_rgba(38,51,63,0.16)]"
               role="listbox"
             >
               {mentionSuggestions.map((member) => (
@@ -2207,7 +2207,7 @@ function CommentComposer({
         </button>
         {onCancel ? (
           <button
-            className="min-h-[44px] rounded px-2.5 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-white"
+            className="min-h-[44px] rounded px-2.5 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-surface"
             onClick={onCancel}
             type="button"
           >
@@ -2251,8 +2251,8 @@ function ReactionButton({
       aria-pressed={reaction.reactedByMe}
       className={`inline-flex h-7 items-center gap-1 rounded-full border px-2 text-xs font-semibold transition ${
         reaction.reactedByMe
-          ? 'border-[#72c9bf] bg-[#e5f7f4] text-[#116b63]'
-          : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:border-[#99d7cf]'
+          ? 'border-tone-72c9bf bg-tone-e5f7f4 text-fg-116b63'
+          : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:border-tone-99d7cf'
       }`}
       disabled={!canReact}
       onClick={() => void controller.toggleReaction(comment, reaction.emoji, reaction.reactedByMe)}
@@ -2286,7 +2286,7 @@ function CommentActionButton({
   return (
     <button
       className={`min-h-11 rounded px-1.5 py-1 text-[0.68rem] font-semibold transition hover:bg-[var(--workbench-surface-muted)] disabled:cursor-not-allowed disabled:opacity-55 ${
-        tone === 'primary' ? 'text-[#16766f]' : 'text-[var(--workbench-muted)]'
+        tone === 'primary' ? 'text-fg-16766f' : 'text-[var(--workbench-muted)]'
       }`}
       disabled={disabled}
       onClick={(event) => onClick(event.currentTarget)}
@@ -2316,7 +2316,7 @@ function ComposerToolButton({
   return (
     <button
       aria-label={label}
-      className="grid min-h-[44px] min-w-[44px] place-items-center rounded px-1.5 text-[0.7rem] font-bold text-[var(--workbench-muted)] transition hover:bg-white hover:text-[var(--workbench-text)]"
+      className="grid min-h-[44px] min-w-[44px] place-items-center rounded px-1.5 text-[0.7rem] font-bold text-[var(--workbench-muted)] transition hover:bg-surface hover:text-[var(--workbench-text)]"
       onClick={onClick}
       title={label}
       type="button"
@@ -2348,7 +2348,7 @@ function MemberAvatar({
   return (
     <span
       aria-label={name}
-      className={`grid flex-none place-items-center rounded-full border border-white bg-[#d9f1ee] font-semibold text-[#116b63] ring-1 ring-[#99d7cf] ${
+      className={`grid flex-none place-items-center rounded-full border border-surface bg-tone-d9f1ee font-semibold text-fg-116b63 ring-1 ring-tone-99d7cf ${
         small ? 'h-6 w-6 text-[0.62rem]' : 'h-8 w-8 text-xs'
       }`}
       title={name}
@@ -2363,10 +2363,10 @@ function CollaborationSkeleton() {
   return (
     <div className="grid gap-3" aria-hidden="true">
       {[0, 1].map((item) => (
-        <div className="motion-safe:animate-pulse rounded-md border border-[var(--workbench-border)] bg-white p-3" key={item}>
-          <div className="h-3 w-32 rounded bg-[#e4e7ec]" />
-          <div className="mt-3 h-3 w-full rounded bg-[#eef1f4]" />
-          <div className="mt-2 h-3 w-3/4 rounded bg-[#eef1f4]" />
+        <div className="motion-safe:animate-pulse rounded-md border border-[var(--workbench-border)] bg-surface p-3" key={item}>
+          <div className="h-3 w-32 rounded bg-tone-e4e7ec" />
+          <div className="mt-3 h-3 w-full rounded bg-tone-eef1f4" />
+          <div className="mt-2 h-3 w-3/4 rounded bg-tone-eef1f4" />
         </div>
       ))}
     </div>

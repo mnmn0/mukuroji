@@ -483,7 +483,7 @@ export function LoginPage({
               />
             ) : challenge ? (
               <>
-                <p className="rounded-lg border border-[#99d7cf] bg-[#e5f7f4] px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary)]">
+                <p className="rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-sm font-semibold leading-6 text-[var(--workbench-primary-text)]">
                   {t('login.challenge.account').replace('{email}', challenge.email)}
                 </p>
 
@@ -491,7 +491,7 @@ export function LoginPage({
                   <label className="w-fit" htmlFor="new-password">
                     {t('login.challenge.newPassword')}
                   </label>
-                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                     <LockIcon />
                     <input
                       autoComplete="new-password"
@@ -512,7 +512,7 @@ export function LoginPage({
                     />
                     <button
                       aria-label={showPassword ? t('login.hidePassword') : t('login.showPassword')}
-                      className="-mr-2 grid h-[38px] w-[38px] cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-[var(--workbench-muted)] outline-none hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] focus-visible:bg-[var(--workbench-surface-muted)] focus-visible:text-[var(--workbench-primary)]"
+                      className="-mr-2 grid h-[38px] w-[38px] cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-[var(--workbench-muted)] outline-none hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:bg-[var(--workbench-surface-muted)] focus-visible:text-[var(--workbench-primary-text)]"
                       type="button"
                       onClick={() => setShowPassword((current) => !current)}
                     >
@@ -528,7 +528,7 @@ export function LoginPage({
                   <label className="w-fit" htmlFor="new-password-confirmation">
                     {t('login.challenge.confirmPassword')}
                   </label>
-                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
+                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
                     <LockIcon />
                     <input
                       autoComplete="new-password"
@@ -553,7 +553,7 @@ export function LoginPage({
                   <span className="relative grid h-6 w-6 place-items-center">
                     <input
                       checked={remember}
-                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-white checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
+                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
                       disabled={isSubmitting}
                       type="checkbox"
                       onChange={(event) => setRemember(event.target.checked)}
@@ -570,15 +570,15 @@ export function LoginPage({
                 </label>
 
                 {errorKey ? (
-                  <p className="m-0 rounded-lg border border-[#ffd2d2] bg-[#fff5f5] px-4 py-3 text-sm font-bold leading-6 text-[#b42318]" role="alert">
+                  <p className="m-0 rounded-lg border border-tone-ffd2d2 bg-tone-fff5f5 px-4 py-3 text-sm font-bold leading-6 text-fg-b42318" role="alert">
                     {t(errorKey)}
                   </p>
                 ) : null}
 
                 {challengeFailed ? (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-left">
-                    <p className="text-sm font-semibold text-amber-900">{t('login.challenge.retryTitle')}</p>
-                    <p className="mt-1 text-sm font-medium leading-6 text-amber-800">{t('login.challenge.retryDescription')}</p>
+                    <p className="text-sm font-semibold text-fg-amber-900">{t('login.challenge.retryTitle')}</p>
+                    <p className="mt-1 text-sm font-medium leading-6 text-fg-amber-800">{t('login.challenge.retryDescription')}</p>
                   </div>
                 ) : null}
 
@@ -591,7 +591,7 @@ export function LoginPage({
                 </button>
 
                 <button
-                  className="justify-self-center text-base font-semibold text-[var(--workbench-primary)] hover:text-[var(--workbench-primary-hover)] hover:underline disabled:opacity-60"
+                  className="justify-self-center text-base font-semibold text-[var(--workbench-primary-text)] hover:text-[var(--workbench-primary-text-hover)] hover:underline disabled:opacity-60"
                   disabled={isSubmitting}
                   type="button"
                   onClick={returnToPasswordLogin}
@@ -606,7 +606,7 @@ export function LoginPage({
                     <label className="w-fit" htmlFor="email">
                       {t('login.email')}
                     </label>
-                    <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+                    <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                       <MailIcon />
                       <input
                         autoComplete="email"
@@ -641,13 +641,13 @@ export function LoginPage({
                       type="email"
                       value={email.trim().toLowerCase()}
                     />
-                    <div className="flex min-w-0 items-center gap-3 rounded-lg border border-[#99d7cf] bg-[#e5f7f4] px-4 py-3">
+                    <div className="flex min-w-0 items-center gap-3 rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3">
                       <MailIcon className="h-5 w-5 shrink-0 fill-none stroke-[var(--workbench-primary)] stroke-2" />
                       <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--workbench-text)]">
                         {email.trim().toLowerCase()}
                       </span>
                       <button
-                        className="shrink-0 cursor-pointer border-0 bg-transparent text-sm font-bold text-[var(--workbench-primary)] hover:underline"
+                        className="shrink-0 cursor-pointer border-0 bg-transparent text-sm font-bold text-[var(--workbench-primary-text)] hover:underline"
                         disabled={isSubmitting}
                         type="button"
                         onClick={returnToEmailDiscovery}
@@ -660,7 +660,7 @@ export function LoginPage({
                       <label className="w-fit" htmlFor="password">
                         {t('login.password')}
                       </label>
-                      <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+                      <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                         <LockIcon />
                         <input
                           autoComplete="current-password"
@@ -684,7 +684,7 @@ export function LoginPage({
                               ? t('login.hidePassword')
                               : t('login.showPassword')
                           }
-                          className="-mr-2 grid h-[38px] w-[38px] cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-[var(--workbench-muted)] outline-none hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] focus-visible:bg-[var(--workbench-surface-muted)] focus-visible:text-[var(--workbench-primary)]"
+                          className="-mr-2 grid h-[38px] w-[38px] cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-[var(--workbench-muted)] outline-none hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:bg-[var(--workbench-surface-muted)] focus-visible:text-[var(--workbench-primary-text)]"
                           type="button"
                           onClick={() => setShowPassword((current) => !current)}
                         >
@@ -699,7 +699,7 @@ export function LoginPage({
                   <span className="relative grid h-6 w-6 place-items-center">
                     <input
                       checked={remember}
-                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-white checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
+                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
                       disabled={isSubmitting}
                       type="checkbox"
                       onChange={(event) => setRemember(event.target.checked)}
@@ -717,7 +717,7 @@ export function LoginPage({
 
                 {errorKey ? (
                   <p
-                    className="m-0 rounded-lg border border-[#ffd2d2] bg-[#fff5f5] px-4 py-3 text-sm font-bold leading-6 text-[#b42318]"
+                    className="m-0 rounded-lg border border-tone-ffd2d2 bg-tone-fff5f5 px-4 py-3 text-sm font-bold leading-6 text-fg-b42318"
                     role="alert"
                   >
                     {t(errorKey)}
@@ -744,7 +744,7 @@ export function LoginPage({
 
                 {loginStep === 'password' ? (
                   <Link
-                    className="justify-self-center text-base font-semibold text-[var(--workbench-primary)] no-underline hover:text-[var(--workbench-primary-hover)] hover:underline focus-visible:text-[var(--workbench-primary-hover)] focus-visible:underline focus-visible:outline-none"
+                    className="justify-self-center text-base font-semibold text-[var(--workbench-primary-text)] no-underline hover:text-[var(--workbench-primary-text-hover)] hover:underline focus-visible:text-[var(--workbench-primary-text-hover)] focus-visible:underline focus-visible:outline-none"
                     to="/forgot-password"
                   >
                     {t('login.forgotPassword')}
@@ -845,11 +845,11 @@ function MfaChallengeForm({
 
   return (
     <>
-      <div className="rounded-lg border border-[#99d7cf] bg-[#e5f7f4] px-4 py-3 text-left">
-        <p className="m-0 text-sm font-bold text-[var(--workbench-primary)]">
+      <div className="rounded-lg border border-tone-99d7cf bg-tone-e5f7f4 px-4 py-3 text-left">
+        <p className="m-0 text-sm font-bold text-[var(--workbench-primary-text)]">
           {t('login.mfa.verifyTitle')}
         </p>
-        <p className="mb-0 mt-1 text-sm font-medium leading-6 text-[#285f59]">
+        <p className="mb-0 mt-1 text-sm font-medium leading-6 text-fg-285f59">
           {deliveryDescription}
         </p>
       </div>
@@ -858,7 +858,7 @@ function MfaChallengeForm({
         <label className="w-fit" htmlFor="mfa-code">
           {t('login.mfa.code')}
         </label>
-        <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-white px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
+        <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
           <LockIcon />
           <input
             aria-describedby={
@@ -895,7 +895,7 @@ function MfaChallengeForm({
         <span className="relative grid h-6 w-6 place-items-center">
           <input
             checked={remember}
-            className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-white checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
+            className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
             disabled={isSubmitting}
             type="checkbox"
             onChange={(event) => onRememberChange(event.target.checked)}
@@ -913,7 +913,7 @@ function MfaChallengeForm({
 
       {errorKey ? (
         <p
-          className="m-0 rounded-lg border border-[#ffd2d2] bg-[#fff5f5] px-4 py-3 text-sm font-bold leading-6 text-[#b42318]"
+          className="m-0 rounded-lg border border-tone-ffd2d2 bg-tone-fff5f5 px-4 py-3 text-sm font-bold leading-6 text-fg-b42318"
           id="mfa-code-error"
           role="alert"
         >
@@ -930,7 +930,7 @@ function MfaChallengeForm({
       </button>
 
       <button
-        className="justify-self-center text-base font-semibold text-[var(--workbench-primary)] hover:text-[var(--workbench-primary-hover)] hover:underline disabled:opacity-60"
+        className="justify-self-center text-base font-semibold text-[var(--workbench-primary-text)] hover:text-[var(--workbench-primary-text-hover)] hover:underline disabled:opacity-60"
         disabled={isSubmitting}
         type="button"
         onClick={onBack}
@@ -1024,7 +1024,7 @@ function FooterLink({
 }: FooterLinkProps) {
   return (
     <Link
-      className="font-medium text-[var(--workbench-muted)] no-underline hover:text-[var(--workbench-primary)] hover:underline focus-visible:text-[var(--workbench-primary)] focus-visible:underline focus-visible:outline-none"
+      className="font-medium text-[var(--workbench-muted)] no-underline hover:text-[var(--workbench-primary-text)] hover:underline focus-visible:text-[var(--workbench-primary-text)] focus-visible:underline focus-visible:outline-none"
       to={to}
     >
       {children}

@@ -479,7 +479,7 @@ export function TaskWorkspace({
       <div className="workbench-toolbar grid gap-2 px-3 py-2">
         <label className="relative block">
           <span className="sr-only">{t('tasks.search')}</span>
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5f6874]" />
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-5f6874" />
           <input
             aria-label={t('tasks.search')}
             className="workbench-input h-9 w-full pl-9 pr-3 placeholder:text-[var(--workbench-muted-soft)] min-[761px]:max-w-sm"
@@ -677,7 +677,7 @@ export function TaskWorkspace({
 
       {taskErrorMessage && activeTab !== 'table' ? (
         <p
-          className="mt-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
+          className="mt-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-fg-red-700"
           data-testid="tasks-error"
           role="alert"
         >
@@ -930,7 +930,7 @@ function FilterMenu({
       {isOpen ? (
         <div
           aria-labelledby={buttonId}
-          className={`absolute ${align === 'right' ? 'right-0' : 'left-0'} z-20 mt-2 rounded-md border border-[#d3d8df] bg-white p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)] ${menuClassName}`}
+          className={`absolute ${align === 'right' ? 'right-0' : 'left-0'} z-20 mt-2 rounded-md border border-tone-d3d8df bg-surface p-1 shadow-[0_12px_24px_rgba(28,40,64,0.12)] ${menuClassName}`}
           id={menuId}
           ref={menuRef}
           role="menu"
@@ -960,8 +960,8 @@ function MenuOption({ checked, label, onClick }: MenuOptionProps) {
       aria-checked={checked}
       className={`flex h-9 w-full items-center justify-between rounded-md px-3 text-left text-sm font-semibold transition ${
         checked
-          ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
-          : 'text-[#1c1d1f] hover:bg-[#f3f4f6]'
+          ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
+          : 'text-fg-1c1d1f hover:bg-tone-f3f4f6'
       }`}
       onClick={onClick}
       role="menuitemradio"
@@ -1011,10 +1011,10 @@ function FilterButton({
       aria-expanded={ariaExpanded}
       aria-haspopup={ariaHaspopup}
       aria-label={label}
-      className={`inline-flex h-9 min-w-[104px] items-center justify-between gap-2 rounded-md border bg-white px-3 text-sm font-semibold transition focus:outline-none focus:ring-4 focus:ring-[#2563eb]/10 ${
+      className={`inline-flex h-9 min-w-[104px] items-center justify-between gap-2 rounded-md border bg-surface px-3 text-sm font-semibold transition focus:outline-none focus:ring-4 focus:ring-tone-2563eb/10 ${
         active
-          ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary)]'
-          : 'border-[var(--workbench-border-strong)] text-[var(--workbench-text)] hover:border-[var(--workbench-primary)] hover:text-[var(--workbench-primary)]'
+          ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary-text)]'
+          : 'border-[var(--workbench-border-strong)] text-[var(--workbench-text)] hover:border-[var(--workbench-primary)] hover:text-[var(--workbench-primary-text)]'
       }`}
       id={id}
       onClick={onClick}

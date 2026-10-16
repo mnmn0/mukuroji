@@ -77,6 +77,7 @@ export function SettingsPage() {
             </>
           ) : undefined}
           fontSizePreference={workspace.fontSizePreference}
+          themePreference={workspace.themePreference}
           locale={workspace.locale}
           notificationSettingsSection={workspace.accessToken ? (
             <NotificationSettingsPanelContainer
@@ -86,6 +87,7 @@ export function SettingsPage() {
             />
           ) : undefined}
           onFontSizePreferenceChange={workspace.onFontSizePreferenceChange}
+          onThemePreferenceChange={workspace.onThemePreferenceChange}
           onLocaleChange={workspace.onLocaleChange}
           t={t}
           userLabel={workspace.userLabel}

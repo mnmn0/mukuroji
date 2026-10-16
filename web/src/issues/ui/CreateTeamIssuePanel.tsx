@@ -194,7 +194,7 @@ export function CreateIssuePanel({
                 </span>
               ) : null}
               {!hasCreatableWorkItemType ? (
-                <span className="text-xs font-semibold text-amber-700">
+                <span className="text-xs font-semibold text-fg-amber-700">
                   {t('tasks.create.noActiveWorkItemTypes')}
                 </span>
               ) : null}
@@ -288,7 +288,7 @@ export function CreateIssuePanel({
           <button className="workbench-button-secondary h-10 px-4" onClick={onCancel} type="button">
             {t('tasks.create.cancel')}
           </button>
-          {errorMessage ? <p className="text-sm font-bold text-red-600">{errorMessage}</p> : null}
+          {errorMessage ? <p className="text-sm font-bold text-fg-red-600">{errorMessage}</p> : null}
         </div>
       </form>
     </section>

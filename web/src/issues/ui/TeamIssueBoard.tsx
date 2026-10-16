@@ -276,7 +276,7 @@ export function IssueBoard({
 
           return (
             <div
-              className={`workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none transition ${dropTargetColumnKey === columnKey ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40' : ''}`}
+              className={`workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none transition ${dropTargetColumnKey === columnKey ? 'border-tone-99d7cf bg-tone-e5f7f4 ring-2 ring-tone-99d7cf/40' : ''}`}
               data-testid={`team-issue-column-${statusTestToken}`}
               key={columnKey}
               onDragLeave={() => setDropTargetColumnKey(undefined)}
@@ -318,7 +318,7 @@ export function IssueBoard({
                   {onCreateIssueOpen && resolveWorkItemTypeDefinition(configuration, workItemTypeId)?.status === 'active' ? (
                     <button
                       aria-label={`${t('tasks.board.addInColumn')}: ${showTypeName ? `${workItemTypeName} · ` : ''}${status.name}`}
-                      className="grid h-7 w-7 place-items-center rounded-md border border-[var(--workbench-border-strong)] bg-white text-lg leading-none text-[var(--workbench-primary)] hover:border-[#99d7cf] hover:bg-[#e5f7f4]"
+                      className="grid h-7 w-7 place-items-center rounded-md border border-[var(--workbench-border-strong)] bg-surface text-lg leading-none text-[var(--workbench-primary-text)] hover:border-tone-99d7cf hover:bg-tone-e5f7f4"
                       data-testid={`team-issue-add-${statusTestToken}`}
                       disabled={isAiOperationPending}
                       onClick={() => onCreateIssueOpen(status.id, workItemTypeId)}
@@ -376,11 +376,11 @@ export function IssueBoard({
                         aria-grabbed={draggedIssueId === issue.id || undefined}
                         className={`rounded-lg border ${cardPadding} text-left transition ${
                           selectedIssueId === issue.id
-                            ? 'border-[#99d7cf] bg-[#e5f7f4]'
-                            : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
+                            ? 'border-tone-99d7cf bg-tone-e5f7f4'
+                            : 'border-[var(--workbench-border)] bg-surface hover:border-tone-99d7cf hover:bg-[var(--workbench-surface-muted)]'
                         } ${selectedForAction ? 'bg-blue-50/70' : ''} ${
                           focusedForAction ? 'ring-2 ring-blue-500/40' : ''
-                        } ${draggedIssueId === issue.id ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
+                        } ${draggedIssueId === issue.id ? 'opacity-50 ring-2 ring-tone-99d7cf' : ''} ${isMoving ? 'opacity-70' : ''}`}
                         data-task-view-focused={focusedForAction ? 'true' : 'false'}
                         data-task-view-selected={selectedForAction ? 'true' : 'false'}
                         data-testid={`team-issue-card-${issue.id}`}
@@ -404,7 +404,7 @@ export function IssueBoard({
                         <div className="flex min-w-0 items-start gap-2">
                           <button
                             aria-pressed={selectedForAction || selectedIssueId === issue.id}
-                            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:cursor-default disabled:text-[var(--workbench-text)] ${
+                            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary-text)] disabled:cursor-default disabled:text-[var(--workbench-text)] ${
                               wrapText ? 'whitespace-normal break-words' : 'truncate'
                             }`}
                             disabled={isAiOperationPending || !onOpenIssue}
@@ -416,7 +416,7 @@ export function IssueBoard({
                           {onIssueActionMenuOpen ? (
                             <button
                               aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
-                              className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                              className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] max-[640px]:h-11 max-[640px]:w-11"
                               data-testid={`team-issue-card-actions-${issue.id}`}
                               disabled={isAiOperationPending}
                               onClick={(event) => {

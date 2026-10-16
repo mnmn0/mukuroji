@@ -346,11 +346,11 @@ export function CreateTaskPanel({
         <fieldset className="contents" disabled={isSubmitPending}>
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] pb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-3">
-            <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-white p-1">
+            <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-surface p-1">
               {quickCaptureAllowed && !hasDetailedScheduleContext ? (
                 <button
                   aria-pressed={effectiveMode === 'quick'}
-                  className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+                  className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]' : 'text-[var(--workbench-muted)]'}`}
                   onClick={() => {
                     setMode('quick')
                   }}
@@ -361,7 +361,7 @@ export function CreateTaskPanel({
               ) : null}
               <button
                 aria-pressed={effectiveMode === 'detailed'}
-                className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'detailed' ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-muted)]'}`}
+                className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'detailed' ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]' : 'text-[var(--workbench-muted)]'}`}
                 onClick={() => {
                   setMode('detailed')
                   setFieldErrors((currentErrors) => {
@@ -390,7 +390,7 @@ export function CreateTaskPanel({
           ) : null}
         </div>
         {configuration ? (
-          <label className="grid max-w-[360px] gap-1.5 text-sm font-semibold text-[#505967]">
+          <label className="grid max-w-[360px] gap-1.5 text-sm font-semibold text-fg-505967">
             {t('tasks.create.workItemType')}
             <select
               className="workbench-input h-10 px-3"
@@ -416,7 +416,7 @@ export function CreateTaskPanel({
               </span>
             ) : null}
             {!hasCreatableWorkItemType ? (
-              <span className="text-xs font-semibold text-amber-700">
+              <span className="text-xs font-semibold text-fg-amber-700">
                 {t('tasks.create.noActiveWorkItemTypes')}
               </span>
             ) : null}
@@ -424,7 +424,7 @@ export function CreateTaskPanel({
         ) : null}
         {effectiveMode === 'quick' ? (
           <div className="grid gap-3">
-            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.create.title')}
               <input
                 autoFocus
@@ -439,7 +439,7 @@ export function CreateTaskPanel({
             <p className="text-sm font-medium text-[var(--workbench-muted)]">
               {t('tasks.create.quickDescription')}
             </p>
-            <label className="grid max-w-[420px] gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid max-w-[420px] gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.create.assignee')}
               <select
                 aria-describedby={hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading
@@ -466,17 +466,17 @@ export function CreateTaskPanel({
                 ))}
               </select>
               {hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading ? (
-                <span className="text-xs font-semibold text-amber-700" id="create-task-assignee-context-error" role="alert">
+                <span className="text-xs font-semibold text-fg-amber-700" id="create-task-assignee-context-error" role="alert">
                   {t('tasks.create.assigneeContextInvalid')}
                 </span>
               ) : null}
               {fieldErrors.assignee ? (
-                <span className="text-xs font-semibold text-red-700" id="create-task-assignee-error" role="alert">
+                <span className="text-xs font-semibold text-fg-red-700" id="create-task-assignee-error" role="alert">
                   {fieldErrors.assignee}
                 </span>
               ) : null}
             </label>
-            <label className="grid max-w-[220px] gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid max-w-[220px] gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.column.dueDate')}
               <input
                 className="workbench-input h-10 px-3"
@@ -499,7 +499,7 @@ export function CreateTaskPanel({
             </label>
             <div className="flex items-center gap-2">
               <button
-                className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
+                className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-tone-b5bdc9 disabled:bg-tone-b5bdc9"
                 disabled={isSubmitPending || isSubmissionDisabled || !hasCreatableWorkItemType || isAssigneeOptionsLoading || Boolean(assigneeErrorMessage) || assigneeOptions.length === 0}
                 type="submit"
               >
@@ -518,7 +518,7 @@ export function CreateTaskPanel({
         ) : null}
         {effectiveMode === 'detailed' ? (
           <div className="grid grid-cols-[minmax(220px,1.4fr)_minmax(180px,0.9fr)_150px_150px_auto] gap-3 max-[1180px]:grid-cols-2 max-[720px]:grid-cols-1">
-            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.create.title')}
               <input
                 className="workbench-input h-10 px-3"
@@ -529,7 +529,7 @@ export function CreateTaskPanel({
                 value={title}
               />
             </label>
-            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.create.assignee')}
               <select
                 aria-describedby={hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading
@@ -556,12 +556,12 @@ export function CreateTaskPanel({
                 ))}
               </select>
               {hasInvalidContextAssignee && !hasSelectedAssignee && !isAssigneeOptionsLoading ? (
-                <span className="text-xs font-semibold text-amber-700" id="create-task-assignee-context-error" role="alert">
+                <span className="text-xs font-semibold text-fg-amber-700" id="create-task-assignee-context-error" role="alert">
                   {t('tasks.create.assigneeContextInvalid')}
                 </span>
               ) : null}
             </label>
-            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.column.status')}
               <select
                 className="workbench-input h-10 px-3"
@@ -577,7 +577,7 @@ export function CreateTaskPanel({
                 ))}
               </select>
             </label>
-            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.column.priority')}
               <select
                 className="workbench-input h-10 px-3"
@@ -594,7 +594,7 @@ export function CreateTaskPanel({
             </label>
             <div className="flex items-end gap-2">
               <button
-                className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-[#b5bdc9] disabled:bg-[#b5bdc9]"
+                className="workbench-button-primary min-h-11 px-4 disabled:cursor-not-allowed disabled:border-tone-b5bdc9 disabled:bg-tone-b5bdc9"
                 disabled={
                   isSubmitPending ||
                   isSubmissionDisabled ||
@@ -622,11 +622,11 @@ export function CreateTaskPanel({
           className={`workbench-panel-muted grid gap-3 p-4 ${effectiveMode === 'quick' ? 'hidden' : ''}`}
           disabled={effectiveMode !== 'detailed'}
         >
-          <legend className="px-1 text-sm font-semibold text-[#505967]">
+          <legend className="px-1 text-sm font-semibold text-fg-505967">
             {t('tasks.schedule.title')}
           </legend>
           <div className="grid grid-cols-[180px_repeat(3,minmax(150px,1fr))] gap-3 max-[900px]:grid-cols-2 max-[640px]:grid-cols-1">
-            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.schedule.mode')}
               <select
                 className="workbench-input h-10 px-3"
@@ -672,7 +672,7 @@ export function CreateTaskPanel({
               onChange={(event) => setScheduleMilestoneDate(event.target.value)}
               value={scheduleMilestoneDate}
             />
-            <label className="grid gap-1.5 text-sm font-semibold text-[#505967]">
+            <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
               {t('tasks.schedule.effortMinutes')}
               <input
                 className="workbench-input h-10 px-3"
@@ -685,7 +685,7 @@ export function CreateTaskPanel({
             </label>
           </div>
           {fieldErrors.schedule ? (
-            <p className="text-sm font-semibold text-red-700" role="alert">
+            <p className="text-sm font-semibold text-fg-red-700" role="alert">
               {fieldErrors.schedule}
             </p>
           ) : null}
@@ -706,20 +706,20 @@ export function CreateTaskPanel({
         {(isSubmissionDisabled
           ? errorMessage ?? t('tasks.create.permissionUnavailable')
           : fieldErrors.submit ?? fieldErrors.mode ?? errorMessage) ? (
-          <p className="text-sm font-semibold text-red-700" role="alert">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
             {isSubmissionDisabled
               ? errorMessage ?? t('tasks.create.permissionUnavailable')
               : fieldErrors.submit ?? fieldErrors.mode ?? errorMessage}
           </p>
         ) : null}
         {isAssigneeOptionsLoading ? (
-          <p className="text-sm font-medium text-[#5f6874]">{t('tasks.create.assigneeLoading')}</p>
+          <p className="text-sm font-medium text-fg-5f6874">{t('tasks.create.assigneeLoading')}</p>
         ) : null}
         {assigneeErrorMessage ? (
-          <p className="text-sm font-semibold text-red-700">{assigneeErrorMessage}</p>
+          <p className="text-sm font-semibold text-fg-red-700">{assigneeErrorMessage}</p>
         ) : null}
         {!isAssigneeOptionsLoading && !assigneeErrorMessage && assigneeOptions.length === 0 ? (
-          <p className="text-sm font-medium text-[#5f6874]">{t('tasks.create.assigneeEmpty')}</p>
+          <p className="text-sm font-medium text-fg-5f6874">{t('tasks.create.assigneeEmpty')}</p>
         ) : null}
         </fieldset>
       </form>
@@ -751,7 +751,7 @@ type ScheduleDateInputProps = {
  */
 function ScheduleDateInput({ disabled = false, hidden = false, label, name, onChange, value }: ScheduleDateInputProps) {
   return (
-    <label className={`grid gap-1.5 text-sm font-semibold text-[#505967] ${hidden ? 'hidden' : ''}`}>
+    <label className={`grid gap-1.5 text-sm font-semibold text-fg-505967 ${hidden ? 'hidden' : ''}`}>
       {label}
       <input
         className="workbench-input h-10 px-3"

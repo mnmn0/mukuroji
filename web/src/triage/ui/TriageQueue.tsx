@@ -165,7 +165,7 @@ export function TriageQueue({
   return (
     <section
       aria-label={t('triage.queue.aria')}
-      className="min-w-0 border-r border-[var(--workbench-border)] bg-white max-[860px]:border-r-0"
+      className="min-w-0 border-r border-[var(--workbench-border)] bg-surface max-[860px]:border-r-0"
       data-testid="triage-queue"
     >
       <div className="border-b border-[var(--workbench-border)] p-4">
@@ -182,7 +182,7 @@ export function TriageQueue({
             <input
               aria-label={t('triage.bulk.selectVisible')}
               checked={allVisibleSelected}
-              className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
+              className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary-text)]"
               disabled={isAiOperationPending || selectableEntries.length === 0}
               onChange={(event) => {
                 const ids = event.target.checked
@@ -298,7 +298,7 @@ export function TriageQueue({
         <QueueSkeleton label={t('triage.queue.loading')} />
       ) : errorMessage ? (
         <div className="grid justify-items-start gap-3 p-5" role="alert">
-          <p className="text-sm font-semibold text-red-700">{errorMessage}</p>
+          <p className="text-sm font-semibold text-fg-red-700">{errorMessage}</p>
           {onRetry ? (
             <button className="workbench-button-secondary min-h-10 px-4" disabled={isAiOperationPending} onClick={onRetry} type="button">
               {t('triage.queue.retry')}
@@ -315,7 +315,7 @@ export function TriageQueue({
             </p>
             {hasActiveFilters(filters) ? (
               <button
-                className="mt-3 min-h-10 px-3 text-sm font-semibold text-[var(--workbench-primary)]"
+                className="mt-3 min-h-10 px-3 text-sm font-semibold text-[var(--workbench-primary-text)]"
                 disabled={isAiOperationPending}
                 onClick={() => onFiltersChange({ owner: 'all' })}
                 type="button"
@@ -340,7 +340,7 @@ export function TriageQueue({
             const isBulkSelectable = canBulkAct(view, allowedBulkActions)
             return (
               <li
-                className={isSelected ? 'bg-[#effaf8]' : 'bg-white hover:bg-slate-50'}
+                className={isSelected ? 'bg-tone-effaf8' : 'bg-surface hover:bg-slate-50'}
                 key={entry.id}
               >
                 <div className="flex items-start gap-2 px-3 py-3">
@@ -350,7 +350,7 @@ export function TriageQueue({
                     </span>
                     <input
                       checked={selectedIdSet.has(entry.id)}
-                      className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
+                      className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary-text)]"
                       disabled={isAiOperationPending || !isBulkSelectable ||
                         (!selectedIdSet.has(entry.id) && selectedIdSet.size >= TRIAGE_BULK_ACTION_LIMIT)}
                       onChange={(event) => onEntrySelectionChange(entry.id, event.target.checked)}
@@ -374,7 +374,7 @@ export function TriageQueue({
                     type="button"
                   >
                     <div className="flex items-start gap-3">
-                      <span className="grid h-9 w-9 flex-none place-items-center rounded-md border border-teal-100 bg-teal-50 text-[var(--workbench-primary)]">
+                      <span className="grid h-9 w-9 flex-none place-items-center rounded-md border border-teal-100 bg-teal-50 text-[var(--workbench-primary-text)]">
                         <TriageSourceIcon className="h-5 w-5 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]" source={entry.source.kind} />
                       </span>
                       <span className="min-w-0 flex-1">
@@ -410,7 +410,7 @@ export function TriageQueue({
                           ) : null}
                         </span>
                         {entry.capabilities.canViewInternalContext && view.routingCandidate ? (
-                          <span className="mt-2 block truncate text-xs font-medium text-slate-500">
+                          <span className="mt-2 block truncate text-xs font-medium text-fg-slate-500">
                             {view.routingCandidate.teamId}
                             {view.routingCandidate.projectId ? ` / ${view.routingCandidate.projectId}` : ''}
                           </span>
@@ -452,7 +452,7 @@ function QueueMetric({ alert = false, label, value }: {
 }) {
   return (
     <div className={`border-l-2 pl-2 ${alert && value > 0 ? 'border-red-400' : 'border-teal-300'}`}>
-      <strong className={`block text-lg ${alert && value > 0 ? 'text-red-700' : 'text-[var(--workbench-text)]'}`}>{value}</strong>
+      <strong className={`block text-lg ${alert && value > 0 ? 'text-fg-red-700' : 'text-[var(--workbench-text)]'}`}>{value}</strong>
       <span className="block truncate text-[11px] font-semibold text-[var(--workbench-muted)]">{label}</span>
     </div>
   )
@@ -517,7 +517,7 @@ function SlaLabel({ state, t }: {
   t: (key: MessageKey) => string
 }) {
   return (
-    <span className={`inline-flex items-center gap-1 ${state === 'breached' ? 'text-red-700' : state === 'due-soon' ? 'text-amber-700' : ''}`}>
+    <span className={`inline-flex items-center gap-1 ${state === 'breached' ? 'text-fg-red-700' : state === 'due-soon' ? 'text-fg-amber-700' : ''}`}>
       <ClockIcon className="h-3.5 w-3.5 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]" />
       {t(slaLabelKeys[state])}
     </span>

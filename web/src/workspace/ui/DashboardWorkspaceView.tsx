@@ -54,19 +54,19 @@ export type DashboardWorkspaceViewProps = {
 
 /** Existing badge tokens used for update-delivery freshness. */
 const updateStateClassNames: Record<PlanningUpdateState, string> = {
-  'not-configured': 'border-slate-200 bg-slate-50 text-slate-600',
-  missing: 'border-slate-300 bg-white text-slate-700',
-  current: 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  stale: 'border-amber-200 bg-amber-50 text-amber-800',
-  overdue: 'border-red-200 bg-red-50 text-red-700',
+  'not-configured': 'border-slate-200 bg-slate-50 text-fg-slate-600',
+  missing: 'border-slate-300 bg-surface text-fg-slate-700',
+  current: 'border-emerald-200 bg-emerald-50 text-fg-emerald-700',
+  stale: 'border-amber-200 bg-amber-50 text-fg-amber-800',
+  overdue: 'border-red-200 bg-red-50 text-fg-red-700',
 }
 
 /** Existing badge tokens used for reported health. */
 const updateHealthClassNames: Record<PlanningHealth, string> = {
-  unknown: 'border-slate-200 bg-slate-50 text-slate-600',
-  'on-track': 'border-emerald-200 bg-emerald-50 text-emerald-700',
-  'at-risk': 'border-amber-200 bg-amber-50 text-amber-800',
-  'off-track': 'border-red-200 bg-red-50 text-red-700',
+  unknown: 'border-slate-200 bg-slate-50 text-fg-slate-600',
+  'on-track': 'border-emerald-200 bg-emerald-50 text-fg-emerald-700',
+  'at-risk': 'border-amber-200 bg-amber-50 text-fg-amber-800',
+  'off-track': 'border-red-200 bg-red-50 text-fg-red-700',
 }
 
 /** Translation keys for Planning update freshness on the dashboard. */
@@ -183,7 +183,7 @@ export function DashboardWorkspaceView({
 
       {planningUpdatesErrorMessage ? (
         <p
-          className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800"
+          className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800"
           role="status"
         >
           {planningUpdatesErrorMessage}
@@ -248,7 +248,7 @@ export function DashboardWorkspaceView({
                       >
                         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                           {planningUpdatesUnavailable ? (
-                            <span className="inline-flex whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                            <span className="inline-flex whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-fg-amber-800">
                               {t('workspace.planningUpdate.unavailable')}
                             </span>
                           ) : (
@@ -298,7 +298,7 @@ export function DashboardWorkspaceView({
                     <td className="px-5 py-4 max-[760px]:hidden">{t(resolvePortfolioRiskMessageKey(project.risk))}</td>
                     <td className="px-5 py-4 max-[760px]:hidden">
                       {planningUpdatesUnavailable ? (
-                        <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                        <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-fg-amber-800">
                           {t('workspace.planningUpdate.unavailable')}
                         </span>
                       ) : (
@@ -309,7 +309,7 @@ export function DashboardWorkspaceView({
                     </td>
                     <td className="px-5 py-4 max-[760px]:hidden">
                       {planningUpdatesUnavailable ? (
-                        <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                        <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-fg-amber-800">
                           {t('workspace.planningUpdate.unavailable')}
                         </span>
                       ) : (

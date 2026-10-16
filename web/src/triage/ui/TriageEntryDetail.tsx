@@ -304,12 +304,12 @@ export function TriageEntryDetail({
 
   if (!view) {
     return (
-      <aside className="grid min-h-[520px] place-items-center bg-white p-8 text-center" data-testid="triage-detail-empty">
+      <aside className="grid min-h-[520px] place-items-center bg-surface p-8 text-center" data-testid="triage-detail-empty">
         <div>
           <p className="text-sm font-semibold text-[var(--workbench-text)]">{t('triage.detail.empty')}</p>
           {errorMessage ? (
             <div className="mt-4 grid justify-items-center gap-3" role="alert">
-              <p className="text-sm font-semibold text-red-700">{errorMessage}</p>
+              <p className="text-sm font-semibold text-fg-red-700">{errorMessage}</p>
               {onRetry ? (
                 <button className="workbench-button-secondary min-h-10 px-4" onClick={onRetry} type="button">
                   {t('triage.detail.retry')}
@@ -438,13 +438,13 @@ export function TriageEntryDetail({
   return (
     <aside
       aria-label={t('triage.detail.aria')}
-      className="min-w-0 bg-white"
+      className="min-w-0 bg-surface"
       data-testid="triage-entry-detail"
       onKeyDown={handleKeyDown}
     >
-      <div className="sticky top-0 z-10 border-b border-[var(--workbench-border)] bg-white px-5 py-4 max-[860px]:px-4">
+      <div className="sticky top-0 z-10 border-b border-[var(--workbench-border)] bg-surface px-5 py-4 max-[860px]:px-4">
         <button
-          className="mb-3 hidden min-h-10 items-center gap-2 text-sm font-semibold text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:opacity-50 max-[860px]:inline-flex"
+          className="mb-3 hidden min-h-10 items-center gap-2 text-sm font-semibold text-[var(--workbench-primary-text)] disabled:cursor-not-allowed disabled:opacity-50 max-[860px]:inline-flex"
           onClick={onBack}
           disabled={actionIsPending}
           type="button"
@@ -490,7 +490,7 @@ export function TriageEntryDetail({
           {actionAnnouncement}
         </p>
         {errorMessage || actionError ? (
-          <p className="border-l-2 border-red-400 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700" role="alert">
+          <p className="border-l-2 border-red-400 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
             {errorMessage ?? t('triage.action.error')}
           </p>
         ) : null}
@@ -504,7 +504,7 @@ export function TriageEntryDetail({
                 {view.body || t('triage.detail.sourceBodyEmpty')}
               </p>
               {entry.sourcePreview.sanitized || entry.sourcePreview.truncated ? (
-                <p className="mt-3 text-xs font-semibold text-amber-700">
+                <p className="mt-3 text-xs font-semibold text-fg-amber-700">
                   {entry.sourcePreview.sanitized && entry.sourcePreview.truncated
                     ? t('triage.detail.sanitizedAndTruncated')
                     : entry.sourcePreview.sanitized
@@ -578,7 +578,7 @@ export function TriageEntryDetail({
           </dl>
           {entry.permission.visibility !== 'denied' && entry.sourcePreview.permalink ? (
             <a
-              className="mt-4 inline-flex min-h-10 items-center text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+              className="mt-4 inline-flex min-h-10 items-center text-sm font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
               href={entry.sourcePreview.permalink}
               rel="noreferrer noopener"
               target="_blank"
@@ -680,7 +680,7 @@ export function TriageEntryDetail({
               </p>
             ) : customerOptionsErrorMessage ? (
               <div className="grid gap-3 border-l-2 border-red-400 bg-red-50 px-3 py-2" role="alert">
-                <p className="text-sm font-semibold text-red-700">{customerOptionsErrorMessage}</p>
+                <p className="text-sm font-semibold text-fg-red-700">{customerOptionsErrorMessage}</p>
                 {onRetryCustomerOptions ? (
                   <button
                     className="workbench-button-secondary min-h-9 w-fit px-3"
@@ -737,7 +737,7 @@ export function TriageEntryDetail({
                   </select>
                 </label>
                 {customerRequestError ? (
-                  <p className="border-l-2 border-red-400 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700" role="alert">
+                  <p className="border-l-2 border-red-400 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
                     {t('triage.customerRequest.error')}
                   </p>
                 ) : null}
@@ -889,7 +889,7 @@ export function TriageEntryDetail({
                           {t('tasks.detail.loading')}
                         </span>
                       ) : !hasCreatableWorkItemType ? (
-                        <span className="text-xs font-semibold text-amber-700">
+                        <span className="text-xs font-semibold text-fg-amber-700">
                           {t('tasks.create.noActiveWorkItemTypes')}
                         </span>
                       ) : null}
@@ -1090,7 +1090,7 @@ function ActionButton({ disabled = false, label, mode, onActivate, primary = fal
 /** Renders the stable loading skeleton for a selected entry. */
 function DetailSkeleton({ label }: { label: string }) {
   return (
-    <aside aria-label={label} className="animate-pulse bg-white p-6 motion-reduce:animate-none" role="status">
+    <aside aria-label={label} className="animate-pulse bg-surface p-6 motion-reduce:animate-none" role="status">
       <div className="h-4 w-24 rounded bg-slate-200" />
       <div className="mt-4 h-7 w-3/4 rounded bg-slate-200" />
       <div className="mt-8 h-36 rounded bg-slate-100" />
@@ -1191,8 +1191,8 @@ function stateTone(state: TriageEntryState) {
 /** Resolves selected and unselected accept-mode button styles. */
 function modeButtonClass(active: boolean) {
   return `min-h-10 rounded-md border px-4 text-sm font-semibold ${active
-    ? 'border-[var(--workbench-primary)] bg-teal-50 text-[var(--workbench-primary)]'
-    : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-text)]'}`
+    ? 'border-[var(--workbench-primary)] bg-teal-50 text-[var(--workbench-primary-text)]'
+    : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-text)]'}`
 }
 
 /** Keeps Customer Request importance inside the supported contract values. */

@@ -479,7 +479,7 @@ export function WorkspaceCommandMenu({
       <section
         aria-label={t('command.aria')}
         aria-modal="true"
-        className="flex max-h-[min(720px,calc(100dvh-24px))] w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-white shadow-[0_28px_90px_rgba(15,23,42,0.3)] max-[520px]:max-h-[calc(100dvh-24px)]"
+        className="flex max-h-[min(720px,calc(100dvh-24px))] w-full max-w-[640px] flex-col overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-surface shadow-[0_28px_90px_rgba(15,23,42,0.3)] max-[520px]:max-h-[calc(100dvh-24px)]"
         data-testid="workspace-command-menu"
         onKeyDown={handleDialogKeyDown}
         onMouseDown={(event) => event.stopPropagation()}
@@ -551,7 +551,7 @@ export function WorkspaceCommandMenu({
                         isDisabled
                           ? 'cursor-not-allowed bg-[var(--workbench-surface-muted)] text-[var(--workbench-muted)]'
                           : isActive
-                            ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+                            ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
                             : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
                       }`}
                       data-command-index={currentIndex}
@@ -581,7 +581,7 @@ export function WorkspaceCommandMenu({
                         ) : null}
                         {disabledReason ? (
                           <span
-                            className="mt-0.5 block text-xs font-semibold text-amber-700"
+                            className="mt-0.5 block text-xs font-semibold text-fg-amber-700"
                             id={disabledReasonId}
                           >
                             {disabledReason}
@@ -608,7 +608,7 @@ export function WorkspaceCommandMenu({
             </p>
           ) : null}
           {errorMessage && errorQuery === normalizedQuery ? (
-            <p className="m-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+            <p className="m-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
               {t('command.error')}
             </p>
           ) : null}

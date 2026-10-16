@@ -299,11 +299,11 @@ export function FilePreviewDialog({
       role="dialog"
       tabIndex={-1}
     >
-      <div className="grid min-h-0 w-full grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-xl border border-white/15 bg-[#101615] shadow-2xl">
+      <div className="grid min-h-0 w-full grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-xl border border-white/15 bg-tone-101615 shadow-2xl">
         <header className="flex min-w-0 flex-wrap items-center justify-between gap-3 border-b border-white/10 px-4 py-3 text-white">
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">{file.name}</p>
-            <p className="mt-0.5 text-xs text-slate-300">
+            <p className="mt-0.5 text-xs text-fg-slate-300">
               {t('files.version.label').replace('{number}', String(selectedVersion.number))}
             </p>
           </div>
@@ -325,7 +325,7 @@ export function FilePreviewDialog({
               value={selectedVersion.id}
             >
               {file.versions.map((version) => (
-                <option className="text-slate-950" key={version.id} value={version.id}>
+                <option className="text-fg-slate-950" key={version.id} value={version.id}>
                   {t('files.version.label').replace('{number}', String(version.number))} · {version.fileName}
                 </option>
               ))}
@@ -368,13 +368,13 @@ export function FilePreviewDialog({
         </header>
 
         <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_340px] max-[880px]:grid-cols-1 max-[880px]:grid-rows-[minmax(360px,1fr)_minmax(260px,0.7fr)]">
-          <div className="relative grid min-h-0 place-items-center overflow-hidden bg-[#080c0b] p-3">
+          <div className="relative grid min-h-0 place-items-center overflow-hidden bg-tone-080c0b p-3">
             {isLoading ? (
-              <p className="text-sm font-semibold text-slate-300">{t('files.preview.loading')}</p>
+              <p className="text-sm font-semibold text-fg-slate-300">{t('files.preview.loading')}</p>
             ) : selectedVersion.scanStatus !== 'available' ? (
               <PreviewUnavailable status={selectedVersion.scanStatus} t={t} />
             ) : loadFailed || !previewUrl ? (
-              <p className="text-sm font-semibold text-red-300">{t('files.preview.error')}</p>
+              <p className="text-sm font-semibold text-fg-red-300">{t('files.preview.error')}</p>
             ) : (
               <PreviewMedia
                 annotations={annotations}
@@ -391,7 +391,7 @@ export function FilePreviewDialog({
             )}
           </div>
 
-          <aside className="min-h-0 overflow-y-auto border-l border-white/10 bg-white p-4 max-[880px]:border-l-0 max-[880px]:border-t">
+          <aside className="min-h-0 overflow-y-auto border-l border-white/10 bg-surface p-4 max-[880px]:border-l-0 max-[880px]:border-t">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-sm font-semibold text-[var(--workbench-text)]">{t('files.annotation.title')}</h2>
               <span className="workbench-badge">{annotations.length}</span>
@@ -437,7 +437,7 @@ export function FilePreviewDialog({
                   </button>
                 </div>
                 {saveFailed ? (
-                  <p className="text-xs font-semibold text-red-700" role="alert">
+                  <p className="text-xs font-semibold text-fg-red-700" role="alert">
                     {t('files.error.request')}
                   </p>
                 ) : null}
@@ -448,7 +448,7 @@ export function FilePreviewDialog({
                 {selectedVersion.previewKind !== 'pdf' &&
                 selectedVersion.scanStatus === 'available' ? (
                   <button
-                    className="mt-2 text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+                    className="mt-2 text-xs font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
                     onClick={() => createAnchorAt(0.5, 0.5)}
                     type="button"
                   >
@@ -459,9 +459,9 @@ export function FilePreviewDialog({
             ) : null}
             <ol className="mt-4 grid gap-3">
               {annotations.map((annotation, index) => (
-                <li className="rounded-lg border border-[var(--workbench-border)] bg-white p-3" key={annotation.id}>
+                <li className="rounded-lg border border-[var(--workbench-border)] bg-surface p-3" key={annotation.id}>
                   <div className="flex items-start gap-2">
-                    <span className="grid h-6 w-6 flex-none place-items-center rounded-full bg-[#0f766e] text-[0.65rem] font-bold text-white">
+                    <span className="grid h-6 w-6 flex-none place-items-center rounded-full bg-tone-0f766e text-[0.65rem] font-bold text-white">
                       {index + 1}
                     </span>
                     <div className="min-w-0 flex-1">
@@ -542,7 +542,7 @@ function PreviewMedia({
     )
   }
 
-  return <p className="text-sm font-semibold text-slate-300">{fileName}</p>
+  return <p className="text-sm font-semibold text-fg-slate-300">{fileName}</p>
 }
 
 function ContainedMediaPreview({
@@ -716,11 +716,11 @@ function PdfPreview({
   }, [url])
 
   if (loadState === 'loading') {
-    return <p className="text-sm font-semibold text-slate-300">{t('files.preview.loading')}</p>
+    return <p className="text-sm font-semibold text-fg-slate-300">{t('files.preview.loading')}</p>
   }
 
   if (loadState === 'error' || !document) {
-    return <p className="text-sm font-semibold text-red-300">{t('files.preview.error')}</p>
+    return <p className="text-sm font-semibold text-fg-red-300">{t('files.preview.error')}</p>
   }
 
   return (
@@ -901,11 +901,11 @@ function PdfPage({
   return (
     <div className="w-full" ref={containerRef}>
       <div
-        className="group relative mx-auto overflow-hidden bg-white shadow-xl"
+        className="group relative mx-auto overflow-hidden bg-surface shadow-xl"
         style={pageStyle}
       >
         {renderFailed ? (
-          <p className="grid h-full place-items-center bg-slate-900 px-4 py-8 text-center text-sm font-semibold text-red-300">
+          <p className="grid h-full place-items-center bg-slate-900 px-4 py-8 text-center text-sm font-semibold text-fg-red-300">
             {t('files.preview.error')}
           </p>
         ) : page && isNearViewport ? (
@@ -913,7 +913,7 @@ function PdfPage({
         ) : (
           <div
             aria-label={pageLabel}
-            className="grid h-full place-items-center bg-slate-100 text-xs font-semibold text-slate-500"
+            className="grid h-full place-items-center bg-slate-100 text-xs font-semibold text-fg-slate-500"
             role="status"
           >
             {pageLabel}
@@ -922,7 +922,7 @@ function PdfPage({
         {canAnnotate && isNearViewport ? (
           <button
             aria-label={t('files.annotation.keyboardPageAction').replace('{page}', String(pageNumber))}
-            className="absolute right-2 top-2 z-20 grid h-8 w-8 place-items-center rounded-full border border-slate-300 bg-white text-sm font-bold text-[var(--workbench-primary)] opacity-0 shadow transition hover:opacity-100 focus:opacity-100 group-hover:opacity-100"
+            className="absolute right-2 top-2 z-20 grid h-8 w-8 place-items-center rounded-full border border-slate-300 bg-surface text-sm font-bold text-[var(--workbench-primary-text)] opacity-0 shadow transition hover:opacity-100 focus:opacity-100 group-hover:opacity-100"
             onClick={() => onCreateAnchor(0.5, 0.5, pageNumber)}
             type="button"
           >
@@ -988,7 +988,7 @@ function AnnotationPins({
         return (
           <span
             aria-label={t('files.annotation.pinLabel').replace('{number}', String(number))}
-            className="absolute grid h-7 w-7 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 border-white bg-[#0f766e] text-[0.68rem] font-bold text-white shadow-lg"
+            className="absolute grid h-7 w-7 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border-2 border-surface bg-tone-0f766e text-[0.68rem] font-bold text-white shadow-lg"
             key={annotation.id}
             role="img"
             style={{
@@ -1003,7 +1003,7 @@ function AnnotationPins({
       {pendingAnchor && isPendingVisible ? (
         <span
           aria-hidden="true"
-          className="absolute h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-dashed border-white bg-amber-500/80"
+          className="absolute h-7 w-7 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-dashed border-surface bg-amber-500/80"
           style={{
             left: `${(pendingAnchor.x ?? 0.5) * 100}%`,
             top: `${(pendingAnchor.y ?? 0.5) * 100}%`,
@@ -1060,7 +1060,7 @@ function PreviewUnavailable({
   return (
     <div className="max-w-sm rounded-lg border border-white/15 bg-white/5 px-5 py-6 text-center">
       <p className="text-sm font-semibold text-white">{t(key)}</p>
-      <p className="mt-2 text-xs leading-5 text-slate-300">{t('files.scan.description')}</p>
+      <p className="mt-2 text-xs leading-5 text-fg-slate-300">{t('files.scan.description')}</p>
     </div>
   )
 }

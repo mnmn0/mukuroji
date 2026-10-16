@@ -471,10 +471,10 @@ export function TaskGanttView({
             )
             return (
               <li
-                className={`flex flex-wrap items-center gap-2 rounded-md border bg-white px-3 py-2 text-xs font-semibold ${row.conflicts.length > 0
-                  ? 'border-red-300 text-red-700'
+                className={`flex flex-wrap items-center gap-2 rounded-md border bg-surface px-3 py-2 text-xs font-semibold ${row.conflicts.length > 0
+                  ? 'border-red-300 text-fg-red-700'
                   : row.critical
-                    ? 'border-amber-300 text-amber-800'
+                    ? 'border-amber-300 text-fg-amber-800'
                     : 'border-[var(--workbench-border)] text-[var(--workbench-text)]'}`}
                 data-testid={`task-gantt-dependency-${row.dependency.id}`}
                 key={row.dependency.id}
@@ -524,8 +524,8 @@ export function TaskGanttView({
         </ul>
       ) : null}
       {planningSnapshot ? (
-        <details className="border-b border-[var(--workbench-border)] bg-white px-4 py-3">
-          <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-primary)]">
+        <details className="border-b border-[var(--workbench-border)] bg-surface px-4 py-3">
+          <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-primary-text)]">
             {t('workItems.dependencies.title')}
           </summary>
           <div className="mt-4">
@@ -542,9 +542,9 @@ export function TaskGanttView({
         </details>
       ) : null}
       {onCreateTaskOpen ? (
-        <div className="flex justify-end border-b border-[#e4e7ec] px-4 py-2">
+        <div className="flex justify-end border-b border-tone-e4e7ec px-4 py-2">
           <button
-            className="text-sm font-semibold text-[var(--workbench-primary)] hover:underline"
+            className="text-sm font-semibold text-[var(--workbench-primary-text)] hover:underline"
             onClick={() => onCreateTaskOpen({
               ...(projectId ? { projectId } : {}),
               source: 'gantt',
@@ -556,18 +556,18 @@ export function TaskGanttView({
         </div>
       ) : null}
       {errorMessage ? (
-        <p className="border-b border-[#fecaca] bg-[#fef2f2] px-4 py-2 text-sm font-medium text-[#b42318]" role="alert">
+        <p className="border-b border-tone-fecaca bg-tone-fef2f2 px-4 py-2 text-sm font-medium text-fg-b42318" role="alert">
           {errorMessage}
         </p>
       ) : null}
       {rows.length > 0 ? (
         <div className="overflow-x-auto" role="grid">
           <div
-            className="grid min-w-max border-b border-[#d8dde5] bg-[#f8fafb]"
+            className="grid min-w-max border-b border-tone-d8dde5 bg-tone-f8fafb"
             role="row"
             style={{ gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px` }}
           >
-            <div className="sticky left-0 z-20 border-r border-[#d8dde5] bg-[#f8fafb] px-4 py-2 text-xs font-bold uppercase tracking-wide text-[#667085]" role="columnheader">
+            <div className="sticky left-0 z-20 border-r border-tone-d8dde5 bg-tone-f8fafb px-4 py-2 text-xs font-bold uppercase tracking-wide text-fg-667085" role="columnheader">
               {t('tasks.gantt.owner')}
             </div>
             <div
@@ -579,7 +579,7 @@ export function TaskGanttView({
                   aria-label={column.startDate === column.endDate
                     ? column.startDate
                     : `${column.startDate} – ${column.endDate}`}
-                  className="border-r border-[#e4e7ec] px-1 py-2 text-center text-[10px] font-semibold text-[#667085]"
+                  className="border-r border-tone-e4e7ec px-1 py-2 text-center text-[10px] font-semibold text-fg-667085"
                   key={column.startDate}
                   role="columnheader"
                   title={column.startDate === column.endDate
@@ -594,20 +594,20 @@ export function TaskGanttView({
           <div className="relative min-w-max">
             {dependencyLayout.externalLaneHeight > 0 ? (
               <div
-                className="grid min-w-max border-b border-[#d8dde5] bg-[#f8fafb]"
+                className="grid min-w-max border-b border-tone-d8dde5 bg-tone-f8fafb"
                 data-testid="task-gantt-external-lane"
                 style={{
                   gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px`,
                   height: `${dependencyLayout.externalLaneHeight}px`,
                 }}
               >
-                <div className="sticky left-0 z-10 border-r border-[#d8dde5] bg-[#f8fafb] px-4 py-3 text-xs font-bold uppercase tracking-wide text-[#667085]">
+                <div className="sticky left-0 z-10 border-r border-tone-d8dde5 bg-tone-f8fafb px-4 py-3 text-xs font-bold uppercase tracking-wide text-fg-667085">
                   {t('workItems.dependencies.externalLane')}
                 </div>
-                <div className="relative bg-white">
+                <div className="relative bg-surface">
                   {dependencyLayout.externalStubs.map((stub) => (
                     <div
-                      className="absolute z-[2] max-w-[220px] -translate-x-1/2 truncate rounded-full border border-[#98a2b3] bg-white px-2 py-1 text-[11px] font-bold text-[#344054] shadow-sm"
+                      className="absolute z-[2] max-w-[220px] -translate-x-1/2 truncate rounded-full border border-tone-98a2b3 bg-surface px-2 py-1 text-[11px] font-bold text-fg-344054 shadow-sm"
                       data-testid={`task-gantt-external-${stub.dependencyId}`}
                       key={stub.dependencyId}
                       style={{ left: `${stub.x}px`, top: `${stub.y - 14}px` }}
@@ -625,7 +625,7 @@ export function TaskGanttView({
             const bar = createGanttBar(row.schedule, timelineColumns)
             return (
               <article
-                className="grid min-w-max border-b border-[#e4e7ec] last:border-b-0"
+                className="grid min-w-max border-b border-tone-e4e7ec last:border-b-0"
                 key={taskKey}
                 role="row"
                 style={{
@@ -633,12 +633,12 @@ export function TaskGanttView({
                   height: `${GANTT_ROW_HEIGHT}px`,
                 }}
               >
-                <div className="sticky left-0 z-10 grid min-h-0 gap-2 overflow-y-auto border-r border-[#d8dde5] bg-white px-4 py-3" role="gridcell">
+                <div className="sticky left-0 z-10 grid min-h-0 gap-2 overflow-y-auto border-r border-tone-d8dde5 bg-surface px-4 py-3" role="gridcell">
                   <div className="flex min-w-0 items-start justify-between gap-3">
                     <div className="min-w-0">
                       {onSelectTask ? (
                         <button
-                          className="block max-w-full truncate text-left text-sm font-semibold text-[#1c1d1f] hover:text-[var(--workbench-primary)]"
+                          className="block max-w-full truncate text-left text-sm font-semibold text-fg-1c1d1f hover:text-[var(--workbench-primary-text)]"
                           data-task-action="open"
                           data-task-team-id={row.task.teamId}
                           data-task-work-item-id={row.task.id}
@@ -648,9 +648,9 @@ export function TaskGanttView({
                           {resolveWorkItemTitle(row.task)}
                         </button>
                       ) : (
-                        <p className="truncate text-sm font-semibold text-[#1c1d1f]">{resolveWorkItemTitle(row.task)}</p>
+                        <p className="truncate text-sm font-semibold text-fg-1c1d1f">{resolveWorkItemTitle(row.task)}</p>
                       )}
-                      <p className="mt-1 truncate text-xs font-medium text-[#5f6874]">
+                      <p className="mt-1 truncate text-xs font-medium text-fg-5f6874">
                         {resolveWorkItemAssignee(row.task)}
                       </p>
                       <WorkItemDependencyChips
@@ -666,7 +666,7 @@ export function TaskGanttView({
                       {onCreateTaskOpen ? (
                         <button
                           aria-label={`${t('tasks.gantt.add')}: ${resolveWorkItemTitle(row.task)}`}
-                          className="rounded px-2 py-1 text-lg font-semibold text-[var(--workbench-primary)] hover:bg-[#e5f7f4]"
+                          className="rounded px-2 py-1 text-lg font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4"
                           data-testid={`task-gantt-add-${row.task.id}`}
                           onClick={() => onCreateTaskOpen({
                             ...(row.task.assigneeUserId ? { assigneeUserId: row.task.assigneeUserId } : {}),
@@ -703,7 +703,7 @@ export function TaskGanttView({
                   <div className="flex flex-wrap items-center gap-2">
                     <label className="sr-only" htmlFor={`gantt-mode-${taskKey}`}>{t('tasks.schedule.mode')}</label>
                     <select
-                      className="rounded border border-[#cfd5de] bg-white px-2 py-1 text-xs font-semibold text-[#344054] disabled:cursor-not-allowed disabled:opacity-60"
+                      className="rounded border border-tone-cfd5de bg-surface px-2 py-1 text-xs font-semibold text-fg-344054 disabled:cursor-not-allowed disabled:opacity-60"
                       disabled={!canEditSchedule || isBusy}
                       id={`gantt-mode-${taskKey}`}
                       onChange={(event) => {
@@ -726,12 +726,12 @@ export function TaskGanttView({
                       t={t}
                       taskKey={taskKey}
                     />
-                    {isBusy ? <span className="text-xs text-[#667085]" role="status">{t('bulk.previewing')}</span> : null}
+                    {isBusy ? <span className="text-xs text-fg-667085" role="status">{t('bulk.previewing')}</span> : null}
                   </div>
                 </div>
                 <div
                   aria-label={`${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}
-                  className="relative min-h-0 bg-white"
+                  className="relative min-h-0 bg-surface"
                   data-testid={`task-gantt-timeline-${row.task.id}`}
                   onDragOver={(event) => {
                     if ((dragChangeRef.current ?? dragChange)?.taskKey === taskKey) {
@@ -801,7 +801,7 @@ export function TaskGanttView({
                             '{task}',
                             resolveWorkItemTitle(row.task),
                           )}
-                          className="absolute -right-1 top-0 h-full w-3 cursor-ew-resize rounded bg-[#087c70] focus:outline-none focus:ring-2 focus:ring-white"
+                          className="absolute -right-1 top-0 h-full w-3 cursor-ew-resize rounded bg-tone-087c70 focus:outline-none focus:ring-2 focus:ring-white"
                           data-testid={`task-gantt-resize-${row.task.id}`}
                           disabled={!canEditSchedule || isBusy}
                           draggable={canEditSchedule && !isBusy}
@@ -822,7 +822,7 @@ export function TaskGanttView({
                       ) : null}
                     </div>
                   ) : (
-                    <span className="absolute left-3 top-9 z-[1] rounded border border-dashed border-[#98a2b3] bg-white px-2 py-1 text-xs font-semibold text-[#667085]">
+                    <span className="absolute left-3 top-9 z-[1] rounded border border-dashed border-tone-98a2b3 bg-surface px-2 py-1 text-xs font-semibold text-fg-667085">
                       {t('tasks.calendar.empty')}
                     </span>
                   )}
@@ -926,11 +926,11 @@ function GanttDateEditor({ disabled, onPreview, schedule, t, taskKey }: GanttDat
   if (schedule.mode === 'unscheduled') {
     return (
       <span className="flex items-center gap-2">
-        <label className="text-xs font-semibold text-[#667085]" htmlFor={`gantt-create-${taskKey}`}>
+        <label className="text-xs font-semibold text-fg-667085" htmlFor={`gantt-create-${taskKey}`}>
           {t('tasks.schedule.createBarDate')}
         </label>
         <input
-          className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+          className="w-[122px] rounded border border-tone-cfd5de px-2 py-1 text-xs disabled:opacity-60"
           data-testid={`task-gantt-create-${taskKey}`}
           disabled={disabled}
           id={`gantt-create-${taskKey}`}
@@ -955,7 +955,7 @@ function GanttDateEditor({ disabled, onPreview, schedule, t, taskKey }: GanttDat
       <span className="flex items-center gap-1">
         <label className="sr-only" htmlFor={`gantt-start-${taskKey}`}>{t('tasks.schedule.startDate')}</label>
         <input
-          className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+          className="w-[122px] rounded border border-tone-cfd5de px-2 py-1 text-xs disabled:opacity-60"
           disabled={disabled}
           id={`gantt-start-${taskKey}`}
           onChange={(event) => {
@@ -966,10 +966,10 @@ function GanttDateEditor({ disabled, onPreview, schedule, t, taskKey }: GanttDat
           type="date"
           value={schedule.startDate}
         />
-        <span aria-hidden="true" className="text-[#98a2b3]">–</span>
+        <span aria-hidden="true" className="text-fg-98a2b3">–</span>
         <label className="sr-only" htmlFor={`gantt-end-${taskKey}`}>{t('tasks.schedule.endDate')}</label>
         <input
-          className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+          className="w-[122px] rounded border border-tone-cfd5de px-2 py-1 text-xs disabled:opacity-60"
           disabled={disabled}
           id={`gantt-end-${taskKey}`}
           onChange={(event) => {
@@ -991,7 +991,7 @@ function GanttDateEditor({ disabled, onPreview, schedule, t, taskKey }: GanttDat
         {schedule.mode === 'milestone' ? t('tasks.schedule.milestoneDate') : t('tasks.schedule.dueDate')}
       </label>
       <input
-        className="w-[122px] rounded border border-[#cfd5de] px-2 py-1 text-xs disabled:opacity-60"
+        className="w-[122px] rounded border border-tone-cfd5de px-2 py-1 text-xs disabled:opacity-60"
         disabled={disabled}
         id={`gantt-date-${taskKey}`}
         onChange={(event) => {
@@ -1022,45 +1022,45 @@ function GanttSchedulePreview({
   const dialogRef = useModalFocus<HTMLDivElement>(onCancel)
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-[#101828]/45 p-4">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-tone-101828/45 p-4">
       <div
         aria-labelledby="gantt-schedule-preview-title"
         aria-modal="true"
-        className="max-h-[min(680px,90vh)] w-full max-w-xl overflow-y-auto rounded-xl bg-white p-5 shadow-2xl"
+        className="max-h-[min(680px,90vh)] w-full max-w-xl overflow-y-auto rounded-xl bg-surface p-5 shadow-2xl"
         ref={dialogRef}
         role="dialog"
         tabIndex={-1}
       >
-        <h2 className="text-lg font-bold text-[#101828]" id="gantt-schedule-preview-title">
+        <h2 className="text-lg font-bold text-fg-101828" id="gantt-schedule-preview-title">
           {t('bulk.preview.title')}
         </h2>
-        <p className="mt-1 text-sm text-[#667085]">{resolveWorkItemTitle(pending.task)}</p>
+        <p className="mt-1 text-sm text-fg-667085">{resolveWorkItemTitle(pending.task)}</p>
         <ul className="mt-4 grid gap-3">
           {pending.controller.preview.impacts.map((impact) => (
-            <li className="rounded-lg border border-[#d8dde5] bg-[#f8fafb] p-3" key={`${impact.teamId}:${impact.workItemId}`}>
+            <li className="rounded-lg border border-tone-d8dde5 bg-tone-f8fafb p-3" key={`${impact.teamId}:${impact.workItemId}`}>
               <div className="flex items-center justify-between gap-3">
-                <span className="font-mono text-xs font-semibold text-[#344054]">{impact.workItemId}</span>
-                <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-[#667085]">
+                <span className="font-mono text-xs font-semibold text-fg-344054">{impact.workItemId}</span>
+                <span className="rounded-full bg-surface px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-fg-667085">
                   {t(`tasks.schedule.impact.${impact.kind}`)}
                 </span>
               </div>
-              <p className="mt-2 text-sm text-[#475467]">
+              <p className="mt-2 text-sm text-fg-475467">
                 <span className="sr-only">{t('tasks.schedule.before')}: </span>
                 <span className="line-through">{describeSchedule(impact.before, t)}</span>
                 <span aria-hidden="true"> → </span>
                 <span className="sr-only">{t('tasks.schedule.after')}: </span>
-                <span className="font-semibold text-[#101828]">{describeSchedule(impact.after, t)}</span>
+                <span className="font-semibold text-fg-101828">{describeSchedule(impact.after, t)}</span>
               </p>
             </li>
           ))}
         </ul>
         <TaskSchedulePreviewMetadata preview={pending.controller.preview} t={t} />
         {pending.controller.preview.warnings.length > 0 ? (
-          <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
-            <p className="text-xs font-bold uppercase tracking-wide text-[#93370d]">
+          <div className="mt-4 rounded-lg border border-tone-f4d38b bg-tone-fffaeb p-3" role="status">
+            <p className="text-xs font-bold uppercase tracking-wide text-fg-93370d">
               {t('tasks.schedule.warnings')}
             </p>
-            <ul className="mt-1 list-disc pl-5 text-sm text-[#93370d]">
+            <ul className="mt-1 list-disc pl-5 text-sm text-fg-93370d">
               {pending.controller.preview.warnings.map((warning) => (
                 <li key={warning}>{resolveScheduleWarning(warning, t)}</li>
               ))}
@@ -1069,7 +1069,7 @@ function GanttSchedulePreview({
         ) : null}
         <div className="mt-5 flex justify-end gap-2">
           <button
-            className="rounded-md border border-[#cfd5de] bg-white px-4 py-2 text-sm font-semibold text-[#344054] disabled:opacity-60"
+            className="rounded-md border border-tone-cfd5de bg-surface px-4 py-2 text-sm font-semibold text-fg-344054 disabled:opacity-60"
             disabled={isApplying}
             onClick={onCancel}
             type="button"
@@ -1549,13 +1549,13 @@ function handleResizeKey(
 function resolveGanttBarClass(mode: WorkItemSchedule['mode']): string {
   switch (mode) {
     case 'date-range':
-      return 'rounded-md border border-[#0e9384] bg-[#ccfbea] text-[#085d55]'
+      return 'rounded-md border border-tone-0e9384 bg-tone-ccfbea text-fg-085d55'
     case 'milestone':
-      return 'rotate-45 rounded-sm border border-[#7f56d9] bg-[#ebe9fe] text-[#53389e]'
+      return 'rotate-45 rounded-sm border border-tone-7f56d9 bg-tone-ebe9fe text-fg-53389e'
     case 'due-date':
-      return 'rounded-full border-2 border-dashed border-[#dc6803] bg-[#fffaeb] text-[#93370d]'
+      return 'rounded-full border-2 border-dashed border-tone-dc6803 bg-tone-fffaeb text-fg-93370d'
     case 'unscheduled':
-      return 'border border-dashed border-[#98a2b3] bg-white text-[#667085]'
+      return 'border border-dashed border-tone-98a2b3 bg-surface text-fg-667085'
   }
 }
 

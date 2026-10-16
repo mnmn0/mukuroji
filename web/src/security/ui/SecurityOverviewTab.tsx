@@ -126,7 +126,7 @@ export function SecurityOverviewTab({
       ) : null}
 
       {canViewIdentity && canViewPrivileged ? (
-        <section className="rounded-lg border border-[var(--workbench-border)] bg-white p-5">
+        <section className="rounded-lg border border-[var(--workbench-border)] bg-surface p-5">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="min-w-0 max-w-[700px]">
               <p className="workbench-eyebrow">
@@ -161,7 +161,7 @@ export function SecurityOverviewTab({
         <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
           {navigationCards.map(([tab, titleKey, descriptionKey]) => (
             <button
-              className="group rounded-lg border border-[var(--workbench-border)] bg-white p-4 text-left transition hover:border-[#99d7cf] hover:shadow-sm"
+              className="group rounded-lg border border-[var(--workbench-border)] bg-surface p-4 text-left transition hover:border-tone-99d7cf hover:shadow-sm"
               key={tab}
               type="button"
               onClick={() => onSelectTab(tab)}
@@ -172,7 +172,7 @@ export function SecurityOverviewTab({
               <span className="mt-2 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
                 {t(descriptionKey)}
               </span>
-              <span className="mt-4 inline-flex text-sm font-semibold text-[var(--workbench-primary)]">
+              <span className="mt-4 inline-flex text-sm font-semibold text-[var(--workbench-primary-text)]">
                 {t('security.overview.open')} →
               </span>
             </button>
@@ -199,9 +199,9 @@ function OverviewMetric({
   value: string
 }) {
   const toneClassName = {
-    danger: 'text-red-700',
-    success: 'text-emerald-700',
-    warning: 'text-amber-700',
+    danger: 'text-fg-red-700',
+    success: 'text-fg-emerald-700',
+    warning: 'text-fg-amber-700',
   }[tone]
 
   return (

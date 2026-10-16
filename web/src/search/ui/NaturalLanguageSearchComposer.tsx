@@ -408,7 +408,7 @@ function SearchDraftReview({
       />
       {!isRouteCurrent ? (
         <p
-          className="border-l-2 border-[var(--workbench-warning)] bg-amber-50 px-3 py-2 text-app-caption font-medium text-amber-900"
+          className="border-l-2 border-[var(--workbench-warning)] bg-amber-50 px-3 py-2 text-app-caption font-medium text-fg-amber-900"
           role="status"
         >
           {t('ai.search.validation.routeChanged')}
@@ -416,7 +416,7 @@ function SearchDraftReview({
       ) : null}
       {!isGenerationQueryCurrent ? (
         <p
-          className="border-l-2 border-[var(--workbench-warning)] bg-amber-50 px-3 py-2 text-app-caption font-medium text-amber-900"
+          className="border-l-2 border-[var(--workbench-warning)] bg-amber-50 px-3 py-2 text-app-caption font-medium text-fg-amber-900"
           role="status"
         >
           {t('ai.search.validation.queryChanged')}
@@ -499,8 +499,8 @@ export function AiSearchDraftEditor({
 
       {draft.caveats.length > 0 ? (
         <section className="border-l-2 border-[var(--workbench-warning)] bg-amber-50 px-3 py-2">
-          <h3 className="text-app-caption font-semibold text-amber-900">{t('ai.search.caveats')}</h3>
-          <ul className="mt-1 list-disc space-y-1 pl-5 text-app-caption text-amber-900">
+          <h3 className="text-app-caption font-semibold text-fg-amber-900">{t('ai.search.caveats')}</h3>
+          <ul className="mt-1 list-disc space-y-1 pl-5 text-app-caption text-fg-amber-900">
             {draft.caveats.map((caveat) => <li key={caveat}>{caveat}</li>)}
           </ul>
         </section>
@@ -532,8 +532,8 @@ export function AiSearchDraftEditor({
                   aria-pressed={active}
                   className={`min-h-[44px] rounded-md border px-3 text-app-caption font-semibold transition ${
                     active
-                      ? 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'
-                      : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+                      ? 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
+                      : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
                   }`}
                   key={entityType}
                   onClick={() => onChange({

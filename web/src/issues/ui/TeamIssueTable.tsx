@@ -145,7 +145,7 @@ export function IssueTable({
                 <div className="flex min-w-0 items-start gap-2">
                   <button
                     aria-pressed={selectedForAction || selectedIssueId === issue.id}
-                    className={`min-w-0 flex-1 rounded-sm text-left font-semibold transition hover:text-[var(--workbench-primary)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563eb]/10 disabled:cursor-default disabled:text-[var(--workbench-text)] ${
+                    className={`min-w-0 flex-1 rounded-sm text-left font-semibold transition hover:text-[var(--workbench-primary-text)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-tone-2563eb/10 disabled:cursor-default disabled:text-[var(--workbench-text)] ${
                       wrapText ? 'whitespace-normal break-words' : 'truncate'
                     }`}
                     data-testid={`issue-row-${issue.id}`}
@@ -158,7 +158,7 @@ export function IssueTable({
                   {onIssueActionMenuOpen ? (
                     <button
                       aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
-                      className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                      className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] max-[640px]:h-11 max-[640px]:w-11"
                       data-testid={`team-issue-row-actions-${issue.id}`}
                       disabled={isAiOperationPending}
                       onClick={(event) => {
@@ -351,7 +351,7 @@ function IssueTableGroupRow({
       <th
         className={secondary
           ? 'bg-slate-50 px-7 py-2 text-left text-xs font-semibold text-[var(--workbench-muted)]'
-          : 'border-y border-[var(--workbench-border)] bg-[#f2f8f7] px-5 py-2.5 text-left text-sm font-bold text-[var(--workbench-text)]'}
+          : 'border-y border-[var(--workbench-border)] bg-tone-f2f8f7 px-5 py-2.5 text-left text-sm font-bold text-[var(--workbench-text)]'}
         colSpan={columnCount}
         scope="rowgroup"
       >

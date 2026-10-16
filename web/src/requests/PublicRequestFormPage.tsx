@@ -301,7 +301,7 @@ function PublicRequestFormPageForLink({ linkToken }: { linkToken: string }) {
           ) : form ? (
             <>
               {formWasUpdated ? (
-                <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-900" role="status">
+                <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-900" role="status">
                   {t('requests.public.formUpdated')}
                 </p>
               ) : null}
@@ -518,7 +518,7 @@ export function PublicRequestFormScreen({
   if (receipt) {
     return (
       <section className="workbench-panel p-8 text-center" data-testid="public-request-confirmation">
-        <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-emerald-100 text-2xl text-emerald-700">✓</div>
+        <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-emerald-100 text-2xl text-fg-emerald-700">✓</div>
         <h1 className="mt-5 text-2xl font-semibold text-[var(--workbench-text)]">
           {receipt.confirmationMessage || resolveRequestLocalizedText(form.confirmation, locale, form.defaultLocale)}
         </h1>
@@ -529,7 +529,7 @@ export function PublicRequestFormScreen({
           <div className="mx-auto mt-7 grid max-w-[620px] gap-3 border-t border-[var(--workbench-border)] pt-6 text-left">
             <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{t('requests.public.threadTitle')}</h2>
             {thread.messages.map((message) => (
-              <article className="rounded-lg border border-[var(--workbench-border)] bg-white px-4 py-3" key={message.id}>
+              <article className="rounded-lg border border-[var(--workbench-border)] bg-surface px-4 py-3" key={message.id}>
                 <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
                   {message.direction === 'staff'
                     ? t('requests.public.threadStaff')
@@ -540,7 +540,7 @@ export function PublicRequestFormScreen({
             ))}
           </div>
         ) : null}
-        {threadError ? <p className="mt-4 text-sm font-semibold text-red-700" role="alert">{t('requests.public.threadError')}</p> : null}
+        {threadError ? <p className="mt-4 text-sm font-semibold text-fg-red-700" role="alert">{t('requests.public.threadError')}</p> : null}
         {onReply && thread?.status !== 'closed' ? (
           <form className="mx-auto mt-7 grid max-w-[620px] gap-3 border-t border-[var(--workbench-border)] pt-6 text-left" onSubmit={(event) => void handleReply(event)}>
             <div>
@@ -561,8 +561,8 @@ export function PublicRequestFormScreen({
                 }}
               />
             </label>
-            {replyReceipt ? <p className="text-sm font-semibold text-emerald-700" role="status">{t('requests.public.replySuccess')}</p> : null}
-            {replyError ? <p className="text-sm font-semibold text-red-700" role="alert">{t('requests.public.replyError')}</p> : null}
+            {replyReceipt ? <p className="text-sm font-semibold text-fg-emerald-700" role="status">{t('requests.public.replySuccess')}</p> : null}
+            {replyError ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('requests.public.replyError')}</p> : null}
             <button className="workbench-button-primary min-h-11 justify-self-end px-5" disabled={isReplying} type="submit">
               {isReplying ? t('requests.public.replySubmitting') : t('requests.public.replySubmit')}
             </button>
@@ -684,10 +684,10 @@ export function PublicRequestFormScreen({
               }} type="checkbox" />
               <span>
                 {resolveRequestLocalizedText(form.consent.text, locale, form.defaultLocale)}
-                {form.consent.privacyUrl ? <a className="ml-2 text-[var(--workbench-primary)] underline" href={form.consent.privacyUrl} rel="noreferrer noopener" target="_blank">{t('requests.public.privacy')}</a> : null}
+                {form.consent.privacyUrl ? <a className="ml-2 text-[var(--workbench-primary-text)] underline" href={form.consent.privacyUrl} rel="noreferrer noopener" target="_blank">{t('requests.public.privacy')}</a> : null}
               </span>
             </label>
-            {validationCodes.__consent ? <p className="mt-2 text-sm font-semibold text-red-700" role="alert">{t('requests.public.required')}</p> : null}
+            {validationCodes.__consent ? <p className="mt-2 text-sm font-semibold text-fg-red-700" role="alert">{t('requests.public.required')}</p> : null}
           </div>
         ) : null}
 
@@ -699,7 +699,7 @@ export function PublicRequestFormScreen({
         </div>
 
         {submitError ? (
-          <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+          <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
             {submitError === 'rate-limit' ? t('requests.public.rateLimited') : t('requests.public.submitError')}
           </p>
         ) : null}
@@ -749,7 +749,7 @@ function PublicField({
 
   return (
     <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-      <span>{label}{field.required ? <span className="ml-1 text-red-700">*</span> : null}</span>
+      <span>{label}{field.required ? <span className="ml-1 text-fg-red-700">*</span> : null}</span>
       {helpText ? <span className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">{helpText}</span> : null}
       {field.type === 'textarea' ? (
         <textarea className={`${commonInputClass} min-h-28 py-3`} data-testid={`public-request-field-${field.id}`} placeholder={placeholder} value={typeof answer === 'string' ? answer : ''} onChange={(event) => onChange(event.target.value)} />
@@ -777,7 +777,7 @@ function PublicField({
             type="file"
           />
           {isUploading ? <span className="text-xs text-[var(--workbench-muted)]">{t('requests.public.uploading')}</span> : null}
-          {uploadError ? <span className="text-xs text-red-700">{t('requests.public.uploadError')}</span> : null}
+          {uploadError ? <span className="text-xs text-fg-red-700">{t('requests.public.uploadError')}</span> : null}
           {fileNames.length > 0 ? <span className="text-xs text-[var(--workbench-muted)]">{fileNames.join(', ')}</span> : null}
         </span>
       ) : (
@@ -798,7 +798,7 @@ function PublicField({
           )}
         />
       )}
-      {errorCode ? <span className="text-xs font-semibold text-red-700" role="alert">{errorText}</span> : null}
+      {errorCode ? <span className="text-xs font-semibold text-fg-red-700" role="alert">{errorText}</span> : null}
     </label>
   )
 }

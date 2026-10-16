@@ -158,7 +158,7 @@ export function PublicPageShell({
 
       <main>{children({ locale, t })}</main>
 
-      <footer className="border-t border-[var(--workbench-border)] bg-white">
+      <footer className="border-t border-[var(--workbench-border)] bg-surface">
         <div className="mx-auto grid w-full max-w-[1240px] gap-7 px-5 py-9 sm:px-8 md:grid-cols-[1fr_auto] md:items-end">
           <div className="max-w-[520px]">
             <div className="inline-flex items-center gap-2.5 font-bold text-[var(--workbench-text)]">
@@ -236,7 +236,7 @@ type PublicFooterLinkProps = {
 function PublicFooterLink({ children, to }: PublicFooterLinkProps) {
   return (
     <Link
-      className="text-sm font-semibold text-[var(--workbench-muted)] no-underline hover:text-[var(--workbench-primary)] hover:underline"
+      className="text-sm font-semibold text-[var(--workbench-muted)] no-underline hover:text-[var(--workbench-primary-text)] hover:underline"
       to={to}
     >
       {children}

@@ -78,6 +78,11 @@ import {
   type FontSizePreference,
 } from '../../shared/lib/preferences/fontSize'
 import {
+  getInitialThemePreference,
+  setThemePreference,
+  type ThemePreference,
+} from '../../shared/lib/preferences/theme'
+import {
   createProjectIssuesPath,
   createTeamIssuesPath,
   createTeamViewPath,
@@ -102,6 +107,8 @@ export type WorkspaceRouteContextValue = {
   workspaceId?: string
   /** The selected application font-size preference. */
   fontSizePreference: FontSizePreference
+  /** The selected application color theme. */
+  themePreference: ThemePreference
   /** The best available display label for the current user. */
   userLabel: string
   /** Stable identifiers that route models may use to recognize the current user. */
@@ -164,6 +171,8 @@ export type WorkspaceRouteContextValue = {
   onRetryProjectQuickAccess: () => Promise<void>
   /** Persists and applies a new font-size preference. */
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
+  /** Persists and applies a new color theme. */
+  onThemePreferenceChange: (preference: ThemePreference) => void
   /** Persists and applies a new workspace locale. */
   onLocaleChange: (locale: Locale) => void
   /** Clears the authentication session and returns to the public entry route. */
@@ -233,6 +242,8 @@ export function WorkspaceRouteProvider() {
   const [locale, setLocale] = useState<Locale>(() => getInitialLocale())
   const [fontSizePreference, setFontSizePreferenceState] =
     useState<FontSizePreference>(() => getInitialFontSizePreference())
+  const [themePreference, setThemePreferenceState] =
+    useState<ThemePreference>(() => getInitialThemePreference())
   const [authenticatedApiErrorReports, setAuthenticatedApiErrorReports] =
     useState<AuthenticatedApiErrorReports>({
       guardedSessionErrors: [],
@@ -461,6 +472,12 @@ export function WorkspaceRouteProvider() {
   const handleFontSizePreferenceChange = useCallback((preference: FontSizePreference) => {
     setFontSizePreferenceState(preference)
     setFontSizePreference(preference)
+  }, [])
+
+  /** Saves a color theme and updates provider state for the active route. */
+  const handleThemePreferenceChange = useCallback((preference: ThemePreference) => {
+    setThemePreferenceState(preference)
+    setThemePreference(preference)
   }, [])
 
   /** Saves a locale preference and updates provider state for the active route. */
@@ -760,6 +777,7 @@ export function WorkspaceRouteProvider() {
     canMutateTeamConfiguration,
     commonErrorKey,
     fontSizePreference,
+    themePreference,
     guardEnterpriseSession,
     inboxCount,
     hasQuickAccessLoadError,
@@ -782,6 +800,7 @@ export function WorkspaceRouteProvider() {
       : undefined,
     onDismissProjectQuickAccessFeedback: handleDismissProjectQuickAccessFeedback,
     onFontSizePreferenceChange: handleFontSizePreferenceChange,
+    onThemePreferenceChange: handleThemePreferenceChange,
     onLocaleChange: handleLocaleChange,
     onLogout: handleLogout,
     onOpenNotification: handleOpenNotification,
@@ -820,6 +839,7 @@ export function WorkspaceRouteProvider() {
     canMutateTeamConfiguration,
     commonErrorKey,
     fontSizePreference,
+    themePreference,
     guardEnterpriseSession,
     handleArchiveProject,
     handleArchiveTeam,
@@ -827,6 +847,7 @@ export function WorkspaceRouteProvider() {
     handleCreateTeam,
     handleDismissProjectQuickAccessFeedback,
     handleFontSizePreferenceChange,
+    handleThemePreferenceChange,
     handleIsProjectQuickAccess,
     handleLocaleChange,
     handleLogout,

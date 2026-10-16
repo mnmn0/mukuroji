@@ -73,7 +73,7 @@ export function TriageSettingsPanel({
     return (
       <section className="grid min-h-80 place-items-center p-8 text-center">
         <div>
-          <p className="text-sm font-semibold text-red-700" role="alert">
+          <p className="text-sm font-semibold text-fg-red-700" role="alert">
             {errorMessage ?? t('triage.settings.error')}
           </p>
           {onRetry ? (
@@ -246,7 +246,7 @@ function TriageSettingsEditor({
           {t('triage.settings.description')}
         </p>
         {!canManage ? (
-          <p className="mt-4 border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-900">
+          <p className="mt-4 border-l-2 border-amber-400 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-900">
             {t('triage.settings.readOnly')}
           </p>
         ) : null}
@@ -288,7 +288,7 @@ function TriageSettingsEditor({
                   t={t}
                 />
                 {canManage ? (
-                  <button className="min-h-10 px-3 text-sm font-semibold text-red-700" onClick={() => setRules(removeAt(rules, index))} type="button">
+                  <button className="min-h-10 px-3 text-sm font-semibold text-fg-red-700" onClick={() => setRules(removeAt(rules, index))} type="button">
                     {t('triage.settings.remove')}
                   </button>
                 ) : null}
@@ -384,7 +384,7 @@ function TriageSettingsEditor({
                 onChange={(value) => setRotationMemberDrafts((current) => ({ ...current, [rotation.id]: value }))}
               />
               {canManage ? (
-                <button className="min-h-10 self-end px-3 text-sm font-semibold text-red-700" onClick={() => setRotations(removeAt(rotations, index))} type="button">
+                <button className="min-h-10 self-end px-3 text-sm font-semibold text-fg-red-700" onClick={() => setRotations(removeAt(rotations, index))} type="button">
                   {t('triage.settings.remove')}
                 </button>
               ) : null}
@@ -430,7 +430,7 @@ function TriageSettingsEditor({
                   t={t}
                 />
                 {canManage ? (
-                  <button className="min-h-10 px-3 text-sm font-semibold text-red-700" onClick={() => setSlaPolicies(removeAt(slaPolicies, index))} type="button">
+                  <button className="min-h-10 px-3 text-sm font-semibold text-fg-red-700" onClick={() => setSlaPolicies(removeAt(slaPolicies, index))} type="button">
                     {t('triage.settings.remove')}
                   </button>
                 ) : null}
@@ -476,15 +476,15 @@ function TriageSettingsEditor({
       </SettingsSection>
 
       {errorMessage || localError ? (
-        <p className="text-sm font-semibold text-red-700" role="alert">
+        <p className="text-sm font-semibold text-fg-red-700" role="alert">
           {errorMessage ?? t(localError ?? 'triage.settings.saveError')}
         </p>
       ) : didSave ? (
-        <p className="text-sm font-semibold text-emerald-700" role="status">{t('triage.settings.saved')}</p>
+        <p className="text-sm font-semibold text-fg-emerald-700" role="status">{t('triage.settings.saved')}</p>
       ) : null}
 
       {canManage ? (
-        <div className="sticky bottom-0 flex justify-end border-t border-[var(--workbench-border)] bg-white py-4">
+        <div className="sticky bottom-0 flex justify-end border-t border-[var(--workbench-border)] bg-surface py-4">
           <button className="workbench-button-primary min-h-10 px-5" disabled={isSaving} type="submit">
             {isSaving ? t('triage.settings.saving') : t('triage.settings.save')}
           </button>

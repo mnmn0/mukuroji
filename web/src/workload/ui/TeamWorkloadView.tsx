@@ -46,23 +46,23 @@ export function TeamWorkloadView({
     <section className="grid gap-5 border-t border-slate-200 pt-6" data-testid="team-workload">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--workbench-primary)]">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--workbench-primary-text)]">
             {t('workload.eyebrow')}
           </p>
-          <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-[#0d1833]">
+          <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-fg-0d1833">
             {t('workload.title')}
           </h2>
           <p className="mt-1 max-w-2xl text-sm font-medium leading-6 text-[var(--workbench-muted)]">
             {t('workload.description')}
           </p>
         </div>
-        <fieldset className="flex rounded-lg border border-slate-200 bg-white p-1">
+        <fieldset className="flex rounded-lg border border-slate-200 bg-surface p-1">
           <legend className="sr-only">{t('workload.granularity.label')}</legend>
           {(['day', 'week', 'month'] as const).map((option) => (
             <label
               className={granularity === option
-                ? 'rounded-md bg-[#0d1833] px-3 py-2 text-xs font-bold text-white'
-                : 'rounded-md px-3 py-2 text-xs font-bold text-[#526381] transition hover:bg-slate-50'}
+                ? 'rounded-md bg-tone-0d1833 px-3 py-2 text-xs font-bold text-white'
+                : 'rounded-md px-3 py-2 text-xs font-bold text-fg-526381 transition hover:bg-slate-50'}
               key={option}
             >
               <input
@@ -80,9 +80,9 @@ export function TeamWorkloadView({
       </div>
 
       {error ? (
-        <div className="flex flex-wrap items-center justify-between gap-3 border border-[#f2c7c7] bg-[#fff7f7] px-4 py-3 text-sm font-semibold text-[#9f3f3f]" role="alert">
+        <div className="flex flex-wrap items-center justify-between gap-3 border border-tone-f2c7c7 bg-tone-fff7f7 px-4 py-3 text-sm font-semibold text-fg-9f3f3f" role="alert">
           <span>{t('workload.error')}</span>
-          <button className="rounded-md border border-[#d99696] px-3 py-2 text-xs font-bold" type="button" onClick={onRetry}>
+          <button className="rounded-md border border-tone-d99696 px-3 py-2 text-xs font-bold" type="button" onClick={onRetry}>
             {t('workload.retry')}
           </button>
         </div>
@@ -96,21 +96,21 @@ export function TeamWorkloadView({
       </div>
 
       {isLoading ? (
-        <div className="border border-slate-200 bg-white px-5 py-8 text-sm font-semibold text-[var(--workbench-muted)]" aria-live="polite">
+        <div className="border border-slate-200 bg-surface px-5 py-8 text-sm font-semibold text-[var(--workbench-muted)]" aria-live="polite">
           {t('workload.loading')}
         </div>
       ) : members.length === 0 ? (
-        <div className="border border-dashed border-slate-300 bg-white px-5 py-8" data-testid="team-workload-empty">
-          <p className="text-sm font-semibold text-[#0d1833]">{t('workload.empty.title')}</p>
+        <div className="border border-dashed border-slate-300 bg-surface px-5 py-8" data-testid="team-workload-empty">
+          <p className="text-sm font-semibold text-fg-0d1833">{t('workload.empty.title')}</p>
           <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">{t('workload.empty.description')}</p>
         </div>
       ) : (
-        <div className="overflow-hidden border border-slate-200 bg-white">
+        <div className="overflow-hidden border border-slate-200 bg-surface">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-            <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-[#526381]">
-              <Legend color="bg-[#b9e6e2]" label={t('workload.legend.under')} />
-              <Legend color="bg-[#f8e2ab]" label={t('workload.legend.balanced')} />
-              <Legend color="bg-[#f3c5c5]" label={t('workload.legend.over')} />
+            <div className="flex flex-wrap items-center gap-3 text-xs font-semibold text-fg-526381">
+              <Legend color="bg-tone-b9e6e2" label={t('workload.legend.under')} />
+              <Legend color="bg-tone-f8e2ab" label={t('workload.legend.balanced')} />
+              <Legend color="bg-tone-f3c5c5" label={t('workload.legend.over')} />
               <Legend color="bg-slate-100" label={t('workload.legend.unavailable')} />
             </div>
             {snapshot && snapshot.redactedAssignmentCount > 0 ? (
@@ -123,12 +123,12 @@ export function TeamWorkloadView({
             <table className="min-w-[720px] w-full border-collapse text-left" data-testid="team-workload-heatmap">
               <caption className="sr-only">{t('workload.table.label')}</caption>
               <thead>
-                <tr className="border-b border-slate-200 bg-[#fbfcfd]">
-                  <th className="sticky left-0 z-10 min-w-[180px] bg-[#fbfcfd] px-4 py-3 text-xs font-bold uppercase tracking-[0.08em] text-[#69758a]" scope="col">
+                <tr className="border-b border-slate-200 bg-tone-fbfcfd">
+                  <th className="sticky left-0 z-10 min-w-[180px] bg-tone-fbfcfd px-4 py-3 text-xs font-bold uppercase tracking-[0.08em] text-fg-69758a" scope="col">
                     {t('workload.table.member')}
                   </th>
                   {cells.map((cell) => (
-                    <th className="min-w-[92px] border-l border-slate-100 px-3 py-3 text-xs font-bold text-[#69758a]" key={cell.fromDate} scope="col">
+                    <th className="min-w-[92px] border-l border-slate-100 px-3 py-3 text-xs font-bold text-fg-69758a" key={cell.fromDate} scope="col">
                       {formatBucket(cell, granularity)}
                     </th>
                   ))}
@@ -137,8 +137,8 @@ export function TeamWorkloadView({
               <tbody>
                 {members.map((member) => (
                   <tr className="border-b border-slate-100 last:border-b-0" key={member.memberId}>
-                    <th className="sticky left-0 z-10 bg-white px-4 py-3" scope="row">
-                      <span className="block truncate text-sm font-bold text-[#0d1833]">{member.displayName ?? member.memberId}</span>
+                    <th className="sticky left-0 z-10 bg-surface px-4 py-3" scope="row">
+                      <span className="block truncate text-sm font-bold text-fg-0d1833">{member.displayName ?? member.memberId}</span>
                       <span className="mt-1 block text-xs font-semibold text-[var(--workbench-muted)]">{member.timeZone}</span>
                     </th>
                     {member.cells.map((cell) => (
@@ -155,14 +155,14 @@ export function TeamWorkloadView({
                         }}
                       >
                         <div className={`min-h-[66px] rounded-md px-2 py-2 ${cellClass(cell)}`} title={formatCellTitle(cell, t)}>
-                          <span className="block text-sm font-bold text-[#0d1833]">{formatMinutes(cell.allocatedMinutes)}</span>
-                          <span className="mt-1 block text-[11px] font-semibold text-[#526381]">
+                          <span className="block text-sm font-bold text-fg-0d1833">{formatMinutes(cell.allocatedMinutes)}</span>
+                          <span className="mt-1 block text-[11px] font-semibold text-fg-526381">
                             {formatMinutes(cell.capacityMinutes)} · {cell.utilizationPercent}%
                           </span>
                           {onMoveAssignment ? snapshot?.assignments
                             .filter((assignment) => assignmentMatchesCell(assignment, member.memberId, cell))
                             .map((assignment) => (
-                              <details className="mt-2 max-w-full text-[10px] font-bold text-[#526381]" key={assignment.id}>
+                              <details className="mt-2 max-w-full text-[10px] font-bold text-fg-526381" key={assignment.id}>
                                 <summary
                                   className="max-w-full cursor-grab truncate rounded bg-white/80 px-1.5 py-1 shadow-sm disabled:opacity-50"
                                   draggable={!isAssignmentMutationPending}
@@ -172,7 +172,7 @@ export function TeamWorkloadView({
                                   {assignment.workItemId ?? assignment.id}
                                 </summary>
                                 <form
-                                  className="mt-2 grid gap-1 rounded border border-slate-200 bg-white p-2 text-left"
+                                  className="mt-2 grid gap-1 rounded border border-slate-200 bg-surface p-2 text-left"
                                   onSubmit={(event) => {
                                     event.preventDefault()
                                     const formData = new FormData(event.currentTarget)
@@ -185,15 +185,15 @@ export function TeamWorkloadView({
                                 >
                                   <label className="grid gap-1 font-semibold" htmlFor={`workload-member-${assignment.id}`}>
                                     {t('workload.assignment.member')}
-                                    <select className="min-h-8 rounded border border-slate-200 bg-white px-1 text-[10px]" defaultValue={assignment.memberId} id={`workload-member-${assignment.id}`} name="memberId">
+                                    <select className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.memberId} id={`workload-member-${assignment.id}`} name="memberId">
                                       {members.map((candidate) => <option key={candidate.memberId} value={candidate.memberId}>{candidate.displayName ?? candidate.memberId}</option>)}
                                     </select>
                                   </label>
                                   <label className="grid gap-1 font-semibold" htmlFor={`workload-date-${assignment.id}`}>
                                     {t('workload.assignment.date')}
-                                    <input className="min-h-8 rounded border border-slate-200 bg-white px-1 text-[10px]" defaultValue={assignment.fromDate} id={`workload-date-${assignment.id}`} name="targetDate" type="date" />
+                                    <input className="min-h-8 rounded border border-slate-200 bg-surface px-1 text-[10px]" defaultValue={assignment.fromDate} id={`workload-date-${assignment.id}`} name="targetDate" type="date" />
                                   </label>
-                                  <button className="rounded bg-[#0d1833] px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="submit">
+                                  <button className="rounded bg-tone-0d1833 px-2 py-1 text-[10px] font-bold text-white disabled:opacity-50" disabled={isAssignmentMutationPending} type="submit">
                                     {t('workload.assignment.move')}
                                   </button>
                                 </form>
@@ -216,16 +216,16 @@ export function TeamWorkloadView({
 /** Renders one workload summary metric. */
 function WorkloadMetric({ label, value, tone }: { label: string; value: string; tone: 'teal' | 'amber' | 'blue' | 'red' | 'emerald' }) {
   const colors = {
-    teal: 'border-[#b9e6e2] bg-[#f2fbfa]',
-    amber: 'border-[#f1dbad] bg-[#fffaf0]',
-    blue: 'border-[#c9d8f0] bg-[#f5f8ff]',
-    red: 'border-[#f2c7c7] bg-[#fff7f7]',
-    emerald: 'border-[#bce4d0] bg-[#f3fbf6]',
+    teal: 'border-tone-b9e6e2 bg-tone-f2fbfa',
+    amber: 'border-tone-f1dbad bg-tone-fffaf0',
+    blue: 'border-tone-c9d8f0 bg-tone-f5f8ff',
+    red: 'border-tone-f2c7c7 bg-tone-fff7f7',
+    emerald: 'border-tone-bce4d0 bg-tone-f3fbf6',
   }
   return (
     <div className={`border px-4 py-3 ${colors[tone]}`}>
-      <p className="text-xs font-bold uppercase tracking-[0.08em] text-[#69758a]">{label}</p>
-      <p className="mt-2 text-xl font-bold tracking-[-0.02em] text-[#0d1833]">{value}</p>
+      <p className="text-xs font-bold uppercase tracking-[0.08em] text-fg-69758a">{label}</p>
+      <p className="mt-2 text-xl font-bold tracking-[-0.02em] text-fg-0d1833">{value}</p>
     </div>
   )
 }
@@ -237,10 +237,10 @@ function Legend({ color, label }: { color: string; label: string }) {
 
 /** Returns the heatmap surface for one workload cell. */
 function cellClass(cell: WorkloadCell): string {
-  if (cell.status === 'over') return 'border border-[#efb3b3] bg-[#fff0f0]'
-  if (cell.status === 'balanced') return 'border border-[#f1d18b] bg-[#fff8e6]'
+  if (cell.status === 'over') return 'border border-tone-efb3b3 bg-tone-fff0f0'
+  if (cell.status === 'balanced') return 'border border-tone-f1d18b bg-tone-fff8e6'
   if (cell.status === 'unavailable') return 'border border-slate-100 bg-slate-50'
-  return 'border border-[#a7d8d2] bg-[#edf9f7]'
+  return 'border border-tone-a7d8d2 bg-tone-edf9f7'
 }
 
 /** Formats a bucket header without assuming that all users share a timezone. */

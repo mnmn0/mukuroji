@@ -225,7 +225,7 @@ function WorkItemConfigurationPanelContent({
       </div>
 
       {inheritedFrom ? (
-        <p className="rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm font-semibold text-teal-900" data-testid="work-item-configuration-inherited">
+        <p className="rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm font-semibold text-fg-teal-900" data-testid="work-item-configuration-inherited">
           {t(`workItems.configuration.inherited.${inheritedFrom}`)}
         </p>
       ) : null}
@@ -280,7 +280,7 @@ function WorkItemConfigurationPanelContent({
       )}
 
       {errorMessage || localErrorMessage ? (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700" role="alert">
+        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
           {localErrorMessage ?? errorMessage}
         </p>
       ) : null}
@@ -480,7 +480,7 @@ export function WorkflowConfigurationSection({
                 + {t('workItems.configuration.addWorkflow')}
               </button>
               <button
-                className="workbench-button-secondary min-h-10 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                className="workbench-button-secondary min-h-10 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
                 disabled={isPrimaryWorkflow || workflowIsUsedByType}
                 onClick={removeWorkflow}
                 title={workflowIsUsedByType
@@ -530,7 +530,7 @@ export function WorkflowConfigurationSection({
           <ol className="grid gap-2">
             {statuses.map((status, index) => (
               <li
-                className="grid grid-cols-[32px_minmax(140px,1fr)_minmax(130px,0.7fr)_auto] items-center gap-2 rounded-lg border border-[var(--workbench-border)] bg-white p-2 max-[680px]:grid-cols-[32px_minmax(0,1fr)_auto]"
+                className="grid grid-cols-[32px_minmax(140px,1fr)_minmax(130px,0.7fr)_auto] items-center gap-2 rounded-lg border border-[var(--workbench-border)] bg-surface p-2 max-[680px]:grid-cols-[32px_minmax(0,1fr)_auto]"
                 data-testid={`workflow-status-${status.id}`}
                 key={status.id}
               >
@@ -638,7 +638,7 @@ export function WorkflowConfigurationSection({
               <tbody>
                 {statuses.map((fromStatus) => (
                   <tr className="border-t border-[var(--workbench-border)]" key={fromStatus.id}>
-                    <th className="sticky left-0 z-10 border-r border-[var(--workbench-border)] bg-white px-3 py-3 text-left text-sm font-semibold text-[var(--workbench-text)]" scope="row">
+                    <th className="sticky left-0 z-10 border-r border-[var(--workbench-border)] bg-surface px-3 py-3 text-left text-sm font-semibold text-[var(--workbench-text)]" scope="row">
                       {fromStatus.name}
                     </th>
                     {statuses.map((toStatus) => {
@@ -795,7 +795,7 @@ export function WorkItemTypesConfigurationSection({
       <div className="grid gap-4 p-5">
         {types.map((type) => (
           <article
-            className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-white p-4"
+            className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-surface p-4"
             data-testid={`work-item-type-definition-${type.id}`}
             key={type.id}
           >
@@ -813,7 +813,7 @@ export function WorkItemTypesConfigurationSection({
               <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
                 {t('workItems.configuration.typeIcon')}
                 <span className="flex items-center gap-2">
-                  <span className="grid h-10 w-10 flex-none place-items-center rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] text-[var(--workbench-primary)]">
+                  <span className="grid h-10 w-10 flex-none place-items-center rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] text-[var(--workbench-primary-text)]">
                     <WorkItemTypeIcon
                       className="h-5 w-5 fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]"
                       iconToken={type.iconToken}
@@ -844,7 +844,7 @@ export function WorkItemTypesConfigurationSection({
               <div className="flex items-end justify-end">
                 <button
                   aria-label={t('workItems.configuration.removeType').replace('{type}', type.name)}
-                  className="workbench-button-secondary min-h-10 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-40"
+                  className="workbench-button-secondary min-h-10 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-40"
                   disabled={type.id === DEFAULT_WORK_ITEM_TYPE.id}
                   onClick={() => removeType(type.id)}
                   type="button"
@@ -1229,7 +1229,7 @@ function CustomFieldDefinitionCard({
   const supportsLengthValidation = field.type === 'text' || field.type === 'multi-select'
 
   return (
-    <article className="rounded-lg border border-[var(--workbench-border)] bg-white" data-testid={`custom-field-definition-${field.id}`}>
+    <article className="rounded-lg border border-[var(--workbench-border)] bg-surface" data-testid={`custom-field-definition-${field.id}`}>
       <div className="grid grid-cols-[40px_minmax(180px,1fr)_minmax(150px,0.7fr)_auto] items-end gap-3 border-b border-[var(--workbench-border)] p-3 max-[760px]:grid-cols-[40px_minmax(0,1fr)_auto]">
         <span className="grid h-9 w-9 place-items-center rounded-full bg-[var(--workbench-surface-muted)] text-xs font-bold text-[var(--workbench-muted)]">
           {index + 1}
@@ -1547,7 +1547,7 @@ function CustomFieldOptionsEditor({
               </button>
               <button
                 aria-label={t('workItems.configuration.removeOption').replace('{option}', option.name)}
-                className="workbench-button-secondary h-9 px-3 text-red-700"
+                className="workbench-button-secondary h-9 px-3 text-fg-red-700"
                 onClick={() => updateOptions((current) => current.filter(
                   (candidate) => candidate.id !== option.id,
                 ))}
@@ -1587,7 +1587,7 @@ function CustomFieldDefaultControl({
 
   if (field.type === 'boolean') {
     return (
-      <label className="flex min-h-10 cursor-pointer items-center gap-3 self-end rounded-lg border border-[var(--workbench-border)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]">
+      <label className="flex min-h-10 cursor-pointer items-center gap-3 self-end rounded-lg border border-[var(--workbench-border)] bg-surface px-3 text-sm font-semibold text-[var(--workbench-text)]">
         <input
           checked={field.defaultValue === true}
           className="h-4 w-4 accent-[var(--workbench-primary)]"

@@ -260,7 +260,7 @@ export function AutomationManagementPanel({
               aria-selected={activeTab === tab}
               className={`min-h-10 whitespace-nowrap border-b-2 px-4 text-sm font-semibold transition-colors ${
                 activeTab === tab
-                  ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary)]'
+                  ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary-text)]'
                   : 'border-transparent text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'
               }`}
               data-testid={`automation-tab-${tab}`}
@@ -280,7 +280,7 @@ export function AutomationManagementPanel({
 
       {errorMessage ? (
         <div className="mx-5 mt-5 flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
-          <p className="text-sm font-semibold text-red-700">{errorMessage}</p>
+          <p className="text-sm font-semibold text-fg-red-700">{errorMessage}</p>
           {onRefresh ? (
             <button className="workbench-button-secondary min-h-9 px-3" type="button" onClick={() => void onRefresh()}>
               {t('automation.refresh')}
@@ -717,7 +717,7 @@ export function AutomationTemplateApplicationEditor({
         </select>
       </label>
       {!targetsAvailable ? (
-        <p className="text-xs font-semibold text-red-700" role="alert">
+        <p className="text-xs font-semibold text-fg-red-700" role="alert">
           {t('automation.template.application.noTargets')}
         </p>
       ) : null}
@@ -740,7 +740,7 @@ export function AutomationTemplateApplicationEditor({
         />
       ) : null}
       {refreshErrorMessage ? (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700" role="alert">
+        <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
           {refreshErrorMessage}
         </p>
       ) : null}
@@ -769,7 +769,7 @@ function TemplateApplicationResult({
   const t = useMemo(() => createTranslator(locale), [locale])
   const result = application.result
   return (
-    <section className="rounded-lg border border-[var(--workbench-border)] bg-white p-4" data-testid="automation-template-application-result">
+    <section className="rounded-lg border border-[var(--workbench-border)] bg-surface p-4" data-testid="automation-template-application-result">
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <StatusBadge
@@ -811,7 +811,7 @@ function TemplateApplicationResult({
         </p>
       ) : null}
       {application.errorMessage ? (
-        <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">
+        <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700">
           {application.errorMessage}
         </p>
       ) : null}
@@ -975,7 +975,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
         const actionResults = execution.actions
 
         return (
-          <article className="rounded-lg border border-[var(--workbench-border)] bg-white p-4" key={id}>
+          <article className="rounded-lg border border-[var(--workbench-border)] bg-surface p-4" key={id}>
             <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1004,7 +1004,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
               ) : null}
             </div>
             {failureReason ? (
-              <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">
+              <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700">
                 {failureReason}
               </p>
             ) : null}
@@ -1027,7 +1027,7 @@ function RunsTab({ busyOperation, executions, locale, onRetry, readOnly }: RunsT
                         )}
                       </span>
                       <span className="flex min-w-0 items-center gap-2">
-                        {actionFailure ? <span className="break-all text-xs font-medium text-red-700">{actionFailure}</span> : null}
+                        {actionFailure ? <span className="break-all text-xs font-medium text-fg-red-700">{actionFailure}</span> : null}
                         <StatusBadge
                           label={formatType(actionStatus, t, 'status')}
                           status={actionStatus}
@@ -1087,7 +1087,7 @@ function ResourceCard({ children, description, locale, name, status, version }: 
   const t = useMemo(() => createTranslator(locale), [locale])
 
   return (
-    <article className="flex min-w-0 flex-wrap items-center justify-between gap-4 rounded-lg border border-[var(--workbench-border)] bg-white p-4">
+    <article className="flex min-w-0 flex-wrap items-center justify-between gap-4 rounded-lg border border-[var(--workbench-border)] bg-surface p-4">
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <h3 className="break-words text-sm font-semibold text-[var(--workbench-text)]">{name}</h3>

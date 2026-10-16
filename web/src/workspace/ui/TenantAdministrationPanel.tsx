@@ -117,7 +117,7 @@ export function TenantAdministrationPanelContainer({
   }
   if (error || !data || !profile || !governance) {
     return (
-      <section className="workbench-panel border-[#f1c4b8] p-5" data-testid="tenant-administration-error">
+      <section className="workbench-panel border-tone-f1c4b8 p-5" data-testid="tenant-administration-error">
         <SectionHeader
           title={t('workspace.tenantAdministration.title')}
           meta={t('workspace.tenantAdministration.loadError')}
@@ -248,7 +248,7 @@ export function TenantAdministrationPanel({
 
   return (
     <section className="workbench-panel overflow-hidden" data-testid="tenant-administration-panel">
-      <div className="border-b border-[var(--workbench-border)] bg-[#f1f7f5] px-5 py-6 sm:px-7">
+      <div className="border-b border-[var(--workbench-border)] bg-tone-f1f7f5 px-5 py-6 sm:px-7">
         <div className="flex flex-wrap items-end justify-between gap-5">
           <div>
             <p className="workbench-eyebrow">{t('workspace.tenantAdministration.eyebrow')}</p>
@@ -259,19 +259,19 @@ export function TenantAdministrationPanel({
               {t('workspace.tenantAdministration.description')}
             </p>
           </div>
-          <div className="rounded-full border border-[#9dd8cf] bg-white/80 px-3 py-1.5 text-xs font-semibold tracking-[0.08em] text-[var(--workbench-primary)]">
+          <div className="rounded-full border border-tone-9dd8cf bg-white/80 px-3 py-1.5 text-xs font-semibold tracking-[0.08em] text-[var(--workbench-primary-text)]">
             {profile.region} · {profile.status}
           </div>
         </div>
         {tenantLifecycleLocked ? (
-          <p className="mt-4 rounded-lg border border-[#f1c4b8] bg-[#fff8f5] px-3 py-2 text-sm font-semibold text-[#9e3d27]" role="status">
+          <p className="mt-4 rounded-lg border border-tone-f1c4b8 bg-tone-fff8f5 px-3 py-2 text-sm font-semibold text-fg-9e3d27" role="status">
             {t(profile.status === 'closed'
               ? 'workspace.tenantAdministration.closed'
               : 'workspace.tenantAdministration.closing')}
           </p>
         ) : null}
         {actionError ? (
-          <p className="mt-4 rounded-lg border border-[#f1c4b8] bg-[#fff8f5] px-3 py-2 text-sm font-semibold text-[#9e3d27]" role="alert">
+          <p className="mt-4 rounded-lg border border-tone-f1c4b8 bg-tone-fff8f5 px-3 py-2 text-sm font-semibold text-fg-9e3d27" role="alert">
             {actionError}
           </p>
         ) : null}
@@ -358,7 +358,7 @@ export function TenantAdministrationPanel({
               </select>
             </label>
           </div>
-          <label className="mt-4 flex items-start gap-3 rounded-lg border border-[#f0d7a8] bg-[#fffaf0] p-3 text-sm font-semibold text-[#7b5b22]">
+          <label className="mt-4 flex items-start gap-3 rounded-lg border border-tone-f0d7a8 bg-tone-fffaf0 p-3 text-sm font-semibold text-fg-7b5b22">
             <input checked={governance.legalHold} disabled={tenantClosed} onChange={(event) => onChangeGovernance({ ...governance, legalHold: event.target.checked })} type="checkbox" />
             <span>{t('workspace.tenantAdministration.legalHold')}</span>
           </label>
@@ -377,10 +377,10 @@ export function TenantAdministrationPanel({
         <section className="border-t border-[var(--workbench-border)] py-7 xl:col-span-2">
           <SectionHeader title={t('workspace.tenantAdministration.lifecycleTitle')} meta={t('workspace.tenantAdministration.lifecycleMeta')} />
           {activeOperation ? (
-            <div className="mt-5 rounded-lg border border-[#99d7cf] bg-[#f2fbf9] p-4">
+            <div className="mt-5 rounded-lg border border-tone-99d7cf bg-tone-f2fbf9 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm font-semibold text-[var(--workbench-text)]">
                 <span>{activeOperation.kind === 'export' ? t('workspace.tenantAdministration.exportOperation') : t('workspace.tenantAdministration.closureOperation')}</span>
-                <span className="text-xs uppercase tracking-[0.08em] text-[var(--workbench-primary)]">{activeOperation.status}</span>
+                <span className="text-xs uppercase tracking-[0.08em] text-[var(--workbench-primary-text)]">{activeOperation.status}</span>
               </div>
               <div
                 aria-label={activeOperation.kind === 'export'
@@ -389,7 +389,7 @@ export function TenantAdministrationPanel({
                 aria-valuemax={100}
                 aria-valuemin={0}
                 aria-valuenow={operationPercent}
-                className="mt-3 h-2 overflow-hidden rounded-full bg-[#d9eee9]"
+                className="mt-3 h-2 overflow-hidden rounded-full bg-tone-d9eee9"
                 role="progressbar"
               >
                 <div className="h-full rounded-full bg-[var(--workbench-primary)] transition-[width] motion-reduce:transition-none" style={{ width: `${operationPercent}%` }} />
@@ -414,9 +414,9 @@ export function TenantAdministrationPanel({
                 <button className="workbench-button-secondary" disabled={isSaving || tenantLifecycleLocked || Boolean(activeOperation)} onClick={onRequestExport} type="button">{t('workspace.tenantAdministration.startExport')}</button>
               </div>
             </div>
-            <div className="border-l-2 border-[#d76a4d] bg-[#fffaf8] px-4 py-5 sm:border-l-0 sm:pl-5">
-              <p className="text-sm font-semibold text-[#8d3c29]">{t('workspace.tenantAdministration.closureTitle')}</p>
-              <p className="mt-1 text-sm leading-6 text-[#9e604f]">{t('workspace.tenantAdministration.closureDescription')}</p>
+            <div className="border-l-2 border-tone-d76a4d bg-tone-fffaf8 px-4 py-5 sm:border-l-0 sm:pl-5">
+              <p className="text-sm font-semibold text-fg-8d3c29">{t('workspace.tenantAdministration.closureTitle')}</p>
+              <p className="mt-1 text-sm leading-6 text-fg-9e604f">{t('workspace.tenantAdministration.closureDescription')}</p>
               <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                 <input aria-label={t('workspace.tenantAdministration.confirmationLabel')} className="workbench-input" onChange={(event) => onChangeClosureConfirmation(event.target.value)} placeholder="CLOSE" value={closureConfirmation} />
                 <button className="workbench-button-danger" disabled={isSaving || tenantLifecycleLocked || Boolean(activeOperation) || governance.legalHold || closureConfirmation !== 'CLOSE'} onClick={onRequestClosure} type="button">{t('workspace.tenantAdministration.startClosure')}</button>
@@ -445,7 +445,7 @@ export function TenantAdministrationPanel({
                         </p>
                       ) : null}
                       {operation.failureCode ? (
-                        <p className="mt-1 font-semibold text-[#9e3d27]">
+                        <p className="mt-1 font-semibold text-fg-9e3d27">
                           {t('workspace.tenantAdministration.operationFailure')}: {' '}
                           {operation.failureCode}
                         </p>
@@ -461,7 +461,7 @@ export function TenantAdministrationPanel({
           ) : null}
         </section>
       </div>
-      <div className="grid border-t border-[var(--workbench-border)] bg-[#f8faf9] sm:grid-cols-3 sm:divide-x sm:divide-[var(--workbench-border)]">
+      <div className="grid border-t border-[var(--workbench-border)] bg-tone-f8faf9 sm:grid-cols-3 sm:divide-x sm:divide-[var(--workbench-border)]">
         {tenantAdministrationInfoItems.map(([titleKey, descriptionKey]) => (
           <section className="px-5 py-5 sm:px-7" key={titleKey}>
             <h3 className="text-sm font-semibold text-[var(--workbench-text)]">

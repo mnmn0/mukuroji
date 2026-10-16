@@ -515,7 +515,7 @@ export function AutomationRuleEditor({
         </label>
       </div>
       {triggerType === 'schedule' ? (
-        <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-white p-3">
+        <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-3">
           <legend className="px-1 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('automation.rule.scheduleConfiguration')}
           </legend>
@@ -582,18 +582,18 @@ export function AutomationRuleEditor({
             />
           </div>
           {!isScheduleTimeValid ? (
-            <p className="text-xs font-semibold text-red-700" data-testid="automation-rule-schedule-error" role="alert">
+            <p className="text-xs font-semibold text-fg-red-700" data-testid="automation-rule-schedule-error" role="alert">
               {t('automation.rule.scheduleInvalid')}
             </p>
           ) : null}
           {!isScheduleCadenceValid ? (
-            <p className="text-xs font-semibold text-red-700" data-testid="automation-rule-schedule-cadence-error" role="alert">
+            <p className="text-xs font-semibold text-fg-red-700" data-testid="automation-rule-schedule-cadence-error" role="alert">
               {t('automation.recurring.cadenceInvalid')}
             </p>
           ) : null}
         </fieldset>
       ) : null}
-      <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-white p-3">
+      <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-3">
         <legend className="px-1 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('automation.rule.condition')}
         </legend>
@@ -956,7 +956,7 @@ function WorkItemTemplatePayloadField({
         />
       </label>
       <p
-        className={`text-xs font-medium leading-5 ${error ? 'text-red-700' : 'text-[var(--workbench-muted)]'}`}
+        className={`text-xs font-medium leading-5 ${error ? 'text-fg-red-700' : 'text-[var(--workbench-muted)]'}`}
         id={messageId}
         role={error ? 'alert' : undefined}
       >
@@ -981,7 +981,7 @@ function ProjectTemplatePayloadFields({
   const t = useMemo(() => createTranslator(locale), [locale])
   const tone = payload.tone ?? 'blue'
   return (
-    <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-white p-4">
+    <fieldset className="grid gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface p-4">
       <legend className="px-1 text-xs font-semibold text-[var(--workbench-muted)]">
         {t('automation.template.project.fields')}
       </legend>
@@ -1016,7 +1016,7 @@ function ProjectTemplatePayloadFields({
         />
       </div>
       {!isAutomationProjectTemplatePayloadValid(payload) ? (
-        <p className="text-xs font-semibold text-red-700" role="alert">
+        <p className="text-xs font-semibold text-fg-red-700" role="alert">
           {t('automation.template.project.nameRequired')}
         </p>
       ) : null}
@@ -1275,12 +1275,12 @@ export function RecurringWorkEditor({
         />
       </div>
       {!isScheduleTimeValid ? (
-        <p className="text-xs font-semibold text-red-700" data-testid="automation-recurring-schedule-error" role="alert">
+        <p className="text-xs font-semibold text-fg-red-700" data-testid="automation-recurring-schedule-error" role="alert">
           {t('automation.recurring.scheduleInvalid')}
         </p>
       ) : null}
       {!isScheduleCadenceValid ? (
-        <p className="text-xs font-semibold text-red-700" data-testid="automation-recurring-cadence-error" role="alert">
+        <p className="text-xs font-semibold text-fg-red-700" data-testid="automation-recurring-cadence-error" role="alert">
           {t('automation.recurring.cadenceInvalid')}
         </p>
       ) : null}

@@ -30,7 +30,7 @@ export function DigestPanelContainer(props: DigestPanelContainerProps) {
   const summary = useRef<HTMLElement>(null)
   const t = createTranslator(props.locale)
   return <details className="mb-5" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary ref={summary} className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-teal-800 focus-visible:outline-2 focus-visible:outline-teal-700">{t('updates.digest.title')}<span className="mt-1 block text-app-meta font-normal">{t('updates.digest.previewOnly')}</span></summary>
+    <summary ref={summary} className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-fg-teal-800 focus-visible:outline-2 focus-visible:outline-teal-700">{t('updates.digest.title')}<span className="mt-1 block text-app-meta font-normal">{t('updates.digest.previewOnly')}</span></summary>
     <DigestContent {...props} open={open} restoreFocus={() => summary.current?.focus()} />
   </details>
 }

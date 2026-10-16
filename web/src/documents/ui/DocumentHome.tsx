@@ -127,7 +127,7 @@ export function DocumentHome({
           <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] gap-3">
             {templates.map((template) => (
               <button
-                className="workbench-panel group min-h-[138px] p-5 text-left transition hover:border-[#99d7cf] hover:shadow-[0_8px_24px_rgba(23,32,29,0.08)]"
+                className="workbench-panel group min-h-[138px] p-5 text-left transition hover:border-tone-99d7cf hover:shadow-[0_8px_24px_rgba(23,32,29,0.08)]"
                 key={template.id}
                 onClick={() =>
                   onInstantiateTemplate
@@ -139,7 +139,7 @@ export function DocumentHome({
                 <span className="text-2xl" aria-hidden="true">
                   ◇
                 </span>
-                <strong className="mt-4 block text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary)]">
+                <strong className="mt-4 block text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary-text)]">
                   {template.title}
                 </strong>
                 <span className="mt-1 block text-xs font-medium text-[var(--workbench-muted)]">
@@ -169,7 +169,7 @@ export function DocumentHome({
                 <div className="flex items-center gap-3">
                   <span
                     aria-hidden="true"
-                    className="grid h-9 w-9 place-items-center rounded-lg bg-[#e5f7f4] font-bold text-[var(--workbench-primary)]"
+                    className="grid h-9 w-9 place-items-center rounded-lg bg-tone-e5f7f4 font-bold text-[var(--workbench-primary-text)]"
                   >
                     ▦
                   </span>
@@ -245,7 +245,7 @@ function DocumentCardSection({
         <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,235px),1fr))] gap-3">
           {documents.map((document) => (
             <button
-              className="workbench-panel group min-h-[120px] p-5 text-left transition hover:border-[#99d7cf] hover:shadow-[0_8px_24px_rgba(23,32,29,0.08)]"
+              className="workbench-panel group min-h-[120px] p-5 text-left transition hover:border-tone-99d7cf hover:shadow-[0_8px_24px_rgba(23,32,29,0.08)]"
               key={document.id}
               onClick={() => onSelectDocument(document.id)}
               type="button"
@@ -253,7 +253,7 @@ function DocumentCardSection({
               <span className="text-xl" aria-hidden="true">
                 {document.kind === 'whiteboard' ? '⌘' : '▤'}
               </span>
-              <strong className="mt-3 block truncate text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary)]">
+              <strong className="mt-3 block truncate text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary-text)]">
                 {document.title}
               </strong>
               <time className="mt-1 block text-xs font-medium text-[var(--workbench-muted)]">

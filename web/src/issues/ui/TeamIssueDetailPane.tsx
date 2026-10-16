@@ -652,7 +652,7 @@ function IssueDetailContent({
         ) : null}
       </label>
       {isWorkItemTypeChangeRequested ? (
-        <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="team-issue-detail-work-item-type-preview">
+        <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-surface p-3 text-sm" data-testid="team-issue-detail-work-item-type-preview">
           <p className="font-semibold text-[var(--workbench-text)]">
             {t('tasks.detail.typeChange.title')}
           </p>
@@ -719,16 +719,16 @@ function IssueDetailContent({
                 </label>
               ) : null}
               {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
-                <p className="text-amber-700">
+                <p className="text-fg-amber-700">
                   {t('tasks.detail.typeChange.missingRequired')}
                 </p>
               ) : null}
             </>
           ) : activeTypeChangeState.errorMessage ? (
-            <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
+            <p className="text-fg-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
           ) : null}
           {fieldErrors.typeChange ? (
-            <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
+            <p className="font-semibold text-fg-red-700" role="alert">{fieldErrors.typeChange}</p>
           ) : null}
         </div>
       ) : null}
@@ -886,7 +886,7 @@ function IssueDetailContent({
         return (
           <>
             {planningSnapshot ? (
-              <div className="border-t border-[var(--workbench-border)] bg-white px-6 py-6">
+              <div className="border-t border-[var(--workbench-border)] bg-surface px-6 py-6">
                 <WorkItemDependencyPanel
                   canManageEndpoint={canManageDependencyEndpoint}
                   currentEndpoint={{ teamId: issue.teamId, workItemId: issue.id }}
@@ -1024,7 +1024,7 @@ function IssueDetailContent({
             {t('issues.detail.readOnlyPermission')}
           </p>
         ) : null}
-        {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
+        {detailErrorMessage ? <p className="text-sm font-bold text-fg-red-600">{detailErrorMessage}</p> : null}
       </div>
     </aside>
   )
