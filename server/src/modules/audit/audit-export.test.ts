@@ -326,6 +326,28 @@ describe('audit export service', () => {
       .rejects.toMatchObject({ status: 409, code: 'AuditExportIdempotencyKeyExpired' })
   })
 
+  test('keeps the first recorded request time as the snapshot of a retried request', async () => {
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store: createMemoryStore(),
+      queue: { async enqueue() {} },
+      readEvents: createReader([]),
+      now: fixedNow,
+    })
+    const recordedAt = new Date(fixedNow().getTime() - 60_000).toISOString()
+    const { job } = await service.requestExport({
+      workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'retry-key', requestedAt: recordedAt,
+    })
+    expect(job.snapshotAt).toBe(recordedAt)
+    expect(job.createdAt).toBe(recordedAt)
+    // A time in the future is not a recorded request; the current time is used instead.
+    const future = await service.requestExport({
+      workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'other-key',
+      requestedAt: new Date(fixedNow().getTime() + 60_000).toISOString(),
+    })
+    expect(future.job.snapshotAt).toBe(fixedNow().toISOString())
+  })
+
   test('retries transient read failures through the queue', async () => {
     const service = createAuditExportService({
       settleSeconds: 0,
