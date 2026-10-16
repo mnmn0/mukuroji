@@ -200,3 +200,18 @@ test('refuses to replay a creation whose live row also has a deletion marker', a
   store.restored = live
   await expect(createCollection(store, context, { name: 'Launch' }, 'key')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
 })
+
+test('reports the item limit before a row would exceed the DynamoDB item size', async () => {
+  const store = new InMemoryCollectionsStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  // Valid but long identifiers: multibyte Team and Work Item IDs and a long member key.
+  const long = (index: number) => `${'長'.repeat(250)}-${index}`
+  const longActor = { ...context, actor: 'a'.repeat(500) }
+  let failure: unknown
+  let added = 0
+  for (; added < COLLECTION_ITEM_LIMIT && failure === undefined; added += 1) {
+    failure = await addCollectionItem(store, longActor, collectionId, long(added), long(added), readWorkItem).then(() => undefined, (error: unknown) => error)
+  }
+  expect(added).toBeLessThan(COLLECTION_ITEM_LIMIT)
+  expect(failure).toMatchObject({ status: 409, code: 'CollectionItemLimitReached' })
+})

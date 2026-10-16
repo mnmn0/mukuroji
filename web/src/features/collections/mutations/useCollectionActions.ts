@@ -65,6 +65,30 @@ export function useCollectionActions(
     }
   }
 
+  /**
+   * Writes a Collection returned by a mutation into the cached list before revalidation, so a
+   * failed list refresh cannot keep the previous name or revision that later edits would send.
+   *
+   * @param token - Bearer token that keys the cached list.
+   * @param updated - Collection returned by the mutation.
+   * @returns The same Collection.
+   */
+  const cacheCollection = async (token: string, updated: WorkItemCollection): Promise<WorkItemCollection> => {
+    await mutate(
+      [COLLECTIONS_QUERY_KEY, token, 'list'],
+      (current: WorkItemCollectionsResponse | undefined) => current
+        ? {
+            ...current,
+            collections: current.collections
+              .map((entry) => entry.collectionId === updated.collectionId ? updated : entry)
+              .sort((left, right) => left.name.localeCompare(right.name)),
+          }
+        : current,
+      { revalidate: false },
+    )
+    return updated
+  }
+
   return {
     pending,
     error,
@@ -116,23 +140,10 @@ export function useCollectionActions(
      * @returns The updated Collection, or undefined on failure.
      */
     rename: (collection: WorkItemCollection, name: string, description: string) =>
-      run(async (token) => {
-        const updated = await updateCollection(token, collection.collectionId, { expectedRevision: collection.revision, name, description })
-        // Apply the saved state right away, so a failed list refresh cannot show the old revision.
-        await mutate(
-          [COLLECTIONS_QUERY_KEY, token, 'list'],
-          (current: WorkItemCollectionsResponse | undefined) => current
-            ? {
-                ...current,
-                collections: current.collections
-                  .map((entry) => entry.collectionId === updated.collectionId ? updated : entry)
-                  .sort((left, right) => left.name.localeCompare(right.name)),
-              }
-            : current,
-          { revalidate: false },
-        )
-        return updated
-      }),
+      run(async (token) => await cacheCollection(
+        token,
+        await updateCollection(token, collection.collectionId, { expectedRevision: collection.revision, name, description }),
+      )),
     /**
      * Deletes a Collection.
      *
@@ -161,7 +172,7 @@ export function useCollectionActions(
      * @returns The Collection after the change, or undefined on failure.
      */
     addItem: (collectionId: string, teamId: string, issueId: string) =>
-      run((token) => addCollectionItem(token, collectionId, teamId, issueId)),
+      run(async (token) => await cacheCollection(token, await addCollectionItem(token, collectionId, teamId, issueId))),
     /**
      * Removes a Work Item reference from a Collection.
      *
@@ -171,6 +182,6 @@ export function useCollectionActions(
      * @returns The Collection after the change, or undefined on failure.
      */
     removeItem: (collectionId: string, teamId: string, issueId: string) =>
-      run((token) => removeCollectionItem(token, collectionId, teamId, issueId)),
+      run(async (token) => await cacheCollection(token, await removeCollectionItem(token, collectionId, teamId, issueId))),
   }
 }
