@@ -30,8 +30,13 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
   install の説明では badge を「対応した端末では」と条件付きで案内します。
   iOS / iPadOS のホーム画面 web app は `setAppBadge()` を公開していますが、通知の許可がない限り badge を表示しません。
-  この app は通知の許可を求めない（push 通知を提供しない）ため、iOS / iPadOS では badge は表示されず、
-  これは意図した対象外です。通知許可の導線を追加する場合は、push 通知の提供と合わせて別途設計します。
+  そのため設定画面のインストール card は、installed な standalone app として動作し、Badging API と `Notification` があり、
+  `Notification.permission` が `default`（未回答）の場合だけ「アイコンのバッジを許可」button を表示します
+  （`web/src/shared/lib/pwa/badgePermission.ts`）。`Notification.requestPermission()` は button の click handler から同期的に呼び、
+  自動では要求しません。許可されると `refreshAppBadge()` でその tab の session が未読数を取得し直して badge を再表示します。
+  許可 / ブロック / 未選択 / 確認できない（API がない・browser が拒否した）の結果は `role="status"` で通知し、
+  button が消える場合もフォーカスを結果へ移します。許可済みまたはブロック済みの端末では再度尋ねません。
+  この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。

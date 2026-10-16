@@ -4,14 +4,23 @@ import { clearAuthSession, hasStoredAuthSession } from '../src/auth/session'
 import {
   clearAppBadgeAndNotifyTabs,
   keepAppBadgePublished,
+  refreshAppBadge,
   resolveAppBadgeAction,
   resolveAppBadgeCount,
   subscribeAppBadgeCleared,
   syncAppBadge,
   type AppBadgeChannel,
 } from '../src/shared/lib/pwa/appBadge'
+import {
+  canRequestAppBadgePermission,
+  requestAppBadgePermission,
+  useAppBadgePermission,
+  type AppBadgePermissionEnvironment,
+  type AppBadgePermissionResult,
+  type NotificationPermissionSource,
+} from '../src/shared/lib/pwa/badgePermission'
 import { createAppInstallPromptStore, resolveAppInstallAnnouncement } from '../src/shared/lib/pwa/installPrompt'
-import { AppInstallCard } from '../src/shared/ui/AppInstallCard'
+import { AppInstallCard, type AppBadgePermissionSectionProps } from '../src/shared/ui/AppInstallCard'
 
 /**
  * Creates a `beforeinstallprompt` event with the browser's prompt API.
@@ -352,6 +361,146 @@ describe('app badge across tabs', () => {
   test('works without BroadcastChannel', async () => {
     expect(() => subscribeAppBadgeCleared(() => undefined, () => undefined)()).not.toThrow()
     await expect(clearAppBadgeAndNotifyTabs({}, () => undefined)).resolves.toBeUndefined()
+  })
+})
+
+/**
+ * Creates a Notification-like object whose permission dialog resolves with a fixed answer.
+ *
+ * @param permission - Permission reported before the dialog.
+ * @param answer - Answer the dialog resolves with, or an error it rejects with.
+ * @returns The fake Notification API and how often its dialog was requested.
+ */
+function createNotification(permission: string, answer: string | Error = 'granted') {
+  const requested = { count: 0 }
+  const notification: NotificationPermissionSource = {
+    permission,
+    requestPermission: () => {
+      requested.count += 1
+      return answer instanceof Error ? Promise.reject(answer) : Promise.resolve(answer)
+    },
+  }
+  return { notification, requested }
+}
+
+describe('app badge permission', () => {
+  const badgeNavigator = { setAppBadge: async () => undefined, clearAppBadge: async () => undefined }
+
+  test('is offered only in the installed app with the Badging API and an unanswered Notification permission', () => {
+    const environment = (overrides: Partial<AppBadgePermissionEnvironment>): AppBadgePermissionEnvironment => ({
+      standalone: true,
+      navigator: badgeNavigator,
+      notification: createNotification('default').notification,
+      ...overrides,
+    })
+    expect(canRequestAppBadgePermission(environment({}))).toBe(true)
+    expect(canRequestAppBadgePermission(environment({ standalone: false }))).toBe(false)
+    expect(canRequestAppBadgePermission(environment({ navigator: {} }))).toBe(false)
+    expect(canRequestAppBadgePermission(environment({ navigator: undefined }))).toBe(false)
+    expect(canRequestAppBadgePermission(environment({ notification: undefined }))).toBe(false)
+    expect(canRequestAppBadgePermission(environment({ notification: createNotification('granted').notification }))).toBe(false)
+    expect(canRequestAppBadgePermission(environment({ notification: createNotification('denied').notification }))).toBe(false)
+  })
+
+  test('asks within the calling click and refreshes the badge only after a grant', async () => {
+    const granted = createNotification('default', 'granted')
+    let refreshed = 0
+    const pending = requestAppBadgePermission(granted.notification, () => { refreshed += 1 })
+    // The dialog is requested synchronously, while the user gesture is still active.
+    expect(granted.requested.count).toBe(1)
+    expect(await pending).toBe('granted')
+    expect(refreshed).toBe(1)
+
+    const answers: [string, AppBadgePermissionResult][] = [['denied', 'denied'], ['default', 'dismissed'], ['prompt', 'unsupported']]
+    for (const [answer, expected] of answers) {
+      expect(await requestAppBadgePermission(createNotification('default', answer).notification, () => { refreshed += 1 })).toBe(expected)
+    }
+    expect(await requestAppBadgePermission(createNotification('default', new TypeError('no gesture')).notification, () => { refreshed += 1 }))
+      .toBe('unsupported')
+    expect(await requestAppBadgePermission(undefined, () => { refreshed += 1 })).toBe('unsupported')
+    expect(refreshed).toBe(1)
+  })
+
+  test('never asks for permission while rendering', () => {
+    const { notification, requested } = createNotification('default')
+    /**
+     * Renders the opt-in state as text.
+     *
+     * @returns Whether the opt-in is offered.
+     */
+    function Probe() {
+      const state = useAppBadgePermission(() => ({ standalone: true, navigator: badgeNavigator, notification }))
+      return <span>{String(state.offered)}</span>
+    }
+    expect(renderToStaticMarkup(<Probe />)).toBe('<span>true</span>')
+    expect(requested.count).toBe(0)
+  })
+
+  test('republishes the signed-in count when the badge is refreshed after a grant', async () => {
+    const shown: number[] = []
+    const stop = keepAppBadgePublished({
+      count: 4,
+      isSessionStored: () => true,
+      refreshCount: async () => 5,
+      sync: (count) => shown.push(count),
+      subscribeCleared: (listener) => subscribeAppBadgeCleared(listener, () => undefined),
+    })
+    expect(shown).toEqual([4])
+    refreshAppBadge()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(shown).toEqual([4, 5])
+    stop()
+    refreshAppBadge()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(shown).toEqual([4, 5])
+  })
+
+  test('shows the opt-in in the install card and announces each answer', () => {
+    const cardProps = {
+      title: 'Install as an app',
+      description: 'Install mukuroji.',
+      installLabel: 'Install',
+      pendingLabel: 'Waiting for the browser',
+      acceptedMessage: 'Installing.',
+      dismissedMessage: 'Installation was cancelled.',
+      failedMessage: 'The browser could not open its install dialog.',
+      installedMessage: 'Installed.',
+      onInstall: () => undefined,
+    }
+    const badge: AppBadgePermissionSectionProps = {
+      offered: true,
+      pending: false,
+      description: 'Allow notifications to show the badge. No push notifications are sent.',
+      actionLabel: 'Allow icon badge',
+      pendingLabel: 'Waiting for your choice',
+      grantedMessage: 'Badge allowed.',
+      deniedMessage: 'Badge blocked.',
+      dismissedMessage: 'No choice.',
+      unsupportedMessage: 'Cannot ask.',
+      onRequest: () => undefined,
+    }
+    const offered = renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={badge} status="installed" />)
+    expect(offered).toContain('>Allow icon badge</button>')
+    expect(offered).toContain('No push notifications are sent.')
+    expect(offered).not.toContain('role="status"')
+    // Not offered and not yet answered: no opt-in row, and an unavailable card stays hidden.
+    expect(renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={{ ...badge, offered: false }} status="installed" />))
+      .not.toContain('app-badge-permission')
+    expect(renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={{ ...badge, offered: false }} status="unavailable" />)).toBe('')
+    // A Home Screen app that the install store does not report as installed still offers the opt-in.
+    expect(renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={badge} status="unavailable" />)).toContain('>Allow icon badge</button>')
+    const pending = renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={{ ...badge, pending: true }} status="installed" />)
+    expect(pending).toContain('aria-disabled="true"')
+    expect(pending).toContain('>Waiting for your choice</button>')
+    const results: [AppBadgePermissionResult, string][] = [['granted', 'Badge allowed.'], ['denied', 'Badge blocked.'], ['dismissed', 'No choice.'], ['unsupported', 'Cannot ask.']]
+    for (const [result, message] of results) {
+      // After a grant or a block the permission is no longer `default`, so only the status remains.
+      const answered = renderToStaticMarkup(<AppInstallCard {...cardProps} badgePermission={{ ...badge, offered: result === 'dismissed', result }} status="installed" />)
+      expect(answered).toContain(`role="status" tabindex="-1">${message}</p>`)
+      expect(answered.includes('>Allow icon badge</button>')).toBe(result === 'dismissed')
+    }
   })
 })
 

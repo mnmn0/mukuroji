@@ -379,6 +379,13 @@ export const workspaceMessages = {
   'workspace.settings.install.dismissed': 'インストールはキャンセルされました。後からブラウザのメニューでもインストールできます。',
   'workspace.settings.install.failed': 'ブラウザがインストールの確認を開けませんでした。ブラウザのメニューからインストールしてください。',
   'workspace.settings.install.installed': 'mukuroji はアプリとしてインストールされています。',
+  'workspace.settings.install.badge.description': 'iPhone や iPad など一部の端末では、通知を許可した場合だけアプリのアイコンに受信箱の未読数を表示します。mukuroji はプッシュ通知を送信せず、この許可はアイコンのバッジ表示にだけ使います。',
+  'workspace.settings.install.badge.action': 'アイコンのバッジを許可',
+  'workspace.settings.install.badge.pending': '選択を待っています…',
+  'workspace.settings.install.badge.granted': '通知を許可しました。アプリのアイコンに受信箱の未読数を表示できます。プッシュ通知は引き続き送信しません。',
+  'workspace.settings.install.badge.denied': '通知がブロックされているため、アプリのアイコンに未読数を表示できません。端末の設定から変更できます。',
+  'workspace.settings.install.badge.dismissed': '選択されませんでした。後からここでアイコンのバッジを許可できます。',
+  'workspace.settings.install.badge.unsupported': 'この端末では通知の許可を確認できなかったため、アプリのアイコンに未読数が表示されない場合があります。',
   'workspace.settings.displayTitle': '表示設定',
   'workspace.settings.displayDescription':
     'このブラウザで使う文字サイズ、配色、表示言語を調整します。',

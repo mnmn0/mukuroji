@@ -379,6 +379,13 @@ export const workspaceMessages = {
   'workspace.settings.install.dismissed': 'Installation was cancelled. You can install later from the browser menu.',
   'workspace.settings.install.failed': 'The browser could not open its install dialog. Install mukuroji from the browser menu instead.',
   'workspace.settings.install.installed': 'mukuroji is installed as an app.',
+  'workspace.settings.install.badge.description': 'Some devices, such as iPhone and iPad, show the unread Inbox count on the app icon only after notifications are allowed. mukuroji sends no push notifications; this permission is used only for the icon badge.',
+  'workspace.settings.install.badge.action': 'Allow icon badge',
+  'workspace.settings.install.badge.pending': 'Waiting for your choice…',
+  'workspace.settings.install.badge.granted': 'Notifications are allowed. The app icon can now show the unread Inbox count. mukuroji still sends no push notifications.',
+  'workspace.settings.install.badge.denied': 'Notifications are blocked, so the app icon cannot show the unread count. You can change this in the device settings.',
+  'workspace.settings.install.badge.dismissed': 'No choice was made. You can allow the icon badge from here later.',
+  'workspace.settings.install.badge.unsupported': 'This device could not ask for notification permission, so the app icon may not show the unread count.',
   'workspace.settings.displayTitle': 'Display',
   'workspace.settings.displayDescription':
     'Adjust text size, theme, and display language for this browser.',

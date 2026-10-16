@@ -75,8 +75,22 @@ export async function clearAppBadgeAndNotifyTabs(
   }
 }
 
-/** Listeners on this page that republish after any clear settles, including this page's own. */
+/**
+ * Listeners on this page that republish after any clear settles, including this page's own,
+ * or after `refreshAppBadge` asks for it.
+ */
 const localClearListeners = new Set<() => void>()
+
+/**
+ * Asks this page's signed-in session to reload its unread count and show it on the badge again.
+ *
+ * Used after notification permission is granted: iOS and iPadOS show the badge only with that
+ * permission, so a count published before the grant must be published once more. A session
+ * whose count is zero, or that is no longer stored, publishes nothing.
+ */
+export function refreshAppBadge(): void {
+  for (const listener of localClearListeners) listener()
+}
 
 /**
  * Calls the listener after any page, this one included, cleared the shared app badge.

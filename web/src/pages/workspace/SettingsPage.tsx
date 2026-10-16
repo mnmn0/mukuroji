@@ -6,6 +6,7 @@ import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platfor
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
 import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../../shared/ui/AppInstallCard'
 import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
@@ -25,6 +26,7 @@ export function SettingsPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const appInstall = useAppInstallPrompt()
+  const badgePermission = useAppBadgePermission()
   const [installOutcome, setInstallOutcome] = useState<'accepted' | 'dismissed' | 'failed'>()
   const developerPlatformInitialSection =
     searchParams.get('developerSection') === 'connectors'
@@ -37,6 +39,19 @@ export function SettingsPage() {
         <WorkspaceSettingsView
           appInstallSection={(
             <AppInstallCard
+              badgePermission={{
+                offered: badgePermission.offered,
+                pending: badgePermission.pending,
+                ...(badgePermission.result ? { result: badgePermission.result } : {}),
+                description: t('workspace.settings.install.badge.description'),
+                actionLabel: t('workspace.settings.install.badge.action'),
+                pendingLabel: t('workspace.settings.install.badge.pending'),
+                grantedMessage: t('workspace.settings.install.badge.granted'),
+                deniedMessage: t('workspace.settings.install.badge.denied'),
+                dismissedMessage: t('workspace.settings.install.badge.dismissed'),
+                unsupportedMessage: t('workspace.settings.install.badge.unsupported'),
+                onRequest: badgePermission.request,
+              }}
               acceptedMessage={t('workspace.settings.install.accepted')}
               description={t('workspace.settings.install.description')}
               dismissedMessage={t('workspace.settings.install.dismissed')}
