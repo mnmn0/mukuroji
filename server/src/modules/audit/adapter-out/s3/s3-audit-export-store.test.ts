@@ -5,7 +5,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3'
-import { createAuditExportWorkspacePrefix, type AuditExportJob } from '../../audit-export'
+import { createAuditExportRequestFingerprint, createAuditExportWorkspacePrefix, type AuditExportJob } from '../../audit-export'
 import { S3AuditExportStore } from './s3-audit-export-store'
 
 /** S3 failure with the name and status the SDK reports. */
@@ -63,7 +63,7 @@ function job(exportId: string, createdAt: string, workspaceId = 'ws-1'): AuditEx
     exportId,
     status: 'queued',
     filters: { eventTypes: ['work-item.updated'] },
-    requestFingerprint: 'fingerprint',
+    requestFingerprint: createAuditExportRequestFingerprint({ eventTypes: ['work-item.updated'] }),
     snapshotAt: createdAt,
     requestedBy: { userKey: 'admin@example.com', displayName: 'admin@example.com' },
     createdAt,
@@ -131,6 +131,11 @@ describe('S3AuditExportStore', () => {
     const reordered = { ...job(exportId, '2026-07-18T00:00:00.000Z'), expiresAt: '2026-07-17T00:00:00.000Z' }
     objects.set(jobPath, { body: JSON.stringify(reordered), etag: '"w"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('expires before it was created')
+    // A fingerprint that no longer describes the stored filters would let a changed job run
+    // under the original request's identity.
+    const widened = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters: {} }
+    objects.set(jobPath, { body: JSON.stringify(widened), etag: '"v"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('do not match their fingerprint')
   })
 
   test('lists only the Workspace jobs, newest first', async () => {

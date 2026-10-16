@@ -423,7 +423,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) {
         throw new TypeError('Audit export identifiers must be 32 lowercase hexadecimal digits.')
       }
-      const requestFingerprint = createRequestFingerprint(filters)
+      const requestFingerprint = createAuditExportRequestFingerprint(filters)
       const job: AuditExportJob = {
         schemaVersion: 1,
         workspaceId: request.workspaceId,
@@ -503,7 +503,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       if (
         existing &&
         (existing.job.requestedBy.userKey !== request.requestedBy.userKey ||
-          existing.job.requestFingerprint !== createRequestFingerprint(filters))
+          existing.job.requestFingerprint !== createAuditExportRequestFingerprint(filters))
       ) {
         throw new AuditExportError(
           409,
@@ -515,7 +515,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         // The job object outlives its API lifetime until the bucket lifecycle removes it.
         throw auditExportIdempotencyKeyExpired()
       }
-      return { exportId, filters, requestFingerprint: createRequestFingerprint(filters), jobExists: existing !== undefined }
+      return { exportId, filters, requestFingerprint: createAuditExportRequestFingerprint(filters), jobExists: existing !== undefined }
     },
 
     /**
@@ -757,7 +757,7 @@ function requireIdempotencyKey(value: string): string {
  * @param filters - Normalized filters.
  * @returns Hex SHA-256 of the canonical filter JSON.
  */
-function createRequestFingerprint(filters: AuditExportFilters): string {
+export function createAuditExportRequestFingerprint(filters: AuditExportFilters): string {
   return createHash('sha256').update(stableStringify(filters)).digest('hex')
 }
 
@@ -789,10 +789,15 @@ export function normalizeAuditExportFilters(filters: AuditExportFilters, request
   if (filters.from && Date.parse(filters.from) > requestedAt.getTime()) {
     throw new AuditExportError(400, 'InvalidAuditExportFilters', 'from must not be in the future.')
   }
+  // A supplied but empty value must not silently drop a restriction; only {"filters":{}}
+  // requests an unfiltered export.
+  for (const [key, value] of Object.entries(filters)) {
+    if ((typeof value === 'string' && !value.trim()) || (Array.isArray(value) && value.length === 0)) {
+      throw new AuditExportError(400, 'InvalidAuditExportFilters', `${key} must not be empty; omit it to leave it unrestricted.`)
+    }
+  }
   const normalized: AuditExportFilters = Object.fromEntries(
-    Object.entries(filters).filter(([, value]) =>
-      value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0)
-    ),
+    Object.entries(filters).filter(([, value]) => value !== undefined),
   )
   try {
     // Reject at request time what the worker's queries would reject later.
@@ -963,6 +968,12 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   const exportId = requireString(record.exportId, 'exportId')
   if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) throw new TypeError('Audit export job has an invalid ID.')
   // Deadlines are enforced from these times, so an unreadable or reordered pair is corrupt.
+  const parsedFilters = parseFilters(filters)
+  const requestFingerprint = requireString(record.requestFingerprint, 'requestFingerprint')
+  // The fingerprint guards key reuse, so it must describe the filters the worker will run.
+  if (requestFingerprint !== createAuditExportRequestFingerprint(parsedFilters)) {
+    throw new TypeError('Audit export job filters do not match their fingerprint.')
+  }
   const createdAt = requireInstant(record.createdAt, 'createdAt')
   const expiresAt = requireInstant(record.expiresAt, 'expiresAt')
   if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
@@ -973,8 +984,8 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     workspaceId: requireString(record.workspaceId, 'workspaceId'),
     exportId,
     status,
-    filters: parseFilters(filters),
-    requestFingerprint: requireString(record.requestFingerprint, 'requestFingerprint'),
+    filters: parsedFilters,
+    requestFingerprint,
     snapshotAt: requireInstant(record.snapshotAt, 'snapshotAt'),
     requestedBy: {
       userKey: requireString(requestedBy.userKey, 'requestedBy.userKey'),
