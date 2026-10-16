@@ -129,18 +129,24 @@ export function normalizeContributorAssignments(
 /**
  * Lists members who become contributors through a replacement list.
  *
+ * A member counts as kept only when the entry keeps an existing `assignmentId` that
+ * already names the same member. An entry that omits the ID, or moves an existing ID
+ * to another member, is a new assignment even if the member was a contributor before,
+ * so the member must be validated again.
+ *
  * @param next - Normalized replacement assignments.
  * @param existing - Assignments stored before the change.
- * @returns Member IDs that were not contributors before, in list order.
+ * @returns Member IDs of new member assignments, in list order.
  */
 export function listAddedContributorMembers(
   next: readonly WorkItemContributorAssignment[],
   existing: readonly WorkItemContributorAssignment[],
 ): string[] {
-  const previousMembers = new Set(existing.flatMap((assignment) =>
-    assignment.memberUserId === undefined ? [] : [assignment.memberUserId]))
+  const previousMemberByAssignmentId = new Map(existing.map((assignment) =>
+    [assignment.assignmentId, assignment.memberUserId]))
   return next.flatMap((assignment) =>
-    assignment.memberUserId !== undefined && !previousMembers.has(assignment.memberUserId)
+    assignment.memberUserId !== undefined &&
+      previousMemberByAssignmentId.get(assignment.assignmentId) !== assignment.memberUserId
       ? [assignment.memberUserId]
       : [])
 }

@@ -78,9 +78,19 @@ test('references readable Work Items without copying them and hides unreadable o
 
   const added = await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'PUT')
   expect(added.status).toBe(200)
-  expect((await added.json()).revision).toBe(2)
+  const addedBody = await added.json()
+  expect(addedBody.revision).toBe(2)
+  // The response carries the added Work Item so a client can show it without reloading.
+  expect(addedBody.item).toEqual({
+    teamId: 'core-team',
+    issueId: 'onboarding-friction',
+    title: expect.any(String),
+    statusCategory: 'started',
+    assignedProjectId: 'refero',
+    addedAt: addedBody.updatedAt,
+  })
   const again = await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'PUT')
-  expect((await again.json()).revision).toBe(2)
+  expect(await again.json()).toEqual(addedBody)
 
   expect((await planningApiRequest(`${itemsPath}/core-team/hidden-item`, 'PUT')).status).toBe(404)
   expect((await planningApiRequest(`${itemsPath}/core-team/wireframe`, 'PUT')).status).toBe(404)

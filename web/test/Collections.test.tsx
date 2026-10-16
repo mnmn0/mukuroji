@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import type { WorkItemCollection } from '@mukuroji/contracts'
-import { CollectionApiError, getCollectionItems, getCollections } from '../src/features/collections/api/collections'
+import { CollectionApiError, addCollectionItem, getCollectionItems, getCollections } from '../src/features/collections/api/collections'
 import { collectionCandidateKey, toCollectionCandidates } from '../src/features/collections/model/collectionCandidates'
 import { searchCollectionCandidates } from '../src/features/collections/queries/useCollections'
 import { resolveCollectionErrorMessageKey } from '../src/features/collections/model/collectionErrors'
@@ -164,6 +164,17 @@ describe('Collection API', () => {
     // Items for another Collection are invalid, not data to ignore.
     globalThis.fetch = async () => new Response(JSON.stringify({ collection: { ...collection, collectionId: 'other' }, items: [] }))
     await expect(getCollectionItems('token', collection.collectionId)).rejects.toMatchObject({ status: 502 })
+  })
+
+  test('returns the added Work Item so the item list can show it without a reload', async () => {
+    const item = { teamId: 'core-team', issueId: 'pricing', title: 'Pricing page', statusCategory: 'unstarted', addedAt: '2026-10-16T00:00:00.000Z' }
+    globalThis.fetch = async () => new Response(JSON.stringify({ ...collection, revision: 3, item }))
+    expect(await addCollectionItem('token', 'c1', 'core-team', 'pricing')).toEqual({ ...collection, revision: 3, item })
+    // An add response without the Work Item, or with another one, is invalid.
+    for (const body of [{ ...collection, revision: 3 }, { ...collection, revision: 3, item: { ...item, issueId: 'other' } }, { ...collection, collectionId: 'other', item }]) {
+      globalThis.fetch = async () => new Response(JSON.stringify(body))
+      await expect(addCollectionItem('token', 'c1', 'core-team', 'pricing')).rejects.toMatchObject({ status: 502 })
+    }
   })
 
   test('maps failures to actionable messages', () => {

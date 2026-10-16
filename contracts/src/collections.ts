@@ -78,6 +78,17 @@ export type WorkItemCollectionEntry = {
 }
 
 /**
+ * Response of adding a Work Item to a Collection.
+ *
+ * Besides the Collection metadata, it carries the Work Item as the caller can read it,
+ * so a client can show the new reference without reloading the item list.
+ */
+export type AddWorkItemCollectionItemResponse = WorkItemCollection & {
+  /** The added Work Item, or the existing reference when it was already present. */
+  item: WorkItemCollectionEntry
+}
+
+/**
  * Response of the Collection item endpoint.
  *
  * Only Work Items the caller can already read are listed; references to other

@@ -2225,7 +2225,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
   })
 })
 
-test('DynamoDB Work Item client fences a membership row once when the actor adds themselves', async () => {
+test('DynamoDB Work Item client keeps the snapshot membership version when the actor adds themselves', async () => {
   await withTestEnvironment({
     MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
     PLANNING_TABLE_NAME: 'PlanningTable',
@@ -2247,13 +2247,13 @@ test('DynamoDB Work Item client fences a membership row once when the actor adds
       {} as DynamoDBClient,
       false,
     )
-    const memberCheck = (memberKey: string) => ({
+    const memberCheck = (memberKey: string, version: number) => ({
       ConditionCheck: {
         TableName: 'WorkspaceAccessTable',
         Key: { workspaceId: 'workspace-1', recordKey: `MEMBER#${memberKey}` },
         ConditionExpression: '#status = :active AND #version = :version',
         ExpressionAttributeNames: { '#status': 'status', '#version': 'version' },
-        ExpressionAttributeValues: { ':active': 'active', ':version': 7 },
+        ExpressionAttributeValues: { ':active': 'active', ':version': version },
       },
     })
 
@@ -2269,7 +2269,8 @@ test('DynamoDB Work Item client fences a membership row once when the actor adds
         customFieldValues: {},
         schedule: createDueDateSchedule('2026-07-20'),
         priority: 'medium',
-        authorizationConditionChecks: [memberCheck('demo@example.com'), memberCheck('suzuki@example.com')],
+        // The contributor check read the actor's row after a change bumped it to version 8.
+        authorizationConditionChecks: [memberCheck('demo@example.com', 8), memberCheck('suzuki@example.com', 3)],
         authorizationSnapshot: {
           workspaceId: 'workspace-1',
           memberKey: 'demo@example.com',
@@ -2280,11 +2281,19 @@ test('DynamoDB Work Item client fences a membership row once when the actor adds
       'demo@example.com',
     )
 
-    const memberRecordKeys = (transactItems ?? []).flatMap((item) =>
+    const memberChecks = (transactItems ?? []).flatMap((item) =>
       item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
-        ? [item.ConditionCheck.Key?.recordKey]
+        ? [{
+            recordKey: item.ConditionCheck.Key?.recordKey,
+            versions: Object.values(item.ConditionCheck.ExpressionAttributeValues ?? {})
+              .filter((value) => typeof value === 'number'),
+          }]
         : [])
-    expect(memberRecordKeys).toEqual(['MEMBER#demo@example.com', 'MEMBER#suzuki@example.com'])
+    // One check per row, and the actor's row keeps the version observed at authorization.
+    expect(memberChecks).toEqual([
+      { recordKey: 'MEMBER#suzuki@example.com', versions: [3] },
+      { recordKey: 'MEMBER#demo@example.com', versions: [7] },
+    ])
   })
 })
 
