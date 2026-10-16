@@ -19,7 +19,8 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   例外を出さずに失敗を通知し、browser のメニューからのインストールを案内します。
 - badge: install 済み app の icon に受信箱の未読数を Badging API (`navigator.setAppBadge`) で表示します。
   数値だけを渡すため Workspace の内容は露出せず、読み込みに成功した未読 0 と、session を破棄するすべての経路（`clearAuthSession`）で消去します。badge は installed app 全体で 1 つなので、
-  複数 window の 1 つが閉じても消去しません。
+  複数 window の 1 つが閉じても消去しません。tab ごとに別の session がある場合、ある tab の sign-out で badge を消すと
+  `BroadcastChannel`（`mukuroji-app-badge`）で通知し、sign-in したままの tab が自分の未読数を再表示します。
   未読数の読み込み中や失敗時は前回の badge をそのまま残します。
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
   install の説明では badge を「対応した端末では」と条件付きで案内します。

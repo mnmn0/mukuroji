@@ -33,7 +33,7 @@ import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/s
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
-import { resolveAppBadgeCount, syncAppBadge } from '../../shared/lib/pwa/appBadge'
+import { resolveAppBadgeCount, subscribeAppBadgeCleared, syncAppBadge } from '../../shared/lib/pwa/appBadge'
 import {
   aiAssistanceUiEnabled,
   isAiAssistanceTaskEnabled as isSavedAiAssistanceTaskEnabled,
@@ -293,7 +293,11 @@ export function WorkspaceRouteProvider() {
   // the count is loading or failed, and clear it only for a loaded zero or a signed-out session.
   const badgeCount = resolveAppBadgeCount(Boolean(accessToken), loadedInboxCount)
   useEffect(() => {
-    if (badgeCount !== undefined) syncAppBadge(badgeCount)
+    if (badgeCount === undefined) return undefined
+    syncAppBadge(badgeCount)
+    if (badgeCount === 0) return undefined
+    // Another tab's sign-out clears the shared badge; this signed-in tab republishes its count.
+    return subscribeAppBadgeCleared(() => syncAppBadge(badgeCount))
   }, [badgeCount])
   const userLabel =
     user?.attributes.email ??

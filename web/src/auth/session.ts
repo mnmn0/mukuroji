@@ -1,4 +1,4 @@
-import { syncAppBadge } from '../shared/lib/pwa/appBadge'
+import { clearAppBadgeForEndedSession } from '../shared/lib/pwa/appBadge'
 
 /**
  * ブラウザに保存する Cognito 認証セッションです。
@@ -67,8 +67,9 @@ export function saveAuthSession(session: AuthSession) {
 export function clearAuthSession() {
   window.localStorage.removeItem(storageKey)
   window.sessionStorage.removeItem(storageKey)
-  // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it.
-  syncAppBadge(0)
+  // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
+  // other tabs that are still signed in republish their own count.
+  clearAppBadgeForEndedSession()
 }
 
 function readSession(storage: Storage) {

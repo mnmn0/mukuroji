@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { clearAuthSession } from '../src/auth/session'
-import { resolveAppBadgeCount, syncAppBadge } from '../src/shared/lib/pwa/appBadge'
+import {
+  clearAppBadgeForEndedSession,
+  resolveAppBadgeCount,
+  subscribeAppBadgeCleared,
+  syncAppBadge,
+  type AppBadgeChannel,
+} from '../src/shared/lib/pwa/appBadge'
 import { createAppInstallPromptStore } from '../src/shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../src/shared/ui/AppInstallCard'
 
@@ -141,6 +147,68 @@ describe('app badge', () => {
     syncAppBadge(2, undefined)
     await Promise.resolve()
     expect(calls).toEqual(['set:3', 'clear', 'clear'])
+  })
+})
+
+describe('app badge across tabs', () => {
+  /**
+   * Creates in-memory broadcast channels that deliver to every other open channel.
+   *
+   * @returns A channel factory and the number of open channels.
+   */
+  function createChannelHub() {
+    const open = new Set<AppBadgeChannel>()
+    const openChannel = (): AppBadgeChannel => {
+      const channel: AppBadgeChannel = {
+        onmessage: null,
+        postMessage: (message) => {
+          for (const other of open) {
+            if (other !== channel) other.onmessage?.(new MessageEvent('message', { data: message }))
+          }
+        },
+        close: () => {
+          open.delete(channel)
+        },
+      }
+      open.add(channel)
+      return channel
+    }
+    return { openChannel, openCount: () => open.size }
+  }
+
+  test('lets signed-in tabs republish after another session clears the badge', () => {
+    const hub = createChannelHub()
+    const calls: string[] = []
+    const navigator = {
+      setAppBadge: async (count?: number) => { calls.push(`set:${count}`) },
+      clearAppBadge: async () => { calls.push('clear') },
+    }
+    const republished: number[] = []
+    const unsubscribe = subscribeAppBadgeCleared(() => republished.push(3), hub.openChannel)
+    // Notices from this page itself, or malformed ones, are ignored.
+    hub.openChannel().postMessage({ type: 'other' })
+    expect(republished).toEqual([])
+
+    clearAppBadgeForEndedSession(navigator, hub.openChannel)
+    expect(calls).toEqual(['clear'])
+    // The page that cleared the badge shares this module's page ID, so it ignores its own notice.
+    expect(republished).toEqual([])
+    unsubscribe()
+    expect(hub.openCount()).toBe(1)
+  })
+
+  test('republishes on a clear notice from another page', () => {
+    const hub = createChannelHub()
+    const republished: number[] = []
+    const unsubscribe = subscribeAppBadgeCleared(() => republished.push(3), hub.openChannel)
+    hub.openChannel().postMessage({ type: 'cleared', pageId: 'another-page' })
+    expect(republished).toEqual([3])
+    unsubscribe()
+  })
+
+  test('works without BroadcastChannel', () => {
+    expect(() => subscribeAppBadgeCleared(() => undefined, () => undefined)()).not.toThrow()
+    expect(() => clearAppBadgeForEndedSession({}, () => undefined)).not.toThrow()
   })
 })
 
