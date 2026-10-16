@@ -1029,10 +1029,10 @@ export function TaskDetailPane({
                     ))}
                   </select>
                 </label>
-                <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-                  {t('workItems.owner.label')}
+                <div className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                  {/* The help sits outside the label so it describes the select without joining its name. */}
+                  <label htmlFor={`${editorFormId}-owner`}>{t('workItems.owner.label')}</label>
                   <span
-                    aria-hidden="true"
                     className="text-xs font-normal text-[var(--workbench-muted)]"
                     id={`${editorFormId}-owner-help`}
                   >
@@ -1040,6 +1040,7 @@ export function TaskDetailPane({
                   </span>
                   <select
                     aria-describedby={`${editorFormId}-owner-help`}
+                    id={`${editorFormId}-owner`}
                     className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                     defaultValue={assigneeUserId}
                     form={editorFormId}
@@ -1053,7 +1054,7 @@ export function TaskDetailPane({
                       <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
                     ))}
                   </select>
-                </label>
+                </div>
                 <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('tasks.column.priority')}
                   <select

@@ -72,7 +72,6 @@ function job(exportId: string, createdAt: string, workspaceId = 'ws-1'): AuditEx
     eventCount: 0,
     parts: [],
     scanAttempt: 1,
-    durableEventCount: 0,
   }
 }
 
@@ -160,15 +159,6 @@ describe('S3AuditExportStore', () => {
     }
     objects.set(jobPath, { body: JSON.stringify(queuedWithProgress), etag: '"p"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('already has progress')
-    // The completeness check compares durable events, so their count cannot exceed the total.
-    const overstatedDurable = {
-      ...job(exportId, '2026-07-18T00:00:00.000Z'),
-      status: 'running',
-      verification: { count: 0 },
-      durableEventCount: 1,
-    }
-    objects.set(jobPath, { body: JSON.stringify(overstatedDurable), etag: '"o"' })
-    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('more durable events than events')
     const { scanAttempt: _scanAttempt, ...withoutAttempt } = job(exportId, '2026-07-18T00:00:00.000Z')
     void _scanAttempt
     objects.set(jobPath, { body: JSON.stringify(withoutAttempt), etag: '"n"' })

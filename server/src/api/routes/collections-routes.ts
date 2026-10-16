@@ -20,7 +20,7 @@ import {
   type CollectionsStore,
   type ReadCollectionWorkItem,
 } from '../../modules/collections'
-import { ProjectDataError, type ProjectAccessEntry } from '../../modules/directory'
+import { normalizeProjectMemberKey, ProjectDataError, type ProjectAccessEntry } from '../../modules/directory'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
@@ -40,7 +40,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { readOptionalPositiveQueryInteger } from '../shared/input-parsing'
 import { toWorkspaceSearchErrorResponse } from '../shared/search-access'
 import { searchWorkspaceForPrincipal } from './search-routes'
-import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
+import { projectAccessAllows, toWorkspaceAccessErrorResponse, type TeamPermissionContext } from '../shared/workspace-access'
 
 /** Maximum length of a client idempotency key. */
 const IDEMPOTENCY_KEY_MAX_LENGTH = 256
@@ -218,7 +218,8 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
 }
 
 /**
- * Binds Collection writes to the caller's current Workspace membership.
+ * Binds Collection writes to the caller's current Workspace membership and, for item
+ * changes, to the Project membership that authorized reading the Work Item.
  *
  * @param principal - Authenticated principal.
  * @returns Request-local Collection store.
@@ -226,7 +227,58 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
 function writeStore(principal: WorkspacePrincipal): CollectionsStore {
   return workItemDependencies.collections.withCallerAuthorization(
     createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'),
+    async (workspaceId, projectId) => {
+      const projectDirectory = workspaceDependencies.projectDirectory
+      if (!projectDirectory.createProjectAccessConditionCheck) {
+        throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
+      }
+      const check = await projectDirectory.createProjectAccessConditionCheck.call(
+        projectDirectory,
+        workspaceId,
+        projectId,
+        normalizeProjectMemberKey(principal.userKey),
+        'viewer',
+      )
+      // A membership that is already gone is the same race as one revoked before commit:
+      // the change is retried with a fresh readability check.
+      if (!check?.ConditionCheck) {
+        throw new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
+      }
+      return { ConditionCheck: check.ConditionCheck }
+    },
   )
+}
+
+/**
+ * Picks the Project whose direct membership authorized reading a Work Item.
+ *
+ * Non-Enterprise members reach a Team and its Work Items only through Project membership
+ * rows, which the Workspace membership fence does not cover. A system administrator, a
+ * direct Team grant, or an Enterprise Project grant is covered by the Enterprise control
+ * fence instead, so no Project membership is returned for them.
+ *
+ * @param principal - Authenticated principal.
+ * @param teamContext - Team authorization used for the read.
+ * @param assignedProjectId - Primary Project of the Work Item, if any.
+ * @returns The Project membership to fence, or undefined when none authorized the read.
+ */
+function resolveAccessProjectId(
+  principal: WorkspacePrincipal,
+  teamContext: TeamPermissionContext,
+  assignedProjectId: string | undefined,
+): string | undefined {
+  if (principal.isSystemAdmin || teamContext.directTeamGrant) return undefined
+  const candidates = (teamContext.projectAccesses ?? [])
+    .filter((access) => projectAccessAllows(access, 'viewer'))
+    .map((access) => access.projectId)
+    .filter((projectId) => assignedProjectId === undefined || projectId === assignedProjectId)
+  // Any one readable Project grants the Team; fencing the first is enough, and a retry after
+  // its revocation picks another one that still holds.
+  const enterpriseProjectIds = new Set((principal.enterpriseProjectAccesses ?? [])
+    .filter((access) => projectAccessAllows(access, 'viewer'))
+    .map((access) => access.projectId))
+  if (candidates.some((projectId) => enterpriseProjectIds.has(projectId))) return undefined
+  return candidates[0]
 }
 
 /**
@@ -267,6 +319,7 @@ async function createWorkItemReader(principal: WorkspacePrincipal): Promise<Read
       )
       if (detail.issue.teamId !== teamId || detail.issue.id !== issueId) return undefined
       requireAssignedProjectPermission(principal, teamContext, detail.issue.assignedProjectId, 'viewer')
+      const accessProjectId = resolveAccessProjectId(principal, teamContext, detail.issue.assignedProjectId)
       return {
         entry: {
           teamId,
@@ -276,6 +329,7 @@ async function createWorkItemReader(principal: WorkspacePrincipal): Promise<Read
           ...(detail.issue.assignedProjectId ? { assignedProjectId: detail.issue.assignedProjectId } : {}),
         },
         revision: detail.issue.revision,
+        ...(accessProjectId === undefined ? {} : { accessProjectId }),
       }
     } catch (error) {
       if (isUnreadableWorkItemError(error)) return undefined

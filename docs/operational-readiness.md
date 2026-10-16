@@ -600,6 +600,14 @@ Re-enable後はsystem of record、idempotency key、checkpoint、partial-batch s
 上記「DLQ alarm の共通初動」に従ってowner承認後にredriveします。停止中のmessageを一括
 deleteしたり、terminal jobを盲目的にredriveしたりしません。
 
+`audit-export` の完了前確認は、`AuditEventsTable` の Workspace partition 全体を strongly
+consistent read で数えます（base table の sort key が時刻順でない `eventId` のため、filter や期間に
+かかわらず全履歴を読む）。1 export につき走査ごとに 1 回（最大 3 回）で、1 step は 1 MB までの
+page を最大 10 回に抑えます。大きな Workspace で export が続く場合は、audit table の
+`ConsumedReadCapacityUnits` と `ReadThrottleEvents` を監視し、throttle が API の audit 読み取りや
+書き込みに波及する場合は export の要求を絞ります。読み取り量が問題になる場合の将来案として、
+`occurredAt` を sort key とする LSI（table の再作成が必要）で期間を絞った件数確認に置き換えられます。
+
 ### Public API contract trust root
 
 Public API compatibility gate は、権限を持たない `pull_request` signal の完了後に default

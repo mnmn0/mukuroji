@@ -5250,6 +5250,16 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-detail-pane').locator('input[name="title"]')).toBeFocused()
   })
 
+  test('Issue #239: 責任者の説明を支援技術にも伝える', async ({ page }) => {
+    const ownerHelp = '結果に最終責任を持つ 1 人です。作業の分担は Contributor に設定します。'
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const taskOwner = page.getByTestId('task-detail-pane').getByRole('combobox', { name: '責任者', exact: true })
+    await expect(taskOwner).toHaveAccessibleDescription(ownerHelp)
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const issueOwner = page.getByTestId('team-issue-detail-pane').getByRole('combobox', { name: '責任者', exact: true })
+    await expect(issueOwner).toHaveAccessibleDescription(ownerHelp)
+  })
+
   test('Issue #239: 責任者とは別に Contributor を計画して保存する', async ({ page }) => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       workspaceWorkItemConfiguration: {
