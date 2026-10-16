@@ -241,19 +241,29 @@ test('fails closed when the partition holds more Collections than the Workspace 
 })
 
 /**
+ * Builds a valid stored Collection row.
+ *
+ * @param index - Distinguishes the Collection.
+ * @returns Persisted row with storage attributes.
+ */
+function storedRow(index: number): Record<string, unknown> {
+  return { ...collection, collectionId: `c${index}`, workspaceId: 'w', recordKey: `COLLECTION#c${index}`, entryType: 'work-item-collection', schemaVersion: 1 }
+}
+
+/**
  * Store whose counter row is missing while the partition holds live Collection rows.
  *
- * @param liveRows - Number of live Collection rows the recount finds.
+ * @param liveRows - Number of live Collection rows the recount finds, or the rows themselves.
  * @returns The store and the commands it received.
  */
-function storeWithMissingCounter(liveRows: number) {
+function storeWithMissingCounter(liveRows: number | Record<string, unknown>[]) {
   const commands: unknown[] = []
   let counter: Record<string, unknown> | undefined
   const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
     commands.push(command)
     if (command instanceof GetCommand) return counter ? { Item: counter } : {}
     if (command instanceof QueryCommand) {
-      return { Items: Array.from({ length: liveRows }, (_, index) => ({ recordKey: `COLLECTION#c${index}` })) }
+      return { Items: typeof liveRows === 'number' ? Array.from({ length: liveRows }, (_, index) => storedRow(index)) : liveRows }
     }
     if (command instanceof PutCommand) {
       counter = command.input.Item
@@ -283,7 +293,9 @@ test('rebuilds a missing counter from the live rows before creating', async () =
   })
   const recount = commands.find((command) => command instanceof QueryCommand)
   if (!(recount instanceof QueryCommand)) throw new Error('The live rows were not counted')
-  expect(recount.input).toMatchObject({ ConsistentRead: true, ProjectionExpression: '#recordKey', Limit: COLLECTION_LIMIT + 1 })
+  // The recount reads the metadata a listing validates, not just keys.
+  expect(recount.input.ConsistentRead).toBe(true)
+  expect(Object.values(recount.input.ExpressionAttributeNames ?? {})).toEqual(expect.arrayContaining(['entryType', 'schemaVersion', 'collectionId', 'name', 'revision']))
   expect(commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(2)
 
   // A full partition without its counter still reports the limit instead of growing past it.
@@ -292,6 +304,21 @@ test('rebuilds a missing counter from the live rows before creating', async () =
   // More live rows than the limit cannot be repaired by a counter and fails closed.
   await expect(storeWithMissingCounter(COLLECTION_LIMIT + 1).store.put('w', collection, 0))
     .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
+test('fails closed without installing a counter when a counted row is malformed or foreign', async () => {
+  for (const row of [
+    { recordKey: 'COLLECTION#c9' },
+    { ...storedRow(9), entryType: 'something-else' },
+    { ...storedRow(9), schemaVersion: 2 },
+    { ...storedRow(9), workspaceId: 'other' },
+    { ...storedRow(9), recordKey: 'COLLECTION#c8' },
+  ]) {
+    const { store, commands } = storeWithMissingCounter([storedRow(1), row])
+    await expect(store.put('w', collection, 0)).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+    expect(commands.some((command) => command instanceof PutCommand)).toBe(false)
+    expect(commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(1)
+  }
 })
 
 test('fences a reference change on the canonical Work Item revision', async () => {
@@ -329,5 +356,38 @@ test('fences a reference change on the canonical Work Item revision', async () =
     .rejects.toMatchObject({ status: 409, code: 'CollectionWorkItemChanged' })
   // Without a configured fence builder, a fenced write is refused rather than left unfenced.
   await expect(new DynamoDbCollectionsStore('planning', client, checks).put('w', { ...collection, revision: 2 }, 1, fence))
+    .rejects.toMatchObject({ status: 503 })
+})
+
+test('fences a reference change on the Project membership that authorized the read', async () => {
+  const transactions: unknown[] = []
+  const revisionCheck = { ConditionCheck: { TableName: 'work-items', Key: { directoryTeamId: 'w#core-team', issueId: 'item-1' }, ConditionExpression: 'revision = :r' } }
+  const membershipCheck = { ConditionCheck: { TableName: 'directory', Key: { directoryId: 'w', entryKey: 'PROJECT_MEMBER#refero#reader' }, ConditionExpression: 'attribute_exists(directoryId)' } }
+  let failMembership = false
+  const client = clientFor(async (command) => {
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
+    transactions.push(command.input.TransactItems)
+    if (!failMembership) return {}
+    throw Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'None' }, { Code: 'None' }, { Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    })
+  })
+  const requested: unknown[] = []
+  const store = new DynamoDbCollectionsStore('planning', client, [], () => revisionCheck)
+    .withCallerAuthorization(checks, async (workspaceId, projectId) => {
+      requested.push([workspaceId, projectId])
+      return membershipCheck
+    })
+  const fence = { teamId: 'core-team', issueId: 'item-1', revision: 4, accessProjectId: 'refero' }
+  await store.put('w', { ...collection, revision: 2 }, 1, fence)
+  expect(requested).toEqual([['w', 'refero']])
+  expect(transactions).toEqual([[expect.objectContaining({ Put: expect.anything() }), expect.anything(), revisionCheck, membershipCheck, ...checks]])
+  // A revoked membership fails only its check: retry with a fresh read, not a lost Workspace grant.
+  failMembership = true
+  await expect(store.put('w', { ...collection, revision: 2 }, 1, fence))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionWorkItemChanged' })
+  // A fence that names a Project cannot be written without the membership builder.
+  await expect(new DynamoDbCollectionsStore('planning', client, checks, () => revisionCheck).put('w', { ...collection, revision: 2 }, 1, fence))
     .rejects.toMatchObject({ status: 503 })
 })

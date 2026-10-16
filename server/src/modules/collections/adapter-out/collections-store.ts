@@ -69,15 +69,31 @@ const COLLECTION_SUMMARY_ATTRIBUTES = [
   'revision',
 ] as const
 
+/**
+ * Builds the condition that the caller still holds the Project membership that authorized
+ * reading a Work Item.
+ *
+ * Throws `409 CollectionWorkItemChanged` when the membership no longer exists.
+ *
+ * @param workspaceId - Server-resolved Workspace.
+ * @param projectId - Project whose membership authorized the read.
+ * @returns Transaction condition check on the membership row.
+ */
+export type CollectionProjectAccessCheck = (workspaceId: string, projectId: string) => Promise<PlanningCallerAuthorizationConditionCheck>
+
 /** Composition-only binding for fresh caller authorization conditions. */
 export interface CollectionsPersistence extends CollectionsStore {
   /**
    * Creates a request-local store whose writes also require the caller's current membership.
    *
    * @param checks - Server-built caller authorization conditions.
+   * @param projectAccessCheck - Builds the Project membership condition for reference changes.
    * @returns Request-local Collection persistence.
    */
-  withCallerAuthorization(checks: readonly PlanningCallerAuthorizationConditionCheck[]): CollectionsStore
+  withCallerAuthorization(
+    checks: readonly PlanningCallerAuthorizationConditionCheck[],
+    projectAccessCheck?: CollectionProjectAccessCheck,
+  ): CollectionsStore
 }
 
 /** Collection rows in the existing Planning table (pk `workspaceId`, sk `recordKey`). */
@@ -90,6 +106,8 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   private readonly checks: readonly PlanningCallerAuthorizationConditionCheck[]
   /** Builds the canonical Work Item condition for reference changes, when configured. */
   private readonly workItemFenceCheck: CollectionWorkItemFenceCheck | undefined
+  /** Builds the request caller's Project membership condition, when bound. */
+  private readonly projectAccessCheck: CollectionProjectAccessCheck | undefined
 
   /**
    * Creates the adapter.
@@ -98,27 +116,34 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * @param client - Configured document client.
    * @param checks - Request-local caller conditions.
    * @param workItemFenceCheck - Builds the Work Item revision condition for reference changes.
+   * @param projectAccessCheck - Request-local Project membership condition builder.
    */
   constructor(
     tableName: string,
     client: DynamoDBDocumentClient,
     checks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
     workItemFenceCheck?: CollectionWorkItemFenceCheck,
+    projectAccessCheck?: CollectionProjectAccessCheck,
   ) {
     this.tableName = tableName
     this.client = client
     this.checks = structuredClone(checks)
     this.workItemFenceCheck = workItemFenceCheck
+    this.projectAccessCheck = projectAccessCheck
   }
 
   /**
    * Binds caller authorization conditions to writes.
    *
    * @param checks - Server-built caller authorization conditions.
+   * @param projectAccessCheck - Builds the Project membership condition for reference changes.
    * @returns Request-local store.
    */
-  withCallerAuthorization(checks: readonly PlanningCallerAuthorizationConditionCheck[]): CollectionsStore {
-    return new DynamoDbCollectionsStore(this.tableName, this.client, checks, this.workItemFenceCheck)
+  withCallerAuthorization(
+    checks: readonly PlanningCallerAuthorizationConditionCheck[],
+    projectAccessCheck?: CollectionProjectAccessCheck,
+  ): CollectionsStore {
+    return new DynamoDbCollectionsStore(this.tableName, this.client, checks, this.workItemFenceCheck, projectAccessCheck)
   }
 
   /**
@@ -221,7 +246,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
     const counter = expectedRevision === 0
       ? [this.counterUpdate(workspaceId, 1), this.notDeletedCheck(workspaceId, collection.collectionId)]
       : [this.notDeletedCheck(workspaceId, collection.collectionId)]
-    const fence = workItemFence ? [this.workItemCheck(workspaceId, workItemFence)] : []
+    const fence = workItemFence ? await this.workItemChecks(workspaceId, workItemFence) : []
     const transactItems = [{
       Put: {
         TableName: this.tableName,
@@ -251,7 +276,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
           await this.initializeCounter(workspaceId)
           continue
         }
-        if (fence.length > 0 && isOnlyConditionFailure(error, transactionSize, 1 + counter.length)) {
+        if (fence.some((_, offset) => isOnlyConditionFailure(error, transactionSize, 1 + counter.length + offset))) {
           throw new CollectionError(409, 'CollectionWorkItemChanged', 'The Work Item changed. Reload and try again.')
         }
         storageFailure(error, transactionSize, 1 + counter.length + fence.length, expectedRevision === 0 ? 'create' : 'update')
@@ -326,28 +351,14 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * While the counter is missing, creations fail their counter condition and deletions fail
    * their decrement, so the live rows cannot change between this count and the write. The
    * write only creates the row, so a concurrent initialization by another request wins.
-   * The count reads keys only and stops past `COLLECTION_LIMIT`, which fails closed.
+   * The count reads the same validated metadata as a listing, so a malformed or foreign row
+   * under the Collection prefix, or more rows than `COLLECTION_LIMIT`, fails closed with
+   * `CollectionCorruptState` before any counter is written.
    *
    * @param workspaceId - Server-resolved Workspace.
    */
   private async initializeCounter(workspaceId: string): Promise<void> {
-    let count = 0
-    let exclusiveStartKey: Record<string, unknown> | undefined
-    do {
-      const page = await this.client.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: '#workspaceId = :workspaceId AND begins_with(#recordKey, :prefix)',
-        ProjectionExpression: '#recordKey',
-        ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey' },
-        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': COLLECTION_RECORD_PREFIX },
-        ConsistentRead: true,
-        Limit: COLLECTION_LIMIT + 1,
-        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-      })).catch((error: unknown) => storageFailure(error))
-      count += page.Items?.length ?? 0
-      if (count > COLLECTION_LIMIT) throw corruptState()
-      exclusiveStartKey = page.LastEvaluatedKey
-    } while (exclusiveStartKey)
+    const count = (await this.listSummaries(workspaceId)).length
     try {
       await this.client.send(new PutCommand({
         TableName: this.tableName,
@@ -361,18 +372,23 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   }
 
   /**
-   * Builds the condition that the canonical Work Item is still at the observed revision.
+   * Builds the conditions that the canonical Work Item is still at the observed revision and
+   * that the caller still holds the Project membership that authorized reading it.
    *
    * @param workspaceId - Server-resolved Workspace.
-   * @param fence - Work Item and its observed revision.
-   * @returns Transaction condition check on the Work Item row.
+   * @param fence - Work Item, its observed revision, and the authorizing Project.
+   * @returns Transaction condition checks.
    */
-  private workItemCheck(workspaceId: string, fence: CollectionWorkItemFence): CollectionTransactItem {
-    if (!this.workItemFenceCheck) {
-      // Without the fence a stale readability check could commit; refuse instead.
+  private async workItemChecks(workspaceId: string, fence: CollectionWorkItemFence): Promise<CollectionTransactItem[]> {
+    // Without either fence a stale readability check could commit; refuse instead.
+    if (!this.workItemFenceCheck || (fence.accessProjectId !== undefined && !this.projectAccessCheck)) {
       throw new CollectionError(503, 'CollectionAuthorizationUnavailable', 'Caller authorization is unavailable.')
     }
-    return this.workItemFenceCheck(workspaceId, fence)
+    const checks: CollectionTransactItem[] = [this.workItemFenceCheck(workspaceId, fence)]
+    if (fence.accessProjectId !== undefined && this.projectAccessCheck) {
+      checks.push(await this.projectAccessCheck(workspaceId, fence.accessProjectId))
+    }
+    return checks
   }
 
   /**
@@ -451,13 +467,29 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
   }
 
   /**
-   * Returns this store; condition checks are verified by the DynamoDB adapter tests.
+   * Returns this store, or a view whose reference changes first require the Project
+   * membership builder to succeed; condition checks themselves are verified by the DynamoDB
+   * adapter tests.
    *
    * @param _checks - Caller authorization conditions.
-   * @returns This store.
+   * @param projectAccessCheck - Project membership condition builder, as in the DynamoDB store.
+   * @returns Request-local store.
    */
-  withCallerAuthorization(_checks: readonly PlanningCallerAuthorizationConditionCheck[]): CollectionsStore {
-    return this
+  withCallerAuthorization(
+    _checks: readonly PlanningCallerAuthorizationConditionCheck[],
+    projectAccessCheck?: CollectionProjectAccessCheck,
+  ): CollectionsStore {
+    if (!projectAccessCheck) return this
+    return {
+      listSummaries: (workspaceId) => this.listSummaries(workspaceId),
+      get: (workspaceId, collectionId) => this.get(workspaceId, collectionId),
+      readDeletion: (workspaceId, collectionId) => this.readDeletion(workspaceId, collectionId),
+      delete: (workspaceId, collectionId, expectedRevision, deletion) => this.delete(workspaceId, collectionId, expectedRevision, deletion),
+      put: async (workspaceId, collection, expectedRevision, workItemFence) => {
+        if (workItemFence?.accessProjectId !== undefined) await projectAccessCheck(workspaceId, workItemFence.accessProjectId)
+        await this.put(workspaceId, collection, expectedRevision, workItemFence)
+      },
+    }
   }
 
   /**

@@ -326,3 +326,38 @@ test('does not let a Team or Project segment in a Collection item path select a 
     }
   }
 })
+
+test('fences an item change on the Project membership that authorized reading the Work Item', async () => {
+  // A non-Enterprise member reads the Refero Work Item only through Refero membership.
+  configureMember()
+  const { collectionId } = await createCollection('Launch')
+  const itemsPath = `/api/collections/${collectionId}/items`
+  const existingProjectDirectory = getTestAppDependencies().workspace.projectDirectory
+  const fenced: unknown[] = []
+  let membershipRevoked = false
+  setTestAppDependencies({
+    projectDirectory: {
+      ...existingProjectDirectory,
+      async createProjectAccessConditionCheck(directoryId, projectId, memberKey, minimumRole) {
+        fenced.push([projectId, minimumRole])
+        // The membership was revoked after the readability check: nothing to fence on.
+        if (membershipRevoked) return undefined
+        return await existingProjectDirectory.createProjectAccessConditionCheck?.(directoryId, projectId, memberKey, minimumRole)
+      },
+    },
+  })
+
+  membershipRevoked = true
+  const revoked = await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'PUT')
+  expect(revoked.status).toBe(409)
+  expect(await revoked.json()).toMatchObject({ code: 'CollectionWorkItemChanged' })
+  expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toEqual([])
+
+  membershipRevoked = false
+  fenced.length = 0
+  expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'PUT')).status).toBe(200)
+  expect(fenced).toEqual([['refero', 'viewer']])
+  membershipRevoked = true
+  expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'DELETE')).status).toBe(409)
+  expect((await getTestAppDependencies().workItems.collections.get(WORKSPACE_ID, collectionId))?.items).toHaveLength(1)
+})

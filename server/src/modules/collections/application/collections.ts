@@ -85,6 +85,11 @@ export type ObservedCollectionWorkItem = {
   entry: ReadableCollectionWorkItem
   /** Canonical Work Item revision read during the check. */
   revision: number
+  /**
+   * Project whose direct membership authorized reading the Work Item, when that membership
+   * must still hold when the change commits; undefined when no Project membership is involved.
+   */
+  accessProjectId?: string
 }
 
 /** Canonical Work Item state that a reference change requires to be unchanged when it commits. */
@@ -95,6 +100,8 @@ export type CollectionWorkItemFence = {
   issueId: string
   /** Canonical revision observed by the readability check. */
   revision: number
+  /** Project whose direct membership authorized the readability check, when any. */
+  accessProjectId?: string
 }
 
 /**
@@ -337,8 +344,9 @@ const ITEM_CHANGE_ATTEMPTS = 3
  * Applies a set-like item change, rereading and reapplying it after a concurrent write.
  *
  * Each attempt first checks that the caller can read the Work Item and then writes with a
- * fence on the Work Item revision that check observed, so a Work Item deleted or moved out
- * of the caller's reach in between never has its reference changed. Adding or removing one
+ * fence on the Work Item revision and the Project membership that check relied on, so a
+ * Work Item deleted or moved, or a membership revoked, in between never has its reference
+ * changed. Adding or removing one
  * reference does not depend on the rest of the Collection, so a revision conflict or a
  * changed Work Item is retried against the current state; a concurrent identical change
  * then becomes a no-op instead of a reported failure.
@@ -368,7 +376,12 @@ async function applyItemChange(
     const next = change(current)
     if (!next) return { collection: current, observed }
     try {
-      await store.put(workspaceId, next, current.revision, { teamId, issueId, revision: observed.revision })
+      await store.put(workspaceId, next, current.revision, {
+        teamId,
+        issueId,
+        revision: observed.revision,
+        ...(observed.accessProjectId === undefined ? {} : { accessProjectId: observed.accessProjectId }),
+      })
       return { collection: next, observed }
     } catch (error) {
       const retryable = error instanceof CollectionError &&
