@@ -112,7 +112,12 @@ export class S3AuditExportStore implements AuditExportStore {
         throw new TypeError('Audit export job storage returned an incomplete object.')
       }
       const parsed: unknown = JSON.parse(text)
-      return { job: parseAuditExportJob(parsed), version: response.ETag }
+      const job = parseAuditExportJob(parsed)
+      // A copied or corrupted document must not act as a job in another namespace.
+      if (job.workspaceId !== workspaceId || job.exportId !== exportId) {
+        throw new TypeError('Stored audit export job does not match its storage key.')
+      }
+      return { job, version: response.ETag }
     } catch (error) {
       if (isMissingObject(error)) return undefined
       throw error
