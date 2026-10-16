@@ -70,6 +70,7 @@
    - `triage`、`search`、`requests`、`documents`、`planning` から `features/ai-assistance` の `ui/`、`mutations/`、`model/`
    - `triage` から `customers/api`、`task-views` から `search/api/errors`、`commands` から `search/api`
    - `task-views` から `commands/ui/WorkspaceCommandMenuContext`
+   - 逆方向として、既存の `features/ai-assistance/model/aiGenerationValidation.ts` から `search/model/searchFilterTransportBudget`
    これらを残したまま `features/` へ移すと、移動後に禁止された依存がそのまま残ります。
 7. **notification の業務データと設定 UI が一つの領域にある。**
    受信箱と未読数は workspace の layout / provider と inbox page の両方が使う業務データです。
@@ -98,6 +99,7 @@
 4. **feature 候補の領域同士の依存を解消する。**
    移動の前に、差分 6 の import を一つずつ解消します。移動を伴わない PR とし、領域ごとに分けて構いません。
    - 複数の領域から使われる API や error（`customers/api`、`search/api/errors`）は、entity または共通の `api/` へ移します。
+   - `searchFilterTransportBudget` のように別 feature の model から参照される上限値は、契約として `@mukuroji/contracts` か entity の `model/` へ移します。
    - `features/ai-assistance` の UI を組み込んでいる箇所は、page が AI の component を組み立てて props / slot として渡す形にするか、`features/ai-assistance` の public な入口（`index.ts`）だけを参照する形にします。
    - `WorkspaceCommandMenuContext` のように画面をまたいで共有する UI 状態は、`app/providers/` に置き、feature は callback を受け取る形にします。
    最後に、feature から別 feature の public な入口以外への依存を禁止するルールを `.dependency-cruiser.cjs` へ追加し、以降の移動で依存が戻らないようにします。
