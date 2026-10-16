@@ -1089,6 +1089,20 @@ export function createAuditConsumerReceiptTransactPut(
 }
 
 /**
+ * Raised when an idempotent audit write reuses an event identity with a different request.
+ *
+ * It extends `TypeError` so existing callers keep their handling, while adapters can tell a
+ * real idempotency conflict apart from a malformed stored row.
+ */
+export class AuditEventIdempotencyConflictError extends TypeError {
+  /** Creates the conflict error. */
+  constructor() {
+    super('Audit event idempotency key conflicts with an existing event.')
+    this.name = 'AuditEventIdempotencyConflictError'
+  }
+}
+
+/**
  * DynamoDB の audit timeline を GSI と opaque cursor で検索します。
  */
 export class DynamoDbAuditEventsClient {
@@ -1163,7 +1177,7 @@ export class DynamoDbAuditEventsClient {
         existing?.entity.type !== event.entity.type ||
         existing?.entity.id !== event.entity.id
       ) {
-        throw new TypeError('Audit event idempotency key conflicts with an existing event.')
+        throw new AuditEventIdempotencyConflictError()
       }
     }
   }
