@@ -86,6 +86,9 @@ test('does not resurrect a deleted Collection when its creation is replayed', as
   await deleteCollection(store, 'w', created.collectionId, 1)
   await expect(createCollection(store, context, { name: 'Launch' }, 'key'))
     .rejects.toMatchObject({ status: 409, code: 'CollectionDeleted' })
+  // Reusing the key for a different request is still an idempotency conflict after deletion.
+  await expect(createCollection(store, context, { name: 'Other' }, 'key'))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionIdempotencyConflict' })
   expect(await store.list('w')).toEqual([])
   expect((await createCollection(store, context, { name: 'Launch' }, 'new-key')).name).toBe('Launch')
 })

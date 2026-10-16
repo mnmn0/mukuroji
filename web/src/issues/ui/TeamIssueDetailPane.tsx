@@ -68,6 +68,7 @@ import {
   WorkItemContributorsEditor,
   type ContributorDraftSubmitError,
 } from '../../work-items/ui/WorkItemContributorsEditor'
+import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import {
   type CanManageWorkItemDependencyEndpoint,
   type TeamIssueScreenProps,
@@ -537,6 +538,8 @@ function IssueDetailContent({
   }
   const editorFormId = useId()
   const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
+  // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
+  const contributorDraftState = useContributorDraft(editorIdentity)
   const [contributorDraftError, setContributorDraftError] = useState<ContributorDraftSubmitError>()
 
   /** Submits the visible Team Issue controls through the external editor form. */
@@ -765,6 +768,7 @@ function IssueDetailContent({
       assignments={issue.contributorAssignments}
       formId={editorFormId}
       jobRoles={configuration?.jobRoles ?? []}
+      draftState={contributorDraftState}
       key={editorIdentity + ':contributors'}
       locale={locale}
       memberOptions={contributorOptions}

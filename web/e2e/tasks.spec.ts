@@ -5318,6 +5318,53 @@ test.describe('authenticated task page', () => {
     await expect(contributors.getByRole('button', { name: 'Contributor を編集' })).toBeVisible()
   })
 
+  test('Issue #239: overview の有無が変わる種別変更でも Contributor 下書きを保持する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workspaceWorkItemConfiguration: {
+        ...defaultWorkItemConfiguration,
+        jobRoles: [{ id: 'designer', name: 'デザイナー' }],
+        workItemTypes: [
+          DEFAULT_WORK_ITEM_TYPE,
+          {
+            ...DEFAULT_WORK_ITEM_TYPE,
+            id: 'compact',
+            name: 'Compact',
+            detailSections: DEFAULT_WORK_ITEM_TYPE.detailSections.filter((section) => section !== 'overview'),
+          },
+        ],
+      },
+    })
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/work-item-type-preview$/u, (route) => route.fulfill({
+      json: {
+        approvalCompletionTransitionConflict: false,
+        currentWorkflowStatusId: 'active',
+        currentWorkItemTypeId: DEFAULT_WORK_ITEM_TYPE.id,
+        expectedRevision: 1,
+        lostCustomFieldIds: [],
+        missingRequiredCustomFieldDefinitions: [],
+        missingRequiredCustomFieldIds: [],
+        requiresResolution: false,
+        targetInitialWorkflowStatusId: 'todo',
+        targetWorkItemTypeId: 'compact',
+      },
+    }))
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const detailPane = page.getByTestId('task-detail-pane')
+    const contributors = detailPane.getByTestId('work-item-contributors')
+    await contributors.getByRole('button', { name: 'Contributor を編集' }).click()
+    await contributors.getByRole('button', { name: 'Contributor を追加' }).click()
+    const row = contributors.getByTestId('work-item-contributor-row')
+    await row.locator('select').nth(1).selectOption('designer')
+    await row.locator('input').fill('2')
+
+    // The editor moves out of the overview section, but the unsaved row must stay.
+    await detailPane.getByRole('combobox', { name: 'Work Item Type' }).selectOption('compact')
+    await expect(detailPane.getByRole('combobox', { name: '責任者', exact: true })).toHaveCount(0)
+    await expect(row).toHaveCount(1)
+    await expect(row.locator('select').nth(1)).toHaveValue('designer')
+    await expect(row.locator('input')).toHaveValue('2')
+  })
+
   test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const detailPane = page.getByTestId('task-detail-pane')
