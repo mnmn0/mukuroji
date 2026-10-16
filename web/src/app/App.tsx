@@ -1,4 +1,5 @@
 import { RouterProvider } from 'react-router/dom'
+import { LiveAnnouncer } from '../shared/ui/LiveAnnouncer'
 import { ServiceWorkerUpdateNotice } from './pwa/ServiceWorkerUpdateNotice'
 import { createAppRouter } from './router'
 
@@ -9,6 +10,7 @@ function App() {
     <>
       <RouterProvider router={router} />
       <ServiceWorkerUpdateNotice />
+      <LiveAnnouncer />
     </>
   )
 }

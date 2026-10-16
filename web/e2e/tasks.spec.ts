@@ -4136,6 +4136,9 @@ test.describe('authenticated task page', () => {
     })
 
     await expect(page.getByTestId('task-action-feedback')).toContainText('変更を保存しました。')
+    await expect(page.getByTestId('task-action-feedback')).not.toHaveAttribute('role', 'status')
+    await expect(page.getByTestId('live-announcer-polite')).toHaveText('変更を保存しました。')
+    await expect(page.getByTestId('live-announcer-polite')).toHaveAttribute('aria-live', 'polite')
     await expect(wireframeRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
     await expect(wireframeRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-04')
     await expect(brandRow.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-06')
