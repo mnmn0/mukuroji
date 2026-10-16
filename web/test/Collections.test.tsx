@@ -71,7 +71,7 @@ describe('CollectionsWorkspace', () => {
     expect(markup).toContain('Only Work Items you can view are shown.')
     expect(markup).toContain('>Pricing page (core-team / pricing)</option>')
     expect(markup).not.toContain('>Reduce onboarding friction (core-team / onboarding)</option>')
-    expect(markup).toContain('aria-label="Remove from Collection: Reduce onboarding friction"')
+    expect(markup).toContain('aria-label="Remove from Collection: Reduce onboarding friction (core-team / onboarding)"')
   })
 
   test('asks for a search before offering candidates and reports an empty search', () => {

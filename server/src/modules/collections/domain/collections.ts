@@ -165,7 +165,7 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     // Persisted names keep the same invariant as accepted input: trimmed, non-empty, printable.
     typeof value.name === 'string' && value.name.length > 0 && value.name === value.name.trim() &&
     value.name.length <= COLLECTION_NAME_MAX_LENGTH && !hasControlCharacter(value.name) &&
-    (value.description === undefined || (typeof value.description === 'string' && value.description.length <= COLLECTION_DESCRIPTION_MAX_LENGTH)) &&
+    (value.description === undefined || isStoredDescription(value.description)) &&
     typeof value.createdBy === 'string' &&
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
@@ -243,6 +243,18 @@ function readDescription(value: unknown): string {
     throw invalidInput()
   }
   return description
+}
+
+/**
+ * Checks a persisted description against the input invariant.
+ *
+ * @param value - Persisted description.
+ * @returns Whether it is non-empty, trimmed, within the limit, and free of control characters
+ * other than line breaks and tabs.
+ */
+function isStoredDescription(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0 && value === value.trim() &&
+    value.length <= COLLECTION_DESCRIPTION_MAX_LENGTH && !hasControlCharacter(value, MULTILINE_WHITESPACE)
 }
 
 /**

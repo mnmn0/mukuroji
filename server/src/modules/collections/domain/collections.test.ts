@@ -36,6 +36,10 @@ test('rejects stored Collections with more references than the item limit', () =
   expect(isStoredCollection({ ...stored, name: '   ' })).toBe(false)
   expect(isStoredCollection({ ...stored, name: ' padded' })).toBe(false)
   expect(isStoredCollection({ ...stored, name: 'bad\u0007name' })).toBe(false)
+  expect(isStoredCollection({ ...stored, description: 'Line one\nLine two' })).toBe(true)
+  expect(isStoredCollection({ ...stored, description: ' padded' })).toBe(false)
+  expect(isStoredCollection({ ...stored, description: '' })).toBe(false)
+  expect(isStoredCollection({ ...stored, description: 'bad\u0007text' })).toBe(false)
   // Re-adding is a no-op, so a repeated (teamId, issueId) is corrupt state.
   expect(isStoredCollection({ ...stored, items: [item(1), item(2), item(1)] })).toBe(false)
 })
