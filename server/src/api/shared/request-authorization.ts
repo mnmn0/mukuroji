@@ -447,6 +447,13 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/work-item-configuration*',
     permission: 'work-items.write',
   },
+  { method: 'GET', pathPattern: '/api/collections*', permission: 'work-items.read' },
+  {
+    method: '*',
+    pathPattern: '/api/collections*',
+    permission: 'work-items.write',
+    alternativePermissions: ['workspace.write'],
+  },
   { method: 'GET', pathPattern: '/api/task-views*', permission: 'work-items.read' },
   {
     method: '*',

@@ -155,6 +155,12 @@ const customerRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'customers.title',
   descriptionKey: 'customers.description',
 }
+const collectionsRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'collections',
+  eyebrowKey: 'collections.eyebrow',
+  titleKey: 'collections.title',
+  descriptionKey: 'collections.description',
+}
 const searchRouteMetadata: WorkspaceRouteMetadata = {
   customHeader: true,
   eyebrowKey: 'search.eyebrow',
@@ -701,6 +707,10 @@ function resolveWorkspaceRouteMetadata(
     matchPath('/customers/*', pathname)
   ) {
     return customerRouteMetadata
+  }
+
+  if (matchPath('/collections', pathname)) {
+    return collectionsRouteMetadata
   }
 
   if (matchPath('/search', pathname)) {

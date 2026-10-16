@@ -81,6 +81,7 @@ export type SidebarNavId =
   | 'inbox'
   | 'requests'
   | 'customers'
+  | 'collections'
   | 'documents'
   | 'dashboard'
   | 'planning'
@@ -545,6 +546,7 @@ const primaryNavItems: MainNavItem[] = [
 const secondaryNavItems: MainNavItem[] = [
   { id: 'requests', icon: PanelIcon },
   { id: 'customers', icon: BuildingIcon },
+  { id: 'collections', icon: CollectionFolderIcon },
   { id: 'documents', icon: DocumentIcon },
   { id: 'dashboard', icon: DashboardIcon },
   { id: 'planning', icon: PlanningIcon },
@@ -636,6 +638,7 @@ const defaultLabels: SidebarLabels = {
     inbox: '受信箱',
     requests: 'リクエスト',
     customers: '顧客',
+    collections: 'コレクション',
     documents: 'ドキュメント',
     dashboard: 'ダッシュボード',
     planning: 'プランニング',
@@ -2560,6 +2563,15 @@ function BuildingIcon({ className }: SidebarIconProps) {
       <path d="M4 21V5l8-2 8 2v16" />
       <path d="M2 21h20" />
       <path d="M8 8h1M15 8h1M8 12h1M15 12h1M8 16h1M15 16h1" />
+    </SvgBase>
+  )
+}
+
+/** Renders the folder icon used for Collection destinations. */
+function CollectionFolderIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
     </SvgBase>
   )
 }

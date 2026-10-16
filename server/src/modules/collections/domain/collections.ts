@@ -1,0 +1,243 @@
+import {
+  COLLECTION_DESCRIPTION_MAX_LENGTH,
+  COLLECTION_NAME_MAX_LENGTH,
+  type CreateWorkItemCollectionInput,
+  type UpdateWorkItemCollectionInput,
+  type WorkItemCollection,
+} from '@mukuroji/contracts'
+
+/** Collection failure carrying an HTTP-compatible status and a stable code. */
+export class CollectionError extends Error {
+  /** HTTP-compatible failure status. */
+  readonly status: number
+  /** Stable application error code. */
+  readonly code: string
+
+  /**
+   * Creates a Collection error.
+   *
+   * @param status - HTTP-compatible failure status.
+   * @param code - Stable application error code.
+   * @param message - Safe diagnostic message.
+   */
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'CollectionError'
+    this.status = status
+    this.code = code
+  }
+}
+
+/** One persisted Work Item reference inside a Collection. */
+export type StoredCollectionItem = {
+  /** Team that owns the canonical Work Item. */
+  teamId: string
+  /** Work Item identifier within the Team. */
+  issueId: string
+  /** ISO timestamp when the reference was added. */
+  addedAt: string
+  /** Member key of the member who added the reference. */
+  addedBy: string
+}
+
+/** Persisted Collection, including references that may not be readable by every caller. */
+export type StoredCollection = WorkItemCollection & {
+  /** Work Item references, most recently added first. */
+  items: StoredCollectionItem[]
+}
+
+/** Pattern for server-generated and route-supplied identifiers. */
+const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
+
+/**
+ * Checks whether a value is a safe Collection, Team, or Work Item identifier.
+ *
+ * @param value - Candidate identifier.
+ * @returns Whether the value can be used as an identifier.
+ */
+export function isCollectionIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && IDENTIFIER_PATTERN.test(value)
+}
+
+/**
+ * Validates a route identifier.
+ *
+ * @param value - Route parameter.
+ * @param code - Error code used when the identifier is invalid.
+ * @returns The identifier.
+ */
+export function readCollectionIdentifier(value: string | undefined, code: string): string {
+  if (!isCollectionIdentifier(value)) throw new CollectionError(400, code, 'The identifier is invalid.')
+  return value
+}
+
+/**
+ * Validates a Collection creation body.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns Trimmed name and optional description.
+ */
+export function parseCreateCollectionInput(value: unknown): CreateWorkItemCollectionInput {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== 'name' && key !== 'description')) {
+    throw invalidInput()
+  }
+  const name = readName(value.name)
+  const description = value.description === undefined ? undefined : readDescription(value.description)
+  return { name, ...(description ? { description } : {}) }
+}
+
+/**
+ * Validates a Collection update body.
+ *
+ * @param value - Untrusted JSON body.
+ * @returns Expected revision and the fields to change.
+ */
+export function parseUpdateCollectionInput(value: unknown): UpdateWorkItemCollectionInput {
+  if (!isPlainRecord(value) || Object.keys(value).some((key) => key !== 'expectedRevision' && key !== 'name' && key !== 'description')) {
+    throw invalidInput()
+  }
+  const expectedRevision = readRevision(value.expectedRevision)
+  if (value.name === undefined && value.description === undefined) throw invalidInput()
+  return {
+    expectedRevision,
+    ...(value.name === undefined ? {} : { name: readName(value.name) }),
+    ...(value.description === undefined ? {} : { description: readDescription(value.description) }),
+  }
+}
+
+/**
+ * Reads the expected revision passed as a query parameter.
+ *
+ * @param value - Raw query value.
+ * @returns A positive revision.
+ */
+export function parseExpectedRevisionQuery(value: string | undefined): number {
+  if (value === undefined || !/^[1-9]\d{0,15}$/u.test(value)) throw invalidInput()
+  return readRevision(Number(value))
+}
+
+/**
+ * Validates a persisted Collection row.
+ *
+ * @param value - Persisted attributes without storage keys.
+ * @returns Whether the row is a well-formed Collection.
+ */
+export function isStoredCollection(value: unknown): value is StoredCollection {
+  if (!isPlainRecord(value)) return false
+  return isCollectionIdentifier(value.collectionId) &&
+    typeof value.name === 'string' && value.name.length > 0 && value.name.length <= COLLECTION_NAME_MAX_LENGTH &&
+    (value.description === undefined || (typeof value.description === 'string' && value.description.length <= COLLECTION_DESCRIPTION_MAX_LENGTH)) &&
+    typeof value.createdBy === 'string' &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string' &&
+    typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
+    Array.isArray(value.items) && value.items.every(isStoredCollectionItem)
+}
+
+/**
+ * Returns the public view of a stored Collection without its references.
+ *
+ * @param collection - Stored Collection.
+ * @returns Collection metadata only.
+ */
+export function toPublicCollection(collection: StoredCollection): WorkItemCollection {
+  return {
+    collectionId: collection.collectionId,
+    name: collection.name,
+    ...(collection.description ? { description: collection.description } : {}),
+    createdBy: collection.createdBy,
+    createdAt: collection.createdAt,
+    updatedAt: collection.updatedAt,
+    revision: collection.revision,
+  }
+}
+
+/**
+ * Validates one persisted reference.
+ *
+ * @param value - Candidate reference.
+ * @returns Whether the reference is well formed.
+ */
+function isStoredCollectionItem(value: unknown): value is StoredCollectionItem {
+  return isPlainRecord(value) &&
+    isCollectionIdentifier(value.teamId) &&
+    isCollectionIdentifier(value.issueId) &&
+    typeof value.addedAt === 'string' &&
+    typeof value.addedBy === 'string'
+}
+
+/**
+ * Validates and trims a Collection name.
+ *
+ * @param value - Untrusted name.
+ * @returns Trimmed name.
+ */
+function readName(value: unknown): string {
+  if (typeof value !== 'string') throw invalidInput()
+  const name = value.trim()
+  if (!name || name.length > COLLECTION_NAME_MAX_LENGTH || hasControlCharacter(name)) throw invalidInput()
+  return name
+}
+
+/**
+ * Validates and trims a Collection description.
+ *
+ * @param value - Untrusted description.
+ * @returns Trimmed description; empty when cleared.
+ */
+function readDescription(value: unknown): string {
+  if (typeof value !== 'string') throw invalidInput()
+  const description = value.trim()
+  if (description.length > COLLECTION_DESCRIPTION_MAX_LENGTH || hasControlCharacter(description, MULTILINE_WHITESPACE)) {
+    throw invalidInput()
+  }
+  return description
+}
+
+/**
+ * Validates an observed revision.
+ *
+ * @param value - Untrusted revision.
+ * @returns A positive safe integer.
+ */
+function readRevision(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) throw invalidInput()
+  return value
+}
+
+/** Line breaks and tabs allowed in multi-line descriptions. */
+const MULTILINE_WHITESPACE: ReadonlySet<number> = new Set([0x09, 0x0a, 0x0d])
+
+/**
+ * Checks for control characters.
+ *
+ * @param value - Text to check.
+ * @param allowed - Control code points that are permitted.
+ * @returns Whether the text contains a disallowed control character.
+ */
+function hasControlCharacter(value: string, allowed: ReadonlySet<number> = new Set()): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    if ((codePoint < 0x20 || codePoint === 0x7f) && !allowed.has(codePoint)) return true
+  }
+  return false
+}
+
+/**
+ * Checks for a non-array object.
+ *
+ * @param value - Candidate value.
+ * @returns Whether the value is a plain record.
+ */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Creates the shared invalid-input error.
+ *
+ * @returns A 400 Collection error.
+ */
+function invalidInput(): CollectionError {
+  return new CollectionError(400, 'InvalidCollectionInput', 'The Collection request is invalid.')
+}

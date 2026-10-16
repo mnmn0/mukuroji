@@ -15,6 +15,7 @@ import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
+import { registerCollectionsRoutes } from './routes/collections-routes'
 import { registerCustomersRoutes } from './routes/customers-routes'
 import { registerAiAssistanceRoutes } from './routes/ai-assistance-routes'
 import { registerWorkItemConfigurationRoutes } from './routes/work-item-configuration-routes'
@@ -161,6 +162,7 @@ registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)
+registerCollectionsRoutes(routeApp)
 registerCustomersRoutes(routeApp)
 registerAiAssistanceRoutes(routeApp)
 registerWorkItemConfigurationRoutes(routeApp)
