@@ -164,7 +164,7 @@ export function TeamWorkloadView({
                             .map((assignment) => (
                               <details className="mt-2 max-w-full text-[10px] font-bold text-fg-526381" key={assignment.id}>
                                 <summary
-                                  className="max-w-full cursor-grab truncate rounded bg-white/80 px-1.5 py-1 shadow-sm disabled:opacity-50"
+                                  className="max-w-full cursor-grab truncate rounded bg-surface/80 px-1.5 py-1 shadow-sm disabled:opacity-50"
                                   draggable={!isAssignmentMutationPending}
                                   title={assignment.workItemId ?? assignment.id}
                                   onDragStart={(event) => event.dataTransfer.setData('text/workload-assignment', assignment.id)}

@@ -17,6 +17,11 @@ export type TaskActionFeedbackProps = {
   onDismiss?: () => void
   /** Optional stable test identifier. */
   testId?: string
+  /**
+   * Identity of the action that produced the message. A new value re-announces a
+   * success message even when its text is unchanged and the banner stays mounted.
+   */
+  announcementKey?: unknown
 }
 
 /**
@@ -31,6 +36,7 @@ export type TaskActionFeedbackProps = {
  * @returns A compact alert banner or a visual confirmation banner.
  */
 export function TaskActionFeedback({
+  announcementKey,
   kind,
   dismissLabel,
   message,
@@ -41,8 +47,8 @@ export function TaskActionFeedback({
 }: TaskActionFeedbackProps) {
   // Synchronizes the confirmation with the external live region; React state is not involved.
   useEffect(() => {
-    if (kind === 'success') announce(message, 'polite')
-  }, [kind, message])
+    if (kind === 'success') announce(message, 'polite', Date.now(), announcementKey)
+  }, [announcementKey, kind, message])
 
   return (
     <div

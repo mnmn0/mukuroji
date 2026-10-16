@@ -2041,7 +2041,7 @@ function CreateModeTab({
       className={`flex h-10 items-center justify-center gap-2 rounded-md px-3 text-[13px] font-semibold transition disabled:cursor-not-allowed ${
         active
           ? 'bg-surface text-[var(--workbench-text)] shadow-[0_3px_10px_rgba(23,32,29,0.1)]'
-          : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+          : 'text-[var(--workbench-muted)] hover:bg-surface/70 hover:text-[var(--workbench-text)]'
       }`}
       type="button"
       aria-pressed={active}

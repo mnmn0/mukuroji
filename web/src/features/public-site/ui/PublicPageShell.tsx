@@ -94,7 +94,7 @@ export function PublicPageShell({
 
   return (
     <div className="workbench-shell min-h-svh">
-      <header className="sticky top-0 z-30 border-b border-[var(--workbench-border)] bg-white/95 backdrop-blur-sm">
+      <header className="sticky top-0 z-30 border-b border-[var(--workbench-border)] bg-surface/95 backdrop-blur-sm">
         <div className="mx-auto flex min-h-16 w-full max-w-[1240px] items-center gap-4 px-5 py-2.5 sm:px-8">
           <Link
             aria-label="mukuroji"

@@ -27,6 +27,7 @@ const DUPLICATE_ANNOUNCEMENT_WINDOW_MILLISECONDS = 500
 let state: LiveAnnouncementState = {}
 let nextId = 1
 let lastAnnouncedAt: Partial<Record<LiveAnnouncementPoliteness, number>> = {}
+let lastSourceKey: Partial<Record<LiveAnnouncementPoliteness, unknown>> = {}
 const listeners = new Set<() => void>()
 
 /**
@@ -34,16 +35,19 @@ const listeners = new Set<() => void>()
  *
  * Messages are announced even when the visible feedback element mounts at the same
  * time, which newly inserted live regions do not reliably do. An identical message
- * repeated within half a second is ignored so that duplicate renders stay silent.
+ * repeated within half a second is ignored so that duplicate renders stay silent,
+ * unless the caller identifies it as coming from a different action.
  *
  * @param message - Text to read; blank text is ignored.
  * @param politeness - `polite` for confirmations, `assertive` for failures.
  * @param now - Current time in milliseconds, injectable for tests.
+ * @param sourceKey - Optional identity of the action that produced the message.
  */
 export function announce(
   message: string,
   politeness: LiveAnnouncementPoliteness = 'polite',
   now: number = Date.now(),
+  sourceKey?: unknown,
 ): void {
   const text = message.trim()
   if (!text) return
@@ -52,6 +56,7 @@ export function announce(
   if (
     previous?.message === text &&
     previousAt !== undefined &&
+    lastSourceKey[politeness] === sourceKey &&
     now - previousAt < DUPLICATE_ANNOUNCEMENT_WINDOW_MILLISECONDS
   ) {
     return
@@ -59,6 +64,7 @@ export function announce(
   state = { ...state, [politeness]: { id: nextId, message: text } }
   nextId += 1
   lastAnnouncedAt = { ...lastAnnouncedAt, [politeness]: now }
+  lastSourceKey = { ...lastSourceKey, [politeness]: sourceKey }
   for (const listener of listeners) listener()
 }
 
@@ -92,5 +98,6 @@ export function readLiveAnnouncements(): LiveAnnouncementState {
 export function resetLiveAnnouncements(): void {
   state = {}
   lastAnnouncedAt = {}
+  lastSourceKey = {}
   for (const listener of listeners) listener()
 }
