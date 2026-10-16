@@ -76,7 +76,7 @@ function job(exportId: string, createdAt: string, workspaceId = 'ws-1'): AuditEx
 
 describe('S3AuditExportStore', () => {
   test('creates a job once and replaces it only with the current ETag', async () => {
-    const { store, puts } = createStore()
+    const { store, puts, objects } = createStore()
     const first = job('a'.repeat(32), '2026-07-18T00:00:00.000Z')
 
     expect(await store.createJob(first)).toBe('created')
@@ -91,8 +91,11 @@ describe('S3AuditExportStore', () => {
     expect(puts.every((input) => input.ServerSideEncryption === 'AES256')).toBe(true)
     expect(puts[0]?.Key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${first.exportId}/job.json`)
     expect(puts[1]?.Key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}index/8215667199999-${first.exportId}`)
-    // A replay rewrites the same marker instead of indexing the job twice.
+    // A replay only creates a missing marker; an existing one keeps its object and
+    // lifecycle clock instead of being rewritten.
     expect(puts[3]?.Key).toBe(puts[1]?.Key)
+    expect(puts[3]?.IfNoneMatch).toBe('*')
+    expect(objects.get(puts[1]?.Key ?? '')?.etag).toBe('"etag-2"')
     expect(puts.every((input) => !input.Key?.includes('ws-1'))).toBe(true)
   })
 
@@ -121,6 +124,13 @@ describe('S3AuditExportStore', () => {
     const unknownFilter = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters: { eventTypez: ['x'] } }
     objects.set(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`, { body: JSON.stringify(unknownFilter), etag: '"y"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('unknown field: eventTypez')
+    // Deadlines come from these times, so unreadable or reordered ones are corrupt.
+    const jobPath = `${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`
+    objects.set(jobPath, { body: JSON.stringify({ ...job(exportId, '2026-07-18T00:00:00.000Z'), createdAt: 'soon' }), etag: '"z"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('createdAt must be an ISO timestamp.')
+    const reordered = { ...job(exportId, '2026-07-18T00:00:00.000Z'), expiresAt: '2026-07-17T00:00:00.000Z' }
+    objects.set(jobPath, { body: JSON.stringify(reordered), etag: '"w"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('expires before it was created')
   })
 
   test('lists only the Workspace jobs, newest first', async () => {

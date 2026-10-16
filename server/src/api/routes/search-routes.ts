@@ -24,7 +24,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import {
   createWorkspaceSearchContext,
   isWorkspaceSearchAuthorizationCurrent,
-  parseSearchWorkItemEntityId,
+  parseSearchWorkItemEntityIdForTeam,
   toWorkspaceSearchErrorResponse,
   type WorkspaceSearchContext,
 } from '../shared/search-access'
@@ -101,7 +101,8 @@ async function resolveCurrentWorkspaceSearchScope(
   const workItemId = document.entityType === 'work-item'
     ? document.entityId
     : document.parentId
-  const parsed = parseSearchWorkItemEntityId(workItemId)
+  // The document's Team splits IDs that contain `/`, which the plain grammar cannot.
+  const parsed = parseSearchWorkItemEntityIdForTeam(workItemId, document.teamId)
   if (parsed) {
     const activeTeam = context.directory.teams.find((team) => team.id === parsed.teamId)
     if (!activeTeam) return undefined

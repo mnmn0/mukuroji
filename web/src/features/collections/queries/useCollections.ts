@@ -8,8 +8,8 @@ export const COLLECTIONS_QUERY_KEY = 'collections'
 /** Maximum number of candidates shown for one search. */
 const COLLECTION_CANDIDATE_LIMIT = 12
 
-/** Maximum number of search pages read for one candidate search. */
-const COLLECTION_CANDIDATE_PAGE_LIMIT = 10
+/** Search pages read for one candidate search beyond those needed to skip listed items. */
+const COLLECTION_CANDIDATE_EXTRA_PAGES = 10
 
 const collectionQueryConfig = {
   dedupingInterval: 5_000,
@@ -84,12 +84,15 @@ export function useCollectionCandidates(
  * @param excluded - Candidate keys already in the Collection.
  * @returns Up to `COLLECTION_CANDIDATE_LIMIT` addable candidates.
  */
-async function searchCollectionCandidates(token: string, keyword: string, excluded: ReadonlySet<string>): Promise<CollectionCandidate[]> {
+export async function searchCollectionCandidates(token: string, keyword: string, excluded: ReadonlySet<string>): Promise<CollectionCandidate[]> {
   const candidates: CollectionCandidate[] = []
   const seen = new Set<string>()
   const seenCursors = new Set<string>()
   let cursor: string | undefined
-  for (let page = 0; page < COLLECTION_CANDIDATE_PAGE_LIMIT && candidates.length < COLLECTION_CANDIDATE_LIMIT; page += 1) {
+  // Every listed item can fill a result slot, so the page budget grows with the Collection
+  // (up to its item limit) and still leaves room to find addable candidates.
+  const pageLimit = Math.ceil(excluded.size / COLLECTION_CANDIDATE_LIMIT) + COLLECTION_CANDIDATE_EXTRA_PAGES
+  for (let page = 0; page < pageLimit && candidates.length < COLLECTION_CANDIDATE_LIMIT; page += 1) {
     const response = await searchCollectionCandidatePage(token, keyword, {
       limit: COLLECTION_CANDIDATE_LIMIT,
       ...(cursor ? { cursor } : {}),

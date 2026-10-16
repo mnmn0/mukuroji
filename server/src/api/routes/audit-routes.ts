@@ -15,8 +15,10 @@ import {
   type AuditEventQuery,
 } from '../../modules/audit/audit'
 import {
+  AUDIT_EXPORT_RECEIPT_RETENTION_DAYS,
   AUDIT_EXPORT_RETENTION_DAYS,
   AuditExportError,
+  auditExportIdempotencyKeyExpired,
   toAuditExportView,
   type AuditExportFilters,
 } from '../../modules/audit/audit-export'
@@ -318,7 +320,14 @@ async function recordAuditExportAction(
       ? 'An audit export was requested.'
       : 'Audit export download links were issued.',
     metadata,
-    expiresAt: calculateAuditExpiresAt(context.occurredAt, getConfiguredAuditRetentionDays()),
+    // The request event is the key's receipt, so it outlives every export artifact even when
+    // the configured audit retention is shorter.
+    expiresAt: calculateAuditExpiresAt(
+      context.occurredAt,
+      eventType === 'audit.export-requested'
+        ? Math.max(getConfiguredAuditRetentionDays(), AUDIT_EXPORT_RECEIPT_RETENTION_DAYS)
+        : getConfiguredAuditRetentionDays(),
+    ),
   })
   if (replayGuard && !replayGuard.jobExists) {
     // The audit event outlives the export job. A key whose recorded request is older than the
@@ -329,11 +338,7 @@ async function recordAuditExportAction(
       recorded &&
       Date.parse(recorded.occurredAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000 <= Date.parse(context.occurredAt)
     ) {
-      throw new AuditExportError(
-        409,
-        'AuditExportIdempotencyKeyExpired',
-        'This Idempotency-Key belongs to an export that has expired. Use a new key.',
-      )
+      throw auditExportIdempotencyKeyExpired()
     }
   }
   try {

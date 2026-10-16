@@ -118,6 +118,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
       'NotificationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'AuditExportWorkerFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [

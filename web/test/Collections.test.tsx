@@ -3,7 +3,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import type { WorkItemCollection } from '@mukuroji/contracts'
 import { CollectionApiError, getCollectionItems, getCollections } from '../src/features/collections/api/collections'
-import { toCollectionCandidates } from '../src/features/collections/model/collectionCandidates'
+import { collectionCandidateKey, toCollectionCandidates } from '../src/features/collections/model/collectionCandidates'
+import { searchCollectionCandidates } from '../src/features/collections/queries/useCollections'
 import { resolveCollectionErrorMessageKey } from '../src/features/collections/model/collectionErrors'
 import { CollectionsWorkspace, type CollectionsWorkspaceProps } from '../src/features/collections/ui/CollectionsWorkspace'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -164,5 +165,34 @@ describe('Collection API', () => {
     expect(resolveCollectionErrorMessageKey(404, 'CollectionWorkItemNotFound')).toBe('collections.error.notFound')
     expect(resolveCollectionErrorMessageKey(403, 'CollectionAuthorizationChanged')).toBe('collections.error.denied')
     expect(resolveCollectionErrorMessageKey(undefined, undefined)).toBe('collections.error.generic')
+  })
+})
+
+describe('searchCollectionCandidates', () => {
+  test('reads past every listed item to find addable candidates', async () => {
+    // 180 listed items fill the first 15 pages; addable matches start on page 16.
+    const listed = Array.from({ length: 180 }, (_, index) => `listed-${index}`)
+    const all = [...listed, 'new-1', 'new-2']
+    const requests: string[] = []
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = async (input) => {
+      const url = new URL(String(input), 'http://localhost')
+      requests.push(url.searchParams.get('cursor') ?? '0')
+      const start = Number(url.searchParams.get('cursor') ?? '0')
+      const page = all.slice(start, start + 12)
+      const next = start + 12 < all.length ? String(start + 12) : undefined
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        results: page.map((issueId) => ({ id: `team/core/issue/${issueId}`, entityType: 'work-item', teamId: 'core', title: issueId, url: '/', highlights: [] })),
+        ...(next ? { nextCursor: next } : {}),
+      }))
+    }
+    try {
+      const candidates = await searchCollectionCandidates('token', 'x', new Set(listed.map((issueId) => collectionCandidateKey('core', issueId))))
+      expect(candidates.map((candidate) => candidate.issueId)).toEqual(['new-1', 'new-2'])
+      expect(requests).toHaveLength(16)
+    } finally {
+      globalThis.fetch = previousFetch
+    }
   })
 })

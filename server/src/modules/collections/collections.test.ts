@@ -97,3 +97,35 @@ test('stores Unicode and slash-containing canonical Work Item identifiers', asyn
   expect((await listCollectionEntries(store, 'w', collectionId, readWorkItem)).items.map((item) => [item.teamId, item.issueId]))
     .toEqual([['チーム/日本', '課題-１']])
 })
+
+/** Store that lets another writer commit once between a request's read and its write. */
+class RacingCollectionsStore extends InMemoryCollectionsStore {
+  /** The concurrent change to commit after the next read, if any. */
+  race: (() => Promise<unknown>) | undefined
+
+  /**
+   * Reads a Collection, then commits the pending concurrent change.
+   *
+   * @param workspaceId - Workspace.
+   * @param collectionId - Collection identifier.
+   * @returns The Collection as read before the concurrent change.
+   */
+  override async get(workspaceId: string, collectionId: string) {
+    const current = await super.get(workspaceId, collectionId)
+    const race = this.race
+    this.race = undefined
+    await race?.()
+    return current
+  }
+}
+
+test('treats an overlapping identical add or remove as a no-op instead of a conflict', async () => {
+  const store = new RacingCollectionsStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  store.race = () => addCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)
+  expect((await addCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)).revision).toBe(2)
+
+  store.race = () => removeCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)
+  expect((await removeCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)).revision).toBe(3)
+  expect((await listCollectionEntries(store, 'w', collectionId, readWorkItem)).items).toEqual([])
+})
