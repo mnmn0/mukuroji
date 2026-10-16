@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
@@ -101,5 +102,35 @@ describe('Workspace settings theme control', () => {
     expect(html).toMatch(/aria-pressed="true"[^>]*data-testid="theme-preference-dark"/)
     expect(html).toMatch(/aria-pressed="false"[^>]*data-testid="theme-preference-light"/)
     expect(html).toContain('System')
+  })
+})
+
+describe('theme bootstrap script', () => {
+  const source = readFileSync(new URL('../public/theme-bootstrap.js', import.meta.url), 'utf8')
+  const indexHtml = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
+
+  test('is loaded as a blocking same-origin script in the document head', () => {
+    const head = indexHtml.slice(0, indexHtml.indexOf('</head>'))
+    expect(head).toContain('<script src="/theme-bootstrap.js"></script>')
+  })
+
+  test('applies the same saved preference as the application before it loads', () => {
+    for (const preference of ['light', 'dark', 'system'] as const) {
+      const storage = new Map([['mukuroji.theme', preference]])
+      const root = installBrowserStubs(storage)
+      new Function(source)()
+      expect(root.dataset.theme).toBe(preference)
+      expect(getInitialThemePreference()).toBe(preference)
+    }
+  })
+
+  test('leaves the root untouched for unknown values and blocked storage', () => {
+    const root = installBrowserStubs(new Map([['mukuroji.theme', 'sepia']]))
+    new Function(source)()
+    expect(root.dataset.theme).toBeUndefined()
+
+    const blockedRoot = installBrowserStubs(new Map(), true)
+    expect(() => new Function(source)()).not.toThrow()
+    expect(blockedRoot.dataset.theme).toBeUndefined()
   })
 })

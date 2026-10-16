@@ -69,7 +69,7 @@ export function NotificationInbox({
                 className={`min-h-9 rounded-md px-3 text-sm font-semibold tracking-[0.01em] transition ${
                   controller.filter === filter
                     ? 'bg-surface text-[var(--workbench-text)] shadow-[0_1px_2px_rgba(23,32,29,0.08)]'
-                    : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+                    : 'text-[var(--workbench-muted)] hover:bg-surface/70 hover:text-[var(--workbench-text)]'
                 }`}
                 data-testid={`notification-filter-${filter}`}
                 key={filter}

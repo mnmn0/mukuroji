@@ -175,7 +175,7 @@ export function SecurityRecoveryPage({
             {t('security.recovery.header')}
           </span>
 
-          <label className="ml-auto inline-flex min-h-10 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 text-app-meta font-semibold text-[var(--workbench-muted)] transition focus-within:border-[var(--workbench-focus)] focus-within:ring-3 focus-within:ring-[rgba(37,99,235,0.18)]">
+          <label className="ml-auto inline-flex min-h-10 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 text-app-meta font-semibold text-[var(--workbench-muted)] transition focus-within:border-[var(--workbench-focus)] focus-within:ring-3 focus-within:ring-[var(--workbench-focus-ring)]">
             <span className="sr-only">{t('language.aria')}</span>
             <GlobeIcon className="h-4 w-4 fill-none stroke-current stroke-[1.8]" />
             <select
@@ -292,7 +292,7 @@ export function SecurityRecoveryPage({
 
                   return (
                     <label
-                      className={`grid min-h-11 cursor-pointer place-items-center rounded-md border px-2 text-sm font-bold transition focus-within:outline focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-[rgba(37,99,235,0.22)] ${
+                      className={`grid min-h-11 cursor-pointer place-items-center rounded-md border px-2 text-sm font-bold transition focus-within:outline focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-[var(--workbench-focus)] ${
                         selected
                           ? 'border-[var(--workbench-primary)] bg-tone-e8f6f3 text-[var(--workbench-primary-text)]'
                           : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)]'

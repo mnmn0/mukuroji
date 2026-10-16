@@ -605,7 +605,7 @@ export function DeveloperPlatformPanel({
               className={`min-h-10 rounded-md px-3 text-left text-sm font-semibold transition ${
                 activeSection === section
                   ? 'bg-surface text-[var(--workbench-primary-text)] shadow-sm'
-                  : 'text-[var(--workbench-muted)] hover:bg-white/70 hover:text-[var(--workbench-text)]'
+                  : 'text-[var(--workbench-muted)] hover:bg-surface/70 hover:text-[var(--workbench-text)]'
               }`}
               key={section}
               onClick={() => {
