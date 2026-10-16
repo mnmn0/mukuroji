@@ -349,6 +349,6 @@ function isConditionalWriteFailure(error: unknown) {
  * @returns `true` when the object does not exist.
  */
 function isMissingObject(error: unknown) {
-  const { name, status } = readAwsFailure(error)
-  return name === 'NoSuchKey' || name === 'NotFound' || status === 404
+  // Only a missing key means "no job"; another 404 such as `NoSuchBucket` is an outage.
+  return readAwsFailure(error).name === 'NoSuchKey'
 }
