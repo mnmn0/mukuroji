@@ -661,6 +661,26 @@ describe('audit export completeness barrier', () => {
     expect(counts[0]?.durableAfter).toBe(Date.parse('2026-07-19T00:00:00.000Z') / 1000)
   })
 
+  test('reads the consistent count in small per-step bites', async () => {
+    const counts: AuditEventCountQuery[] = []
+    const { service, base, index, job } = await lagging({
+      countEvents: async (query) => {
+        counts.push(query)
+        const page = Number(query.cursor ?? '0')
+        return page < 24 ? { count: page === 0 ? 6 : 0, nextCursor: String(page + 1) } : { count: 0 }
+      },
+    })
+    index.visible = base
+
+    // 25 count pages take three steps of at most ten pages, well below the scan budget.
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(counts).toHaveLength(10)
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(counts).toHaveLength(20)
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(counts).toHaveLength(25)
+  })
+
   test('leaves events that TTL may delete during the job out of the export and the count', async () => {
     const store = createMemoryStore()
     // The first event expires exactly at the processing deadline, the second has no TTL.

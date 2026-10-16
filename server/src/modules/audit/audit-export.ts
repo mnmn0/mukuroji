@@ -15,6 +15,15 @@ export const AUDIT_EXPORT_EVENTS_PER_PART = 5_000
 /** Query pages one processing step may evaluate before it checkpoints. */
 export const AUDIT_EXPORT_PAGES_PER_STEP = 50
 
+/**
+ * Consistent base-table count pages one step may read.
+ *
+ * The count reads the whole Workspace audit partition with strongly consistent reads of up
+ * to 1 MB per page, so steps take smaller bites to leave the partition's read capacity to
+ * the API and audit writers.
+ */
+export const AUDIT_EXPORT_VERIFICATION_PAGES_PER_STEP = 10
+
 /** Approximate serialized bytes one part may hold before it is closed. */
 export const AUDIT_EXPORT_PART_BYTE_BUDGET = 32 * 1024 * 1024
 
@@ -389,6 +398,8 @@ export type AuditExportServiceDependencies = {
   readonly eventsPerPart?: number
   /** Query pages per step; overridable for tests. */
   readonly pagesPerStep?: number
+  /** Consistent count pages per step; overridable for tests. */
+  readonly verificationPagesPerStep?: number
   /** Serialized byte budget per part; overridable for tests. */
   readonly partByteBudget?: number
   /** Settle delay after the snapshot time; overridable for tests. */
@@ -441,6 +452,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
   const maxEvents = dependencies.maxEvents ?? AUDIT_EXPORT_MAX_EVENTS
   const maxParts = dependencies.maxParts ?? AUDIT_EXPORT_MAX_PARTS
   const pagesPerStep = dependencies.pagesPerStep ?? AUDIT_EXPORT_PAGES_PER_STEP
+  const verificationPagesPerStep = dependencies.verificationPagesPerStep ?? AUDIT_EXPORT_VERIFICATION_PAGES_PER_STEP
   const partByteBudget = dependencies.partByteBudget ?? AUDIT_EXPORT_PART_BYTE_BUDGET
   const settleSeconds = dependencies.settleSeconds ?? AUDIT_EXPORT_SETTLE_SECONDS
 
@@ -755,14 +767,16 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       // The index scan reached the snapshot; count the same events on the base table.
       let verification = scanned.verification ?? { count: 0 }
       let verified = false
+      let countPages = 0
       try {
-        while (pages < pagesPerStep) {
+        while (pages < pagesPerStep && countPages < verificationPagesPerStep) {
           const page = await dependencies.countEvents({
             ...createSnapshotQuery(job),
             durableAfter: durabilityThreshold(job),
             ...(verification.cursor ? { cursor: verification.cursor } : {}),
           })
           pages += 1
+          countPages += 1
           verification = {
             count: verification.count + page.count,
             ...(page.nextCursor ? { cursor: page.nextCursor } : {}),
