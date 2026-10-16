@@ -264,13 +264,6 @@ export class S3AuditExportStore implements AuditExportStore {
 }
 
 /**
- * Builds the object key of a job document.
- *
- * @param workspaceId - Workspace that owns the job.
- * @param exportId - Export identifier.
- * @returns The job document key.
- */
-/**
  * Builds the object key prefix of one export.
  *
  * @param workspaceId - Workspace that owns the export.
@@ -284,11 +277,15 @@ function exportDirectory(workspaceId: string, exportId: string) {
   return `${createAuditExportWorkspacePrefix(workspaceId)}${exportId}/`
 }
 
+/**
+ * Builds the object key of a job document.
+ *
+ * @param workspaceId - Workspace that owns the job.
+ * @param exportId - Export identifier.
+ * @returns The job document key.
+ */
 function jobKey(workspaceId: string, exportId: string) {
-  if (!/^[0-9a-f]{32}$/u.test(exportId)) {
-    throw new TypeError('Audit export identifiers must be 32 lowercase hexadecimal digits.')
-  }
-  return `${createAuditExportWorkspacePrefix(workspaceId)}${exportId}/job.json`
+  return `${exportDirectory(workspaceId, exportId)}job.json`
 }
 
 /**
