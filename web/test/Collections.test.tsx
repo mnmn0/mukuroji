@@ -161,6 +161,9 @@ describe('Collection API', () => {
     const failure = await getCollectionItems('token', 'c1').catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(CollectionApiError)
     expect(failure).toMatchObject({ status: 404, code: 'CollectionNotFound' })
+    // Items for another Collection are invalid, not data to ignore.
+    globalThis.fetch = async () => new Response(JSON.stringify({ collection: { ...collection, collectionId: 'other' }, items: [] }))
+    await expect(getCollectionItems('token', collection.collectionId)).rejects.toMatchObject({ status: 502 })
   })
 
   test('maps failures to actionable messages', () => {

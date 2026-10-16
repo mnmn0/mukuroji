@@ -100,7 +100,11 @@ export async function searchCollectionCandidatePage(
  */
 export async function getCollectionItems(accessToken: string, collectionId: string): Promise<WorkItemCollectionItemsResponse> {
   const data = await requestJson(`${collectionPath(collectionId)}/items`, accessToken)
-  if (!isRecord(data) || !isCollection(data.collection) || !Array.isArray(data.items) || !data.items.every(isCollectionEntry)) {
+  // A response for another Collection is invalid, not a silent mismatch that never resolves.
+  if (
+    !isRecord(data) || !isCollection(data.collection) || data.collection.collectionId !== collectionId ||
+    !Array.isArray(data.items) || !data.items.every(isCollectionEntry)
+  ) {
     throw invalidResponse()
   }
   return { collection: data.collection, items: data.items }
