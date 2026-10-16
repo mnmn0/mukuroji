@@ -99,6 +99,8 @@ describe('canonical Work Item API', () => {
       [{ ...contributor, plannedEffortMinutes: 60_001 }],
       Array.from({ length: 21 }, (_, index) => ({ ...contributor, assignmentId: index.toString(16).padStart(32, '0') })),
       [contributor, contributor],
+      // One member cannot hold two assignments, even under distinct assignment IDs.
+      [contributor, { ...contributor, assignmentId: 'd'.repeat(32) }],
     ]) {
       expect(isCanonicalWorkItem({ ...valid, contributorAssignments })).toBeFalse()
     }

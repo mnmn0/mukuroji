@@ -520,6 +520,7 @@ function isContributorAssignmentList(value: unknown): value is WorkItemContribut
   return Array.isArray(value) &&
     value.length <= WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT &&
     new Set(value.map((entry) => isRecord(entry) ? entry.assignmentId : undefined)).size === value.length &&
+    hasUniqueContributorMembers(value) &&
     value.every((entry) =>
     isRecord(entry) &&
     typeof entry.assignmentId === 'string' &&
@@ -532,6 +533,19 @@ function isContributorAssignmentList(value: unknown): value is WorkItemContribut
         entry.plannedEffortMinutes >= 0 &&
         entry.plannedEffortMinutes <= WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES)) &&
     (entry.status === 'planned' || entry.status === 'in-progress' || entry.status === 'done'))
+}
+
+/**
+ * Checks that no member appears in two contributor assignments, as the server stores them.
+ *
+ * @param entries - Candidate assignments.
+ * @returns Whether every named member appears once, compared case-insensitively.
+ */
+function hasUniqueContributorMembers(entries: readonly unknown[]): boolean {
+  const members = entries
+    .map((entry) => isRecord(entry) && typeof entry.memberUserId === 'string' ? entry.memberUserId.trim().toLowerCase() : undefined)
+    .filter((member): member is string => member !== undefined)
+  return new Set(members).size === members.length
 }
 
 /** Returns whether a value is one compact committed Work Item schedule. */
