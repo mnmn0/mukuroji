@@ -20,6 +20,7 @@ import {
   type ContributorDraftError,
   type ContributorDraftRow,
 } from '../model/contributorAssignments'
+import { useContributorDraft, type ContributorDraftState } from './useContributorDraft'
 
 /**
  * Props accepted by the Work Item contributor editor.
@@ -46,6 +47,11 @@ export type WorkItemContributorsEditorProps = {
   onSave?: (assignments: WorkItemContributorAssignmentInput[]) => Promise<void>
   /** Shows contributors without edit controls. */
   readOnly?: boolean
+  /**
+   * Draft held by the owning editor, so unsaved rows survive this section moving in the
+   * layout. When absent, the section keeps its own draft.
+   */
+  draftState?: ContributorDraftState
 }
 
 /**
@@ -79,13 +85,26 @@ export function WorkItemContributorsEditor({
   ownerUserId,
   readOnly = false,
   submitError,
+  draftState,
 }: WorkItemContributorsEditorProps) {
   const t = createTranslator(locale)
   const headingId = useId()
-  const [rows, setRows] = useState<ContributorDraftRow[] | undefined>()
+  const ownDraftState = useContributorDraft('')
+  const { draft, setDraft } = draftState ?? ownDraftState
+  const { rows } = draft
   const [draftError, setDraftError] = useState<{ error: ContributorDraftError | 'save'; rowKey?: string }>()
   const [isSaving, setIsSaving] = useState(false)
-  const [nextRowNumber, setNextRowNumber] = useState(1)
+  /**
+   * Replaces or updates the draft rows.
+   *
+   * @param action - Next rows or an updater of the current rows.
+   */
+  const setRows = (action: ContributorDraftRow[] | undefined | ((current: ContributorDraftRow[] | undefined) => ContributorDraftRow[] | undefined)) => {
+    setDraft((current) => {
+      const next = typeof action === 'function' ? action(current.rows) : action
+      return next ? { ...current, rows: next } : { nextRowNumber: current.nextRowNumber }
+    })
+  }
   const totalMinutes = sumContributorPlannedEffort(assignments)
   const canEdit = !readOnly && (formId !== undefined || onSave !== undefined)
   const visibleError = draftError ?? (rows ? submitError : undefined)
@@ -307,8 +326,10 @@ export function WorkItemContributorsEditor({
             <button
               className="workbench-button-secondary h-8 px-3 text-sm"
               onClick={() => {
-                setRows((current) => [...(current ?? []), createEmptyContributorDraftRow(`new-${nextRowNumber}`)])
-                setNextRowNumber((current) => current + 1)
+                setDraft((current) => ({
+                  rows: [...(current.rows ?? []), createEmptyContributorDraftRow(`new-${current.nextRowNumber}`)],
+                  nextRowNumber: current.nextRowNumber + 1,
+                }))
               }}
               type="button"
             >
