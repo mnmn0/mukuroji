@@ -345,6 +345,20 @@ async function handleAuditExportJobRequest(
 }
 
 /**
+ * Reads the first part index of a download page.
+ *
+ * @param value - Raw `fromPart` query value.
+ * @returns The part index, 0 when absent.
+ */
+function readFromPartQuery(value: string | undefined): number {
+  if (value === undefined) return 0
+  if (!/^(0|[1-9]\d{0,6})$/u.test(value)) {
+    throw new AuditExportError(400, 'InvalidAuditExportPart', 'fromPart must be a non-negative integer.')
+  }
+  return Number(value)
+}
+
+/**
  * Registers the audit HTTP routes on the shared route application.
  *
  * @param routeApp - Hono application that receives the routes.
@@ -354,18 +368,24 @@ export function registerAuditRoutes(routeApp: Hono): void {
     create: (c) => handleAuditExportJobRequest(c, async (principal, service) => {
       const filters = readAuditExportFilters(await readJson<unknown>(c.req))
       const idempotencyKey = c.req.header('Idempotency-Key')
-      const { job, created } = await service.requestExport({
+      if (idempotencyKey === undefined) {
+        throw new AuditExportError(400, 'IdempotencyKeyRequired', 'An Idempotency-Key header is required.')
+      }
+      const request = {
         workspaceId: principal.directoryId,
         requestedBy: { userKey: principal.userKey, displayName: principal.userKey },
         filters,
-        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-      })
-      // Replays write the same event under the same request identity, so the audit
-      // writer treats them as idempotent and a retry after a failed audit write still records it.
+        idempotencyKey,
+      }
+      // The request is recorded before any job exists, so an export can never run
+      // without its audit event. The key makes every retry reuse the same export and
+      // write the same event, which the audit writer treats as an idempotent repeat.
+      const prepared = await service.prepareExport(request)
       await recordAuditExportAction(c, principal, 'audit.export-requested', {
-        exportId: job.exportId,
-        filtered: Object.keys(job.filters).length > 0,
+        exportId: prepared.exportId,
+        filtered: Object.keys(prepared.filters).length > 0,
       })
+      const { job, created } = await service.requestExport(request)
       return c.json({ export: toAuditExportView(job) }, created ? 202 : 200)
     }),
     list: (c) => handleAuditExportJobRequest(c, async (principal, service) =>
@@ -376,13 +396,15 @@ export function registerAuditRoutes(routeApp: Hono): void {
     ),
     download: (c) => handleAuditExportJobRequest(c, async (principal, service) => {
       const job = await service.getExport(principal.directoryId, c.req.param('exportId') ?? '')
-      const parts = await service.createDownloadLinks(job)
+      const fromPart = readFromPartQuery(c.req.query('fromPart'))
+      const page = await service.createDownloadLinks(job, fromPart)
       await recordAuditExportAction(c, principal, 'audit.export-downloaded', {
         exportId: job.exportId,
-        partCount: parts.length,
+        fromPart,
+        partCount: page.parts.length,
         eventCount: job.eventCount,
       })
-      return c.json({ export: toAuditExportView(job), parts })
+      return c.json({ export: toAuditExportView(job), ...page })
     }),
   }))
 }

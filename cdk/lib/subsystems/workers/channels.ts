@@ -80,7 +80,9 @@ export function buildWorkerChannels(scope: cdk.Stack): WorkerChannels {
     encryption: sqs.QueueEncryption.SQS_MANAGED,
     enforceSSL: true,
     removalPolicy: cdk.RemovalPolicy.RETAIN,
-    retentionPeriod: cdk.Duration.days(4),
+    // Outlives the seven-day job lifetime so an unreceived step message is never dropped
+    // while its job still looks queued or running.
+    retentionPeriod: cdk.Duration.days(8),
     // Six times the five-minute worker timeout, as AWS recommends for SQS event sources.
     visibilityTimeout: cdk.Duration.minutes(30),
   });

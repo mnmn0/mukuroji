@@ -125,8 +125,9 @@ describe('audit export service', () => {
     expect(firstPart.trim().split('\n')).toHaveLength(120)
 
     const links = await service.createDownloadLinks(done)
-    expect(links.map((link) => link.index)).toEqual([1, 2, 3])
-    expect(links[0]?.url).toStartWith('https://download.test/audit-exports/')
+    expect(links.parts.map((link) => link.index)).toEqual([1, 2, 3])
+    expect(links.parts[0]?.url).toStartWith('https://download.test/audit-exports/')
+    expect(links).not.toHaveProperty('nextPart')
     expect(toAuditExportView(done)).toEqual(expect.objectContaining({ partCount: 3, requestedBy: { displayName: 'Admin' } }))
     expect(toAuditExportView(done)).not.toHaveProperty('nextCursor')
   })
