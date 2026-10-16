@@ -194,6 +194,24 @@ describe('searchCollectionCandidates', () => {
     }
   })
 
+  test('rejects a malformed candidate page instead of treating it as empty', async () => {
+    const previousFetch = globalThis.fetch
+    try {
+      for (const body of [
+        { results: [] },
+        { schemaVersion: 2, results: [] },
+        { schemaVersion: 1, results: [null] },
+        { schemaVersion: 1, results: 'none' },
+      ]) {
+        globalThis.fetch = async () => new Response(JSON.stringify(body))
+        const failure = await searchCollectionCandidates('token', 'x', new Set()).catch((error: unknown) => error)
+        expect(failure).toBeInstanceOf(CollectionApiError)
+      }
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
   test('reads past every listed item to find addable candidates', async () => {
     // 180 listed items fill the first 15 pages; addable matches start on page 16.
     const listed = Array.from({ length: 180 }, (_, index) => `listed-${index}`)
