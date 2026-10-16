@@ -9,6 +9,7 @@ import {
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import { isRecord } from '../../../shared/api/jsonValidation'
+import { toCollectionCandidates } from '../model/collectionCandidates'
 import { createMutationHeaders, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
 
 /** Error returned by a Collection request. */
@@ -75,7 +76,14 @@ export async function searchCollectionCandidatePage(
   if (options.cursor) query.set('cursor', options.cursor)
   const data = await requestJson(`${collectionsApiBaseUrl}/candidates?${query.toString()}`, accessToken)
   // A page from another search schema, or with non-object results, is malformed rather than empty.
-  if (!isRecord(data) || data.schemaVersion !== SEARCH_SCHEMA_VERSION || !Array.isArray(data.results) || !data.results.every(isRecord)) {
+  // Every result must be a complete Work Item candidate; a malformed one is a transport error,
+  // not a match to drop silently.
+  if (
+    !isRecord(data) ||
+    data.schemaVersion !== SEARCH_SCHEMA_VERSION ||
+    !Array.isArray(data.results) ||
+    !data.results.every((result) => toCollectionCandidates([result]).length === 1)
+  ) {
     throw invalidResponse()
   }
   const { nextCursor } = data

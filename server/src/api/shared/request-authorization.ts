@@ -1348,18 +1348,26 @@ export async function evaluateEnterpriseRequestAccess(
     }
   }
 
+  // Workspace-wide resources such as Collections are not owned by any Team or Project, so
+  // only a grant at the resource itself authorizes the route. Descendant scopes still feed
+  // the Team and Project accesses used for item visibility.
+  const directGrantOnly = input.context !== undefined &&
+    requiresEnterpriseDirectGrant(input.context.req.path)
+  const directRoutePermissions = direct.decisions
+    .filter((decision) => decision.access.allowed)
+    .map((decision) => decision.permission)
   const permissions = direct.granted
     ? direct.granted.access.permissions
-    : [...scopedPermissions]
+    : directGrantOnly ? [] : [...scopedPermissions]
   return {
     allowed:
       direct.granted !== undefined ||
-      authorizedTeamIds.size > 0 ||
-      projectAccesses.length > 0,
+      !directGrantOnly && (authorizedTeamIds.size > 0 || projectAccesses.length > 0),
     resource,
     permissions,
-    grantedRoutePermission: direct.granted?.permission ?? scopedGrantedRoutePermission,
-    grantedRoutePermissions: [...grantedRoutePermissions],
+    grantedRoutePermission: direct.granted?.permission ??
+      (directGrantOnly ? undefined : scopedGrantedRoutePermission),
+    grantedRoutePermissions: directGrantOnly ? directRoutePermissions : [...grantedRoutePermissions],
     authorizedAtResource: direct.granted !== undefined,
     projectAccesses,
     projectScopeAccesses,
@@ -1381,6 +1389,16 @@ function shouldEvaluateEnterpriseProjectScopes(
   if (resource.kind === 'project') return true
   return /^\/api\/(?:analytics|approvals|bulk-operations|collections|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
+}
+
+/**
+ * Returns whether a route is authorized only by a grant at the requested resource.
+ *
+ * @param path - Request path.
+ * @returns Whether Team or Project grants must not authorize the route.
+ */
+function requiresEnterpriseDirectGrant(path: string): boolean {
+  return /^\/api\/collections(?:\/|$)/u.test(path)
 }
 
 /** Returns whether the notification list needs Enterprise content scopes for visibility checks. */

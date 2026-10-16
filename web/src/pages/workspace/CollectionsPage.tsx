@@ -44,12 +44,16 @@ function CollectionsSession() {
       }, { replace: true })
     }
   }, [firstCollectionId, params, setParams])
-  const canEdit = workspace.canMutateTeamConfiguration && collections.data?.canWrite === true
+  const collectionsDenied = collections.error instanceof CollectionApiError && collections.error.status === 403
+  const canEdit = !collectionsDenied && workspace.canMutateTeamConfiguration && collections.data?.canWrite === true
   // Only load items for a Collection the list contains; an unknown selection shows a notice instead.
-  const selectedExists = collections.data?.collections.some((collection) => collection.collectionId === selectedId) === true
+  const selectedExists = !collectionsDenied && collections.data?.collections.some((collection) => collection.collectionId === selectedId) === true
   const items = useCollectionItems(workspace.accessToken, selectedExists ? selectedId : undefined, workspace.canLoadWorkspaceData)
   const [candidateQuery, setCandidateQuery] = useState('')
-  const listedItems = items.data?.collection.collectionId === selectedId ? items.data?.items : undefined
+  // SWR keeps the last loaded data after a failed revalidation; a 403 means the caller may no
+  // longer read these Work Items, so the cached titles and links must not stay on screen.
+  const itemsDenied = items.error instanceof CollectionApiError && items.error.status === 403
+  const listedItems = !itemsDenied && items.data?.collection.collectionId === selectedId ? items.data?.items : undefined
   const candidates = useCollectionCandidates(
     workspace.accessToken,
     candidateQuery,
@@ -69,8 +73,8 @@ function CollectionsSession() {
           candidates={candidates.data}
           candidatesFailed={Boolean(candidates.error)}
           canEdit={canEdit}
-          collections={collections.data?.collections}
-          accessDenied={collections.error instanceof CollectionApiError && collections.error.status === 403}
+          collections={collectionsDenied ? undefined : collections.data?.collections}
+          accessDenied={collectionsDenied}
           collectionsFailed={Boolean(collections.error)}
           errorMessage={actionError ? t(actionError) : undefined}
           items={listedItems}

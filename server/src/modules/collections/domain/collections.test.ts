@@ -47,6 +47,10 @@ test('rejects stored Collections with more references than the item limit', () =
   expect(isStoredCollection({ ...stored, createFingerprint: '' })).toBe(false)
   expect(isStoredCollection({ ...stored, createFingerprint: 'F'.repeat(64) })).toBe(false)
   expect(isStoredCollection({ ...stored, createFingerprint: 'f'.repeat(63) })).toBe(false)
+  // Creators and adders are server-resolved member keys.
+  expect(isStoredCollection({ ...stored, createdBy: '' })).toBe(false)
+  expect(isStoredCollection({ ...stored, createdBy: ' reader' })).toBe(false)
+  expect(isStoredCollection({ ...stored, items: [{ ...stored.items[0], addedBy: '' }] })).toBe(false)
   // Re-adding is a no-op, so a repeated (teamId, issueId) is corrupt state.
   expect(isStoredCollection({ ...stored, items: [item(1), item(2), item(1)] })).toBe(false)
 })
