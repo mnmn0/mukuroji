@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { WorkItemContributorAssignment, WorkItemJobRoleDefinition } from '@mukuroji/contracts'
 import {
   createEmptyContributorDraftRow,
+  formatContributorMemberLabel,
   formatPlannedEffortHours,
   listSelectableJobRoles,
   parseContributorDraftRows,
@@ -160,6 +161,11 @@ describe('job role configuration', () => {
 })
 
 describe('contributor options', () => {
+  test('label members with their email so shared names stay distinguishable', () => {
+    expect(formatContributorMemberLabel({ name: 'Sato', email: 'sato@example.com' })).toBe('Sato (sato@example.com)')
+    expect(formatContributorMemberLabel({ email: 'anon@example.com' })).toBe('anon@example.com')
+  })
+
   test('offer every active non-guest Workspace member, not only Project members', () => {
     const member = (email: string, role: WorkspaceMember['role'], status: WorkspaceMember['status'] = 'active'): WorkspaceMember => ({
       id: email, memberKey: email, email, role, status, version: 1, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
