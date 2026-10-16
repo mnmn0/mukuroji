@@ -60,7 +60,6 @@ import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
 import { readContributorDraftSubmission } from '../../work-items/model/contributorAssignments'
 import {
   WorkItemContributorsEditor,
-  type ContributorDraftSubmitError,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
@@ -338,7 +337,6 @@ export function TaskDetailPane({
     collaborationRoute?.onCollaborationTabChange,
   )
   const editorFormId = useId()
-  const [contributorDraftError, setContributorDraftError] = useState<ContributorDraftSubmitError>()
   const scheduleFormId = useId()
   const {
     data: triageSourcesPages,
@@ -802,10 +800,10 @@ export function TaskDetailPane({
     }
     const contributorSubmission = readContributorDraftSubmission(formData)
     if (contributorSubmission && 'error' in contributorSubmission) {
-      setContributorDraftError(contributorSubmission)
+      contributorDraftState.setDraft((current) => ({ ...current, submitError: contributorSubmission }))
       return
     }
-    setContributorDraftError(undefined)
+    contributorDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
     const contributorDraft = contributorSubmission
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
@@ -987,7 +985,6 @@ export function TaskDetailPane({
       memberOptions={contributorOptions}
       ownerUserId={(issue ?? currentTask).assigneeUserId}
       readOnly={isReadOnly}
-      {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
     />
   )
 
