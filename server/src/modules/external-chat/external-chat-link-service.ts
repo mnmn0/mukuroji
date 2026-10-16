@@ -31,6 +31,7 @@ import {
   deriveWorkItemScheduleDueDate,
   isCanonicalWorkItemRelationIds,
   isCanonicalWorkItemSchedule,
+  isStoredContributorAssignmentList,
 } from '../work-items'
 import {
   type ChatProviderAuthorization,
@@ -1605,6 +1606,10 @@ function normalizeCanonicalWorkItemResult(value: unknown): CanonicalWorkItem {
     value.updatedAt,
   )
   const approvalSummary = normalizeApprovalSummary(value.approvalSummary, value.createdAt)
+  if (value.contributorAssignments !== undefined && !isStoredContributorAssignmentList(value.contributorAssignments)) {
+    invalidTransactionResult('canonical Work Item contributor assignments')
+  }
+  const contributorAssignments = value.contributorAssignments?.map((assignment) => ({ ...assignment }))
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: value.revision,
@@ -1634,6 +1639,7 @@ function normalizeCanonicalWorkItemResult(value: unknown): CanonicalWorkItem {
     ...(archivedAt === undefined ? {} : { archivedAt }),
     ...(archivedBy === undefined ? {} : { archivedBy }),
     ...(approvalSummary === undefined ? {} : { approvalSummary }),
+    ...(contributorAssignments === undefined ? {} : { contributorAssignments }),
     source: 'dynamodb',
   }
 }
