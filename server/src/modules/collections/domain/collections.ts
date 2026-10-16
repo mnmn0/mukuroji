@@ -170,7 +170,8 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     isStoredInstant(value.createdAt) &&
     isStoredInstant(value.updatedAt) &&
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
-    typeof value.createFingerprint === 'string' &&
+    // The create fingerprint is a lowercase SHA-256 hex digest; anything else cannot match a retry.
+    typeof value.createFingerprint === 'string' && /^[0-9a-f]{64}$/u.test(value.createFingerprint) &&
     Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&
     hasUniqueReferences(value.items)
 }

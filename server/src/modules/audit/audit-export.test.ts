@@ -48,8 +48,8 @@ function createMemoryStore() {
       parts.set(key, body)
       return { key, byteLength: Buffer.byteLength(body), sha256: 'digest' }
     },
-    async createPartDownloadUrl(_workspaceId: string, _exportId: string, part: AuditExportPart) {
-      return `https://download.test/${part.key}`
+    async createPartDownloadUrl(_workspaceId: string, _exportId: string, part: AuditExportPart, maxLifetimeSeconds: number) {
+      return `https://download.test/${part.key}?ttl=${maxLifetimeSeconds}`
     },
   }
   return store
@@ -348,6 +348,25 @@ describe('audit export service', () => {
     expect(future.job.snapshotAt).toBe(fixedNow().toISOString())
   })
 
+  test('caps download links at the remaining job lifetime', async () => {
+    let current = fixedNow()
+    const store = createMemoryStore()
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue() {} },
+      readEvents: createReader(events(3)),
+      now: () => current,
+      createId: () => '3'.repeat(32),
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    const completed = await service.getExport('ws-1', job.exportId)
+    current = new Date(Date.parse(completed.expiresAt) - 42_000)
+    const { parts } = await service.createDownloadLinks(await service.getExport('ws-1', job.exportId))
+    expect(parts[0]?.url).toEndWith('?ttl=42')
+  })
+
   test('retries transient read failures through the queue', async () => {
     const service = createAuditExportService({
       settleSeconds: 0,
@@ -530,8 +549,11 @@ describe('normalizeAuditExportFilters', () => {
     expect(() => normalizeAuditExportFilters({ actorId: '' }, requestedAt)).toThrow('actorId must not be empty')
     expect(() => normalizeAuditExportFilters({ actorId: '  ' }, requestedAt)).toThrow('actorId must not be empty')
     expect(() => normalizeAuditExportFilters({ eventTypes: [] }, requestedAt)).toThrow('eventTypes must not be empty')
-    expect(() => normalizeAuditExportFilters({ entityType: 'work-item' }, requestedAt)).toThrow('entityType and entityId')
-    expect(() => normalizeAuditExportFilters({ targetId: 'x' }, requestedAt)).toThrow('targetType and targetId')
+    // As in the synchronous query, a type may be filtered alone, but an ID needs its type.
+    expect(normalizeAuditExportFilters({ entityType: 'work-item' }, requestedAt)).toEqual({ entityType: 'work-item' })
+    expect(normalizeAuditExportFilters({ targetType: 'comment' }, requestedAt)).toEqual({ targetType: 'comment' })
+    expect(() => normalizeAuditExportFilters({ entityId: 'x' }, requestedAt)).toThrow('entityId requires entityType')
+    expect(() => normalizeAuditExportFilters({ targetId: 'x' }, requestedAt)).toThrow('targetId requires targetType')
     expect(() => normalizeAuditExportFilters({ from: 'yesterday' }, requestedAt)).toThrow('ISO 8601')
     expect(() => normalizeAuditExportFilters({ from: '2026-07-02T00:00:00Z', to: '2026-07-01T00:00:00Z' }, requestedAt)).toThrow('later than')
     // The query layer accepts at most 20 non-blank event types; reject the rest before creating a job.

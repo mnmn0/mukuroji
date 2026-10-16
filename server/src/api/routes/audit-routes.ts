@@ -16,7 +16,7 @@ import {
 } from '../../modules/audit/audit'
 import {
   AUDIT_EXPORT_RECEIPT_RETENTION_DAYS,
-  AUDIT_EXPORT_RETENTION_DAYS,
+  AUDIT_EXPORT_PROCESSING_HOURS,
   AuditExportError,
   auditExportIdempotencyKeyExpired,
   toAuditExportView,
@@ -337,9 +337,11 @@ async function recordAuditExportAction(
     // job lifetime belonged to an export that already expired, so it must not start a new one.
     recorded = await workspaceDependencies.auditEvents.getEvent(principal.directoryId, event.eventId)
     if (recorded && recorded.requestFingerprint !== event.requestFingerprint) throw auditExportIdempotencyConflict()
+    // A missing job can no longer be created once its processing deadline, counted from the
+    // recorded request, has passed: it would never run, and the late write would extend storage.
     if (
       recorded &&
-      Date.parse(recorded.occurredAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000 <= Date.parse(context.occurredAt)
+      Date.parse(recorded.occurredAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000 <= Date.parse(context.occurredAt)
     ) {
       throw auditExportIdempotencyKeyExpired()
     }
@@ -352,6 +354,11 @@ async function recordAuditExportAction(
       throw auditExportIdempotencyConflict()
     }
     throw error
+  }
+  if (replayGuard && !replayGuard.jobExists && !recorded) {
+    // A concurrent first request may have written the receipt first; the writer then accepts
+    // this one as a duplicate, so the persisted time, not this attempt's, is the request time.
+    recorded = await workspaceDependencies.auditEvents.getEvent(principal.directoryId, event.eventId)
   }
   return recorded?.occurredAt ?? event.occurredAt
 }
