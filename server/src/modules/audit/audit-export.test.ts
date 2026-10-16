@@ -232,6 +232,45 @@ describe('audit export service', () => {
     const invalidJob = (await invalid.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })).job
     expect(await invalid.processExport('ws-1', invalidJob.exportId)).toBe('failed')
     expect((await invalid.getExport('ws-1', invalidJob.exportId)).failure?.code).toBe('AuditExportQueryInvalid')
+
+    const tooManyParts = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue() {} },
+      readEvents: createReader(events(30)),
+      now: fixedNow,
+      createId: () => 'f'.repeat(32),
+      eventsPerPart: 10,
+      maxParts: 2,
+    })
+    const partsJob = (await tooManyParts.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })).job
+    expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('advanced')
+    expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('advanced')
+    expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('failed')
+    const failedParts = await tooManyParts.getExport('ws-1', partsJob.exportId)
+    expect(failedParts.failure?.code).toBe('AuditExportTooManyParts')
+    expect(failedParts.parts).toHaveLength(2)
+  })
+
+  test('fails a job that is still processing after the processing deadline', async () => {
+    let current = new Date('2026-07-18T00:00:00.000Z')
+    const store = createMemoryStore()
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue() {} },
+      readEvents: createReader(events(30)),
+      now: () => current,
+      createId: () => '1'.repeat(32),
+      eventsPerPart: 10,
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    current = new Date('2026-07-19T00:00:00.000Z')
+    expect(await service.processExport('ws-1', job.exportId)).toBe('failed')
+    const failed = await service.getExport('ws-1', job.exportId)
+    expect(failed.failure?.code).toBe('AuditExportProcessingTimedOut')
+    expect(failed.parts).toHaveLength(1)
   })
 
   test('retries transient read failures through the queue', async () => {
@@ -396,17 +435,21 @@ describe('audit export step safety', () => {
 })
 
 describe('normalizeAuditExportFilters', () => {
+  const requestedAt = new Date('2026-07-10T00:00:00.000Z')
+
   test('drops empty values and validates paired filters and timestamps', () => {
-    expect(normalizeAuditExportFilters({ actorId: '', eventTypes: [], from: '2026-07-01T00:00:00.000Z' }))
+    expect(normalizeAuditExportFilters({ actorId: '', eventTypes: [], from: '2026-07-01T00:00:00.000Z' }, requestedAt))
       .toEqual({ from: '2026-07-01T00:00:00.000Z' })
-    expect(() => normalizeAuditExportFilters({ entityType: 'work-item' })).toThrow('entityType and entityId')
-    expect(() => normalizeAuditExportFilters({ targetId: 'x' })).toThrow('targetType and targetId')
-    expect(() => normalizeAuditExportFilters({ from: 'yesterday' })).toThrow('ISO 8601')
-    expect(() => normalizeAuditExportFilters({ from: '2026-07-02T00:00:00Z', to: '2026-07-01T00:00:00Z' })).toThrow('later than')
+    expect(() => normalizeAuditExportFilters({ entityType: 'work-item' }, requestedAt)).toThrow('entityType and entityId')
+    expect(() => normalizeAuditExportFilters({ targetId: 'x' }, requestedAt)).toThrow('targetType and targetId')
+    expect(() => normalizeAuditExportFilters({ from: 'yesterday' }, requestedAt)).toThrow('ISO 8601')
+    expect(() => normalizeAuditExportFilters({ from: '2026-07-02T00:00:00Z', to: '2026-07-01T00:00:00Z' }, requestedAt)).toThrow('later than')
     // The query layer accepts at most 20 non-blank event types; reject the rest before creating a job.
     expect(() => normalizeAuditExportFilters({
       eventTypes: Array.from({ length: 21 }, (_, index) => `event-${index}`),
-    })).toThrow('at most 20')
-    expect(() => normalizeAuditExportFilters({ eventTypes: ['work-item.updated', ' '] })).toThrow('event type is required')
+    }, requestedAt)).toThrow('at most 20')
+    expect(() => normalizeAuditExportFilters({ eventTypes: ['work-item.updated', ' '] }, requestedAt)).toThrow('event type is required')
+    // The worker caps the range at the snapshot time, so a future lower bound can never match.
+    expect(() => normalizeAuditExportFilters({ from: '2026-07-11T00:00:01.000Z' }, new Date('2026-07-11T00:00:00.000Z'))).toThrow('future')
   })
 })

@@ -284,12 +284,14 @@ function requireAuditExporter(principal: ProjectPrincipal) {
  * @param principal - Authenticated Workspace principal.
  * @param eventType - Export action event type.
  * @param metadata - Safe action metadata.
+ * @param idempotencyKeyOverride - Operation-scoped audit idempotency key, if any.
  */
 async function recordAuditExportAction(
   c: Context,
   principal: ProjectPrincipal,
   eventType: 'audit.export-requested' | 'audit.export-downloaded',
   metadata: Record<string, string | number | boolean>,
+  idempotencyKeyOverride?: string,
 ) {
   if (!workspaceDependencies.auditEvents.putEvent) {
     throw new ProjectDataError(
@@ -298,7 +300,7 @@ async function recordAuditExportAction(
       'Audit access cannot proceed without an immutable audit writer.',
     )
   }
-  const context = createApiMutationContext(c, principal, { auditExport: eventType, ...metadata })
+  const context = createApiMutationContext(c, principal, { auditExport: eventType, ...metadata }, idempotencyKeyOverride)
   await workspaceDependencies.auditEvents.putEvent(createAuditEvent({
     context,
     eventType,
@@ -380,11 +382,16 @@ export function registerAuditRoutes(routeApp: Hono): void {
       // The request is recorded before any job exists, so an export can never run
       // without its audit event. The key makes every retry reuse the same export and
       // write the same event, which the audit writer treats as an idempotent repeat.
+      // The audit identity is scoped to export requests through the key-derived export
+      // ID, so a key the member also used for another audited operation cannot collide
+      // with it. The filter digest makes a reused key with different filters conflict
+      // even before the job exists.
       const prepared = await service.prepareExport(request)
       await recordAuditExportAction(c, principal, 'audit.export-requested', {
         exportId: prepared.exportId,
         filtered: Object.keys(prepared.filters).length > 0,
-      })
+        filtersDigest: prepared.requestFingerprint,
+      }, `audit-export-request:${prepared.exportId}`)
       const { job, created } = await service.requestExport(request)
       return c.json({ export: toAuditExportView(job) }, created ? 202 : 200)
     }),
