@@ -163,7 +163,7 @@ GET  /api/audit/exports/:exportId/download    # completed の part ごとの署�
 
 system admin または `audit.export` 権限を要求する。
 
-- request body は `filters` だけを持つ JSON object とする。body がない場合、JSON が壊れている場合、`filters` がない場合、`filters` 以外の field がある場合は `400 InvalidAuditExportRequest` を返し、絞り込みのない export に広げない。全件を出す場合は `{"filters":{}}` を明示する。
+- request body は `filters` だけを持つ JSON object とする。body がない場合、JSON が壊れている場合、`filters` がない場合、`filters` 以外の field がある場合は `400 InvalidAuditExportRequest` を返し、絞り込みのない export に広げない。全件を出す場合は `{"filters":{}}` を明示する。filter に空文字列や空配列を渡すと制限が外れて全件に広がるため、`400 InvalidAuditExportFilters` で拒否する（制限しない項目は省略する）。
 - filter は同期 audit query と同じ規則で作成時に検証する（`eventTypes` は空でない最大 20 件など）。worker で初めて失敗する job は作らない。
 - `Idempotency-Key` は必須で、ない場合は `400 IdempotencyKeyRequired` を返す。export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。
 - 要求は job を作る前に `audit.export-requested` として記録する。audit 書き込みに失敗した場合は job を作らずに失敗を返すため、記録のない export は実行されない。
@@ -188,6 +188,7 @@ job と worker の動作は次のとおり。
 - API の寿命（7 日）を過ぎた job の object が lifecycle で消える前に同じ key で再送された場合も `409 AuditExportIdempotencyKeyExpired` を返す。
 - job が消えた後に同じ `Idempotency-Key` で再送された場合、記録済みの `audit.export-requested` が job の寿命（7 日）より古ければ `409 AuditExportIdempotencyKeyExpired` で拒否し、新しい snapshot の export を作らない。同じ key で filter が異なる場合は、audit writer が冪等 key の競合として返す `AuditEventIdempotencyConflictError` も含めて `409 AuditExportIdempotencyConflict` を返す。それ以外の audit 書き込み失敗は 409 にせず 5xx として返す。
 - S3 の条件付き書き込みは 412 だけを既存 / 変更済みとして扱い、409 `ConditionalRequestConflict` は再試行対象としてそのまま失敗させる。
+- 保存済み job の `requestFingerprint` が保存済み filter から計算した値と一致しない場合は、壊れた job として読み込みを拒否する。
 - 保存済み job の `createdAt` / `expiresAt` などの時刻が読めない場合や、`expiresAt` が `createdAt` 以前の場合は壊れた job として読み込みを拒否する。
 - index marker は存在しない場合だけ作成し、再送で書き直して lifecycle の期限を延ばさない。
 - 保存済み job の filter に未知の key がある場合は壊れた job として読み込みを拒否し、未知の条件を黙って捨てた広い export を作らない。
