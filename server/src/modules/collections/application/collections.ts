@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
   COLLECTION_ITEM_LIMIT,
+  type AddWorkItemCollectionItemResponse,
   type CreateWorkItemCollectionInput,
   type UpdateWorkItemCollectionInput,
   type WorkItemCollection,
@@ -261,7 +262,7 @@ const COLLECTION_ROW_BYTE_LIMIT = 350_000
  * @param teamId - Team that owns the Work Item.
  * @param issueId - Work Item identifier.
  * @param readWorkItem - Caller-scoped Work Item reader.
- * @returns The Collection after the change.
+ * @returns The Collection after the change and the Work Item as the caller can read it.
  */
 export async function addCollectionItem(
   store: CollectionsStore,
@@ -270,8 +271,8 @@ export async function addCollectionItem(
   teamId: string,
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
-): Promise<WorkItemCollection> {
-  return await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
+): Promise<AddWorkItemCollectionItemResponse> {
+  const { collection, observed } = await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
     if (current.items.some((item) => item.teamId === teamId && item.issueId === issueId)) return undefined
     if (current.items.length >= COLLECTION_ITEM_LIMIT) {
       throw new CollectionError(409, 'CollectionItemLimitReached', `A Collection can hold up to ${COLLECTION_ITEM_LIMIT} Work Items.`)
@@ -292,6 +293,10 @@ export async function addCollectionItem(
     }
     return next
   })
+  const stored = collection.items.find((item) => item.teamId === teamId && item.issueId === issueId)
+  // The reference was just written or found in this state, so it is always present.
+  if (!stored) throw corruptState()
+  return { ...toPublicCollection(collection), item: { ...observed.entry, addedAt: stored.addedAt } }
 }
 
 /**
@@ -317,11 +322,12 @@ export async function removeCollectionItem(
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
 ): Promise<WorkItemCollection> {
-  return await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
+  const { collection } = await applyItemChange(store, context.workspaceId, collectionId, teamId, issueId, readWorkItem, (current) => {
     const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
     if (items.length === current.items.length) return undefined
     return { ...current, items, updatedAt: laterInstant(context.now, current.updatedAt), revision: current.revision + 1 }
   })
+  return toPublicCollection(collection)
 }
 
 /** Attempts for a set-like item change that races another writer. */
@@ -344,7 +350,7 @@ const ITEM_CHANGE_ATTEMPTS = 3
  * @param issueId - Work Item identifier.
  * @param readWorkItem - Caller-scoped Work Item reader.
  * @param change - Returns the next state, or undefined when the change is already applied.
- * @returns The Collection after the change.
+ * @returns The stored Collection after the change and the Work Item read by the last attempt.
  */
 async function applyItemChange(
   store: CollectionsStore,
@@ -354,16 +360,16 @@ async function applyItemChange(
   issueId: string,
   readWorkItem: ReadCollectionWorkItem,
   change: (current: StoredCollection) => StoredCollection | undefined,
-): Promise<WorkItemCollection> {
+): Promise<{ collection: StoredCollection; observed: ObservedCollectionWorkItem }> {
   for (let attempt = 1; ; attempt += 1) {
     const observed = await readWorkItem(teamId, issueId)
     if (!observed) throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
     const current = await requireCollection(store, workspaceId, collectionId)
     const next = change(current)
-    if (!next) return toPublicCollection(current)
+    if (!next) return { collection: current, observed }
     try {
       await store.put(workspaceId, next, current.revision, { teamId, issueId, revision: observed.revision })
-      return toPublicCollection(next)
+      return { collection: next, observed }
     } catch (error) {
       const retryable = error instanceof CollectionError &&
         (error.code === 'CollectionConflict' || error.code === 'CollectionWorkItemChanged')
