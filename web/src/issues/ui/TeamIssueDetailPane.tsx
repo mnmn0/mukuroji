@@ -658,7 +658,7 @@ function IssueDetailContent({
         {t('tasks.create.workItemType')}
         <select
           className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-          disabled={isIssueReadOnly || isAiSummaryOperationPending || activeTypeChangeState.isPreviewing}
+          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending || activeTypeChangeState.isPreviewing}
           form={editorFormId}
           name="workItemTypeId"
           onChange={handleWorkItemTypeChange}

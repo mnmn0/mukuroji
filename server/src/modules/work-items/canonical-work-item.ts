@@ -129,8 +129,10 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     isNonEmptyString(value.title) &&
     (value.description === undefined || typeof value.description === 'string') &&
     isNonEmptyString(value.assigneeUserId) &&
+    // An empty list is stored as an absent attribute, so `[]` in a row is not canonical.
     (value.contributorAssignments === undefined ||
-      isStoredContributorAssignmentList(value.contributorAssignments)) &&
+      (Array.isArray(value.contributorAssignments) && value.contributorAssignments.length > 0 &&
+        isStoredContributorAssignmentList(value.contributorAssignments))) &&
     isNonEmptyString(value.creatorMemberKey) &&
     (value.sourceRequestId === undefined || isNonEmptyString(value.sourceRequestId)) &&
     (value.sourceTriageEntryId === undefined ||
