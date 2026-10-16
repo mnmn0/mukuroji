@@ -89,7 +89,10 @@ export function JobRolesConfigurationSection({
       </div>
 
       <div className="grid gap-3 p-5">
-        {jobRoles.map((jobRole, index) => (
+        {jobRoles.map((jobRole, index) => {
+          // Row controls name their role so screen readers can tell repeated controls apart.
+          const roleLabel = jobRole.name.trim() || `${t('workItems.configuration.jobRoles.name')} ${index + 1}`
+          return (
           <div
             className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-end gap-3 max-[640px]:grid-cols-1"
             data-testid="work-item-configuration-job-role"
@@ -107,6 +110,7 @@ export function JobRolesConfigurationSection({
             </label>
             <label className="flex min-h-10 items-center gap-2 text-sm font-semibold text-[var(--workbench-text)]">
               <input
+                aria-label={`${t('workItems.configuration.jobRoles.archived')}: ${roleLabel}`}
                 checked={jobRole.archived === true}
                 onChange={(event) => updateJobRole(jobRole.id, { archived: event.target.checked })}
                 type="checkbox"
@@ -117,6 +121,7 @@ export function JobRolesConfigurationSection({
               <span aria-hidden="true" />
             ) : (
               <button
+                aria-label={`${t('workItems.configuration.jobRoles.remove')}: ${roleLabel}`}
                 className="workbench-button-secondary min-h-10 px-3"
                 onClick={() => updateJobRoles(jobRoles.filter((candidate) => candidate.id !== jobRole.id))}
                 type="button"
@@ -125,7 +130,8 @@ export function JobRolesConfigurationSection({
               </button>
             )}
           </div>
-        ))}
+          )
+        })}
         {jobRoles.length === 0 ? (
           <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
             {t('workItems.configuration.jobRoles.empty')}
