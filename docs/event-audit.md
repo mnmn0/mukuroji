@@ -155,21 +155,33 @@ system admin を要求する。target filter がある場合は `TargetOccurredA
 ### 非同期 audit export job
 
 ```text
-POST /api/audit/exports                       # body: { actorId?, actorKind?, entityType?, entityId?, targetType?, targetId?, eventTypes?, from?, to? }
+POST /api/audit/exports                       # body: { "filters": { actorId?, actorKind?, entityType?, entityId?, targetType?, targetId?, eventTypes?, from?, to? } }
 GET  /api/audit/exports                       # 期限内の最新 20 件
 GET  /api/audit/exports/:exportId
 GET  /api/audit/exports/:exportId/download    # completed の part ごとの署名付き URL
 ```
 
-system admin または `audit.export` 権限を要求する。`Idempotency-Key` を指定した場合、export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。`queued` の既存 job への再要求は、enqueue に失敗した前回試行を救済するため再度 enqueue する。
+system admin または `audit.export` 権限を要求する。
+
+- request body は `filters` だけを持つ JSON object とする。body がない場合、JSON が壊れている場合、`filters` 以外の field がある場合は `400 InvalidAuditExportRequest` を返し、絞り込みのない export に広げない。全件を出す場合は `{"filters":{}}` を明示する。
+- filter は同期 audit query と同じ規則で作成時に検証する（`eventTypes` は空でない最大 20 件など）。worker で初めて失敗する job は作らない。
+- `Idempotency-Key` を指定した場合、export ID は Workspace・要求者・key の SHA-256 から決まり、同じ key で別の filter や要求者を送ると `409 AuditExportIdempotencyConflict` を返す。
+- `queued` の既存 job への再要求は、enqueue に失敗した前回試行を救済するため再度 enqueue する。`Idempotency-Key` なしの要求で enqueue に失敗した job は、再試行で別の job が作られるため `AuditExportEnqueueFailed` で `failed` にする。
+
+job と worker の動作は次のとおり。
 
 - job は要求時刻を `snapshotAt` として固定し、`to` を snapshot 時刻で上限化するため、export 中に追加された event は含めない。
-- `AuditExportQueue` の message ごとに worker Lambda が最大 5,000 件を `part-NNNNN.ndjson` として書き、cursor を job に保存して次の step を enqueue する。合計上限は 1,000,000 件で、超えた場合は `AuditExportTooLarge` で `failed` にする。
-- job state は `audit-exports/<sha256(workspaceId)>/<exportId>/job.json` に置き、作成は `If-None-Match`、更新は ETag の `If-Match` で条件付き書き込みにする。重複 delivery は条件付き書き込みの競合として `skipped` になり、part は同じ内容で上書きされるだけになる。
-- part は SHA-256 checksum 付きで保存し、job は件数・byte 長・checksum を記録する。download URL の有効期限は 300 秒。
+- audit index は結果整合のため、最初の step は `snapshotAt` から 30 秒後まで event を読まない。早く届いた message は残り時間だけ遅延して再 enqueue する。
+- `AuditExportQueue` の message ごとに worker Lambda が 1 step を処理する。1 step は query page を最大 50 回まで評価し、5,000 件または約 32 MiB に達したところで part を閉じ、cursor を job に保存して次の step を enqueue する。絞り込みで一致が少ない場合も、page 上限で cursor を保存して進むため、Lambda の timeout まで走り続けない。
+- 合計上限は 1,000,000 件で、超えた場合は `AuditExportTooLarge` で `failed` にする。
+- job state は `audit-exports/<sha256(workspaceId)>/<exportId>/job.json` に置き、作成は `If-None-Match`、更新は ETag の `If-Match` で条件付き書き込みにする。
+- part は内容の SHA-256 を含む `part-NNNNN-<digest>.ndjson` として保存する。同じ step が重複して実行されても、条件付き書き込みに勝った job が参照する object を上書きできない。job は件数・byte 長・checksum を記録する。
+- download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒。
+- worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かずに停止する。tenant closure が export namespace を削除した後に object を作り直さない。
+- 読めない queue message は失敗として返し、redrive policy で DLQ に送る。
 - job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。
 - 行 projection は同期 export と同じ public DTO を使う。
-- export の要求は `audit.export-requested`（idempotent replay も `replayed: true` で記録し、audit 書き込み失敗後の retry でも記録を残す）、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。
+- export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。`Idempotency-Key` 付きの replay は同じ event を同じ request identity で書き直すため、audit writer が重複として扱う。audit 書き込みに失敗した後の retry でも記録が残る。
 
 ### Public response projection
 

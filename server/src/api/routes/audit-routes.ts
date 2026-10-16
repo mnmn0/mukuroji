@@ -206,9 +206,17 @@ const AUDIT_EXPORT_FILTER_FIELDS = [
  * @returns The requested filters.
  */
 function readAuditExportFilters(body: unknown): AuditExportFilters {
-  if (body === undefined) return {}
+  // A missing or malformed body must never widen into an unfiltered export.
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    throw new AuditExportError(400, 'InvalidAuditExportFilters', 'Request body must be a JSON object.')
+    throw new AuditExportError(400, 'InvalidAuditExportRequest', 'Request body must be a JSON object such as {"filters":{}}.')
+  }
+  const unknownTopLevelField = Object.keys(body).find((key) => key !== 'filters')
+  if (unknownTopLevelField !== undefined) {
+    throw new AuditExportError(
+      400,
+      'InvalidAuditExportRequest',
+      `Unsupported field: ${unknownTopLevelField}. Put export filters inside "filters".`,
+    )
   }
   const filters: unknown = Reflect.get(body, 'filters') ?? {}
   if (typeof filters !== 'object' || filters === null || Array.isArray(filters)) {
@@ -352,11 +360,11 @@ export function registerAuditRoutes(routeApp: Hono): void {
         filters,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
       })
-      // Replays are recorded too, so a client retry after a failed audit write still leaves a record.
+      // Replays write the same event under the same request identity, so the audit
+      // writer treats them as idempotent and a retry after a failed audit write still records it.
       await recordAuditExportAction(c, principal, 'audit.export-requested', {
         exportId: job.exportId,
         filtered: Object.keys(job.filters).length > 0,
-        replayed: !created,
       })
       return c.json({ export: toAuditExportView(job) }, created ? 202 : 200)
     }),

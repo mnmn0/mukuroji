@@ -41,7 +41,7 @@ export function buildAuditExportWorker(
   scope: cdk.Stack,
   input: AuditExportWorkerInput,
 ): void {
-  const { auditEventsTable } = input.dataStores;
+  const { auditEventsTable, tenantAdministrationTable } = input.dataStores;
   const { auditExportBucket } = input.fileStorage;
   const { auditExportDlq, auditExportQueue } = input.workerChannels;
   const { depsLockFilePath, projectRoot, serverHandlersDirectory } = input.lambdaBuildPaths;
@@ -72,6 +72,7 @@ export function buildAuditExportWorker(
       AUDIT_EXPORT_BUCKET_NAME: auditExportBucket.bucketName,
       AUDIT_EXPORT_QUEUE_URL: auditExportQueue.queueUrl,
       MUKUROJI_RUNTIME_ROLE: 'audit-export-worker',
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
     },
   });
   bindRuntimeControls(input.runtimeControls, workerFunction, 'audit-export');
@@ -88,6 +89,11 @@ export function buildAuditExportWorker(
   workerFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['s3:GetObject', 's3:PutObject'],
     resources: [auditExportBucket.arnForObjects('audit-exports/*')],
+  }));
+  // Steps stop for closing or closed tenants so exports cannot outlive tenant closure.
+  workerFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
 
   new cloudwatch.Alarm(scope, 'AuditExportDlqAlarm', {

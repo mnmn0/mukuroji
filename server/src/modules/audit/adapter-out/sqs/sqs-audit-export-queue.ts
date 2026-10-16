@@ -26,12 +26,14 @@ export class SqsAuditExportQueue implements AuditExportQueue {
    *
    * @param workspaceId - Workspace that owns the job.
    * @param exportId - Export identifier.
+   * @param delaySeconds - Optional delivery delay, capped at the SQS maximum of 900 seconds.
    */
-  async enqueue(workspaceId: string, exportId: string): Promise<void> {
+  async enqueue(workspaceId: string, exportId: string, delaySeconds?: number): Promise<void> {
     const message: AuditExportQueueMessage = { version: 1, workspaceId, exportId }
     await this.client.send(new SendMessageCommand({
       QueueUrl: this.queueUrl,
       MessageBody: JSON.stringify(message),
+      ...(delaySeconds && delaySeconds > 0 ? { DelaySeconds: Math.min(Math.ceil(delaySeconds), 900) } : {}),
     }))
   }
 }

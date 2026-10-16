@@ -48,7 +48,7 @@ function createMemoryStore() {
       parts.set(key, body)
       return { key, byteLength: Buffer.byteLength(body), sha256: 'digest' }
     },
-    async createPartDownloadUrl(part: AuditExportPart) {
+    async createPartDownloadUrl(_workspaceId: string, _exportId: string, part: AuditExportPart) {
       return `https://download.test/${part.key}`
     },
   }
@@ -91,6 +91,7 @@ describe('audit export service', () => {
     const queued: string[] = []
     const calls: AuditEventQuery[] = []
     const service = createAuditExportService({
+      settleSeconds: 0,
       store,
       queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
       readEvents: createReader(events(250), calls),
@@ -133,6 +134,7 @@ describe('audit export service', () => {
   test('completes an empty export without parts', async () => {
     const store = createMemoryStore()
     const service = createAuditExportService({
+      settleSeconds: 0,
       store,
       queue: { async enqueue() {} },
       readEvents: createReader([]),
@@ -149,6 +151,7 @@ describe('audit export service', () => {
     const store = createMemoryStore()
     let enqueueAttempts = 0
     const service = createAuditExportService({
+      settleSeconds: 0,
       store,
       queue: {
         async enqueue() {
@@ -179,6 +182,7 @@ describe('audit export service', () => {
     const store = createMemoryStore()
     const queued: string[] = []
     const service = createAuditExportService({
+      settleSeconds: 0,
       store,
       queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
       readEvents: createReader(events(30)),
@@ -202,6 +206,7 @@ describe('audit export service', () => {
   test('fails exports above the event limit and invalid queries', async () => {
     const store = createMemoryStore()
     const tooLarge = createAuditExportService({
+      settleSeconds: 0,
       store,
       queue: { async enqueue() {} },
       readEvents: createReader(events(30)),
@@ -216,6 +221,7 @@ describe('audit export service', () => {
     expect((await tooLarge.getExport('ws-1', job.exportId)).failure?.code).toBe('AuditExportTooLarge')
 
     const invalid = createAuditExportService({
+      settleSeconds: 0,
       store,
       queue: { async enqueue() {} },
       readEvents: async () => { throw new TypeError('Invalid cursor.') },
@@ -229,6 +235,7 @@ describe('audit export service', () => {
 
   test('retries transient read failures through the queue', async () => {
     const service = createAuditExportService({
+      settleSeconds: 0,
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: async () => { throw new Error('DynamoDB throttled') },
@@ -244,6 +251,7 @@ describe('audit export service', () => {
   test('hides jobs of other Workspaces, unknown IDs, and expired jobs', async () => {
     let current = fixedNow()
     const service = createAuditExportService({
+      settleSeconds: 0,
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: createReader([]),
@@ -262,6 +270,7 @@ describe('audit export service', () => {
 
   test('rejects downloads before completion', async () => {
     const service = createAuditExportService({
+      settleSeconds: 0,
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: createReader([]),
@@ -274,6 +283,117 @@ describe('audit export service', () => {
   })
 })
 
+describe('audit export step safety', () => {
+  /**
+   * Creates a service with one requested job and a recording queue.
+   *
+   * @param overrides - Service dependency overrides.
+   * @param all - Events visible to the reader.
+   * @returns The service, its queue log, and the requested job.
+   */
+  async function requested(
+    overrides: Partial<Parameters<typeof createAuditExportService>[0]>,
+    all: AuditEventV1[] = events(5),
+  ) {
+    const store = createMemoryStore()
+    const queued: Array<{ exportId: string; delaySeconds?: number }> = []
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: {
+        async enqueue(_workspaceId, exportId, delaySeconds) {
+          queued.push({ exportId, ...(delaySeconds === undefined ? {} : { delaySeconds }) })
+        },
+      },
+      readEvents: createReader(all),
+      now: fixedNow,
+      createId: () => '7'.repeat(32),
+      ...overrides,
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    return { service, queued, store, job }
+  }
+
+  test('waits for the settle delay before reading events', async () => {
+    const reads: AuditEventQuery[] = []
+    let clock = Date.parse('2026-07-18T00:00:00.000Z')
+    const { service, queued, job } = await requested({
+      settleSeconds: 30,
+      now: () => new Date(clock),
+      readEvents: createReader(events(2), reads),
+    })
+    expect(queued).toEqual([{ exportId: job.exportId, delaySeconds: 30 }])
+
+    clock += 10_000
+    expect(await service.processExport('ws-1', job.exportId)).toBe('deferred')
+    expect(reads).toEqual([])
+    expect(queued.at(-1)).toEqual({ exportId: job.exportId, delaySeconds: 20 })
+
+    clock += 20_000
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(reads).toHaveLength(1)
+  })
+
+  test('stops without writing for closing or closed tenants', async () => {
+    const reads: AuditEventQuery[] = []
+    const { service, store, job } = await requested({
+      isTenantActive: async () => false,
+      readEvents: createReader(events(2), reads),
+    })
+
+    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(reads).toEqual([])
+    expect(store.parts.size).toBe(0)
+    expect((await service.getExport('ws-1', job.exportId)).status).toBe('queued')
+  })
+
+  test('checkpoints a selective scan after the page budget even without matches', async () => {
+    const reads: AuditEventQuery[] = []
+    const { service, store, queued, job } = await requested({
+      pagesPerStep: 3,
+      readEvents: async (query) => {
+        reads.push(query)
+        const page = Number(query.cursor ?? '0')
+        return { events: [], nextCursor: String(page + 1) }
+      },
+    })
+
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(reads).toHaveLength(3)
+    expect(store.parts.size).toBe(0)
+    const checkpointed = await service.getExport('ws-1', job.exportId)
+    expect(checkpointed).toMatchObject({ status: 'running', nextCursor: '3', eventCount: 0, parts: [] })
+    expect(queued).toHaveLength(2)
+  })
+
+  test('closes a part when its serialized byte budget is reached', async () => {
+    const { service, job } = await requested({ partByteBudget: 1 }, events(250))
+
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    // One query page of 100 events exceeds the budget, so the step stops there.
+    expect((await service.getExport('ws-1', job.exportId)).parts.map((part) => part.eventCount)).toEqual([100])
+  })
+
+  test('marks a keyless job failed when it cannot be scheduled', async () => {
+    const store = createMemoryStore()
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue() { throw new Error('queue unavailable') } },
+      readEvents: createReader([]),
+      now: fixedNow,
+      createId: () => '8'.repeat(32),
+    })
+
+    await expect(service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} }))
+      .rejects.toThrow('queue unavailable')
+    expect(await service.getExport('ws-1', '8'.repeat(32))).toMatchObject({
+      status: 'failed',
+      failure: { code: 'AuditExportEnqueueFailed' },
+    })
+  })
+})
+
 describe('normalizeAuditExportFilters', () => {
   test('drops empty values and validates paired filters and timestamps', () => {
     expect(normalizeAuditExportFilters({ actorId: '', eventTypes: [], from: '2026-07-01T00:00:00.000Z' }))
@@ -282,5 +402,10 @@ describe('normalizeAuditExportFilters', () => {
     expect(() => normalizeAuditExportFilters({ targetId: 'x' })).toThrow('targetType and targetId')
     expect(() => normalizeAuditExportFilters({ from: 'yesterday' })).toThrow('ISO 8601')
     expect(() => normalizeAuditExportFilters({ from: '2026-07-02T00:00:00Z', to: '2026-07-01T00:00:00Z' })).toThrow('later than')
+    // The query layer accepts at most 20 non-blank event types; reject the rest before creating a job.
+    expect(() => normalizeAuditExportFilters({
+      eventTypes: Array.from({ length: 21 }, (_, index) => `event-${index}`),
+    })).toThrow('at most 20')
+    expect(() => normalizeAuditExportFilters({ eventTypes: ['work-item.updated', ' '] })).toThrow('event type is required')
   })
 })
