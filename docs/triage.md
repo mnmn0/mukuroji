@@ -138,6 +138,8 @@ envelope と handler を使い、sender、recipient、Message-ID、spam verdict�
 Inbound webhook endpoint は作成時に `purpose` を `automation` か `triage` に固定する。既存 endpoint と
 purpose を指定しない endpoint は `automation` である。`triage` endpoint は作成時に存在を確認した
 `triageRouting.teamId` を持ち、payload から Team、Project、owner、SLA を変えることはできない。
+Team の確認は新しい endpoint を予約するときだけ行う。同じ `Idempotency-Key` の作成 replay は、その後に
+Team が無効になっていても元の endpoint を返す（delivery 時の Team 確認で fail closed になる）。
 
 `triage` endpoint への delivery は Automation と同じ HMAC、timestamp、`Idempotency-Key`、signature
 replay、active tenant の検証を通る。その後:

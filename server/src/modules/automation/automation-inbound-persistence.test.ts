@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
+import type { CreateAutomationInboundWebhookEndpointInput } from '@mukuroji/contracts'
 import {
   AUTOMATION_INBOUND_WEBHOOK_SECRET_CLEANUP_GRACE_MS,
   AUTOMATION_INBOUND_WEBHOOK_SECRET_RECOVERY_MS,
@@ -455,6 +456,25 @@ describe('DynamoDB inbound webhook lifecycle', () => {
       trigger: { type: 'webhook', webhookId: triage.id },
       actions: [{ type: 'comment', body: 'Received' }],
     }, 'hijack-key')).rejects.toMatchObject({ code: 'AutomationInboundWebhookTriggerUnavailable' })
+  })
+
+  test('validates a new endpoint before reserving it but replays without revalidating', async () => {
+    const probe = createInboundWebhookDocumentProbe()
+    const client = new DynamoDbAutomationRepository('AutomationTable', probe.documentClient)
+    const input: CreateAutomationInboundWebhookEndpointInput = { name: 'Status page', purpose: 'triage', triageRouting: { teamId: 'support' } }
+    let checks = 0
+    const created = await client.reserveCreateInboundWebhookEndpoint('workspace-1', 'actor-1', input, 'triage-key', 'https://api.example.com', async () => {
+      checks += 1
+    })
+    expect(checks).toBe(1)
+    const replay = await client.reserveCreateInboundWebhookEndpoint('workspace-1', 'actor-1', input, 'triage-key', 'https://api.example.com', async () => {
+      throw new Error('Team was archived')
+    })
+    expect(replay.endpoint.id).toBe(created.endpoint.id)
+    await expect(client.reserveCreateInboundWebhookEndpoint('workspace-1', 'actor-1', input, 'other-key', 'https://api.example.com', async () => {
+      throw new Error('Team was archived')
+    })).rejects.toThrow('Team was archived')
+    expect(await client.listInboundWebhookEndpoints('workspace-1')).toHaveLength(1)
   })
 })
 

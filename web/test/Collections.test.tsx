@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import type { WorkItemCollection } from '@mukuroji/contracts'
 import { CollectionApiError, getCollectionItems, getCollections } from '../src/features/collections/api/collections'
+import { toCollectionCandidates } from '../src/features/collections/model/collectionCandidates'
 import { resolveCollectionErrorMessageKey } from '../src/features/collections/model/collectionErrors'
 import { CollectionsWorkspace, type CollectionsWorkspaceProps } from '../src/features/collections/ui/CollectionsWorkspace'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -36,6 +37,8 @@ function render(overrides: Partial<CollectionsWorkspaceProps> = {}) {
     collectionsFailed: false,
     onRetryCollections: () => undefined,
     onRetryItems: () => undefined,
+    candidateQuery: 'page',
+    onSearchCandidates: () => undefined,
     candidatesFailed: false,
     onRetryCandidates: () => undefined,
     selectedId: 'c1',
@@ -70,12 +73,23 @@ describe('CollectionsWorkspace', () => {
     expect(markup).toContain('aria-label="Remove from Collection: Reduce onboarding friction"')
   })
 
+  test('asks for a search before offering candidates and reports an empty search', () => {
+    const before = render({ candidateQuery: '', candidates: undefined })
+    expect(before).toContain('Find Work Items to add')
+    expect(before).not.toContain('Add a Work Item')
+    expect(render({ candidates: undefined })).toContain('Searching Work Items')
+    const empty = render({ candidates: [{ teamId: 'core-team', issueId: 'onboarding', title: 'Reduce onboarding friction' }] })
+    expect(empty).toContain('No Work Items to add match this search.')
+    expect(empty).not.toContain('Add a Work Item')
+  })
+
   test('hides every change control for view-only members', () => {
     const markup = render({ canEdit: false })
     expect(markup).toContain('You have view-only access')
     expect(markup).not.toContain('New Collection')
     expect(markup).not.toContain('Remove from Collection')
     expect(markup).not.toContain('Add a Work Item')
+    expect(markup).not.toContain('Find Work Items to add')
   })
 
   test('reports loading failures and the latest action error', () => {
@@ -89,9 +103,22 @@ describe('CollectionsWorkspace', () => {
     const markup = render({ collectionsFailed: true, itemsFailed: true, candidatesFailed: true })
     expect(markup).toContain('The latest state could not be loaded.')
     expect(markup).toContain('Reduce onboarding friction')
-    expect(markup).toContain('Work Items to add could not be loaded.')
+    expect(markup).toContain('Work Items to add could not be searched.')
     expect(markup).not.toContain('Add a Work Item')
     expect(markup.match(/>Retry<\/button>/gu)).toHaveLength(3)
+  })
+})
+
+describe('toCollectionCandidates', () => {
+  test('reads Team and Work Item IDs from Work Item search results only', () => {
+    const base = { title: 'T', url: '/x', highlights: [] }
+    expect(toCollectionCandidates([
+      { ...base, id: 'team/チーム/a/issue/課題/1', entityType: 'work-item', teamId: 'チーム/a' },
+      { ...base, id: 'team/core/issue/x/comment/c1', entityType: 'comment', teamId: 'core' },
+      { ...base, id: 'team/core/issue/', entityType: 'work-item', teamId: 'core' },
+      { ...base, id: 'team/other/issue/x', entityType: 'work-item', teamId: 'core' },
+      { ...base, id: 'team/core/issue/x', entityType: 'work-item' },
+    ])).toEqual([{ teamId: 'チーム/a', issueId: '課題/1', title: 'T' }])
   })
 })
 

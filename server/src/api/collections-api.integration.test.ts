@@ -81,6 +81,10 @@ test('references readable Work Items without copying them and hides unreadable o
   expect((await planningApiRequest(`${itemsPath}/core-team/hidden-item`, 'PUT')).status).toBe(404)
   expect((await planningApiRequest(`${itemsPath}/core-team/wireframe`, 'PUT')).status).toBe(404)
   expect((await planningApiRequest(`${itemsPath}/missing-team/onboarding-friction`, 'PUT')).status).toBe(404)
+  const unicode = await planningApiRequest(`${itemsPath}/${encodeURIComponent('チーム/日本')}/${encodeURIComponent('課題-１')}`, 'PUT')
+  expect(unicode.status).toBe(404)
+  expect(await unicode.json()).toMatchObject({ code: 'CollectionWorkItemNotFound' })
+  expect((await planningApiRequest(`${itemsPath}/core-team/${encodeURIComponent(' padded')}`, 'PUT')).status).toBe(400)
 
   const store = getTestAppDependencies().workItems.collections
   const stored = await store.get(WORKSPACE_ID, collectionId)
