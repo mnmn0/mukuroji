@@ -202,6 +202,8 @@ describe('searchCollectionCandidates', () => {
         { schemaVersion: 2, results: [] },
         { schemaVersion: 1, results: [null] },
         { schemaVersion: 1, results: 'none' },
+        { schemaVersion: 1, results: [{ id: 'team/core/issue/x', entityType: 'work-item', teamId: 'core' }] },
+        { schemaVersion: 1, results: [{ id: 'other/x', entityType: 'work-item', teamId: 'core', title: 'X' }] },
       ]) {
         globalThis.fetch = async () => new Response(JSON.stringify(body))
         const failure = await searchCollectionCandidates('token', 'x', new Set()).catch((error: unknown) => error)

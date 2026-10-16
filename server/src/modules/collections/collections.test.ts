@@ -93,6 +93,14 @@ test('does not resurrect a deleted Collection when its creation is replayed', as
   expect((await createCollection(store, context, { name: 'Launch' }, 'new-key')).name).toBe('Launch')
 })
 
+test('treats a retried delete after a lost response as already done', async () => {
+  const store = new InMemoryCollectionsStore()
+  const created = await createCollection(store, context, { name: 'Launch' }, 'key')
+  await deleteCollection(store, 'w', created.collectionId, 1)
+  await expect(deleteCollection(store, 'w', created.collectionId, 1)).resolves.toBeUndefined()
+  await expect(deleteCollection(store, 'w', 'missing', 1)).rejects.toMatchObject({ status: 404, code: 'CollectionNotFound' })
+})
+
 test('stores Unicode and slash-containing canonical Work Item identifiers', async () => {
   const store = new InMemoryCollectionsStore()
   const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')

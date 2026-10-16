@@ -12,7 +12,7 @@ Collection は workflow、assignee、status を持たず、Work Item の所有 T
 ## 権限と可視性
 
 - Collection の一覧・作成・名前変更・削除・Work Item の追加と削除は、Workspace の business read / write 権限で行います。Guest は利用できません。
-  Enterprise principal は `work-items.read`（参照）、`work-items.write` または `workspace.write`（変更）が必要です。
+  Enterprise principal は `work-items.read`（参照）、`work-items.write` または `workspace.write`（変更）が必要です。Collection は Workspace 全体の resource なので、これらの権限は Workspace scope の割り当てで判定し、Team / Project scope だけの grant では Collection を参照・変更できません。Team / Project scope の割り当ては Item の可視性判定にだけ使います。
   一覧 response の `canWrite` は変更できるかどうかを返し、Web は変更できない member に編集操作を表示しません。
 - Collection は閲覧権限を広げません。Item の一覧は、Work Item detail と同じ Team / primary Project の viewer 判定を通った Work Item だけを返し、読めない Work Item は存在を示さずに省きます。
 - Work Item の追加と参照の削除には、操作する人がその Work Item を読める必要があります。読めない Work Item と存在しない Work Item は同じ `404 CollectionWorkItemNotFound` を返すため、ID を推測して隠れた参照の有無を確かめることはできません。
@@ -27,7 +27,7 @@ Collection は既存の Planning table に `COLLECTION#<collectionId>` row と�
 Workspace あたりの Collection は 200 件までです。保存済み row の参照が 200 件を超えている場合や同じ Work Item を重複して参照している場合は破損として扱い、読み取りを `502 CollectionCorruptState` で止めます。上限は `COLLECTION_COUNT` counter row を作成・削除と同じ transaction で条件付き更新して強制し、同時作成でも超えません。
 
 - 作成は `Idempotency-Key` header を必須とし、同じ key の再送は最初に作った Collection を返します。作成時の request fingerprint を row に保存するため、その後に名前変更や Work Item の追加があっても再送は成功します。
-- 削除すると同じ transaction で `COLLECTION_DELETED#<collectionId>` marker を残します。marker には作成 request の fingerprint も残すため、削除後に元の作成 request を再送しても Collection は復活せず `409 CollectionDeleted` を返し、同じ key を別の内容で再利用した場合は `409 CollectionIdempotencyConflict` を返します。marker の Workspace・record key・entry type・Collection ID・fingerprint が一致しない行は `502 CollectionCorruptState` として扱います。Web はこの応答で保持していた idempotency key を破棄し、次の作成操作は新しい key で送ります。作成 transaction は marker が無いことを条件に含めます。
+- 削除すると同じ transaction で `COLLECTION_DELETED#<collectionId>` marker を残します。marker には作成 request の fingerprint も残すため、削除後に元の作成 request を再送しても Collection は復活せず `409 CollectionDeleted` を返し、同じ key を別の内容で再利用した場合は `409 CollectionIdempotencyConflict` を返します。marker の Workspace・record key・entry type・Collection ID・fingerprint が一致しない行は `502 CollectionCorruptState` として扱います。Web はこの応答で保持していた idempotency key を破棄し、次の作成操作は新しい key で送ります。作成・更新の transaction は marker が無いことを条件に含め、削除は既存 marker を上書きしません。live row と marker が両方ある矛盾した状態は `502 CollectionCorruptState` です。削除の応答が失われて同じ削除を再送した場合、Collection が無く marker がある時は削除済みとして `204` を返します。
 - 名前変更と削除は `expectedRevision` による optimistic concurrency で行い、古い revision は `409 CollectionConflict` で拒否します。
 - Work Item の追加と削除も revision 条件付きで書き込み、同じ Work Item の再追加・未登録 Work Item の削除は変更なしとして扱います。
 - すべての書き込みは、呼び出した member の現在の Workspace membership を同じ DynamoDB transaction の条件として確認します。membership の条件が失敗した場合は revision の競合ではなく `403 CollectionAuthorizationChanged` を返します。
