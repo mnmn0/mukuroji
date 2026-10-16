@@ -6,6 +6,8 @@ import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platfor
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
+import { AppInstallCard } from '../../shared/ui/AppInstallCard'
 import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
 import { WorkspaceAccessPanelContainer } from '../../workspace/ui/WorkspaceAccessPanel'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -22,6 +24,7 @@ export function SettingsPage() {
   const workspace = useWorkspaceRouteContext()
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
+  const appInstall = useAppInstallPrompt()
   const developerPlatformInitialSection =
     searchParams.get('developerSection') === 'connectors'
       ? 'connectors'
@@ -31,6 +34,16 @@ export function SettingsPage() {
     <WorkspaceRouteContent>
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
         <WorkspaceSettingsView
+          appInstallSection={(
+            <AppInstallCard
+              description={t('workspace.settings.install.description')}
+              installedMessage={t('workspace.settings.install.installed')}
+              installLabel={t('workspace.settings.install.action')}
+              status={appInstall.status}
+              title={t('workspace.settings.install.title')}
+              onInstall={() => { void appInstall.install() }}
+            />
+          )}
           configurationSections={workspace.accessToken ? (
             <>
               {aiAssistanceUiEnabled ? (

@@ -6,6 +6,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -32,6 +33,7 @@ import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/s
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
+import { syncAppBadge } from '../../shared/lib/pwa/appBadge'
 import {
   aiAssistanceUiEnabled,
   isAiAssistanceTaskEnabled as isSavedAiAssistanceTaskEnabled,
@@ -286,6 +288,12 @@ export function WorkspaceRouteProvider() {
     accessToken,
     Boolean(user && !currentUserError),
   )
+  // Mirror the unread Inbox count on the installed app icon; clear it when signed out.
+  const badgeCount = user && !currentUserError ? inboxCount : 0
+  useEffect(() => {
+    syncAppBadge(badgeCount)
+  }, [badgeCount])
+  useEffect(() => () => syncAppBadge(0), [])
   const userLabel =
     user?.attributes.email ??
     user?.attributes.name ??

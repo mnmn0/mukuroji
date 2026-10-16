@@ -10,8 +10,13 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   192px / 512px / maskable 512px の PNG icon と、マイタスク・インボックス・フォーカスへの shortcut を持ちます。
 - `web/src/service-worker/sw.ts`: Vite の別 entry として build し、site root の `/sw.js` に出力します。
   production build かつ secure context の場合だけ `window.load` 後に登録します。開発 server では登録しません。
-- install: browser 標準の install UI (Chromium の address bar / menu、iOS Safari の「ホーム画面に追加」) を使います。
-  `beforeinstallprompt` を使う独自の install 導線は後続範囲です。
+- install: browser 標準の install UI (Chromium の address bar / menu、iOS Safari の「ホーム画面に追加」) に加えて、
+  Chromium が `beforeinstallprompt` を発火した場合は設定画面に「アプリとしてインストール」を表示します。
+  `main.tsx` の起動時に event を捕捉して browser の mini-infobar を抑止し、利用者が押した時に一度だけ dialog を出します。
+  `appinstalled` 後と standalone 表示中は「インストール済み」を表示し、対応しない browser では何も表示しません。
+- badge: install 済み app の icon に受信箱の未読数を Badging API (`navigator.setAppBadge`) で表示します。
+  数値だけを渡すため Workspace の内容は露出せず、未読 0、sign out、Workspace 画面の unmount で消去します。
+  対応しない browser と API の失敗は無視します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。

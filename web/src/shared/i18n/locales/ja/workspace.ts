@@ -371,6 +371,10 @@ export const workspaceMessages = {
   'workspace.settings.title': '設定',
   'workspace.settings.description':
     'このブラウザの表示言語と文字サイズ、ログイン中のアカウントを確認します。',
+  'workspace.settings.install.title': 'アプリとしてインストール',
+  'workspace.settings.install.description': 'mukuroji をアプリとして追加すると、独立したウィンドウで開き、アイコンに受信箱の未読数を表示します。',
+  'workspace.settings.install.action': 'インストール',
+  'workspace.settings.install.installed': 'mukuroji はアプリとしてインストールされています。',
   'workspace.settings.displayTitle': '表示設定',
   'workspace.settings.displayDescription':
     'このブラウザで使う文字サイズ、配色、表示言語を調整します。',
