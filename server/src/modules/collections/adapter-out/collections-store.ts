@@ -7,7 +7,13 @@ import {
 import { COLLECTION_LIMIT } from '@mukuroji/contracts'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import type { CollectionsStore } from '../application/collections'
-import { CollectionError, isStoredCollection, type StoredCollection } from '../domain/collections'
+import {
+  CollectionError,
+  isCollectionCreateFingerprint,
+  isStoredCollection,
+  type CollectionDeletion,
+  type StoredCollection,
+} from '../domain/collections'
 
 /** Sort-key prefix of Collection rows in the Planning table. */
 const COLLECTION_RECORD_PREFIX = 'COLLECTION#'
@@ -115,19 +121,30 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
   }
 
   /**
-   * Checks for the deletion marker of a Collection.
+   * Reads the deletion marker of a Collection.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param collectionId - Collection identifier.
-   * @returns Whether the Collection was deleted.
+   * @returns The deletion record, or undefined when the Collection was never deleted.
    */
-  async wasDeleted(workspaceId: string, collectionId: string): Promise<boolean> {
+  async readDeletion(workspaceId: string, collectionId: string): Promise<CollectionDeletion | undefined> {
     const { Item: row } = await this.client.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: tombstoneKey(collectionId) },
       ConsistentRead: true,
     })).catch((error: unknown) => storageFailure(error))
-    return row !== undefined
+    if (row === undefined) return undefined
+    // Only a marker written by `delete` proves the deletion; anything else is corrupt state.
+    if (
+      row.workspaceId !== workspaceId ||
+      row.recordKey !== tombstoneKey(collectionId) ||
+      row.entryType !== COLLECTION_TOMBSTONE_ENTRY_TYPE ||
+      row.collectionId !== collectionId ||
+      !isCollectionCreateFingerprint(row.createFingerprint)
+    ) {
+      throw new CollectionError(502, 'CollectionCorruptState', 'Collection data is invalid.')
+    }
+    return { createFingerprint: row.createFingerprint }
   }
 
   /**
@@ -171,8 +188,9 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    * @param workspaceId - Server-resolved Workspace.
    * @param collectionId - Collection identifier.
    * @param expectedRevision - Stored revision.
+   * @param deletion - Creation details kept in the deletion marker.
    */
-  async delete(workspaceId: string, collectionId: string, expectedRevision: number): Promise<void> {
+  async delete(workspaceId: string, collectionId: string, expectedRevision: number, deletion: CollectionDeletion): Promise<void> {
     this.requireChecks()
     try {
       await this.client.send(new TransactWriteCommand({
@@ -190,6 +208,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
               recordKey: tombstoneKey(collectionId),
               entryType: COLLECTION_TOMBSTONE_ENTRY_TYPE,
               collectionId,
+              createFingerprint: deletion.createFingerprint,
             },
           },
         }, ...this.checks],
@@ -252,8 +271,8 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
 export class InMemoryCollectionsStore implements CollectionsPersistence {
   /** Collections keyed by Workspace and Collection. */
   private readonly collections = new Map<string, StoredCollection>()
-  /** Keys of deleted Collections. */
-  private readonly deleted = new Set<string>()
+  /** Deletion markers keyed by Workspace and Collection. */
+  private readonly deleted = new Map<string, CollectionDeletion>()
 
   /**
    * Returns this store; condition checks are verified by the DynamoDB adapter tests.
@@ -291,14 +310,15 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
   }
 
   /**
-   * Checks whether a Collection was deleted.
+   * Reads a copy of a deletion marker.
    *
    * @param workspaceId - Test Workspace.
    * @param collectionId - Collection identifier.
-   * @returns Whether the Collection was deleted.
+   * @returns The deletion record, or undefined.
    */
-  async wasDeleted(workspaceId: string, collectionId: string): Promise<boolean> {
-    return this.deleted.has(memoryKey(workspaceId, collectionId))
+  async readDeletion(workspaceId: string, collectionId: string): Promise<CollectionDeletion | undefined> {
+    const deletion = this.deleted.get(memoryKey(workspaceId, collectionId))
+    return deletion ? { ...deletion } : undefined
   }
 
   /**
@@ -321,12 +341,13 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
    * @param workspaceId - Test Workspace.
    * @param collectionId - Collection identifier.
    * @param expectedRevision - Stored revision.
+   * @param deletion - Creation details kept in the deletion marker.
    */
-  async delete(workspaceId: string, collectionId: string, expectedRevision: number): Promise<void> {
+  async delete(workspaceId: string, collectionId: string, expectedRevision: number, deletion: CollectionDeletion): Promise<void> {
     const key = memoryKey(workspaceId, collectionId)
     if (this.collections.get(key)?.revision !== expectedRevision) throw conflict()
     this.collections.delete(key)
-    this.deleted.add(key)
+    this.deleted.set(key, { ...deletion })
   }
 }
 
