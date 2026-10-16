@@ -1005,6 +1005,21 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
     throw new TypeError('Audit export job expires before it was created.')
   }
+  const eventCount = requireCount(record.eventCount, 'eventCount')
+  const parsedParts = parts.map((entry: unknown) => {
+    const part = requireObject(entry, 'Audit export part')
+    return {
+      index: requireCount(part.index, 'part.index'),
+      key: requireString(part.key, 'part.key'),
+      eventCount: requireCount(part.eventCount, 'part.eventCount'),
+      byteLength: requireCount(part.byteLength, 'part.byteLength'),
+      sha256: requireString(part.sha256, 'part.sha256'),
+    }
+  })
+  // The event limit is enforced from the job total, so it must account for every part.
+  if (parsedParts.reduce((total, part) => total + part.eventCount, 0) !== eventCount) {
+    throw new TypeError('Audit export job event count does not match its parts.')
+  }
   return {
     schemaVersion: 1,
     workspaceId: requireString(record.workspaceId, 'workspaceId'),
@@ -1020,17 +1035,8 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     createdAt,
     updatedAt: requireInstant(record.updatedAt, 'updatedAt'),
     expiresAt,
-    eventCount: requireCount(record.eventCount, 'eventCount'),
-    parts: parts.map((entry: unknown) => {
-      const part = requireObject(entry, 'Audit export part')
-      return {
-        index: requireCount(part.index, 'part.index'),
-        key: requireString(part.key, 'part.key'),
-        eventCount: requireCount(part.eventCount, 'part.eventCount'),
-        byteLength: requireCount(part.byteLength, 'part.byteLength'),
-        sha256: requireString(part.sha256, 'part.sha256'),
-      }
-    }),
+    eventCount,
+    parts: parsedParts,
     ...(record.nextCursor === undefined ? {} : { nextCursor: requireString(record.nextCursor, 'nextCursor') }),
     ...(failure
       ? { failure: { code: requireString(failure.code, 'failure.code'), message: requireString(failure.message, 'failure.message') } }
@@ -1048,9 +1054,13 @@ function parseFilters(filters: Record<string, unknown>): AuditExportFilters {
   // A stored key this version does not know could be a restriction that would otherwise be dropped.
   const unknownKey = Object.keys(filters).find((key) => !AUDIT_EXPORT_FILTER_KEYS.has(key))
   if (unknownKey !== undefined) throw new TypeError(`Audit export filters contain an unknown field: ${unknownKey}.`)
+  // Empty stored values would be dropped by the query and widen the export, so they are corrupt.
   const optional = (key: string) => {
     const value = filters[key]
-    return value === undefined ? {} : { [key]: requireString(value, `filters.${key}`) }
+    if (value === undefined) return {}
+    const text = requireString(value, `filters.${key}`)
+    if (text.trim() === '') throw new TypeError(`Audit export filters.${key} must not be empty.`)
+    return { [key]: text }
   }
   const actorKind = filters.actorKind
   if (
@@ -1063,6 +1073,9 @@ function parseFilters(filters: Record<string, unknown>): AuditExportFilters {
   const eventTypes = filters.eventTypes
   if (eventTypes !== undefined && (!Array.isArray(eventTypes) || !eventTypes.every((entry) => typeof entry === 'string'))) {
     throw new TypeError('Audit export eventTypes must be strings.')
+  }
+  if (eventTypes !== undefined && (eventTypes.length === 0 || eventTypes.some((entry) => typeof entry === 'string' && entry.trim() === ''))) {
+    throw new TypeError('Audit export eventTypes must not be empty.')
   }
   return {
     ...optional('actorId'),

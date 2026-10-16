@@ -141,6 +141,31 @@ describe('S3AuditExportStore', () => {
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('does not match its storage key')
     objects.set(`${createAuditExportWorkspacePrefix('ws-2')}${exportId}/job.json`, { body: JSON.stringify(job(exportId, '2026-07-18T00:00:00.000Z')), etag: '"t"' })
     await expect(store.readJob('ws-2', exportId)).rejects.toThrow('does not match its storage key')
+    // The worker enforces the event limit from the job total, so it must match the parts.
+    const understated = {
+      ...job(exportId, '2026-07-18T00:00:00.000Z'),
+      eventCount: 1,
+      parts: [{ index: 0, key: 'k', eventCount: 5, byteLength: 1, sha256: 'a'.repeat(64) }],
+    }
+    objects.set(jobPath, { body: JSON.stringify(understated), etag: '"s"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('event count does not match its parts')
+    // An empty stored restriction would be dropped by the query and widen the export.
+    for (const filters of [{ eventTypes: [] }, { eventTypes: [' '] }, { actorId: '' }]) {
+      const widenedByEmpty = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters }
+      objects.set(jobPath, { body: JSON.stringify(widenedByEmpty), etag: '"r"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow('must not be empty')
+    }
+  })
+
+  test('propagates a missing bucket instead of reporting a missing job', async () => {
+    const client = new S3Client({ region: 'us-east-1', credentials: { accessKeyId: 'test', secretAccessKey: 'test' } })
+    Object.assign(client, {
+      async send() {
+        throw awsError('NoSuchBucket', 404)
+      },
+    })
+    const store = new S3AuditExportStore({ client, bucketName: 'missing' })
+    await expect(store.readJob('ws-1', 'b'.repeat(32))).rejects.toMatchObject({ name: 'NoSuchBucket' })
   })
 
   test('lists only the Workspace jobs, newest first', async () => {
