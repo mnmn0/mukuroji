@@ -25,6 +25,12 @@ if (import.meta.main) {
   Bun.serve({
     hostname: '127.0.0.1',
     port,
+    /**
+     * Serves a file from the static root, or 404 when the path does not name one.
+     *
+     * @param request - Incoming HTTP request.
+     * @returns The file response, or a 404 response.
+     */
     fetch(request) {
       const pathname = decodeURIComponent(new URL(request.url).pathname)
       const file = resolveStaticFile(root, pathname)
