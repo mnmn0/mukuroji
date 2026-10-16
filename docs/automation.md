@@ -52,7 +52,7 @@ Inbound webhook は server-issued endpoint と signing secret を Workspace 管�
 - `provisioning`: create/rotate の secret を確定中。Public delivery からは存在しない endpoint として扱う。処理が完了しない場合は Workspace 管理者が revoke して abort できる。Rotate 途中の abort でも endpoint 全体が終端失効するため、Rule と sender は新しい endpoint へ再設定する。
 - `active`: 署名済み delivery を受け付ける。
 - `paused`: Metadata と secret は保持するが delivery を `423 AutomationInboundWebhookPaused` で拒否する。
-- `revoked`: 終端状態。Opaque lookup と Secrets Manager resource を削除し、public API は `404 AutomationInboundWebhookNotFound` を返す。例外として、`triage` endpoint で revoke 前に delivery receipt を確定済みの delivery の再送は、Triage Entry の作成を完了する（[Triage の Webhook](./triage.md#webhook)）。`paused` でも同様。
+- `revoked`: 終端状態。Opaque lookup と Secrets Manager resource を削除し、public API は `404 AutomationInboundWebhookNotFound` を返す。例外として、`triage` endpoint で revoke 前に delivery receipt を確定済みの delivery の再送は、Triage Entry の作成を完了する（[Triage の Webhook](./triage.md#webhook)）。`paused` や、`active` のまま secret を rotate した後でも同様。
 
 Create の予約 transaction は、`triage` endpoint の routing Team が active であることを Directory の Team row への ConditionCheck として含める。予約前の検証後に Team が archive された場合、予約は `409 AutomationInboundWebhookReferenceUnavailable` で失敗する。
 
