@@ -1,5 +1,7 @@
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
+  WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES,
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
   type ConfirmedWorkItemSchedule,
@@ -514,7 +516,11 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
  * @returns Whether every entry names a member or job role with a valid status and effort.
  */
 function isContributorAssignmentList(value: unknown): value is WorkItemContributorAssignment[] {
-  return Array.isArray(value) && value.every((entry) =>
+  // Same limits as the canonical contract: a bounded list with unique assignment IDs.
+  return Array.isArray(value) &&
+    value.length <= WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT &&
+    new Set(value.map((entry) => isRecord(entry) ? entry.assignmentId : undefined)).size === value.length &&
+    value.every((entry) =>
     isRecord(entry) &&
     typeof entry.assignmentId === 'string' &&
     isOptionalString(entry.memberUserId) &&
@@ -523,7 +529,8 @@ function isContributorAssignmentList(value: unknown): value is WorkItemContribut
     (entry.plannedEffortMinutes === undefined ||
       (Number.isSafeInteger(entry.plannedEffortMinutes) &&
         typeof entry.plannedEffortMinutes === 'number' &&
-        entry.plannedEffortMinutes >= 0)) &&
+        entry.plannedEffortMinutes >= 0 &&
+        entry.plannedEffortMinutes <= WORK_ITEM_CONTRIBUTOR_PLANNED_EFFORT_MAX_MINUTES)) &&
     (entry.status === 'planned' || entry.status === 'in-progress' || entry.status === 'done'))
 }
 
