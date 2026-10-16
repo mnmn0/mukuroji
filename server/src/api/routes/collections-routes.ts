@@ -24,6 +24,7 @@ import { workItemDependencies, workspaceDependencies } from '../shared/app-depen
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
+  canWriteTaskViews,
   getEffectiveProjectScopeAccessList,
   requireAssignedProjectPermission,
   requireTeamPermission,
@@ -51,7 +52,10 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
   routeApp.get('/api/collections', async (c) => {
     try {
       const principal = await authenticate(c, 'read')
-      return c.json({ collections: await listCollections(workItemDependencies.collections, principal.directoryId) })
+      return c.json({
+        collections: await listCollections(workItemDependencies.collections, principal.directoryId),
+        canWrite: canWriteTaskViews(principal),
+      })
     } catch (error) {
       return toCollectionErrorResponse(c, error)
     }
@@ -131,14 +135,21 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
     }
   })
 
-  /** Removes a Work Item reference from a Collection. */
+  /** Removes a readable Work Item's reference from a Collection. */
   routeApp.delete('/api/collections/:collectionId/items/:teamId/:issueId', async (c) => {
     try {
       const principal = await authenticate(c, 'write')
       const collectionId = readCollectionIdentifier(c.req.param('collectionId'), 'InvalidCollectionId')
       const teamId = readCollectionIdentifier(c.req.param('teamId'), 'InvalidCollectionWorkItem')
       const issueId = readCollectionIdentifier(c.req.param('issueId'), 'InvalidCollectionWorkItem')
-      return c.json(await removeCollectionItem(writeStore(principal), mutationContext(principal), collectionId, teamId, issueId))
+      return c.json(await removeCollectionItem(
+        writeStore(principal),
+        mutationContext(principal),
+        collectionId,
+        teamId,
+        issueId,
+        await createWorkItemReader(principal),
+      ))
     } catch (error) {
       return toCollectionErrorResponse(c, error)
     }
@@ -158,8 +169,13 @@ async function authenticate(context: Context, minimum: 'read' | 'write'): Promis
     throw new WorkspaceAccessError(401, 'WorkspaceAuthenticationRequired', 'Bearer token is required.')
   }
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
-  if (minimum === 'write') requireWorkspaceBusinessWrite(principal)
   requireWorkspaceBusinessRead(principal)
+  if (minimum === 'write') {
+    requireWorkspaceBusinessWrite(principal)
+    if (!canWriteTaskViews(principal)) {
+      throw new WorkspaceAccessError(403, 'CollectionWriteDenied', 'Work Item write permission is required to change Collections.')
+    }
+  }
   return principal
 }
 

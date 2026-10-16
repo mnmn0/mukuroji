@@ -39,6 +39,8 @@ export type WorkItemCollection = {
 export type WorkItemCollectionsResponse = {
   /** Collections in the Workspace, ordered by name. */
   collections: WorkItemCollection[]
+  /** Whether the caller may create, change, and delete Collections. */
+  canWrite: boolean
 }
 
 /** Request body that creates a Collection. */

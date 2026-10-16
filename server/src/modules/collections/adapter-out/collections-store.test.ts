@@ -36,6 +36,7 @@ const collection: StoredCollection = {
   updatedAt: '2026-10-16T00:00:00.000Z',
   revision: 1,
   items: [{ teamId: 'core-team', issueId: 'item-1', addedAt: '2026-10-16T00:00:00.000Z', addedBy: 'reader' }],
+  createFingerprint: 'f'.repeat(64),
 }
 
 test('writes require caller checks and carry a revision condition', async () => {
@@ -55,6 +56,7 @@ test('writes require caller checks and carry a revision condition', async () => 
   expect(transactions).toEqual([
     [
       { Put: expect.objectContaining({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: expect.objectContaining({ workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }) }) },
+      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: 'attribute_not_exists(#count) OR #count < :limit', ExpressionAttributeValues: expect.objectContaining({ ':delta': 1, ':limit': 200 }) }) },
       ...checks,
     ],
     [
@@ -63,9 +65,20 @@ test('writes require caller checks and carry a revision condition', async () => 
     ],
     [
       { Delete: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION#c1' }, ExpressionAttributeValues: { ':revision': 2, ':entryType': 'work-item-collection' } }) },
+      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ExpressionAttributeValues: expect.objectContaining({ ':delta': -1 }) }) },
       ...checks,
     ],
   ])
+})
+
+test('maps a failed counter condition on creation to the Workspace limit', async () => {
+  const store = new DynamoDbCollectionsStore('planning', clientFor(async () => {
+    throw Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    })
+  }), checks)
+  await expect(store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
 })
 
 test('maps a failed condition to a conflict', async () => {

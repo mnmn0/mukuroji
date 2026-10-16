@@ -19,16 +19,24 @@ export type CollectionsWorkspaceProps = {
   t: (key: MessageKey) => string
   /** Collections, or undefined while loading. */
   collections: WorkItemCollection[] | undefined
-  /** Whether the Collection list failed to load. */
+  /** Whether the latest Collection list request failed, including a refresh of loaded data. */
   collectionsFailed: boolean
+  /** Reloads the Collection list. */
+  onRetryCollections: () => void
   /** Selected Collection identifier. */
   selectedId: string | undefined
   /** Items of the selected Collection, or undefined while loading. */
   items: WorkItemCollectionEntry[] | undefined
-  /** Whether the selected Collection's items failed to load. */
+  /** Whether the latest request for the selected Collection's items failed. */
   itemsFailed: boolean
+  /** Reloads the selected Collection's items. */
+  onRetryItems: () => void
   /** Work Items that can be added. */
   candidates: CollectionCandidate[]
+  /** Whether the Work Items that can be added failed to load. */
+  candidatesFailed: boolean
+  /** Reloads the Work Items that can be added. */
+  onRetryCandidates: () => void
   /** Whether the caller may change Collections. */
   canEdit: boolean
   /** Whether a mutation is running. */
@@ -70,10 +78,11 @@ export function CollectionsWorkspace(props: CollectionsWorkspaceProps) {
         {props.errorMessage ? (
           <p className="text-sm font-medium text-[var(--workbench-danger)]" role="alert">{props.errorMessage}</p>
         ) : null}
+        {props.collectionsFailed ? (
+          <FailureNotice message={t(collections === undefined ? 'collections.list.failed' : 'collections.refreshFailed')} onRetry={props.onRetryCollections} t={t} />
+        ) : null}
         {collections === undefined ? (
-          <p className="text-sm text-[var(--workbench-muted)]" role={props.collectionsFailed ? 'alert' : 'status'}>
-            {t(props.collectionsFailed ? 'collections.list.failed' : 'collections.list.loading')}
-          </p>
+          props.collectionsFailed ? null : <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('collections.list.loading')}</p>
         ) : collections.length === 0 ? (
           <p className="text-sm text-[var(--workbench-muted)]">{t('collections.list.empty')}</p>
         ) : (
@@ -228,7 +237,10 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
 
       <p className="text-sm text-[var(--workbench-muted)]">{t('collections.items.visibility')}</p>
 
-      {props.canEdit ? (
+      {props.canEdit && props.candidatesFailed ? (
+        <FailureNotice message={t('collections.add.failed')} onRetry={props.onRetryCandidates} t={t} />
+      ) : null}
+      {props.canEdit && !props.candidatesFailed ? (
         <div className="flex flex-wrap items-end gap-2">
           <label className="grid min-w-[240px] flex-1 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
             {t('collections.add.label')}
@@ -248,10 +260,11 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
       ) : null}
 
       <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('collections.items.title')}</h3>
+      {props.itemsFailed ? (
+        <FailureNotice message={t(props.items === undefined ? 'collections.items.failed' : 'collections.refreshFailed')} onRetry={props.onRetryItems} t={t} />
+      ) : null}
       {props.items === undefined ? (
-        <p className="text-sm text-[var(--workbench-muted)]" role={props.itemsFailed ? 'alert' : 'status'}>
-          {t(props.itemsFailed ? 'collections.items.failed' : 'collections.items.loading')}
-        </p>
+        props.itemsFailed ? null : <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('collections.items.loading')}</p>
       ) : props.items.length === 0 ? (
         <p className="text-sm text-[var(--workbench-muted)]">{t('collections.items.empty')}</p>
       ) : (
@@ -284,6 +297,21 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
         </ul>
       )}
     </>
+  )
+}
+
+/**
+ * Explains a failed request and offers to retry it.
+ *
+ * @param props - Message, retry callback, and translator.
+ * @returns An alert with a retry button.
+ */
+function FailureNotice({ message, onRetry, t }: { message: string; onRetry: () => void; t: CollectionsWorkspaceProps['t'] }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-[var(--workbench-danger)]" role="alert">
+      <span>{message}</span>
+      <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">{t('collections.retry')}</button>
+    </div>
   )
 }
 

@@ -44,6 +44,8 @@ export type StoredCollectionItem = {
 export type StoredCollection = WorkItemCollection & {
   /** Work Item references, most recently added first. */
   items: StoredCollectionItem[]
+  /** Fingerprint of the creation request, used to recognize idempotent replays. */
+  createFingerprint: string
 }
 
 /** Pattern for server-generated and route-supplied identifiers. */
@@ -131,6 +133,7 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
+    typeof value.createFingerprint === 'string' &&
     Array.isArray(value.items) && value.items.every(isStoredCollectionItem)
 }
 

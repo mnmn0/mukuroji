@@ -1,11 +1,12 @@
 import { expect, test } from 'bun:test'
-import { COLLECTION_ITEM_LIMIT } from '@mukuroji/contracts'
+import { COLLECTION_ITEM_LIMIT, COLLECTION_LIMIT } from '@mukuroji/contracts'
 import { InMemoryCollectionsStore } from './adapter-out/collections-store'
 import {
   addCollectionItem,
   createCollection,
   listCollectionEntries,
   removeCollectionItem,
+  updateCollection,
   type ReadCollectionWorkItem,
 } from './application/collections'
 
@@ -30,7 +31,7 @@ test('keeps the most recently added reference first and skips unreadable ones on
   expect(listed.items.map((item) => item.issueId)).toEqual(['c', 'b', 'a'])
   expect(listed.items[0]).toEqual({ teamId: 't', issueId: 'c', title: 'Title c', statusCategory: 'started', addedAt: '2026-10-16T00:00:03.000Z' })
 
-  await removeCollectionItem(store, context, collectionId, 't', 'b')
+  await removeCollectionItem(store, context, collectionId, 't', 'b', readWorkItem)
   expect((await listCollectionEntries(store, 'w', collectionId, readWorkItem)).items.map((item) => item.issueId)).toEqual(['c', 'a'])
 })
 
@@ -55,4 +56,25 @@ test('propagates unexpected Work Item read failures instead of hiding items', as
   await expect(listCollectionEntries(store, 'w', collectionId, async () => {
     throw new Error('storage down')
   })).rejects.toThrow('storage down')
+})
+
+test('replays a creation after the Collection changed and enforces the Workspace limit', async () => {
+  const store = new InMemoryCollectionsStore()
+  const created = await createCollection(store, context, { name: 'Launch' }, 'key')
+  await updateCollection(store, context, created.collectionId, { expectedRevision: 1, name: 'Renamed' })
+  expect((await createCollection(store, context, { name: 'Launch' }, 'key')).collectionId).toBe(created.collectionId)
+  await expect(createCollection(store, context, { name: 'Other' }, 'key')).rejects.toMatchObject({ code: 'CollectionIdempotencyConflict' })
+
+  for (let index = 1; index < COLLECTION_LIMIT; index += 1) {
+    await createCollection(store, context, { name: `C${index}` }, `key-${index}`)
+  }
+  await expect(createCollection(store, context, { name: 'One too many' }, 'overflow'))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
+})
+
+test('refuses to remove a reference the caller cannot read', async () => {
+  const store = new InMemoryCollectionsStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  await expect(removeCollectionItem(store, context, collectionId, 't', 'hidden-1', readWorkItem))
+    .rejects.toMatchObject({ status: 404, code: 'CollectionWorkItemNotFound' })
 })

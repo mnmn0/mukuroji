@@ -38,15 +38,15 @@ const collectionsApiBaseUrl = `${(import.meta.env.VITE_API_BASE_URL ?? '/api').r
 const statusCategories: readonly WorkflowStatusCategory[] = ['backlog', 'unstarted', 'started', 'completed', 'canceled']
 
 /**
- * Loads the Workspace's Collections.
+ * Loads the Workspace's Collections and whether the caller may change them.
  *
  * @param accessToken - Bearer token for the Workspace.
- * @returns Collections ordered by name.
+ * @returns Collections ordered by name, with the caller's write capability.
  */
-export async function getCollections(accessToken: string): Promise<WorkItemCollection[]> {
+export async function getCollections(accessToken: string): Promise<WorkItemCollectionsResponse> {
   const data = await requestJson(collectionsApiBaseUrl, accessToken)
   if (!isCollectionsResponse(data)) throw invalidResponse()
-  return data.collections
+  return { collections: data.collections, canWrite: data.canWrite }
 }
 
 /**
@@ -214,7 +214,8 @@ function readCollection(value: unknown): WorkItemCollection {
  * @returns Whether the body is a Collection list.
  */
 function isCollectionsResponse(value: unknown): value is WorkItemCollectionsResponse {
-  return isRecord(value) && Array.isArray(value.collections) && value.collections.every(isCollection)
+  return isRecord(value) && Array.isArray(value.collections) && value.collections.every(isCollection) &&
+    typeof value.canWrite === 'boolean'
 }
 
 /**

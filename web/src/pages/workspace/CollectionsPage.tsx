@@ -30,11 +30,12 @@ function CollectionsSession() {
   const t = createTranslator(workspace.locale)
   const [params, setParams] = useSearchParams()
   const collections = useCollections(workspace.accessToken, workspace.canLoadWorkspaceData)
-  const selectedId = params.get('collectionId') ?? collections.data?.[0]?.collectionId
+  const selectedId = params.get('collectionId') ?? collections.data?.collections[0]?.collectionId
+  const canEdit = workspace.canMutateTeamConfiguration && collections.data?.canWrite === true
   const items = useCollectionItems(workspace.accessToken, selectedId, workspace.canLoadWorkspaceData)
   const candidates = useWorkspaceWorkItems(
     workspace.accessToken,
-    workspace.canLoadWorkspaceData && workspace.canMutateTeamConfiguration && Boolean(selectedId),
+    workspace.canLoadWorkspaceData && canEdit && Boolean(selectedId),
   )
   const actions = useCollectionActions(workspace.accessToken, workspace.guardEnterpriseSession)
   const actionError = actions.error instanceof CollectionApiError
@@ -46,8 +47,9 @@ function CollectionsSession() {
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         <CollectionsWorkspace
           candidates={(candidates.data ?? []).map((workItem) => ({ teamId: workItem.teamId, issueId: workItem.id, title: workItem.title }))}
-          canEdit={workspace.canMutateTeamConfiguration}
-          collections={collections.data}
+          candidatesFailed={Boolean(candidates.error)}
+          canEdit={canEdit}
+          collections={collections.data?.collections}
           collectionsFailed={Boolean(collections.error)}
           errorMessage={actionError ? t(actionError) : undefined}
           items={items.data?.collection.collectionId === selectedId ? items.data?.items : undefined}
@@ -65,6 +67,9 @@ function CollectionsSession() {
               if (deleted) setParams({})
             })
           }}
+          onRetryCandidates={() => { void candidates.mutate() }}
+          onRetryCollections={() => { void collections.mutate() }}
+          onRetryItems={() => { void items.mutate() }}
           onRemoveItem={(teamId, issueId) => {
             if (selectedId) void actions.removeItem(selectedId, teamId, issueId)
           }}

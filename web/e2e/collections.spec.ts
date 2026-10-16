@@ -12,9 +12,10 @@ const workItems = [
  * Installs the session and an in-memory Collection API.
  *
  * @param page - Browser page whose API requests are intercepted.
+ * @param canWrite - Whether the server reports that the member may change Collections.
  * @returns Mutable mock server state.
  */
-async function mockCollections(page: Page) {
+async function mockCollections(page: Page, canWrite = true) {
   const state = {
     collections: [] as (WorkItemCollection & { items: WorkItemCollectionEntry[] })[],
     createKeys: [] as string[],
@@ -41,7 +42,7 @@ async function mockCollections(page: Page) {
         state.collections.push(created)
         return route.fulfill({ status: 201, json: toPublicCollection(created) })
       }
-      return route.fulfill({ json: { collections: state.collections.map(toPublicCollection) } })
+      return route.fulfill({ json: { collections: state.collections.map(toPublicCollection), canWrite } })
     }
     const collection = state.collections.find((candidate) => candidate.collectionId === collectionId)
     if (!collection) return route.fulfill({ status: 404, json: { code: 'CollectionNotFound' } })
@@ -112,4 +113,13 @@ test('Issue #238: places a Work Item in a Collection without copying it', async 
   await page.getByRole('button', { name: 'Delete Collection' }).click()
   await expect(page.getByText('There are no Collections yet.')).toBeVisible()
   expect(state.collections).toEqual([])
+})
+
+test('Issue #238: members without Work Item write permission see Collections read-only', async ({ page }) => {
+  const state = await mockCollections(page, false)
+  state.collections.push({ collectionId: 'c1', name: 'Q4 launch', createdBy: 'demo@example.com', createdAt: '2026-10-16T00:00:00.000Z', updatedAt: '2026-10-16T00:00:00.000Z', revision: 1, items: [] })
+  await page.goto('/collections')
+  await expect(page.getByText('You have view-only access, so Collections cannot be changed.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Create' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Delete Collection' })).toHaveCount(0)
 })

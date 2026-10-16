@@ -18,6 +18,7 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 - `UPDATE_COMMENT_ID#<target>#<version>#<commentId>`: update version 内で comment ID の再利用を防ぐ immutable marker
 - `UPDATE_REACTION#<target>#<version>#...`: immutable update に対する member reaction
 - `COLLECTION#<collectionId>`: Work Item を参照する整理用 Collection（[Collections](./collections.md)）。Planning graph の revision fence には含めません
+- `COLLECTION_COUNT`: Workspace の Collection 数。作成・削除と同じ transaction で更新し、上限を強制します
 
 Planning API snapshot は `schemaVersion: 2` を返し、Web は現在の schema version の snapshot だけを受け付けます。DynamoDB の storage schema version 1 は API contract から独立しています。Revision の正本は、graph row の `<workspaceId>` partition から分離した `FENCE#<workspaceId>` partition の `META` row だけです。
 

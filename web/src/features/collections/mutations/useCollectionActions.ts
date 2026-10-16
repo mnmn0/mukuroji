@@ -1,4 +1,4 @@
-import type { WorkItemCollection } from '@mukuroji/contracts'
+import type { WorkItemCollection, WorkItemCollectionsResponse } from '@mukuroji/contracts'
 import { useEffect, useRef, useState } from 'react'
 import { useSWRConfig } from 'swr'
 import { createMutationRequestContext, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
@@ -81,7 +81,22 @@ export function useCollectionActions(
         createContext.current = { fingerprint, context: createMutationRequestContext() }
       }
       const { context } = createContext.current
-      const created = await run((token) => createCollection(token, { name, ...(description ? { description } : {}) }, context))
+      const created = await run(async (token) => {
+        const collection = await createCollection(token, { name, ...(description ? { description } : {}) }, context)
+        // Show the new Collection right away, even if the following list refresh fails.
+        await mutate(
+          [COLLECTIONS_QUERY_KEY, token, 'list'],
+          (current: WorkItemCollectionsResponse | undefined) => current
+            ? {
+                ...current,
+                collections: [...current.collections.filter((entry) => entry.collectionId !== collection.collectionId), collection]
+                  .sort((left, right) => left.name.localeCompare(right.name)),
+              }
+            : current,
+          { revalidate: false },
+        )
+        return collection
+      })
       if (created) createContext.current = undefined
       return created
     },

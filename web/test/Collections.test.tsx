@@ -34,6 +34,10 @@ function render(overrides: Partial<CollectionsWorkspaceProps> = {}) {
     t: createTranslator('en'),
     collections: [collection],
     collectionsFailed: false,
+    onRetryCollections: () => undefined,
+    onRetryItems: () => undefined,
+    candidatesFailed: false,
+    onRetryCandidates: () => undefined,
     selectedId: 'c1',
     items: [{ teamId: 'core-team', issueId: 'onboarding', title: 'Reduce onboarding friction', statusCategory: 'started', assignedProjectId: 'refero', addedAt: '2026-10-16T00:00:00.000Z' }],
     itemsFailed: false,
@@ -78,12 +82,24 @@ describe('CollectionsWorkspace', () => {
     const markup = render({ collections: undefined, collectionsFailed: true, errorMessage: 'The Collection changed.' })
     expect(markup).toContain('Collections could not be loaded.')
     expect(markup).toContain('role="alert">The Collection changed.')
+    expect(markup).toContain('>Retry</button>')
+  })
+
+  test('keeps loaded data visible when a refresh or the candidate list fails', () => {
+    const markup = render({ collectionsFailed: true, itemsFailed: true, candidatesFailed: true })
+    expect(markup).toContain('The latest state could not be loaded.')
+    expect(markup).toContain('Reduce onboarding friction')
+    expect(markup).toContain('Work Items to add could not be loaded.')
+    expect(markup).not.toContain('Add a Work Item')
+    expect(markup.match(/>Retry<\/button>/gu)).toHaveLength(3)
   })
 })
 
 describe('Collection API', () => {
   test('rejects malformed responses and keeps the API error code', async () => {
-    globalThis.fetch = async () => new Response(JSON.stringify({ collections: [{ name: 'Missing ID' }] }))
+    globalThis.fetch = async () => new Response(JSON.stringify({ collections: [], canWrite: 'yes' }))
+    await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
+    globalThis.fetch = async () => new Response(JSON.stringify({ collections: [{ name: 'Missing ID' }], canWrite: true }))
     await expect(getCollections('token')).rejects.toMatchObject({ status: 502 })
     globalThis.fetch = async () => new Response(JSON.stringify({ code: 'CollectionNotFound', message: 'Not found' }), { status: 404 })
     const failure = await getCollectionItems('token', 'c1').catch((error: unknown) => error)

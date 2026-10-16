@@ -4,12 +4,16 @@ import {
   TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { COLLECTION_LIMIT } from '@mukuroji/contracts'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import type { CollectionsStore } from '../application/collections'
 import { CollectionError, isStoredCollection, type StoredCollection } from '../domain/collections'
 
 /** Sort-key prefix of Collection rows in the Planning table. */
 const COLLECTION_RECORD_PREFIX = 'COLLECTION#'
+
+/** Sort key of the per-Workspace Collection counter row. */
+const COLLECTION_COUNT_RECORD_KEY = 'COLLECTION_COUNT'
 
 /** Entry type stored on Collection rows. */
 const COLLECTION_ENTRY_TYPE = 'work-item-collection'
@@ -109,6 +113,7 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
    */
   async put(workspaceId: string, collection: StoredCollection, expectedRevision: number): Promise<void> {
     this.requireChecks()
+    const counter = expectedRevision === 0 ? [this.counterUpdate(workspaceId, 1)] : []
     try {
       await this.client.send(new TransactWriteCommand({
         TransactItems: [{
@@ -123,10 +128,10 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
             },
             ...revisionCondition(expectedRevision),
           },
-        }, ...this.checks],
+        }, ...counter, ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, this.checks.length + 1)
+      storageFailure(error, 1 + counter.length + this.checks.length, counter.length > 0)
     }
   }
 
@@ -147,10 +152,34 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
             Key: { workspaceId, recordKey: recordKey(collectionId) },
             ...revisionCondition(expectedRevision),
           },
-        }, ...this.checks],
+        }, this.counterUpdate(workspaceId, -1), ...this.checks],
       }))
     } catch (error) {
-      storageFailure(error, this.checks.length + 1)
+      storageFailure(error, this.checks.length + 2)
+    }
+  }
+
+  /**
+   * Builds the counter update that keeps the Workspace within `COLLECTION_LIMIT`.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param delta - 1 when creating, -1 when deleting.
+   * @returns Transaction item that adjusts the counter.
+   */
+  private counterUpdate(workspaceId: string, delta: 1 | -1) {
+    return {
+      Update: {
+        TableName: this.tableName,
+        Key: { workspaceId, recordKey: COLLECTION_COUNT_RECORD_KEY },
+        UpdateExpression: 'ADD #count :delta SET #entryType = :entryType',
+        ...(delta === 1 ? { ConditionExpression: 'attribute_not_exists(#count) OR #count < :limit' } : {}),
+        ExpressionAttributeNames: { '#count': 'count', '#entryType': 'entryType' },
+        ExpressionAttributeValues: {
+          ':delta': delta,
+          ':entryType': 'work-item-collection-count',
+          ...(delta === 1 ? { ':limit': COLLECTION_LIMIT } : {}),
+        },
+      },
     }
   }
 
@@ -212,6 +241,7 @@ export class InMemoryCollectionsStore implements CollectionsPersistence {
   async put(workspaceId: string, collection: StoredCollection, expectedRevision: number): Promise<void> {
     const key = memoryKey(workspaceId, collection.collectionId)
     if ((this.collections.get(key)?.revision ?? 0) !== expectedRevision) throw conflict()
+    if (expectedRevision === 0 && (await this.list(workspaceId)).length >= COLLECTION_LIMIT) throw limitReached()
     this.collections.set(key, structuredClone(collection))
   }
 
@@ -300,12 +330,16 @@ function conflict(): CollectionError {
  *
  * @param error - Thrown SDK error.
  * @param transactionSize - Number of items in the failed transaction, if any.
+ * @param countsCreation - Whether item 1 is the creation counter update.
  * @returns Never; always throws a Collection error.
  */
-function storageFailure(error: unknown, transactionSize = 0): never {
+function storageFailure(error: unknown, transactionSize = 0, countsCreation = false): never {
   const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
   if (name === 'TransactionCanceledException' && typeof error === 'object' && error !== null && 'CancellationReasons' in error && Array.isArray(error.CancellationReasons)) {
     const codes = error.CancellationReasons.map((reason: unknown) => typeof reason === 'object' && reason !== null && 'Code' in reason ? reason.Code : undefined)
+    if (countsCreation && codes.length === transactionSize && codes[0] !== 'ConditionalCheckFailed' && codes[1] === 'ConditionalCheckFailed') {
+      throw limitReached()
+    }
     if (transactionSize > 0 && codes.length === transactionSize && codes.includes('ConditionalCheckFailed')) {
       throw new CollectionError(409, 'CollectionConflict', 'The Collection or your permissions changed. Reload and try again.')
     }
@@ -317,6 +351,15 @@ function storageFailure(error: unknown, transactionSize = 0): never {
     throw retryable()
   }
   throw new CollectionError(502, 'CollectionStorageFailure', 'Collection storage request failed.')
+}
+
+/**
+ * Creates the Workspace Collection limit error.
+ *
+ * @returns A 409 Collection error.
+ */
+function limitReached(): CollectionError {
+  return new CollectionError(409, 'CollectionLimitReached', `A Workspace can have up to ${COLLECTION_LIMIT} Collections.`)
 }
 
 /**

@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
   COLLECTION_ITEM_LIMIT,
-  COLLECTION_LIMIT,
   type CreateWorkItemCollectionInput,
   type UpdateWorkItemCollectionInput,
   type WorkItemCollection,
@@ -9,7 +8,11 @@ import {
 } from '@mukuroji/contracts'
 import { CollectionError, toPublicCollection, type StoredCollection } from '../domain/collections'
 
-/** Persistence port for Workspace Collections. */
+/** Persistence port for Workspace Collections.
+ *
+ * Creating (`expectedRevision` 0) fails with `409 CollectionLimitReached` once the
+ * Workspace holds `COLLECTION_LIMIT` Collections; the store enforces this atomically.
+ */
 export interface CollectionsStore {
   /**
    * Lists every Collection in a Workspace.
@@ -103,11 +106,11 @@ export async function createCollection(
     .update(JSON.stringify([context.workspaceId, context.actor, idempotencyKey]))
     .digest('hex')
     .slice(0, 32)
+  const createFingerprint = createHash('sha256')
+    .update(JSON.stringify([input.name, input.description ?? '']))
+    .digest('hex')
   const existing = await store.get(context.workspaceId, collectionId)
-  if (existing) return replayCreatedCollection(existing, context.actor, input)
-  if ((await store.list(context.workspaceId)).length >= COLLECTION_LIMIT) {
-    throw new CollectionError(409, 'CollectionLimitReached', `A Workspace can have up to ${COLLECTION_LIMIT} Collections.`)
-  }
+  if (existing) return replayCreatedCollection(existing, context.actor, createFingerprint)
   const collection: StoredCollection = {
     collectionId,
     name: input.name,
@@ -117,6 +120,7 @@ export async function createCollection(
     updatedAt: context.now,
     revision: 1,
     items: [],
+    createFingerprint,
   }
   try {
     await store.put(context.workspaceId, collection, 0)
@@ -124,7 +128,7 @@ export async function createCollection(
     const raced = error instanceof CollectionError && error.status === 409
       ? await store.get(context.workspaceId, collectionId)
       : undefined
-    if (raced) return replayCreatedCollection(raced, context.actor, input)
+    if (raced) return replayCreatedCollection(raced, context.actor, createFingerprint)
     throw error
   }
   return toPublicCollection(collection)
@@ -157,6 +161,7 @@ export async function updateCollection(
     updatedAt: context.now,
     revision: current.revision + 1,
     items: current.items,
+    createFingerprint: current.createFingerprint,
   }
   await store.put(context.workspaceId, next, current.revision)
   return toPublicCollection(next)
@@ -226,13 +231,15 @@ export async function addCollectionItem(
 /**
  * Removes a Work Item reference from a Collection; the Work Item itself is not changed.
  *
- * Removing a reference that is not present is a no-op.
+ * The caller must be able to read the Work Item, so a hidden reference can be neither
+ * removed nor probed. Removing a reference that is not present is a no-op.
  *
  * @param store - Collection persistence.
  * @param context - Caller and clock.
  * @param collectionId - Collection identifier.
  * @param teamId - Team that owns the Work Item.
  * @param issueId - Work Item identifier.
+ * @param readWorkItem - Caller-scoped Work Item reader.
  * @returns The Collection after the change.
  */
 export async function removeCollectionItem(
@@ -241,7 +248,11 @@ export async function removeCollectionItem(
   collectionId: string,
   teamId: string,
   issueId: string,
+  readWorkItem: ReadCollectionWorkItem,
 ): Promise<WorkItemCollection> {
+  if (!await readWorkItem(teamId, issueId)) {
+    throw new CollectionError(404, 'CollectionWorkItemNotFound', 'The Work Item was not found.')
+  }
   const current = await requireCollection(store, context.workspaceId, collectionId)
   const items = current.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
   if (items.length === current.items.length) return toPublicCollection(current)
@@ -301,13 +312,16 @@ async function requireCollection(store: CollectionsStore, workspaceId: string, c
 /**
  * Returns the Collection created by an earlier request with the same idempotency key.
  *
+ * The comparison uses the fingerprint stored at creation, so a retry still succeeds
+ * after the Collection was renamed or its items changed.
+ *
  * @param existing - Collection stored under the derived identifier.
  * @param actor - Current caller.
- * @param input - Current request.
- * @returns The earlier Collection when the request matches it.
+ * @param createFingerprint - Fingerprint of the current request.
+ * @returns The Collection created by the earlier request.
  */
-function replayCreatedCollection(existing: StoredCollection, actor: string, input: CreateWorkItemCollectionInput): WorkItemCollection {
-  if (existing.createdBy !== actor || existing.revision !== 1 || existing.name !== input.name || (existing.description ?? '') !== (input.description ?? '')) {
+function replayCreatedCollection(existing: StoredCollection, actor: string, createFingerprint: string): WorkItemCollection {
+  if (existing.createdBy !== actor || existing.createFingerprint !== createFingerprint) {
     throw new CollectionError(409, 'CollectionIdempotencyConflict', 'The idempotency key was used for a different request.')
   }
   return toPublicCollection(existing)

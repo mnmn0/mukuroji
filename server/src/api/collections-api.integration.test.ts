@@ -64,6 +64,7 @@ test('creates Collections idempotently and lists them by name', async () => {
 
   const listed = await (await planningApiRequest('/api/collections')).json()
   expect(listed.collections.map((collection: { name: string }) => collection.name)).toEqual(['Accessibility', 'Launch'])
+  expect(listed.canWrite).toBe(true)
 })
 
 test('references readable Work Items without copying them and hides unreadable ones', async () => {

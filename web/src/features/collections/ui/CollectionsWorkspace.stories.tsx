@@ -14,6 +14,10 @@ const meta = {
       { collectionId: 'c2', name: 'アクセシビリティ', createdBy: 'sato@example.com', createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z', revision: 1 },
     ],
     collectionsFailed: false,
+    onRetryCollections: () => undefined,
+    onRetryItems: () => undefined,
+    candidatesFailed: false,
+    onRetryCandidates: () => undefined,
     selectedId: 'c1',
     items: [
       { teamId: 'core-team', issueId: 'onboarding', title: '初回オンボーディングの離脱要因を減らす', statusCategory: 'started', assignedProjectId: 'refero', addedAt: '2026-10-10T00:00:00.000Z' },
@@ -53,6 +57,11 @@ export const Default: Story = {}
 /** View-only members see Collections without change controls. */
 export const ReadOnly: Story = {
   args: { canEdit: false },
+}
+
+/** Failed refreshes keep the loaded data and offer a retry. */
+export const LoadFailures: Story = {
+  args: { collectionsFailed: true, itemsFailed: true, candidatesFailed: true },
 }
 
 /** An empty Workspace before the first Collection. */
