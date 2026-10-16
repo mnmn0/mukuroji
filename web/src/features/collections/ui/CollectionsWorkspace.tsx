@@ -2,16 +2,7 @@ import type { WorkItemCollection, WorkItemCollectionEntry } from '@mukuroji/cont
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import type { MessageKey } from '../../../shared/i18n/i18n'
-
-/** Work Item that can be added to a Collection. */
-export type CollectionCandidate = {
-  /** Team that owns the Work Item. */
-  teamId: string
-  /** Work Item identifier. */
-  issueId: string
-  /** Current title. */
-  title: string
-}
+import type { CollectionCandidate } from '../model/collectionCandidates'
 
 /** Props accepted by the Collections workspace. */
 export type CollectionsWorkspaceProps = {
@@ -31,9 +22,13 @@ export type CollectionsWorkspaceProps = {
   itemsFailed: boolean
   /** Reloads the selected Collection's items. */
   onRetryItems: () => void
-  /** Work Items that can be added. */
-  candidates: CollectionCandidate[]
-  /** Whether the Work Items that can be added failed to load. */
+  /** Keyword of the latest candidate search; blank before the first search. */
+  candidateQuery: string
+  /** Searches the Work Items that can be added. */
+  onSearchCandidates: (keyword: string) => void
+  /** Work Items matching the candidate search, or undefined while searching. */
+  candidates: CollectionCandidate[] | undefined
+  /** Whether the candidate search failed. */
   candidatesFailed: boolean
   /** Reloads the Work Items that can be added. */
   onRetryCandidates: () => void
@@ -172,8 +167,21 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
   const [name, setName] = useState(collection.name)
   const [description, setDescription] = useState(collection.description ?? '')
   const [candidateKey, setCandidateKey] = useState('')
+  const [keyword, setKeyword] = useState(props.candidateQuery)
   const listedKeys = new Set((props.items ?? []).map((item) => candidateValue(item.teamId, item.issueId)))
-  const candidates = props.candidates.filter((candidate) => !listedKeys.has(candidateValue(candidate.teamId, candidate.issueId)))
+  const candidates = (props.candidates ?? []).filter((candidate) => !listedKeys.has(candidateValue(candidate.teamId, candidate.issueId)))
+
+  /**
+   * Searches candidates for the entered keyword.
+   *
+   * @param event - Form submit event.
+   */
+  const search = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!keyword.trim()) return
+    setCandidateKey('')
+    props.onSearchCandidates(keyword.trim())
+  }
 
   /**
    * Saves the edited name and description.
@@ -188,7 +196,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
 
   /** Adds the chosen candidate. */
   const add = () => {
-    const candidate = props.candidates.find((entry) => candidateValue(entry.teamId, entry.issueId) === candidateKey)
+    const candidate = candidates.find((entry) => candidateValue(entry.teamId, entry.issueId) === candidateKey)
     if (!candidate) return
     props.onAddItem(candidate.teamId, candidate.issueId)
     setCandidateKey('')
@@ -240,23 +248,40 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
       {props.canEdit && props.candidatesFailed ? (
         <FailureNotice message={t('collections.add.failed')} onRetry={props.onRetryCandidates} t={t} />
       ) : null}
-      {props.canEdit && !props.candidatesFailed ? (
-        <div className="flex flex-wrap items-end gap-2">
+      {props.canEdit ? (
+        <form className="flex flex-wrap items-end gap-2" onSubmit={search} role="search">
           <label className="grid min-w-[240px] flex-1 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-            {t('collections.add.label')}
-            <select className="workbench-input min-h-10 px-3" onChange={(event) => setCandidateKey(event.target.value)} value={candidateKey}>
-              <option value="">{t('collections.add.placeholder')}</option>
-              {candidates.map((candidate) => (
-                <option key={candidateValue(candidate.teamId, candidate.issueId)} value={candidateValue(candidate.teamId, candidate.issueId)}>
-                  {`${candidate.title} (${candidate.teamId} / ${candidate.issueId})`}
-                </option>
-              ))}
-            </select>
+            {t('collections.add.search')}
+            <input className="workbench-input min-h-10 px-3" maxLength={200} onChange={(event) => setKeyword(event.target.value)} type="search" value={keyword} />
           </label>
-          <button className="workbench-button-primary min-h-10 px-4" disabled={props.pending || !candidateKey} onClick={add} type="button">
-            {t('collections.add.submit')}
+          <button className="workbench-button-secondary min-h-10 px-4" disabled={!keyword.trim()} type="submit">
+            {t('collections.add.searchSubmit')}
           </button>
-        </div>
+        </form>
+      ) : null}
+      {props.canEdit && props.candidateQuery && !props.candidatesFailed ? (
+        props.candidates === undefined ? (
+          <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('collections.add.searching')}</p>
+        ) : candidates.length === 0 ? (
+          <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('collections.add.noResults')}</p>
+        ) : (
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="grid min-w-[240px] flex-1 gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('collections.add.label')}
+              <select className="workbench-input min-h-10 px-3" onChange={(event) => setCandidateKey(event.target.value)} value={candidateKey}>
+                <option value="">{t('collections.add.placeholder')}</option>
+                {candidates.map((candidate) => (
+                  <option key={candidateValue(candidate.teamId, candidate.issueId)} value={candidateValue(candidate.teamId, candidate.issueId)}>
+                    {`${candidate.title} (${candidate.teamId} / ${candidate.issueId})`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className="workbench-button-primary min-h-10 px-4" disabled={props.pending || !candidateKey} onClick={add} type="button">
+              {t('collections.add.submit')}
+            </button>
+          </div>
+        )
       ) : null}
 
       <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('collections.items.title')}</h3>

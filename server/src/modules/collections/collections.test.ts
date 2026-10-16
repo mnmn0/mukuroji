@@ -4,6 +4,7 @@ import { InMemoryCollectionsStore } from './adapter-out/collections-store'
 import {
   addCollectionItem,
   createCollection,
+  deleteCollection,
   listCollectionEntries,
   removeCollectionItem,
   updateCollection,
@@ -77,4 +78,22 @@ test('refuses to remove a reference the caller cannot read', async () => {
   const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
   await expect(removeCollectionItem(store, context, collectionId, 't', 'hidden-1', readWorkItem))
     .rejects.toMatchObject({ status: 404, code: 'CollectionWorkItemNotFound' })
+})
+
+test('does not resurrect a deleted Collection when its creation is replayed', async () => {
+  const store = new InMemoryCollectionsStore()
+  const created = await createCollection(store, context, { name: 'Launch' }, 'key')
+  await deleteCollection(store, 'w', created.collectionId, 1)
+  await expect(createCollection(store, context, { name: 'Launch' }, 'key'))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionDeleted' })
+  expect(await store.list('w')).toEqual([])
+  expect((await createCollection(store, context, { name: 'Launch' }, 'new-key')).name).toBe('Launch')
+})
+
+test('stores Unicode and slash-containing canonical Work Item identifiers', async () => {
+  const store = new InMemoryCollectionsStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  await addCollectionItem(store, context, collectionId, 'チーム/日本', '課題-１', readWorkItem)
+  expect((await listCollectionEntries(store, 'w', collectionId, readWorkItem)).items.map((item) => [item.teamId, item.issueId]))
+    .toEqual([['チーム/日本', '課題-１']])
 })

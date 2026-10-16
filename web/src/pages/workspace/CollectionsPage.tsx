@@ -1,10 +1,10 @@
+import { useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { CollectionApiError } from '../../features/collections/api/collections'
 import { resolveCollectionErrorMessageKey } from '../../features/collections/model/collectionErrors'
 import { useCollectionActions } from '../../features/collections/mutations/useCollectionActions'
-import { useCollectionItems, useCollections } from '../../features/collections/queries/useCollections'
+import { useCollectionCandidates, useCollectionItems, useCollections } from '../../features/collections/queries/useCollections'
 import { CollectionsWorkspace } from '../../features/collections/ui/CollectionsWorkspace'
-import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -33,8 +33,10 @@ function CollectionsSession() {
   const selectedId = params.get('collectionId') ?? collections.data?.collections[0]?.collectionId
   const canEdit = workspace.canMutateTeamConfiguration && collections.data?.canWrite === true
   const items = useCollectionItems(workspace.accessToken, selectedId, workspace.canLoadWorkspaceData)
-  const candidates = useWorkspaceWorkItems(
+  const [candidateQuery, setCandidateQuery] = useState('')
+  const candidates = useCollectionCandidates(
     workspace.accessToken,
+    candidateQuery,
     workspace.canLoadWorkspaceData && canEdit && Boolean(selectedId),
   )
   const actions = useCollectionActions(workspace.accessToken, workspace.guardEnterpriseSession)
@@ -46,7 +48,8 @@ function CollectionsSession() {
     <WorkspaceRouteContent sessionErrors={[collections.error, items.error, candidates.error]}>
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         <CollectionsWorkspace
-          candidates={(candidates.data ?? []).map((workItem) => ({ teamId: workItem.teamId, issueId: workItem.id, title: workItem.title }))}
+          candidateQuery={candidateQuery}
+          candidates={candidates.data}
           candidatesFailed={Boolean(candidates.error)}
           canEdit={canEdit}
           collections={collections.data?.collections}
@@ -67,6 +70,7 @@ function CollectionsSession() {
               if (deleted) setParams({})
             })
           }}
+          onSearchCandidates={setCandidateQuery}
           onRetryCandidates={() => { void candidates.mutate() }}
           onRetryCollections={() => { void collections.mutate() }}
           onRetryItems={() => { void items.mutate() }}

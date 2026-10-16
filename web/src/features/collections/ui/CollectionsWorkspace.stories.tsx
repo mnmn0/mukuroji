@@ -16,6 +16,8 @@ const meta = {
     collectionsFailed: false,
     onRetryCollections: () => undefined,
     onRetryItems: () => undefined,
+    candidateQuery: 'help',
+    onSearchCandidates: () => undefined,
     candidatesFailed: false,
     onRetryCandidates: () => undefined,
     selectedId: 'c1',
