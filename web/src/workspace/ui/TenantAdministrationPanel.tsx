@@ -259,7 +259,7 @@ export function TenantAdministrationPanel({
               {t('workspace.tenantAdministration.description')}
             </p>
           </div>
-          <div className="rounded-full border border-tone-9dd8cf bg-white/80 px-3 py-1.5 text-xs font-semibold tracking-[0.08em] text-[var(--workbench-primary-text)]">
+          <div className="rounded-full border border-tone-9dd8cf bg-surface/80 px-3 py-1.5 text-xs font-semibold tracking-[0.08em] text-[var(--workbench-primary-text)]">
             {profile.region} · {profile.status}
           </div>
         </div>

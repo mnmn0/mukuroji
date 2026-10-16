@@ -409,7 +409,7 @@ export function LoginPage({
         className="relative order-2 grid min-h-svh min-w-0 grid-rows-[auto_1fr_auto] bg-[var(--workbench-surface)] px-[clamp(32px,5.5vw,80px)] pb-[38px] pt-12 max-[1080px]:order-1 max-[1080px]:min-h-svh max-[1080px]:pt-[26px] max-[720px]:px-[18px] max-[720px]:pb-7 max-[720px]:pt-[22px]"
         aria-labelledby="login-title"
       >
-        <div className="flex min-w-0 items-center gap-2 justify-self-end text-[var(--workbench-muted)] focus-within:rounded-lg focus-within:outline focus-within:outline-3 focus-within:outline-offset-[5px] focus-within:outline-[rgba(37,99,235,0.18)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:justify-end">
+        <div className="flex min-w-0 items-center gap-2 justify-self-end text-[var(--workbench-muted)] focus-within:rounded-lg focus-within:outline focus-within:outline-3 focus-within:outline-offset-[5px] focus-within:outline-[var(--workbench-focus)] max-[720px]:w-[calc(100vw-72px)] max-[720px]:justify-self-start max-[720px]:justify-end">
           <GlobeIcon className="h-[19px] w-[19px] fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]" />
           <select
             className="w-auto min-w-0 cursor-pointer appearance-none border-0 bg-transparent text-base font-semibold text-[var(--workbench-text)] outline-none"
@@ -491,7 +491,7 @@ export function LoginPage({
                   <label className="w-fit" htmlFor="new-password">
                     {t('login.challenge.newPassword')}
                   </label>
-                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_var(--workbench-focus-ring)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                     <LockIcon />
                     <input
                       autoComplete="new-password"
@@ -528,7 +528,7 @@ export function LoginPage({
                   <label className="w-fit" htmlFor="new-password-confirmation">
                     {t('login.challenge.confirmPassword')}
                   </label>
-                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
+                  <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_var(--workbench-focus-ring)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
                     <LockIcon />
                     <input
                       autoComplete="new-password"
@@ -553,7 +553,7 @@ export function LoginPage({
                   <span className="relative grid h-6 w-6 place-items-center">
                     <input
                       checked={remember}
-                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
+                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[var(--workbench-focus)]"
                       disabled={isSubmitting}
                       type="checkbox"
                       onChange={(event) => setRemember(event.target.checked)}
@@ -606,7 +606,7 @@ export function LoginPage({
                     <label className="w-fit" htmlFor="email">
                       {t('login.email')}
                     </label>
-                    <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+                    <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_var(--workbench-focus-ring)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                       <MailIcon />
                       <input
                         autoComplete="email"
@@ -660,7 +660,7 @@ export function LoginPage({
                       <label className="w-fit" htmlFor="password">
                         {t('login.password')}
                       </label>
-                      <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
+                      <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr_auto] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_var(--workbench-focus-ring)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)_auto] max-[720px]:px-3.5">
                         <LockIcon />
                         <input
                           autoComplete="current-password"
@@ -699,7 +699,7 @@ export function LoginPage({
                   <span className="relative grid h-6 w-6 place-items-center">
                     <input
                       checked={remember}
-                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
+                      className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[var(--workbench-focus)]"
                       disabled={isSubmitting}
                       type="checkbox"
                       onChange={(event) => setRemember(event.target.checked)}
@@ -858,7 +858,7 @@ function MfaChallengeForm({
         <label className="w-fit" htmlFor="mfa-code">
           {t('login.mfa.code')}
         </label>
-        <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_rgba(37,99,235,0.12)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
+        <span className="grid min-h-[58px] w-full min-w-0 grid-cols-[24px_1fr] items-center gap-3 rounded-lg border border-[var(--workbench-border-strong)] bg-surface px-4 text-[var(--workbench-muted)] transition-[border-color,box-shadow] duration-150 focus-within:border-[var(--workbench-focus)] focus-within:shadow-[0_0_0_4px_var(--workbench-focus-ring)] max-[720px]:min-h-[54px] max-[720px]:grid-cols-[22px_minmax(0,1fr)] max-[720px]:px-3.5">
           <LockIcon />
           <input
             aria-describedby={
@@ -895,7 +895,7 @@ function MfaChallengeForm({
         <span className="relative grid h-6 w-6 place-items-center">
           <input
             checked={remember}
-            className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[rgba(37,99,235,0.18)]"
+            className="peer h-6 w-6 cursor-pointer appearance-none rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface checked:border-[var(--workbench-primary)] checked:bg-[var(--workbench-primary)] focus-visible:outline focus-visible:outline-3 focus-visible:outline-offset-3 focus-visible:outline-[var(--workbench-focus)]"
             disabled={isSubmitting}
             type="checkbox"
             onChange={(event) => onRememberChange(event.target.checked)}

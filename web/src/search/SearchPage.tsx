@@ -1325,7 +1325,7 @@ function CustomFieldFilterBuilder({
         <label className="grid gap-1 text-[11px] font-semibold text-[var(--workbench-muted)]">
           {t('search.filters.value')}
           <input
-            className="workbench-input min-h-9 px-3 disabled:bg-white/60"
+            className="workbench-input min-h-9 px-3 disabled:bg-surface/60"
             disabled={draftOperator === 'is-empty' || draftOperator === 'is-not-empty'}
             onChange={(event) => setDraftValue(event.target.value)}
             value={draftValue}

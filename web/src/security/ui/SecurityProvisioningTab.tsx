@@ -374,7 +374,7 @@ function ProvisioningImpactPreview({
           )}
         </span>
       </div>
-      <dl className="grid grid-cols-3 border-y border-amber-200 bg-white/80 max-[760px]:grid-cols-2">
+      <dl className="grid grid-cols-3 border-y border-amber-200 bg-surface/80 max-[760px]:grid-cols-2">
         {countItems.map(([key, labelKey]) => (
           <div className="border-b border-r border-amber-100 px-3 py-3" key={key}>
             <dt className="text-xs font-semibold text-[var(--workbench-muted)]">

@@ -565,7 +565,7 @@ export function WorkspaceCommandMenu({
                       role="option"
                       type="button"
                     >
-                      <span className="grid h-8 w-8 place-items-center rounded-md border border-current/10 bg-white/70">
+                      <span className="grid h-8 w-8 place-items-center rounded-md border border-current/10 bg-surface/70">
                         {item.result ? <EntityGlyph entityType={item.result.entityType} /> : <ArrowGlyph />}
                       </span>
                       <span className="min-w-0">

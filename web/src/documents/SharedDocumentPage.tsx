@@ -126,7 +126,7 @@ export function SharedDocumentScreen({
 
   return (
     <div className="workbench-shell min-h-svh">
-      <header className="sticky top-0 z-30 border-b border-[var(--workbench-border)] bg-white/95 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-[var(--workbench-border)] bg-surface/95 backdrop-blur">
         <div className="mx-auto flex min-h-16 max-w-[1240px] flex-wrap items-center gap-2 px-4 py-2.5 sm:gap-4 sm:px-8">
           <Link
             aria-label="mukuroji"

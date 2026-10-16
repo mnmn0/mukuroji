@@ -44,6 +44,17 @@ describe('live announcements', () => {
     expect(repeated?.id).not.toBe(first?.id)
   })
 
+  test('re-announces an identical message from a different action inside the duplicate window', () => {
+    const firstAction = {}
+    const secondAction = {}
+    announce('Saved.', 'polite', 1_000, firstAction)
+    const firstId = readLiveAnnouncements().polite?.id
+    announce('Saved.', 'polite', 1_100, firstAction)
+    expect(readLiveAnnouncements().polite?.id).toBe(firstId)
+    announce('Saved.', 'polite', 1_200, secondAction)
+    expect(readLiveAnnouncements().polite?.id).not.toBe(firstId)
+  })
+
   test('renders persistent role-less live regions with the latest messages', () => {
     const emptyMarkup = renderToStaticMarkup(<LiveAnnouncer />)
     expect(emptyMarkup).toContain('aria-live="polite"')
@@ -51,6 +62,6 @@ describe('live announcements', () => {
     expect(emptyMarkup).not.toContain('role=')
 
     announce('Saved.', 'polite', 1_000)
-    expect(renderToStaticMarkup(<LiveAnnouncer />)).toContain('<p>Saved.</p>')
+    expect(renderToStaticMarkup(<LiveAnnouncer />)).toMatch(/<p data-announcement-id="\d+">Saved\.<\/p>/)
   })
 })
