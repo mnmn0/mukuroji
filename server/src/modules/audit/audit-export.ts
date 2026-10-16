@@ -390,10 +390,11 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       throw new AuditExportError(404, 'AuditExportNotFound', 'Audit export was not found.')
     }
     const stored = await dependencies.store.readJob(workspaceId, exportId)
-    if (!stored || stored.job.workspaceId !== workspaceId || isExpired(stored.job, now())) {
+    const current = now()
+    if (!stored || stored.job.workspaceId !== workspaceId || isExpired(stored.job, current)) {
       throw new AuditExportError(404, 'AuditExportNotFound', 'Audit export was not found.')
     }
-    return stored
+    return { ...stored, job: presentAuditExportJob(stored.job, current) }
   }
 
   return {
@@ -515,6 +516,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       const current = now()
       return (await dependencies.store.listJobs(workspaceId, 20))
         .filter((job) => job.workspaceId === workspaceId && !isExpired(job, current))
+        .map((job) => presentAuditExportJob(job, current))
     },
 
     /**
@@ -565,16 +567,10 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         await dependencies.queue.enqueue(job.workspaceId, job.exportId, AUDIT_EXPORT_INACTIVE_TENANT_RETRY_SECONDS)
         return 'deferred'
       }
-      if (isExpired(job, current)) {
-        return await finish(job, version, failJob(job, current, 'AuditExportExpired', 'Audit export expired before it completed.'))
-      }
-      if (isPastProcessingDeadline(job, current)) {
-        return await finish(job, version, failJob(
-          job,
-          current,
-          'AuditExportProcessingTimedOut',
-          `Audit export did not finish within ${AUDIT_EXPORT_PROCESSING_HOURS} hours. Request it again.`,
-        ))
+      if (isExpired(job, current) || isPastProcessingDeadline(job, current)) {
+        // Past the write deadline nothing is written, not even the failure: rewriting job.json
+        // would restart the bucket's expiration clock. Readers present the job as timed out.
+        return 'skipped'
       }
       const settleRemainingSeconds = Math.ceil(
         (Date.parse(job.snapshotAt) + settleSeconds * 1000 - current.getTime()) / 1000,
@@ -848,6 +844,27 @@ function areQueryFiltersValid(job: AuditExportJob): boolean {
  */
 function isPastProcessingDeadline(job: AuditExportJob, current: Date) {
   return Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000 <= current.getTime()
+}
+
+/**
+ * Presents an unfinished job past its processing deadline as timed out.
+ *
+ * The worker stops writing at the deadline so the stored job keeps its last write time,
+ * which bounds how long the bucket retains it; readers derive the failure instead.
+ *
+ * @param job - Stored job.
+ * @param current - Current time.
+ * @returns The job as callers should see it.
+ */
+function presentAuditExportJob(job: AuditExportJob, current: Date): AuditExportJob {
+  if (job.status === 'completed' || job.status === 'failed' || !isPastProcessingDeadline(job, current)) return job
+  const deadline = new Date(Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000)
+  return failJob(
+    job,
+    deadline,
+    'AuditExportProcessingTimedOut',
+    `Audit export did not finish within ${AUDIT_EXPORT_PROCESSING_HOURS} hours. Request it again.`,
+  )
 }
 
 /**
