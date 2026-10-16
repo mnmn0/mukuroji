@@ -122,6 +122,20 @@ class RacingCollectionsStore extends InMemoryCollectionsStore {
   }
 }
 
+test('keeps a newer updatedAt when a retry rebuilds on a later concurrent change', async () => {
+  const store = new RacingCollectionsStore()
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  const later = { ...context, now: '2026-10-16T00:05:00.000Z' }
+  store.race = () => addCollectionItem(store, later, collectionId, 't', 'b', readWorkItem)
+  const added = await addCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)
+  expect(added.revision).toBe(3)
+  expect(added.updatedAt).toBe(later.now)
+
+  store.race = () => addCollectionItem(store, later, collectionId, 't', 'c', readWorkItem)
+  const removed = await removeCollectionItem(store, context, collectionId, 't', 'a', readWorkItem)
+  expect(removed.updatedAt).toBe(later.now)
+})
+
 test('treats an overlapping identical add or remove as a no-op instead of a conflict', async () => {
   const store = new RacingCollectionsStore()
   const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')

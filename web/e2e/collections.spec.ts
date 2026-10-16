@@ -20,6 +20,8 @@ async function mockCollections(page: Page, canWrite = true) {
     collections: [] as (WorkItemCollection & { items: WorkItemCollectionEntry[] })[],
     createKeys: [] as string[],
     deleteNextCreate: false,
+    renameBeforeNextPatch: undefined as string | undefined,
+    patches: [] as unknown[],
     searches: [] as unknown[],
   }
   await page.addInitScript(() => {
@@ -75,6 +77,22 @@ async function mockCollections(page: Page, canWrite = true) {
     }
     if (itemsSegment === 'items') {
       return route.fulfill({ json: { collection: toPublicCollection(collection), items: collection.items } })
+    }
+    if (request.method() === 'PATCH') {
+      const input = request.postDataJSON()
+      state.patches.push(input)
+      // Simulates another editor renaming the Collection just before this save arrives.
+      if (state.renameBeforeNextPatch) {
+        collection.name = state.renameBeforeNextPatch
+        collection.revision += 1
+        state.renameBeforeNextPatch = undefined
+      }
+      if (input.expectedRevision !== collection.revision) return route.fulfill({ status: 409, json: { code: 'CollectionConflict' } })
+      collection.name = input.name
+      if (input.description) collection.description = input.description
+      else delete collection.description
+      collection.revision += 1
+      return route.fulfill({ json: toPublicCollection(collection) })
     }
     if (request.method() === 'DELETE') {
       if (url.searchParams.get('expectedRevision') !== String(collection.revision)) return route.fulfill({ status: 409, json: { code: 'CollectionConflict' } })
@@ -162,4 +180,24 @@ test('Issue #238: a create replay of a deleted Collection gets a new key on the 
   await expect(page).toHaveURL(/collectionId=c1/u)
   expect(state.createKeys).toHaveLength(2)
   expect(state.createKeys[1]).not.toBe(state.createKeys[0])
+})
+
+test('Issue #238: saving again after a metadata conflict applies the draft', async ({ page }) => {
+  const state = await mockCollections(page)
+  state.collections.push({ collectionId: 'c1', name: 'Q4 launch', createdBy: 'demo@example.com', createdAt: '2026-10-16T00:00:00.000Z', updatedAt: '2026-10-16T00:00:00.000Z', revision: 1, items: [] })
+  await page.goto('/collections?collectionId=c1')
+  await page.getByRole('button', { name: 'Edit name and description' }).click()
+  await page.getByRole('textbox', { name: 'Name' }).last().fill('Q4 launch plan')
+  state.renameBeforeNextPatch = 'Q4 launch (renamed elsewhere)'
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByText('The Collection changed. The latest version is loaded; try again.')).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Name' }).last()).toHaveValue('Q4 launch plan')
+
+  // The draft is now based on the reloaded Collection, so the retry succeeds.
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Q4 launch plan', level: 2 })).toBeVisible()
+  expect(state.patches).toEqual([
+    expect.objectContaining({ expectedRevision: 1, name: 'Q4 launch plan' }),
+    expect.objectContaining({ expectedRevision: 2, name: 'Q4 launch plan' }),
+  ])
 })
