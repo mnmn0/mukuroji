@@ -817,13 +817,15 @@ describe('AutomationManagementPanel', () => {
         ]}
         locale="en"
         readOnly={false}
-        teams={[{ id: 'support', name: 'Support' }]}
+        teams={[{ id: 'support', name: 'Support' }, { id: '新規チーム-2', name: '新規チーム' }]}
         onCreate={async () => inboundWebhookSecretResponseFixture}
       />,
     )
     expect(html).toContain('data-testid="automation-webhook-purpose"')
     expect(html).toContain('>Automation rules</option>')
     expect(html).toContain('>Triage: Support</option>')
+    // A Team ID that Triage cannot store is listed but cannot be chosen.
+    expect(html).toContain('<option disabled="" value="新規チーム-2">Triage: 新規チーム (unsupported Team ID)</option>')
     expect(html).toContain('data-testid="automation-webhook-purpose-triage-hook"')
     expect(html).not.toContain(`data-testid="automation-webhook-purpose-${activeInboundWebhookEndpointFixture.id}"`)
   })

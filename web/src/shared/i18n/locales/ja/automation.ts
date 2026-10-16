@@ -91,6 +91,7 @@ export const automationMessages = {
   'automation.webhook.purpose': '送信先',
   'automation.webhook.purposeAutomation': 'Automation rule',
   'automation.webhook.purposeTriage': 'Triage: {team}',
+  'automation.webhook.purposeTriageUnsupported': 'Triage: {team}（Team ID が未対応）',
   'automation.webhook.empty': 'Webhook endpoint はまだありません。',
   'automation.webhook.endpointUrl': 'Endpoint URL',
   'automation.webhook.endpointId': 'Endpoint ID: {id}',

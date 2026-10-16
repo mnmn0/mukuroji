@@ -153,11 +153,17 @@ export function AutomationInboundWebhooksPanel({
                   onChange={(event) => setTriageTeamId(event.target.value)}
                 >
                   <option value="">{t('automation.webhook.purposeAutomation')}</option>
-                  {teams.map((team) => (
-                    <option key={team.id} value={team.id}>
-                      {t('automation.webhook.purposeTriage').replace('{team}', team.name)}
-                    </option>
-                  ))}
+                  {teams.map((team) => {
+                    // Triage stores Team IDs in its record keys and accepts only this grammar;
+                    // such Teams are shown but cannot be chosen, with the reason in the label.
+                    const supported = isTriageTeamIdentifier(team.id)
+                    return (
+                      <option disabled={!supported} key={team.id} value={team.id}>
+                        {t(supported ? 'automation.webhook.purposeTriage' : 'automation.webhook.purposeTriageUnsupported')
+                          .replace('{team}', team.name)}
+                      </option>
+                    )
+                  })}
                 </select>
               </label>
             ) : null}
@@ -369,4 +375,12 @@ export function AutomationWebhookSecretNotice({
       </div>
     </section>
   )
+}/**
+ * Checks that a Team ID can own Triage entries, matching the server's Triage identifier grammar.
+ *
+ * @param teamId - Team ID.
+ * @returns Whether a Triage webhook can route to the Team.
+ */
+function isTriageTeamIdentifier(teamId: string): boolean {
+  return teamId.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(teamId)
 }
