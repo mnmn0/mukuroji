@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   createAuditEvent,
   createMutationAuditContext,
+  type AuditEventCountQuery,
   type AuditEventQuery,
   type AuditEventV1,
 } from './audit'
@@ -82,6 +83,20 @@ function createReader(all: AuditEventV1[], calls: AuditEventQuery[] = []) {
   }
 }
 
+/**
+ * Creates a consistent counter over a fixed event list.
+ *
+ * @param all - Events committed to the base table.
+ * @param calls - Optional log of count queries.
+ * @returns A single-page counter of the durable events.
+ */
+function createCounter(all: AuditEventV1[], calls: AuditEventCountQuery[] = []) {
+  return async (query: AuditEventCountQuery) => {
+    calls.push(query)
+    return { count: all.filter((event) => event.expiresAt === undefined || event.expiresAt > query.durableAfter).length }
+  }
+}
+
 const requester = { userKey: 'admin@example.com', displayName: 'Admin' }
 const fixedNow = () => new Date('2026-07-18T00:00:00.000Z')
 
@@ -95,6 +110,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
       readEvents: createReader(events(250), calls),
+      countEvents: createCounter(events(250)),
       now: fixedNow,
       createId: () => 'a'.repeat(32),
       eventsPerPart: 120,
@@ -139,6 +155,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue() {} },
       readEvents: createReader([]),
+      countEvents: createCounter([]),
       now: fixedNow,
       createId: () => 'b'.repeat(32),
     })
@@ -161,6 +178,7 @@ describe('audit export service', () => {
         },
       },
       readEvents: createReader([]),
+      countEvents: createCounter([]),
       now: fixedNow,
     })
     const request = { workspaceId: 'ws-1', requestedBy: requester, filters: { actorId: 'actor-1' }, idempotencyKey: 'key-1' }
@@ -187,6 +205,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
       readEvents: createReader(events(30)),
+      countEvents: createCounter(events(30)),
       now: fixedNow,
       createId: () => 'c'.repeat(32),
       eventsPerPart: 10,
@@ -211,6 +230,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue() {} },
       readEvents: createReader(events(30)),
+      countEvents: createCounter(events(30)),
       now: fixedNow,
       createId: () => 'd'.repeat(32),
       eventsPerPart: 20,
@@ -226,6 +246,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue() {} },
       readEvents: async () => { throw new TypeError('Audit event is malformed.') },
+      countEvents: createCounter([]),
       now: fixedNow,
       createId: () => 'e'.repeat(32),
     })
@@ -245,6 +266,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue() {} },
       readEvents: createReader(events(30)),
+      countEvents: createCounter(events(30)),
       now: fixedNow,
       createId: () => 'f'.repeat(32),
       eventsPerPart: 10,
@@ -267,6 +289,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue() {} },
       readEvents: createReader(events(30)),
+      countEvents: createCounter(events(30)),
       now: () => current,
       createId: () => '1'.repeat(32),
       eventsPerPart: 10,
@@ -294,6 +317,7 @@ describe('audit export service', () => {
       settleSeconds: 0,
       store,
       queue: { async enqueue() {} },
+      countEvents: createCounter(events(30)),
       readEvents: async (query) => {
         // The step starts before the deadline but its reads finish after it.
         current = new Date('2026-07-19T00:00:01.000Z')
@@ -318,6 +342,7 @@ describe('audit export service', () => {
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: createReader([]),
+      countEvents: createCounter([]),
       now: () => current,
     })
     await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'old-key' })
@@ -332,6 +357,7 @@ describe('audit export service', () => {
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: createReader([]),
+      countEvents: createCounter([]),
       now: fixedNow,
     })
     const recordedAt = new Date(fixedNow().getTime() - 60_000).toISOString()
@@ -356,6 +382,7 @@ describe('audit export service', () => {
       store,
       queue: { async enqueue() {} },
       readEvents: createReader(events(3)),
+      countEvents: createCounter(events(3)),
       now: () => current,
       createId: () => '3'.repeat(32),
     })
@@ -373,6 +400,7 @@ describe('audit export service', () => {
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: async () => { throw new Error('DynamoDB throttled') },
+      countEvents: createCounter([]),
       now: fixedNow,
       createId: () => 'f'.repeat(32),
     })
@@ -389,6 +417,7 @@ describe('audit export service', () => {
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: createReader([]),
+      countEvents: createCounter([]),
       now: () => current,
       createId: () => '1'.repeat(32),
     })
@@ -408,6 +437,7 @@ describe('audit export service', () => {
       store: createMemoryStore(),
       queue: { async enqueue() {} },
       readEvents: createReader([]),
+      countEvents: createCounter([]),
       now: fixedNow,
       createId: () => '2'.repeat(32),
     })
@@ -440,6 +470,7 @@ describe('audit export step safety', () => {
         },
       },
       readEvents: createReader(all),
+      countEvents: createCounter(all),
       now: fixedNow,
       createId: () => '7'.repeat(32),
       ...overrides,
@@ -455,6 +486,7 @@ describe('audit export step safety', () => {
       settleSeconds: 30,
       now: () => new Date(clock),
       readEvents: createReader(events(2), reads),
+      countEvents: createCounter(events(2)),
     })
     expect(queued).toEqual([{ exportId: job.exportId, delaySeconds: 30 }])
 
@@ -474,6 +506,7 @@ describe('audit export step safety', () => {
     const { service, store, queued, job } = await requested({
       isTenantActive: async () => active,
       readEvents: createReader(events(2), reads),
+      countEvents: createCounter(events(2)),
     })
 
     expect(await service.processExport('ws-1', job.exportId)).toBe('deferred')
@@ -496,6 +529,7 @@ describe('audit export step safety', () => {
     const reads: AuditEventQuery[] = []
     const { service, store, queued, job } = await requested({
       pagesPerStep: 3,
+      countEvents: createCounter([]),
       readEvents: async (query) => {
         reads.push(query)
         const page = Number(query.cursor ?? '0')
@@ -526,6 +560,7 @@ describe('audit export step safety', () => {
       store,
       queue: { async enqueue() { throw new Error('queue unavailable') } },
       readEvents: createReader([]),
+      countEvents: createCounter([]),
       now: fixedNow,
       createId: () => '8'.repeat(32),
     })
@@ -536,6 +571,225 @@ describe('audit export step safety', () => {
       status: 'failed',
       failure: { code: 'AuditExportEnqueueFailed' },
     })
+  })
+})
+
+describe('audit export completeness barrier', () => {
+  /**
+   * Creates a service over a base table and an index that may lag behind it.
+   *
+   * @param overrides - Service dependency overrides.
+   * @returns The service, its stores, the queue log, the visible index, and the job.
+   */
+  async function lagging(overrides: Partial<Parameters<typeof createAuditExportService>[0]> = {}) {
+    const store = createMemoryStore()
+    const base = events(6)
+    const index = { visible: base.filter((_, position) => position !== 2) }
+    const queued: Array<{ delaySeconds?: number }> = []
+    let clock = Date.parse('2026-07-18T00:00:00.000Z')
+    const service = createAuditExportService({
+      settleSeconds: 30,
+      store,
+      queue: {
+        async enqueue(_workspaceId, _exportId, delaySeconds) {
+          queued.push(delaySeconds === undefined ? {} : { delaySeconds })
+        },
+      },
+      readEvents: (query) => createReader(index.visible)(query),
+      countEvents: createCounter(base),
+      now: () => new Date(clock),
+      createId: () => '9'.repeat(32),
+      ...overrides,
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    // Steps run after the settle delay.
+    clock += 60_000
+    return { service, store, base, index, queued, job }
+  }
+
+  test('restarts a scan that missed an event the index had not received yet', async () => {
+    const { service, base, index, queued, job } = await lagging()
+
+    // The index is missing the third event, so the consistent count disagrees.
+    expect(await service.processExport('ws-1', job.exportId)).toBe('restarted')
+    const restarted = await service.getExport('ws-1', job.exportId)
+    expect(restarted).toMatchObject({ status: 'queued', eventCount: 0, durableEventCount: 0, parts: [], scanAttempt: 2 })
+    expect(restarted.verification).toBeUndefined()
+    expect(queued.at(-1)).toEqual({ delaySeconds: 30 })
+
+    index.visible = base
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    const done = await service.getExport('ws-1', job.exportId)
+    expect(done).toMatchObject({ status: 'completed', eventCount: 6, durableEventCount: 6, scanAttempt: 2 })
+    expect(done.verification).toBeUndefined()
+  })
+
+  test('fails as incomplete instead of completing when the index keeps missing events', async () => {
+    const { service, job } = await lagging()
+
+    expect(await service.processExport('ws-1', job.exportId)).toBe('restarted')
+    expect(await service.processExport('ws-1', job.exportId)).toBe('restarted')
+    expect(await service.processExport('ws-1', job.exportId)).toBe('failed')
+    const failed = await service.getExport('ws-1', job.exportId)
+    expect(failed.failure?.code).toBe('AuditExportIncomplete')
+    expect(failed.verification).toBeUndefined()
+  })
+
+  test('checkpoints a long consistent count across steps with the same predicate as the scan', async () => {
+    const counts: AuditEventCountQuery[] = []
+    const { service, base, index, job } = await lagging({
+      pagesPerStep: 2,
+      countEvents: async (query) => {
+        counts.push(query)
+        const page = Number(query.cursor ?? '0')
+        return page < 2 ? { count: 2, nextCursor: String(page + 1) } : { count: 2 }
+      },
+    })
+    index.visible = base
+
+    // One scan page and one count page fit the first step.
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(await service.getExport('ws-1', job.exportId)).toMatchObject({
+      status: 'running',
+      eventCount: 6,
+      verification: { count: 2, cursor: '1' },
+    })
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(counts.map((query) => query.cursor)).toEqual([undefined, '1', '2'])
+    expect(counts.every((query) => query.to === job.snapshotAt && query.workspaceId === 'ws-1')).toBe(true)
+    // Events whose TTL can pass before the processing deadline are left out of the count.
+    expect(counts[0]?.durableAfter).toBe(Date.parse('2026-07-19T00:00:00.000Z') / 1000)
+  })
+
+  test('ignores events that TTL may delete during the job on both sides of the check', async () => {
+    const store = createMemoryStore()
+    const all = events(4).map((event, position) => position === 0 ? { ...event, expiresAt: 1_784_419_200 } : event)
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue() {} },
+      readEvents: createReader(all),
+      // TTL already deleted the expiring event from the base table after the scan read it.
+      countEvents: createCounter(all.slice(1)),
+      now: fixedNow,
+      createId: () => '6'.repeat(32),
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+
+    expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
+    expect(await service.getExport('ws-1', job.exportId)).toMatchObject({ eventCount: 4, durableEventCount: 3 })
+  })
+})
+
+describe('audit export continuation recovery', () => {
+  test('a redelivered step that already committed only sends its continuation again', async () => {
+    const store = createMemoryStore()
+    let sendFails = false
+    let sends = 0
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: {
+        async enqueue() {
+          if (sendFails) throw new Error('SQS unavailable')
+          sends += 1
+        },
+      },
+      readEvents: createReader(events(30)),
+      countEvents: createCounter(events(30)),
+      now: fixedNow,
+      createId: () => '5'.repeat(32),
+      eventsPerPart: 10,
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    sends = 0
+
+    // The step commits its part and cursor, then the continuation send fails.
+    sendFails = true
+    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    const committed = await store.readJob('ws-1', job.exportId)
+    expect(committed?.job).toMatchObject({ status: 'running', eventCount: 10, lastStepMessageId: 'message-1' })
+
+    // Every redelivery of the same message retries only the send, never another step.
+    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    sendFails = false
+    expect(await service.processExport('ws-1', job.exportId, 'message-1')).toBe('advanced')
+    expect(await store.readJob('ws-1', job.exportId)).toEqual(committed)
+    expect(store.parts.size).toBe(1)
+    expect(sends).toBe(1)
+
+    // The continuation carries a new message and runs the next step.
+    expect(await service.processExport('ws-1', job.exportId, 'message-2')).toBe('advanced')
+    expect((await service.getExport('ws-1', job.exportId)).eventCount).toBe(20)
+    expect(await service.processExport('ws-1', job.exportId, 'message-3')).toBe('completed')
+    const done = await service.getExport('ws-1', job.exportId)
+    expect(done).toMatchObject({ status: 'completed', eventCount: 30 })
+    expect(done.lastStepMessageId).toBeUndefined()
+  })
+
+  test('reading a job whose continuation was lost schedules it once per stale period', async () => {
+    const store = createMemoryStore()
+    let current = fixedNow()
+    let sendFails = false
+    const queued: string[] = []
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: {
+        async enqueue(_workspaceId, exportId) {
+          if (sendFails) throw new Error('SQS unavailable')
+          queued.push(exportId)
+        },
+      },
+      readEvents: createReader(events(30)),
+      countEvents: createCounter(events(30)),
+      now: () => current,
+      createId: () => '4'.repeat(32),
+      eventsPerPart: 10,
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    // The send outage outlasts every receive, so the message reaches the DLQ.
+    sendFails = true
+    await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
+    sendFails = false
+    queued.length = 0
+
+    current = new Date(fixedNow().getTime() + 10 * 60_000)
+    expect((await service.getExport('ws-1', job.exportId)).status).toBe('running')
+    expect(queued).toEqual([])
+
+    current = new Date(fixedNow().getTime() + 21 * 60_000)
+    await service.getExport('ws-1', job.exportId)
+    await service.getExport('ws-1', job.exportId)
+    expect(await service.listExports('ws-1')).toHaveLength(1)
+    expect(queued).toEqual([job.exportId])
+
+    // The resumed step continues from the committed cursor.
+    expect(await service.processExport('ws-1', job.exportId, 'message-2')).toBe('advanced')
+    expect((await service.getExport('ws-1', job.exportId)).eventCount).toBe(20)
+  })
+
+  test('does not resume a job past its processing deadline', async () => {
+    const store = createMemoryStore()
+    let current = fixedNow()
+    const queued: string[] = []
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
+      readEvents: createReader([]),
+      countEvents: createCounter([]),
+      now: () => current,
+      createId: () => '3'.repeat(32),
+    })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    queued.length = 0
+    const before = await store.readJob('ws-1', job.exportId)
+
+    current = new Date(fixedNow().getTime() + 25 * 3_600_000)
+    expect((await service.getExport('ws-1', job.exportId)).failure?.code).toBe('AuditExportProcessingTimedOut')
+    expect(queued).toEqual([])
+    expect(await store.readJob('ws-1', job.exportId)).toEqual(before)
   })
 })
 

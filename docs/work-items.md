@@ -114,11 +114,11 @@ Web は list/detail response の revision を mutation body に含める。`Work
 - `memberUserId` と `jobRoleId` の少なくとも一方が必要である。ロールだけの Contributor は、担当者が未定の段階の計画に使う。
 - 同じメンバーは 1 つの Work Item に 1 回だけ設定できる。Contributor は最大 20 件。
 - 更新では `contributorAssignments` に完全な置換リストを送る。既存の Contributor は `assignmentId` を付けて残し、新規の Contributor は `assignmentId` を省略する。存在しない `assignmentId` は拒否する。フィールドを省略した更新は保存済みの Contributor を変更しない。
-- 新しく追加するメンバーは active な non-guest member でなければならない。追加後に無効化されたメンバーは、他の変更をしても残せる。再割り当ては別の flow で扱う。
+- 新しく追加するメンバーは active な non-guest member でなければならない。検証時に読んだ member row の version・status・role を Work Item 書き込みと同じ transaction の `ConditionCheck` で固定するため、検証後 commit 前に無効化されたメンバーは保存せず `409 WorkItemAuthorizationChanged` を返す。追加後に無効化されたメンバーは、他の変更をしても残せる。再割り当ては別の flow で扱う。
 - archive 済みのジョブロールは既存の Contributor に残せるが、新しく設定できない。
 - Contributor の変更は `work-item.updated` audit event の `contributorAssignments` field change として記録する。
 - Public API は `contributorAssignments` を受け付けず、返さない。
-- 職種は archive で廃止する。contributor が参照している職種を設定から削除・改名する保存は `409 WorkItemConfigurationInUse` で拒否する。
+- 職種は archive で廃止する。contributor が参照している職種を設定から削除・改名する保存は `409 WorkItemConfigurationInUse` で拒否する。Contributor を変更する作成・更新は、職種の検証に使った configuration revision と `CONFIG_WRITE_LOCK` を同じ transaction で guard するため、設定保存の usage 検証と並行して削除予定の職種を割り当てることはできない（[Work Item configuration](./work-item-configuration.md) の lock 手順を参照）。
 - 保存済み contributor の member ID は trim・小文字化済み・256 文字以内・制御文字なし、職種 ID は設定 ID の文法に従う必要があり、外れた row は読み取り時に失敗する。
 - contributor を変更する更新で `expectedRevision` が古い場合は、assignment ID の検証より先に `409 WorkItemRevisionConflict` を返す。
 

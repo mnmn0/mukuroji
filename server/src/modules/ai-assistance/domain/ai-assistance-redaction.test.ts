@@ -3,12 +3,30 @@ import type { AiAssistanceDraft } from '@mukuroji/contracts'
 import {
   aliasAiAssistanceTextIdentifiers,
   classifyAiAssistanceSensitivePromptField,
+  createAiAssistanceProviderAlias,
   redactAiAssistanceDraft,
   redactAiAssistancePromptFieldValue,
   redactAiAssistanceText,
 } from './ai-assistance-redaction'
 
 describe('AI assistance redaction', () => {
+  test('creates provider aliases that redaction never rewrites', () => {
+    // These bytes encode in hex as U_08038868168e47db…, which contains a Japanese mobile number.
+    const phoneLikeBytes = Uint8Array.from([
+      0x08, 0x03, 0x88, 0x68, 0x16, 0x8e, 0x47, 0xdb,
+      0x9f, 0x17, 0xb8, 0x5b, 0x90, 0xa5, 0xe8, 0xcf,
+    ])
+    const alias = createAiAssistanceProviderAlias(() => phoneLikeBytes)
+
+    expect(alias).toMatch(/^U_[a-p]{32}$/u)
+    expect(redactAiAssistanceText(alias)).toBe(alias)
+    expect(redactAiAssistanceText(`${alias}09012345678`)).toContain(alias)
+    for (let index = 0; index < 2_000; index += 1) {
+      const randomAlias = createAiAssistanceProviderAlias()
+      expect(redactAiAssistanceText(randomAlias)).toBe(randomAlias)
+    }
+  })
+
   test('aliases exact canonical member identifiers without substring replacement', () => {
     const result = aliasAiAssistanceTextIdentifiers(
       'owner@example.com xowner@example.com owner@example.com.au (owner@example.com)',

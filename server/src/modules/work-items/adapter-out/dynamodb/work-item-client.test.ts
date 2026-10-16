@@ -2225,6 +2225,69 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
   })
 })
 
+test('DynamoDB Work Item client fences a membership row once when the actor adds themselves', async () => {
+  await withTestEnvironment({
+    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+  }, async () => {
+    let transactItems: TransactWriteCommandInput['TransactItems']
+    const documentClient = {
+      async send(command: { input: TransactWriteCommandInput; constructor: { name: string } }) {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactItems = command.input.TransactItems
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'IssuesTable',
+      'IssueEventsTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+    )
+    const memberCheck = (memberKey: string) => ({
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: `MEMBER#${memberKey}` },
+        ConditionExpression: '#status = :active AND #version = :version',
+        ExpressionAttributeNames: { '#status': 'status', '#version': 'version' },
+        ExpressionAttributeValues: { ':active': 'active', ':version': 7 },
+      },
+    })
+
+    await client.createTeamIssue(
+      'workspace-1',
+      'core-team',
+      {
+        title: 'Self-assigned contributor',
+        assigneeUserId: 'sato@example.com',
+        workflowSchemaVersion: 1,
+        workflowStatusId: 'todo',
+        statusCategory: 'unstarted',
+        customFieldValues: {},
+        schedule: createDueDateSchedule('2026-07-20'),
+        priority: 'medium',
+        authorizationConditionChecks: [memberCheck('demo@example.com'), memberCheck('suzuki@example.com')],
+        authorizationSnapshot: {
+          workspaceId: 'workspace-1',
+          memberKey: 'demo@example.com',
+          workspaceMemberVersion: 7,
+          planningRevision: 0,
+        },
+      },
+      'demo@example.com',
+    )
+
+    const memberRecordKeys = (transactItems ?? []).flatMap((item) =>
+      item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+        ? [item.ConditionCheck.Key?.recordKey]
+        : [])
+    expect(memberRecordKeys).toEqual(['MEMBER#demo@example.com', 'MEMBER#suzuki@example.com'])
+  })
+})
+
 test('DynamoDB Work Item updates compile and classify app-owned Planning revision fences', async () => {
   await withTestEnvironment({ PLANNING_TABLE_NAME: 'PlanningTable' }, async () => {
     const currentIssue = createScheduleCascadeIssue('core-team', 'planning-fence')
