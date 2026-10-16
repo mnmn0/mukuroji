@@ -61,6 +61,9 @@ export async function clearAppBadgeAndNotifyTabs(
   } catch {
     // Badge failures never affect sign-out.
   }
+  // A session started on this page while the clear was pending must republish after it, and
+  // the broadcast never reaches the page that sent it.
+  for (const listener of [...localClearListeners]) listener()
   const channel = openChannel()
   if (!channel) return
   try {
@@ -72,8 +75,14 @@ export async function clearAppBadgeAndNotifyTabs(
   }
 }
 
+/** Listeners on this page that republish after any clear settles, including this page's own. */
+const localClearListeners = new Set<() => void>()
+
 /**
- * Calls the listener when another page cleared the shared app badge.
+ * Calls the listener after any page, this one included, cleared the shared app badge.
+ *
+ * The listener decides whether its session still applies, so a session that ended with the
+ * clear does nothing while one started after it republishes.
  *
  * @param listener - Republishes this page's count.
  * @param openChannel - Opens the broadcast channel; defaults to `BroadcastChannel`.
@@ -83,15 +92,20 @@ export function subscribeAppBadgeCleared(
   listener: () => void,
   openChannel: () => AppBadgeChannel | undefined = openBroadcastChannel,
 ): () => void {
+  localClearListeners.add(listener)
   const channel = openChannel()
-  if (!channel) return () => undefined
-  channel.onmessage = (event) => {
-    const message: unknown = event.data
-    if (typeof message !== 'object' || message === null) return
-    if (Reflect.get(message, 'type') !== 'cleared' || Reflect.get(message, 'pageId') === pageId) return
-    listener()
+  if (channel) {
+    channel.onmessage = (event) => {
+      const message: unknown = event.data
+      if (typeof message !== 'object' || message === null) return
+      // This page's own clears reach its listeners directly, after the clear settles.
+      if (Reflect.get(message, 'type') !== 'cleared' || Reflect.get(message, 'pageId') === pageId) return
+      listener()
+    }
   }
   return () => {
+    localClearListeners.delete(listener)
+    if (!channel) return
     channel.onmessage = null
     channel.close()
   }

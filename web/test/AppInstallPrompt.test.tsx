@@ -199,8 +199,9 @@ describe('app badge across tabs', () => {
 
     await clearAppBadgeAndNotifyTabs(navigator, hub.openChannel)
     expect(calls).toEqual(['clear'])
-    // The page that cleared the badge shares this module's page ID, so it ignores its own notice.
-    expect(republished).toEqual([])
+    // This page's listener runs once, directly after the clear; its own broadcast is ignored,
+    // and the listener's session check decides whether to republish.
+    expect(republished).toEqual([3])
     unsubscribe()
     expect(hub.openCount()).toBe(1)
   })
@@ -236,6 +237,23 @@ describe('app badge across tabs', () => {
     finishClear()
     await pending
     expect(order).toEqual(['cleared', 'notice'])
+  })
+
+  test('lets a session started on this page republish after a pending clear settles', async () => {
+    let finishClear: () => void = () => undefined
+    const navigator = {
+      clearAppBadge: () => new Promise<void>((resolve) => { finishClear = resolve }),
+    }
+    const republished: string[] = []
+    const pending = clearAppBadgeAndNotifyTabs(navigator, () => undefined)
+    // The new session subscribes while the previous session's clear is still pending.
+    const unsubscribe = subscribeAppBadgeCleared(() => republished.push('new session'), () => undefined)
+    await Promise.resolve()
+    expect(republished).toEqual([])
+    finishClear()
+    await pending
+    expect(republished).toEqual(['new session'])
+    unsubscribe()
   })
 
   test('works without BroadcastChannel', async () => {
