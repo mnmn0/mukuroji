@@ -6,7 +6,7 @@ test('normalizes the envelope content', () => {
     eventId: ' evt-1 ',
     title: ' Checkout errors ',
     body: 'Customers see 500.',
-    requester: { name: 'Status page', email: 'alerts@example.com' },
+    requester: { name: 'Status page', email: ' Alerts@Example.com ' },
   })).toEqual({
     eventId: 'evt-1',
     title: 'Checkout errors',
@@ -25,6 +25,8 @@ test('rejects routing, owner, and other fields the payload must not control', ()
     { ...valid, title: ' ' },
     { ...valid, eventId: 1 },
     { ...valid, body: 'x'.repeat(8_001) },
+    { ...valid, requester: { name: 'N', email: 'not-an-address' } },
+    { ...valid, requester: { name: 'N', email: 'a b@example.com' } },
     [],
     null,
   ]) {
