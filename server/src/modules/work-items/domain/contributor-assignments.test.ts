@@ -83,6 +83,21 @@ describe('normalizeContributorAssignments', () => {
   })
 })
 
+describe('retained job roles', () => {
+  test('keeps a role that was removed from the configuration on an unchanged assignment', () => {
+    const stored: WorkItemContributorAssignment[] = [{ assignmentId: 'b'.repeat(32), jobRoleId: 'removed', status: 'planned' }]
+    const next = normalizeContributorAssignments(
+      [{ assignmentId: 'b'.repeat(32), jobRoleId: 'removed', status: 'in-progress' }, { memberUserId: 'sam@example.com' }],
+      { jobRoles, existing: stored, createAssignmentId: () => 'c'.repeat(32) },
+    )
+    expect(next.map((assignment) => assignment.jobRoleId)).toEqual(['removed', undefined])
+    expect(() => normalizeContributorAssignments(
+      [{ assignmentId: 'b'.repeat(32), jobRoleId: 'other-removed' }],
+      { jobRoles, existing: stored, createAssignmentId: () => 'c'.repeat(32) },
+    )).toThrow('is not defined')
+  })
+})
+
 describe('listAddedContributorMembers', () => {
   test('returns only members who were not contributors before', () => {
     const next = normalize([
@@ -105,6 +120,8 @@ describe('isStoredContributorAssignmentList', () => {
     ['an empty assignment', [{ assignmentId: 'c'.repeat(32), status: 'planned' }]],
     ['an invalid status', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'blocked' }]],
     ['invalid effort', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'planned', plannedEffortMinutes: '60' }]],
+    ['a duplicate assignment ID', [...existing, { ...existing[0], memberUserId: 'sam@example.com' }]],
+    ['a duplicate member', [...existing, { assignmentId: 'c'.repeat(32), memberUserId: 'Alex@example.com', status: 'planned' }]],
   ])('rejects %s', (_label, value) => {
     expect(isStoredContributorAssignmentList(value)).toBe(false)
   })

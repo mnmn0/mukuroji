@@ -45,6 +45,7 @@ import {
   resolveCreateWorkflowStatuses,
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
+  resolveWorkItemContributorOptions,
   resolveWorkItemPersonOptions,
   resolveWorkItemTypeDefinition,
   resolveWorkItemTypeFormFields,
@@ -446,6 +447,7 @@ function IssueDetailContent({
   const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
+  const contributorOptions = resolveWorkItemContributorOptions(workspaceMembers)
   const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
@@ -840,7 +842,7 @@ function IssueDetailContent({
                 jobRoles={configuration?.jobRoles ?? []}
                 key={editorIdentity + ':contributors'}
                 locale={locale}
-                memberOptions={assigneeOptions}
+                memberOptions={contributorOptions}
                 ownerUserId={issue.assigneeUserId}
                 readOnly={isIssueReadOnly}
                 {...(contributorDraftError ? { submitError: contributorDraftError } : {})}

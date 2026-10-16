@@ -143,15 +143,20 @@ export function listAddedContributorMembers(
  * Checks whether a stored value is a valid contributor assignment list.
  *
  * Stored rows are validated without the configuration, because job roles may have
- * been removed after the assignment was saved.
+ * been removed after the assignment was saved. Assignment IDs and member IDs must be
+ * unique, as the request normalizer guarantees.
  *
  * @param value - Stored attribute value.
  * @returns Whether the value is a well-formed assignment list.
  */
 export function isStoredContributorAssignmentList(value: unknown): value is WorkItemContributorAssignment[] {
-  return Array.isArray(value) &&
-    value.length <= WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT &&
-    value.every(isStoredContributorAssignment)
+  if (!Array.isArray(value) || value.length > WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT || !value.every(isStoredContributorAssignment)) {
+    return false
+  }
+  const assignmentIds = new Set(value.map((assignment) => assignment.assignmentId))
+  const members = value.flatMap((assignment) =>
+    assignment.memberUserId === undefined ? [] : [assignment.memberUserId.toLowerCase()])
+  return assignmentIds.size === value.length && new Set(members).size === members.length
 }
 
 /**
@@ -226,11 +231,13 @@ function readOptionalJobRoleId(
     throw new WorkItemContributorAssignmentError('Contributor job role ID is invalid.')
   }
   const jobRoleId = value.trim()
+  // A kept assignment may retain a role that was archived or removed after it was saved.
+  if (previous?.jobRoleId === jobRoleId) return jobRoleId
   const jobRole = jobRolesById.get(jobRoleId)
   if (!jobRole) {
     throw new WorkItemContributorAssignmentError(`Job role "${jobRoleId}" is not defined for this Work Item.`)
   }
-  if (jobRole.archived && previous?.jobRoleId !== jobRoleId) {
+  if (jobRole.archived) {
     throw new WorkItemContributorAssignmentError(`Job role "${jobRoleId}" is archived.`)
   }
   return jobRoleId

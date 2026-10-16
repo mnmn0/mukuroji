@@ -14,6 +14,8 @@ import {
 } from '../src/work-items/model/contributorAssignments'
 import { workspaceWorkItemConfigurationFixture as baseConfiguration } from '../src/work-items/fixtures'
 import { normalizeWorkItemConfigurationForSave } from '../src/work-items/model/workItemConfigurationEditor'
+import { resolveWorkItemContributorOptions } from '../src/work-items/model/workItemDisplay'
+import type { WorkspaceMember } from '../src/workspace/api/access'
 import { JobRolesConfigurationSection } from '../src/work-items/ui/JobRolesConfigurationSection'
 import { WorkItemContributorsEditor } from '../src/work-items/ui/WorkItemContributorsEditor'
 
@@ -150,5 +152,19 @@ describe('job role configuration', () => {
       ...baseConfiguration,
       jobRoles: [{ id: 'qa', name: '  QA ', archived: false }, { id: 'legacy', name: 'Legacy', archived: true }],
     }).jobRoles).toEqual([{ id: 'qa', name: 'QA' }, { id: 'legacy', name: 'Legacy', archived: true }])
+  })
+})
+
+describe('contributor options', () => {
+  test('offer every active non-guest Workspace member, not only Project members', () => {
+    const member = (email: string, role: WorkspaceMember['role'], status: WorkspaceMember['status'] = 'active'): WorkspaceMember => ({
+      id: email, memberKey: email, email, role, status, version: 1, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+    })
+    expect(resolveWorkItemContributorOptions([
+      member('owner@example.com', 'owner'),
+      member('outside-project@example.com', 'member'),
+      member('guest@example.com', 'guest'),
+      member('former@example.com', 'member', 'deactivated'),
+    ]).map((option) => option.id)).toEqual(['owner@example.com', 'outside-project@example.com'])
   })
 })

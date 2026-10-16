@@ -532,6 +532,21 @@ export function resolveWorkItemPersonOptions(
     }))
 }
 
+/**
+ * Lists the Workspace members who can be planned as contributors.
+ *
+ * Matches the server rule: any active non-guest Workspace member, whether or not they
+ * belong to the Work Item's Project.
+ *
+ * @param workspaceMembers - Workspace members.
+ * @returns Contributor options keyed by the member's user ID.
+ */
+export function resolveWorkItemContributorOptions(
+  workspaceMembers: readonly WorkspaceMember[],
+) {
+  return resolveWorkItemPersonOptions(workspaceMembers.filter((member) => member.role !== 'guest'))
+}
+
 const customFieldValidationMessageKeys: Record<CustomFieldValidationCode, MessageKey> = {
   required: 'workItems.fields.validation.required',
   'invalid-type': 'workItems.fields.validation.invalidType',
