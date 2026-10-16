@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { createAuditRouter } from '../../modules/audit/adapter-in/http/audit-router'
@@ -405,12 +406,18 @@ export function registerAuditRoutes(routeApp: Hono): void {
       const job = await service.getExport(principal.directoryId, c.req.param('exportId') ?? '')
       const fromPart = readFromPartQuery(c.req.query('fromPart'))
       const page = await service.createDownloadLinks(job, fromPart)
+      // A client key is scoped to this export page, so one key reused while following
+      // nextPart neither collides across pages nor with other audited operations.
+      // Without a key, every issuance is recorded as its own event.
+      const downloadKey = c.req.header('Idempotency-Key')
       await recordAuditExportAction(c, principal, 'audit.export-downloaded', {
         exportId: job.exportId,
         fromPart,
         partCount: page.parts.length,
         eventCount: job.eventCount,
-      })
+      }, downloadKey === undefined
+        ? undefined
+        : `audit-export-download:${job.exportId}:${fromPart}:${createHash('sha256').update(downloadKey).digest('hex')}`)
       return c.json({ export: toAuditExportView(job), ...page })
     }),
   }))
