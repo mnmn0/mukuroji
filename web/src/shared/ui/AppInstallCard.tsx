@@ -19,6 +19,8 @@ export type AppInstallCardProps = {
   acceptedMessage: string
   /** Localized message shown after the user dismissed the browser dialog. */
   dismissedMessage: string
+  /** Localized message shown when the browser could not show its dialog. */
+  failedMessage: string
   /** Localized message shown when the app runs installed. */
   installedMessage: string
   /** Shows the browser install dialog. */
@@ -41,12 +43,14 @@ export function AppInstallCard(props: AppInstallCardProps) {
   const showsButton = status === 'available' || status === 'prompting'
   const result = status === 'installed' || showsButton || outcome === undefined
     ? undefined
-    : outcome === 'accepted' ? props.acceptedMessage : props.dismissedMessage
+    : outcome === 'accepted' ? props.acceptedMessage : outcome === 'failed' ? props.failedMessage : props.dismissedMessage
+  // Keyed by the outcome, not the translated text, so a language change does not steal focus.
+  const resultKey = result === undefined ? undefined : outcome
 
   useEffect(() => {
     // The install button disappears once the dialog closes, so keep focus on the result.
-    if (result) resultRef.current?.focus()
-  }, [result])
+    if (resultKey) resultRef.current?.focus()
+  }, [resultKey])
 
   if (status === 'unavailable' && outcome === undefined) return null
   return (

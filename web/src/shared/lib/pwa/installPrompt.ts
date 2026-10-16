@@ -3,8 +3,8 @@ import { useSyncExternalStore } from 'react'
 /** Whether the app can be installed from inside the page; `prompting` while the browser dialog is open. */
 export type AppInstallStatus = 'unavailable' | 'available' | 'prompting' | 'installed'
 
-/** Result of asking the browser to show its install dialog. */
-export type AppInstallOutcome = 'accepted' | 'dismissed' | 'unavailable'
+/** Result of asking the browser to show its install dialog; `failed` when the browser rejected the request. */
+export type AppInstallOutcome = 'accepted' | 'dismissed' | 'failed' | 'unavailable'
 
 /** Browser event that lets a page show the install dialog later. */
 type DeferredInstallPrompt = Event & {
@@ -34,7 +34,8 @@ export type AppInstallPromptStore = {
   /**
    * Shows the browser install dialog once.
    *
-   * @returns What the user chose, or `unavailable` when no prompt is pending.
+   * @returns What the user chose, `failed` when the browser rejected the dialog, or
+   * `unavailable` when no prompt is pending.
    */
   prompt: () => Promise<AppInstallOutcome>
 }
@@ -104,6 +105,9 @@ export function createAppInstallPromptStore(
         await pending.prompt()
         const choice = await pending.userChoice
         return isRecord(choice) && choice.outcome === 'accepted' ? 'accepted' : 'dismissed'
+      } catch {
+        // The kept event can expire or the browser can refuse; the caller explains the browser menu.
+        return 'failed'
       } finally {
         prompting = false
         notify()

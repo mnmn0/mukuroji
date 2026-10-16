@@ -25,7 +25,7 @@ export function SettingsPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const appInstall = useAppInstallPrompt()
-  const [installOutcome, setInstallOutcome] = useState<'accepted' | 'dismissed'>()
+  const [installOutcome, setInstallOutcome] = useState<'accepted' | 'dismissed' | 'failed'>()
   const developerPlatformInitialSection =
     searchParams.get('developerSection') === 'connectors'
       ? 'connectors'
@@ -40,6 +40,7 @@ export function SettingsPage() {
               acceptedMessage={t('workspace.settings.install.accepted')}
               description={t('workspace.settings.install.description')}
               dismissedMessage={t('workspace.settings.install.dismissed')}
+              failedMessage={t('workspace.settings.install.failed')}
               installedMessage={t('workspace.settings.install.installed')}
               installLabel={t('workspace.settings.install.action')}
               outcome={installOutcome}

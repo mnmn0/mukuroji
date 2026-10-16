@@ -13,6 +13,7 @@ const meta = {
     pendingLabel: 'ブラウザの確認を待っています…',
     acceptedMessage: 'mukuroji をインストールしています。完了すると独立したウィンドウで開けます。',
     dismissedMessage: 'インストールはキャンセルされました。後からブラウザのメニューでもインストールできます。',
+    failedMessage: 'ブラウザがインストールの確認を開けませんでした。ブラウザのメニューからインストールしてください。',
     installedMessage: 'mukuroji はアプリとしてインストールされています。',
     onInstall: fn(),
   },

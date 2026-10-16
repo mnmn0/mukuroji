@@ -377,6 +377,7 @@ export const workspaceMessages = {
   'workspace.settings.install.pending': 'Waiting for the browser…',
   'workspace.settings.install.accepted': 'Installing mukuroji. It opens in its own window once the browser finishes.',
   'workspace.settings.install.dismissed': 'Installation was cancelled. You can install later from the browser menu.',
+  'workspace.settings.install.failed': 'The browser could not open its install dialog. Install mukuroji from the browser menu instead.',
   'workspace.settings.install.installed': 'mukuroji is installed as an app.',
   'workspace.settings.displayTitle': 'Display',
   'workspace.settings.displayDescription':

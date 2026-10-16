@@ -15,7 +15,8 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   `main.tsx` の起動時に event を捕捉して browser の mini-infobar を抑止し、利用者が押した時に一度だけ dialog を出します。
   `appinstalled` 後と standalone 表示中は「インストール済み」を表示し、対応しない browser では何も表示しません。
   dialog 表示中は button を `aria-disabled` のまま残してフォーカスを失わせず、閉じた後は承認 / キャンセルの結果を
-  `role="status"` で通知してフォーカスを移します。
+  `role="status"` で通知してフォーカスを移します（表示言語を切り替えてもフォーカスは移しません）。browser が dialog を開けなかった場合は
+  例外を出さずに失敗を通知し、browser のメニューからのインストールを案内します。
 - badge: install 済み app の icon に受信箱の未読数を Badging API (`navigator.setAppBadge`) で表示します。
   数値だけを渡すため Workspace の内容は露出せず、読み込みに成功した未読 0、sign out、Workspace 画面の unmount で消去します。
   未読数の読み込み中や失敗時は前回の badge をそのまま残します。

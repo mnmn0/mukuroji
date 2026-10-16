@@ -56,6 +56,19 @@ describe('app install prompt', () => {
     expect(await store.prompt()).toBe('dismissed')
   })
 
+  test('reports a rejected browser prompt as failed instead of throwing', async () => {
+    const target = new EventTarget()
+    const store = createAppInstallPromptStore(target, () => false)
+    store.start()
+    const event = Object.assign(new Event('beforeinstallprompt', { cancelable: true }), {
+      prompt: async () => { throw new Error('InvalidStateError') },
+      userChoice: new Promise(() => undefined),
+    })
+    target.dispatchEvent(event)
+    expect(await store.prompt()).toBe('failed')
+    expect(store.getSnapshot()).toBe('unavailable')
+  })
+
   test('starts as installed inside the installed app', () => {
     const store = createAppInstallPromptStore(new EventTarget(), () => true)
     store.start()
@@ -71,6 +84,7 @@ describe('AppInstallCard', () => {
     pendingLabel: 'Waiting for the browser',
     acceptedMessage: 'Installing.',
     dismissedMessage: 'Installation was cancelled.',
+    failedMessage: 'The browser could not open its install dialog.',
     installedMessage: 'Installed.',
     onInstall: () => undefined,
   }
@@ -91,6 +105,8 @@ describe('AppInstallCard', () => {
     expect(dismissed).toContain('role="status"')
     expect(dismissed).toContain('Installation was cancelled.')
     expect(dismissed).not.toContain('<button')
+    expect(renderToStaticMarkup(<AppInstallCard {...props} outcome="failed" status="unavailable" />))
+      .toContain('The browser could not open its install dialog.')
   })
 })
 
