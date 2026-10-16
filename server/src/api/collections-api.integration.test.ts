@@ -1,4 +1,6 @@
+import type { EnterpriseRoleAssignment } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { createApiTestHarness } from './test-support/api-test-harness'
 
 const {
@@ -157,4 +159,56 @@ test('searches addable Work Item candidates under the Collection permission', as
   expect(await response.json()).toEqual({ schemaVersion: 1, results: [] })
   expect(capturedFilters).toEqual({ keyword: 'onboarding', entityTypes: ['work-item'] })
   expect(capturedLimit).toBe(5)
+})
+
+/**
+ * Creates an Enterprise identity whose only grant is a Workspace-scoped custom role.
+ *
+ * @param workspaceId - Workspace the role applies to.
+ * @returns Enterprise Identity fake with one direct Workspace assignment for the test member.
+ */
+async function createWorkspaceWorkItemIdentity(workspaceId: string) {
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const now = '2026-10-16T00:00:00.000Z'
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:work-item-editor',
+    name: 'Work Item editor',
+    permissions: ['work-items.read', 'work-items.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  })
+  return new Proxy(identity, {
+    get(target, property) {
+      if (property === 'getSnapshot') {
+        return async (requestedWorkspaceId: string) => {
+          const snapshot = await target.getSnapshot(requestedWorkspaceId)
+          const assignment: EnterpriseRoleAssignment = {
+            workspaceId,
+            assignmentId: 'work-item-editor-assignment',
+            principalKind: 'member',
+            principalId: 'demo@example.com',
+            roleId: 'custom:work-item-editor',
+            scope: { workspaceId, kind: 'workspace', targetId: workspaceId },
+            source: 'direct',
+          }
+          return { ...snapshot, roleAssignments: [assignment] }
+        }
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
+test('lets a Workspace-scoped Work Item role add and read Collection items', async () => {
+  configureFakeProjectClients(false, { directoryId: WORKSPACE_ID, workspaceRole: 'admin', projectAccesses: [] })
+  setTestAppDependencies({ enterpriseIdentity: await createWorkspaceWorkItemIdentity(WORKSPACE_ID) })
+  const { collectionId } = await createCollection('Launch')
+  const itemsPath = `/api/collections/${collectionId}/items`
+  expect((await planningApiRequest(`${itemsPath}/core-team/onboarding-friction`, 'PUT')).status).toBe(200)
+  const listed = await (await planningApiRequest(itemsPath)).json()
+  expect(listed.items).toEqual([expect.objectContaining({ teamId: 'core-team', issueId: 'onboarding-friction' })])
 })

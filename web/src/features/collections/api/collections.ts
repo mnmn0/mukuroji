@@ -1,11 +1,12 @@
-import type {
-  CreateWorkItemCollectionInput,
-  UpdateWorkItemCollectionInput,
-  WorkItemCollection,
-  WorkItemCollectionEntry,
-  WorkItemCollectionItemsResponse,
-  WorkItemCollectionsResponse,
-  WorkflowStatusCategory,
+import {
+  SEARCH_SCHEMA_VERSION,
+  type CreateWorkItemCollectionInput,
+  type UpdateWorkItemCollectionInput,
+  type WorkItemCollection,
+  type WorkItemCollectionEntry,
+  type WorkItemCollectionItemsResponse,
+  type WorkItemCollectionsResponse,
+  type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import { isRecord } from '../../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
@@ -73,7 +74,10 @@ export async function searchCollectionCandidatePage(
   const query = new URLSearchParams({ keyword, limit: String(options.limit) })
   if (options.cursor) query.set('cursor', options.cursor)
   const data = await requestJson(`${collectionsApiBaseUrl}/candidates?${query.toString()}`, accessToken)
-  if (!isRecord(data) || !Array.isArray(data.results)) throw invalidResponse()
+  // A page from another search schema, or with non-object results, is malformed rather than empty.
+  if (!isRecord(data) || data.schemaVersion !== SEARCH_SCHEMA_VERSION || !Array.isArray(data.results) || !data.results.every(isRecord)) {
+    throw invalidResponse()
+  }
   const { nextCursor } = data
   if (nextCursor !== undefined && typeof nextCursor !== 'string') throw invalidResponse()
   return { results: data.results, ...(nextCursor ? { nextCursor } : {}) }

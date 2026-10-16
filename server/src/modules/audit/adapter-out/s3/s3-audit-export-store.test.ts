@@ -166,16 +166,19 @@ describe('S3AuditExportStore', () => {
     expect((await store.putPart('ws-1', exportId, 1, '{"eventId":"e2"}\n')).key).not.toBe(part.key)
     await expect(store.putPart('ws-1', exportId, 0, '')).rejects.toThrow(RangeError)
 
-    const url = new URL(await store.createPartDownloadUrl('ws-1', exportId, { ...part, index: 1, eventCount: 1 }))
+    const url = new URL(await store.createPartDownloadUrl('ws-1', exportId, { ...part, index: 1, eventCount: 1 }, 3600))
     expect(url.pathname).toBe(`/${part.key}`)
     expect(url.searchParams.get('X-Amz-Expires')).toBe('300')
+    // A link never outlives the job.
+    const capped = new URL(await store.createPartDownloadUrl('ws-1', exportId, { ...part, index: 1, eventCount: 1 }, 42))
+    expect(capped.searchParams.get('X-Amz-Expires')).toBe('42')
     expect(url.searchParams.get('response-content-disposition')).toContain('mukuroji-audit-part-00001.ndjson')
-    await expect(store.createPartDownloadUrl('ws-1', exportId, { ...part, key: 'workspaces/x/files/a', index: 1, eventCount: 1 }))
+    await expect(store.createPartDownloadUrl('ws-1', exportId, { ...part, key: 'workspaces/x/files/a', index: 1, eventCount: 1 }, 300))
       .rejects.toThrow('outside the export')
     // A key from another Workspace's or another export's namespace is rejected too.
-    await expect(store.createPartDownloadUrl('ws-2', exportId, { ...part, index: 1, eventCount: 1 }))
+    await expect(store.createPartDownloadUrl('ws-2', exportId, { ...part, index: 1, eventCount: 1 }, 300))
       .rejects.toThrow('outside the export')
-    await expect(store.createPartDownloadUrl('ws-1', 'd'.repeat(32), { ...part, index: 1, eventCount: 1 }))
+    await expect(store.createPartDownloadUrl('ws-1', 'd'.repeat(32), { ...part, index: 1, eventCount: 1 }, 300))
       .rejects.toThrow('outside the export')
   })
 })
