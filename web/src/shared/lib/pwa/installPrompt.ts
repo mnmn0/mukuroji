@@ -166,7 +166,10 @@ export type AppInstallAnnouncement = 'installed' | 'accepted' | 'dismissed' | 'f
 /**
  * Chooses which install result the card announces as a live status.
  *
- * A dialog outcome from the card is always announced. An installation started elsewhere,
+ * A dialog outcome from the card is announced until the caller resets it, normally when the
+ * user presses Install again. It stays announced when the status returns to `available`,
+ * because Chromium may fire a new `beforeinstallprompt` right after a dismissal; only an open
+ * dialog (`prompting`) hides it. An installation started elsewhere,
  * such as from the browser menu, is announced when the status turns `installed` while the
  * card is shown; an app that was already installed when the card mounted is not announced,
  * so opening settings in a standalone window does not move focus.
@@ -183,7 +186,8 @@ export function resolveAppInstallAnnouncement(input: {
   outcome?: Exclude<AppInstallOutcome, 'unavailable'>
 }): AppInstallAnnouncement | undefined {
   const { initialStatus, outcome, status } = input
-  if (status === 'available' || status === 'prompting') return undefined
+  if (status === 'prompting') return undefined
+  if (status === 'available') return outcome
   if (status === 'installed') return outcome !== undefined || initialStatus !== 'installed' ? 'installed' : undefined
   return outcome
 }

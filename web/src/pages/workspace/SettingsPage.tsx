@@ -63,6 +63,8 @@ export function SettingsPage() {
               status={appInstall.status}
               title={t('workspace.settings.install.title')}
               onInstall={() => {
+                // The previous result stays announced, even after a new install offer, until the next attempt.
+                setInstallOutcome(undefined)
                 void appInstall.install().then((outcome) => {
                   if (outcome !== 'unavailable') setInstallOutcome(outcome)
                 })

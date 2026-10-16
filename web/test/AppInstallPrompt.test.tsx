@@ -14,6 +14,7 @@ import {
 import {
   canRequestAppBadgePermission,
   createAppBadgePermissionStore,
+  isNotificationGatedBadgePlatform,
   requestAppBadgePermission,
   subscribeNotificationPermissionChanges,
   useAppBadgePermission,
@@ -131,6 +132,17 @@ describe('AppInstallCard', () => {
     const installedAfterAccept = renderToStaticMarkup(<AppInstallCard {...props} outcome="accepted" status="installed" />)
     expect(installedAfterAccept).toContain('role="status"')
     expect(installedAfterAccept).toContain('Installed.')
+  })
+
+  test('keeps a dismissal announced when the browser offers installation again right away', () => {
+    // Chromium can fire a new `beforeinstallprompt` immediately after a dismissal.
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'available', status: 'available', outcome: 'dismissed' })).toBe('dismissed')
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'available', status: 'available', outcome: 'failed' })).toBe('failed')
+    // Only an open dialog hides the previous result; the caller resets it on the next Install press.
+    expect(resolveAppInstallAnnouncement({ initialStatus: 'available', status: 'prompting', outcome: 'dismissed' })).toBeUndefined()
+    const reoffered = renderToStaticMarkup(<AppInstallCard {...props} outcome="dismissed" status="available" />)
+    expect(reoffered).toContain('role="status" tabindex="-1">Installation was cancelled.</p>')
+    expect(reoffered).toContain('>Install</button>')
   })
 
   test('announces an install from the browser menu but not an app that was already installed', () => {
@@ -360,6 +372,61 @@ describe('app badge across tabs', () => {
     stop()
   })
 
+  test('clears a refreshed zero through the coordinated clear so other tabs republish after it', async () => {
+    const hub = createChannelHub()
+    const operations: string[] = []
+    const finishClears: (() => void)[] = []
+    const navigator = {
+      setAppBadge: async (count?: number) => { operations.push(`set:${count}`) },
+      clearAppBadge: () => new Promise<void>((resolve) => {
+        finishClears.push(() => {
+          operations.push('cleared')
+          resolve()
+        })
+      }),
+    }
+    let tabAClears = 0
+    /**
+     * Starts one tab's publisher on the shared fake badge.
+     *
+     * @param count - Count the tab loaded.
+     * @param refreshed - Count the tab's reload returns.
+     * @param clear - Coordinated clear the tab uses for a refreshed zero.
+     * @returns Stops the publisher.
+     */
+    const startTab = (count: number, refreshed: number, clear?: () => Promise<void>) => keepAppBadgePublished({
+      count,
+      isSessionStored: () => true,
+      refreshCount: async () => refreshed,
+      sync: (value) => syncAppBadge(value, navigator),
+      subscribeCleared: (listener) => subscribeAppBadgeCleared(listener, hub.openChannel),
+      ...(clear ? { clear } : {}),
+    })
+    const settle = async () => {
+      for (let index = 0; index < 6; index += 1) await Promise.resolve()
+    }
+    // Tab A's count drops to zero; tab B keeps five unread items.
+    const stopA = startTab(4, 0, () => {
+      tabAClears += 1
+      return clearAppBadgeAndNotifyTabs(navigator, hub.openChannel)
+    })
+    const stopB = startTab(5, 5)
+    // A third tab cleared the badge; both tabs reload their count.
+    hub.openChannel().postMessage({ type: 'cleared', pageId: 'tab-c' })
+    await settle()
+    expect(operations).toEqual(['set:4', 'set:5', 'set:5'])
+    // Tab A's clear lands late, after tab B already republished.
+    for (const finish of finishClears.splice(0)) finish()
+    await settle()
+    // The coordinated clear tells tab B afterwards, so the shared badge ends on B's count.
+    expect(operations.at(-1)).toBe('set:5')
+    // Tab A ignores its own clear notice instead of re-clearing in a loop.
+    expect(tabAClears).toBe(1)
+    expect(finishClears).toEqual([])
+    stopA()
+    stopB()
+  })
+
   test('works without BroadcastChannel', async () => {
     expect(() => subscribeAppBadgeCleared(() => undefined, () => undefined)()).not.toThrow()
     await expect(clearAppBadgeAndNotifyTabs({}, () => undefined)).resolves.toBeUndefined()
@@ -391,17 +458,36 @@ describe('app badge permission', () => {
   test('is offered only in the installed app with the Badging API and an unanswered Notification permission', () => {
     const environment = (overrides: Partial<AppBadgePermissionEnvironment>): AppBadgePermissionEnvironment => ({
       standalone: true,
+      badgeRequiresNotificationPermission: true,
       navigator: badgeNavigator,
       notification: createNotification('default').notification,
       ...overrides,
     })
     expect(canRequestAppBadgePermission(environment({}))).toBe(true)
     expect(canRequestAppBadgePermission(environment({ standalone: false }))).toBe(false)
+    // Chromium desktop apps show badges without permission, so they are never asked.
+    expect(canRequestAppBadgePermission(environment({ badgeRequiresNotificationPermission: false }))).toBe(false)
     expect(canRequestAppBadgePermission(environment({ navigator: {} }))).toBe(false)
     expect(canRequestAppBadgePermission(environment({ navigator: undefined }))).toBe(false)
     expect(canRequestAppBadgePermission(environment({ notification: undefined }))).toBe(false)
     expect(canRequestAppBadgePermission(environment({ notification: createNotification('granted').notification }))).toBe(false)
     expect(canRequestAppBadgePermission(environment({ notification: createNotification('denied').notification }))).toBe(false)
+  })
+
+  test('treats only iOS and iPadOS WebKit as needing notification permission for the badge', () => {
+    const chromeWindows = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+    const chromeMac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+    const chromeOs = 'Mozilla/5.0 (X11; CrOS x86_64 16181.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+    const iPhone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
+    const iPadDesktop = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15'
+    expect(isNotificationGatedBadgePlatform({ userAgent: chromeWindows, platform: 'Win32', maxTouchPoints: 0, hasStandaloneProperty: false })).toBe(false)
+    expect(isNotificationGatedBadgePlatform({ userAgent: chromeMac, platform: 'MacIntel', maxTouchPoints: 0, hasStandaloneProperty: false })).toBe(false)
+    expect(isNotificationGatedBadgePlatform({ userAgent: chromeOs, platform: 'Linux x86_64', maxTouchPoints: 10, hasStandaloneProperty: false })).toBe(false)
+    expect(isNotificationGatedBadgePlatform({ userAgent: iPhone, platform: 'iPhone', maxTouchPoints: 5, hasStandaloneProperty: true })).toBe(true)
+    expect(isNotificationGatedBadgePlatform({ userAgent: iPhone, hasStandaloneProperty: false })).toBe(true)
+    // iPadOS requesting the desktop site reports a Mac user agent but has touch points.
+    expect(isNotificationGatedBadgePlatform({ userAgent: iPadDesktop, platform: 'MacIntel', maxTouchPoints: 5, hasStandaloneProperty: false })).toBe(true)
+    expect(isNotificationGatedBadgePlatform({ userAgent: iPadDesktop, platform: 'MacIntel', maxTouchPoints: 0, hasStandaloneProperty: true })).toBe(true)
   })
 
   test('asks within the calling click and refreshes the badge only after a grant', async () => {
@@ -432,7 +518,7 @@ describe('app badge permission', () => {
      */
     function Probe() {
       const state = useAppBadgePermission({
-        readEnvironment: () => ({ standalone: true, navigator: badgeNavigator, notification }),
+        readEnvironment: () => ({ standalone: true, badgeRequiresNotificationPermission: true, navigator: badgeNavigator, notification }),
         subscribeLifecycle: () => () => undefined,
       })
       return <span>{String(state.offered)}</span>
@@ -444,7 +530,7 @@ describe('app badge permission', () => {
   test('clears the previous answer when a retry starts so a repeated dismissal is announced again', async () => {
     const { notification, requested } = createNotification('default', 'default')
     const store = createAppBadgePermissionStore({
-      readEnvironment: () => ({ standalone: true, navigator: badgeNavigator, notification }),
+      readEnvironment: () => ({ standalone: true, badgeRequiresNotificationPermission: true, navigator: badgeNavigator, notification }),
       subscribeLifecycle: () => () => undefined,
       refreshBadge: () => undefined,
     })
@@ -478,7 +564,7 @@ describe('app badge permission', () => {
     let lifecycleStopped = 0
     let refreshed = 0
     const store = createAppBadgePermissionStore({
-      readEnvironment: () => ({ standalone: true, navigator: badgeNavigator, notification }),
+      readEnvironment: () => ({ standalone: true, badgeRequiresNotificationPermission: true, navigator: badgeNavigator, notification }),
       subscribeLifecycle: (onChange) => {
         lifecycleChanged = onChange
         return () => { lifecycleStopped += 1 }

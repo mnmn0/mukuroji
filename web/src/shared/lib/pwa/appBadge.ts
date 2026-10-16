@@ -137,6 +137,8 @@ export type KeepAppBadgePublishedOptions = {
   sync?: (count: number) => void
   /** Subscribes to clear notices; defaults to `subscribeAppBadgeCleared`. */
   subscribeCleared?: (listener: () => void) => () => void
+  /** Clears the badge and then tells the other tabs; defaults to `clearAppBadgeAndNotifyTabs`. */
+  clear?: () => Promise<void>
 }
 
 /**
@@ -145,7 +147,11 @@ export type KeepAppBadgePublishedOptions = {
  * Every publication first checks that the session is still stored, so a tab whose shared
  * session was signed out elsewhere never restores the badge. After a clear notice the tab
  * reloads its count; when that reload fails it reapplies the count it already knows, since
- * a same-valued later load would not publish again.
+ * a same-valued later load would not publish again. A reload that finds zero clears through
+ * `clearAppBadgeAndNotifyTabs`, whose notice is sent only after the clear settles, so tabs with
+ * a positive count republish after it instead of being blanked by a late clear. The tab then
+ * stops reacting to notices, including its own, so two zero tabs cannot keep re-clearing; its
+ * owner starts a new publisher when the count turns positive again.
  *
  * @param options - Count, session check, and refresh.
  * @returns Stops publishing; pending reloads are ignored afterwards.
@@ -153,7 +159,10 @@ export type KeepAppBadgePublishedOptions = {
 export function keepAppBadgePublished(options: KeepAppBadgePublishedOptions): () => void {
   const sync = options.sync ?? ((count: number) => syncAppBadge(count))
   const subscribeCleared = options.subscribeCleared ?? ((listener: () => void) => subscribeAppBadgeCleared(listener))
+  const clear = options.clear ?? (() => clearAppBadgeAndNotifyTabs())
   let active = true
+  // Set once a refresh found zero; this publisher then has nothing left to show.
+  let cleared = false
   /**
    * Shows a count while this tab is still active and signed in.
    *
@@ -168,7 +177,7 @@ export function keepAppBadgePublished(options: KeepAppBadgePublishedOptions): ()
   // Subscribe first: a clear that settles while the initial count is being published still
   // reaches this tab and republishes, whichever order the two badge updates finish in.
   const unsubscribe = subscribeCleared(() => {
-    if (!options.isSessionStored()) return
+    if (cleared || !options.isSessionStored()) return
     generation += 1
     const current = generation
     /**
@@ -177,7 +186,15 @@ export function keepAppBadgePublished(options: KeepAppBadgePublishedOptions): ()
      * @param count - Count to show.
      */
     const publishLatest = (count: number) => {
-      if (current === generation) publish(count)
+      if (current !== generation) return
+      if (count > 0) {
+        publish(count)
+        return
+      }
+      if (!active || !options.isSessionStored()) return
+      // Mark first: the coordinated clear also calls this page's own listener.
+      cleared = true
+      void clear()
     }
     options.refreshCount().then(
       (fresh) => publishLatest(typeof fresh === 'number' ? fresh : options.count),

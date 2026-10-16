@@ -17,6 +17,11 @@ export type NotificationPermissionSource = {
 export type AppBadgePermissionEnvironment = {
   /** Whether the page runs as an installed standalone app. */
   standalone: boolean
+  /**
+   * Whether the platform shows the app badge only with notification permission, as iOS and
+   * iPadOS Home Screen web apps do; Chromium desktop apps show it without permission.
+   */
+  badgeRequiresNotificationPermission: boolean
   /** Navigator that may expose the Badging API. */
   navigator: AppBadgeNavigator | undefined
   /** Notification API, when the browser has one. */
@@ -34,15 +39,17 @@ export type AppBadgePermissionResult = 'granted' | 'denied' | 'dismissed' | 'uns
  *
  * iOS and iPadOS Home Screen apps expose the Badging API but show the badge only after
  * notification permission is granted. The opt-in is offered only inside the installed app,
- * only where both the Badging API and `Notification` exist, and only while the user has not
- * answered yet, so it never re-asks after a grant or a block.
+ * only on such a platform, only where both the Badging API and `Notification` exist, and only
+ * while the user has not answered yet, so it never re-asks after a grant or a block. Platforms
+ * that show badges without permission, such as Chromium desktop apps, are never asked.
  *
- * @param environment - Standalone display, navigator, and Notification API.
+ * @param environment - Standalone display, platform requirement, navigator, and Notification API.
  * @returns Whether the opt-in button can be shown.
  */
 export function canRequestAppBadgePermission(environment: AppBadgePermissionEnvironment): boolean {
-  const { navigator, notification, standalone } = environment
+  const { badgeRequiresNotificationPermission, navigator, notification, standalone } = environment
   return standalone
+    && badgeRequiresNotificationPermission
     && typeof navigator?.setAppBadge === 'function'
     && notification !== undefined
     && typeof notification.requestPermission === 'function'
@@ -80,6 +87,34 @@ export async function requestAppBadgePermission(
   return 'unsupported'
 }
 
+/** Navigator details used to recognize platforms whose badge needs notification permission. */
+export type BadgePlatformHints = {
+  /** Browser user agent. */
+  userAgent: string
+  /** Legacy platform string; iPadOS reports `MacIntel` with a desktop user agent. */
+  platform?: string
+  /** Number of touch points; above one on an iPad that requests the desktop site. */
+  maxTouchPoints?: number
+  /** Whether the navigator has WebKit's non-standard `standalone` property. */
+  hasStandaloneProperty: boolean
+}
+
+/**
+ * Recognizes iOS and iPadOS WebKit, where Home Screen web apps show the badge only after
+ * notification permission is granted.
+ *
+ * WebKit's `navigator.standalone` property marks iOS and iPadOS Safari; the user agent covers
+ * iPhone and iPod, and iPadOS with a desktop user agent is recognized by `MacIntel` with touch.
+ *
+ * @param hints - Navigator details.
+ * @returns Whether the badge needs notification permission on this platform.
+ */
+export function isNotificationGatedBadgePlatform(hints: BadgePlatformHints): boolean {
+  if (hints.hasStandaloneProperty) return true
+  if (/\b(?:iPhone|iPad|iPod)\b/u.test(hints.userAgent)) return true
+  return hints.platform === 'MacIntel' && (hints.maxTouchPoints ?? 0) > 1
+}
+
 /**
  * Reads the running page's badge permission capabilities.
  *
@@ -87,13 +122,19 @@ export async function requestAppBadgePermission(
  */
 export function readAppBadgePermissionEnvironment(): AppBadgePermissionEnvironment {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
-    return { standalone: false, navigator: undefined, notification: undefined }
+    return { standalone: false, badgeRequiresNotificationPermission: false, navigator: undefined, notification: undefined }
   }
   // iOS Safari also reports Home Screen apps through the non-standard `navigator.standalone`.
   const standalone = window.matchMedia?.('(display-mode: standalone)').matches === true
     || Reflect.get(navigator, 'standalone') === true
   return {
     standalone,
+    badgeRequiresNotificationPermission: isNotificationGatedBadgePlatform({
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      maxTouchPoints: navigator.maxTouchPoints,
+      hasStandaloneProperty: 'standalone' in navigator,
+    }),
     navigator,
     notification: typeof Notification === 'undefined' ? undefined : Notification,
   }

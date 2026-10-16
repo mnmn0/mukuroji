@@ -32,7 +32,7 @@ export type AppBadgePermissionSectionProps = {
 export type AppInstallCardProps = {
   /** Whether the app can be installed from the page. */
   status: AppInstallStatus
-  /** Result of the latest install dialog shown from this card, if any. */
+  /** Result of the latest install dialog shown from this card, if any; reset it when Install is pressed again. */
   outcome?: Exclude<AppInstallOutcome, 'unavailable'>
   /** Localized card title. */
   title: string
@@ -81,8 +81,9 @@ export function AppInstallCard(props: AppInstallCardProps) {
     : announcement === 'installed'
       ? installedMessage
       : announcement === 'accepted' ? props.acceptedMessage : announcement === 'failed' ? props.failedMessage : props.dismissedMessage
-  // Keyed by the outcome and status, not the translated text, so a language change does not steal focus.
-  const resultKey = result === undefined ? undefined : `${outcome}:${status}`
+  // Keyed by the outcome and the announcement, not the translated text or the raw status, so a
+  // language change or a fresh install offer after a dismissal does not move focus again.
+  const resultKey = result === undefined ? undefined : `${outcome}:${announcement}`
 
   useEffect(() => {
     // The install button disappears once the dialog closes, so keep focus on the result.

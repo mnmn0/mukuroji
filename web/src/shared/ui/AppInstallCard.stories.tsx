@@ -57,6 +57,16 @@ export const Dismissed: Story = {
   },
 }
 
+/** The browser offered installation again right after a dismissal; the result stays announced. */
+export const DismissedThenReoffered: Story = {
+  args: { status: 'available', outcome: 'dismissed' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('status')).toHaveFocus()
+    await expect(canvas.getByRole('button', { name: 'インストール' })).toBeVisible()
+  },
+}
+
 /** Badge permission opt-in copy shared by the installed-app stories. */
 const badgePermission = {
   offered: true,
