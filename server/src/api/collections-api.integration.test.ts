@@ -6,6 +6,7 @@ const {
   getTestAppDependencies,
   planningApiRequest,
   resetTestApp,
+  setTestAppDependencies,
 } = createApiTestHarness()
 
 afterEach(() => {
@@ -131,5 +132,29 @@ test('lets guests neither read nor change Collections', async () => {
   configureMember('viewer', 'guest')
   expect((await planningApiRequest('/api/collections')).status).toBe(403)
   expect((await planningApiRequest('/api/collections', 'POST', { name: 'Launch' }, 'k')).status).toBe(403)
+  expect((await planningApiRequest('/api/collections/candidates?keyword=onboarding')).status).toBe(403)
 })
 
+test('searches addable Work Item candidates under the Collection permission', async () => {
+  configureMember()
+  const missing = await planningApiRequest('/api/collections/candidates?keyword=%20')
+  expect(missing.status).toBe(400)
+  expect(await missing.json()).toMatchObject({ code: 'InvalidCollectionCandidateQuery' })
+  let capturedFilters: unknown
+  let capturedLimit: number | undefined
+  setTestAppDependencies({
+    workspaceSearch: {
+      ...getTestAppDependencies().workItems.workspaceSearch,
+      async search(input) {
+        capturedFilters = input.filters
+        capturedLimit = input.limit
+        return { schemaVersion: 1, results: [] }
+      },
+    },
+  })
+  const response = await planningApiRequest('/api/collections/candidates?keyword=%20onboarding%20&limit=5')
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ schemaVersion: 1, results: [] })
+  expect(capturedFilters).toEqual({ keyword: 'onboarding', entityTypes: ['work-item'] })
+  expect(capturedLimit).toBe(5)
+})
