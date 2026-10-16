@@ -5383,6 +5383,34 @@ test.describe('authenticated task page', () => {
     await expect(contributors).not.toContainText('メンバーかジョブロールのどちらかを選んでください。')
   })
 
+  test('Issue #239: Team Issue の保存中は保存ボタンを無効にする', async ({ page }) => {
+    let releaseUpdate: (() => void) | undefined
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve
+    })
+    let updateRequests = 0
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe$/u, async (route) => {
+      if (route.request().method() !== 'PATCH') {
+        await route.fallback()
+        return
+      }
+      updateRequests += 1
+      await updateGate
+      await route.fallback()
+    })
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const detailPane = page.getByTestId('team-issue-detail-pane')
+    const saveButton = detailPane.getByRole('button', { name: '変更を保存' })
+    await detailPane.locator('input[name="title"]').fill('保存中に二重送信しない')
+    await saveButton.click()
+    await expect.poll(() => updateRequests).toBe(1)
+    // The button lives outside the disabled fieldset, so it needs its own pending guard.
+    await expect(saveButton).toBeDisabled()
+    releaseUpdate?.()
+    await expect(saveButton).toBeEnabled()
+    expect(updateRequests).toBe(1)
+  })
+
   test('詳細の編集失敗でもコメント下書きと詳細paneを保持する', async ({ page }) => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const detailPane = page.getByTestId('task-detail-pane')

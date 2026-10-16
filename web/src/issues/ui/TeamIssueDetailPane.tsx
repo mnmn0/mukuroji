@@ -1068,7 +1068,7 @@ function IssueDetailContent({
         </div>
         <button
           className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isIssueReadOnly || isAiSummaryOperationPending}
+          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           form={editorFormId}
           type="submit"
         >
