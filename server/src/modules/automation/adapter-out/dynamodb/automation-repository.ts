@@ -39,6 +39,7 @@ import {
   type UpdateRecurringWorkInput,
 } from '@mukuroji/contracts'
 import type {
+  AutomationAcceptedTriageWebhookDelivery,
   AutomationExecutionClaimToken,
   AutomationExecutionDefinitionGuard,
   AutomationExecutionQuery,
@@ -151,6 +152,10 @@ const INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE = 'inbound-webhook-lookup'
  * instead of recording its payload as an Automation event.
  */
 const INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE = 'inbound-webhook-triage-lookup'
+/** Entry type of the marker that keeps an accepted Triage delivery resolvable after revocation. */
+const INBOUND_WEBHOOK_TRIAGE_DELIVERY_ENTRY_TYPE = 'inbound-webhook-triage-delivery'
+/** Number of items the create reservation writes before any reference fence. */
+const INBOUND_WEBHOOK_CREATE_RESERVATION_ITEM_COUNT = 3
 
 /** Inbound webhook plaintext secret を同じ key で回収できる時間です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_SECRET_RECOVERY_MS = 24 * 60 * 60_000
@@ -956,7 +961,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     input: CreateAutomationInboundWebhookEndpointInput,
     idempotencyKey: string,
     endpointBaseUrl: string,
-    validateNewEndpoint?: () => Promise<void>,
+    validateNewEndpoint?: () => Promise<readonly DynamoDbAutomationTransactionItem[] | void>,
   ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
@@ -977,7 +982,12 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     if (existing) {
       return await this.readInboundWebhookProvisioningReplay(existing, identity.requestFingerprint)
     }
-    await validateNewEndpoint?.()
+    // The validator's condition checks commit with the reservation, so a reference it
+    // validated, such as the Triage routing Team, cannot be archived before the endpoint exists.
+    const referenceFences = [...(await validateNewEndpoint?.() ?? [])]
+    if (!referenceFences.every(isDynamoDbConditionCheckTransactionItem)) {
+      throw invalidInput('Inbound webhook endpoint reference fence is invalid.')
+    }
 
     const endpointId = `webhook-${randomUUID()}`
     const opaqueEndpointId = randomBytes(32).toString('base64url')
@@ -1059,6 +1069,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
             },
           },
+          ...referenceFences,
         ],
       }))
       return { endpoint, operation }
@@ -1068,8 +1079,63 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         normalizedWorkspaceId,
         identity.operationId,
       )
-      if (!replay) throw idempotencyConflict()
-      return await this.readInboundWebhookProvisioningReplay(replay, identity.requestFingerprint)
+      if (replay) {
+        return await this.readInboundWebhookProvisioningReplay(replay, identity.requestFingerprint)
+      }
+      if (hasConditionalCheckFailureFrom(error, INBOUND_WEBHOOK_CREATE_RESERVATION_ITEM_COUNT)) {
+        throw inboundWebhookReferenceUnavailable()
+      }
+      throw idempotencyConflict()
+    }
+  }
+
+  /**
+   * Resolves a Triage delivery whose receipt already committed, whatever the endpoint's status.
+   *
+   * The marker is written in the same transaction as the delivery receipt and survives
+   * revocation, so only a delivery accepted while the endpoint was active resolves here.
+   *
+   * @param opaqueEndpointId - Public endpoint identifier from the request path.
+   * @param idempotencyKey - Sender idempotency key of the delivery.
+   * @returns The accepted delivery, or undefined when no receipt was committed for it.
+   */
+  async resolveAcceptedTriageWebhookDelivery(
+    opaqueEndpointId: string,
+    idempotencyKey: string,
+  ): Promise<AutomationAcceptedTriageWebhookDelivery | undefined> {
+    await this.ensureTable()
+    const normalizedOpaqueId = requireInboundWebhookOpaqueId(opaqueEndpointId)
+    const idempotencyKeyHash = hashCanonicalText(
+      requireBoundedText(idempotencyKey, 'Inbound webhook idempotency key', 256),
+    )
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        scopeKey: inboundWebhookLookupScopeKey(normalizedOpaqueId),
+        recordKey: inboundWebhookTriageDeliveryKey(idempotencyKeyHash),
+      },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (item?.entryType !== INBOUND_WEBHOOK_TRIAGE_DELIVERY_ENTRY_TYPE) return undefined
+    if (
+      typeof item.workspaceId !== 'string' ||
+      typeof item.endpointId !== 'string' ||
+      typeof item.bodyFingerprint !== 'string' ||
+      typeof item.eventId !== 'string' ||
+      typeof item.createdAt !== 'string'
+    ) {
+      throw storedInvalid('inbound webhook Triage delivery')
+    }
+    const endpoint = await this.getInboundWebhookEndpointRecord(item.workspaceId, item.endpointId)
+    if (endpoint?.opaqueEndpointId !== normalizedOpaqueId || endpoint.purpose !== 'triage') {
+      return undefined
+    }
+    return {
+      endpoint,
+      eventId: item.eventId,
+      bodyFingerprint: item.bodyFingerprint,
+      acceptedAt: item.createdAt,
     }
   }
 
@@ -1530,6 +1596,23 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
             },
           },
+          // Revocation deletes the opaque lookup, so a Triage receipt is also indexed under the
+          // opaque ID; a retry can then finish the accepted delivery's entry after revocation.
+          ...(endpoint.purpose === 'triage'
+            ? [{
+              Put: {
+                TableName: this.tableName,
+                Item: createInboundWebhookTriageDeliveryStorageItem(
+                  endpoint,
+                  idempotencyKeyHash,
+                  bodyFingerprint,
+                  eventId,
+                  now,
+                ),
+                ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+              },
+            }]
+            : []),
           input.auditMutation,
         ],
       }))
@@ -3152,6 +3235,46 @@ function inboundWebhookLookupScopeKey(opaqueEndpointId: string) {
   return `INBOUND_WEBHOOK_LOOKUP#${requireInboundWebhookOpaqueId(opaqueEndpointId)}`
 }
 
+/**
+ * Builds the sort key of a Triage delivery marker under an endpoint's opaque lookup partition.
+ *
+ * @param idempotencyKeyHash - SHA-256 of the sender idempotency key.
+ * @returns The marker sort key.
+ */
+function inboundWebhookTriageDeliveryKey(idempotencyKeyHash: string) {
+  return `DELIVERY#${requireSha256Fingerprint(idempotencyKeyHash, 'Inbound webhook idempotency fingerprint')}`
+}
+
+/**
+ * Builds the Triage delivery marker committed with a Triage-purpose delivery receipt.
+ *
+ * @param endpoint - Active endpoint that accepted the delivery.
+ * @param idempotencyKeyHash - SHA-256 of the sender idempotency key.
+ * @param bodyFingerprint - SHA-256 of the accepted raw body.
+ * @param eventId - Audit outbox event identifier of the delivery.
+ * @param now - ISO time the delivery was accepted.
+ * @returns The storage item, expiring with the delivery receipt.
+ */
+function createInboundWebhookTriageDeliveryStorageItem(
+  endpoint: AutomationInboundWebhookEndpointRecord,
+  idempotencyKeyHash: string,
+  bodyFingerprint: string,
+  eventId: string,
+  now: string,
+) {
+  return {
+    scopeKey: inboundWebhookLookupScopeKey(endpoint.opaqueEndpointId),
+    recordKey: inboundWebhookTriageDeliveryKey(idempotencyKeyHash),
+    entryType: INBOUND_WEBHOOK_TRIAGE_DELIVERY_ENTRY_TYPE,
+    workspaceId: endpoint.workspaceId,
+    endpointId: endpoint.id,
+    bodyFingerprint,
+    eventId,
+    createdAt: now,
+    expiresAt: Math.floor(Date.parse(now) / 1_000) + AUTOMATION_INBOUND_WEBHOOK_DELIVERY_RETENTION_SECONDS,
+  }
+}
+
 function inboundWebhookOperationKey(operationId: string) {
   return `INBOUND_WEBHOOK_OPERATION#${encodeKey(operationId)}`
 }
@@ -3718,6 +3841,19 @@ function inboundWebhookLifecycleConflict() {
   )
 }
 
+/**
+ * Reports that a reference validated for a new endpoint changed before the endpoint committed.
+ *
+ * @returns The conflict error.
+ */
+function inboundWebhookReferenceUnavailable() {
+  return new AutomationError(
+    'conflict',
+    'AutomationInboundWebhookReferenceUnavailable',
+    'A reference of the inbound webhook endpoint changed before it was created.',
+  )
+}
+
 function inboundWebhookIdempotencyConflict() {
   return new AutomationError(
     'conflict',
@@ -3844,6 +3980,41 @@ function isDynamoDbAuditPutTransactionItem(
     put.TableName.trim().length > 0 &&
     isRecord(put.Item) &&
     Object.keys(put.Item).length > 0
+}
+
+/**
+ * Checks whether an unknown value is a DynamoDB ConditionCheck transaction item.
+ *
+ * @param value - Candidate transaction item.
+ * @returns Whether the value holds only a ConditionCheck with a table, key, and condition.
+ */
+function isDynamoDbConditionCheckTransactionItem(
+  value: unknown,
+): value is DynamoDbAutomationTransactionItem {
+  if (!isRecord(value)) return false
+  const keys = Object.keys(value)
+  if (keys.length !== 1 || keys[0] !== 'ConditionCheck') return false
+  const check = value.ConditionCheck
+  return isRecord(check) &&
+    typeof check.TableName === 'string' &&
+    check.TableName.trim().length > 0 &&
+    isRecord(check.Key) &&
+    typeof check.ConditionExpression === 'string' &&
+    check.ConditionExpression.trim().length > 0
+}
+
+/**
+ * Checks whether a cancelled transaction failed a condition at or after an item index.
+ *
+ * @param error - Error thrown by the transaction.
+ * @param startIndex - First transaction item index to inspect.
+ * @returns Whether any inspected item reported `ConditionalCheckFailed`.
+ */
+function hasConditionalCheckFailureFrom(error: unknown, startIndex: number) {
+  if (!isRecord(error) || !Array.isArray(error.CancellationReasons)) return false
+  return error.CancellationReasons.slice(startIndex).some((reason) =>
+    isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
+  )
 }
 
 function isNamedError(error: unknown, name: string) {

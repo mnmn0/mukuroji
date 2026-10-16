@@ -9,6 +9,7 @@ import {
   type BulkOperationItemResult,
   type BulkOperationPreview,
   type BulkOperationRequest,
+  type CreateWebhookTriageEntryInput,
   type UpdateAutomationRuleInput,
   type UpdateAutomationTemplateInput,
   type UpdateRecurringWorkInput,
@@ -2014,12 +2015,13 @@ function automationValuesEqual(first: unknown, second: unknown): boolean {
 }
 
 /**
- * Requires the Team a Triage-purpose endpoint routes to to exist in the Workspace.
+ * Requires the Team a Triage-purpose endpoint routes to to be active in the Workspace.
  *
  * @param workspaceId - Workspace that owns the endpoint.
  * @param teamId - Routing Team.
+ * @returns Condition checks that keep the Team active until the endpoint reservation commits.
  */
-async function requireActiveTriageRoutingTeam(workspaceId: string, teamId: string): Promise<void> {
+async function createTriageRoutingTeamFences(workspaceId: string, teamId: string) {
   // Triage rejects Team IDs outside its identifier grammar, so such a Team could never
   // receive a delivered entry; refuse the endpoint instead of accepting dead deliveries.
   if (!isTriageTeamIdentifier(teamId)) {
@@ -2029,13 +2031,26 @@ async function requireActiveTriageRoutingTeam(workspaceId: string, teamId: strin
       'Triage cannot route entries to this Team ID.',
     )
   }
-  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', true)
-  if (!directory.teams.some((team) => team.id === teamId)) {
+  const projectDirectory = workspaceDependencies.projectDirectory
+  if (!projectDirectory.createActiveReferenceConditionChecks) {
     throw new AutomationError(
-      'invalid-input',
-      'AutomationInboundWebhookTriageTeamNotFound',
-      'The Triage routing Team does not exist.',
+      'unavailable',
+      'AutomationInboundWebhookTriageTeamUnavailable',
+      'Triage routing Team fencing is unavailable.',
+      true,
     )
+  }
+  try {
+    return await projectDirectory.createActiveReferenceConditionChecks(workspaceId, teamId)
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
+      throw new AutomationError(
+        'invalid-input',
+        'AutomationInboundWebhookTriageTeamNotFound',
+        'The Triage routing Team does not exist.',
+      )
+    }
+    throw error
   }
 }
 
@@ -2105,28 +2120,84 @@ async function deliverTriageWebhook(
       eventId: event.eventId,
       auditMutation: createAuditEventTransactPut(auditTableName, event),
     })
-    let receipt
-    try {
-      receipt = await workItemDependencies.triage.createWebhookEntry(
-        endpoint.workspaceId,
-        teamId,
-        { id: endpoint.id, name: endpoint.name },
-        envelope,
-        {
-          // Delivery keys may be up to 256 characters; the Triage receipt stores a fixed-length digest.
-          key: createHash('sha256').update(`${endpoint.id}\0${delivery.idempotencyKey}`).digest('hex'),
-          fingerprint: createTriageInputFingerprint(envelope),
-        },
-        // A retry after a failed admission keeps the time the delivery was first accepted.
-        // The admission validator checks the routing Team with a commit-time condition.
-        recorded.acceptedAt ? { receivedAt: recorded.acceptedAt } : {},
-      )
-    } catch (error) {
-      // Admission failures, including infrastructure errors, use the Triage error envelope.
-      return toTriageErrorResponse(c, error)
-    }
-    const response: AutomationInboundWebhookDeliveryResponse = { eventId: recorded.eventId, triageEntryId: receipt.entry.id }
-    return c.json(response, 202)
+    return await admitTriageWebhookEntry(c, endpoint, teamId, envelope, delivery.idempotencyKey, recorded)
+  } catch (error) {
+    if (error instanceof TriageError) return toTriageErrorResponse(c, error)
+    throw error
+  }
+}
+
+/**
+ * Creates, or replays, the Triage entry of a delivery whose receipt has committed.
+ *
+ * @param c - Hono request context.
+ * @param endpoint - Endpoint that accepted the delivery.
+ * @param teamId - Routing Team of the endpoint.
+ * @param envelope - Validated webhook envelope.
+ * @param idempotencyKey - Sender idempotency key.
+ * @param recorded - Committed receipt's event ID and first accepted time.
+ * @returns 202 with the delivery event ID and the Triage entry ID, or a Triage error response.
+ */
+async function admitTriageWebhookEntry(
+  c: Context,
+  endpoint: AutomationInboundWebhookEndpointRecord,
+  teamId: string,
+  envelope: CreateWebhookTriageEntryInput,
+  idempotencyKey: string,
+  recorded: { eventId: string; acceptedAt?: string },
+) {
+  let receipt
+  try {
+    receipt = await workItemDependencies.triage.createWebhookEntry(
+      endpoint.workspaceId,
+      teamId,
+      { id: endpoint.id, name: endpoint.name },
+      envelope,
+      {
+        // Delivery keys may be up to 256 characters; the Triage receipt stores a fixed-length digest.
+        key: createHash('sha256').update(`${endpoint.id}\0${idempotencyKey}`).digest('hex'),
+        fingerprint: createTriageInputFingerprint(envelope),
+      },
+      // A retry after a failed admission keeps the time the delivery was first accepted.
+      // The admission validator checks the routing Team with a commit-time condition.
+      recorded.acceptedAt ? { receivedAt: recorded.acceptedAt } : {},
+    )
+  } catch (error) {
+    // Admission failures, including infrastructure errors, use the Triage error envelope.
+    return toTriageErrorResponse(c, error)
+  }
+  const response: AutomationInboundWebhookDeliveryResponse = { eventId: recorded.eventId, triageEntryId: receipt.entry.id }
+  return c.json(response, 202)
+}
+
+/**
+ * Finishes a Triage delivery that was accepted before its endpoint stopped accepting deliveries.
+ *
+ * A committed receipt is the server's acceptance of that delivery, so a retry completes its
+ * Triage entry even after the endpoint is paused or revoked and its signing secret deleted.
+ * The retry must carry the same idempotency key and the exact raw body the receipt accepted;
+ * the body was authenticated when the receipt committed, and a SHA-256 match binds the retry
+ * to it. Any other request, including every new delivery, gets no recovery.
+ *
+ * @param c - Hono request context.
+ * @param opaqueEndpointId - Public endpoint identifier from the request path.
+ * @returns The admission response, or undefined when no accepted delivery matches.
+ */
+async function completeAcceptedTriageWebhookDelivery(c: Context, opaqueEndpointId: string) {
+  const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+  if (!idempotencyKey || idempotencyKey.length > 256) return undefined
+  const accepted = await automationDependencies.inboundWebhooks.resolveAcceptedTriageWebhookDelivery(
+    opaqueEndpointId,
+    idempotencyKey,
+  )
+  const teamId = accepted?.endpoint.triageRouting?.teamId
+  if (!accepted || !teamId) return undefined
+  const rawBody = await readAutomationInboundWebhookBody(c.req.raw)
+  if (createHash('sha256').update(rawBody).digest('hex') !== accepted.bodyFingerprint) return undefined
+  try {
+    const envelope = readWebhookTriageEnvelope(parseAutomationInboundWebhookJson(rawBody))
+    await enforceActiveTenantForWorkspace(accepted.endpoint.workspaceId)
+    return await admitTriageWebhookEntry(c, accepted.endpoint, teamId, envelope, idempotencyKey, accepted)
   } catch (error) {
     if (error instanceof TriageError) return toTriageErrorResponse(c, error)
     throw error
@@ -2228,7 +2299,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
         idempotencyKey,
         getAutomationInboundWebhookBaseUrl(c),
         triageRouting
-          ? () => requireActiveTriageRoutingTeam(principal.directoryId, triageRouting.teamId)
+          ? () => createTriageRoutingTeamFences(principal.directoryId, triageRouting.teamId)
           : undefined,
       )
       const { completed, signingSecret } = await provisionAutomationInboundWebhookEndpoint(
@@ -2345,9 +2416,16 @@ export function registerAutomationRoutes(routeApp: Hono): void {
   /** External sender の raw JSON delivery を HMAC 検証して durable outbox event に変換します。 */
   routeApp.post('/api/automation/inbound-webhooks/:opaqueEndpointId', async (c) => {
     try {
+      const opaqueEndpointId = c.req.param('opaqueEndpointId')
       const endpoint = await automationDependencies.inboundWebhooks.resolveInboundWebhookEndpoint(
-        c.req.param('opaqueEndpointId'),
+        opaqueEndpointId,
       )
+      if (!endpoint || endpoint.status !== 'active') {
+        // Only a delivery whose receipt already committed may finish after the endpoint stops
+        // accepting; a new delivery to a paused or revoked endpoint is rejected below.
+        const completed = await completeAcceptedTriageWebhookDelivery(c, opaqueEndpointId)
+        if (completed) return completed
+      }
       if (!endpoint || endpoint.status === 'provisioning' || endpoint.status === 'revoked') {
         throw automationInboundWebhookNotFound()
       }

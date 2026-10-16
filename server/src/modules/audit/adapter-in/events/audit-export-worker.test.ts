@@ -6,8 +6,8 @@ describe('audit export worker', () => {
     const steps: string[] = []
     const logs: string[] = []
     const worker = createAuditExportWorker({
-      async processExport(workspaceId, exportId) {
-        steps.push(`${workspaceId}/${exportId}`)
+      async processExport(workspaceId, exportId, messageId) {
+        steps.push(`${workspaceId}/${exportId}@${messageId}`)
         if (exportId === 'b'.repeat(32)) throw new Error('S3 unavailable')
         return 'advanced'
       },
@@ -23,7 +23,8 @@ describe('audit export worker', () => {
       ],
     })
 
-    expect(steps).toEqual([`ws-1/${'a'.repeat(32)}`, `ws-1/${'b'.repeat(32)}`])
+    // The SQS message ID is passed so a redelivered committed step only resends its continuation.
+    expect(steps).toEqual([`ws-1/${'a'.repeat(32)}@m1`, `ws-1/${'b'.repeat(32)}@m2`])
     // Malformed messages are failures too, so the redrive policy quarantines them in the DLQ.
     expect(response.batchItemFailures).toEqual([
       { itemIdentifier: 'm2' },

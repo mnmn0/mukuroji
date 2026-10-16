@@ -179,6 +179,24 @@ export function parseExpectedRevisionQuery(value: string | undefined): number {
  */
 export function isStoredCollection(value: unknown): value is StoredCollection {
   if (!isPlainRecord(value)) return false
+  // The create fingerprint is a lowercase SHA-256 hex digest; anything else cannot match a retry.
+  return isCollectionCreateFingerprint(value.createFingerprint) &&
+    Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&
+    hasUniqueReferences(value.items) &&
+    isCollectionSummary(value)
+}
+
+/**
+ * Validates the metadata of a persisted Collection row, without its references.
+ *
+ * Listing reads only these attributes, so the same metadata invariants apply whether
+ * the whole row or only its summary was read.
+ *
+ * @param value - Persisted attributes without storage keys.
+ * @returns Whether the metadata is well formed.
+ */
+export function isCollectionSummary(value: unknown): value is WorkItemCollection {
+  if (!isPlainRecord(value)) return false
   return isCollectionIdentifier(value.collectionId) &&
     // Persisted names keep the same invariant as accepted input: trimmed, non-empty, printable.
     typeof value.name === 'string' && value.name.length > 0 && value.name === value.name.trim() &&
@@ -189,20 +207,16 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     isStoredInstant(value.updatedAt) &&
     // The next change writes `revision + 1`, so the stored revision must leave room for it.
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
-    value.revision < Number.MAX_SAFE_INTEGER &&
-    // The create fingerprint is a lowercase SHA-256 hex digest; anything else cannot match a retry.
-    isCollectionCreateFingerprint(value.createFingerprint) &&
-    Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&
-    hasUniqueReferences(value.items)
+    value.revision < Number.MAX_SAFE_INTEGER
 }
 
 /**
- * Returns the public view of a stored Collection without its references.
+ * Returns the public view of a Collection without its references or storage fields.
  *
- * @param collection - Stored Collection.
+ * @param collection - Stored Collection or its validated summary.
  * @returns Collection metadata only.
  */
-export function toPublicCollection(collection: StoredCollection): WorkItemCollection {
+export function toPublicCollection(collection: WorkItemCollection): WorkItemCollection {
   return {
     collectionId: collection.collectionId,
     name: collection.name,

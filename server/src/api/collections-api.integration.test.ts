@@ -1,4 +1,4 @@
-import type { EnterprisePermissionId, EnterpriseRoleAssignment } from '@mukuroji/contracts'
+import type { EnterprisePermissionId, EnterpriseRoleAssignment, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { createApiTestHarness } from './test-support/api-test-harness'
@@ -24,7 +24,7 @@ const WORKSPACE_ID = 'workspace-collections'
  * @param role - Project role on Refero.
  * @param workspaceRole - Optional Workspace role override.
  */
-function configureMember(role: 'member' | 'viewer' = 'member', workspaceRole?: 'guest') {
+function configureMember(role: 'member' | 'viewer' = 'member', workspaceRole?: 'guest', detailMissingIssueIds?: string[]) {
   configureFakeProjectClients(true, {
     directoryId: WORKSPACE_ID,
     teamProjects: [
@@ -34,6 +34,7 @@ function configureMember(role: 'member' | 'viewer' = 'member', workspaceRole?: '
     projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role }],
     detailAssignedProjectIds: { 'hidden-item': 'secret' },
     ...(workspaceRole ? { workspaceRole } : {}),
+    ...(detailMissingIssueIds ? { detailMissingIssueIds } : {}),
   })
 }
 
@@ -138,7 +139,8 @@ test('lets guests neither read nor change Collections', async () => {
 })
 
 test('searches addable Work Item candidates under the Collection permission', async () => {
-  configureMember()
+  // No canonical Work Item has the keyword as its ID, so only the index answers.
+  configureMember('member', undefined, ['onboarding'])
   const missing = await planningApiRequest('/api/collections/candidates?keyword=%20')
   expect(missing.status).toBe(400)
   expect(await missing.json()).toMatchObject({ code: 'InvalidCollectionCandidateQuery' })
@@ -161,6 +163,44 @@ test('searches addable Work Item candidates under the Collection permission', as
   expect(capturedLimit).toBe(5)
 })
 
+test('offers a readable Work Item by exact ID even when its search projection is missing', async () => {
+  configureMember()
+  let indexed: WorkspaceSearchResult[] = []
+  setTestAppDependencies({
+    workspaceSearch: {
+      ...getTestAppDependencies().workItems.workspaceSearch,
+      async search() {
+        return { schemaVersion: 1, results: indexed, nextCursor: 'next' }
+      },
+    },
+  })
+  const exact: WorkspaceSearchResult = {
+    id: 'team/core-team/issue/onboarding-friction',
+    entityType: 'work-item',
+    title: '初回オンボーディングの離脱要因を減らす',
+    subtitle: 'onboarding-friction',
+    url: '/projects/refero/issues?teamId=core-team&issueId=onboarding-friction',
+    teamId: 'core-team',
+    projectId: 'refero',
+    highlights: [],
+  }
+  // The index has no document for the Work Item, as after a failed projection.
+  const response = await planningApiRequest('/api/collections/candidates?keyword=onboarding-friction')
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ schemaVersion: 1, results: [exact], nextCursor: 'next' })
+
+  // An indexed match is not repeated, and later pages read the index only.
+  indexed = [{ ...exact, title: 'Indexed title' }]
+  expect((await (await planningApiRequest('/api/collections/candidates?keyword=onboarding-friction')).json()).results)
+    .toEqual(indexed)
+  indexed = []
+  expect((await (await planningApiRequest('/api/collections/candidates?keyword=onboarding-friction&cursor=next')).json()).results)
+    .toEqual([])
+
+  // A Work Item the caller cannot read is never offered by its ID.
+  expect((await (await planningApiRequest('/api/collections/candidates?keyword=hidden-item')).json()).results).toEqual([])
+})
+
 /** One custom role and where it is assigned to the test member. */
 type TestRoleGrant = {
   /** Custom role ID. */
@@ -168,8 +208,8 @@ type TestRoleGrant = {
   /** Permissions of the role. */
   permissions: EnterprisePermissionId[]
   /** Assignment scope kind. */
-  kind: 'workspace' | 'team'
-  /** Scope target; the Workspace ID or a Team ID. */
+  kind: 'workspace' | 'team' | 'project'
+  /** Scope target; the Workspace ID, a Team ID, or a Project ID. */
   targetId: string
 }
 
@@ -252,5 +292,27 @@ test('does not let a Team-scoped Work Item grant change Workspace-wide Collectio
     expect((await planningApiRequest(`/api/collections/${collectionId}`, 'PATCH', { expectedRevision: revision, name: 'Renamed' })).status).toBe(403)
     expect((await planningApiRequest(`/api/collections/${collectionId}?expectedRevision=${revision}`, 'DELETE')).status).toBe(403)
     expect((await planningApiRequest(`/api/collections/${collectionId}/items/core-team/onboarding-friction`, 'PUT')).status).toBe(403)
+  }
+})
+
+test('does not let a Team or Project segment in a Collection item path select a narrower grant', async () => {
+  configureFakeProjectClients(false, {
+    directoryId: WORKSPACE_ID,
+    workspaceRole: 'admin',
+    projectAccesses: [],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const { collectionId } = await createCollection('Launch')
+  const itemsPath = `/api/collections/${collectionId}/items`
+  // `projects/refero` and `teams/core-team` are a Team ID and a Work Item ID here, not resources.
+  for (const grant of [
+    { roleId: 'custom:project-editor', permissions: ['work-items.read', 'work-items.write'], kind: 'project', targetId: 'refero' },
+    { roleId: 'custom:team-editor', permissions: ['work-items.read', 'work-items.write'], kind: 'team', targetId: 'core-team' },
+  ] satisfies TestRoleGrant[]) {
+    setTestAppDependencies({ enterpriseIdentity: await createWorkItemRoleIdentity(WORKSPACE_ID, [grant]) })
+    for (const path of [`${itemsPath}/projects/refero`, `${itemsPath}/teams/core-team`]) {
+      expect((await planningApiRequest(path, 'PUT')).status).toBe(403)
+      expect((await planningApiRequest(path, 'DELETE')).status).toBe(403)
+    }
   }
 })

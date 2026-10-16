@@ -19,6 +19,7 @@ export {
 } from './adapter-out/collections-store'
 export {
   CollectionError,
+  isWorkItemReferenceIdentifier,
   parseCreateCollectionInput,
   parseExpectedRevisionQuery,
   parseUpdateCollectionInput,

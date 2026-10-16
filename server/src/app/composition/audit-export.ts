@@ -9,6 +9,7 @@ import { S3AuditExportStore } from '../../modules/audit/adapter-out/s3/s3-audit-
 import { SqsAuditExportQueue } from '../../modules/audit/adapter-out/sqs/sqs-audit-export-queue'
 import {
   createAuditExportService,
+  type AuditExportEventCounter,
   type AuditExportEventReader,
   type AuditExportService,
 } from '../../modules/audit/audit-export'
@@ -16,13 +17,19 @@ import {
 /**
  * Creates the audit export service when its bucket and queue are configured.
  *
- * @param readEvents - Audit event reader shared with the synchronous API.
+ * @param events - Audit event reader shared with the synchronous API, and the consistent
+ * counter that verifies a finished scan.
  * @param environment - Runtime environment that names the bucket and queue.
  * @param isTenantActive - Optional tenant lifecycle check used by worker steps.
  * @returns The service, or undefined when asynchronous export is not deployed.
  */
 export function createConfiguredAuditExportService(
-  readEvents: AuditExportEventReader,
+  events: {
+    /** Index-backed reader shared with the synchronous API. */
+    readonly readEvents: AuditExportEventReader
+    /** Strongly consistent base-table counter. */
+    readonly countEvents: AuditExportEventCounter
+  },
   environment: ServerEnvironment = readServerEnvironment(),
   isTenantActive?: (workspaceId: string) => Promise<boolean>,
 ): AuditExportService | undefined {
@@ -35,7 +42,8 @@ export function createConfiguredAuditExportService(
       bucketName,
     }),
     queue: new SqsAuditExportQueue(createSqsClient(), queueUrl),
-    readEvents,
+    readEvents: events.readEvents,
+    countEvents: events.countEvents,
     ...(isTenantActive ? { isTenantActive } : {}),
   })
 }

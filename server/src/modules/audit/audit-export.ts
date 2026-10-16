@@ -3,6 +3,8 @@ import {
   assertValidAuditQueryFilters,
   auditEventsToNdjson,
   type AuditActorKind,
+  type AuditEventCountPage,
+  type AuditEventCountQuery,
   type AuditEventPage,
   type AuditEventQuery,
 } from './audit'
@@ -18,9 +20,24 @@ export const AUDIT_EXPORT_PART_BYTE_BUDGET = 32 * 1024 * 1024
 
 /**
  * Seconds a job waits after its snapshot time before reading events, so events
- * committed before the snapshot have propagated to the eventually consistent indexes.
+ * committed before the snapshot have usually propagated to the eventually consistent
+ * indexes. Completeness does not depend on it: the consistent count before completion does.
  */
 export const AUDIT_EXPORT_SETTLE_SECONDS = 30
+/**
+ * Index scans one job may run before it fails as incomplete.
+ *
+ * A scan whose event count disagrees with the consistent base-table count is discarded
+ * and started again, because the index had not yet received every event of the snapshot.
+ */
+export const AUDIT_EXPORT_MAX_SCAN_ATTEMPTS = 3
+/**
+ * Seconds without a job write after which reading the job schedules its next step again.
+ *
+ * Longer than the SQS maximum delay (900 seconds) plus the worker timeout (5 minutes), so
+ * a healthy chain always writes first; only a job whose continuation was lost is resumed.
+ */
+export const AUDIT_EXPORT_STALE_SECONDS = 20 * 60
 /** Largest number of events one export job may contain. */
 export const AUDIT_EXPORT_MAX_EVENTS = 1_000_000
 /**
@@ -143,6 +160,25 @@ export type AuditExportJob = {
   readonly parts: readonly AuditExportPart[]
   /** Opaque audit query cursor where the next part starts. */
   readonly nextCursor?: string
+  /** One-based index scan attempt; a failed completeness check starts the next one. */
+  readonly scanAttempt: number
+  /** Events written so far whose TTL cannot expire before the processing deadline. */
+  readonly durableEventCount: number
+  /**
+   * Consistent base-table count in progress after the index scan reached the snapshot.
+   * The job completes only when the final count equals `durableEventCount`.
+   */
+  readonly verification?: {
+    /** Durable matching events counted on the base table so far. */
+    readonly count: number
+    /** Opaque count cursor where the next page starts. */
+    readonly cursor?: string
+  }
+  /**
+   * Queue message that committed the latest step. A redelivery of that message finds its
+   * step already applied and only sends the continuation again.
+   */
+  readonly lastStepMessageId?: string
   /** Terminal failure reported to the requester. */
   readonly failure?: {
     /** Stable error code. */
@@ -293,6 +329,14 @@ export function parseAuditExportQueueMessage(body: string): AuditExportQueueMess
 export type AuditExportEventReader = (query: AuditEventQuery) => Promise<AuditEventPage>
 
 /**
+ * Counts one page of matching events on the base table with strongly consistent reads.
+ *
+ * @param query - Filters, durability threshold, and optional cursor.
+ * @returns The page count and the next cursor.
+ */
+export type AuditExportEventCounter = (query: AuditEventCountQuery) => Promise<AuditEventCountPage>
+
+/**
  * Failure returned to the API caller with a stable status and code.
  */
 export class AuditExportError extends Error {
@@ -326,6 +370,8 @@ export type AuditExportServiceDependencies = {
   readonly queue: AuditExportQueue
   /** Audit event reader shared with the synchronous API. */
   readonly readEvents: AuditExportEventReader
+  /** Consistent counter that verifies a finished index scan before the job completes. */
+  readonly countEvents: AuditExportEventCounter
   /** Clock used for timestamps. */
   readonly now?: () => Date
   /** Identifier factory used when no idempotency key is supplied. */
@@ -366,7 +412,7 @@ export type AuditExportRequest = {
 }
 
 /** Result of one processing step. */
-export type AuditExportStepResult = 'advanced' | 'completed' | 'deferred' | 'failed' | 'skipped'
+export type AuditExportStepResult = 'advanced' | 'completed' | 'deferred' | 'failed' | 'restarted' | 'skipped'
 
 /**
  * Asynchronous audit export operations.
@@ -446,6 +492,8 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         expiresAt: new Date(requestedAt.getTime() + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000).toISOString(),
         eventCount: 0,
         parts: [],
+        scanAttempt: 1,
+        durableEventCount: 0,
       }
       if (await dependencies.store.createJob(job) === 'created') {
         try {
@@ -490,7 +538,9 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      * @returns The job.
      */
     async getExport(workspaceId: string, exportId: string) {
-      return (await readVisibleJob(workspaceId, exportId)).job
+      const stored = await readVisibleJob(workspaceId, exportId)
+      await resumeIfStale(stored)
+      return stored.job
     },
 
     /**
@@ -534,9 +584,14 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      */
     async listExports(workspaceId: string) {
       const current = now()
-      return (await dependencies.store.listJobs(workspaceId, 20))
+      const jobs = (await dependencies.store.listJobs(workspaceId, 20))
         .filter((job) => job.workspaceId === workspaceId && !isExpired(job, current))
-        .map((job) => presentAuditExportJob(job, current))
+      for (const job of jobs) {
+        if (!isStale(job, current)) continue
+        const stored = await dependencies.store.readJob(workspaceId, job.exportId)
+        if (stored && stored.job.workspaceId === workspaceId) await resumeIfStale(stored)
+      }
+      return jobs.map((job) => presentAuditExportJob(job, current))
     },
 
     /**
@@ -570,13 +625,20 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     },
 
     /**
-     * Writes the next part of an export and schedules the following step.
+     * Runs the next step of an export and schedules the following one.
+     *
+     * A step first scans the eventually consistent index for the next part. Once the scan
+     * reaches the snapshot, it counts the same events on the base table with strongly
+     * consistent reads, and the job completes only when both counts agree. A disagreement
+     * means the index had not yet received an event of the snapshot, so the scan restarts.
      *
      * @param workspaceId - Workspace that owns the job.
      * @param exportId - Export identifier.
+     * @param messageId - Queue message that carries this step. A redelivery of the message
+     * that committed the current state only sends the continuation again.
      * @returns What the step did.
      */
-    async processExport(workspaceId: string, exportId: string): Promise<AuditExportStepResult> {
+    async processExport(workspaceId: string, exportId: string, messageId?: string): Promise<AuditExportStepResult> {
       if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) return 'skipped'
       const tenantActive = dependencies.isTenantActive ? await dependencies.isTenantActive(workspaceId) : true
       const stored = await dependencies.store.readJob(workspaceId, exportId)
@@ -597,91 +659,203 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         // would restart the bucket's expiration clock. Readers present the job as timed out.
         return 'skipped'
       }
+      if (messageId !== undefined && job.lastStepMessageId === messageId) {
+        // This delivery already committed its step, and its continuation may never have been
+        // sent. Advancing again would duplicate work; sending the continuation is enough.
+        await enqueueContinuation(job)
+        return 'advanced'
+      }
       const settleRemainingSeconds = Math.ceil(
         (Date.parse(job.snapshotAt) + settleSeconds * 1000 - current.getTime()) / 1000,
       )
       if (settleRemainingSeconds > 0) {
-        // Index reads are eventually consistent; wait until pre-snapshot events have propagated.
+        // Index reads are eventually consistent; most pre-snapshot events propagate within the delay.
         await dependencies.queue.enqueue(job.workspaceId, job.exportId, Math.min(settleRemainingSeconds, 900))
         return 'deferred'
       }
 
-      const events: AuditEventPage['events'] = []
-      let cursor = job.nextCursor
-      let hasMore = true
       let pages = 0
-      let approximateBytes = 0
+      let scanned = job
+      if (!job.verification) {
+        const events: AuditEventPage['events'] = []
+        let cursor = job.nextCursor
+        let hasMore = true
+        let approximateBytes = 0
+        try {
+          while (events.length < eventsPerPart && pages < pagesPerStep && approximateBytes < partByteBudget) {
+            const page = await dependencies.readEvents({
+              ...createSnapshotQuery(job),
+              direction: 'ascending',
+              limit: Math.min(AUDIT_EXPORT_QUERY_PAGE_SIZE, eventsPerPart - events.length),
+              ...(cursor ? { cursor } : {}),
+            })
+            pages += 1
+            events.push(...page.events)
+            for (const event of page.events) approximateBytes += JSON.stringify(event).length
+            cursor = page.nextCursor
+            if (!cursor) {
+              hasMore = false
+              break
+            }
+          }
+        } catch (error) {
+          return await failInvalidQuery(job, version, error, messageId)
+        }
+
+        if (job.eventCount + events.length > maxEvents) {
+          return await finish(job, version, failJob(
+            job,
+            now(),
+            'AuditExportTooLarge',
+            `Audit export exceeds ${maxEvents} events. Narrow the filters or period.`,
+          ), messageId)
+        }
+
+        if (events.length > 0 && job.parts.length >= maxParts) {
+          return await finish(job, version, failJob(
+            job,
+            now(),
+            'AuditExportTooManyParts',
+            `Audit export exceeds ${maxParts} parts. Narrow the filters or period.`,
+          ), messageId)
+        }
+
+        const parts = [...job.parts]
+        // Reading can take most of the Lambda timeout; never start a write past the deadline.
+        if (isPastProcessingDeadline(job, now()) || isExpired(job, now())) return 'skipped'
+        if (events.length > 0) {
+          const index = parts.length + 1
+          const part = await dependencies.store.putPart(
+            job.workspaceId,
+            job.exportId,
+            index,
+            await auditEventsToNdjson(events),
+          )
+          parts.push({ index, eventCount: events.length, ...part })
+        }
+        const durableAfter = durabilityThreshold(job)
+        const { nextCursor: _previousCursor, ...withoutCursor } = job
+        void _previousCursor
+        scanned = {
+          ...withoutCursor,
+          status: 'running',
+          parts,
+          eventCount: job.eventCount + events.length,
+          durableEventCount: job.durableEventCount +
+            events.filter((event) => event.expiresAt === undefined || event.expiresAt > durableAfter).length,
+          updatedAt: now().toISOString(),
+          ...(hasMore && cursor ? { nextCursor: cursor } : { verification: { count: 0 } }),
+        }
+        if (scanned.nextCursor !== undefined) return await finish(job, version, scanned, messageId)
+      }
+
+      // The index scan reached the snapshot; count the same events on the base table.
+      let verification = scanned.verification ?? { count: 0 }
+      let verified = false
       try {
-        while (events.length < eventsPerPart && pages < pagesPerStep && approximateBytes < partByteBudget) {
-          const page = await dependencies.readEvents({
-            workspaceId: job.workspaceId,
-            ...job.filters,
-            to: capAtSnapshot(job.filters.to, job.snapshotAt),
-            direction: 'ascending',
-            limit: Math.min(AUDIT_EXPORT_QUERY_PAGE_SIZE, eventsPerPart - events.length),
-            ...(cursor ? { cursor } : {}),
+        while (pages < pagesPerStep) {
+          const page = await dependencies.countEvents({
+            ...createSnapshotQuery(job),
+            durableAfter: durabilityThreshold(job),
+            ...(verification.cursor ? { cursor: verification.cursor } : {}),
           })
           pages += 1
-          events.push(...page.events)
-          for (const event of page.events) approximateBytes += JSON.stringify(event).length
-          cursor = page.nextCursor
-          if (!cursor) {
-            hasMore = false
+          verification = {
+            count: verification.count + page.count,
+            ...(page.nextCursor ? { cursor: page.nextCursor } : {}),
+          }
+          if (!page.nextCursor) {
+            verified = true
             break
           }
         }
       } catch (error) {
-        // Only filters the query layer rejects are terminal. Other TypeErrors, such as a
-        // malformed persisted audit row, propagate so the message retries and reaches the DLQ.
-        if ((error instanceof TypeError || error instanceof RangeError) && !areQueryFiltersValid(job)) {
-          return await finish(job, version, failJob(job, now(), 'AuditExportQueryInvalid', 'Audit export filters could not be evaluated.'))
-        }
-        throw error
+        return await failInvalidQuery(job, version, error, messageId)
       }
-
-      if (job.eventCount + events.length > maxEvents) {
+      const updatedAt = now().toISOString()
+      if (!verified) {
+        return await finish(job, version, { ...scanned, verification, updatedAt }, messageId)
+      }
+      const { verification: _verification, ...withoutVerification } = scanned
+      void _verification
+      if (verification.count === scanned.durableEventCount) {
+        return await finish(job, version, { ...withoutVerification, status: 'completed', updatedAt }, messageId)
+      }
+      if (scanned.scanAttempt >= AUDIT_EXPORT_MAX_SCAN_ATTEMPTS) {
         return await finish(job, version, failJob(
-          job,
+          scanned,
           now(),
-          'AuditExportTooLarge',
-          `Audit export exceeds ${maxEvents} events. Narrow the filters or period.`,
-        ))
+          'AuditExportIncomplete',
+          'Audit events of the snapshot were still arriving. Request the export again.',
+        ), messageId)
       }
-
-      if (events.length > 0 && job.parts.length >= maxParts) {
-        return await finish(job, version, failJob(
-          job,
-          now(),
-          'AuditExportTooManyParts',
-          `Audit export exceeds ${maxParts} parts. Narrow the filters or period.`,
-        ))
-      }
-
-      const parts = [...job.parts]
-      // Reading can take most of the Lambda timeout; never start a write past the deadline.
-      if (isPastProcessingDeadline(job, now()) || isExpired(job, now())) return 'skipped'
-      if (events.length > 0) {
-        const index = parts.length + 1
-        const stored = await dependencies.store.putPart(
-          job.workspaceId,
-          job.exportId,
-          index,
-          await auditEventsToNdjson(events),
-        )
-        parts.push({ index, eventCount: events.length, ...stored })
-      }
-      const { nextCursor: _previousCursor, ...withoutCursor } = job
-      void _previousCursor
-      const next: AuditExportJob = {
-        ...withoutCursor,
-        status: hasMore ? 'running' : 'completed',
-        parts,
-        eventCount: job.eventCount + events.length,
-        updatedAt: now().toISOString(),
-        ...(hasMore && cursor ? { nextCursor: cursor } : {}),
-      }
-      return await finish(job, version, next)
+      // The index missed events the base table already holds; discard the scan and start again.
+      return await finish(job, version, {
+        ...withoutVerification,
+        status: 'queued',
+        parts: [],
+        eventCount: 0,
+        durableEventCount: 0,
+        scanAttempt: scanned.scanAttempt + 1,
+        updatedAt,
+      }, messageId)
     },
+  }
+
+  /**
+   * Ends a step whose read failed: only filters the query layer rejects are terminal.
+   *
+   * Other errors, such as a malformed persisted audit row or a throttled read, propagate
+   * so the message retries and finally reaches the DLQ.
+   *
+   * @param job - Job state read at the start of the step.
+   * @param version - Version read at the start of the step.
+   * @param error - Error raised by the read.
+   * @param messageId - Queue message that carries this step.
+   * @returns The failed step result.
+   */
+  async function failInvalidQuery(
+    job: AuditExportJob,
+    version: string,
+    error: unknown,
+    messageId: string | undefined,
+  ): Promise<AuditExportStepResult> {
+    if ((error instanceof TypeError || error instanceof RangeError) && !areQueryFiltersValid(job)) {
+      return await finish(job, version, failJob(job, now(), 'AuditExportQueryInvalid', 'Audit export filters could not be evaluated.'), messageId)
+    }
+    throw error
+  }
+
+  /**
+   * Schedules the step that continues an unfinished job.
+   *
+   * @param job - Job to continue; a restarted (queued) scan waits for the settle delay again.
+   */
+  async function enqueueContinuation(job: AuditExportJob): Promise<void> {
+    if (job.status === 'queued') {
+      await dependencies.queue.enqueue(job.workspaceId, job.exportId, settleSeconds)
+      return
+    }
+    await dependencies.queue.enqueue(job.workspaceId, job.exportId)
+  }
+
+  /**
+   * Schedules an unfinished job again when no step has written it for a long time.
+   *
+   * A continuation can be lost when its send keeps failing until the delivering message
+   * reaches the DLQ. The job is first touched with a conditional write, so concurrent or
+   * repeated reads resume it once per stale period instead of starting several chains.
+   *
+   * @param stored - Job read with its version.
+   */
+  async function resumeIfStale(stored: StoredAuditExportJob): Promise<void> {
+    const { job, version } = stored
+    const current = now()
+    if (!isStale(job, current) || isExpired(job, current) || isPastProcessingDeadline(job, current)) return
+    if (dependencies.isTenantActive && !await dependencies.isTenantActive(job.workspaceId)) return
+    const touched: AuditExportJob = { ...job, updatedAt: current.toISOString() }
+    if (!await dependencies.store.replaceJob(touched, version)) return
+    await enqueueContinuation(touched)
   }
 
   /**
@@ -690,22 +864,32 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
    * @param current - Job state read at the start of the step.
    * @param version - Version read at the start of the step.
    * @param next - Next job state.
+   * @param messageId - Queue message that carries this step, recorded with the new state.
    * @returns What the step did.
    */
   async function finish(
     current: AuditExportJob,
     version: string,
     next: AuditExportJob,
+    messageId: string | undefined,
   ): Promise<AuditExportStepResult> {
     // Rewriting job.json restarts its lifecycle clock, so nothing is written past the deadline.
     const writeTime = now()
     if (isPastProcessingDeadline(current, writeTime) || isExpired(current, writeTime)) return 'skipped'
-    if (!await dependencies.store.replaceJob(next, version)) return 'skipped'
-    if (next.status === 'running') {
-      await dependencies.queue.enqueue(current.workspaceId, current.exportId)
-      return 'advanced'
+    const { lastStepMessageId: _previousMessage, ...withoutMessage } = next
+    void _previousMessage
+    const recorded: AuditExportJob = {
+      ...withoutMessage,
+      ...(messageId !== undefined && (next.status === 'running' || next.status === 'queued')
+        ? { lastStepMessageId: messageId }
+        : {}),
     }
-    return next.status === 'completed' ? 'completed' : 'failed'
+    if (!await dependencies.store.replaceJob(recorded, version)) return 'skipped'
+    if (recorded.status === 'running' || recorded.status === 'queued') {
+      await enqueueContinuation(recorded)
+      return recorded.status === 'running' ? 'advanced' : 'restarted'
+    }
+    return recorded.status === 'completed' ? 'completed' : 'failed'
   }
 }
 
@@ -883,6 +1067,46 @@ function capAtSnapshot(to: string | undefined, snapshotAt: string) {
 }
 
 /**
+ * Builds the filters every read of a job applies, capped at its snapshot time.
+ *
+ * The index scan and the consistent count use the same predicate, so their totals agree
+ * exactly when the scan saw every event of the snapshot.
+ *
+ * @param job - Stored job.
+ * @returns Workspace, filters, and upper bound.
+ */
+function createSnapshotQuery(job: AuditExportJob) {
+  return { workspaceId: job.workspaceId, ...job.filters, to: capAtSnapshot(job.filters.to, job.snapshotAt) }
+}
+
+/**
+ * Computes the TTL threshold of events the completeness check compares.
+ *
+ * DynamoDB TTL never deletes an item before its `expiresAt`, and the job writes nothing
+ * after its processing deadline, so an event expiring later stays readable for the whole
+ * job. Events that may expire mid-job are exported but left out of both counts, so a TTL
+ * deletion cannot hide a missing event.
+ *
+ * @param job - Stored job.
+ * @returns Epoch seconds of the processing deadline.
+ */
+function durabilityThreshold(job: AuditExportJob): number {
+  return Math.ceil((Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000) / 1000)
+}
+
+/**
+ * Checks whether an unfinished job has gone without a write for longer than any healthy step takes.
+ *
+ * @param job - Stored job.
+ * @param current - Current time.
+ * @returns Whether the job's continuation may have been lost.
+ */
+function isStale(job: AuditExportJob, current: Date): boolean {
+  return (job.status === 'queued' || job.status === 'running') &&
+    Date.parse(job.updatedAt) + AUDIT_EXPORT_STALE_SECONDS * 1000 <= current.getTime()
+}
+
+/**
  * Checks whether a job is past its retention period.
  *
  * @param job - Job to check.
@@ -901,7 +1125,7 @@ function isExpired(job: AuditExportJob, current: Date) {
  */
 function areQueryFiltersValid(job: AuditExportJob): boolean {
   try {
-    assertValidAuditQueryFilters({ workspaceId: job.workspaceId, ...job.filters, to: capAtSnapshot(job.filters.to, job.snapshotAt) })
+    assertValidAuditQueryFilters(createSnapshotQuery(job))
     return true
   } catch (error) {
     if (error instanceof TypeError || error instanceof RangeError) return false
@@ -951,8 +1175,10 @@ function presentAuditExportJob(job: AuditExportJob, current: Date): AuditExportJ
  * @returns The failed job state.
  */
 function failJob(job: AuditExportJob, at: Date, code: string, message: string): AuditExportJob {
-  const { nextCursor: _cursor, ...rest } = job
+  const { nextCursor: _cursor, verification: _verification, lastStepMessageId: _message, ...rest } = job
   void _cursor
+  void _verification
+  void _message
   return { ...rest, status: 'failed', updatedAt: at.toISOString(), failure: { code, message } }
 }
 
@@ -1016,14 +1242,31 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
       sha256: requireString(part.sha256, 'part.sha256'),
     }
   })
-  // Only a running job continues from a cursor, and it always has one; any other combination
-  // would restart the query or resume a finished job, so it is corrupt.
+  // Only a running job continues, either from a scan cursor or from a verification count,
+  // and never both; any other combination would restart the query, skip the completeness
+  // check, or resume a finished job, so it is corrupt.
   const nextCursor = record.nextCursor === undefined ? undefined : requireString(record.nextCursor, 'nextCursor')
-  if ((status === 'running') !== (nextCursor !== undefined && nextCursor !== '')) {
+  if (nextCursor === '') throw new TypeError('Audit export job status does not match its cursor.')
+  const verification = record.verification === undefined
+    ? undefined
+    : parseVerification(requireObject(record.verification, 'Audit export verification'))
+  if ((status === 'running') !== ((nextCursor !== undefined) !== (verification !== undefined))) {
     throw new TypeError('Audit export job status does not match its cursor.')
   }
+  if (status !== 'running' && (nextCursor !== undefined || verification !== undefined)) {
+    throw new TypeError('Audit export job status does not match its cursor.')
+  }
+  const scanAttempt = requireCount(record.scanAttempt, 'scanAttempt')
+  if (scanAttempt < 1) throw new TypeError('Audit export scanAttempt must be at least 1.')
+  const durableEventCount = requireCount(record.durableEventCount, 'durableEventCount')
+  if (durableEventCount > eventCount) {
+    throw new TypeError('Audit export job has more durable events than events.')
+  }
+  const lastStepMessageId = record.lastStepMessageId === undefined
+    ? undefined
+    : requireString(record.lastStepMessageId, 'lastStepMessageId')
   // A queued job has not read anything yet; stored progress would be appended to a fresh scan.
-  if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0)) {
+  if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0 || durableEventCount !== 0)) {
     throw new TypeError('Queued audit export job already has progress.')
   }
   // The event limit is enforced from the job total, so it must account for every part.
@@ -1048,10 +1291,28 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     eventCount,
     parts: parsedParts,
     ...(nextCursor === undefined ? {} : { nextCursor }),
+    scanAttempt,
+    durableEventCount,
+    ...(verification === undefined ? {} : { verification }),
+    ...(lastStepMessageId === undefined ? {} : { lastStepMessageId }),
     ...(failure
       ? { failure: { code: requireString(failure.code, 'failure.code'), message: requireString(failure.message, 'failure.message') } }
       : {}),
   }
+}
+
+/**
+ * Validates a stored completeness count in progress.
+ *
+ * @param record - Stored verification object.
+ * @returns The validated verification state.
+ */
+function parseVerification(record: Record<string, unknown>): NonNullable<AuditExportJob['verification']> {
+  const count = requireCount(record.count, 'verification.count')
+  if (record.cursor === undefined) return { count }
+  const cursor = requireString(record.cursor, 'verification.cursor')
+  if (!cursor) throw new TypeError('Audit export verification has an empty cursor.')
+  return { count, cursor }
 }
 
 /**

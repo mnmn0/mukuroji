@@ -1188,10 +1188,14 @@ async function authenticateEnterpriseServiceAccount(
 export async function evaluateEnterpriseRequestAccess(
   input: EnterpriseRequestAccessInput,
 ): Promise<EnterpriseRequestAccess> {
-  const resource = input.resource ?? await resolveEnterpriseAuthorizationResource(
-    input.workspaceId,
-    input.context,
-  )
+  // A Workspace-wide route is evaluated at the Workspace even when a caller supplies a
+  // narrower resource, so a Team or Project grant can never count as its direct grant.
+  const resource = input.context !== undefined && requiresEnterpriseDirectGrant(input.context.req.path)
+    ? { workspaceId: input.workspaceId, kind: 'workspace' as const }
+    : input.resource ?? await resolveEnterpriseAuthorizationResource(
+      input.workspaceId,
+      input.context,
+    )
   if (!input.requiredPermissions || input.requiredPermissions.length === 0) {
     return {
       allowed: input.context === undefined,
@@ -1414,6 +1418,11 @@ async function resolveEnterpriseAuthorizationResource(
   context: Context | undefined,
 ): Promise<EnterpriseAuthorizationResource> {
   const path = context?.req.path
+  // Workspace-wide routes are authorized at the Workspace; Team or Project segments in their
+  // paths, such as a Collection item's Team ID, are data and must not pick a narrower resource.
+  if (path !== undefined && requiresEnterpriseDirectGrant(path)) {
+    return { workspaceId, kind: 'workspace' as const }
+  }
   const planningUpdateResource = await resolvePlanningUpdateAuthorizationResource(
     workspaceId,
     context,

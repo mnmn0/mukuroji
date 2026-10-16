@@ -114,8 +114,23 @@ export type AutomationInboundWebhookDeliveryResult = {
   acceptedAt?: string
 }
 
+/** Triage delivery whose receipt committed, resolvable after its endpoint stops accepting new deliveries. */
+export type AutomationAcceptedTriageWebhookDelivery = {
+  /** Endpoint record the delivery was accepted by, in its current status. */
+  endpoint: AutomationInboundWebhookEndpointRecord
+  /** Audit outbox event identifier recorded with the receipt. */
+  eventId: string
+  /** SHA-256 fingerprint of the raw request bytes the receipt accepted. */
+  bodyFingerprint: string
+  /** ISO time the delivery was first accepted. */
+  acceptedAt: string
+}
+
 /** Durable endpoint, delivery, and secret-cleanup capability for inbound webhooks. */
-export interface AutomationInboundWebhookPort<TAuditMutation = unknown> {
+export interface AutomationInboundWebhookPort<
+  TAuditMutation = unknown,
+  TConditionMutation = TAuditMutation,
+> {
   /** Lists public endpoint views in a Workspace. */
   listInboundWebhookEndpoints(
     workspaceId: string,
@@ -134,13 +149,16 @@ export interface AutomationInboundWebhookPort<TAuditMutation = unknown> {
    *
    * A replay of an existing operation returns it without calling `validateNewEndpoint`,
    * so state that changed after the original request cannot turn a retry into an error.
+   * The condition checks `validateNewEndpoint` returns join the reservation transaction, so
+   * state it validated, such as the routing Team, cannot change before the endpoint commits.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param actorId - Caller creating the endpoint.
    * @param input - Validated create input.
    * @param idempotencyKey - Client idempotency key.
    * @param endpointBaseUrl - Public base URL of inbound webhooks.
-   * @param validateNewEndpoint - Checks run only before reserving a new endpoint.
+   * @param validateNewEndpoint - Checks run only before reserving a new endpoint; returns
+   *   adapter-owned condition checks committed with the reservation.
    * @returns The new or replayed provisioning operation.
    */
   reserveCreateInboundWebhookEndpoint(
@@ -149,7 +167,7 @@ export interface AutomationInboundWebhookPort<TAuditMutation = unknown> {
     input: CreateAutomationInboundWebhookEndpointInput,
     idempotencyKey: string,
     endpointBaseUrl: string,
-    validateNewEndpoint?: () => Promise<void>,
+    validateNewEndpoint?: () => Promise<readonly TConditionMutation[] | void>,
   ): Promise<AutomationInboundWebhookProvisioning>
   /** Atomically reserves a secret-rotation provisioning operation. */
   reserveRotateInboundWebhookEndpoint(
@@ -182,11 +200,27 @@ export interface AutomationInboundWebhookPort<TAuditMutation = unknown> {
     endpointId: string,
     input: AutomationInboundWebhookLifecycleInput,
   ): Promise<AutomationInboundWebhookEndpointRecord>
-  /** Atomically records endpoint guards, replay receipts, and the audit outbox event. */
+  /**
+   * Atomically records endpoint guards, replay receipts, and the audit outbox event.
+   *
+   * A Triage-purpose delivery also records a recovery marker under the endpoint's opaque
+   * identifier, so its Triage entry can still be completed after the endpoint is revoked.
+   */
   recordInboundWebhookDelivery(
     endpoint: AutomationInboundWebhookEndpointRecord,
     input: AutomationInboundWebhookDeliveryInput<TAuditMutation>,
   ): Promise<AutomationInboundWebhookDeliveryResult>
+  /**
+   * Resolves a Triage delivery whose receipt already committed, whatever the endpoint's status.
+   *
+   * @param opaqueEndpointId - Public endpoint identifier from the request path.
+   * @param idempotencyKey - Sender idempotency key of the delivery.
+   * @returns The accepted delivery, or undefined when no receipt was committed for it.
+   */
+  resolveAcceptedTriageWebhookDelivery(
+    opaqueEndpointId: string,
+    idempotencyKey: string,
+  ): Promise<AutomationAcceptedTriageWebhookDelivery | undefined>
   /** Lists due durable secret-cleanup intents from one schedule shard. */
   listDueInboundWebhookSecretCleanups(
     scheduleShard: string,
