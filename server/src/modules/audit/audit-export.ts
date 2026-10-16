@@ -1022,6 +1022,10 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   if ((status === 'running') !== (nextCursor !== undefined && nextCursor !== '')) {
     throw new TypeError('Audit export job status does not match its cursor.')
   }
+  // A queued job has not read anything yet; stored progress would be appended to a fresh scan.
+  if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0)) {
+    throw new TypeError('Queued audit export job already has progress.')
+  }
   // The event limit is enforced from the job total, so it must account for every part.
   if (parsedParts.reduce((total, part) => total + part.eventCount, 0) !== eventCount) {
     throw new TypeError('Audit export job event count does not match its parts.')

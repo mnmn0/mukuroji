@@ -66,7 +66,6 @@ import { IssuePriorityBadge } from './TeamIssueBadges'
 import { readContributorDraftSubmission } from '../../work-items/model/contributorAssignments'
 import {
   WorkItemContributorsEditor,
-  type ContributorDraftSubmitError,
 } from '../../work-items/ui/WorkItemContributorsEditor'
 import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import {
@@ -540,7 +539,6 @@ function IssueDetailContent({
   const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
   // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
   const contributorDraftState = useContributorDraft(editorIdentity)
-  const [contributorDraftError, setContributorDraftError] = useState<ContributorDraftSubmitError>()
 
   /** Submits the visible Team Issue controls through the external editor form. */
   const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
@@ -586,10 +584,10 @@ function IssueDetailContent({
     }
     const contributorSubmission = readContributorDraftSubmission(formData)
     if (contributorSubmission && 'error' in contributorSubmission) {
-      setContributorDraftError(contributorSubmission)
+      contributorDraftState.setDraft((current) => ({ ...current, submitError: contributorSubmission }))
       return
     }
-    setContributorDraftError(undefined)
+    contributorDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
     const contributorDraft = contributorSubmission
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
@@ -774,7 +772,6 @@ function IssueDetailContent({
       memberOptions={contributorOptions}
       ownerUserId={issue.assigneeUserId}
       readOnly={isIssueReadOnly}
-      {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
     />
   )
 
