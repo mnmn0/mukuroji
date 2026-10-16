@@ -121,6 +121,12 @@ describe('isStoredContributorAssignmentList', () => {
     ['an invalid status', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'blocked' }]],
     ['invalid effort', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'planned', plannedEffortMinutes: '60' }]],
     ['a duplicate assignment ID', [...existing, { ...existing[0], memberUserId: 'sam@example.com' }]],
+    ['an untrimmed member', [{ assignmentId: 'c'.repeat(32), memberUserId: ' sam@example.com', status: 'planned' }]],
+    ['an uppercase member', [{ assignmentId: 'c'.repeat(32), memberUserId: 'Sam@example.com', status: 'planned' }]],
+    ['a whitespace-only member', [{ assignmentId: 'c'.repeat(32), memberUserId: '   ', status: 'planned' }]],
+    ['a member with a control character', [{ assignmentId: 'c'.repeat(32), memberUserId: 'sam\u0000@example.com', status: 'planned' }]],
+    ['an overlong member', [{ assignmentId: 'c'.repeat(32), memberUserId: `${'a'.repeat(251)}@x.com`, status: 'planned' }]],
+    ['a malformed job role ID', [{ assignmentId: 'c'.repeat(32), jobRoleId: ' qa', status: 'planned' }]],
     ['an unknown stored field', [{ assignmentId: 'c'.repeat(32), jobRoleId: 'qa', status: 'planned', note: 'x' }]],
     ['a duplicate member', [...existing, { assignmentId: 'c'.repeat(32), memberUserId: 'Alex@example.com', status: 'planned' }]],
   ])('rejects %s', (_label, value) => {

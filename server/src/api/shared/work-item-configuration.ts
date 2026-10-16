@@ -438,6 +438,13 @@ export function assertWorkItemConfigurationUsage(
     if (!customFieldValueRecordsEqual(storedValues, normalizedValues)) {
       throw new Error('stored custom field values require normalization or scope cleanup')
     }
+    // Job roles are retired by archiving; a role still assigned to a contributor must stay defined.
+    const jobRoleIds = new Set((configuration.jobRoles ?? []).map((role) => role.id))
+    const orphanedAssignment = workItem.contributorAssignments?.find((assignment) =>
+      assignment.jobRoleId !== undefined && !jobRoleIds.has(assignment.jobRoleId))
+    if (orphanedAssignment) {
+      throw new Error(`job role "${orphanedAssignment.jobRoleId}" is still assigned to a contributor`)
+    }
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'stored values are incompatible'
     throw new WorkItemConfigurationError(
