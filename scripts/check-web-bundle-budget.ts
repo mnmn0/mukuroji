@@ -124,6 +124,11 @@ export function checkBundleBudget(
  */
 export function measureBuiltFiles(directory: string): BuiltFileSize[] {
   const files: BuiltFileSize[] = []
+  /**
+   * Recursively records the gzip size of every file below a directory.
+   *
+   * @param current - Directory being visited.
+   */
   const walk = (current: string) => {
     for (const entry of readdirSync(current)) {
       const path = join(current, entry)
