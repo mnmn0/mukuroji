@@ -89,6 +89,27 @@ const adminHeaders = () => ({
   'Content-Type': 'application/json',
 })
 
+test('keeps the export request receipt past every artifact even with a short audit retention', async () => {
+  const previous = process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+  process.env.MUKUROJI_AUDIT_RETENTION_DAYS = '1'
+  try {
+    const { accessEvents } = configureExports()
+    const created = await app.request('/api/audit/exports', {
+      method: 'POST',
+      headers: { ...adminHeaders(), 'Idempotency-Key': 'short-retention' },
+      body: JSON.stringify({ filters: {} }),
+    })
+    expect(created.status).toBe(202)
+    const requested = accessEvents[0]
+    if (requested?.expiresAt === undefined) throw new Error('The export request event was not recorded with a TTL.')
+    const retainedSeconds = requested.expiresAt - Math.floor(Date.parse(requested.occurredAt) / 1000)
+    expect(retainedSeconds).toBeGreaterThanOrEqual(17 * 86_400)
+  } finally {
+    if (previous === undefined) delete process.env.MUKUROJI_AUDIT_RETENTION_DAYS
+    else process.env.MUKUROJI_AUDIT_RETENTION_DAYS = previous
+  }
+})
+
 test('requests, reports, and downloads an asynchronous audit export', async () => {
   const { accessEvents, queued, service } = configureExports()
 

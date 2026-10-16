@@ -46,6 +46,14 @@ const AUDIT_EXPORT_QUERY_PAGE_SIZE = 100
 /** Longest accepted `Idempotency-Key` header. */
 const AUDIT_EXPORT_IDEMPOTENCY_KEY_MAX_LENGTH = 255
 
+/**
+ * Minimum days the `audit.export-requested` event is kept, whatever the audit retention.
+ *
+ * The event is the key's receipt, so it must outlive the job (7 days) and every artifact the
+ * bucket lifecycle can still hold (8 days after the last write plus 1 day for old versions).
+ */
+export const AUDIT_EXPORT_RECEIPT_RETENTION_DAYS = 17
+
 /** Maximum number of part download links returned by one download request. */
 export const AUDIT_EXPORT_DOWNLOAD_LINKS_PER_PAGE = 100
 /** Filter fields an export job may store. */
@@ -503,6 +511,10 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           'Idempotency-Key was already used for a different audit export.',
         )
       }
+      if (existing && isExpired(existing.job, now())) {
+        // The job object outlives its API lifetime until the bucket lifecycle removes it.
+        throw auditExportIdempotencyKeyExpired()
+      }
       return { exportId, filters, requestFingerprint: createRequestFingerprint(filters), jobExists: existing !== undefined }
     },
 
@@ -633,6 +645,8 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       }
 
       const parts = [...job.parts]
+      // Reading can take most of the Lambda timeout; never start a write past the deadline.
+      if (isPastProcessingDeadline(job, now()) || isExpired(job, now())) return 'skipped'
       if (events.length > 0) {
         const index = parts.length + 1
         const stored = await dependencies.store.putPart(
@@ -670,6 +684,9 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     version: string,
     next: AuditExportJob,
   ): Promise<AuditExportStepResult> {
+    // Rewriting job.json restarts its lifecycle clock, so nothing is written past the deadline.
+    const writeTime = now()
+    if (isPastProcessingDeadline(current, writeTime) || isExpired(current, writeTime)) return 'skipped'
     if (!await dependencies.store.replaceJob(next, version)) return 'skipped'
     if (next.status === 'running') {
       await dependencies.queue.enqueue(current.workspaceId, current.exportId)
@@ -677,6 +694,32 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     }
     return next.status === 'completed' ? 'completed' : 'failed'
   }
+}
+
+/**
+ * Builds the error for a key whose export already expired.
+ *
+ * @returns The stable 409 error.
+ */
+export function auditExportIdempotencyKeyExpired(): AuditExportError {
+  return new AuditExportError(
+    409,
+    'AuditExportIdempotencyKeyExpired',
+    'This Idempotency-Key belongs to an export that has expired. Use a new key.',
+  )
+}
+
+/**
+ * Reads a stored ISO timestamp.
+ *
+ * @param value - Stored value.
+ * @param label - Field name for errors.
+ * @returns The timestamp text.
+ */
+function requireInstant(value: unknown, label: string): string {
+  const text = requireString(value, label)
+  if (!Number.isFinite(Date.parse(text))) throw new TypeError(`${label} must be an ISO timestamp.`)
+  return text
 }
 
 /**
@@ -919,6 +962,12 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   const failure = record.failure === undefined ? undefined : requireObject(record.failure, 'Audit export failure')
   const exportId = requireString(record.exportId, 'exportId')
   if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) throw new TypeError('Audit export job has an invalid ID.')
+  // Deadlines are enforced from these times, so an unreadable or reordered pair is corrupt.
+  const createdAt = requireInstant(record.createdAt, 'createdAt')
+  const expiresAt = requireInstant(record.expiresAt, 'expiresAt')
+  if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
+    throw new TypeError('Audit export job expires before it was created.')
+  }
   return {
     schemaVersion: 1,
     workspaceId: requireString(record.workspaceId, 'workspaceId'),
@@ -926,14 +975,14 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     status,
     filters: parseFilters(filters),
     requestFingerprint: requireString(record.requestFingerprint, 'requestFingerprint'),
-    snapshotAt: requireString(record.snapshotAt, 'snapshotAt'),
+    snapshotAt: requireInstant(record.snapshotAt, 'snapshotAt'),
     requestedBy: {
       userKey: requireString(requestedBy.userKey, 'requestedBy.userKey'),
       displayName: requireString(requestedBy.displayName, 'requestedBy.displayName'),
     },
-    createdAt: requireString(record.createdAt, 'createdAt'),
-    updatedAt: requireString(record.updatedAt, 'updatedAt'),
-    expiresAt: requireString(record.expiresAt, 'expiresAt'),
+    createdAt,
+    updatedAt: requireInstant(record.updatedAt, 'updatedAt'),
+    expiresAt,
     eventCount: requireCount(record.eventCount, 'eventCount'),
     parts: parts.map((entry: unknown) => {
       const part = requireObject(entry, 'Audit export part')
