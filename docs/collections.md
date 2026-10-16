@@ -17,17 +17,17 @@ Collection は workflow、assignee、status を持たず、Work Item の所有 T
 - Collection は閲覧権限を広げません。Item の一覧は、Work Item detail と同じ Team / primary Project の viewer 判定を通った Work Item だけを返し、読めない Work Item は存在を示さずに省きます。
 - Work Item の追加と参照の削除には、操作する人がその Work Item を読める必要があります。読めない Work Item と存在しない Work Item は同じ `404 CollectionWorkItemNotFound` を返すため、ID を推測して隠れた参照の有無を確かめることはできません。
 - Collection から開いた Work Item は、通常の canonical Work Item detail と mutation を使います。Collection ごとの別データは作りません。
-- Work Item の追加候補は Workspace 検索（`/api/search`、`entityTypes: ["work-item"]`）の keyword 検索で探します。検索は権限で絞り込まれた cursor pagination なので、大きな Workspace でも全 Work Item を一度に読み込みません。
+- Work Item の追加候補は Workspace 検索（`/api/search`、`entityTypes: ["work-item"]`）の keyword 検索で探します。検索は権限で絞り込まれた cursor pagination なので、大きな Workspace でも全 Work Item を一度に読み込みません。すでに Collection に入っている Work Item は候補数に数えずに次の page を読みます（最大 10 page）。
 - 追加・削除の可視性確認と書き込みは同じ transaction ではありません。確認直後に権限が変わって参照が残っても、一覧は読むたびに可視性を再判定するため、読めない Work Item は表示されません。
 - Team ID と Work Item ID は Collection 側で形式を狭めず、Planning と同じ canonical な識別子（前後に空白がなく 256 文字以内、制御文字なし。Unicode や `/` を含む ID も可）を受け付けます。
 
 ## 保存
 
 Collection は既存の Planning table に `COLLECTION#<collectionId>` row として保存し、参照する Work Item の `teamId` / `issueId` を最大 200 件まで row 内に持ちます。
-Workspace あたりの Collection は 200 件までです。上限は `COLLECTION_COUNT` counter row を作成・削除と同じ transaction で条件付き更新して強制し、同時作成でも超えません。
+Workspace あたりの Collection は 200 件までです。保存済み row の参照が 200 件を超えている場合は破損として扱い、読み取りを `502 CollectionCorruptState` で止めます。上限は `COLLECTION_COUNT` counter row を作成・削除と同じ transaction で条件付き更新して強制し、同時作成でも超えません。
 
 - 作成は `Idempotency-Key` header を必須とし、同じ key の再送は最初に作った Collection を返します。作成時の request fingerprint を row に保存するため、その後に名前変更や Work Item の追加があっても再送は成功します。
-- 削除すると同じ transaction で `COLLECTION_DELETED#<collectionId>` marker を残します。削除後に元の作成 request を再送しても Collection は復活せず、`409 CollectionDeleted` を返します。作成 transaction は marker が無いことを条件に含めます。
+- 削除すると同じ transaction で `COLLECTION_DELETED#<collectionId>` marker を残します。削除後に元の作成 request を再送しても Collection は復活せず、`409 CollectionDeleted` を返します。Web はこの応答で保持していた idempotency key を破棄し、次の作成操作は新しい key で送ります。作成 transaction は marker が無いことを条件に含めます。
 - 名前変更と削除は `expectedRevision` による optimistic concurrency で行い、古い revision は `409 CollectionConflict` で拒否します。
 - Work Item の追加と削除も revision 条件付きで書き込み、同じ Work Item の再追加・未登録 Work Item の削除は変更なしとして扱います。
 - すべての書き込みは、呼び出した member の現在の Workspace membership を同じ DynamoDB transaction の条件として確認します。membership の条件が失敗した場合は revision の競合ではなく `403 CollectionAuthorizationChanged` を返します。

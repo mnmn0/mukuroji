@@ -32,3 +32,14 @@ export function toCollectionCandidates(results: readonly WorkspaceSearchResult[]
   }
   return candidates
 }
+
+/**
+ * Builds the key that identifies one Work Item reference.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item identifier.
+ * @returns A key that cannot collide between different references.
+ */
+export function collectionCandidateKey(teamId: string, issueId: string): string {
+  return JSON.stringify([teamId, issueId])
+}

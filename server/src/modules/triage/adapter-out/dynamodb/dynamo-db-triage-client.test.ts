@@ -2434,6 +2434,23 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
+  test('runs the new-entry check only before admitting a fresh webhook entry', async () => {
+    const harness = createHarness([{}])
+    try {
+      await expect(harness.client.createWebhookEntry(
+        'workspace-1',
+        'support',
+        { id: 'webhook-1', name: 'Status page' },
+        { eventId: 'evt-2', title: 'T', body: 'B', requesterDisplayName: 'Status page' },
+        { key: 'delivery-2', fingerprint: createTriageInputFingerprint({ eventId: 'evt-2' }) },
+        async () => { throw new Error('Team was archived') },
+      )).rejects.toThrow('Team was archived')
+      expect(harness.commands).toHaveLength(1)
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('replays an existing manual source after a response is lost', async () => {
     const fingerprint = createTriageInputFingerprint({
       workspaceId: 'workspace-1',

@@ -149,7 +149,10 @@ replay、active tenant の検証を通る。その後:
 - delivery receipt は payload を含まない `triage.webhook-received` audit event として記録する。
   Automation rule が評価する `webhook.received` は作らないため、Triage 用 endpoint は Automation を
   起動しない。Automation rule の webhook trigger に `triage` endpoint は指定できない。
-- routing Team が delivery 時点でも存在することを確認してから、`webhook` source の Entry を作る。
+- 新しい event では routing Team が delivery 時点でも存在することを確認してから、`webhook` source の Entry を作る。
+  すでに受け付けた event の再配送は Team の確認より先に元の Entry を返すため、その後 Team が無くなっても
+  送信側は元の `triageEntryId` を受け取れる。Response は `{ eventId, triageEntryId }`
+  （`AutomationInboundWebhookDeliveryResponse`）。
   Source identity は `<endpointId>:<eventId>` で、同じ event と同じ envelope の再配送は元の Entry を
   返し、同じ event に異なる envelope は `409 TriageSourceConflict` にする。Response 消失後の再送も
   同じ Entry を返す。

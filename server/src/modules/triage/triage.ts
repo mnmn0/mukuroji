@@ -282,6 +282,7 @@ export interface TriageClient {
    * @param endpoint The verified inbound webhook endpoint.
    * @param input The validated webhook envelope.
    * @param idempotency Replay protection bound to the envelope.
+   * @param validateNewEntry Checks run only when no entry exists for the source yet.
    * @returns The created or replayed entry receipt.
    */
   createWebhookEntry(
@@ -290,6 +291,7 @@ export interface TriageClient {
     endpoint: TriageWebhookEndpointReference,
     input: CreateWebhookTriageEntryInput,
     idempotency: TriageIdempotency,
+    validateNewEntry?: () => Promise<void>,
   ): Promise<TriageMutationReceipt>
   /** Lists source entries attached to a Work Item.
    *

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import {
   type AutomationAction,
   type AutomationExecutionStatus,
+  type AutomationInboundWebhookDeliveryResponse,
   type AutomationTemplateApplication,
   type AutomationValue,
   type BulkOperation,
@@ -2064,7 +2065,6 @@ async function deliverTriageWebhook(
     const teamId = endpoint.triageRouting?.teamId
     if (!teamId) throw automationInboundWebhookUnavailable()
     const envelope = readWebhookTriageEnvelope(payload)
-    await requireActiveTriageRoutingTeam(endpoint.workspaceId, teamId)
     const auditTableName = getConfiguredAuditTableName()
     if (!auditTableName) throw automationInboundWebhookUnavailable()
     const path = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
@@ -2101,8 +2101,11 @@ async function deliverTriageWebhook(
       { id: endpoint.id, name: endpoint.name },
       envelope,
       { key: delivery.idempotencyKey, fingerprint: createTriageInputFingerprint(envelope) },
+      // A redelivery of an admitted event replays its entry even if the Team changed since.
+      () => requireActiveTriageRoutingTeam(endpoint.workspaceId, teamId),
     )
-    return c.json({ eventId: recorded.eventId, triageEntryId: receipt.entry.id }, 202)
+    const response: AutomationInboundWebhookDeliveryResponse = { eventId: recorded.eventId, triageEntryId: receipt.entry.id }
+    return c.json(response, 202)
   } catch (error) {
     if (error instanceof TriageError) return toTriageErrorResponse(c, error)
     throw error

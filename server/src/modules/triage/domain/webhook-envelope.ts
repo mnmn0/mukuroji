@@ -25,7 +25,7 @@ export function readWebhookTriageEnvelope(value: unknown): CreateWebhookTriageEn
   if (!isPlainRecord(requester) || Object.keys(requester).some((key) => !REQUESTER_KEYS.has(key))) {
     throw invalidEnvelope('requester must contain only name and email.')
   }
-  const email = requester.email === undefined ? undefined : readText(requester.email, 'requester.email', 320)
+  const email = requester.email === undefined ? undefined : readEmail(requester.email)
   return {
     eventId: readText(value.eventId, 'eventId', 200),
     title: readText(value.title, 'title', 500),
@@ -48,6 +48,21 @@ function readText(value: unknown, field: string, maxLength: number): string {
   const text = value.trim()
   if (!text || text.length > maxLength) throw invalidEnvelope(`${field} must be 1 to ${maxLength} characters.`)
   return text
+}
+
+/**
+ * Reads and normalizes the optional requester email.
+ *
+ * The envelope is validated before the delivery is recorded, so an address the entry
+ * would reject must fail here instead of consuming the delivery's idempotency key.
+ *
+ * @param value - Untrusted value.
+ * @returns The lowercased address.
+ */
+function readEmail(value: unknown): string {
+  const email = readText(value, 'requester.email', 320).toLowerCase()
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(email)) throw invalidEnvelope('requester.email must be an email address.')
+  return email
 }
 
 /**

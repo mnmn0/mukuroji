@@ -83,6 +83,13 @@ describe('CollectionsWorkspace', () => {
     expect(empty).not.toContain('Add a Work Item')
   })
 
+  test('shows a permission-denied state instead of a retryable failure', () => {
+    const markup = render({ accessDenied: true, collections: undefined, collectionsFailed: true })
+    expect(markup).toContain('You do not have permission to view Collections.')
+    expect(markup).not.toContain('>Retry</button>')
+    expect(markup).not.toContain('view-only access')
+  })
+
   test('hides every change control for view-only members', () => {
     const markup = render({ canEdit: false })
     expect(markup).toContain('You have view-only access')
@@ -137,6 +144,7 @@ describe('Collection API', () => {
   test('maps failures to actionable messages', () => {
     expect(resolveCollectionErrorMessageKey(409, 'CollectionConflict')).toBe('collections.error.conflict')
     expect(resolveCollectionErrorMessageKey(409, 'CollectionItemLimitReached')).toBe('collections.error.limit')
+    expect(resolveCollectionErrorMessageKey(409, 'CollectionDeleted')).toBe('collections.error.createdDeleted')
     expect(resolveCollectionErrorMessageKey(404, 'CollectionWorkItemNotFound')).toBe('collections.error.notFound')
     expect(resolveCollectionErrorMessageKey(403, 'CollectionAuthorizationChanged')).toBe('collections.error.denied')
     expect(resolveCollectionErrorMessageKey(undefined, undefined)).toBe('collections.error.generic')

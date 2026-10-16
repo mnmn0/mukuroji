@@ -631,6 +631,8 @@ export type AutomationInboundWebhookSecretResponse = {
 export type AutomationInboundWebhookDeliveryResponse = {
   /** Audit outbox に保存した deterministic event ID です。 */
   eventId: string
+  /** Triage purpose の endpoint が作成または再送で返した Triage entry ID です。Automation purpose では省略します。 */
+  triageEntryId?: string
 }
 
 /** Missed recurrence の扱いです。 */
