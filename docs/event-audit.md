@@ -171,6 +171,7 @@ system admin または `audit.export` 権限を要求する。
 
 job と worker の動作は次のとおり。
 
+- 要求の audit event を記録した後に job の作成が失敗して同じ key で再送された場合は、記録済み event の時刻を `snapshotAt` に使い、再送時刻の後に追加された event を含めない。
 - job は要求時刻を `snapshotAt` として固定し、`to` を snapshot 時刻で上限化するため、export 中に追加された event は含めない。
 - audit index は結果整合のため、最初の step は `snapshotAt` から 30 秒後まで event を読まない。早く届いた message は残り時間だけ遅延して再 enqueue する。
 - `AuditExportQueue` の message ごとに worker Lambda が 1 step を処理する。1 step は query page を最大 50 回まで評価し、5,000 件または約 32 MiB に達したところで part を閉じ、cursor を job に保存して次の step を enqueue する。絞り込みで一致が少ない場合も、page 上限で cursor を保存して進むため、Lambda の timeout まで走り続けない。

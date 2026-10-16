@@ -131,7 +131,7 @@ test('Issue #238: places a Work Item in a Collection without copying it', async 
   await expect(items.getByRole('link', { name: 'Reduce onboarding friction' })).toHaveAttribute('href', '/teams/core-team/issues?issueId=onboarding')
   await expect(page.getByText('No Work Items to add match this search.')).toBeVisible()
 
-  await page.getByRole('button', { name: 'Remove from Collection: Reduce onboarding friction' }).click()
+  await page.getByRole('button', { name: 'Remove from Collection: Reduce onboarding friction (core-team / onboarding)' }).click()
   await expect(page.getByText('This Collection has no Work Items yet.')).toBeVisible()
 
   page.once('dialog', (dialog) => { void dialog.accept() })

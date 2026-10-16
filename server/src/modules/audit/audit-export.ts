@@ -355,6 +355,8 @@ export type AuditExportRequest = {
   readonly filters: AuditExportFilters
   /** Optional client idempotency key. */
   readonly idempotencyKey?: string
+  /** ISO time the request was first recorded; a retry keeps it as the snapshot time. */
+  readonly requestedAt?: string
 }
 
 /** Result of one processing step. */
@@ -413,7 +415,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      * @returns The job and whether this call created it.
      */
     async requestExport(request: AuditExportRequest) {
-      const requestedAt = now()
+      const requestedAt = resolveRequestTime(request.requestedAt, now())
       const filters = normalizeAuditExportFilters(request.filters, requestedAt)
       const snapshotAt = requestedAt.toISOString()
       const idempotencyKey = request.idempotencyKey === undefined ? undefined : requireIdempotencyKey(request.idempotencyKey)
@@ -707,6 +709,18 @@ export function auditExportIdempotencyKeyExpired(): AuditExportError {
     'AuditExportIdempotencyKeyExpired',
     'This Idempotency-Key belongs to an export that has expired. Use a new key.',
   )
+}
+
+/**
+ * Chooses the snapshot time of a request.
+ *
+ * @param recordedAt - When the request was first recorded, if known.
+ * @param current - Current time.
+ * @returns The recorded time when it is a valid past instant, otherwise the current time.
+ */
+function resolveRequestTime(recordedAt: string | undefined, current: Date): Date {
+  const recorded = recordedAt === undefined ? Number.NaN : Date.parse(recordedAt)
+  return Number.isFinite(recorded) && recorded <= current.getTime() ? new Date(recorded) : current
 }
 
 /**

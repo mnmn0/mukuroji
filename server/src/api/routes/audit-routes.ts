@@ -295,6 +295,8 @@ function requireAuditExporter(principal: ProjectPrincipal) {
  * @param metadata - Safe action metadata.
  * @param idempotencyKeyOverride - Operation-scoped audit idempotency key, if any.
  * @param replayGuard - For export requests, whether the export job still exists.
+ * @returns When the request was first recorded: the earlier event's time on a retry,
+ * otherwise this event's time.
  */
 async function recordAuditExportAction(
   c: Context,
@@ -303,7 +305,7 @@ async function recordAuditExportAction(
   metadata: Record<string, string | number | boolean>,
   idempotencyKeyOverride?: string,
   replayGuard?: { readonly jobExists: boolean },
-) {
+): Promise<string> {
   if (!workspaceDependencies.auditEvents.putEvent) {
     throw new ProjectDataError(
       503,
@@ -329,10 +331,11 @@ async function recordAuditExportAction(
         : getConfiguredAuditRetentionDays(),
     ),
   })
+  let recorded: Awaited<ReturnType<typeof workspaceDependencies.auditEvents.getEvent>> | undefined
   if (replayGuard && !replayGuard.jobExists) {
     // The audit event outlives the export job. A key whose recorded request is older than the
     // job lifetime belonged to an export that already expired, so it must not start a new one.
-    const recorded = await workspaceDependencies.auditEvents.getEvent(principal.directoryId, event.eventId)
+    recorded = await workspaceDependencies.auditEvents.getEvent(principal.directoryId, event.eventId)
     if (recorded && recorded.requestFingerprint !== event.requestFingerprint) throw auditExportIdempotencyConflict()
     if (
       recorded &&
@@ -350,6 +353,7 @@ async function recordAuditExportAction(
     }
     throw error
   }
+  return recorded?.occurredAt ?? event.occurredAt
 }
 
 /**
@@ -439,12 +443,14 @@ export function registerAuditRoutes(routeApp: Hono): void {
       // with it. The filter digest makes a reused key with different filters conflict
       // even before the job exists.
       const prepared = await service.prepareExport(request)
-      await recordAuditExportAction(c, principal, 'audit.export-requested', {
+      // A retry after the request was recorded but its job was not created keeps the original
+      // request time, so the export snapshot matches the recorded request.
+      const requestedAt = await recordAuditExportAction(c, principal, 'audit.export-requested', {
         exportId: prepared.exportId,
         filtered: Object.keys(prepared.filters).length > 0,
         filtersDigest: prepared.requestFingerprint,
       }, `audit-export-request:${prepared.exportId}`, { jobExists: prepared.jobExists })
-      const { job, created } = await service.requestExport(request)
+      const { job, created } = await service.requestExport({ ...request, requestedAt })
       return c.json({ export: toAuditExportView(job) }, created ? 202 : 200)
     }),
     list: (c) => handleAuditExportJobRequest(c, async (principal, service) =>

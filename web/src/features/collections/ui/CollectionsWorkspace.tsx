@@ -332,6 +332,9 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
                   {item.title}
                 </Link>
                 <p className="text-xs text-[var(--workbench-muted)]">
+                  {/* Titles are not unique, so the Team and Work Item ID tell equal titles apart. */}
+                  {`${item.teamId} / ${item.issueId}`}
+                  {' · '}
                   {t(statusMessageKeys[item.statusCategory])}
                   {' · '}
                   {item.assignedProjectId ?? t('collections.items.unassigned')}
@@ -339,7 +342,7 @@ function CollectionDetail(props: CollectionsWorkspaceProps & { collection: WorkI
               </div>
               {props.canEdit ? (
                 <button
-                  aria-label={`${t('collections.items.remove')}: ${item.title}`}
+                  aria-label={`${t('collections.items.remove')}: ${item.title} (${item.teamId} / ${item.issueId})`}
                   className="workbench-button-secondary min-h-9 px-3"
                   disabled={props.pending}
                   onClick={() => props.onRemoveItem(item.teamId, item.issueId)}
