@@ -13,7 +13,9 @@ import {
 } from '../src/shared/lib/pwa/appBadge'
 import {
   canRequestAppBadgePermission,
+  createAppBadgePermissionStore,
   requestAppBadgePermission,
+  subscribeNotificationPermissionChanges,
   useAppBadgePermission,
   type AppBadgePermissionEnvironment,
   type AppBadgePermissionResult,
@@ -429,11 +431,113 @@ describe('app badge permission', () => {
      * @returns Whether the opt-in is offered.
      */
     function Probe() {
-      const state = useAppBadgePermission(() => ({ standalone: true, navigator: badgeNavigator, notification }))
+      const state = useAppBadgePermission({
+        readEnvironment: () => ({ standalone: true, navigator: badgeNavigator, notification }),
+        subscribeLifecycle: () => () => undefined,
+      })
       return <span>{String(state.offered)}</span>
     }
     expect(renderToStaticMarkup(<Probe />)).toBe('<span>true</span>')
     expect(requested.count).toBe(0)
+  })
+
+  test('clears the previous answer when a retry starts so a repeated dismissal is announced again', async () => {
+    const { notification, requested } = createNotification('default', 'default')
+    const store = createAppBadgePermissionStore({
+      readEnvironment: () => ({ standalone: true, navigator: badgeNavigator, notification }),
+      subscribeLifecycle: () => () => undefined,
+      refreshBadge: () => undefined,
+    })
+    const results: (string | undefined)[] = []
+    const unsubscribe = store.subscribe(() => results.push(store.getSnapshot().result))
+    store.request()
+    // The dialog is requested within the click, before any state is published.
+    expect(requested.count).toBe(1)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: false, result: 'dismissed' })
+    store.request()
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(store.getSnapshot().result).toBe('dismissed')
+    // Each attempt passes through an unanswered state, so the status remounts and is announced.
+    expect(results).toEqual([undefined, 'dismissed', undefined, 'dismissed'])
+    unsubscribe()
+  })
+
+  test('clears a stale denied answer and refreshes the badge after notifications are allowed in device settings', async () => {
+    const notification = {
+      permission: 'default',
+      requestPermission: async () => {
+        notification.permission = 'denied'
+        return 'denied'
+      },
+    }
+    let lifecycleChanged: () => void = () => undefined
+    let lifecycleStopped = 0
+    let refreshed = 0
+    const store = createAppBadgePermissionStore({
+      readEnvironment: () => ({ standalone: true, navigator: badgeNavigator, notification }),
+      subscribeLifecycle: (onChange) => {
+        lifecycleChanged = onChange
+        return () => { lifecycleStopped += 1 }
+      },
+      refreshBadge: () => { refreshed += 1 },
+    })
+    const unsubscribe = store.subscribe(() => undefined)
+    store.request()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false, result: 'denied' })
+    // Returning without a permission change keeps the answer and the same snapshot.
+    const before = store.getSnapshot()
+    lifecycleChanged()
+    expect(store.getSnapshot()).toBe(before)
+    expect(refreshed).toBe(0)
+    // The user allows notifications in the device settings and returns without reloading.
+    notification.permission = 'granted'
+    lifecycleChanged()
+    expect(store.getSnapshot()).toEqual({ offered: false, pending: false })
+    expect(refreshed).toBe(1)
+    // A reset back to "ask" offers the button again.
+    notification.permission = 'default'
+    lifecycleChanged()
+    expect(store.getSnapshot()).toEqual({ offered: true, pending: false })
+    unsubscribe()
+    expect(lifecycleStopped).toBe(1)
+  })
+
+  test('watches focus, visibility, and Permissions API changes until unsubscribed', async () => {
+    const windowTarget = new EventTarget()
+    const documentTarget = new EventTarget()
+    const permissionStatus = new EventTarget()
+    let changes = 0
+    const stop = subscribeNotificationPermissionChanges(() => { changes += 1 }, {
+      window: windowTarget,
+      document: documentTarget,
+      permissions: { query: async () => permissionStatus },
+    })
+    await Promise.resolve()
+    windowTarget.dispatchEvent(new Event('focus'))
+    documentTarget.dispatchEvent(new Event('visibilitychange'))
+    permissionStatus.dispatchEvent(new Event('change'))
+    expect(changes).toBe(3)
+    stop()
+    windowTarget.dispatchEvent(new Event('focus'))
+    documentTarget.dispatchEvent(new Event('visibilitychange'))
+    permissionStatus.dispatchEvent(new Event('change'))
+    expect(changes).toBe(3)
+    // Browsers that cannot query `notifications` still reconcile on focus.
+    const fallback = subscribeNotificationPermissionChanges(() => { changes += 1 }, {
+      window: windowTarget,
+      document: undefined,
+      permissions: { query: () => Promise.reject(new TypeError('unsupported')) },
+    })
+    await Promise.resolve()
+    windowTarget.dispatchEvent(new Event('focus'))
+    expect(changes).toBe(4)
+    fallback()
   })
 
   test('republishes the signed-in count when the badge is refreshed after a grant', async () => {

@@ -35,7 +35,10 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   （`web/src/shared/lib/pwa/badgePermission.ts`）。`Notification.requestPermission()` は button の click handler から同期的に呼び、
   自動では要求しません。許可されると `refreshAppBadge()` でその tab の session が未読数を取得し直して badge を再表示します。
   許可 / ブロック / 未選択 / 確認できない（API がない・browser が拒否した）の結果は `role="status"` で通知し、
-  button が消える場合もフォーカスを結果へ移します。許可済みまたはブロック済みの端末では再度尋ねません。
+  button が消える場合もフォーカスを結果へ移します。再試行の開始時に前回の結果を消すため、同じ結果（未選択の繰り返しなど）も再度通知します。
+  端末の設定で通知を変更して再読み込みせずに戻った場合は、`focus` / `visibilitychange` と、対応する browser では
+  Permissions API の `change` で許可状態を読み直し、一致しなくなった結果を消します（許可に変わった場合は badge も再表示します）。
+  許可済みまたはブロック済みの端末では再度尋ねません。
   この app は push 通知を送信せず、通知の許可は badge の表示にだけ使うことを文言でも案内します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
