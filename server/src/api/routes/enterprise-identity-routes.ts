@@ -76,6 +76,7 @@ import {
   workItemDependencies,
   workspaceDependencies,
 } from '../shared/app-dependencies'
+import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
 import {
   assertEnterpriseCognitoFederationProvider,
   assertEnterpriseCognitoSsoAppClient,
@@ -108,7 +109,6 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { getAwsRegion, getEnv } from '../shared/runtime-config'
 import { decodeJwtPayload, readNumericClaim } from '../shared/token-claims'
 import { isRecord } from '../shared/value-guards'
-import { createAuthenticationResponse, toProjectPrincipal } from '../shared/work-item-configuration'
 import {
   enforceActiveTenantForWorkspace,
   readWorkspaceEmail,
