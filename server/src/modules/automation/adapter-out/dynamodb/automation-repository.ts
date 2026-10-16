@@ -140,6 +140,18 @@ export {
   AUTOMATION_SCHEDULE_SHARD_COUNT,
   createAutomationScheduleShard,
 } from '../../application/schedule-shard'
+/** Entry type of the public lookup row of an Automation-purpose endpoint. */
+const INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE = 'inbound-webhook-lookup'
+
+/**
+ * Entry type of the public lookup row of a Triage-purpose endpoint.
+ *
+ * Servers from before endpoint purposes resolve only the Automation lookup type and ignore
+ * `purpose`. A separate type makes them treat a Triage endpoint as unknown after a rollback,
+ * instead of recording its payload as an Automation event.
+ */
+const INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE = 'inbound-webhook-triage-lookup'
+
 /** Inbound webhook plaintext secret を同じ key で回収できる時間です。 */
 export const AUTOMATION_INBOUND_WEBHOOK_SECRET_RECOVERY_MS = 24 * 60 * 60_000
 /** Revoke 後の late secret write を再削除する間隔です。 */
@@ -917,9 +929,10 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       },
       ConsistentRead: true,
     }))
+    const lookupEntryType: unknown = lookup.Item?.entryType
     if (
-      lookup.Item?.entryType !== 'inbound-webhook-lookup' ||
-      lookup.Item.opaqueEndpointId !== normalizedOpaqueId ||
+      (lookupEntryType !== INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE && lookupEntryType !== INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE) ||
+      lookup.Item?.opaqueEndpointId !== normalizedOpaqueId ||
       typeof lookup.Item.workspaceId !== 'string' ||
       typeof lookup.Item.endpointId !== 'string'
     ) {
@@ -929,7 +942,11 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       lookup.Item.workspaceId,
       lookup.Item.endpointId,
     )
-    return endpoint?.opaqueEndpointId === normalizedOpaqueId ? endpoint : undefined
+    // The lookup kind must match the endpoint purpose, so neither can be swapped for the other.
+    return endpoint?.opaqueEndpointId === normalizedOpaqueId &&
+      inboundWebhookLookupEntryType(endpoint.purpose) === lookupEntryType
+      ? endpoint
+      : undefined
   }
 
   /** Create operation と provisioning endpoint を atomic に予約します。 */
@@ -1026,7 +1043,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
               Item: {
                 scopeKey: inboundWebhookLookupScopeKey(opaqueEndpointId),
                 recordKey: 'ENDPOINT',
-                entryType: 'inbound-webhook-lookup',
+                entryType: inboundWebhookLookupEntryType(endpoint.purpose),
                 opaqueEndpointId,
                 workspaceId: normalizedWorkspaceId,
                 endpointId,
@@ -3886,4 +3903,14 @@ function createInboundWebhookPurposeFields(
   return input.purpose === 'triage'
     ? { purpose: 'triage', triageRouting: input.triageRouting }
     : { purpose: 'automation' }
+}
+
+/**
+ * Chooses the lookup row entry type for an endpoint purpose.
+ *
+ * @param purpose - Endpoint purpose.
+ * @returns The lookup entry type that servers resolve for that purpose.
+ */
+function inboundWebhookLookupEntryType(purpose: 'automation' | 'triage'): string {
+  return purpose === 'triage' ? INBOUND_WEBHOOK_TRIAGE_LOOKUP_ENTRY_TYPE : INBOUND_WEBHOOK_LOOKUP_ENTRY_TYPE
 }

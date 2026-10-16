@@ -450,6 +450,22 @@ describe('DynamoDB inbound webhook lifecycle', () => {
     ))
     expect(automation.purpose).toBe('automation')
     expect(triage).toMatchObject({ purpose: 'triage', triageRouting: { teamId: 'support' } })
+    // A server from before purposes resolves only `inbound-webhook-lookup`, so a Triage endpoint
+    // gets its own lookup type and stays unknown to it after a rollback.
+    const lookupTypes = [...probe.items.values()]
+      .filter((item) => typeof item.entryType === 'string' && item.entryType.startsWith('inbound-webhook') && item.entryType.endsWith('lookup'))
+      .map((item) => [item.endpointId, item.entryType])
+    expect(lookupTypes).toEqual(expect.arrayContaining([
+      [automation.id, 'inbound-webhook-lookup'],
+      [triage.id, 'inbound-webhook-triage-lookup'],
+    ]))
+    expect((await client.resolveInboundWebhookEndpoint(triage.opaqueEndpointId))?.id).toBe(triage.id)
+    expect((await client.resolveInboundWebhookEndpoint(automation.opaqueEndpointId))?.id).toBe(automation.id)
+    // A lookup whose kind does not match the endpoint purpose resolves nothing.
+    for (const item of probe.items.values()) {
+      if (item.endpointId === triage.id && item.entryType === 'inbound-webhook-triage-lookup') item.entryType = 'inbound-webhook-lookup'
+    }
+    expect(await client.resolveInboundWebhookEndpoint(triage.opaqueEndpointId)).toBeUndefined()
     await expect(client.createRule('workspace-1', {
       name: 'Hijack Triage endpoint',
       enabled: false,
