@@ -285,6 +285,16 @@ test('requires canonical ISO dates for Work Item search projections', () => {
   })).toThrow('must be a real ISO date')
 })
 
+test('never gives two Work Items the same search identity', () => {
+  const input = { workspaceId: 'workspace-1', title: 'Release readiness' }
+  // A Work Item ID may contain `/` and even `/issue/`; the identity still names one Work Item.
+  expect(createWorkItemWorkspaceSearchDocument({ ...input, teamId: 'a', issueId: 'b/issue/c' }).entityId)
+    .toBe('team/a/issue/b/issue/c')
+  // This Team would claim the same identity for another Work Item, so it is refused.
+  expect(() => createWorkItemWorkspaceSearchDocument({ ...input, teamId: 'a/issue/b', issueId: 'c' }))
+    .toThrow(WorkspaceSearchError)
+})
+
 test('binds live projections to a deterministic server-owned content digest', async () => {
   const first = createWorkspaceSearchDocument({
     workspaceId: 'workspace-1',

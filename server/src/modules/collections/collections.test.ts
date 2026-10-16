@@ -17,7 +17,7 @@ const context = { workspaceId: 'w', actor: 'reader', now: '2026-10-16T00:00:00.0
 /** Reader that can see every Work Item except those whose ID starts with `hidden`. */
 const readWorkItem: ReadCollectionWorkItem = async (teamId, issueId) => issueId.startsWith('hidden')
   ? undefined
-  : { teamId, issueId, title: `Title ${issueId}`, statusCategory: 'started' }
+  : { entry: { teamId, issueId, title: `Title ${issueId}`, statusCategory: 'started' }, revision: 1 }
 
 test('keeps the most recently added reference first and skips unreadable ones on read', async () => {
   const store = new InMemoryCollectionsStore()
@@ -90,7 +90,7 @@ test('does not resurrect a deleted Collection when its creation is replayed', as
   // Reusing the key for a different request is still an idempotency conflict after deletion.
   await expect(createCollection(store, context, { name: 'Other' }, 'key'))
     .rejects.toMatchObject({ status: 409, code: 'CollectionIdempotencyConflict' })
-  expect(await store.list('w')).toEqual([])
+  expect(await store.listSummaries('w')).toEqual([])
   expect((await createCollection(store, context, { name: 'Launch' }, 'new-key')).name).toBe('Launch')
 })
 
@@ -214,4 +214,42 @@ test('reports the item limit before a row would exceed the DynamoDB item size', 
   }
   expect(added).toBeLessThan(COLLECTION_ITEM_LIMIT)
   expect(failure).toMatchObject({ status: 409, code: 'CollectionItemLimitReached' })
+})
+
+test('does not commit a reference change after the Work Item is deleted or moved past the check', async () => {
+  // Canonical Work Item revisions; undefined means the Work Item no longer exists.
+  const revisions = new Map<string, number | undefined>([['a', 1], ['b', 1]])
+  const store = new InMemoryCollectionsStore((_teamId, issueId) => revisions.get(issueId))
+  const { collectionId } = await createCollection(store, context, { name: 'Launch' }, 'key')
+  /**
+   * Reader that sees the current canonical state, then lets the Work Item change before the write.
+   *
+   * @param change - Applied to the Work Item right after it was read.
+   * @returns Caller-scoped reader for the test.
+   */
+  const racingReader = (change: () => void): ReadCollectionWorkItem => {
+    let pending: (() => void) | undefined = change
+    return async (teamId, issueId) => {
+      const revision = revisions.get(issueId)
+      if (revision === undefined) return undefined
+      const apply = pending
+      pending = undefined
+      apply?.()
+      return { entry: { teamId, issueId, title: `Title ${issueId}`, statusCategory: 'started' }, revision }
+    }
+  }
+
+  // Deleted between the readability check and the write: the retry sees it is gone.
+  await expect(addCollectionItem(store, context, collectionId, 't', 'a', racingReader(() => revisions.set('a', undefined))))
+    .rejects.toMatchObject({ status: 404, code: 'CollectionWorkItemNotFound' })
+  expect((await store.get('w', collectionId))?.items).toEqual([])
+
+  // Changed (for example moved to another Project) in between: the retry rechecks and then commits.
+  const added = await addCollectionItem(store, context, collectionId, 't', 'b', racingReader(() => revisions.set('b', 2)))
+  expect(added.revision).toBe(2)
+
+  // The same fence guards removal.
+  await expect(removeCollectionItem(store, context, collectionId, 't', 'b', racingReader(() => revisions.set('b', undefined))))
+    .rejects.toMatchObject({ status: 404, code: 'CollectionWorkItemNotFound' })
+  expect((await store.get('w', collectionId))?.items.map((item) => item.issueId)).toEqual(['b'])
 })

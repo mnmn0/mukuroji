@@ -103,6 +103,9 @@ async function resolveCurrentWorkspaceSearchScope(
     : document.parentId
   // The document's Team splits IDs that contain `/`, which the plain grammar cannot.
   const parsed = parseSearchWorkItemEntityIdForTeam(workItemId, document.teamId)
+  // An identity under a Team ID with `/` can collide with another Work Item's, so it is
+  // never resolved, not even to a Team-level scope below.
+  if (!parsed && document.teamId?.includes('/')) return undefined
   if (parsed) {
     const activeTeam = context.directory.teams.find((team) => team.id === parsed.teamId)
     if (!activeTeam) return undefined

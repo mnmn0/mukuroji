@@ -1308,6 +1308,8 @@ function configureFakeProjectClients(
     /** Contributors stored on the first fake Team Work Item and on detail reads. */
     issueContributorAssignments?: WorkItemContributorAssignment[]
     inactiveWorkspaceMemberKeys?: string[]
+    /** Members that read as active but are deactivated before their commit-time fence is built. */
+    deactivatedBeforeFenceMemberKeys?: string[]
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
     newPasswordChallengeError?: CognitoServiceError
@@ -1402,6 +1404,10 @@ function configureFakeProjectClients(
       issueId: string
       /** Contributor list supplied to the adapter, when the update changes it. */
       contributorAssignments?: unknown
+      /** Caller authorization ConditionChecks supplied to the adapter. */
+      authorizationConditionChecks?: UpdateTeamIssueRequestBody['authorizationConditionChecks']
+      /** Configuration guard ConditionChecks supplied to the adapter. */
+      configurationConditionChecks?: UpdateTeamIssueRequestBody['configurationConditionChecks']
     }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
@@ -2153,6 +2159,7 @@ function configureFakeProjectClients(
       async createActiveMemberConditionCheck(workspaceId, memberKey) {
         const member = createWorkspaceMember(memberKey)
         if (member.status !== 'active') return undefined
+        if (options.deactivatedBeforeFenceMemberKeys?.includes(memberKey)) return undefined
         return {
           ConditionCheck: {
             TableName: 'WorkspaceAccessTable',
@@ -2608,6 +2615,8 @@ function configureFakeProjectClients(
           planningRevisionFence: input.planningRevisionFence,
           issueId,
           ...('contributorAssignments' in input ? { contributorAssignments: input.contributorAssignments } : {}),
+          authorizationConditionChecks: input.authorizationConditionChecks,
+          configurationConditionChecks: input.configurationConditionChecks,
         })
         calls.issueUpdates.push({
           actorUserId,

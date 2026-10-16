@@ -1,3 +1,4 @@
+import type { WorkspaceSearchResult } from '@mukuroji/contracts'
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import {
@@ -5,6 +6,7 @@ import {
   CollectionError,
   createCollection,
   deleteCollection,
+  isWorkItemReferenceIdentifier,
   listCollectionEntries,
   listCollections,
   parseCreateCollectionInput,
@@ -70,6 +72,8 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
    *
    * Candidate search follows the Collection permission (`work-items.read`) instead of the
    * Workspace-wide search permission, and returns only Work Items the caller can read.
+   * The search index is a best-effort projection, so the first page also looks the keyword
+   * up as an exact Work Item ID in the canonical Work Items of the caller's readable Teams.
    */
   routeApp.get('/api/collections/candidates', async (c) => {
     let principal: WorkspacePrincipal
@@ -81,10 +85,15 @@ export function registerCollectionsRoutes(routeApp: Hono): void {
     try {
       const keyword = c.req.query('keyword')?.trim() ?? ''
       if (!keyword) return c.json({ code: 'InvalidCollectionCandidateQuery', message: 'keyword is required.' }, 400)
-      return c.json(await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, {
+      const cursor = c.req.query('cursor')
+      const page = await searchWorkspaceForPrincipal(principal, { keyword, entityTypes: ['work-item'] }, {
         limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit'),
-        cursor: c.req.query('cursor'),
-      }))
+        cursor,
+      })
+      if (cursor) return c.json(page)
+      const exact = await findExactCandidates(principal, keyword)
+      const indexed = new Set(page.results.map((result) => result.id))
+      return c.json({ ...page, results: [...exact.filter((result) => !indexed.has(result.id)), ...page.results] })
     } catch (error) {
       return toWorkspaceSearchErrorResponse(c, error)
     }
@@ -259,17 +268,71 @@ async function createWorkItemReader(principal: WorkspacePrincipal): Promise<Read
       if (detail.issue.teamId !== teamId || detail.issue.id !== issueId) return undefined
       requireAssignedProjectPermission(principal, teamContext, detail.issue.assignedProjectId, 'viewer')
       return {
-        teamId,
-        issueId,
-        title: detail.issue.title,
-        statusCategory: detail.issue.statusCategory,
-        ...(detail.issue.assignedProjectId ? { assignedProjectId: detail.issue.assignedProjectId } : {}),
+        entry: {
+          teamId,
+          issueId,
+          title: detail.issue.title,
+          statusCategory: detail.issue.statusCategory,
+          ...(detail.issue.assignedProjectId ? { assignedProjectId: detail.issue.assignedProjectId } : {}),
+        },
+        revision: detail.issue.revision,
       }
     } catch (error) {
       if (isUnreadableWorkItemError(error)) return undefined
       throw error
     }
   }
+}
+
+/** Readable Teams whose canonical Work Items are checked for an exact-ID candidate. */
+const EXACT_CANDIDATE_TEAM_LIMIT = 100
+
+/** Number of exact-ID reads issued at once. */
+const EXACT_CANDIDATE_READ_CONCURRENCY = 10
+
+/**
+ * Looks a candidate keyword up as an exact Work Item ID in the canonical Work Items.
+ *
+ * The search index is only a best-effort projection, so a Work Item whose projection
+ * failed would otherwise never be offered. This reads the canonical row directly in each
+ * Team of the Workspace, at most `EXACT_CANDIDATE_TEAM_LIMIT` Teams, and keeps only Work
+ * Items the caller can read.
+ *
+ * @param principal - Authenticated principal.
+ * @param keyword - Trimmed search keyword.
+ * @returns Work Item search results for exact ID matches.
+ */
+async function findExactCandidates(principal: WorkspacePrincipal, keyword: string): Promise<WorkspaceSearchResult[]> {
+  if (!isWorkItemReferenceIdentifier(keyword)) return []
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+  const teamIds = directory.teams.slice(0, EXACT_CANDIDATE_TEAM_LIMIT).map((team) => team.id)
+  const readWorkItem = await createWorkItemReader(principal)
+  const results: WorkspaceSearchResult[] = []
+  for (let start = 0; start < teamIds.length; start += EXACT_CANDIDATE_READ_CONCURRENCY) {
+    const batch = teamIds.slice(start, start + EXACT_CANDIDATE_READ_CONCURRENCY)
+    for (const observed of await Promise.all(batch.map((teamId) => readWorkItem(teamId, keyword)))) {
+      if (!observed) continue
+      const { entry } = observed
+      // Same identity and URL as the projected search document of this Work Item.
+      const query = new URLSearchParams({
+        ...(entry.assignedProjectId ? { teamId: entry.teamId } : {}),
+        issueId: entry.issueId,
+      }).toString()
+      results.push({
+        id: `team/${entry.teamId}/issue/${entry.issueId}`,
+        entityType: 'work-item',
+        title: entry.title,
+        subtitle: entry.issueId,
+        url: entry.assignedProjectId
+          ? `/projects/${encodeURIComponent(entry.assignedProjectId)}/issues?${query}`
+          : `/teams/${encodeURIComponent(entry.teamId)}/issues?${query}`,
+        teamId: entry.teamId,
+        ...(entry.assignedProjectId ? { projectId: entry.assignedProjectId } : {}),
+        highlights: [],
+      })
+    }
+  }
+  return results
 }
 
 /**

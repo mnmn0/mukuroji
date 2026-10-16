@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { COLLECTION_LIMIT } from '@mukuroji/contracts'
 import type { PlanningCallerAuthorizationConditionCheck } from '../../planning'
 import type { StoredCollection } from '../domain/collections'
@@ -57,7 +57,7 @@ test('writes require caller checks and carry a revision condition', async () => 
   expect(transactions).toEqual([
     [
       { Put: expect.objectContaining({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: expect.objectContaining({ workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }) }) },
-      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: 'attribute_not_exists(recordKey) OR (#entryType = :entryType AND #count >= :zero AND #count < :limit)', ExpressionAttributeValues: expect.objectContaining({ ':delta': 1, ':limit': 200, ':zero': 0 }) }) },
+      { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ConditionExpression: '#entryType = :entryType AND #count >= :zero AND #count < :limit', ExpressionAttributeValues: expect.objectContaining({ ':delta': 1, ':limit': 200, ':zero': 0 }) }) },
       { ConditionCheck: { TableName: 'planning', Key: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1' }, ConditionExpression: 'attribute_not_exists(recordKey)' } },
       ...checks,
     ],
@@ -88,7 +88,7 @@ test('maps a failed counter condition on creation to the limit only for a valid 
   // A concurrent delete freed a slot after the failed write: retry, not corruption.
   await expect(storeWithCounter({ ...full, count: 199 }).put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
   // A negative or foreign counter row is corrupt state, not a full Workspace.
-  for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }, undefined]) {
+  for (const counter of [{ ...full, count: -1 }, { ...full, entryType: 'other' }]) {
     await expect(storeWithCounter(counter).put('w', collection, 0)).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
   }
 })
@@ -200,6 +200,10 @@ test('reads only the Workspace partition, pages through results, and rejects cor
     if (command instanceof QueryCommand) {
       expect(command.input.ExpressionAttributeValues).toEqual({ ':workspaceId': 'w', ':prefix': 'COLLECTION#' })
       expect(command.input.ConsistentRead).toBe(true)
+      // Listing projects the metadata only; inline references are never read.
+      const projected = (command.input.ProjectionExpression ?? '').split(', ')
+        .map((name) => command.input.ExpressionAttributeNames?.[name])
+      expect(projected).toEqual(['workspaceId', 'recordKey', 'entryType', 'schemaVersion', 'collectionId', 'name', 'description', 'createdBy', 'createdAt', 'updatedAt', 'revision'])
       pages += 1
       return pages === 1
         ? { Items: [row], LastEvaluatedKey: { workspaceId: 'w', recordKey: 'COLLECTION#c1' } }
@@ -212,7 +216,10 @@ test('reads only the Workspace partition, pages through results, and rejects cor
     }
     throw new Error('Unexpected command')
   }))
-  expect((await store.list('w')).map((stored) => stored.collectionId)).toEqual(['c1', 'c2'])
+  expect(await store.listSummaries('w')).toEqual([
+    { collectionId: 'c1', name: 'Launch', createdBy: 'reader', createdAt: collection.createdAt, updatedAt: collection.updatedAt, revision: 1 },
+    { collectionId: 'c2', name: 'Launch', createdBy: 'reader', createdAt: collection.createdAt, updatedAt: collection.updatedAt, revision: 1 },
+  ])
   expect(await store.get('w', 'missing')).toBeUndefined()
   await expect(store.get('w', 'c1')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
 })
@@ -227,5 +234,100 @@ test('fails closed when the partition holds more Collections than the Workspace 
     schemaVersion: 1,
   }))
   const store = new DynamoDbCollectionsStore('planning', clientFor(async () => ({ Items: rows })))
-  await expect(store.list('w')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  await expect(store.listSummaries('w')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  // A listed row with invalid metadata is corrupt even though its references are not read.
+  const invalid = new DynamoDbCollectionsStore('planning', clientFor(async () => ({ Items: [{ ...rows[0], name: ' padded ' }] })))
+  await expect(invalid.listSummaries('w')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
+/**
+ * Store whose counter row is missing while the partition holds live Collection rows.
+ *
+ * @param liveRows - Number of live Collection rows the recount finds.
+ * @returns The store and the commands it received.
+ */
+function storeWithMissingCounter(liveRows: number) {
+  const commands: unknown[] = []
+  let counter: Record<string, unknown> | undefined
+  const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
+    commands.push(command)
+    if (command instanceof GetCommand) return counter ? { Item: counter } : {}
+    if (command instanceof QueryCommand) {
+      return { Items: Array.from({ length: liveRows }, (_, index) => ({ recordKey: `COLLECTION#c${index}` })) }
+    }
+    if (command instanceof PutCommand) {
+      counter = command.input.Item
+      return {}
+    }
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
+    // The counter condition holds only for an existing counter below the limit.
+    const count = counter?.count
+    if (typeof count === 'number' && count < COLLECTION_LIMIT) return {}
+    throw Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
+    })
+  }), checks)
+  return { store, commands }
+}
+
+test('rebuilds a missing counter from the live rows before creating', async () => {
+  const { store, commands } = storeWithMissingCounter(3)
+  await store.put('w', collection, 0)
+  const initialization = commands.find((command) => command instanceof PutCommand)
+  if (!(initialization instanceof PutCommand)) throw new Error('The counter was not initialized')
+  expect(initialization.input).toEqual({
+    TableName: 'planning',
+    Item: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT', entryType: 'work-item-collection-count', count: 3 },
+    ConditionExpression: 'attribute_not_exists(recordKey)',
+  })
+  const recount = commands.find((command) => command instanceof QueryCommand)
+  if (!(recount instanceof QueryCommand)) throw new Error('The live rows were not counted')
+  expect(recount.input).toMatchObject({ ConsistentRead: true, ProjectionExpression: '#recordKey', Limit: COLLECTION_LIMIT + 1 })
+  expect(commands.filter((command) => command instanceof TransactWriteCommand)).toHaveLength(2)
+
+  // A full partition without its counter still reports the limit instead of growing past it.
+  await expect(storeWithMissingCounter(COLLECTION_LIMIT).store.put('w', collection, 0))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionLimitReached' })
+  // More live rows than the limit cannot be repaired by a counter and fails closed.
+  await expect(storeWithMissingCounter(COLLECTION_LIMIT + 1).store.put('w', collection, 0))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})
+
+test('fences a reference change on the canonical Work Item revision', async () => {
+  const transactions: unknown[] = []
+  const fenceCheck = {
+    ConditionCheck: { TableName: 'work-items', Key: { directoryTeamId: 'w#core-team', issueId: 'item-1' }, ConditionExpression: 'revision = :expectedRevision', ExpressionAttributeValues: { ':expectedRevision': 4 } },
+  }
+  const fences: unknown[] = []
+  let failFence = false
+  const client = clientFor(async (command) => {
+    if (!(command instanceof TransactWriteCommand)) throw new Error('Unexpected command')
+    transactions.push(command.input.TransactItems)
+    if (!failFence) return {}
+    throw Object.assign(new Error('cancelled'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'None' }, { Code: 'None' }, { Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    })
+  })
+  const store = new DynamoDbCollectionsStore('planning', client, [], (workspaceId, fence) => {
+    fences.push([workspaceId, fence])
+    return fenceCheck
+  }).withCallerAuthorization(checks)
+  const fence = { teamId: 'core-team', issueId: 'item-1', revision: 4 }
+  await store.put('w', { ...collection, revision: 2 }, 1, fence)
+  expect(fences).toEqual([['w', fence]])
+  expect(transactions).toEqual([[
+    expect.objectContaining({ Put: expect.anything() }),
+    { ConditionCheck: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1' } }) },
+    fenceCheck,
+    ...checks,
+  ]])
+  // A deleted or changed Work Item fails only its fence: report it, not corruption or a lost grant.
+  failFence = true
+  await expect(store.put('w', { ...collection, revision: 2 }, 1, fence))
+    .rejects.toMatchObject({ status: 409, code: 'CollectionWorkItemChanged' })
+  // Without a configured fence builder, a fenced write is refused rather than left unfenced.
+  await expect(new DynamoDbCollectionsStore('planning', client, checks).put('w', { ...collection, revision: 2 }, 1, fence))
+    .rejects.toMatchObject({ status: 503 })
 })
