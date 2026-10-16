@@ -30,10 +30,10 @@ async function mockCollections(page: Page, canWrite = true) {
   await page.route('**/api/teams/projects**', (route) => route.fulfill({ json: { teams: projectDirectoryFixtures } }))
   await page.route('**/api/projects/quick-access', (route) => route.fulfill({ json: { items: [], revision: 0 } }))
   await page.route('**/api/notifications/unread-count', (route) => route.fulfill({ json: { unreadCount: 0 } }))
-  await page.route((url) => url.pathname === '/api/search', (route) => {
-    const filters = JSON.parse(new URL(route.request().url()).searchParams.get('filters') ?? '{}')
-    state.searches.push(filters)
-    const keyword = String(filters.keyword ?? '').toLowerCase()
+  await page.route((url) => url.pathname === '/api/collections/candidates', (route) => {
+    const params = new URL(route.request().url()).searchParams
+    state.searches.push({ keyword: params.get('keyword') })
+    const keyword = String(params.get('keyword') ?? '').toLowerCase()
     const results = workItems
       .filter((workItem) => workItem.title.toLowerCase().includes(keyword))
       .map((workItem) => ({ id: `team/${workItem.teamId}/issue/${workItem.id}`, entityType: 'work-item', teamId: workItem.teamId, title: workItem.title, url: `/teams/${workItem.teamId}/issues?issueId=${workItem.id}`, highlights: [] }))
@@ -44,6 +44,8 @@ async function mockCollections(page: Page, canWrite = true) {
     const url = new URL(request.url())
     const segments = url.pathname.split('/').filter(Boolean).slice(2).map(decodeURIComponent)
     const [collectionId, itemsSegment, teamId, issueId] = segments
+    // Candidate search is served by the handler registered before this one.
+    if (collectionId === 'candidates' && !itemsSegment) return route.fallback()
     if (!collectionId) {
       if (request.method() === 'POST') {
         state.createKeys.push(request.headers()['idempotency-key'] ?? '')
@@ -116,10 +118,16 @@ test('Issue #238: places a Work Item in a Collection without copying it', async 
 
   await page.getByLabel('Find Work Items to add').fill('onboarding')
   await page.getByRole('button', { name: 'Search', exact: true }).click()
-  await expect.poll(() => state.searches).toEqual([{ keyword: 'onboarding', entityTypes: ['work-item'] }])
+  await expect.poll(() => state.searches).toEqual([{ keyword: 'onboarding' }])
   await page.getByLabel('Add a Work Item').selectOption({ label: 'Reduce onboarding friction (core-team / onboarding)' })
+  // An item change bumps the revision but must not discard an open metadata draft.
+  await page.getByRole('button', { name: 'Edit name and description' }).click()
+  await page.getByRole('textbox', { name: 'Name' }).last().fill('Q4 launch draft')
   await page.getByRole('button', { name: 'Add', exact: true }).click()
   const items = page.getByTestId('collection-items')
+  await expect(items.getByRole('link', { name: 'Reduce onboarding friction' })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Name' }).last()).toHaveValue('Q4 launch draft')
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(items.getByRole('link', { name: 'Reduce onboarding friction' })).toHaveAttribute('href', '/teams/core-team/issues?issueId=onboarding')
   await expect(page.getByText('No Work Items to add match this search.')).toBeVisible()
 

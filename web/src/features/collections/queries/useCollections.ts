@@ -1,6 +1,5 @@
 import useSWR from 'swr'
-import { searchWorkspace } from '../../../search/api'
-import { getCollectionItems, getCollections } from '../api/collections'
+import { getCollectionItems, getCollections, searchCollectionCandidatePage } from '../api/collections'
 import { collectionCandidateKey, toCollectionCandidates, type CollectionCandidate } from '../model/collectionCandidates'
 
 /** Shared SWR key namespace for Collection queries. */
@@ -91,7 +90,7 @@ async function searchCollectionCandidates(token: string, keyword: string, exclud
   const seenCursors = new Set<string>()
   let cursor: string | undefined
   for (let page = 0; page < COLLECTION_CANDIDATE_PAGE_LIMIT && candidates.length < COLLECTION_CANDIDATE_LIMIT; page += 1) {
-    const response = await searchWorkspace(token, { keyword, entityTypes: ['work-item'] }, {
+    const response = await searchCollectionCandidatePage(token, keyword, {
       limit: COLLECTION_CANDIDATE_LIMIT,
       ...(cursor ? { cursor } : {}),
     })

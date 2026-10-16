@@ -28,6 +28,7 @@ import {
   toWorkspaceSearchErrorResponse,
   type WorkspaceSearchContext,
 } from '../shared/search-access'
+import type { WorkspacePrincipal } from '../shared/project-access'
 import { isRecord } from '../shared/value-guards'
 
 async function resolveCurrentWorkspaceSearchScope(
@@ -295,6 +296,47 @@ function readWorkspaceSearchFilters(value: string | undefined): WorkspaceSearchF
 }
 
 /**
+ * Searches the Workspace index as the principal, returning only results whose current
+ * scope the principal can still read.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param filters - Search filters; `entityTypes` also limits scope resolution.
+ * @param page - Optional page size and opaque cursor.
+ * @returns One page of authorized search results.
+ */
+export async function searchWorkspaceForPrincipal(
+  principal: WorkspacePrincipal,
+  filters: WorkspaceSearchFilters,
+  page: { limit?: number; cursor?: string },
+) {
+  const context = await createWorkspaceSearchContext(principal)
+  const scopeCache = new Map<string, Promise<TeamIssueDetailResponse | undefined>>()
+  const documentSearchReadContext = createDocumentSearchAccessReadContext()
+  return workItemDependencies.workspaceSearch.search({
+    workspaceId: principal.directoryId,
+    filters,
+    limit: page.limit,
+    cursor: page.cursor,
+    access: context.searchAccess,
+    resolveCurrentScope: (document) => {
+      if (
+        filters.entityTypes?.length &&
+        !filters.entityTypes.includes(document.entityType)
+      ) {
+        return Promise.resolve(undefined)
+      }
+      return resolveCurrentWorkspaceSearchScope(
+        principal.directoryId,
+        document,
+        context,
+        scopeCache,
+        documentSearchReadContext,
+      )
+    },
+  })
+}
+
+/**
  * Registers the search HTTP routes on the shared route application.
  *
  * @param routeApp - Hono application that receives the routes.
@@ -312,33 +354,9 @@ export function registerSearchRoutes(routeApp: Hono): void {
 
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      const context = await createWorkspaceSearchContext(principal)
-      const filters = readWorkspaceSearchFilters(c.req.query('filters'))
-      const scopeCache = new Map<string, Promise<TeamIssueDetailResponse | undefined>>()
-      const documentSearchReadContext =
-        createDocumentSearchAccessReadContext()
-
-      return c.json(await workItemDependencies.workspaceSearch.search({
-        workspaceId: principal.directoryId,
-        filters,
+      return c.json(await searchWorkspaceForPrincipal(principal, readWorkspaceSearchFilters(c.req.query('filters')), {
         limit: readOptionalPositiveQueryInteger(c.req.query('limit'), 'Search limit'),
         cursor: c.req.query('cursor'),
-        access: context.searchAccess,
-        resolveCurrentScope: (document) => {
-          if (
-            filters.entityTypes?.length &&
-            !filters.entityTypes.includes(document.entityType)
-          ) {
-            return Promise.resolve(undefined)
-          }
-          return resolveCurrentWorkspaceSearchScope(
-            principal.directoryId,
-            document,
-            context,
-            scopeCache,
-            documentSearchReadContext,
-          )
-        },
       }))
     } catch (error) {
       return toWorkspaceSearchErrorResponse(c, error)
