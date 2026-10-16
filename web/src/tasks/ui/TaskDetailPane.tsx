@@ -62,6 +62,7 @@ import {
   WorkItemContributorsEditor,
   type ContributorDraftSubmitError,
 } from '../../work-items/ui/WorkItemContributorsEditor'
+import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
@@ -409,6 +410,9 @@ export function TaskDetailPane({
     ? scheduleSelection.mode
     : resolvedSchedule?.mode ?? 'unscheduled'
 
+  // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
+  // The identity matches the editor's, so a new Work Item or revision starts a fresh draft.
+  const contributorDraftState = useContributorDraft(scheduleSelectionIdentity)
   if (!task) {
     const statusMessage = isLoading
       ? t('tasks.detail.loading')
@@ -977,6 +981,7 @@ export function TaskDetailPane({
       assignments={(issue ?? currentTask).contributorAssignments}
       formId={editorFormId}
       jobRoles={resolvedConfiguration?.jobRoles ?? []}
+      draftState={contributorDraftState}
       key={`contributors:${editorIdentity}`}
       locale={locale}
       memberOptions={contributorOptions}
