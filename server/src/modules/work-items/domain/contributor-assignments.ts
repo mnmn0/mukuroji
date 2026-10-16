@@ -6,7 +6,7 @@ import {
   type WorkItemJobRoleDefinition,
 } from '@mukuroji/contracts'
 
-/** Fields a client may send for one contributor assignment. */
+/** Fields of one contributor assignment, on input and in storage. */
 const CONTRIBUTOR_ASSIGNMENT_FIELDS = new Set([
   'assignmentId',
   'memberUserId',
@@ -167,6 +167,7 @@ export function isStoredContributorAssignmentList(value: unknown): value is Work
  */
 function isStoredContributorAssignment(value: unknown): value is WorkItemContributorAssignment {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (Object.keys(value).some((key) => !CONTRIBUTOR_ASSIGNMENT_FIELDS.has(key))) return false
   const assignmentId: unknown = Reflect.get(value, 'assignmentId')
   const memberUserId: unknown = Reflect.get(value, 'memberUserId')
   const jobRoleId: unknown = Reflect.get(value, 'jobRoleId')
