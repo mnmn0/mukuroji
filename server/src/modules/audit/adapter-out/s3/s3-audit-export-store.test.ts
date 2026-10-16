@@ -71,6 +71,8 @@ function job(exportId: string, createdAt: string, workspaceId = 'ws-1'): AuditEx
     expiresAt: '2099-01-01T00:00:00.000Z',
     eventCount: 0,
     parts: [],
+    scanAttempt: 1,
+    durableEventCount: 0,
   }
 }
 
@@ -141,6 +143,10 @@ describe('S3AuditExportStore', () => {
       { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'running' },
       { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'running', nextCursor: '' },
       { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'completed', nextCursor: 'cursor-1' },
+      // A running job either scans from a cursor or verifies with a count, never both.
+      { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'running', nextCursor: 'cursor-1', verification: { count: 0 } },
+      // A completed job must not carry an unfinished completeness check.
+      { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'completed', verification: { count: 0 } },
     ]) {
       objects.set(jobPath, { body: JSON.stringify(mismatched), etag: '"q"' })
       await expect(store.readJob('ws-1', exportId)).rejects.toThrow('status does not match its cursor')
@@ -154,6 +160,22 @@ describe('S3AuditExportStore', () => {
     }
     objects.set(jobPath, { body: JSON.stringify(queuedWithProgress), etag: '"p"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('already has progress')
+    // The completeness check compares durable events, so their count cannot exceed the total.
+    const overstatedDurable = {
+      ...job(exportId, '2026-07-18T00:00:00.000Z'),
+      status: 'running',
+      verification: { count: 0 },
+      durableEventCount: 1,
+    }
+    objects.set(jobPath, { body: JSON.stringify(overstatedDurable), etag: '"o"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('more durable events than events')
+    const { scanAttempt: _scanAttempt, ...withoutAttempt } = job(exportId, '2026-07-18T00:00:00.000Z')
+    void _scanAttempt
+    objects.set(jobPath, { body: JSON.stringify(withoutAttempt), etag: '"n"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('scanAttempt must be a non-negative integer')
+    const verifying = { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'running', verification: { count: 0, cursor: 'c' }, lastStepMessageId: 'm-1' }
+    objects.set(jobPath, { body: JSON.stringify(verifying), etag: '"m"' })
+    expect((await store.readJob('ws-1', exportId))?.job).toMatchObject({ verification: { count: 0, cursor: 'c' }, lastStepMessageId: 'm-1' })
     // The stored identity must match the key it was read from.
     objects.set(jobPath, { body: JSON.stringify(job('c'.repeat(32), '2026-07-18T00:00:00.000Z')), etag: '"u"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('does not match its storage key')

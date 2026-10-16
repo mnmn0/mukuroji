@@ -79,6 +79,7 @@ function configureExports(workspaceRole?: 'member', readRecordedEvent: () => Aud
     store: createMemoryStore(),
     queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
     readEvents: (query) => auditEvents.query(query),
+    countEvents: async () => ({ count: 1 }),
   })
   setTestAppDependencies({ auditEvents, auditExports: service })
   return { accessEvents, queued, service }
@@ -325,7 +326,7 @@ test('pages download links for exports with many parts', async () => {
   await store.createJob(completed)
   setTestAppDependencies({
     auditEvents: { async putEvent(event: AuditEventV1) { accessEvents.push(event) }, async getEvent() { return undefined }, async query() { return { events: [] } } },
-    auditExports: createAuditExportService({ settleSeconds: 0, store, queue: { async enqueue() {} }, readEvents: async () => ({ events: [] }) }),
+    auditExports: createAuditExportService({ settleSeconds: 0, store, queue: { async enqueue() {} }, readEvents: async () => ({ events: [] }), countEvents: async () => ({ count: 0 }) }),
   })
 
   const first = await (await app.request(`/api/audit/exports/${job.exportId}/download`, { headers: adminHeaders() })).json()
@@ -387,6 +388,7 @@ test('rejects a key whose export expired and maps audit-writer conflicts to 409'
     store,
     queue: { async enqueue() {} },
     readEvents: (query) => auditEvents.query(query),
+    countEvents: async () => ({ count: 1 }),
   })
   setTestAppDependencies({ auditEvents, auditExports: service })
   const request = () => app.request('/api/audit/exports', {

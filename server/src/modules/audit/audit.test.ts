@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test'
-import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   AUDIT_TARGET_INDEX_NAME,
   auditEventsToNdjson,
@@ -584,6 +584,67 @@ test('queries the target timeline and binds cursor to the original filters', asy
     limit: 25,
     cursor: forgedCursor,
   })).rejects.toThrow('Audit cursor does not match the query partition.')
+})
+
+test('counts export events on the base table with the index predicate and a consistent read', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+    region: 'us-east-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  }))
+  let page = 0
+  Object.assign(documentClient, {
+    async send(command: { input: Record<string, unknown> }) {
+      commands.push(command.input)
+      page += 1
+      return page === 1
+        ? { Count: 3, LastEvaluatedKey: { directoryId: 'workspace-1', eventId: 'evt-3' } }
+        : { Count: 1 }
+    },
+  })
+  const client = new DynamoDbAuditEventsClient(documentClient, 'AuditTable')
+  const query = {
+    workspaceId: 'workspace-1',
+    actorId: 'actor-1',
+    eventTypes: ['work-item.updated'],
+    from: '2026-07-01T00:00:00.000Z',
+    to: '2026-07-31T23:59:59.999Z',
+    durableAfter: 1_800_000_000,
+  }
+
+  const first = await client.countEventsConsistently(query)
+  const second = await client.countEventsConsistently({ ...query, cursor: first.nextCursor })
+
+  expect(first.count).toBe(3)
+  expect(first.nextCursor).toBeString()
+  expect(second).toEqual({ count: 1 })
+  expect(commands[0]).toEqual({
+    TableName: 'AuditTable',
+    KeyConditionExpression: '#directoryId = :workspaceId',
+    FilterExpression: '#partitionKey = :partitionValue AND #timelineKey BETWEEN :fromKey AND :toKey AND ' +
+      '#eventType IN (:eventType0) AND (attribute_not_exists(#expiresAt) OR #expiresAt > :durableAfter)',
+    ExpressionAttributeNames: {
+      '#directoryId': 'directoryId',
+      '#partitionKey': 'actorKey',
+      '#timelineKey': 'actorEventKey',
+      '#expiresAt': 'expiresAt',
+      '#eventType': 'eventType',
+    },
+    ExpressionAttributeValues: {
+      ':workspaceId': 'workspace-1',
+      ':partitionValue': 'workspace-1#actor#actor-1',
+      ':durableAfter': 1_800_000_000,
+      ':fromKey': '2026-07-01T00:00:00.000Z#',
+      ':toKey': '2026-07-31T23:59:59.999Z#\uffff',
+      ':eventType0': 'work-item.updated',
+    },
+    ConsistentRead: true,
+    Select: 'COUNT',
+  })
+  expect(commands[1]?.ExclusiveStartKey).toEqual({ directoryId: 'workspace-1', eventId: 'evt-3' })
+  // A cursor issued for another predicate is rejected instead of skipping rows.
+  await expect(client.countEventsConsistently({ ...query, actorId: 'actor-2', cursor: first.nextCursor }))
+    .rejects.toThrow('Audit count cursor does not match the query.')
 })
 
 test('gets a deterministic audit event with a strongly consistent read', async () => {

@@ -32,6 +32,9 @@ export type AuditExportBatchResponse = {
 /**
  * Creates the SQS entrypoint that runs one export step per message.
  *
+ * Each step receives its SQS message ID, which stays the same across redeliveries, so a
+ * retry after the step committed but its continuation failed to send only sends it again.
+ *
  * Malformed messages and failed steps are reported as batch item failures, so SQS
  * retries them and the redrive policy quarantines them in the dead-letter queue,
  * where the DLQ alarm makes them visible.
@@ -56,7 +59,8 @@ export function createAuditExportWorker(
         continue
       }
       try {
-        await service.processExport(message.workspaceId, message.exportId)
+        // The message ID lets a redelivery of a committed step resend only its continuation.
+        await service.processExport(message.workspaceId, message.exportId, record.messageId)
       } catch (error) {
         log('Audit export step failed and will be retried.', {
           messageId: record.messageId,

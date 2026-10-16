@@ -173,7 +173,9 @@ job と worker の動作は次のとおり。
 
 - 要求の audit event を記録した後に job の作成が失敗して同じ key で再送された場合は、記録済み event の時刻を `snapshotAt` に使い、再送時刻の後に追加された event を含めない。
 - job は要求時刻を `snapshotAt` として固定し、`to` を snapshot 時刻で上限化するため、export 中に追加された event は含めない。
-- audit index は結果整合のため、最初の step は `snapshotAt` から 30 秒後まで event を読まない。早く届いた message は残り時間だけ遅延して再 enqueue する。
+- audit index は結果整合のため、最初の step は `snapshotAt` から 30 秒後まで event を読まない。早く届いた message は残り時間だけ遅延して再 enqueue する。この待機は再走査を減らすための最適化であり、完全性は次の completeness barrier で保証する。
+- completeness barrier: index の走査が snapshot 末尾に達しても、job はすぐには `completed` にしない。同じ Workspace partition の base table（`directoryId`）を strongly consistent read の `Query`（`Select: COUNT`）で読み、index query と同じ述語（index の partition key、`*EventKey` の期間、filter）に一致する event 数を数える。base table の sort key は時刻順でない `eventId` のため、件数の確認は filter や期間にかかわらず Workspace の audit partition 全体を読む（1 export につき 1 回、再走査時はその都度）。件数は走査と同じく page 予算内で cursor を `job.verification` に保存して step をまたいで進める。base table の件数が走査で書いた件数と一致した場合だけ `completed` にする。GSI への伝搬が 30 秒を超えて遅れた event が走査から漏れると件数が食い違うため、part と件数を破棄して `queued` に戻し、`scanAttempt` を増やして待機後に走査をやり直す。3 回の走査で一致しない場合（backfill などで snapshot 以前の時刻の event が書き込まれ続ける場合を含む）は、欠けた export を完了させず `AuditExportIncomplete` で `failed` にする。
+- TTL の削除で件数が減って漏れを相殺しないよう、比較は処理期限（作成から 24 時間）より後に `expiresAt` を迎える event と `expiresAt` のない event だけを数える（job は `durableEventCount` として保持する）。DynamoDB TTL は `expiresAt` より前に item を削除しないため、これらの event は job の間ずっと base table に残る。処理中に期限を迎え得る retention 末端の event は export には含めるが、比較の対象外とする。
 - `AuditExportQueue` の message ごとに worker Lambda が 1 step を処理する。1 step は query page を最大 50 回まで評価し、5,000 件または約 32 MiB に達したところで part を閉じ、cursor を job に保存して次の step を enqueue する。絞り込みで一致が少ない場合も、page 上限で cursor を保存して進むため、Lambda の timeout まで走り続けない。
 - 合計上限は 1,000,000 件で、超えた場合は `AuditExportTooLarge` で `failed` にする。
 - job state は `audit-exports/<sha256(workspaceId)>/<exportId>/job.json` に置き、作成は `If-None-Match`、更新は ETag の `If-Match` で条件付き書き込みにする。
@@ -181,6 +183,8 @@ job と worker の動作は次のとおり。
 - download URL は job の Workspace と export ID から導出した prefix の内側にある key だけに発行し、有効期限は 300 秒（job の有効期限までの残り時間がそれより短い場合はその残り時間）。1 回の応答は最大 100 part で、続きがある場合は `nextPart` を返し、`?fromPart=<nextPart>` で次の page を取得する。Lambda の同期応答上限を超えないようにするため。
 - worker は step ごとに tenant が active かを確認し、closing / closed の tenant では何も書かない。closing は取り消されて active に戻り得るため、job が残っていれば 15 分後に同じ step を再投入して再開できる状態を保つ。tenant closure が export namespace を削除した後は job が存在しないため chain は終わり、object を作り直さない。処理期限を過ぎた job も再投入しない。
 - 読めない queue message は失敗として返し、redrive policy で DLQ に送る。
+- step が job を条件付きで書き込んだ後に次の step の `SendMessage` が失敗した場合に備え、job は直前の step を確定した SQS message ID（`lastStepMessageId`）を保持する。同じ message が再配送されたときは step を再実行せず、続きの message の送信だけをやり直すため、cursor を進め直して part を重複させない。
+- 送信の失敗が `maxReceiveCount` まで続いて message が DLQ に移ると、続きの message がないまま job が `queued` / `running` に残る。`GET /api/audit/exports/:exportId` と `GET /api/audit/exports` は、処理期限内の未完了 job が 20 分（SQS の最大遅延 900 秒と worker の timeout 5 分より長い）書き込まれていない場合、`updatedAt` を条件付きで更新してから続きを enqueue する。条件付き更新に勝った読み取りだけが enqueue するため、続けて読まれても stale 期間ごとに 1 回しか再開しない。重複した message は ETag の条件付き書き込みで 1 つだけが step を確定する。誰も読まない job は処理期限後に `AuditExportProcessingTimedOut` として返る。
 - job は作成から 24 時間以内に完了しなければ `AuditExportProcessingTimedOut` で失敗し、それ以降は part も job も書き込まない。期限後に遅れて届いた message でも worker は失敗状態を書き込まず（`job.json` を書き換えると lifecycle の期限が延びるため）、API が期限を過ぎた未完了の job を読み取り時に `failed` として返す。step の途中で期限を過ぎた場合も、part と job の書き込みの直前に期限を再確認して書き込まない。bucket lifecycle は各 object の最終書き込みから 8 日で current version を削除し、noncurrent version をさらに 1 日後に消すため、artifact は作成から最長約 10 日で消える。
 - 1 job の part は 10,000 個まで。選択的な filter で小さな part が続いて上限に達した場合は `AuditExportTooManyParts` で失敗し、filter や期間を絞った再依頼を求める。
 - `from` が依頼時刻より未来の filter は `400 InvalidAuditExportFilters` で拒否する（worker は上限を snapshot 時刻に揃えるため一致し得ない）。
