@@ -63,7 +63,7 @@ export async function clearAppBadgeAndNotifyTabs(
   }
   // A session started on this page while the clear was pending must republish after it, and
   // the broadcast never reaches the page that sent it.
-  for (const listener of [...localClearListeners]) listener()
+  for (const listener of localClearListeners) listener()
   const channel = openChannel()
   if (!channel) return
   try {
