@@ -386,9 +386,12 @@ const statusMessageKeys = {
 /**
  * Describes who created a Collection and when, to tell Collections with equal names apart.
  *
+ * The short Collection ID keeps the description unique even for equal names created by the
+ * same member in the same minute.
+ *
  * @param collection - Collection to describe.
- * @returns The creator and the UTC creation date.
+ * @returns The creator, the UTC creation minute, and a short Collection ID.
  */
-function describeCollectionOrigin(collection: Pick<WorkItemCollection, 'createdBy' | 'createdAt'>): string {
-  return `${collection.createdBy} · ${collection.createdAt.slice(0, 10)}`
+function describeCollectionOrigin(collection: Pick<WorkItemCollection, 'collectionId' | 'createdBy' | 'createdAt'>): string {
+  return `${collection.createdBy} · ${collection.createdAt.slice(0, 16).replace('T', ' ')} UTC · #${collection.collectionId.slice(0, 8)}`
 }
