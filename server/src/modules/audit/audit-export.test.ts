@@ -259,7 +259,7 @@ describe('audit export service', () => {
     expect(failedParts.parts).toHaveLength(2)
   })
 
-  test('fails a job that is still processing after the processing deadline', async () => {
+  test('stops writing after the processing deadline and presents the job as timed out', async () => {
     let current = new Date('2026-07-18T00:00:00.000Z')
     const store = createMemoryStore()
     const service = createAuditExportService({
@@ -273,11 +273,17 @@ describe('audit export service', () => {
     })
     const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
     expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
-    current = new Date('2026-07-19T00:00:00.000Z')
-    expect(await service.processExport('ws-1', job.exportId)).toBe('failed')
+    const beforeDeadline = await store.readJob('ws-1', job.exportId)
+    // A worker that recovers days later must not rewrite job.json and restart bucket expiration.
+    current = new Date('2026-07-21T00:00:00.000Z')
+    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
+    expect(await store.readJob('ws-1', job.exportId)).toEqual(beforeDeadline)
     const failed = await service.getExport('ws-1', job.exportId)
+    expect(failed.status).toBe('failed')
     expect(failed.failure?.code).toBe('AuditExportProcessingTimedOut')
+    expect(failed.updatedAt).toBe('2026-07-19T00:00:00.000Z')
     expect(failed.parts).toHaveLength(1)
+    expect((await service.listExports('ws-1')).map((listed) => listed.status)).toEqual(['failed'])
   })
 
   test('retries transient read failures through the queue', async () => {
@@ -312,7 +318,7 @@ describe('audit export service', () => {
     current = new Date(fixedNow().getTime() + 8 * 86_400_000)
     await expect(service.getExport('ws-1', job.exportId)).rejects.toMatchObject({ code: 'AuditExportNotFound' })
     expect(await service.listExports('ws-1')).toEqual([])
-    expect(await service.processExport('ws-1', job.exportId)).toBe('failed')
+    expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
   })
 
   test('rejects downloads before completion', async () => {

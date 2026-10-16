@@ -145,6 +145,10 @@ describe('job role configuration', () => {
     expect(markup).toContain('value="Designer"')
     expect(markup).toContain('value="Writer"')
     expect(markup.match(/>Remove</gu)).toHaveLength(1)
+    // Repeated row controls are named after their role.
+    expect(markup).toContain('aria-label="Archived: Designer"')
+    expect(markup).toContain('aria-label="Archived: Writer"')
+    expect(markup).toContain('aria-label="Remove: Writer"')
   })
 
   test('trims names and drops a false archived flag when saving', () => {
