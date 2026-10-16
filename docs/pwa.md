@@ -23,6 +23,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   `BroadcastChannel`（`mukuroji-app-badge`）で通知し、sign-in したままの tab が自分の未読数を再表示します。
   通知は badge の消去が終わってから送り、再表示は受け取った tab の token が storage に残っている場合だけ行います
   （remember した session は tab 間で共有されるため、別 tab の sign-out で破棄された session の未読数は戻しません）。
+  読み込みに成功した未読 0 で badge を消した場合も同じ通知を送り、受け取った tab は未読数を取得し直してから再表示します。
   未読数の読み込み中や失敗時は前回の badge をそのまま残します。
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
   install の説明では badge を「対応した端末では」と条件付きで案内します。

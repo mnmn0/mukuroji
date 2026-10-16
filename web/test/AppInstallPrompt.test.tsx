@@ -2,7 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { clearAuthSession, hasStoredAuthSession } from '../src/auth/session'
 import {
-  clearAppBadgeForEndedSession,
+  clearAppBadgeAndNotifyTabs,
+  resolveAppBadgeAction,
   resolveAppBadgeCount,
   subscribeAppBadgeCleared,
   syncAppBadge,
@@ -129,6 +130,13 @@ describe('app badge', () => {
     expect(resolveAppBadgeCount(false, 4)).toBe(0)
   })
 
+  test('tells other tabs about a loaded zero but not about a sign-out, which already did', () => {
+    expect(resolveAppBadgeAction(true, undefined)).toEqual({ kind: 'keep' })
+    expect(resolveAppBadgeAction(true, 0)).toEqual({ kind: 'clear', notifyTabs: true })
+    expect(resolveAppBadgeAction(false, 3)).toEqual({ kind: 'clear', notifyTabs: false })
+    expect(resolveAppBadgeAction(true, 3)).toEqual({ kind: 'show', count: 3 })
+  })
+
   test('shows positive counts, clears otherwise, and tolerates missing support', async () => {
     const calls: string[] = []
     const navigator = {
@@ -189,7 +197,7 @@ describe('app badge across tabs', () => {
     hub.openChannel().postMessage({ type: 'other' })
     expect(republished).toEqual([])
 
-    await clearAppBadgeForEndedSession(navigator, hub.openChannel)
+    await clearAppBadgeAndNotifyTabs(navigator, hub.openChannel)
     expect(calls).toEqual(['clear'])
     // The page that cleared the badge shares this module's page ID, so it ignores its own notice.
     expect(republished).toEqual([])
@@ -222,7 +230,7 @@ describe('app badge across tabs', () => {
       postMessage: () => { order.push('notice') },
       close: () => undefined,
     }
-    const pending = clearAppBadgeForEndedSession(navigator, () => channel)
+    const pending = clearAppBadgeAndNotifyTabs(navigator, () => channel)
     await Promise.resolve()
     expect(order).toEqual([])
     finishClear()
@@ -232,7 +240,7 @@ describe('app badge across tabs', () => {
 
   test('works without BroadcastChannel', async () => {
     expect(() => subscribeAppBadgeCleared(() => undefined, () => undefined)()).not.toThrow()
-    await expect(clearAppBadgeForEndedSession({}, () => undefined)).resolves.toBeUndefined()
+    await expect(clearAppBadgeAndNotifyTabs({}, () => undefined)).resolves.toBeUndefined()
   })
 })
 

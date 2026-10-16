@@ -42,7 +42,7 @@ export type AppBadgeChannel = {
 }
 
 /**
- * Clears the app badge when this page's session ends and tells the other tabs.
+ * Clears the app badge and tells the other tabs, when a session ends or its count reaches zero.
  *
  * The OS badge is shared by every window of the installed app, while sessions can live
  * per tab. Other tabs that are still signed in republish their own count on the notice,
@@ -52,7 +52,7 @@ export type AppBadgeChannel = {
  * @param openChannel - Opens the broadcast channel; defaults to `BroadcastChannel`.
  * @returns Resolves once the notice was sent; never rejects.
  */
-export async function clearAppBadgeForEndedSession(
+export async function clearAppBadgeAndNotifyTabs(
   target: AppBadgeNavigator | undefined = readNavigator(),
   openChannel: () => AppBadgeChannel | undefined = openBroadcastChannel,
 ): Promise<void> {
@@ -107,6 +107,40 @@ export function subscribeAppBadgeCleared(
  */
 export function resolveAppBadgeCount(signedIn: boolean, loadedCount: number | undefined): number | undefined {
   return signedIn ? loadedCount : 0
+}
+
+/** What a tab does with the shared app badge for its current count. */
+export type AppBadgeAction =
+  | {
+    /** Leave the badge as it is while the count is loading or failed. */
+    kind: 'keep'
+  }
+  | {
+    /** Clear the badge. */
+    kind: 'clear'
+    /** Whether to tell other tabs so a still-signed-in one can republish its count. */
+    notifyTabs: boolean
+  }
+  | {
+    /** Show a positive count. */
+    kind: 'show'
+    /** Count to show. */
+    count: number
+  }
+
+/**
+ * Decides how a tab updates the shared app badge.
+ *
+ * @param signedIn - Whether this tab has a session.
+ * @param loadedCount - Unread count from the latest successful load, if any.
+ * @returns `keep` while unknown, `clear` for zero (telling other tabs only while signed in,
+ * since a sign-out already told them), or `show` for a positive count.
+ */
+export function resolveAppBadgeAction(signedIn: boolean, loadedCount: number | undefined): AppBadgeAction {
+  const count = resolveAppBadgeCount(signedIn, loadedCount)
+  if (count === undefined) return { kind: 'keep' }
+  if (count <= 0) return { kind: 'clear', notifyTabs: signedIn }
+  return { kind: 'show', count }
 }
 
 /**

@@ -33,7 +33,12 @@ import { clearAuthSession, getAuthSession, hasStoredAuthSession, type AuthSessio
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
-import { resolveAppBadgeCount, subscribeAppBadgeCleared, syncAppBadge } from '../../shared/lib/pwa/appBadge'
+import {
+  clearAppBadgeAndNotifyTabs,
+  resolveAppBadgeAction,
+  subscribeAppBadgeCleared,
+  syncAppBadge,
+} from '../../shared/lib/pwa/appBadge'
 import {
   aiAssistanceUiEnabled,
   isAiAssistanceTaskEnabled as isSavedAiAssistanceTaskEnabled,
@@ -284,6 +289,7 @@ export function WorkspaceRouteProvider() {
   const {
     data: loadedInboxCount,
     error: notificationUnreadCountError,
+    mutate: refreshInboxCount,
   } = useNotificationUnreadCount(
     accessToken,
     Boolean(user && !currentUserError),
@@ -291,17 +297,28 @@ export function WorkspaceRouteProvider() {
   const inboxCount = loadedInboxCount ?? 0
   // Mirror the unread Inbox count on the installed app icon. Keep the existing badge while
   // the count is loading or failed, and clear it only for a loaded zero or a signed-out session.
-  const badgeCount = resolveAppBadgeCount(Boolean(accessToken), loadedInboxCount)
+  const badgeAction = resolveAppBadgeAction(Boolean(accessToken), loadedInboxCount)
+  const badgeCount = badgeAction.kind === 'show' ? badgeAction.count : undefined
+  const badgeClear = badgeAction.kind === 'clear' ? (badgeAction.notifyTabs ? 'notify' : 'local') : undefined
+  useEffect(() => {
+    // The badge is shared by every tab: a loaded zero clears it and tells the others, while a
+    // sign-out already did both in clearAuthSession.
+    if (badgeClear === 'notify') void clearAppBadgeAndNotifyTabs()
+    if (badgeClear === 'local') syncAppBadge(0)
+  }, [badgeClear])
   useEffect(() => {
     if (badgeCount === undefined) return undefined
     syncAppBadge(badgeCount)
-    if (badgeCount === 0) return undefined
-    // Another tab's sign-out clears the shared badge; this tab republishes its count only
-    // while its own session is still stored, since a remembered session may be shared.
+    // Another tab cleared the shared badge. This tab republishes only while its own session
+    // is still stored, and with a fresh count, since a remembered session may be shared.
     return subscribeAppBadgeCleared(() => {
-      if (accessToken && hasStoredAuthSession(accessToken)) syncAppBadge(badgeCount)
+      if (!accessToken || !hasStoredAuthSession(accessToken)) return
+      refreshInboxCount().then(
+        (fresh) => { if (typeof fresh === 'number') syncAppBadge(fresh) },
+        () => undefined,
+      )
     })
-  }, [accessToken, badgeCount])
+  }, [accessToken, badgeCount, refreshInboxCount])
   const userLabel =
     user?.attributes.email ??
     user?.attributes.name ??
