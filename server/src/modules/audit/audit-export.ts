@@ -219,10 +219,16 @@ export interface AuditExportStore {
    * @param workspaceId - Workspace that owns the export.
    * @param exportId - Export the part belongs to.
    * @param part - Part to download.
+   * @param maxLifetimeSeconds - Longest the URL may stay valid; the adapter may use less.
    * @returns A presigned URL.
    * @throws TypeError when the part key is outside that export.
    */
-  createPartDownloadUrl(workspaceId: string, exportId: string, part: AuditExportPart): Promise<string>
+  createPartDownloadUrl(
+    workspaceId: string,
+    exportId: string,
+    part: AuditExportPart,
+    maxLifetimeSeconds: number,
+  ): Promise<string>
 }
 
 /**
@@ -547,13 +553,18 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       if (!Number.isSafeInteger(fromPart) || fromPart < 0 || (fromPart > 0 && fromPart >= job.parts.length)) {
         throw new AuditExportError(400, 'InvalidAuditExportPart', 'fromPart must be the index of an existing part.')
       }
+      // A link must not outlive the job: parts are no longer served after it expires.
+      const remainingSeconds = Math.floor((Date.parse(job.expiresAt) - now().getTime()) / 1000)
+      if (remainingSeconds <= 0) {
+        throw new AuditExportError(404, 'AuditExportNotFound', 'Audit export was not found.')
+      }
       const end = fromPart + AUDIT_EXPORT_DOWNLOAD_LINKS_PER_PAGE
       const parts = await Promise.all(job.parts.slice(fromPart, end).map(async (part) => ({
         index: part.index,
         eventCount: part.eventCount,
         byteLength: part.byteLength,
         sha256: part.sha256,
-        url: await dependencies.store.createPartDownloadUrl(job.workspaceId, job.exportId, part),
+        url: await dependencies.store.createPartDownloadUrl(job.workspaceId, job.exportId, part, remainingSeconds),
       })))
       return { parts, ...(end < job.parts.length ? { nextPart: end } : {}) }
     },
@@ -786,11 +797,12 @@ export function createAuditExportRequestFingerprint(filters: AuditExportFilters)
  * @returns Filters with empty values removed.
  */
 export function normalizeAuditExportFilters(filters: AuditExportFilters, requestedAt: Date): AuditExportFilters {
-  if (Boolean(filters.entityType) !== Boolean(filters.entityId)) {
-    throw new AuditExportError(400, 'InvalidAuditExportFilters', 'entityType and entityId must be supplied together.')
+  // Like the synchronous audit query, a type may be filtered alone, but an ID needs its type.
+  if (filters.entityId !== undefined && filters.entityType === undefined) {
+    throw new AuditExportError(400, 'InvalidAuditExportFilters', 'entityId requires entityType.')
   }
-  if (Boolean(filters.targetType) !== Boolean(filters.targetId)) {
-    throw new AuditExportError(400, 'InvalidAuditExportFilters', 'targetType and targetId must be supplied together.')
+  if (filters.targetId !== undefined && filters.targetType === undefined) {
+    throw new AuditExportError(400, 'InvalidAuditExportFilters', 'targetId requires targetType.')
   }
   for (const [label, value] of [['from', filters.from], ['to', filters.to]] as const) {
     if (value !== undefined && Number.isNaN(Date.parse(value))) {
