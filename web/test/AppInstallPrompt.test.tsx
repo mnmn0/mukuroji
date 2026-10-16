@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { syncAppBadge } from '../src/shared/lib/pwa/appBadge'
+import { resolveAppBadgeCount, syncAppBadge } from '../src/shared/lib/pwa/appBadge'
 import { createAppInstallPromptStore } from '../src/shared/lib/pwa/installPrompt'
 import { AppInstallCard } from '../src/shared/ui/AppInstallCard'
 
@@ -95,6 +95,13 @@ describe('AppInstallCard', () => {
 })
 
 describe('app badge', () => {
+  test('keeps the badge while the count is unknown and clears it when signed out', () => {
+    expect(resolveAppBadgeCount(true, undefined)).toBeUndefined()
+    expect(resolveAppBadgeCount(true, 0)).toBe(0)
+    expect(resolveAppBadgeCount(true, 4)).toBe(4)
+    expect(resolveAppBadgeCount(false, 4)).toBe(0)
+  })
+
   test('shows positive counts, clears otherwise, and tolerates missing support', async () => {
     const calls: string[] = []
     const navigator = {

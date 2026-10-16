@@ -17,7 +17,8 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   dialog 表示中は button を `aria-disabled` のまま残してフォーカスを失わせず、閉じた後は承認 / キャンセルの結果を
   `role="status"` で通知してフォーカスを移します。
 - badge: install 済み app の icon に受信箱の未読数を Badging API (`navigator.setAppBadge`) で表示します。
-  数値だけを渡すため Workspace の内容は露出せず、未読 0、sign out、Workspace 画面の unmount で消去します。
+  数値だけを渡すため Workspace の内容は露出せず、読み込みに成功した未読 0、sign out、Workspace 画面の unmount で消去します。
+  未読数の読み込み中や失敗時は前回の badge をそのまま残します。
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
   install の説明では badge を「対応した端末では」と条件付きで案内します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。

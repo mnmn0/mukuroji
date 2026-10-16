@@ -24,6 +24,18 @@ export function syncAppBadge(count: number | undefined, target: AppBadgeNavigato
 }
 
 /**
+ * Chooses what the app badge should show for the current session.
+ *
+ * @param signedIn - Whether a Workspace session exists.
+ * @param loadedCount - Unread count from the latest successful load, if any.
+ * @returns The count to show, zero to clear, or undefined to leave the badge unchanged
+ * while the count is loading or failed to load.
+ */
+export function resolveAppBadgeCount(signedIn: boolean, loadedCount: number | undefined): number | undefined {
+  return signedIn ? loadedCount : 0
+}
+
+/**
  * Reads the page navigator when it exists.
  *
  * @returns The navigator, or undefined outside a browser.

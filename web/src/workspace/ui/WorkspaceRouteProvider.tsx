@@ -33,7 +33,7 @@ import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/s
 import type { InboxNotification } from '../../notifications/api'
 import { resolveNotificationPath } from '../../notifications/model/paths'
 import { useNotificationUnreadCount } from '../../notifications/queries/useNotificationUnreadCount'
-import { syncAppBadge } from '../../shared/lib/pwa/appBadge'
+import { resolveAppBadgeCount, syncAppBadge } from '../../shared/lib/pwa/appBadge'
 import {
   aiAssistanceUiEnabled,
   isAiAssistanceTaskEnabled as isSavedAiAssistanceTaskEnabled,
@@ -282,16 +282,18 @@ export function WorkspaceRouteProvider() {
     enabled: Boolean(user && !currentUserError),
   })
   const {
-    data: inboxCount = 0,
+    data: loadedInboxCount,
     error: notificationUnreadCountError,
   } = useNotificationUnreadCount(
     accessToken,
     Boolean(user && !currentUserError),
   )
-  // Mirror the unread Inbox count on the installed app icon; clear it when signed out.
-  const badgeCount = user && !currentUserError ? inboxCount : 0
+  const inboxCount = loadedInboxCount ?? 0
+  // Mirror the unread Inbox count on the installed app icon. Keep the existing badge while
+  // the count is loading or failed, and clear it only for a loaded zero or a signed-out session.
+  const badgeCount = resolveAppBadgeCount(Boolean(accessToken), loadedInboxCount)
   useEffect(() => {
-    syncAppBadge(badgeCount)
+    if (badgeCount !== undefined) syncAppBadge(badgeCount)
   }, [badgeCount])
   useEffect(() => () => syncAppBadge(0), [])
   const userLabel =
