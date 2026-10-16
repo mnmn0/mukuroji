@@ -17,7 +17,7 @@ Collection は workflow、assignee、status を持たず、Work Item の所有 T
 - Collection は閲覧権限を広げません。Item の一覧は、Work Item detail と同じ Team / primary Project の viewer 判定を通った Work Item だけを返し、読めない Work Item は存在を示さずに省きます。
 - Work Item の追加と参照の削除には、操作する人がその Work Item を読める必要があります。読めない Work Item と存在しない Work Item は同じ `404 CollectionWorkItemNotFound` を返すため、ID を推測して隠れた参照の有無を確かめることはできません。
 - Collection から開いた Work Item は、通常の canonical Work Item detail と mutation を使います。Collection ごとの別データは作りません。
-- Work Item の追加候補は `GET /api/collections/candidates?keyword=` で探します。Workspace 検索 index を `entityTypes: ["work-item"]` に固定して引くため、`workspace.read` ではなく Collection と同じ `work-items.read` で利用でき、結果は呼び出し元が読める Work Item に限られます。keyword が空の場合は `400 InvalidCollectionCandidateQuery` です。検索は権限で絞り込まれた cursor pagination なので、大きな Workspace でも全 Work Item を一度に読み込みません。すでに Collection に入っている Work Item は候補数に数えずに次の page を読みます。読む page 数は、Collection の item 数ぶんの結果を読み飛ばせる page 数に 10 page を加えた数までです。
+- Work Item の追加候補は `GET /api/collections/candidates?keyword=` で探します。Workspace 検索 index を `entityTypes: ["work-item"]` に固定して引くため、`workspace.read` ではなく Collection と同じ `work-items.read` で利用でき、結果は呼び出し元が読める Work Item に限られます。keyword が空の場合は `400 InvalidCollectionCandidateQuery` です。検索は権限で絞り込まれた cursor pagination なので、大きな Workspace でも全 Work Item を一度に読み込みません。すでに Collection に入っている Work Item は候補数に数えずに次の page を読みます。cursor が残る限り次の page を読み（検索 server は 1 page ごとに評価する行数が限られ、他の種類の entity だけで空の page になることがあるため）、異常な走査に備えて最大 100 page で止めます。
 - 追加・削除の可視性確認と書き込みは同じ transaction ではありません。確認直後に権限が変わって参照が残っても、一覧は読むたびに可視性を再判定するため、読めない Work Item は表示されません。
 - Team ID と Work Item ID は Collection 側で形式を狭めず、Planning と同じ canonical な識別子（前後に空白がなく 256 文字以内、制御文字なし。Unicode や `/` を含む ID も可）を受け付けます。
 

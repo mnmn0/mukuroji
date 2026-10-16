@@ -167,8 +167,8 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     value.name.length <= COLLECTION_NAME_MAX_LENGTH && !hasControlCharacter(value.name) &&
     (value.description === undefined || isStoredDescription(value.description)) &&
     typeof value.createdBy === 'string' &&
-    typeof value.createdAt === 'string' &&
-    typeof value.updatedAt === 'string' &&
+    isStoredInstant(value.createdAt) &&
+    isStoredInstant(value.updatedAt) &&
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
     typeof value.createFingerprint === 'string' &&
     Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&
@@ -203,8 +203,20 @@ function isStoredCollectionItem(value: unknown): value is StoredCollectionItem {
   return isPlainRecord(value) &&
     isWorkItemReferenceIdentifier(value.teamId) &&
     isWorkItemReferenceIdentifier(value.issueId) &&
-    typeof value.addedAt === 'string' &&
+    isStoredInstant(value.addedAt) &&
     typeof value.addedBy === 'string'
+}
+
+/**
+ * Checks that a persisted timestamp is a canonical ISO instant, as the contract promises.
+ *
+ * @param value - Persisted value.
+ * @returns Whether it round-trips through `Date#toISOString`.
+ */
+function isStoredInstant(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const time = Date.parse(value)
+  return Number.isFinite(time) && new Date(time).toISOString() === value
 }
 
 /**

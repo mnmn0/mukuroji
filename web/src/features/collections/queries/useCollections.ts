@@ -8,8 +8,14 @@ export const COLLECTIONS_QUERY_KEY = 'collections'
 /** Maximum number of candidates shown for one search. */
 const COLLECTION_CANDIDATE_LIMIT = 12
 
-/** Search pages read for one candidate search beyond those needed to skip listed items. */
-const COLLECTION_CANDIDATE_EXTRA_PAGES = 10
+/**
+ * Hard cap on search pages read for one candidate search.
+ *
+ * A page can come back empty while a cursor remains, because each server page evaluates a
+ * bounded number of index rows that may all be other entity types. Reading continues while a
+ * cursor remains, and this cap only bounds a pathological scan.
+ */
+const COLLECTION_CANDIDATE_PAGE_CAP = 100
 
 const collectionQueryConfig = {
   dedupingInterval: 5_000,
@@ -89,10 +95,7 @@ export async function searchCollectionCandidates(token: string, keyword: string,
   const seen = new Set<string>()
   const seenCursors = new Set<string>()
   let cursor: string | undefined
-  // Every listed item can fill a result slot, so the page budget grows with the Collection
-  // (up to its item limit) and still leaves room to find addable candidates.
-  const pageLimit = Math.ceil(excluded.size / COLLECTION_CANDIDATE_LIMIT) + COLLECTION_CANDIDATE_EXTRA_PAGES
-  for (let page = 0; page < pageLimit && candidates.length < COLLECTION_CANDIDATE_LIMIT; page += 1) {
+  for (let page = 0; page < COLLECTION_CANDIDATE_PAGE_CAP && candidates.length < COLLECTION_CANDIDATE_LIMIT; page += 1) {
     const response = await searchCollectionCandidatePage(token, keyword, {
       limit: COLLECTION_CANDIDATE_LIMIT,
       ...(cursor ? { cursor } : {}),
