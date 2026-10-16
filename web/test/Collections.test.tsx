@@ -105,7 +105,7 @@ describe('CollectionsWorkspace', () => {
 
   test('tells Collections with the same name apart by creator and date', () => {
     const markup = render()
-    expect(markup).toContain(">Launch<span class=\"mt-0.5 block truncate text-xs font-normal text-[var(--workbench-muted)]\">demo@example.com · 2026-10-16</span>")
+    expect(markup).toContain(">Launch<span class=\"mt-0.5 block truncate text-xs font-normal text-[var(--workbench-muted)]\">demo@example.com · 2026-10-16 00:00 UTC · #c1</span>")
   })
 
   test('hides every change control for view-only members', () => {
@@ -174,6 +174,26 @@ describe('Collection API', () => {
 })
 
 describe('searchCollectionCandidates', () => {
+  test('keeps reading while a cursor remains even when pages come back empty', async () => {
+    // The server's per-page evaluation budget can be spent on other entity types.
+    let calls = 0
+    const previousFetch = globalThis.fetch
+    globalThis.fetch = async () => {
+      calls += 1
+      const results = calls === 30
+        ? [{ id: 'team/core/issue/found', entityType: 'work-item', teamId: 'core', title: 'Found', url: '/', highlights: [] }]
+        : []
+      return new Response(JSON.stringify({ schemaVersion: 1, results, ...(calls < 30 ? { nextCursor: String(calls) } : {}) }))
+    }
+    try {
+      const candidates = await searchCollectionCandidates('token', 'x', new Set())
+      expect(candidates.map((candidate) => candidate.issueId)).toEqual(['found'])
+      expect(calls).toBe(30)
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
   test('reads past every listed item to find addable candidates', async () => {
     // 180 listed items fill the first 15 pages; addable matches start on page 16.
     const listed = Array.from({ length: 180 }, (_, index) => `listed-${index}`)
