@@ -29,6 +29,7 @@ import {
   type BulkOperation,
   type CreateAutomationRuleInput,
   type CreateAutomationInboundWebhookEndpointInput,
+  type AutomationInboundWebhookTriageRouting,
   type CreateAutomationTemplateInput,
   type CreateRecurringWorkInput,
   type RecurringWork,
@@ -976,8 +977,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       workspaceId: normalizedWorkspaceId,
       opaqueEndpointId,
       name: normalized.name,
-      purpose: normalized.purpose ?? 'automation',
-      ...(normalized.triageRouting ? { triageRouting: normalized.triageRouting } : {}),
+      ...createInboundWebhookPurposeFields(normalized),
       status: 'provisioning',
       version: 1,
       secretGeneration,
@@ -3872,4 +3872,18 @@ function hasAutomationKeySchema(
       key.AttributeName === attributeName && key.KeyType === keyType
     )
   )
+}
+
+/**
+ * Builds the purpose fields of a new endpoint, keeping Team routing only for Triage.
+ *
+ * @param input - Validated create input.
+ * @returns The endpoint's purpose and, for Triage, its fixed Team routing.
+ */
+function createInboundWebhookPurposeFields(
+  input: CreateAutomationInboundWebhookEndpointInput,
+): { purpose: 'automation' } | { purpose: 'triage'; triageRouting: AutomationInboundWebhookTriageRouting } {
+  return input.purpose === 'triage'
+    ? { purpose: 'triage', triageRouting: input.triageRouting }
+    : { purpose: 'automation' }
 }

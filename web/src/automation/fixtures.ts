@@ -311,3 +311,14 @@ export const deadLetterAutomationExecutionFixture: AutomationExecution = {
   triggerEventId: 'event-release-1',
   workspaceId: 'workspace-demo',
 }
+
+/** Team-routed Triage-purpose inbound webhook endpoint fixture. */
+export const triageInboundWebhookEndpointFixture: AutomationInboundWebhookEndpoint = {
+  ...activeInboundWebhookEndpointFixture,
+  id: 'webhook-triage',
+  opaqueEndpointId: 'triage-opaque-endpoint',
+  name: 'Status page alerts',
+  purpose: 'triage',
+  triageRouting: { teamId: 'core-team' },
+  endpointUrl: 'https://api.example.com/api/automation/inbound-webhooks/triage-opaque-endpoint',
+}

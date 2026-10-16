@@ -47,6 +47,7 @@ import type {
   AutomationActionExecutionContext,
 } from '../../application/ports'
 import { AutomationError } from '../../domain/automation-error'
+import { TriageError } from '../../../triage'
 import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-webhook-view'
 import type {
   AutomationInboundWebhookSecretStore,
@@ -2860,6 +2861,7 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
     const deliveries: Parameters<TestAutomationInboundWebhookPort['recordInboundWebhookDelivery']>[1][] = []
     const created: { teamId: string; input: CreateWebhookTriageEntryInput }[] = []
     const admissions: { key: string; receivedAt: string | undefined }[] = []
+    let admissionFailure: Error | undefined
     const now = '2026-10-16T00:00:00.000Z'
     const entry: TriageEntry = {
       schemaVersion: 1,
@@ -2915,7 +2917,9 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
         async createWebhookEntry(_workspaceId, teamId, _endpoint, input, idempotency, options) {
           // Mirrors the store: a committed source replays before any current-state check.
           if (created.some((item) => item.input.eventId === input.eventId)) return { entry, replayed: true }
-          await options?.validateNewEntry?.()
+          if (admissionFailure) throw admissionFailure
+          // Mirrors the admission validator's commit-time Team check.
+          if (teamId !== 'core-team') throw new TriageError(409, 'TriageAdmissionTeamUnavailable', 'The target Triage Team is not active.')
           admissions.push({ key: idempotency.key, receivedAt: options?.receivedAt })
           created.push({ teamId, input })
           return { entry, replayed: false }
@@ -2982,9 +2986,16 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
     expect(replay.status).toBe(202)
     expect(await replay.json()).toMatchObject({ triageEntryId: 'triage-webhook-1' })
     const fresh = await deliver(JSON.stringify({ eventId: 'evt-3', title: 'New', body: 'x', requester: { name: 'Status page' } }))
-    expect(fresh.status).toBe(400)
-    expect(await fresh.json()).toMatchObject({ code: 'AutomationInboundWebhookTriageTeamNotFound' })
+    expect(fresh.status).toBe(409)
+    expect(await fresh.json()).toMatchObject({ code: 'TriageAdmissionTeamUnavailable' })
     expect(created).toHaveLength(1)
+
+    // Infrastructure failures during admission use the Triage error envelope.
+    endpoint.triageRouting = { teamId: 'core-team' }
+    admissionFailure = new Error('ProvisionedThroughputExceededException')
+    const throttled = await deliver(JSON.stringify({ eventId: 'evt-4', title: 'New', body: 'x', requester: { name: 'Status page' } }))
+    expect(throttled.status).toBe(503)
+    expect(await throttled.json()).toMatchObject({ code: 'TriageUnavailable' })
   } finally {
     if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
     else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable

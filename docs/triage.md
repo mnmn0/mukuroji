@@ -149,16 +149,21 @@ replay、active tenant の検証を通る。その後:
 - delivery receipt は payload を含まない `triage.webhook-received` audit event として記録する。
   Automation rule が評価する `webhook.received` は作らないため、Triage 用 endpoint は Automation を
   起動しない。Automation rule の webhook trigger に `triage` endpoint は指定できない。
-- 新しい event では routing Team が delivery 時点でも存在することを確認してから、`webhook` source の Entry を作る。
+- 新しい event では、他の source と同じ admission validator が routing Team の存在を commit 時の条件付き書き込みで
+  確認してから `webhook` source の Entry を作り、Team が無ければ `409 TriageAdmissionTeamUnavailable` を返す。
+  Directory の読み込みは admission 1 回につき validator の分だけで、route 側で重ねて読まない。
   すでに受け付けた event の再配送は Team の確認より先に元の Entry を返すため、その後 Team が無くなっても
   送信側は元の `triageEntryId` を受け取れる。Response は `{ eventId, triageEntryId }`
   （`AutomationInboundWebhookDeliveryResponse`）。
 - delivery receipt を記録した後に Triage の受け付けが失敗して再送された場合も、Entry の `receivedAt`、SLA、retention は
-  delivery を最初に受け付けた時刻から計算する。Triage の受付 receipt には endpoint と delivery key の SHA-256 digest を使い、
+  delivery を最初に受け付けた時刻から計算する。その時点ですでに retention 期限を過ぎている Entry は、
+  redact 済みの形でだけ保存し、期限を過ぎた title、body、requester を新たに書き込まない。Triage の受付 receipt には endpoint と delivery key の SHA-256 digest を使い、
   256 文字までの `Idempotency-Key` をそのまま扱える。
   Source identity は `<endpointId>:<eventId>` で、同じ event と同じ envelope の再配送は元の Entry を
   返し、同じ event に異なる envelope は `409 TriageSourceConflict` にする。Response 消失後の再送も
   同じ Entry を返す。
+- Triage の受け付けで起きた失敗は、DynamoDB の throttling などの基盤エラーも含めて Triage の error envelope
+  （`code` と `message`）で返し、基盤エラーは再試行可能な `503 TriageUnavailable` にする。
 - Team configuration の webhook 向け rule、owner rotation、SLA、retention は他の source と同様に
   admission 時に適用する。
 - requester は外部 guest とし、webhook の reply adapter はまだないため request-information と reply は
