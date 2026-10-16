@@ -93,11 +93,11 @@ export function WorkItemContributorsEditor({
    * Resolves the display label of a contributor.
    *
    * @param memberUserId - Workspace member ID of the contributor.
-   * @returns The member's name or email, or the raw ID when the member is unknown.
+   * @returns The member's name with email, the email alone, or the raw ID when the member is unknown.
    */
   const memberName = (memberUserId: string) => {
     const member = memberOptions.find((candidate) => candidate.id === memberUserId)
-    return member?.name ?? member?.email ?? memberUserId
+    return member ? formatContributorMemberLabel(member) : memberUserId
   }
   /**
    * Resolves the display label of a job role.

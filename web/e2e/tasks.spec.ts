@@ -5288,6 +5288,9 @@ test.describe('authenticated task page', () => {
     await expect(contributors).toContainText('デザイナー')
     await expect(contributors).toContainText('合計 1.5 時間')
     await expect(detailPane.locator('input[name="title"]')).toHaveValue('Contributor と一緒に保存する')
+    // The generic inverse patch cannot restore contributors, so the save offers no Undo.
+    await expect(page.getByTestId('task-action-feedback')).toBeVisible()
+    await expect(page.getByTestId('task-action-feedback').getByRole('button', { name: '元に戻す', exact: true })).toHaveCount(0)
     expect(patchBodies).toHaveLength(1)
     expect(patchBodies[0]).toMatchObject({
       title: 'Contributor と一緒に保存する',

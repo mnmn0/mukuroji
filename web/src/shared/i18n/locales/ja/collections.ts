@@ -17,7 +17,7 @@ export const collectionsMessages = {
   'collections.detail.save': '保存',
   'collections.detail.cancel': 'キャンセル',
   'collections.detail.delete': 'コレクションを削除',
-  'collections.detail.deleteConfirm': 'このコレクションを削除しますか？ 入っている Work Item は削除されません。',
+  'collections.detail.deleteConfirm': 'コレクション「{name}」を削除しますか？ 入っている Work Item は削除されません。',
   'collections.items.title': 'Work Item',
   'collections.items.loading': 'Work Item を読み込んでいます。',
   'collections.items.failed': 'Work Item を読み込めませんでした。',

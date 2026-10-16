@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { CollectionApiError } from '../../features/collections/api/collections'
 import { collectionCandidateKey } from '../../features/collections/model/collectionCandidates'
@@ -31,7 +31,19 @@ function CollectionsSession() {
   const t = createTranslator(workspace.locale)
   const [params, setParams] = useSearchParams()
   const collections = useCollections(workspace.accessToken, workspace.canLoadWorkspaceData)
-  const selectedId = params.get('collectionId') ?? collections.data?.collections[0]?.collectionId
+  const firstCollectionId = collections.data?.collections[0]?.collectionId
+  const selectedId = params.get('collectionId') ?? firstCollectionId
+  // Pin the implicit first selection in the URL, so a rename or a new Collection that sorts
+  // ahead of it does not silently switch the open Collection on the next refresh.
+  useEffect(() => {
+    if (!params.get('collectionId') && firstCollectionId) {
+      setParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('collectionId', firstCollectionId)
+        return next
+      }, { replace: true })
+    }
+  }, [firstCollectionId, params, setParams])
   const canEdit = workspace.canMutateTeamConfiguration && collections.data?.canWrite === true
   // Only load items for a Collection the list contains; an unknown selection shows a notice instead.
   const selectedExists = collections.data?.collections.some((collection) => collection.collectionId === selectedId) === true

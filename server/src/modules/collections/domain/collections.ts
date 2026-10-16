@@ -162,7 +162,9 @@ export function parseExpectedRevisionQuery(value: string | undefined): number {
 export function isStoredCollection(value: unknown): value is StoredCollection {
   if (!isPlainRecord(value)) return false
   return isCollectionIdentifier(value.collectionId) &&
-    typeof value.name === 'string' && value.name.length > 0 && value.name.length <= COLLECTION_NAME_MAX_LENGTH &&
+    // Persisted names keep the same invariant as accepted input: trimmed, non-empty, printable.
+    typeof value.name === 'string' && value.name.length > 0 && value.name === value.name.trim() &&
+    value.name.length <= COLLECTION_NAME_MAX_LENGTH && !hasControlCharacter(value.name) &&
     (value.description === undefined || (typeof value.description === 'string' && value.description.length <= COLLECTION_DESCRIPTION_MAX_LENGTH)) &&
     typeof value.createdBy === 'string' &&
     typeof value.createdAt === 'string' &&

@@ -40,7 +40,21 @@ export function getAutomationInboundWebhookEndpoints(accessToken: string) {
     accessToken,
     'endpoints',
     isAutomationInboundWebhookEndpoint,
+    withDefaultInboundWebhookPurpose,
   )
+}
+
+/**
+ * Treats an endpoint without `purpose` as an Automation endpoint.
+ *
+ * A server from before Triage-purpose endpoints omits the field, as do its legacy stored
+ * endpoints, so the Web client keeps working during a rolling deployment or rollback.
+ *
+ * @param value - Unknown entry from the endpoint collection response.
+ * @returns The entry with `purpose: 'automation'` when the field is missing.
+ */
+function withDefaultInboundWebhookPurpose(value: unknown): unknown {
+  return isRecord(value) && value.purpose === undefined ? { ...value, purpose: 'automation' } : value
 }
 
 /**
@@ -201,6 +215,7 @@ function requestInboundWebhookLifecycle<TResponse>(
  * @param accessToken - Access token used for the Authorization header.
  * @param collectionKey - Response property that owns the collection.
  * @param isItem - Runtime guard for one collection entry.
+ * @param normalize - Fills compatible defaults on an entry before it is validated.
  * @returns Validated collection entries.
  * @throws AutomationApiError when the response does not contain a valid collection.
  */
@@ -209,11 +224,13 @@ async function requestCollection<TItem>(
   accessToken: string,
   collectionKey: string,
   isItem: (value: unknown) => value is TItem,
+  normalize: (value: unknown) => unknown = (value) => value,
 ): Promise<TItem[]> {
   const response = await requestJson<unknown>(url, accessToken)
-  const collection = isRecord(response) ? response[collectionKey] : undefined
+  const raw = isRecord(response) ? response[collectionKey] : undefined
+  const collection = Array.isArray(raw) ? raw.map(normalize) : undefined
 
-  if (!Array.isArray(collection) || !collection.every(isItem)) {
+  if (!collection || !collection.every(isItem)) {
     throw new AutomationApiError(
       502,
       'Automation API returned an invalid response.',

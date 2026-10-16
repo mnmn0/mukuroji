@@ -440,3 +440,13 @@ function installFetchRecorder(responseBody: unknown) {
 
   return requests
 }
+
+describe('inbound webhook endpoint compatibility', () => {
+  test('treats an endpoint without purpose from an older server as an Automation endpoint', async () => {
+    const { purpose: _purpose, ...legacy } = activeInboundWebhookEndpointFixture
+    void _purpose
+    installFetchRecorder({ endpoints: [legacy] })
+    const listed = await getAutomationInboundWebhookEndpoints('access-token')
+    expect(listed).toEqual([{ ...legacy, purpose: 'automation' }])
+  })
+})
