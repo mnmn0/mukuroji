@@ -179,6 +179,12 @@ export type AuditExportJob = {
    * step already applied and only sends the continuation again.
    */
   readonly lastStepMessageId?: string
+  /**
+   * Set when a read resumed a stale job and its continuation may not have been sent yet.
+   * Cleared once the send succeeds or the next step commits, so a failed send leaves the
+   * job resumable by the very next read instead of hiding it for another stale period.
+   */
+  readonly continuationPending?: true
   /** Terminal failure reported to the requester. */
   readonly failure?: {
     /** Stable error code. */
@@ -843,8 +849,10 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
    * Schedules an unfinished job again when no step has written it for a long time.
    *
    * A continuation can be lost when its send keeps failing until the delivering message
-   * reaches the DLQ. The job is first touched with a conditional write, so concurrent or
-   * repeated reads resume it once per stale period instead of starting several chains.
+   * reaches the DLQ. The job is first claimed with a conditional write that also records
+   * `continuationPending`, so concurrent reads resume it once instead of starting several
+   * chains. The marker is cleared only after the send succeeds; if the send fails, the
+   * marker keeps the job stale and the next read sends it again.
    *
    * @param stored - Job read with its version.
    */
@@ -853,9 +861,16 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     const current = now()
     if (!isStale(job, current) || isExpired(job, current) || isPastProcessingDeadline(job, current)) return
     if (dependencies.isTenantActive && !await dependencies.isTenantActive(job.workspaceId)) return
-    const touched: AuditExportJob = { ...job, updatedAt: current.toISOString() }
-    if (!await dependencies.store.replaceJob(touched, version)) return
-    await enqueueContinuation(touched)
+    const claimed: AuditExportJob = { ...job, updatedAt: current.toISOString(), continuationPending: true }
+    if (!await dependencies.store.replaceJob(claimed, version)) return
+    await enqueueContinuation(claimed)
+    // The send succeeded. Clear the marker unless a step or another read already rewrote the job;
+    // a later step also drops it, so losing this race is harmless.
+    const sent = await dependencies.store.readJob(job.workspaceId, job.exportId)
+    if (!sent || !sent.job.continuationPending || sent.job.updatedAt !== claimed.updatedAt) return
+    const { continuationPending: _pending, ...cleared } = sent.job
+    void _pending
+    await dependencies.store.replaceJob(cleared, sent.version)
   }
 
   /**
@@ -876,8 +891,10 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     // Rewriting job.json restarts its lifecycle clock, so nothing is written past the deadline.
     const writeTime = now()
     if (isPastProcessingDeadline(current, writeTime) || isExpired(current, writeTime)) return 'skipped'
-    const { lastStepMessageId: _previousMessage, ...withoutMessage } = next
+    // A committed step proves the chain is alive, so a pending resume marker is dropped too.
+    const { lastStepMessageId: _previousMessage, continuationPending: _pending, ...withoutMessage } = next
     void _previousMessage
+    void _pending
     const recorded: AuditExportJob = {
       ...withoutMessage,
       ...(messageId !== undefined && (next.status === 'running' || next.status === 'queued')
@@ -1103,7 +1120,8 @@ function durabilityThreshold(job: AuditExportJob): number {
  */
 function isStale(job: AuditExportJob, current: Date): boolean {
   return (job.status === 'queued' || job.status === 'running') &&
-    Date.parse(job.updatedAt) + AUDIT_EXPORT_STALE_SECONDS * 1000 <= current.getTime()
+    (job.continuationPending === true ||
+      Date.parse(job.updatedAt) + AUDIT_EXPORT_STALE_SECONDS * 1000 <= current.getTime())
 }
 
 /**
@@ -1175,7 +1193,14 @@ function presentAuditExportJob(job: AuditExportJob, current: Date): AuditExportJ
  * @returns The failed job state.
  */
 function failJob(job: AuditExportJob, at: Date, code: string, message: string): AuditExportJob {
-  const { nextCursor: _cursor, verification: _verification, lastStepMessageId: _message, ...rest } = job
+  const {
+    nextCursor: _cursor,
+    verification: _verification,
+    lastStepMessageId: _message,
+    continuationPending: _pending,
+    ...rest
+  } = job
+  void _pending
   void _cursor
   void _verification
   void _message
@@ -1265,6 +1290,14 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   const lastStepMessageId = record.lastStepMessageId === undefined
     ? undefined
     : requireString(record.lastStepMessageId, 'lastStepMessageId')
+  if (record.continuationPending !== undefined && record.continuationPending !== true) {
+    throw new TypeError('Audit export continuationPending must be true when present.')
+  }
+  const continuationPending = record.continuationPending === true
+  // Only an unfinished job can wait for its continuation.
+  if (continuationPending && status !== 'queued' && status !== 'running') {
+    throw new TypeError('Audit export job status does not match its pending continuation.')
+  }
   // A queued job has not read anything yet; stored progress would be appended to a fresh scan.
   if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0 || durableEventCount !== 0)) {
     throw new TypeError('Queued audit export job already has progress.')
@@ -1295,6 +1328,7 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     durableEventCount,
     ...(verification === undefined ? {} : { verification }),
     ...(lastStepMessageId === undefined ? {} : { lastStepMessageId }),
+    ...(continuationPending ? { continuationPending: true } : {}),
     ...(failure
       ? { failure: { code: requireString(failure.code, 'failure.code'), message: requireString(failure.message, 'failure.message') } }
       : {}),
