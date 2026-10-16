@@ -29,6 +29,9 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   未読数の読み込み中や失敗時は前回の badge をそのまま残します。
   対応しない browser と API の失敗は無視します。Android の Chromium など Badging API を持たない端末もあるため、
   install の説明では badge を「対応した端末では」と条件付きで案内します。
+  iOS / iPadOS のホーム画面 web app は `setAppBadge()` を公開していますが、通知の許可がない限り badge を表示しません。
+  この app は通知の許可を求めない（push 通知を提供しない）ため、iOS / iPadOS では badge は表示されず、
+  これは意図した対象外です。通知許可の導線を追加する場合は、push 通知の提供と合わせて別途設計します。
 - 表示言語: 更新通知は route の外にあるため、保存された locale 設定を購読し、言語切替に追従します。
 - 更新: 新しい worker は既存ページを自動で奪いません。`待機中` になると画面下部に再読み込みの通知を出し、
   利用者が承認した時だけ有効化して再読み込みします。別 tab で既に有効化済みなら、そのまま再読み込みします。ページが visible に戻るたびに更新を確認します。
