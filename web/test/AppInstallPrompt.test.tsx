@@ -306,6 +306,38 @@ describe('app badge across tabs', () => {
     expect(shown).toEqual([4, 6, 4])
   })
 
+  test('subscribes before the first publication and publishes only the latest refresh', async () => {
+    const order: string[] = []
+    const shown: number[] = []
+    let notifyCleared: () => void = () => undefined
+    const pending: ((count: number) => void)[] = []
+    const stop = keepAppBadgePublished({
+      count: 4,
+      isSessionStored: () => true,
+      refreshCount: () => new Promise((resolve) => { pending.push(resolve) }),
+      sync: (count) => {
+        order.push('publish')
+        shown.push(count)
+      },
+      subscribeCleared: (listener) => {
+        order.push('subscribe')
+        notifyCleared = listener
+        return () => undefined
+      },
+    })
+    expect(order).toEqual(['subscribe', 'publish'])
+    // Two clear notices start two refreshes; the older one resolves last with a stale count.
+    notifyCleared()
+    notifyCleared()
+    pending[1]?.(7)
+    await Promise.resolve()
+    pending[0]?.(5)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(shown).toEqual([4, 7])
+    stop()
+  })
+
   test('works without BroadcastChannel', async () => {
     expect(() => subscribeAppBadgeCleared(() => undefined, () => undefined)()).not.toThrow()
     await expect(clearAppBadgeAndNotifyTabs({}, () => undefined)).resolves.toBeUndefined()

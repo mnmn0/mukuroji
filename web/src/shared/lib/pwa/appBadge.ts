@@ -148,14 +148,29 @@ export function keepAppBadgePublished(options: KeepAppBadgePublishedOptions): ()
   const publish = (count: number) => {
     if (active && options.isSessionStored()) sync(count)
   }
-  publish(options.count)
+  // Only the latest refresh publishes, so an older response that resolves late cannot
+  // overwrite a newer count.
+  let generation = 0
+  // Subscribe first: a clear that settles while the initial count is being published still
+  // reaches this tab and republishes, whichever order the two badge updates finish in.
   const unsubscribe = subscribeCleared(() => {
     if (!options.isSessionStored()) return
+    generation += 1
+    const current = generation
+    /**
+     * Publishes a refresh result only while it is the latest one.
+     *
+     * @param count - Count to show.
+     */
+    const publishLatest = (count: number) => {
+      if (current === generation) publish(count)
+    }
     options.refreshCount().then(
-      (fresh) => publish(typeof fresh === 'number' ? fresh : options.count),
-      () => publish(options.count),
+      (fresh) => publishLatest(typeof fresh === 'number' ? fresh : options.count),
+      () => publishLatest(options.count),
     )
   })
+  publish(options.count)
   return () => {
     active = false
     unsubscribe()
