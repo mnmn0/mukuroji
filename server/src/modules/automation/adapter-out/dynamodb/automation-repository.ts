@@ -1469,7 +1469,11 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
         signatureFingerprint,
         input.signatureTimestamp,
       )
-      return { eventId: existing.eventId, replayed: true }
+      return {
+        eventId: existing.eventId,
+        replayed: true,
+        ...(existing.acceptedAt ? { acceptedAt: existing.acceptedAt } : {}),
+      }
     }
 
     const now = new Date().toISOString()
@@ -1512,7 +1516,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
           input.auditMutation,
         ],
       }))
-      return { eventId, replayed: false }
+      return { eventId, replayed: false, acceptedAt: now }
     } catch (error) {
       if (!isTransactionConditionalCheckFailed(error)) throw persistenceError(error)
       const replay = await this.getInboundWebhookDeliveryReceipt(endpoint.workspaceId, deliveryKey)
@@ -1524,7 +1528,11 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
           signatureFingerprint,
           input.signatureTimestamp,
         )
-        return { eventId: replay.eventId, replayed: true }
+        return {
+          eventId: replay.eventId,
+          replayed: true,
+          ...(replay.acceptedAt ? { acceptedAt: replay.acceptedAt } : {}),
+        }
       }
       const signature = await this.getInboundWebhookSignatureReceipt(
         endpoint.workspaceId,
@@ -2436,6 +2444,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     return {
       bodyFingerprint: response.Item.bodyFingerprint,
       eventId: response.Item.eventId,
+      ...(typeof response.Item.createdAt === 'string' ? { acceptedAt: response.Item.createdAt } : {}),
     }
   }
 

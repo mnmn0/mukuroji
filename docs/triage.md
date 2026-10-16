@@ -153,6 +153,9 @@ replay、active tenant の検証を通る。その後:
   すでに受け付けた event の再配送は Team の確認より先に元の Entry を返すため、その後 Team が無くなっても
   送信側は元の `triageEntryId` を受け取れる。Response は `{ eventId, triageEntryId }`
   （`AutomationInboundWebhookDeliveryResponse`）。
+- delivery receipt を記録した後に Triage の受け付けが失敗して再送された場合も、Entry の `receivedAt`、SLA、retention は
+  delivery を最初に受け付けた時刻から計算する。Triage の受付 receipt には endpoint と delivery key の SHA-256 digest を使い、
+  256 文字までの `Idempotency-Key` をそのまま扱える。
   Source identity は `<endpointId>:<eventId>` で、同じ event と同じ envelope の再配送は元の Entry を
   返し、同じ event に異なる envelope は `409 TriageSourceConflict` にする。Response 消失後の再送も
   同じ Entry を返す。

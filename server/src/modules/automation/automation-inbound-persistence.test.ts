@@ -518,7 +518,8 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       eventId: 'event-1',
       auditMutation: auditPut('event-1'),
     })
-    expect(first).toEqual({ eventId: 'event-1', replayed: false })
+    expect(first).toEqual({ eventId: 'event-1', replayed: false, acceptedAt: expect.any(String) })
+    // Replays report the time the delivery was first accepted.
     expect(await client.recordInboundWebhookDelivery(endpoint, {
       idempotencyKey: 'delivery-key',
       bodyFingerprint: fingerprint('raw body'),
@@ -526,7 +527,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureTimestamp: '1784160000',
       eventId: 'unused-event',
       auditMutation: auditPut('unused-event'),
-    })).toEqual({ eventId: 'event-1', replayed: true })
+    })).toEqual({ eventId: 'event-1', replayed: true, acceptedAt: first.acceptedAt })
     expect(await client.recordInboundWebhookDelivery(endpoint, {
       idempotencyKey: 'delivery-key',
       bodyFingerprint: fingerprint('raw body'),
@@ -534,7 +535,7 @@ describe('DynamoDB inbound webhook delivery receipts', () => {
       signatureTimestamp: '1784160001',
       eventId: 'unused-event',
       auditMutation: auditPut('unused-event'),
-    })).toEqual({ eventId: 'event-1', replayed: true })
+    })).toEqual({ eventId: 'event-1', replayed: true, acceptedAt: first.acceptedAt })
 
     await expect(client.recordInboundWebhookDelivery(endpoint, {
       idempotencyKey: 'delivery-key',

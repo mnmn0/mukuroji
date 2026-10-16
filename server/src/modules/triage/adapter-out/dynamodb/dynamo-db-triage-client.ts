@@ -65,6 +65,7 @@ import type {
   ResolveTriageWorkItemAction,
   TriageActor,
   TriageWebhookEndpointReference,
+  TriageWebhookAdmissionOptions,
   TriageAuditContextFactory,
   TriageAuthorizationConditionChecks,
   TriageCustomerAssociationAuthorizationFactory,
@@ -1517,7 +1518,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param endpoint - Verified inbound webhook endpoint.
    * @param input - Validated webhook envelope.
    * @param idempotency - Replay protection bound to the envelope.
-   * @param validateNewEntry - Checks run only before admitting a new entry.
+   * @param options - Admission-only checks and the time the delivery was first accepted.
    * @returns The created or replayed entry receipt.
    */
   async createWebhookEntry(
@@ -1526,10 +1527,11 @@ export class DynamoDbTriageClient implements TriageClient {
     endpoint: TriageWebhookEndpointReference,
     input: CreateWebhookTriageEntryInput,
     idempotency: TriageIdempotency,
-    validateNewEntry?: () => Promise<void>,
+    options: TriageWebhookAdmissionOptions = {},
   ): Promise<TriageMutationReceipt> {
     return this.admitSourceEntry({
-      ...(validateNewEntry ? { validateNewEntry } : {}),
+      ...(options.validateNewEntry ? { validateNewEntry: options.validateNewEntry } : {}),
+      ...(options.receivedAt ? { receivedAt: options.receivedAt } : {}),
       workspaceId,
       teamId,
       sourceKind: 'webhook',
@@ -1557,13 +1559,15 @@ export class DynamoDbTriageClient implements TriageClient {
     authorizationConditionChecks?: TriageAuthorizationConditionChecks
     validateAdmission?: (admission: Awaited<ReturnType<DynamoDbTriageClient['prepareEntryAdmission']>>) => void
     validateNewEntry?: () => Promise<void>
+    receivedAt?: string
   }): Promise<TriageMutationReceipt> {
     const { workspaceId, teamId, sourceKind, sourceId, idempotency } = request
     const existing = await this.readSourceClaim(workspaceId, sourceKind, sourceId)
     if (existing) return this.replaySourceClaim(existing, idempotency.fingerprint, teamId)
     // Checks of current state apply only to fresh admissions; a committed source replays as is.
     await request.validateNewEntry?.()
-    const now = this.now().toISOString()
+    // A delivery accepted earlier keeps its original received time, SLA, and retention start.
+    const now = request.receivedAt ? requireIsoInstant(request.receivedAt, 'Webhook received time') : this.now().toISOString()
     const baseEntry = request.createEntry(this.id(), now)
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const admission = await this.prepareEntryAdmission(baseEntry)

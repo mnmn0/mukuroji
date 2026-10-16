@@ -74,6 +74,14 @@ export type TriageActor = {
   id: string
 }
 
+/** Options for admitting a Triage entry from an inbound webhook delivery. */
+export type TriageWebhookAdmissionOptions = {
+  /** Checks run only when no entry exists for the source yet. */
+  validateNewEntry?: () => Promise<void>
+  /** ISO time the delivery was first accepted; the entry's received time and deadlines start here. */
+  receivedAt?: string
+}
+
 /** Verified inbound webhook endpoint that delivers Triage entries. */
 export type TriageWebhookEndpointReference = {
   /** Stable endpoint identifier. */
@@ -282,7 +290,7 @@ export interface TriageClient {
    * @param endpoint The verified inbound webhook endpoint.
    * @param input The validated webhook envelope.
    * @param idempotency Replay protection bound to the envelope.
-   * @param validateNewEntry Checks run only when no entry exists for the source yet.
+   * @param options Admission-only checks and the time the delivery was first accepted.
    * @returns The created or replayed entry receipt.
    */
   createWebhookEntry(
@@ -291,7 +299,7 @@ export interface TriageClient {
     endpoint: TriageWebhookEndpointReference,
     input: CreateWebhookTriageEntryInput,
     idempotency: TriageIdempotency,
-    validateNewEntry?: () => Promise<void>,
+    options?: TriageWebhookAdmissionOptions,
   ): Promise<TriageMutationReceipt>
   /** Lists source entries attached to a Work Item.
    *
