@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  assertValidAuditQueryFilters,
   auditEventsToNdjson,
   type AuditActorKind,
   type AuditEventPage,
@@ -8,6 +9,18 @@ import {
 
 /** Events written to one NDJSON part object. */
 export const AUDIT_EXPORT_EVENTS_PER_PART = 5_000
+
+/** Query pages one processing step may evaluate before it checkpoints. */
+export const AUDIT_EXPORT_PAGES_PER_STEP = 50
+
+/** Approximate serialized bytes one part may hold before it is closed. */
+export const AUDIT_EXPORT_PART_BYTE_BUDGET = 32 * 1024 * 1024
+
+/**
+ * Seconds a job waits after its snapshot time before reading events, so events
+ * committed before the snapshot have propagated to the eventually consistent indexes.
+ */
+export const AUDIT_EXPORT_SETTLE_SECONDS = 30
 /** Largest number of events one export job may contain. */
 export const AUDIT_EXPORT_MAX_EVENTS = 1_000_000
 /** Days a job and its artifacts remain downloadable. */
@@ -154,7 +167,8 @@ export interface AuditExportStore {
    */
   listJobs(workspaceId: string, limit: number): Promise<AuditExportJob[]>
   /**
-   * Writes one NDJSON part; rewriting the same index replaces it.
+   * Writes one NDJSON part under a content-addressed key, so a concurrent step
+   * with different content can never replace the object a committed job references.
    *
    * @param workspaceId - Workspace that owns the job.
    * @param exportId - Export identifier.
@@ -169,12 +183,15 @@ export interface AuditExportStore {
     body: string,
   ): Promise<Omit<AuditExportPart, 'index' | 'eventCount'>>
   /**
-   * Creates a short-lived download URL for one part.
+   * Creates a short-lived download URL for one part of one export.
    *
+   * @param workspaceId - Workspace that owns the export.
+   * @param exportId - Export the part belongs to.
    * @param part - Part to download.
    * @returns A presigned URL.
+   * @throws TypeError when the part key is outside that export.
    */
-  createPartDownloadUrl(part: AuditExportPart): Promise<string>
+  createPartDownloadUrl(workspaceId: string, exportId: string, part: AuditExportPart): Promise<string>
 }
 
 /**
@@ -186,8 +203,9 @@ export interface AuditExportQueue {
    *
    * @param workspaceId - Workspace that owns the job.
    * @param exportId - Export identifier.
+   * @param delaySeconds - Optional delivery delay, at most 900 seconds.
    */
-  enqueue(workspaceId: string, exportId: string): Promise<void>
+  enqueue(workspaceId: string, exportId: string, delaySeconds?: number): Promise<void>
 }
 
 /**
@@ -275,8 +293,19 @@ export type AuditExportServiceDependencies = {
   readonly now?: () => Date
   /** Identifier factory used when no idempotency key is supplied. */
   readonly createId?: () => string
+  /**
+   * Reports whether the Workspace is active. Steps for closing or closed tenants
+   * stop without writing, so exports cannot recreate data after tenant closure.
+   */
+  readonly isTenantActive?: (workspaceId: string) => Promise<boolean>
   /** Events per part; overridable for tests. */
   readonly eventsPerPart?: number
+  /** Query pages per step; overridable for tests. */
+  readonly pagesPerStep?: number
+  /** Serialized byte budget per part; overridable for tests. */
+  readonly partByteBudget?: number
+  /** Settle delay after the snapshot time; overridable for tests. */
+  readonly settleSeconds?: number
   /** Maximum events per export; overridable for tests. */
   readonly maxEvents?: number
 }
@@ -296,7 +325,7 @@ export type AuditExportRequest = {
 }
 
 /** Result of one processing step. */
-export type AuditExportStepResult = 'advanced' | 'completed' | 'failed' | 'skipped'
+export type AuditExportStepResult = 'advanced' | 'completed' | 'deferred' | 'failed' | 'skipped'
 
 /**
  * Asynchronous audit export operations.
@@ -306,9 +335,10 @@ export type AuditExportService = ReturnType<typeof createAuditExportService>
 /**
  * Creates the asynchronous audit export service.
  *
- * Each processing step writes at most one part and advances the job with an
- * optimistic-concurrency replacement, so duplicate queue deliveries rewrite the
- * same deterministic part and only one of them schedules the next step.
+ * Each processing step evaluates a bounded number of query pages, writes at most one
+ * content-addressed part, and advances the job with an optimistic-concurrency
+ * replacement. Duplicate queue deliveries therefore never overwrite the part a
+ * committed job references, and only one of them schedules the next step.
  *
  * @param dependencies - Store, queue, event reader, and optional overrides.
  * @returns Export request, read, download, and processing operations.
@@ -318,6 +348,9 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
   const createId = dependencies.createId ?? (() => randomUUID().replaceAll('-', ''))
   const eventsPerPart = dependencies.eventsPerPart ?? AUDIT_EXPORT_EVENTS_PER_PART
   const maxEvents = dependencies.maxEvents ?? AUDIT_EXPORT_MAX_EVENTS
+  const pagesPerStep = dependencies.pagesPerStep ?? AUDIT_EXPORT_PAGES_PER_STEP
+  const partByteBudget = dependencies.partByteBudget ?? AUDIT_EXPORT_PART_BYTE_BUDGET
+  const settleSeconds = dependencies.settleSeconds ?? AUDIT_EXPORT_SETTLE_SECONDS
 
   /**
    * Reads a job that is visible to the caller.
@@ -378,7 +411,20 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         parts: [],
       }
       if (await dependencies.store.createJob(job) === 'created') {
-        await dependencies.queue.enqueue(job.workspaceId, job.exportId)
+        try {
+          await dependencies.queue.enqueue(job.workspaceId, job.exportId, settleSeconds)
+        } catch (error) {
+          // With an idempotency key, retrying the request re-enqueues the queued job.
+          // Without one a retry creates a new job, so this one must not stay queued forever.
+          const stored = idempotencyKey ? undefined : await dependencies.store.readJob(job.workspaceId, job.exportId)
+          if (stored) {
+            await dependencies.store.replaceJob(
+              failJob(stored.job, now(), 'AuditExportEnqueueFailed', 'The export could not be scheduled. Request it again.'),
+              stored.version,
+            )
+          }
+          throw error
+        }
         return { job, created: true }
       }
       const existing = await readVisibleJob(request.workspaceId, exportId)
@@ -394,7 +440,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       }
       if (existing.job.status === 'queued') {
         // A previous attempt may have stored the job but failed to enqueue it.
-        await dependencies.queue.enqueue(existing.job.workspaceId, existing.job.exportId)
+        await dependencies.queue.enqueue(existing.job.workspaceId, existing.job.exportId, settleSeconds)
       }
       return { job: existing.job, created: false }
     },
@@ -437,7 +483,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         eventCount: part.eventCount,
         byteLength: part.byteLength,
         sha256: part.sha256,
-        url: await dependencies.store.createPartDownloadUrl(part),
+        url: await dependencies.store.createPartDownloadUrl(job.workspaceId, job.exportId, part),
       })))
     },
 
@@ -450,19 +496,31 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
      */
     async processExport(workspaceId: string, exportId: string): Promise<AuditExportStepResult> {
       if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) return 'skipped'
+      if (dependencies.isTenantActive && !await dependencies.isTenantActive(workspaceId)) return 'skipped'
       const stored = await dependencies.store.readJob(workspaceId, exportId)
       if (!stored || stored.job.workspaceId !== workspaceId) return 'skipped'
       const { job, version } = stored
       if (job.status === 'completed' || job.status === 'failed') return 'skipped'
-      if (isExpired(job, now())) {
-        return await finish(job, version, failJob(job, now(), 'AuditExportExpired', 'Audit export expired before it completed.'))
+      const current = now()
+      if (isExpired(job, current)) {
+        return await finish(job, version, failJob(job, current, 'AuditExportExpired', 'Audit export expired before it completed.'))
+      }
+      const settleRemainingSeconds = Math.ceil(
+        (Date.parse(job.snapshotAt) + settleSeconds * 1000 - current.getTime()) / 1000,
+      )
+      if (settleRemainingSeconds > 0) {
+        // Index reads are eventually consistent; wait until pre-snapshot events have propagated.
+        await dependencies.queue.enqueue(job.workspaceId, job.exportId, Math.min(settleRemainingSeconds, 900))
+        return 'deferred'
       }
 
       const events: AuditEventPage['events'] = []
       let cursor = job.nextCursor
       let hasMore = true
+      let pages = 0
+      let approximateBytes = 0
       try {
-        while (events.length < eventsPerPart) {
+        while (events.length < eventsPerPart && pages < pagesPerStep && approximateBytes < partByteBudget) {
           const page = await dependencies.readEvents({
             workspaceId: job.workspaceId,
             ...job.filters,
@@ -471,7 +529,9 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
             limit: Math.min(AUDIT_EXPORT_QUERY_PAGE_SIZE, eventsPerPart - events.length),
             ...(cursor ? { cursor } : {}),
           })
+          pages += 1
           events.push(...page.events)
+          for (const event of page.events) approximateBytes += JSON.stringify(event).length
           cursor = page.nextCursor
           if (!cursor) {
             hasMore = false
@@ -562,11 +622,21 @@ export function normalizeAuditExportFilters(filters: AuditExportFilters): AuditE
   if (filters.from && filters.to && Date.parse(filters.from) > Date.parse(filters.to)) {
     throw new AuditExportError(400, 'InvalidAuditExportFilters', 'from must not be later than to.')
   }
-  return Object.fromEntries(
+  const normalized: AuditExportFilters = Object.fromEntries(
     Object.entries(filters).filter(([, value]) =>
       value !== undefined && value !== '' && !(Array.isArray(value) && value.length === 0)
     ),
   )
+  try {
+    // Reject at request time what the worker's queries would reject later.
+    assertValidAuditQueryFilters({ workspaceId: 'validation', ...normalized })
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) {
+      throw new AuditExportError(400, 'InvalidAuditExportFilters', error.message)
+    }
+    throw error
+  }
+  return normalized
 }
 
 /**

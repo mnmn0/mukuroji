@@ -45,7 +45,7 @@ function createMemoryStore(): AuditExportStore {
     async putPart(_workspaceId, exportId, index, body) {
       return { key: `audit-exports/test/${exportId}/part-${index}.ndjson`, byteLength: body.length, sha256: 'digest' }
     },
-    async createPartDownloadUrl(part) {
+    async createPartDownloadUrl(_workspaceId, _exportId, part) {
       return `https://download.test/${part.key}`
     },
   }
@@ -74,6 +74,7 @@ function configureExports(workspaceRole?: 'member') {
     },
   }
   const service = createAuditExportService({
+    settleSeconds: 0,
     store: createMemoryStore(),
     queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
     readEvents: (query) => auditEvents.query(query),
@@ -130,8 +131,12 @@ test('requests, reports, and downloads an asynchronous audit export', async () =
     'audit.export-requested',
     'audit.export-downloaded',
   ])
-  expect(accessEvents[0]).toMatchObject({ metadata: { exportId: job.exportId, replayed: false } })
-  expect(accessEvents[1]).toMatchObject({ metadata: { exportId: job.exportId, replayed: true } })
+  expect(accessEvents[0]).toMatchObject({ metadata: { exportId: job.exportId, filtered: true } })
+  // The replay repeats the event under the same identity and fingerprint, which the
+  // idempotent audit writer collapses instead of rejecting as a conflicting reuse.
+  for (const field of ['eventId', 'eventType', 'requestFingerprint', 'metadata'] as const) {
+    expect(accessEvents[1]?.[field]).toEqual(accessEvents[0]?.[field])
+  }
   expect(accessEvents[2]).toMatchObject({ metadata: { exportId: job.exportId, partCount: 1, eventCount: 1 } })
 })
 
@@ -156,6 +161,25 @@ test('rejects malformed filters and unknown exports', async () => {
   })
   expect(unknownFilter.status).toBe(400)
   expect(await unknownFilter.json()).toMatchObject({ code: 'InvalidAuditExportFilters' })
+
+  // Missing, truncated, or misplaced filters must never become an unfiltered export.
+  for (const body of [undefined, '{"filters":{"actorId":', JSON.stringify({ actorId: 'demo@example.com' }), '[]']) {
+    const response = await app.request('/api/audit/exports', {
+      method: 'POST',
+      headers: adminHeaders(),
+      ...(body === undefined ? {} : { body }),
+    })
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'InvalidAuditExportRequest' })
+  }
+
+  const tooManyTypes = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ filters: { eventTypes: Array.from({ length: 21 }, (_, index) => `event-${index}`) } }),
+  })
+  expect(tooManyTypes.status).toBe(400)
+  expect(await tooManyTypes.json()).toMatchObject({ code: 'InvalidAuditExportFilters' })
 
   const missing = await app.request(`/api/audit/exports/${'f'.repeat(32)}`, { headers: adminHeaders() })
   expect(missing.status).toBe(404)

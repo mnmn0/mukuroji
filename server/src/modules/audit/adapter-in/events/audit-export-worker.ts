@@ -32,8 +32,9 @@ export type AuditExportBatchResponse = {
 /**
  * Creates the SQS entrypoint that runs one export step per message.
  *
- * Malformed messages are dropped because retrying cannot fix them. Step failures
- * are retried by SQS and reach the dead-letter queue after the redrive limit.
+ * Malformed messages and failed steps are reported as batch item failures, so SQS
+ * retries them and the redrive policy quarantines them in the dead-letter queue,
+ * where the DLQ alarm makes them visible.
  *
  * @param service - Export service.
  * @param log - Error sink for operational logs.
@@ -50,7 +51,8 @@ export function createAuditExportWorker(
     for (const record of event.Records ?? []) {
       const message = parseAuditExportQueueMessage(record.body)
       if (!message) {
-        log('Audit export worker dropped a malformed message.', { messageId: record.messageId })
+        log('Audit export worker rejected a malformed message.', { messageId: record.messageId })
+        failures.push({ itemIdentifier: record.messageId })
         continue
       }
       try {

@@ -18,11 +18,13 @@ import {
  *
  * @param readEvents - Audit event reader shared with the synchronous API.
  * @param environment - Runtime environment that names the bucket and queue.
+ * @param isTenantActive - Optional tenant lifecycle check used by worker steps.
  * @returns The service, or undefined when asynchronous export is not deployed.
  */
 export function createConfiguredAuditExportService(
   readEvents: AuditExportEventReader,
   environment: ServerEnvironment = readServerEnvironment(),
+  isTenantActive?: (workspaceId: string) => Promise<boolean>,
 ): AuditExportService | undefined {
   const bucketName = environment.AUDIT_EXPORT_BUCKET_NAME?.trim()
   const queueUrl = environment.AUDIT_EXPORT_QUEUE_URL?.trim()
@@ -34,5 +36,6 @@ export function createConfiguredAuditExportService(
     }),
     queue: new SqsAuditExportQueue(createSqsClient(), queueUrl),
     readEvents,
+    ...(isTenantActive ? { isTenantActive } : {}),
   })
 }

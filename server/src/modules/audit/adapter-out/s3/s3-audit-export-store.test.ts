@@ -126,17 +126,24 @@ describe('S3AuditExportStore', () => {
 
     const part = await store.putPart('ws-1', exportId, 1, '{"eventId":"e1"}\n')
 
-    expect(part.key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/part-00001.ndjson`)
+    expect(part.key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${exportId}/part-00001-${part.sha256.slice(0, 16)}.ndjson`)
     expect(part.byteLength).toBe(17)
     expect(part.sha256).toMatch(/^[0-9a-f]{64}$/)
     expect(puts.at(-1)).toMatchObject({ ChecksumSHA256: Buffer.from(part.sha256, 'hex').toString('base64') })
+    // Different content for the same index gets a different key, so it cannot replace a committed part.
+    expect((await store.putPart('ws-1', exportId, 1, '{"eventId":"e2"}\n')).key).not.toBe(part.key)
     await expect(store.putPart('ws-1', exportId, 0, '')).rejects.toThrow(RangeError)
 
-    const url = new URL(await store.createPartDownloadUrl({ ...part, index: 1, eventCount: 1 }))
+    const url = new URL(await store.createPartDownloadUrl('ws-1', exportId, { ...part, index: 1, eventCount: 1 }))
     expect(url.pathname).toBe(`/${part.key}`)
     expect(url.searchParams.get('X-Amz-Expires')).toBe('300')
     expect(url.searchParams.get('response-content-disposition')).toContain('mukuroji-audit-part-00001.ndjson')
-    await expect(store.createPartDownloadUrl({ ...part, key: 'workspaces/x/files/a', index: 1, eventCount: 1 }))
-      .rejects.toThrow('outside the export namespace')
+    await expect(store.createPartDownloadUrl('ws-1', exportId, { ...part, key: 'workspaces/x/files/a', index: 1, eventCount: 1 }))
+      .rejects.toThrow('outside the export')
+    // A key from another Workspace's or another export's namespace is rejected too.
+    await expect(store.createPartDownloadUrl('ws-2', exportId, { ...part, index: 1, eventCount: 1 }))
+      .rejects.toThrow('outside the export')
+    await expect(store.createPartDownloadUrl('ws-1', 'd'.repeat(32), { ...part, index: 1, eventCount: 1 }))
+      .rejects.toThrow('outside the export')
   })
 })

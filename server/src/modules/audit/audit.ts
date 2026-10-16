@@ -1620,6 +1620,16 @@ type AuditCursorPayload = {
   lastEvaluatedKey: NonNullable<QueryCommandInput['ExclusiveStartKey']>
 }
 
+/**
+ * Validates audit query filters with the same rules the query layer applies.
+ *
+ * @param input - Query whose filters are checked.
+ * @throws TypeError or RangeError when a filter would be rejected by a query.
+ */
+export function assertValidAuditQueryFilters(input: AuditEventQuery): void {
+  normalizeAuditQuery(input)
+}
+
 function normalizeAuditQuery(input: AuditEventQuery): NormalizedAuditQuery {
   const workspaceId = requireText(input.workspaceId, 'Audit workspace ID')
   const actorId = optionalText(input.actorId, 'Audit actor ID')

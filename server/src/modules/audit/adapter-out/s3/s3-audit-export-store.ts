@@ -185,7 +185,8 @@ export class S3AuditExportStore implements AuditExportStore {
     }
     const bytes = new TextEncoder().encode(body)
     const digest = createHash('sha256').update(bytes).digest()
-    const key = `${createAuditExportWorkspacePrefix(workspaceId)}${exportId}/part-${String(index).padStart(5, '0')}.ndjson`
+    // The digest in the key keeps concurrent steps from overwriting a referenced part.
+    const key = `${exportDirectory(workspaceId, exportId)}part-${String(index).padStart(5, '0')}-${digest.toString('hex').slice(0, 16)}.ndjson`
     await this.client.send(new PutObjectCommand({
       Bucket: this.bucketName,
       Key: key,
@@ -199,14 +200,17 @@ export class S3AuditExportStore implements AuditExportStore {
   }
 
   /**
-   * Creates a five-minute download URL for a part.
+   * Creates a five-minute download URL for a part of one export.
    *
+   * @param workspaceId - Workspace that owns the export.
+   * @param exportId - Export the part must belong to.
    * @param part - Part to download.
    * @returns The presigned URL.
+   * @throws TypeError when the stored key is outside that export.
    */
-  async createPartDownloadUrl(part: AuditExportPart): Promise<string> {
-    if (!part.key.startsWith('audit-exports/') || !part.key.endsWith('.ndjson')) {
-      throw new TypeError('Audit export part key is outside the export namespace.')
+  async createPartDownloadUrl(workspaceId: string, exportId: string, part: AuditExportPart): Promise<string> {
+    if (!part.key.startsWith(exportDirectory(workspaceId, exportId)) || !part.key.endsWith('.ndjson')) {
+      throw new TypeError('Audit export part key is outside the export.')
     }
     return await getSignedUrl(
       this.client,
@@ -249,6 +253,20 @@ export class S3AuditExportStore implements AuditExportStore {
  * @param exportId - Export identifier.
  * @returns The job document key.
  */
+/**
+ * Builds the object key prefix of one export.
+ *
+ * @param workspaceId - Workspace that owns the export.
+ * @param exportId - Export identifier.
+ * @returns Prefix ending with `/`.
+ */
+function exportDirectory(workspaceId: string, exportId: string) {
+  if (!/^[0-9a-f]{32}$/u.test(exportId)) {
+    throw new TypeError('Audit export identifiers must be 32 lowercase hexadecimal digits.')
+  }
+  return `${createAuditExportWorkspacePrefix(workspaceId)}${exportId}/`
+}
+
 function jobKey(workspaceId: string, exportId: string) {
   if (!/^[0-9a-f]{32}$/u.test(exportId)) {
     throw new TypeError('Audit export identifiers must be 32 lowercase hexadecimal digits.')
