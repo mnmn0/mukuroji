@@ -31,10 +31,10 @@ export default meta
 /** Story type for the Workspace help navigation view. */
 type Story = StoryObj<typeof meta>
 
-/** Standard Japanese Workspace help destinations. */
+/** Japanese MCP connection guide followed by Workspace help destinations. */
 export const Default: Story = {}
 
-/** English Workspace help destinations. */
+/** English MCP connection guide followed by Workspace help destinations. */
 export const English: Story = {
   args: {
     t: createTranslator('en'),
