@@ -141,8 +141,11 @@ purpose を指定しない endpoint は `automation` である。`triage` endpoi
 Triage は record key に使える Team ID（英数字で始まり `A-Z a-z 0-9 . _ : -` のみ、200 文字以内）だけを
 扱うため、それ以外の Team ID（日本語名から作られた ID など）への routing は作成時に
 `400 AutomationInboundWebhookTriageTeamUnsupported` で拒否する。
-Team の確認は新しい endpoint を予約するときだけ行う。同じ `Idempotency-Key` の作成 replay は、その後に
-Team が無効になっていても元の endpoint を返す（delivery 時の Team 確認で fail closed になる）。
+Team の確認は新しい endpoint を予約するときだけ行う。確認時の Team row への条件（active であること）は
+endpoint の予約 transaction に含めるため、確認後から予約の commit までに Team が archive されると予約は
+`409 AutomationInboundWebhookReferenceUnavailable` で失敗し、無効な Team への endpoint は作られない。
+同じ `Idempotency-Key` の作成 replay は、その後に Team が無効になっていても元の endpoint を返す
+（delivery 時の Team 確認で fail closed になる）。
 
 `triage` endpoint への delivery は Automation と同じ HMAC、timestamp、`Idempotency-Key`、signature
 replay、active tenant の検証を通る。その後:
@@ -165,6 +168,14 @@ replay、active tenant の検証を通る。その後:
   Source identity は `<endpointId>:<eventId>` で、同じ event と同じ envelope の再配送は元の Entry を
   返し、同じ event に異なる envelope は `409 TriageSourceConflict` にする。Response 消失後の再送も
   同じ Entry を返す。
+- delivery receipt は Triage の受け付けとは別の transaction で確定するため、`triage` endpoint の receipt と
+  同じ transaction で、opaque endpoint ID と delivery key の digest を key にした recovery marker も保存する
+  （receipt と同じ 400 日 TTL）。Revoke は opaque lookup と secret を削除するが marker は残すため、receipt の
+  確定後に Triage の受け付けが失敗し、再送までに endpoint が pause または revoke されても、同じ
+  `Idempotency-Key` と receipt が受け付けた raw body と SHA-256 が一致する再送は Entry の作成を完了する。
+  Raw body は receipt の確定時に署名検証済みで、digest の一致がその body への束縛になるため、secret の削除後も
+  署名を検証し直さない。Marker の無い delivery、body が一致しない再送、新しい delivery は従来どおり
+  `404 AutomationInboundWebhookNotFound` または `423 AutomationInboundWebhookPaused` で拒否する。
 - Triage の受け付けで起きた失敗は、DynamoDB の throttling などの基盤エラーも含めて Triage の error envelope
   （`code` と `message`）で返し、基盤エラーは再試行可能な `503 TriageUnavailable` にする。
 - Team configuration の webhook 向け rule、owner rotation、SLA、retention は他の source と同様に

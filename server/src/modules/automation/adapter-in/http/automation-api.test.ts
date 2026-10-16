@@ -72,6 +72,7 @@ import {
   test,
 } from 'bun:test'
 import {
+  createHash,
   createHmac,
 } from 'node:crypto'
 
@@ -314,6 +315,10 @@ function createAutomationInboundWebhookPort(
     },
     async resolveInboundWebhookEndpoint() {
       return unexpectedAutomationPortCall()
+    },
+    async resolveAcceptedTriageWebhookDelivery() {
+      // Most tests send no delivery to an inactive endpoint, so none was accepted.
+      return undefined
     },
     async reserveCreateInboundWebhookEndpoint() {
       return unexpectedAutomationPortCall()
@@ -3000,4 +3005,160 @@ test('turns a signed Triage-purpose delivery into a Triage entry without an Auto
     if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
     else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
   }
+})
+
+test('fences the Triage routing Team in the endpoint reservation', async () => {
+  configureFakeProjectClients(true)
+  const endpoint = createInboundWebhookEndpointRecord({
+    name: 'Status page',
+    purpose: 'triage',
+    triageRouting: { teamId: 'core-team' },
+  })
+  const fences: unknown[] = []
+  setTestAppDependencies({
+    inboundWebhooks: createAutomationInboundWebhookPort({
+      async reserveCreateInboundWebhookEndpoint(_workspaceId, _actorId, _input, _key, _baseUrl, validateNewEndpoint) {
+        fences.push(...(await validateNewEndpoint?.() ?? []))
+        return createInboundWebhookProvisioning(endpoint, 'create')
+      },
+      async completeInboundWebhookProvisioning(provisioning) {
+        return { ...provisioning.endpoint, status: 'active' }
+      },
+    }),
+    automationInboundWebhookSecrets: {
+      async provision() { return 'one-time-secret' },
+      async get() { throw new Error('unexpected') },
+      async delete() { throw new Error('unexpected') },
+    },
+  })
+  const response = await app.request('/api/automation/inbound-webhooks', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'triage-endpoint-1',
+    },
+    body: JSON.stringify({ name: 'Status page', purpose: 'triage', triageRouting: { teamId: 'core-team' } }),
+  })
+  expect(response.status).toBe(201)
+  // The Team check is a commit-time condition of the reservation, not only a preflight read.
+  expect(fences).toEqual([expect.objectContaining({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'DirectoryTable',
+      Key: expect.objectContaining({ entryKey: 'TEAM#core-team' }),
+    }),
+  })])
+})
+
+test('finishes an accepted Triage delivery after its endpoint is revoked', async () => {
+  configureFakeProjectClients(true)
+  const endpoint = createInboundWebhookEndpointRecord({
+    name: 'Status page',
+    purpose: 'triage',
+    triageRouting: { teamId: 'core-team' },
+    status: 'revoked',
+    revokedAt: '2026-10-16T01:00:00.000Z',
+  })
+  const body = JSON.stringify({ eventId: 'evt-1', title: 'Checkout errors', body: 'Customers see 500.', requester: { name: 'Status page' } })
+  const admissions: { eventId: string; receivedAt: string | undefined }[] = []
+  const unexpected = async (): Promise<never> => {
+    throw new Error('Unexpected Triage client call.')
+  }
+  setTestAppDependencies({
+    inboundWebhooks: createAutomationInboundWebhookPort({
+      // Revocation removed the opaque lookup.
+      async resolveInboundWebhookEndpoint() {
+        return undefined
+      },
+      async resolveAcceptedTriageWebhookDelivery(_opaqueEndpointId, idempotencyKey) {
+        if (idempotencyKey !== 'accepted-key') return undefined
+        return {
+          endpoint: structuredClone(endpoint),
+          eventId: 'event-accepted',
+          bodyFingerprint: createHash('sha256').update(body).digest('hex'),
+          acceptedAt: '2026-10-16T00:00:00.000Z',
+        }
+      },
+      async recordInboundWebhookDelivery() {
+        throw new Error('A revoked endpoint must not record a new delivery.')
+      },
+    }),
+    automationInboundWebhookSecrets: {
+      async provision() { throw new Error('unexpected') },
+      // The revoked endpoint's secret is gone.
+      async get() { throw new Error('A revoked endpoint has no signing secret.') },
+      async delete() { throw new Error('unexpected') },
+    },
+    tenantLifecycleEnforcement: { async assertActive() {} },
+    triage: {
+      listEntries: unexpected,
+      getEntry: unexpected,
+      getEntryForMutation: unexpected,
+      applyAction: unexpected,
+      getActionReceipt: unexpected,
+      applyBulkAction: unexpected,
+      getConfiguration: unexpected,
+      getConfigurationUpdateReceipt: unexpected,
+      updateConfiguration: unexpected,
+      createManualHandoff: unexpected,
+      listWorkItemSources: unexpected,
+      async createWebhookEntry(_workspaceId, _teamId, _endpoint, input, _idempotency, options) {
+        admissions.push({ eventId: input.eventId, receivedAt: options?.receivedAt })
+        return {
+          entry: {
+            schemaVersion: 1,
+            id: 'triage-webhook-1',
+            workspaceId: endpoint.workspaceId,
+            source: { kind: 'webhook', sourceId: `${endpoint.id}:evt-1`, connectorId: endpoint.id },
+            sourcePreview: { title: 'Checkout errors', body: 'Customers see 500.', attachmentCount: 0, commentCount: 0, watcherCount: 0, sanitized: true, truncated: false },
+            requester: { displayName: 'Status page', guest: true },
+            receivedAt: '2026-10-16T00:00:00.000Z',
+            lastActivityAt: '2026-10-16T00:00:00.000Z',
+            state: 'pending',
+            routing: { reason: 'Received by inbound webhook.', candidates: [] },
+            teamId: 'core-team',
+            permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: '2026-10-16T00:00:00.000Z' },
+            retention: { expiresAt: '2027-10-16T00:00:00.000Z' },
+            capabilities: { canAssign: true, canAcceptCreate: true, canAcceptLink: true, canMarkDuplicate: true, canDecline: true, canSnooze: true, canRequestInformation: false, canReply: false, canViewInternalContext: true },
+            events: [],
+            revision: 1,
+            createdAt: '2026-10-16T00:00:00.000Z',
+            updatedAt: '2026-10-16T00:00:00.000Z',
+          },
+          replayed: false,
+        }
+      },
+    },
+  })
+  /**
+   * Retries a delivery to the revoked endpoint.
+   *
+   * @param idempotencyKey - Sender idempotency key.
+   * @param requestBody - Raw JSON body.
+   * @returns The response.
+   */
+  const retry = (idempotencyKey: string, requestBody: string) =>
+    app.request(`/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+        'X-Mukuroji-Signature': `sha256=${'0'.repeat(64)}`,
+        'X-Mukuroji-Timestamp': String(Math.floor(Date.now() / 1_000)),
+      },
+      body: requestBody,
+    })
+
+  const completed = await retry('accepted-key', body)
+  expect(completed.status).toBe(202)
+  expect(await completed.json()).toEqual({ eventId: 'event-accepted', triageEntryId: 'triage-webhook-1' })
+  expect(admissions).toEqual([{ eventId: 'evt-1', receivedAt: '2026-10-16T00:00:00.000Z' }])
+
+  // A new delivery, or a different body under the accepted key, is still rejected.
+  const fresh = await retry('new-key', JSON.stringify({ eventId: 'evt-2', title: 'New', body: 'x', requester: { name: 'Status page' } }))
+  expect(fresh.status).toBe(404)
+  expect(await fresh.json()).toMatchObject({ code: 'AutomationInboundWebhookNotFound' })
+  const altered = await retry('accepted-key', JSON.stringify({ eventId: 'evt-1', title: 'Altered', body: 'x', requester: { name: 'Status page' } }))
+  expect(altered.status).toBe(404)
+  expect(admissions).toHaveLength(1)
 })

@@ -20,6 +20,9 @@ function createInboundWebhookDocumentProbe() {
     if (typeof value.directoryId === 'string' && typeof value.eventId === 'string') {
       return `${tableName}\0${value.directoryId}\0${value.eventId}`
     }
+    if (typeof value.directoryId === 'string' && typeof value.entryKey === 'string') {
+      return `${tableName}\0${value.directoryId}\0${value.entryKey}`
+    }
     throw new Error('Test item key is invalid.')
   }
   const readExisting = (tableName: string, key: Record<string, unknown>) =>
@@ -492,9 +495,89 @@ describe('DynamoDB inbound webhook lifecycle', () => {
     })).rejects.toThrow('Team was archived')
     expect(await client.listInboundWebhookEndpoints('workspace-1')).toHaveLength(1)
   })
+
+  test('fences the routing Team in the reservation transaction', async () => {
+    const probe = createInboundWebhookDocumentProbe()
+    const client = new DynamoDbAutomationRepository('AutomationTable', probe.documentClient)
+    const input: CreateAutomationInboundWebhookEndpointInput = { name: 'Status page', purpose: 'triage', triageRouting: { teamId: 'support' } }
+    const teamKey = { directoryId: 'workspace-1', entryKey: 'TEAM#support' }
+    probe.items.set('DirectoryTable\0workspace-1\0TEAM#support', { ...teamKey, status: 'active' })
+    const teamFence = {
+      ConditionCheck: {
+        TableName: 'DirectoryTable',
+        Key: teamKey,
+        ConditionExpression: '#status = :active',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'active' },
+      },
+    }
+    // The Team is archived after validation but before the reservation commits.
+    await expect(client.reserveCreateInboundWebhookEndpoint('workspace-1', 'actor-1', input, 'raced-key', 'https://api.example.com', async () => {
+      probe.items.set('DirectoryTable\0workspace-1\0TEAM#support', { ...teamKey, status: 'archived' })
+      return [teamFence]
+    })).rejects.toMatchObject({ category: 'conflict', code: 'AutomationInboundWebhookReferenceUnavailable' })
+    expect(await client.listInboundWebhookEndpoints('workspace-1')).toHaveLength(0)
+    expect([...probe.items.values()].some((item) => item.entryType === 'inbound-webhook-triage-lookup')).toBe(false)
+
+    // Only condition checks may join the reservation.
+    const transactionsBeforeInvalidFence = probe.transactionCalls
+    await expect(client.reserveCreateInboundWebhookEndpoint('workspace-1', 'actor-1', input, 'put-key', 'https://api.example.com', async () => [
+      { Put: { TableName: 'DirectoryTable', Item: teamKey } },
+    ])).rejects.toMatchObject({ code: 'InvalidAutomationInput' })
+    expect(probe.transactionCalls).toBe(transactionsBeforeInvalidFence)
+
+    probe.items.set('DirectoryTable\0workspace-1\0TEAM#support', { ...teamKey, status: 'active' })
+    const created = await client.reserveCreateInboundWebhookEndpoint('workspace-1', 'actor-1', input, 'active-key', 'https://api.example.com', async () => [teamFence])
+    expect(created.endpoint.triageRouting).toEqual({ teamId: 'support' })
+    expect(await client.listInboundWebhookEndpoints('workspace-1')).toHaveLength(1)
+  })
 })
 
 describe('DynamoDB inbound webhook delivery receipts', () => {
+  test('keeps an accepted Triage delivery resolvable after the endpoint is revoked', async () => {
+    const probe = createInboundWebhookDocumentProbe()
+    const client = new DynamoDbAutomationRepository('AutomationTable', probe.documentClient)
+    const triage = await client.completeInboundWebhookProvisioning(await client.reserveCreateInboundWebhookEndpoint(
+      'workspace-1', 'actor-1', { name: 'Status page', purpose: 'triage', triageRouting: { teamId: 'support' } }, 'triage-key', 'https://api.example.com',
+    ))
+    const automation = await client.completeInboundWebhookProvisioning(await client.reserveCreateInboundWebhookEndpoint(
+      'workspace-1', 'actor-1', { name: 'Builds' }, 'automation-key', 'https://api.example.com',
+    ))
+    const accepted = await client.recordInboundWebhookDelivery(triage, {
+      idempotencyKey: 'delivery-key',
+      bodyFingerprint: fingerprint('raw body'),
+      signatureFingerprint: fingerprint('signature-1'),
+      signatureTimestamp: '1784160000',
+      eventId: 'event-1',
+      auditMutation: auditPut('event-1'),
+    })
+    await client.recordInboundWebhookDelivery(automation, {
+      idempotencyKey: 'delivery-key',
+      bodyFingerprint: fingerprint('raw body'),
+      signatureFingerprint: fingerprint('signature-2'),
+      signatureTimestamp: '1784160000',
+      eventId: 'event-2',
+      auditMutation: auditPut('event-2'),
+    })
+
+    await client.revokeInboundWebhookEndpoint(triage.workspaceId, triage.id, { expectedRevision: triage.revision })
+    expect(await client.resolveInboundWebhookEndpoint(triage.opaqueEndpointId)).toBeUndefined()
+    const recovered = await client.resolveAcceptedTriageWebhookDelivery(triage.opaqueEndpointId, 'delivery-key')
+    expect(recovered).toEqual({
+      endpoint: expect.objectContaining({ id: triage.id, status: 'revoked', triageRouting: { teamId: 'support' } }),
+      eventId: 'event-1',
+      bodyFingerprint: fingerprint('raw body'),
+      acceptedAt: expect.any(String),
+    })
+    expect(recovered?.acceptedAt).toBe(accepted.acceptedAt ?? '')
+    const marker = [...probe.items.values()].find((item) => item.entryType === 'inbound-webhook-triage-delivery')
+    expect(marker?.expiresAt).toBeNumber()
+    // Only a committed Triage receipt resolves; new keys and Automation deliveries do not.
+    expect(await client.resolveAcceptedTriageWebhookDelivery(triage.opaqueEndpointId, 'other-key')).toBeUndefined()
+    expect(await client.resolveAcceptedTriageWebhookDelivery(automation.opaqueEndpointId, 'delivery-key')).toBeUndefined()
+  })
+
+
   test('binds body/key/signature and checks active generation on every replay path', async () => {
     const probe = createInboundWebhookDocumentProbe()
     const client = new DynamoDbAutomationRepository('AutomationTable', probe.documentClient)
