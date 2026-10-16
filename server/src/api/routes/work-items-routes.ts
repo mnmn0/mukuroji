@@ -4714,6 +4714,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           readTeamIssueAssigneeUserId(configuredBody),
         )
       }
+      if ('contributorAssignments' in configuredBody && detail.issue.revision !== expectedRevision) {
+        // Assignment IDs refer to the observed list, so a stale request is a revision conflict.
+        throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
+      }
       const contributorAssignments = await readContributorAssignmentChange(
         principal.directoryId,
         configuredBody,

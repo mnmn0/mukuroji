@@ -6,7 +6,14 @@ import {
 } from '@mukuroji/contracts'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
 
-const { app, configureFakeProjectClients, resetTestApp } = createApiTestHarness()
+const {
+  app,
+  configureFakeProjectClients,
+  createFakeWorkItemConfigurationClient,
+  createTestWorkItemConfiguration,
+  resetTestApp,
+  setTestAppDependencies,
+} = createApiTestHarness()
 
 afterEach(() => {
   resetTestApp()
@@ -169,4 +176,56 @@ test('creates a Work Item with planned contributors', async () => {
     { assignmentId: expect.stringMatching(/^[0-9a-f]{32}$/u), jobRoleId: 'qa', status: 'planned' },
   ])
   expect(creates).toEqual([issue.contributorAssignments])
+})
+
+test('keeps job roles that contributors still use from being removed', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    jobRoles,
+    issueContributorAssignments: [storedContributor],
+  })
+  let writes = 0
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async saveTeamConfiguration(_workspaceId, teamId, configuration, compatibilityCheck) {
+        await compatibilityCheck()
+        writes += 1
+        return { configuration: { ...configuration, scopeId: teamId } }
+      },
+    }),
+  })
+
+  /**
+   * Saves the Team configuration with the given job roles.
+   *
+   * @param roles - Job roles of the candidate configuration.
+   * @returns The HTTP response.
+   */
+  const save = (roles: WorkItemJobRoleDefinition[]) => app.request('/api/teams/core-team/work-item-configuration', {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...createTestWorkItemConfiguration('team', 'core-team'), jobRoles: roles }),
+  })
+
+  const removed = await save(jobRoles.filter((role) => role.id !== 'legacy-writer'))
+  expect(removed.status).toBe(409)
+  expect(await removed.json()).toMatchObject({ code: 'WorkItemConfigurationInUse' })
+  expect(writes).toBe(0)
+  expect((await save(jobRoles)).status).toBe(200)
+  expect(writes).toBe(1)
+})
+
+test('reports a stale revision before validating contributor assignment IDs', async () => {
+  configureFakeProjectClients(true, { jobRoles, issueContributorAssignments: [] })
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contributorAssignments: [{ assignmentId: storedContributor.assignmentId, jobRoleId: 'qa' }],
+      expectedRevision: 7,
+    }),
+  })
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'WorkItemRevisionConflict' })
 })
