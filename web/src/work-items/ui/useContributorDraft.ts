@@ -1,5 +1,15 @@
 import { useState, type Dispatch, type SetStateAction } from 'react'
-import type { ContributorDraftRow } from '../model/contributorAssignments'
+import type { ContributorDraftError, ContributorDraftRow } from '../model/contributorAssignments'
+
+/**
+ * Draft problem shown next to the contributor rows.
+ */
+export type ContributorDraftSubmitError = {
+  /** Why the draft cannot be saved. */
+  error: ContributorDraftError
+  /** Row that caused the problem, when one row is at fault. */
+  rowKey?: string
+}
 
 /** Unsaved contributor rows of one Work Item editor. */
 export type ContributorDraft = {
@@ -7,6 +17,8 @@ export type ContributorDraft = {
   rows?: ContributorDraftRow[]
   /** Number used for the key of the next added row. */
   nextRowNumber: number
+  /** Problem reported by the owning form's last submit; cleared with the draft. */
+  submitError?: ContributorDraftSubmitError
 }
 
 /** Contributor draft state that can live above the editor that shows it. */

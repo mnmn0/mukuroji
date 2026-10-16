@@ -176,5 +176,9 @@ describe('contributor options', () => {
       member('guest@example.com', 'guest'),
       member('former@example.com', 'member', 'deactivated'),
     ]).map((option) => option.id)).toEqual(['owner@example.com', 'outside-project@example.com'])
+    // A directory-managed member whose email changed is still identified by the member key.
+    expect(resolveWorkItemContributorOptions([
+      { ...member('new-address@example.com', 'member'), memberKey: 'old-address@example.com' },
+    ])).toEqual([{ email: 'new-address@example.com', id: 'old-address@example.com', name: 'new-address@example.com' }])
   })
 })

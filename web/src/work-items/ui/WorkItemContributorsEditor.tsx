@@ -20,7 +20,7 @@ import {
   type ContributorDraftError,
   type ContributorDraftRow,
 } from '../model/contributorAssignments'
-import { useContributorDraft, type ContributorDraftState } from './useContributorDraft'
+import { useContributorDraft, type ContributorDraftState, type ContributorDraftSubmitError } from './useContributorDraft'
 
 /**
  * Props accepted by the Work Item contributor editor.
@@ -54,15 +54,7 @@ export type WorkItemContributorsEditorProps = {
   draftState?: ContributorDraftState
 }
 
-/**
- * Draft problem shown next to the contributor rows.
- */
-export type ContributorDraftSubmitError = {
-  /** Why the draft cannot be saved. */
-  error: ContributorDraftError
-  /** Row that caused the problem, when one row is at fault. */
-  rowKey?: string
-}
+export type { ContributorDraftSubmitError } from './useContributorDraft'
 
 /**
  * Shows the contributors who share a Work Item and edits them as one replacement list.
@@ -92,6 +84,9 @@ export function WorkItemContributorsEditor({
   const ownDraftState = useContributorDraft('')
   const { draft, setDraft } = draftState ?? ownDraftState
   const { rows } = draft
+  // A draft held by the owning editor carries its own submit error, so cancelling or
+  // switching Work Items clears it with the draft.
+  const currentSubmitError = draftState ? draft.submitError : submitError
   const [draftError, setDraftError] = useState<{ error: ContributorDraftError | 'save'; rowKey?: string }>()
   const [isSaving, setIsSaving] = useState(false)
   /**
@@ -107,7 +102,7 @@ export function WorkItemContributorsEditor({
   }
   const totalMinutes = sumContributorPlannedEffort(assignments)
   const canEdit = !readOnly && (formId !== undefined || onSave !== undefined)
-  const visibleError = draftError ?? (rows ? submitError : undefined)
+  const visibleError = draftError ?? (rows ? currentSubmitError : undefined)
   /**
    * Resolves the display label of a contributor.
    *
@@ -129,7 +124,7 @@ export function WorkItemContributorsEditor({
 
   /** Starts editing from the stored list. */
   const startEditing = () => {
-    setRows(toContributorDraftRows(assignments))
+    setDraft((current) => ({ nextRowNumber: current.nextRowNumber, rows: toContributorDraftRows(assignments) }))
     setDraftError(undefined)
   }
 

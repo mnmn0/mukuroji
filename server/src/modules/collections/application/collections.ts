@@ -224,6 +224,9 @@ export async function deleteCollection(
   })
 }
 
+/** Largest encoded Collection row, kept well below DynamoDB's 400 KB item limit. */
+const COLLECTION_ROW_BYTE_LIMIT = 350_000
+
 /**
  * Adds a Work Item reference to a Collection.
  *
@@ -257,12 +260,18 @@ export async function addCollectionItem(
     // A retry rebuilds on newer state, so the new item must not look older than items already
     // there; most recently added first stays true.
     const addedAt = laterInstant(context.now, current.updatedAt)
-    return {
+    const next = {
       ...current,
       items: [{ teamId, issueId, addedAt, addedBy: context.actor }, ...current.items],
       updatedAt: addedAt,
       revision: current.revision + 1,
     }
+    // References are stored inline, so long identifiers can reach DynamoDB's 400 KB item limit
+    // before the count limit; report that as the same item-limit conflict.
+    if (new TextEncoder().encode(JSON.stringify(next)).byteLength > COLLECTION_ROW_BYTE_LIMIT) {
+      throw new CollectionError(409, 'CollectionItemLimitReached', 'This Collection cannot hold more Work Items.')
+    }
+    return next
   })
 }
 
