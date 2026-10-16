@@ -14,6 +14,7 @@ import {
   type AuditEventQuery,
 } from '../../modules/audit/audit'
 import {
+  AUDIT_EXPORT_RETENTION_DAYS,
   AuditExportError,
   toAuditExportView,
   type AuditExportFilters,
@@ -286,6 +287,7 @@ function requireAuditExporter(principal: ProjectPrincipal) {
  * @param eventType - Export action event type.
  * @param metadata - Safe action metadata.
  * @param idempotencyKeyOverride - Operation-scoped audit idempotency key, if any.
+ * @param replayGuard - For export requests, whether the export job still exists.
  */
 async function recordAuditExportAction(
   c: Context,
@@ -293,6 +295,7 @@ async function recordAuditExportAction(
   eventType: 'audit.export-requested' | 'audit.export-downloaded',
   metadata: Record<string, string | number | boolean>,
   idempotencyKeyOverride?: string,
+  replayGuard?: { readonly jobExists: boolean },
 ) {
   if (!workspaceDependencies.auditEvents.putEvent) {
     throw new ProjectDataError(
@@ -302,7 +305,7 @@ async function recordAuditExportAction(
     )
   }
   const context = createApiMutationContext(c, principal, { auditExport: eventType, ...metadata }, idempotencyKeyOverride)
-  await workspaceDependencies.auditEvents.putEvent(createAuditEvent({
+  const event = createAuditEvent({
     context,
     eventType,
     entity: { type: 'audit-log', id: principal.directoryId },
@@ -311,7 +314,43 @@ async function recordAuditExportAction(
       : 'Audit export download links were issued.',
     metadata,
     expiresAt: calculateAuditExpiresAt(context.occurredAt, getConfiguredAuditRetentionDays()),
-  }))
+  })
+  if (replayGuard && !replayGuard.jobExists) {
+    // The audit event outlives the export job. A key whose recorded request is older than the
+    // job lifetime belonged to an export that already expired, so it must not start a new one.
+    const recorded = await workspaceDependencies.auditEvents.getEvent(principal.directoryId, event.eventId)
+    if (recorded && recorded.requestFingerprint !== event.requestFingerprint) throw auditExportIdempotencyConflict()
+    if (
+      recorded &&
+      Date.parse(recorded.occurredAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000 <= Date.parse(context.occurredAt)
+    ) {
+      throw new AuditExportError(
+        409,
+        'AuditExportIdempotencyKeyExpired',
+        'This Idempotency-Key belongs to an export that has expired. Use a new key.',
+      )
+    }
+  }
+  try {
+    await workspaceDependencies.auditEvents.putEvent(event)
+  } catch (error) {
+    // The audit writer reports a reused key with a different request as a TypeError.
+    if (error instanceof TypeError && eventType === 'audit.export-requested') throw auditExportIdempotencyConflict()
+    throw error
+  }
+}
+
+/**
+ * Creates the stable conflict for an export key reused with a different request.
+ *
+ * @returns A 409 audit export error.
+ */
+function auditExportIdempotencyConflict(): AuditExportError {
+  return new AuditExportError(
+    409,
+    'AuditExportIdempotencyConflict',
+    'Idempotency-Key was already used for a different audit export.',
+  )
 }
 
 /**
@@ -392,7 +431,7 @@ export function registerAuditRoutes(routeApp: Hono): void {
         exportId: prepared.exportId,
         filtered: Object.keys(prepared.filters).length > 0,
         filtersDigest: prepared.requestFingerprint,
-      }, `audit-export-request:${prepared.exportId}`)
+      }, `audit-export-request:${prepared.exportId}`, { jobExists: prepared.jobExists })
       const { job, created } = await service.requestExport(request)
       return c.json({ export: toAuditExportView(job) }, created ? 202 : 200)
     }),
