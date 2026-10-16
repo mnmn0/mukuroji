@@ -206,15 +206,21 @@ export class S3AuditExportStore implements AuditExportStore {
   }
 
   /**
-   * Creates a five-minute download URL for a part of one export.
+   * Creates a download URL for a part of one export, valid for at most five minutes.
    *
    * @param workspaceId - Workspace that owns the export.
    * @param exportId - Export the part must belong to.
    * @param part - Part to download.
+   * @param maxLifetimeSeconds - Remaining job lifetime; the URL never outlives it.
    * @returns The presigned URL.
    * @throws TypeError when the stored key is outside that export.
    */
-  async createPartDownloadUrl(workspaceId: string, exportId: string, part: AuditExportPart): Promise<string> {
+  async createPartDownloadUrl(
+    workspaceId: string,
+    exportId: string,
+    part: AuditExportPart,
+    maxLifetimeSeconds: number,
+  ): Promise<string> {
     if (!part.key.startsWith(exportDirectory(workspaceId, exportId)) || !part.key.endsWith('.ndjson')) {
       throw new TypeError('Audit export part key is outside the export.')
     }
@@ -226,7 +232,7 @@ export class S3AuditExportStore implements AuditExportStore {
         ResponseContentDisposition:
           `attachment; filename="mukuroji-audit-part-${String(part.index).padStart(5, '0')}.ndjson"`,
       }),
-      { expiresIn: AUDIT_EXPORT_DOWNLOAD_TTL_SECONDS },
+      { expiresIn: Math.max(1, Math.min(AUDIT_EXPORT_DOWNLOAD_TTL_SECONDS, Math.floor(maxLifetimeSeconds))) },
     )
   }
 

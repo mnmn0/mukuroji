@@ -58,7 +58,7 @@ function createMemoryStore(): AuditExportStore {
  * @param workspaceRole - Optional Workspace role of the caller.
  * @returns Recorded access events, queued export IDs, and the service.
  */
-function configureExports(workspaceRole?: 'member') {
+function configureExports(workspaceRole?: 'member', readRecordedEvent: () => AuditEventV1 | undefined = () => undefined) {
   configureFakeProjectClients(true, workspaceRole ? { workspaceRole } : {})
   const accessEvents: AuditEventV1[] = []
   const queued: string[] = []
@@ -68,7 +68,7 @@ function configureExports(workspaceRole?: 'member') {
       accessEvents.push(accessEvent)
     },
     async getEvent() {
-      return undefined
+      return readRecordedEvent()
     },
     async query(_query: AuditEventQuery) {
       return { events: [event] }
@@ -108,6 +108,35 @@ test('keeps the export request receipt past every artifact even with a short aud
     if (previous === undefined) delete process.env.MUKUROJI_AUDIT_RETENTION_DAYS
     else process.env.MUKUROJI_AUDIT_RETENTION_DAYS = previous
   }
+})
+
+test('uses the persisted request time after a concurrent first request and rejects receipts past the deadline', async () => {
+  const request = () => app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'shared-key' },
+    body: JSON.stringify({ filters: {} }),
+  })
+  // Record the request event this key produces.
+  const first = configureExports()
+  expect((await request()).status).toBe(202)
+  const recorded = first.accessEvents[0]
+  if (!recorded) throw new Error('The request event was not recorded.')
+
+  // A concurrent first request wrote the receipt a minute earlier; the pre-read missed it and
+  // the writer accepted this request as a duplicate. The job snapshot uses the persisted time.
+  const earlier = { ...recorded, occurredAt: new Date(Date.parse(recorded.occurredAt) - 60_000).toISOString() }
+  let reads = 0
+  configureExports(undefined, () => (reads++ === 0 ? undefined : earlier))
+  const concurrent = await request()
+  expect(concurrent.status).toBe(202)
+  expect((await concurrent.json()).export.snapshotAt).toBe(earlier.occurredAt)
+
+  // A receipt whose job was never created cannot start one after the processing deadline.
+  const stale = { ...recorded, occurredAt: new Date(Date.now() - 25 * 3_600_000).toISOString() }
+  configureExports(undefined, () => stale)
+  const late = await request()
+  expect(late.status).toBe(409)
+  expect(await late.json()).toMatchObject({ code: 'AuditExportIdempotencyKeyExpired' })
 })
 
 test('requests, reports, and downloads an asynchronous audit export', async () => {

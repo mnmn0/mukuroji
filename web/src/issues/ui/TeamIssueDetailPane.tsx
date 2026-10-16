@@ -399,6 +399,9 @@ function IssueDetailContent({
     collaborationRoute?.onCollaborationTabChange,
   )
   const isIssueReadOnly = !onUpdateIssue
+  // A save in flight locks the editors, so a draft cannot change or be submitted twice
+  // before the refreshed issue remounts them.
+  const [isIssueUpdatePending, setIssueUpdatePending] = useState(false)
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
   const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue)
   const selectedWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
@@ -540,7 +543,7 @@ function IssueDetailContent({
   const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    if (!onUpdateIssue || isAiSummaryOperationPending) {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) {
       return
     }
 
@@ -639,7 +642,10 @@ function IssueDetailContent({
       nextIssueInput.contributorAssignments = contributorDraft.assignments
     }
 
-    void onUpdateIssue(issue.id, nextIssueInput).catch(() => undefined)
+    setIssueUpdatePending(true)
+    void onUpdateIssue(issue.id, nextIssueInput)
+      .catch(() => undefined)
+      .finally(() => setIssueUpdatePending(false))
   }
 
   /** Renders the Work Item Type selector and any pending type-change resolution UI. */
@@ -775,7 +781,7 @@ function IssueDetailContent({
         return (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <section className="grid min-w-0 gap-3" data-testid="team-issue-detail-overview">
               {renderWorkItemTypeControl()}
@@ -1051,7 +1057,7 @@ function IssueDetailContent({
           ))}
           {!hasOverviewSection ? (
           // Same mutation lock as the overview section, so a draft cannot change while it saves.
-          <fieldset className="contents" disabled={isIssueReadOnly || isAiSummaryOperationPending}>
+          <fieldset className="contents" disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}>
             {renderContributorsEditor()}
           </fieldset>
         ) : null}
