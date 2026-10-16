@@ -938,6 +938,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     input: CreateAutomationInboundWebhookEndpointInput,
     idempotencyKey: string,
     endpointBaseUrl: string,
+    validateNewEndpoint?: () => Promise<void>,
   ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
@@ -958,6 +959,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     if (existing) {
       return await this.readInboundWebhookProvisioningReplay(existing, identity.requestFingerprint)
     }
+    await validateNewEndpoint?.()
 
     const endpointId = `webhook-${randomUUID()}`
     const opaqueEndpointId = randomBytes(32).toString('base64url')

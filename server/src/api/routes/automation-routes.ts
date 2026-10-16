@@ -2195,15 +2195,17 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       const principal = await authenticateAutomationPrincipal(c, true)
       const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
       const input = validateCreateAutomationInboundWebhookEndpointInput(await readAutomationJson(c))
-      if (input.triageRouting) {
-        await requireActiveTriageRoutingTeam(principal.directoryId, input.triageRouting.teamId)
-      }
+      const triageRouting = input.triageRouting
+      // A replay returns the endpoint created by the original request, even if the Team changed since.
       const provisioning = await automationDependencies.inboundWebhooks.reserveCreateInboundWebhookEndpoint(
         principal.directoryId,
         principal.actorId,
         input,
         idempotencyKey,
         getAutomationInboundWebhookBaseUrl(c),
+        triageRouting
+          ? () => requireActiveTriageRoutingTeam(principal.directoryId, triageRouting.teamId)
+          : undefined,
       )
       const { completed, signingSecret } = await provisionAutomationInboundWebhookEndpoint(
         provisioning,

@@ -127,13 +127,27 @@ export interface AutomationInboundWebhookPort<TAuditMutation = unknown> {
   resolveInboundWebhookEndpoint(
     opaqueEndpointId: string,
   ): Promise<AutomationInboundWebhookEndpointRecord | undefined>
-  /** Atomically reserves an idempotent create provisioning operation. */
+  /**
+   * Atomically reserves an idempotent create provisioning operation.
+   *
+   * A replay of an existing operation returns it without calling `validateNewEndpoint`,
+   * so state that changed after the original request cannot turn a retry into an error.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param actorId - Caller creating the endpoint.
+   * @param input - Validated create input.
+   * @param idempotencyKey - Client idempotency key.
+   * @param endpointBaseUrl - Public base URL of inbound webhooks.
+   * @param validateNewEndpoint - Checks run only before reserving a new endpoint.
+   * @returns The new or replayed provisioning operation.
+   */
   reserveCreateInboundWebhookEndpoint(
     workspaceId: string,
     actorId: string,
     input: CreateAutomationInboundWebhookEndpointInput,
     idempotencyKey: string,
     endpointBaseUrl: string,
+    validateNewEndpoint?: () => Promise<void>,
   ): Promise<AutomationInboundWebhookProvisioning>
   /** Atomically reserves a secret-rotation provisioning operation. */
   reserveRotateInboundWebhookEndpoint(
