@@ -384,5 +384,3 @@ export function AutomationWebhookSecretNotice({
 function isTriageTeamIdentifier(teamId: string): boolean {
   return teamId.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(teamId)
 }
-
-
