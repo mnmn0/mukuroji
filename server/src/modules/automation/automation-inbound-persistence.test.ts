@@ -437,6 +437,25 @@ describe('DynamoDB inbound webhook lifecycle', () => {
       code: 'AutomationInboundWebhookTriggerUnavailable',
     })
   })
+
+  test('stores the endpoint purpose and keeps Triage endpoints out of Automation triggers', async () => {
+    const probe = createInboundWebhookDocumentProbe()
+    const client = new DynamoDbAutomationRepository('AutomationTable', probe.documentClient)
+    const automation = await client.completeInboundWebhookProvisioning(await client.reserveCreateInboundWebhookEndpoint(
+      'workspace-1', 'actor-1', { name: 'Builds' }, 'automation-key', 'https://api.example.com',
+    ))
+    const triage = await client.completeInboundWebhookProvisioning(await client.reserveCreateInboundWebhookEndpoint(
+      'workspace-1', 'actor-1', { name: 'Status page', purpose: 'triage', triageRouting: { teamId: 'support' } }, 'triage-key', 'https://api.example.com',
+    ))
+    expect(automation.purpose).toBe('automation')
+    expect(triage).toMatchObject({ purpose: 'triage', triageRouting: { teamId: 'support' } })
+    await expect(client.createRule('workspace-1', {
+      name: 'Hijack Triage endpoint',
+      enabled: false,
+      trigger: { type: 'webhook', webhookId: triage.id },
+      actions: [{ type: 'comment', body: 'Received' }],
+    }, 'hijack-key')).rejects.toMatchObject({ code: 'AutomationInboundWebhookTriggerUnavailable' })
+  })
 })
 
 describe('DynamoDB inbound webhook delivery receipts', () => {

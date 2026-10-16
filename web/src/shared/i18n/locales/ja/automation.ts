@@ -88,6 +88,9 @@ export const automationMessages = {
   'automation.webhook.createDescription':
     '外部サービスから event を安全に受信する endpoint と署名 secret を発行します。',
   'automation.webhook.create': 'Endpoint を作成',
+  'automation.webhook.purpose': '送信先',
+  'automation.webhook.purposeAutomation': 'Automation rule',
+  'automation.webhook.purposeTriage': 'Triage: {team}',
   'automation.webhook.empty': 'Webhook endpoint はまだありません。',
   'automation.webhook.endpointUrl': 'Endpoint URL',
   'automation.webhook.endpointId': 'Endpoint ID: {id}',

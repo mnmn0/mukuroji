@@ -47,7 +47,7 @@ Outbound webhook は HTTPS の既定 port のみを許可し、credential 付き
 
 ## Signed inbound webhook
 
-Inbound webhook は server-issued endpoint と signing secret を Workspace 管理者が発行する。管理 API が使う論理 `endpointId` と、sender が URL で使う推測不能な `opaqueEndpointId` は分離する。Endpoint は `provisioning`、`active`、`paused`、`revoked` の状態を持つ。
+Inbound webhook は server-issued endpoint と signing secret を Workspace 管理者が発行する。Endpoint は作成時に `purpose`（既定 `automation`、または Team を指定した `triage`）を固定し、`triage` endpoint の delivery は Automation event ではなく Triage Entry になる（[Triage の Webhook](./triage.md#webhook)）。管理 API が使う論理 `endpointId` と、sender が URL で使う推測不能な `opaqueEndpointId` は分離する。Endpoint は `provisioning`、`active`、`paused`、`revoked` の状態を持つ。
 
 - `provisioning`: create/rotate の secret を確定中。Public delivery からは存在しない endpoint として扱う。処理が完了しない場合は Workspace 管理者が revoke して abort できる。Rotate 途中の abort でも endpoint 全体が終端失効するため、Rule と sender は新しい endpoint へ再設定する。
 - `active`: 署名済み delivery を受け付ける。

@@ -15,6 +15,7 @@ export {
   type TriageScheduleEvaluation,
   type TriageSourceActivity,
 } from './domain/triage-entry'
+export { readWebhookTriageEnvelope } from './domain/webhook-envelope'
 
 /** Triage application ports used by composition and adapters. */
 export {
@@ -23,6 +24,7 @@ export {
   createTriageInputFingerprint,
   type ResolveTriageWorkItemAction,
   type TriageActor,
+  type TriageWebhookEndpointReference,
   type TriageAuthorizationConditionChecks,
   type TriageAuditContextFactory,
   type TriageClient,

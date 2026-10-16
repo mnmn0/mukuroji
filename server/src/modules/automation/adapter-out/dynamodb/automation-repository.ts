@@ -974,6 +974,8 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       workspaceId: normalizedWorkspaceId,
       opaqueEndpointId,
       name: normalized.name,
+      purpose: normalized.purpose ?? 'automation',
+      ...(normalized.triageRouting ? { triageRouting: normalized.triageRouting } : {}),
       status: 'provisioning',
       version: 1,
       secretGeneration,
@@ -2736,7 +2738,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
   ) {
     if (trigger.type !== 'webhook') return
     const endpoint = await this.getInboundWebhookEndpointRecord(workspaceId, trigger.webhookId)
-    if (endpoint?.status !== 'active') {
+    if (endpoint?.status !== 'active' || endpoint.purpose !== 'automation') {
       throw new AutomationError(
         'conflict',
         'AutomationInboundWebhookTriggerUnavailable',
@@ -3498,7 +3500,11 @@ function readTemplateApplication(item: Record<string, unknown>) {
 }
 
 function readInboundWebhookEndpointRecord(item: Record<string, unknown>) {
-  const value = stripStorage<AutomationInboundWebhookEndpointRecord>(item)
+  // Endpoints created before purposes existed deliver to Automation.
+  const value = stripStorage<AutomationInboundWebhookEndpointRecord>({ purpose: 'automation', ...item })
+  const purposeIsValid = value.purpose === 'automation'
+    ? value.triageRouting === undefined
+    : value.purpose === 'triage' && isNonEmptyText(value.triageRouting?.teamId)
   const statusIsValid = value.status === 'provisioning' || value.status === 'active' ||
     value.status === 'paused' || value.status === 'revoked'
   const provisioningIsValid = value.status === 'provisioning'
@@ -3522,7 +3528,8 @@ function readInboundWebhookEndpointRecord(item: Record<string, unknown>) {
     !isIsoTimestamp(value.updatedAt) ||
     (value.rotatedAt !== undefined && !isIsoTimestamp(value.rotatedAt)) ||
     (value.revokedAt !== undefined && !isIsoTimestamp(value.revokedAt)) ||
-    !provisioningIsValid
+    !provisioningIsValid ||
+    !purposeIsValid
   ) {
     throw storedInvalid('inbound webhook endpoint')
   }

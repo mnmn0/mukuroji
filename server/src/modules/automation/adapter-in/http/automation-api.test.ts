@@ -57,6 +57,8 @@ import type {
   AutomationTemplateApplicationResult,
   BulkOperation,
   BulkOperationRequest,
+  CreateWebhookTriageEntryInput,
+  TriageEntry,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
@@ -2842,4 +2844,126 @@ test('rejects inactive automation approval reviewers before creating durable sta
     status: 409,
   })
   expect(createCalls).toBe(0)
+})
+
+test('turns a signed Triage-purpose delivery into a Triage entry without an Automation event', async () => {
+  const previousAuditTable = process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+  process.env.MUKUROJI_AUDIT_EVENTS_TABLE = 'AuditTable'
+  try {
+    configureFakeProjectClients(true)
+    const endpoint = createInboundWebhookEndpointRecord({
+      name: 'Status page',
+      purpose: 'triage',
+      triageRouting: { teamId: 'core-team' },
+    })
+    const signingSecret = Buffer.from('server-issued-secret', 'utf8')
+    const deliveries: Parameters<TestAutomationInboundWebhookPort['recordInboundWebhookDelivery']>[1][] = []
+    const created: { teamId: string; input: CreateWebhookTriageEntryInput }[] = []
+    const now = '2026-10-16T00:00:00.000Z'
+    const entry: TriageEntry = {
+      schemaVersion: 1,
+      id: 'triage-webhook-1',
+      workspaceId: endpoint.workspaceId,
+      source: { kind: 'webhook', sourceId: `${endpoint.id}:evt-1`, connectorId: endpoint.id },
+      sourcePreview: { title: 'Checkout errors', body: 'Customers see 500.', attachmentCount: 0, commentCount: 0, watcherCount: 0, sanitized: true, truncated: false },
+      requester: { displayName: 'Status page', guest: true },
+      receivedAt: now,
+      lastActivityAt: now,
+      state: 'pending',
+      routing: { reason: 'Received by inbound webhook.', candidates: [] },
+      teamId: 'core-team',
+      permission: { visibility: 'full', canReply: false, guestVisible: false, checkedAt: now },
+      retention: { expiresAt: '2027-10-16T00:00:00.000Z' },
+      capabilities: { canAssign: true, canAcceptCreate: true, canAcceptLink: true, canMarkDuplicate: true, canDecline: true, canSnooze: true, canRequestInformation: false, canReply: false, canViewInternalContext: true },
+      events: [],
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    }
+    const unexpected = async (): Promise<never> => {
+      throw new Error('Unexpected Triage client call.')
+    }
+    setTestAppDependencies({
+      inboundWebhooks: createAutomationInboundWebhookPort({
+        async resolveInboundWebhookEndpoint() {
+          return structuredClone(endpoint)
+        },
+        async recordInboundWebhookDelivery(_endpoint, input) {
+          deliveries.push(input)
+          return { eventId: input.eventId, replayed: false }
+        },
+      }),
+      automationInboundWebhookSecrets: {
+        async provision() { throw new Error('unexpected') },
+        async get() { return signingSecret },
+        async delete() { throw new Error('unexpected') },
+      },
+      tenantLifecycleEnforcement: { async assertActive() {} },
+      triage: {
+        listEntries: unexpected,
+        getEntry: unexpected,
+        getEntryForMutation: unexpected,
+        applyAction: unexpected,
+        getActionReceipt: unexpected,
+        applyBulkAction: unexpected,
+        getConfiguration: unexpected,
+        getConfigurationUpdateReceipt: unexpected,
+        updateConfiguration: unexpected,
+        createManualHandoff: unexpected,
+        listWorkItemSources: unexpected,
+        async createWebhookEntry(_workspaceId, teamId, _endpoint, input) {
+          created.push({ teamId, input })
+          return { entry, replayed: false }
+        },
+      },
+    })
+    /**
+     * Sends a signed delivery.
+     *
+     * @param body - Raw JSON body.
+     * @returns The response.
+     */
+    const deliver = (body: string) => {
+      const timestamp = String(Math.floor(Date.now() / 1_000))
+      const signature = `sha256=${createHmac('sha256', signingSecret).update(`${timestamp}.`, 'utf8').update(body, 'utf8').digest('hex')}`
+      return app.request(`/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `delivery-${deliveries.length + created.length}`,
+          'X-Mukuroji-Signature': signature,
+          'X-Mukuroji-Timestamp': timestamp,
+        },
+        body,
+      })
+    }
+
+    const response = await deliver(JSON.stringify({
+      eventId: 'evt-1',
+      title: 'Checkout errors',
+      body: 'Customers see 500.',
+      requester: { name: 'Status page' },
+    }))
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({ eventId: deliveries[0]?.eventId, triageEntryId: 'triage-webhook-1' })
+    expect(created).toEqual([{ teamId: 'core-team', input: { eventId: 'evt-1', title: 'Checkout errors', body: 'Customers see 500.', requesterDisplayName: 'Status page' } }])
+    const auditItem = JSON.stringify(deliveries[0]?.auditMutation)
+    expect(auditItem).toContain('triage.webhook-received')
+    expect(auditItem).not.toContain('webhook.received"')
+    expect(auditItem).not.toContain('Customers see 500.')
+
+    const hijack = await deliver(JSON.stringify({
+      eventId: 'evt-2',
+      title: 'Reroute me',
+      body: 'x',
+      requester: { name: 'Attacker' },
+      teamId: 'other-team',
+    }))
+    expect(hijack.status).toBe(400)
+    expect(await hijack.json()).toMatchObject({ code: 'InvalidTriageWebhookEnvelope' })
+    expect(created).toHaveLength(1)
+  } finally {
+    if (previousAuditTable === undefined) delete process.env.MUKUROJI_AUDIT_EVENTS_TABLE
+    else process.env.MUKUROJI_AUDIT_EVENTS_TABLE = previousAuditTable
+  }
 })

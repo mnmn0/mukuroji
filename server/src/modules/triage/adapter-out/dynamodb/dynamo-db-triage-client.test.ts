@@ -2401,6 +2401,39 @@ describe('DynamoDbTriageClient source admission', () => {
     }
   })
 
+  test('admits a webhook entry routed by its endpoint with replies closed', async () => {
+    const harness = createHarness([{}, {}, {}])
+    try {
+      const receipt = await harness.client.createWebhookEntry(
+        'workspace-1',
+        'support',
+        { id: 'webhook-1', name: 'Status page' },
+        {
+          eventId: 'evt-1',
+          title: 'Checkout errors',
+          body: 'Customers see 500 on checkout.',
+          requesterDisplayName: 'Status page',
+          requesterEmail: 'alerts@example.com',
+        },
+        { key: 'delivery-1', fingerprint: createTriageInputFingerprint({ eventId: 'evt-1' }) },
+      )
+
+      expect(receipt.replayed).toBe(false)
+      const transactItems = harness.commands[2]?.input.TransactItems
+      const stored = Array.isArray(transactItems) ? transactItems[0]?.Put?.Item?.entry : undefined
+      expect(stored).toMatchObject({
+        source: { kind: 'webhook', sourceId: 'webhook-1:evt-1', connectorId: 'webhook-1' },
+        requester: { displayName: 'Status page', email: 'alerts@example.com', guest: true },
+        permission: { canReply: false },
+        teamId: 'support',
+        state: 'pending',
+      })
+      expect(JSON.stringify(transactItems)).toContain('webhook-ingest')
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('replays an existing manual source after a response is lost', async () => {
     const fingerprint = createTriageInputFingerprint({
       workspaceId: 'workspace-1',

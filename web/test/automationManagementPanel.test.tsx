@@ -808,6 +808,26 @@ describe('AutomationManagementPanel', () => {
     expect(durableHtml).not.toContain('automation-webhook-one-time-secret')
   })
 
+  test('offers Triage routing per Team and labels Triage endpoints', () => {
+    const html = renderToStaticMarkup(
+      <AutomationInboundWebhooksPanel
+        endpoints={[
+          activeInboundWebhookEndpointFixture,
+          { ...activeInboundWebhookEndpointFixture, id: 'triage-hook', purpose: 'triage', triageRouting: { teamId: 'support' } },
+        ]}
+        locale="en"
+        readOnly={false}
+        teams={[{ id: 'support', name: 'Support' }]}
+        onCreate={async () => inboundWebhookSecretResponseFixture}
+      />,
+    )
+    expect(html).toContain('data-testid="automation-webhook-purpose"')
+    expect(html).toContain('>Automation rules</option>')
+    expect(html).toContain('>Triage: Support</option>')
+    expect(html).toContain('data-testid="automation-webhook-purpose-triage-hook"')
+    expect(html).not.toContain(`data-testid="automation-webhook-purpose-${activeInboundWebhookEndpointFixture.id}"`)
+  })
+
   test('discards a one-time Webhook secret when access becomes read-only', () => {
     const revealed = reduceAutomationWebhookSecret(undefined, {
       readOnly: false,

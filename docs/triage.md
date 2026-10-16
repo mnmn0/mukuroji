@@ -102,8 +102,9 @@ subscribe したり、message/File を別 storage へ物理移送したり、dup
 
 ## Source adapters
 
-Production で初期 Entry を作成する compose 済み ingress は Form と manual handoff である。
-Chat、new-email、Webhook は共通 contract/state machine/source-claim を利用する adapter 境界を持つが、
+Production で初期 Entry を作成する compose 済み ingress は Form、manual handoff、Triage purpose の
+署名付き inbound webhook である。
+Chat と new-email は共通 contract/state machine/source-claim を利用する adapter 境界を持つが、
 provider の tenant/signature/reply 検証を行う production adapter が接続されるまでは初期 ingestion と
 request-information を fail closed にする。未配送の reply や未作成 Entry を成功として返さない。
 
@@ -134,11 +135,26 @@ envelope と handler を使い、sender、recipient、Message-ID、spam verdict�
 
 ### Webhook
 
-将来の production adapter は `automation` と `triage` を混同しない明示 purpose と routing 設定を
-持ち、署名検証済み normalized envelope だけを Triage に渡す必要がある。現行 Automation inbound
-endpoint は Triage ingress として接続せず、すべての webhook を暗黙に request とみなさない。
-Adapter 接続時も同じ provider event ID/同じ fingerprint は replay、異なる fingerprint は conflict
-にする。
+Inbound webhook endpoint は作成時に `purpose` を `automation` か `triage` に固定する。既存 endpoint と
+purpose を指定しない endpoint は `automation` である。`triage` endpoint は作成時に存在を確認した
+`triageRouting.teamId` を持ち、payload から Team、Project、owner、SLA を変えることはできない。
+
+`triage` endpoint への delivery は Automation と同じ HMAC、timestamp、`Idempotency-Key`、signature
+replay、active tenant の検証を通る。その後:
+
+- body は `{ eventId, title, body, requester: { name, email? } }` だけを受け付け、それ以外の field は
+  `400 InvalidTriageWebhookEnvelope` にする。
+- delivery receipt は payload を含まない `triage.webhook-received` audit event として記録する。
+  Automation rule が評価する `webhook.received` は作らないため、Triage 用 endpoint は Automation を
+  起動しない。Automation rule の webhook trigger に `triage` endpoint は指定できない。
+- routing Team が delivery 時点でも存在することを確認してから、`webhook` source の Entry を作る。
+  Source identity は `<endpointId>:<eventId>` で、同じ event と同じ envelope の再配送は元の Entry を
+  返し、同じ event に異なる envelope は `409 TriageSourceConflict` にする。Response 消失後の再送も
+  同じ Entry を返す。
+- Team configuration の webhook 向け rule、owner rotation、SLA、retention は他の source と同様に
+  admission 時に適用する。
+- requester は外部 guest とし、webhook の reply adapter はまだないため request-information と reply は
+  fail closed のままにする。
 
 ### Manual handoff
 

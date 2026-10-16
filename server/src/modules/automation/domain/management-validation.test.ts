@@ -55,6 +55,18 @@ describe('Automation management validation domain', () => {
   test('validates webhook and recurring inputs at a transport-neutral boundary', () => {
     expect(validateCreateAutomationInboundWebhookEndpointInput({ name: '  CI  ' }))
       .toEqual({ name: 'CI' })
+    expect(validateCreateAutomationInboundWebhookEndpointInput({ name: 'CI', purpose: 'automation' }))
+      .toEqual({ name: 'CI' })
+    expect(validateCreateAutomationInboundWebhookEndpointInput({ name: 'Support', purpose: 'triage', triageRouting: { teamId: 'support' } }))
+      .toEqual({ name: 'Support', purpose: 'triage', triageRouting: { teamId: 'support' } })
+    for (const invalid of [
+      { name: 'Support', purpose: 'triage' },
+      { name: 'Support', purpose: 'triage', triageRouting: { teamId: 'support', ownerUserId: 'x' } },
+      { name: 'CI', triageRouting: { teamId: 'support' } },
+      { name: 'CI', purpose: 'chat' },
+    ]) {
+      expect(() => validateCreateAutomationInboundWebhookEndpointInput(invalid)).toThrow()
+    }
     expect(validateCreateRecurringWorkInput({
       name: 'Weekly review',
       teamId: 'core',

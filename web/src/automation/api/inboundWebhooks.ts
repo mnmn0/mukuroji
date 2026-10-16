@@ -239,6 +239,7 @@ function isAutomationInboundWebhookEndpoint(
     typeof value.workspaceId === 'string' &&
     typeof value.opaqueEndpointId === 'string' &&
     typeof value.name === 'string' &&
+    (value.purpose === 'automation' || (value.purpose === 'triage' && isRecord(value.triageRouting) && typeof value.triageRouting.teamId === 'string')) &&
     inboundWebhookEndpointStatuses.some((status) => status === value.status) &&
     isNonnegativeSafeInteger(value.version) &&
     isNonnegativeSafeInteger(value.secretGeneration) &&

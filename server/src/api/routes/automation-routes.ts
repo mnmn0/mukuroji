@@ -88,12 +88,18 @@ import {
   requirePlanningWorkItemHasNoScheduleDependencies,
 } from '../../modules/planning'
 import {
+  createTriageInputFingerprint,
+  readWebhookTriageEnvelope,
+  TriageError,
+} from '../../modules/triage'
+import {
   ambientAutomationActionExecutorDependencies,
   type AutomationActionExecutorDependencies,
   automationDependencies,
   workItemDependencies,
   workspaceDependencies,
 } from '../shared/app-dependencies'
+import { toTriageErrorResponse } from '../shared/request-intake-access'
 import {
   createAutomationWorkItemCreateBody,
   mapAutomationErrorStatus,
@@ -2005,6 +2011,104 @@ function automationValuesEqual(first: unknown, second: unknown): boolean {
   return false
 }
 
+/**
+ * Requires the Team a Triage-purpose endpoint routes to to exist in the Workspace.
+ *
+ * @param workspaceId - Workspace that owns the endpoint.
+ * @param teamId - Routing Team.
+ */
+async function requireActiveTriageRoutingTeam(workspaceId: string, teamId: string): Promise<void> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', true)
+  if (!directory.teams.some((team) => team.id === teamId)) {
+    throw new AutomationError(
+      'invalid-input',
+      'AutomationInboundWebhookTriageTeamNotFound',
+      'The Triage routing Team does not exist.',
+    )
+  }
+}
+
+/** Verified delivery facts shared by every inbound webhook purpose. */
+type VerifiedInboundWebhookDelivery = {
+  /** Sender idempotency key. */
+  idempotencyKey: string
+  /** SHA-256 of the raw body. */
+  bodyFingerprint: string
+  /** Fingerprint of the verified signature. */
+  signatureFingerprint: string
+  /** Verified signature timestamp. */
+  signatureTimestamp: string
+}
+
+/**
+ * Turns a verified Triage-purpose delivery into a Triage entry.
+ *
+ * The delivery is recorded with the same replay and signature receipts as Automation
+ * deliveries, but under a `triage.webhook-received` audit event that carries no payload
+ * and is never matched by Automation rules. The entry is idempotent by endpoint and
+ * event ID, so a redelivery after a lost response returns the same entry.
+ *
+ * @param c - Hono request context.
+ * @param endpoint - Verified active endpoint.
+ * @param payload - Parsed JSON body.
+ * @param delivery - Verified delivery facts.
+ * @returns 202 with the delivery event ID and the Triage entry ID.
+ */
+async function deliverTriageWebhook(
+  c: Context,
+  endpoint: AutomationInboundWebhookEndpointRecord,
+  payload: unknown,
+  delivery: VerifiedInboundWebhookDelivery,
+) {
+  try {
+    const teamId = endpoint.triageRouting?.teamId
+    if (!teamId) throw automationInboundWebhookUnavailable()
+    const envelope = readWebhookTriageEnvelope(payload)
+    await requireActiveTriageRoutingTeam(endpoint.workspaceId, teamId)
+    const auditTableName = getConfiguredAuditTableName()
+    if (!auditTableName) throw automationInboundWebhookUnavailable()
+    const path = `/api/automation/inbound-webhooks/${endpoint.opaqueEndpointId}`
+    const auditContext = createMutationAuditContext({
+      workspaceId: endpoint.workspaceId,
+      actor: { id: `inbound-webhook:${endpoint.id}`, kind: 'service', displayName: endpoint.name },
+      idempotencyKey: createHash('sha256').update(`${endpoint.id}\0${delivery.idempotencyKey}`).digest('hex'),
+      request: { method: 'POST', path, body: { endpointId: endpoint.id, bodyFingerprint: delivery.bodyFingerprint } },
+      source: {
+        kind: 'api',
+        requestId: c.req.header('X-Request-Id'),
+        method: 'POST',
+        route: path,
+        ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        userAgent: c.req.header('User-Agent'),
+      },
+    })
+    const event = createAuditEvent({
+      context: auditContext,
+      eventType: 'triage.webhook-received',
+      entity: { type: 'automation-webhook', id: endpoint.id },
+      summary: 'A Triage webhook was received.',
+      metadata: { webhookId: endpoint.id, teamId },
+      expiresAt: calculateAuditExpiresAt(auditContext.occurredAt, getConfiguredAuditRetentionDays()),
+    })
+    const recorded = await automationDependencies.inboundWebhooks.recordInboundWebhookDelivery(endpoint, {
+      ...delivery,
+      eventId: event.eventId,
+      auditMutation: createAuditEventTransactPut(auditTableName, event),
+    })
+    const receipt = await workItemDependencies.triage.createWebhookEntry(
+      endpoint.workspaceId,
+      teamId,
+      { id: endpoint.id, name: endpoint.name },
+      envelope,
+      { key: delivery.idempotencyKey, fingerprint: createTriageInputFingerprint(envelope) },
+    )
+    return c.json({ eventId: recorded.eventId, triageEntryId: receipt.entry.id }, 202)
+  } catch (error) {
+    if (error instanceof TriageError) return toTriageErrorResponse(c, error)
+    throw error
+  }
+}
+
 function toAutomationErrorResponse(c: Context, error: unknown) {
   if (error instanceof CognitoServiceError) {
     return toCognitoDirectoryErrorResponse(c, error)
@@ -2090,10 +2194,14 @@ export function registerAutomationRoutes(routeApp: Hono): void {
     try {
       const principal = await authenticateAutomationPrincipal(c, true)
       const idempotencyKey = readRequiredInboundWebhookIdempotencyKey(c)
+      const input = validateCreateAutomationInboundWebhookEndpointInput(await readAutomationJson(c))
+      if (input.triageRouting) {
+        await requireActiveTriageRoutingTeam(principal.directoryId, input.triageRouting.teamId)
+      }
       const provisioning = await automationDependencies.inboundWebhooks.reserveCreateInboundWebhookEndpoint(
         principal.directoryId,
         principal.actorId,
-        validateCreateAutomationInboundWebhookEndpointInput(await readAutomationJson(c)),
+        input,
         idempotencyKey,
         getAutomationInboundWebhookBaseUrl(c),
       )
@@ -2255,6 +2363,9 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       }
       const bodyFingerprint = createHash('sha256').update(rawBody).digest('hex')
       await enforceActiveTenantForWorkspace(endpoint.workspaceId)
+      if (endpoint.purpose === 'triage') {
+        return await deliverTriageWebhook(c, endpoint, payload, { idempotencyKey, bodyFingerprint, signatureFingerprint, signatureTimestamp })
+      }
 
       const auditTableName = getConfiguredAuditTableName()
       if (!auditTableName) throw automationInboundWebhookUnavailable()

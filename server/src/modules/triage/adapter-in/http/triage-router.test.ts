@@ -147,6 +147,7 @@ function createClient(entry: TriageEntry, entries: TriageEntry[] = [entry]): Tri
       return configurationReceipt
     },
     createManualHandoff: async () => ({ entry, replayed: false }),
+    createWebhookEntry: async () => ({ entry, replayed: false }),
     listWorkItemSources: async () => ({ entries: [entry] }),
   }
 }

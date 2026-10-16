@@ -24,6 +24,8 @@ export type AutomationInboundWebhooksPanelProps = {
   busyOperation?: string
   /** Mutation controls を表示しない参照専用状態です。 */
   readOnly: boolean
+  /** Teams a Triage-purpose endpoint can route to; omit to offer Automation only. */
+  teams?: readonly { id: string; name: string }[]
   /** Endpoint 作成 callback です。 */
   onCreate?: (
     input: CreateAutomationInboundWebhookEndpointInput,
@@ -51,9 +53,11 @@ export function AutomationInboundWebhooksPanel({
   onRevoke,
   onRotate,
   readOnly,
+  teams = [],
 }: AutomationInboundWebhooksPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [name, setName] = useState('')
+  const [triageTeamId, setTriageTeamId] = useState('')
   const [oneTimeSecret, dispatchSecret] = useReducer(
     reduceAutomationWebhookSecret,
     undefined,
@@ -73,12 +77,15 @@ export function AutomationInboundWebhooksPanel({
     const normalizedName = name.trim()
     if (!normalizedName || !onCreate) return
     try {
-      const response = await onCreate({ name: normalizedName })
+      const response = await onCreate(triageTeamId
+        ? { name: normalizedName, purpose: 'triage', triageRouting: { teamId: triageTeamId } }
+        : { name: normalizedName })
       dispatchSecret({ readOnly: readOnlyRef.current, response, type: 'reveal' })
     } catch {
       return
     }
     setName('')
+    setTriageTeamId('')
   }
 
   async function handleRotate(endpoint: AutomationInboundWebhookEndpoint) {
@@ -136,6 +143,24 @@ export function AutomationInboundWebhooksPanel({
                 onChange={(event) => setName(event.target.value)}
               />
             </label>
+            {teams.length > 0 ? (
+              <label className="grid min-w-[200px] gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+                {t('automation.webhook.purpose')}
+                <select
+                  className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+                  data-testid="automation-webhook-purpose"
+                  value={triageTeamId}
+                  onChange={(event) => setTriageTeamId(event.target.value)}
+                >
+                  <option value="">{t('automation.webhook.purposeAutomation')}</option>
+                  {teams.map((team) => (
+                    <option key={team.id} value={team.id}>
+                      {t('automation.webhook.purposeTriage').replace('{team}', team.name)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <button
               className="workbench-button-primary min-h-10 px-5 disabled:cursor-not-allowed disabled:opacity-55"
               data-testid="automation-webhook-create"
@@ -189,6 +214,14 @@ export function AutomationInboundWebhooksPanel({
                       <span className="workbench-badge">
                         {t('automation.version').replace('{version}', String(endpoint.version))}
                       </span>
+                      {endpoint.purpose === 'triage' ? (
+                        <span className="workbench-badge" data-testid={`automation-webhook-purpose-${endpoint.id}`}>
+                          {t('automation.webhook.purposeTriage').replace(
+                            '{team}',
+                            teams.find((team) => team.id === endpoint.triageRouting?.teamId)?.name ?? endpoint.triageRouting?.teamId ?? '',
+                          )}
+                        </span>
+                      ) : null}
                     </div>
                     <p className="mt-2 break-all text-xs font-medium text-[var(--workbench-muted)]">
                       {t('automation.webhook.endpointId').replace('{id}', endpoint.id)}

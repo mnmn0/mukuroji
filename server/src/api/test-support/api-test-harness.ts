@@ -238,6 +238,7 @@ function createInboundWebhookEndpointRecord(
     workspaceId: 'user#demo@example.com',
     opaqueEndpointId: 'A'.repeat(43),
     name: 'Build events',
+    purpose: 'automation',
     status: 'active',
     version: 1,
     secretGeneration: 1,

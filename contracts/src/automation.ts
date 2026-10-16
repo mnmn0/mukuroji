@@ -545,6 +545,20 @@ export type AutomationInboundWebhookEndpointStatus =
   | 'paused'
   | 'revoked'
 
+/**
+ * What an inbound webhook endpoint delivers to.
+ *
+ * `automation` deliveries become `webhook.received` events for Automation rules;
+ * `triage` deliveries become Triage entries for one Team and never reach Automation.
+ */
+export type AutomationInboundWebhookPurpose = 'automation' | 'triage'
+
+/** Fixed routing of a Triage-purpose endpoint; payloads cannot change it. */
+export type AutomationInboundWebhookTriageRouting = {
+  /** Team whose Triage queue receives the entries. */
+  teamId: string
+}
+
 /** Workspace に属する server-issued inbound webhook endpoint です。 */
 export type AutomationInboundWebhookEndpoint = {
   /** Automation schema version です。 */
@@ -557,6 +571,10 @@ export type AutomationInboundWebhookEndpoint = {
   opaqueEndpointId: string
   /** 管理 UI に表示する endpoint 名です。 */
   name: string
+  /** Where deliveries go; fixed when the endpoint is created. */
+  purpose: AutomationInboundWebhookPurpose
+  /** Team routing, present exactly when the purpose is `triage`. */
+  triageRouting?: AutomationInboundWebhookTriageRouting
   /** 現在の lifecycle status です。 */
   status: AutomationInboundWebhookEndpointStatus
   /** Lifecycle または表示設定が変わるたびに増える endpoint version です。 */
@@ -581,6 +599,10 @@ export type AutomationInboundWebhookEndpoint = {
 export type CreateAutomationInboundWebhookEndpointInput = {
   /** 管理 UI に表示する endpoint 名です。 */
   name: string
+  /** Where deliveries go; defaults to `automation`. */
+  purpose?: AutomationInboundWebhookPurpose
+  /** Team routing, required exactly when the purpose is `triage`. */
+  triageRouting?: AutomationInboundWebhookTriageRouting
 }
 
 /** Inbound webhook endpoint 表示設定の更新入力です。 */

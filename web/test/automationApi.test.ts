@@ -412,6 +412,7 @@ function createInboundWebhookEndpoint(): AutomationInboundWebhookEndpoint {
     id: 'release/hook',
     name: 'Release events',
     opaqueEndpointId: 'opaque-release-hook',
+    purpose: 'automation',
     revision: 4,
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
     secretGeneration: 1,
