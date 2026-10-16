@@ -227,3 +227,13 @@ function isContributorDraftRow(value: unknown): value is ContributorDraftRow {
     typeof Reflect.get(value, 'plannedEffortHours') === 'string' &&
     contributionStatuses.some((candidate) => candidate === status)
 }
+
+/**
+ * Labels a member option so members who share a display name stay distinguishable.
+ *
+ * @param member - Workspace member offered as a contributor.
+ * @returns The name with the email, or the email alone.
+ */
+export function formatContributorMemberLabel(member: { readonly email: string; readonly name?: string }): string {
+  return member.name ? `${member.name} (${member.email})` : member.email
+}

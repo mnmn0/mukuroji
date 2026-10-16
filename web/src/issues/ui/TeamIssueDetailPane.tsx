@@ -753,6 +753,21 @@ function IssueDetailContent({
     </section>
   ) : null
 
+  /** Renders the Work Item-wide contributor editor; shown even when a type omits the overview section. */
+  const renderContributorsEditor = (): ReactNode => (
+    <WorkItemContributorsEditor
+      assignments={issue.contributorAssignments}
+      formId={editorFormId}
+      jobRoles={configuration?.jobRoles ?? []}
+      key={editorIdentity + ':contributors'}
+      locale={locale}
+      memberOptions={contributorOptions}
+      ownerUserId={issue.assigneeUserId}
+      readOnly={isIssueReadOnly}
+      {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
+    />
+  )
+
   /** Renders one configured Team Issue detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
     switch (section) {
@@ -836,17 +851,7 @@ function IssueDetailContent({
                   </select>
                 </label>
               </div>
-              <WorkItemContributorsEditor
-                assignments={issue.contributorAssignments}
-                formId={editorFormId}
-                jobRoles={configuration?.jobRoles ?? []}
-                key={editorIdentity + ':contributors'}
-                locale={locale}
-                memberOptions={contributorOptions}
-                ownerUserId={issue.assigneeUserId}
-                readOnly={isIssueReadOnly}
-                {...(contributorDraftError ? { submitError: contributorDraftError } : {})}
-              />
+              {renderContributorsEditor()}
             </section>
           </fieldset>
         )
@@ -1044,6 +1049,7 @@ function IssueDetailContent({
           {renderedDetailSectionOrder.map((section) => (
             <Fragment key={section}>{renderDetailSection(section)}</Fragment>
           ))}
+          {!hasOverviewSection ? renderContributorsEditor() : null}
           {!hasCustomFieldSection && hasCustomFields
             ? <Fragment>{renderDetailSection('custom-fields')}</Fragment>
             : null}
