@@ -501,9 +501,13 @@ describe('audit export step safety', () => {
 describe('normalizeAuditExportFilters', () => {
   const requestedAt = new Date('2026-07-10T00:00:00.000Z')
 
-  test('drops empty values and validates paired filters and timestamps', () => {
-    expect(normalizeAuditExportFilters({ actorId: '', eventTypes: [], from: '2026-07-01T00:00:00.000Z' }, requestedAt))
+  test('rejects empty values instead of widening, and validates paired filters and timestamps', () => {
+    expect(normalizeAuditExportFilters({ actorId: undefined, from: '2026-07-01T00:00:00.000Z' }, requestedAt))
       .toEqual({ from: '2026-07-01T00:00:00.000Z' })
+    // A supplied but empty value would otherwise drop a restriction and export everything.
+    expect(() => normalizeAuditExportFilters({ actorId: '' }, requestedAt)).toThrow('actorId must not be empty')
+    expect(() => normalizeAuditExportFilters({ actorId: '  ' }, requestedAt)).toThrow('actorId must not be empty')
+    expect(() => normalizeAuditExportFilters({ eventTypes: [] }, requestedAt)).toThrow('eventTypes must not be empty')
     expect(() => normalizeAuditExportFilters({ entityType: 'work-item' }, requestedAt)).toThrow('entityType and entityId')
     expect(() => normalizeAuditExportFilters({ targetId: 'x' }, requestedAt)).toThrow('targetType and targetId')
     expect(() => normalizeAuditExportFilters({ from: 'yesterday' }, requestedAt)).toThrow('ISO 8601')

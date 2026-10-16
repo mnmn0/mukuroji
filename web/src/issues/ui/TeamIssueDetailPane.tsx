@@ -1049,7 +1049,12 @@ function IssueDetailContent({
           {renderedDetailSectionOrder.map((section) => (
             <Fragment key={section}>{renderDetailSection(section)}</Fragment>
           ))}
-          {!hasOverviewSection ? renderContributorsEditor() : null}
+          {!hasOverviewSection ? (
+          // Same mutation lock as the overview section, so a draft cannot change while it saves.
+          <fieldset className="contents" disabled={isIssueReadOnly || isAiSummaryOperationPending}>
+            {renderContributorsEditor()}
+          </fieldset>
+        ) : null}
           {!hasCustomFieldSection && hasCustomFields
             ? <Fragment>{renderDetailSection('custom-fields')}</Fragment>
             : null}
