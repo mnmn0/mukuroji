@@ -125,8 +125,14 @@ test('requests, reports, and downloads an asynchronous audit export', async () =
     expect.objectContaining({ index: 1, eventCount: 1, url: expect.stringMatching(/^https:\/\/download\.test\//) }),
   ])
 
-  expect(accessEvents.map((event) => event.eventType)).toEqual(['audit.export-requested', 'audit.export-downloaded'])
-  expect(accessEvents[1]).toMatchObject({ metadata: { exportId: job.exportId, partCount: 1, eventCount: 1 } })
+  expect(accessEvents.map((event) => event.eventType)).toEqual([
+    'audit.export-requested',
+    'audit.export-requested',
+    'audit.export-downloaded',
+  ])
+  expect(accessEvents[0]).toMatchObject({ metadata: { exportId: job.exportId, replayed: false } })
+  expect(accessEvents[1]).toMatchObject({ metadata: { exportId: job.exportId, replayed: true } })
+  expect(accessEvents[2]).toMatchObject({ metadata: { exportId: job.exportId, partCount: 1, eventCount: 1 } })
 })
 
 test('rejects Workspace members without audit export rights', async () => {

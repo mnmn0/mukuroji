@@ -19,9 +19,8 @@ import {
 } from '../../modules/audit/audit-export'
 import { workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
-import { readBearerAccessToken } from '../shared/http'
+import { readBearerAccessToken, readJson } from '../shared/http'
 import { readAuditEventQuery } from '../shared/input-parsing'
-import { readJson } from '../shared/http'
 import {
   createApiMutationContext,
   type ProjectPrincipal,
@@ -353,12 +352,12 @@ export function registerAuditRoutes(routeApp: Hono): void {
         filters,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
       })
-      if (created) {
-        await recordAuditExportAction(c, principal, 'audit.export-requested', {
-          exportId: job.exportId,
-          filtered: Object.keys(job.filters).length > 0,
-        })
-      }
+      // Replays are recorded too, so a client retry after a failed audit write still leaves a record.
+      await recordAuditExportAction(c, principal, 'audit.export-requested', {
+        exportId: job.exportId,
+        filtered: Object.keys(job.filters).length > 0,
+        replayed: !created,
+      })
       return c.json({ export: toAuditExportView(job) }, created ? 202 : 200)
     }),
     list: (c) => handleAuditExportJobRequest(c, async (principal, service) =>

@@ -19,6 +19,10 @@ import {
 const AUDIT_EXPORT_DOWNLOAD_TTL_SECONDS = 300
 /** Upper bound on job directories inspected when listing exports. */
 const AUDIT_EXPORT_LIST_SCAN_LIMIT = 200
+/** Directory of zero-byte markers whose keys sort newest job first. */
+const AUDIT_EXPORT_INDEX_DIRECTORY = 'index/'
+/** Upper bound subtracted from creation epochs so newer jobs sort first. */
+const AUDIT_EXPORT_INDEX_EPOCH_CEILING = 9_999_999_999_999
 
 /**
  * Configuration of the S3 export store.
@@ -60,14 +64,29 @@ export class S3AuditExportStore implements AuditExportStore {
    * @returns `created`, or `exists` when the ID is taken.
    */
   async createJob(job: AuditExportJob): Promise<'created' | 'exists'> {
+    let outcome: 'created' | 'exists'
     try {
       await this.client.send(this.putJobCommand(job, { IfNoneMatch: '*' }))
-      return 'created'
+      outcome = 'created'
     } catch (error) {
-      if (isConditionalWriteFailure(error)) return 'exists'
-      throw error
+      if (!isConditionalWriteFailure(error)) throw error
+      outcome = 'exists'
     }
+    // The marker key derives from the stored job, so a replay rewrites the same marker and
+    // repairs one lost when a previous attempt failed between the two writes.
+    const indexed = outcome === 'created' ? job : (await this.readJob(job.workspaceId, job.exportId))?.job
+    if (indexed) {
+      await this.client.send(new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: indexKey(indexed),
+        Body: new Uint8Array(),
+        ContentLength: 0,
+        ServerSideEncryption: 'AES256',
+      }))
+    }
+    return outcome
   }
+
 
   /**
    * Reads one job document and its ETag.
@@ -119,30 +138,34 @@ export class S3AuditExportStore implements AuditExportStore {
    * @returns Jobs ordered from newest to oldest.
    */
   async listJobs(workspaceId: string, limit: number): Promise<AuditExportJob[]> {
-    const prefix = createAuditExportWorkspacePrefix(workspaceId)
+    const prefix = `${createAuditExportWorkspacePrefix(workspaceId)}${AUDIT_EXPORT_INDEX_DIRECTORY}`
     const exportIds: string[] = []
+    let scanned = 0
     let continuationToken: string | undefined
     do {
       const response = await this.client.send(new ListObjectsV2Command({
         Bucket: this.bucketName,
         Prefix: prefix,
-        Delimiter: '/',
+        MaxKeys: AUDIT_EXPORT_LIST_SCAN_LIMIT,
         ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
       }))
-      for (const common of response.CommonPrefixes ?? []) {
-        const exportId = common.Prefix?.slice(prefix.length).replace(/\/$/u, '')
-        if (exportId && /^[0-9a-f]{32}$/u.test(exportId)) exportIds.push(exportId)
+      for (const object of response.Contents ?? []) {
+        scanned += 1
+        const exportId = object.Key?.slice(prefix.length).match(/^\d{13}-([0-9a-f]{32})$/u)?.[1]
+        if (exportId && !exportIds.includes(exportId)) exportIds.push(exportId)
       }
       continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined
-    } while (continuationToken && exportIds.length < AUDIT_EXPORT_LIST_SCAN_LIMIT)
+    } while (continuationToken && scanned < AUDIT_EXPORT_LIST_SCAN_LIMIT)
 
-    const jobs = await Promise.all(
-      exportIds.slice(0, AUDIT_EXPORT_LIST_SCAN_LIMIT).map(async (exportId) =>
-        (await this.readJob(workspaceId, exportId))?.job
-      ),
-    )
+    // Lifecycle expiry can remove a job before its marker, so read in batches until enough jobs exist.
+    const jobs: AuditExportJob[] = []
+    for (let offset = 0; offset < exportIds.length && jobs.length < limit; offset += limit) {
+      const batch = await Promise.all(
+        exportIds.slice(offset, offset + limit).map(async (exportId) => (await this.readJob(workspaceId, exportId))?.job),
+      )
+      jobs.push(...batch.filter((job): job is AuditExportJob => job !== undefined))
+    }
     return jobs
-      .filter((job): job is AuditExportJob => job !== undefined)
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
       .slice(0, limit)
   }
@@ -231,6 +254,23 @@ function jobKey(workspaceId: string, exportId: string) {
     throw new TypeError('Audit export identifiers must be 32 lowercase hexadecimal digits.')
   }
   return `${createAuditExportWorkspacePrefix(workspaceId)}${exportId}/job.json`
+}
+
+/**
+ * Builds the index marker key that lists a job in reverse creation order.
+ *
+ * @param job - Job being created.
+ * @returns Marker key inside the Workspace export namespace.
+ */
+function indexKey(job: AuditExportJob) {
+  const createdAt = Date.parse(job.createdAt)
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0 || createdAt > AUDIT_EXPORT_INDEX_EPOCH_CEILING) {
+    throw new RangeError('Audit export creation time is out of range.')
+  }
+  const inverted = String(AUDIT_EXPORT_INDEX_EPOCH_CEILING - createdAt).padStart(13, '0')
+  // jobKey validates the export ID before it becomes part of another key.
+  jobKey(job.workspaceId, job.exportId)
+  return `${createAuditExportWorkspacePrefix(job.workspaceId)}${AUDIT_EXPORT_INDEX_DIRECTORY}${inverted}-${job.exportId}`
 }
 
 /**

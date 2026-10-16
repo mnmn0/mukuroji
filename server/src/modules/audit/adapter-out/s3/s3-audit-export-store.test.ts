@@ -46,12 +46,8 @@ function createStore() {
       }
       if (command instanceof ListObjectsV2Command) {
         const prefix = command.input.Prefix ?? ''
-        const directories = new Set(
-          [...objects.keys()]
-            .filter((key) => key.startsWith(prefix))
-            .map((key) => `${prefix}${key.slice(prefix.length).split('/')[0]}/`),
-        )
-        return { CommonPrefixes: [...directories].map((Prefix) => ({ Prefix })), IsTruncated: false }
+        const keys = [...objects.keys()].filter((key) => key.startsWith(prefix)).sort()
+        return { Contents: keys.map((Key) => ({ Key })), IsTruncated: false }
       }
       throw new Error('Unexpected S3 command.')
     },
@@ -94,7 +90,10 @@ describe('S3AuditExportStore', () => {
     expect((await store.readJob('ws-1', first.exportId))?.job.status).toBe('running')
     expect(puts.every((input) => input.ServerSideEncryption === 'AES256')).toBe(true)
     expect(puts[0]?.Key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}${first.exportId}/job.json`)
-    expect(puts[0]?.Key).not.toContain('ws-1')
+    expect(puts[1]?.Key).toBe(`${createAuditExportWorkspacePrefix('ws-1')}index/8215667199999-${first.exportId}`)
+    // A replay rewrites the same marker instead of indexing the job twice.
+    expect(puts[3]?.Key).toBe(puts[1]?.Key)
+    expect(puts.every((input) => !input.Key?.includes('ws-1'))).toBe(true)
   })
 
   test('returns undefined for a missing job and rejects malformed stored jobs', async () => {
@@ -108,13 +107,17 @@ describe('S3AuditExportStore', () => {
   })
 
   test('lists only the Workspace jobs, newest first', async () => {
-    const { store } = createStore()
+    const { store, objects } = createStore()
     await store.createJob(job('1'.repeat(32), '2026-07-16T00:00:00.000Z'))
     await store.createJob(job('2'.repeat(32), '2026-07-18T00:00:00.000Z'))
     await store.createJob(job('3'.repeat(32), '2026-07-17T00:00:00.000Z', 'ws-2'))
 
+    // A replay keeps the stored creation time, and a stale marker without a job is skipped.
+    await store.createJob(job('1'.repeat(32), '2026-07-19T00:00:00.000Z'))
+    objects.set(`${createAuditExportWorkspacePrefix('ws-1')}index/0000000000000-${'4'.repeat(32)}`, { body: '', etag: '"m"' })
+
     expect((await store.listJobs('ws-1', 20)).map((entry) => entry.exportId)).toEqual(['2'.repeat(32), '1'.repeat(32)])
-    expect(await store.listJobs('ws-1', 1)).toHaveLength(1)
+    expect((await store.listJobs('ws-1', 1)).map((entry) => entry.exportId)).toEqual(['2'.repeat(32)])
   })
 
   test('writes checksummed parts and presigns downloads inside the export namespace', async () => {

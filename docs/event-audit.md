@@ -169,7 +169,7 @@ system admin または `audit.export` 権限を要求する。`Idempotency-Key` 
 - part は SHA-256 checksum 付きで保存し、job は件数・byte 長・checksum を記録する。download URL の有効期限は 300 秒。
 - job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。
 - 行 projection は同期 export と同じ public DTO を使う。
-- export の要求は `audit.export-requested`、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。
+- export の要求は `audit.export-requested`（idempotent replay も `replayed: true` で記録し、audit 書き込み失敗後の retry でも記録を残す）、download URL の発行は `audit.export-downloaded` として別の audit event に記録する。
 
 ### Public response projection
 
