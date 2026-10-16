@@ -173,6 +173,10 @@ describe('S3AuditExportStore', () => {
     void _scanAttempt
     objects.set(jobPath, { body: JSON.stringify(withoutAttempt), etag: '"n"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('scanAttempt must be a non-negative integer')
+    // Only an unfinished job can wait for a continuation send.
+    const pendingAfterCompletion = { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'completed', continuationPending: true }
+    objects.set(jobPath, { body: JSON.stringify(pendingAfterCompletion), etag: '"l"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('does not match its pending continuation')
     const verifying = { ...job(exportId, '2026-07-18T00:00:00.000Z'), status: 'running', verification: { count: 0, cursor: 'c' }, lastStepMessageId: 'm-1' }
     objects.set(jobPath, { body: JSON.stringify(verifying), etag: '"m"' })
     expect((await store.readJob('ws-1', exportId))?.job).toMatchObject({ verification: { count: 0, cursor: 'c' }, lastStepMessageId: 'm-1' })
