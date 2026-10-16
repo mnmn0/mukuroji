@@ -288,3 +288,58 @@ test('reports asynchronous export as unavailable when it is not deployed', async
   expect(response.status).toBe(503)
   expect(await response.json()).toMatchObject({ code: 'AuditExportUnavailable' })
 })
+
+test('rejects a key whose export expired and maps audit-writer conflicts to 409', async () => {
+  configureFakeProjectClients(true, {})
+  const stored = new Map<string, AuditEventV1>()
+  let rejectWrites = false
+  const auditEvents = {
+    async putEvent(accessEvent: AuditEventV1) {
+      if (rejectWrites) throw new TypeError('Audit event idempotency key conflicts with an existing event.')
+      stored.set(accessEvent.eventId, accessEvent)
+    },
+    async getEvent(_workspaceId: string, eventId: string) {
+      return stored.get(eventId)
+    },
+    async query(_query: AuditEventQuery) {
+      return { events: [] }
+    },
+  }
+  const memory = createMemoryStore()
+  let jobsGone = false
+  const store: AuditExportStore = {
+    ...memory,
+    async readJob(workspaceId, exportId) {
+      return jobsGone ? undefined : memory.readJob(workspaceId, exportId)
+    },
+  }
+  const service = createAuditExportService({
+    settleSeconds: 0,
+    store,
+    queue: { async enqueue() {} },
+    readEvents: (query) => auditEvents.query(query),
+  })
+  setTestAppDependencies({ auditEvents, auditExports: service })
+  const request = () => app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'expired-key' },
+    body: JSON.stringify({ filters: {} }),
+  })
+
+  expect((await request()).status).toBe(202)
+  // The job is gone (lifecycle removed it) while its request event, recorded 8 days ago, remains.
+  jobsGone = true
+  const [recorded] = stored.values()
+  if (!recorded) throw new Error('missing audit event')
+  stored.set(recorded.eventId, { ...recorded, occurredAt: new Date(Date.now() - 8 * 86_400_000).toISOString() })
+  const expired = await request()
+  expect(expired.status).toBe(409)
+  expect(await expired.json()).toMatchObject({ code: 'AuditExportIdempotencyKeyExpired' })
+
+  // A writer-side fingerprint conflict is the stable export conflict, not a 5xx.
+  stored.clear()
+  rejectWrites = true
+  const conflicted = await request()
+  expect(conflicted.status).toBe(409)
+  expect(await conflicted.json()).toMatchObject({ code: 'AuditExportIdempotencyConflict' })
+})

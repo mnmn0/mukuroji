@@ -184,6 +184,9 @@ job と worker の動作は次のとおり。
 - 1 job の part は 10,000 個まで。選択的な filter で小さな part が続いて上限に達した場合は `AuditExportTooManyParts` で失敗し、filter や期間を絞った再依頼を求める。
 - `from` が依頼時刻より未来の filter は `400 InvalidAuditExportFilters` で拒否する（worker は上限を snapshot 時刻に揃えるため一致し得ない）。
 - `audit.export-requested` event は key から導出した export ID による `audit-export-request:<exportId>` を audit の冪等 key とし、正規化した filter の digest（`filtersDigest`）を含める。同じ key を別の audit 操作に使っても衝突せず、job 作成前に失敗した後で filter を変えて再送すると audit 側で競合になる。
+- job が消えた後に同じ `Idempotency-Key` で再送された場合、記録済みの `audit.export-requested` が job の寿命（7 日）より古ければ `409 AuditExportIdempotencyKeyExpired` で拒否し、新しい snapshot の export を作らない。同じ key で filter が異なる場合は audit writer の競合も含めて `409 AuditExportIdempotencyConflict` を返す。
+- S3 の条件付き書き込みは 412 だけを既存 / 変更済みとして扱い、409 `ConditionalRequestConflict` は再試行対象としてそのまま失敗させる。
+- worker は保存済み filter を query 層が拒否する場合だけ `AuditExportQueryInvalid` で終了し、壊れた audit row などそれ以外の失敗は再試行させて DLQ に届ける。
 - `audit.export-downloaded` event は、`Idempotency-Key` があれば `audit-export-download:<exportId>:<fromPart>:<key hash>` を audit の冪等 key とし、同じ key で `nextPart` を辿っても page ごとに別 event になる。key が無い download は発行のたびに記録する。
 - job は 7 日で API から見えなくなり、bucket lifecycle が 8 日で object を削除する。`AuditExportQueue` の message 保持期間は job の寿命より長い 8 日とし、worker が長時間止まっても job が `queued` / `running` のまま message だけが消えないようにする。
 - 行 projection は同期 export と同じ public DTO を使う。
