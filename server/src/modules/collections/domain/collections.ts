@@ -187,7 +187,9 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     isStoredMemberKey(value.createdBy) &&
     isStoredInstant(value.createdAt) &&
     isStoredInstant(value.updatedAt) &&
+    // The next change writes `revision + 1`, so the stored revision must leave room for it.
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
+    value.revision < Number.MAX_SAFE_INTEGER &&
     // The create fingerprint is a lowercase SHA-256 hex digest; anything else cannot match a retry.
     isCollectionCreateFingerprint(value.createFingerprint) &&
     Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&

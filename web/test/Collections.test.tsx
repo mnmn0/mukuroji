@@ -214,6 +214,21 @@ describe('searchCollectionCandidates', () => {
     }
   })
 
+  test('reports a search that hits the page cap without candidates instead of showing no matches', async () => {
+    const previousFetch = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = async () => {
+      calls += 1
+      return new Response(JSON.stringify({ schemaVersion: 1, results: [], nextCursor: String(calls) }))
+    }
+    try {
+      await expect(searchCollectionCandidates('token', 'x', new Set())).rejects.toThrow('stopped before finding a candidate')
+      expect(calls).toBe(100)
+    } finally {
+      globalThis.fetch = previousFetch
+    }
+  })
+
   test('reads past every listed item to find addable candidates', async () => {
     // 180 listed items fill the first 15 pages; addable matches start on page 16.
     const listed = Array.from({ length: 180 }, (_, index) => `listed-${index}`)
