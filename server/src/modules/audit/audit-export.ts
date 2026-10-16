@@ -162,11 +162,9 @@ export type AuditExportJob = {
   readonly nextCursor?: string
   /** One-based index scan attempt; a failed completeness check starts the next one. */
   readonly scanAttempt: number
-  /** Events written so far whose TTL cannot expire before the processing deadline. */
-  readonly durableEventCount: number
   /**
    * Consistent base-table count in progress after the index scan reached the snapshot.
-   * The job completes only when the final count equals `durableEventCount`.
+   * The job completes only when the final count equals `eventCount`.
    */
   readonly verification?: {
     /** Durable matching events counted on the base table so far. */
@@ -499,7 +497,6 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         eventCount: 0,
         parts: [],
         scanAttempt: 1,
-        durableEventCount: 0,
       }
       if (await dependencies.store.createJob(job) === 'created') {
         try {
@@ -696,8 +693,11 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
               ...(cursor ? { cursor } : {}),
             })
             pages += 1
-            events.push(...page.events)
-            for (const event of page.events) approximateBytes += JSON.stringify(event).length
+            // Events that TTL may delete before the deadline are outside the snapshot: the
+            // consistent count could not tell a missed one from a deleted one.
+            const retained = page.events.filter((event) => isRetainedThroughJob(event, job))
+            events.push(...retained)
+            for (const event of retained) approximateBytes += JSON.stringify(event).length
             cursor = page.nextCursor
             if (!cursor) {
               hasMore = false
@@ -739,7 +739,6 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           )
           parts.push({ index, eventCount: events.length, ...part })
         }
-        const durableAfter = durabilityThreshold(job)
         const { nextCursor: _previousCursor, ...withoutCursor } = job
         void _previousCursor
         scanned = {
@@ -747,8 +746,6 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
           status: 'running',
           parts,
           eventCount: job.eventCount + events.length,
-          durableEventCount: job.durableEventCount +
-            events.filter((event) => event.expiresAt === undefined || event.expiresAt > durableAfter).length,
           updatedAt: now().toISOString(),
           ...(hasMore && cursor ? { nextCursor: cursor } : { verification: { count: 0 } }),
         }
@@ -784,7 +781,7 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       }
       const { verification: _verification, ...withoutVerification } = scanned
       void _verification
-      if (verification.count === scanned.durableEventCount) {
+      if (verification.count === scanned.eventCount) {
         return await finish(job, version, { ...withoutVerification, status: 'completed', updatedAt }, messageId)
       }
       if (scanned.scanAttempt >= AUDIT_EXPORT_MAX_SCAN_ATTEMPTS) {
@@ -801,7 +798,6 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         status: 'queued',
         parts: [],
         eventCount: 0,
-        durableEventCount: 0,
         scanAttempt: scanned.scanAttempt + 1,
         updatedAt,
       }, messageId)
@@ -1097,18 +1093,30 @@ function createSnapshotQuery(job: AuditExportJob) {
 }
 
 /**
- * Computes the TTL threshold of events the completeness check compares.
+ * Computes the TTL threshold of events an export contains.
  *
  * DynamoDB TTL never deletes an item before its `expiresAt`, and the job writes nothing
  * after its processing deadline, so an event expiring later stays readable for the whole
- * job. Events that may expire mid-job are exported but left out of both counts, so a TTL
- * deletion cannot hide a missing event.
+ * job and the consistent count can prove the scan saw it. An event that may expire
+ * mid-job could be missed by the scan and deleted before the count, leaving both totals
+ * equal, so such events are excluded from the export and from the count alike.
  *
  * @param job - Stored job.
  * @returns Epoch seconds of the processing deadline.
  */
 function durabilityThreshold(job: AuditExportJob): number {
   return Math.ceil((Date.parse(job.createdAt) + AUDIT_EXPORT_PROCESSING_HOURS * 3_600_000) / 1000)
+}
+
+/**
+ * Checks whether an event is retained for the whole job and therefore belongs to its snapshot.
+ *
+ * @param event - Event read from the index.
+ * @param job - Stored job.
+ * @returns Whether the event has no TTL or expires after the processing deadline.
+ */
+function isRetainedThroughJob(event: { readonly expiresAt?: number }, job: AuditExportJob): boolean {
+  return event.expiresAt === undefined || event.expiresAt > durabilityThreshold(job)
 }
 
 /**
@@ -1283,10 +1291,6 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   }
   const scanAttempt = requireCount(record.scanAttempt, 'scanAttempt')
   if (scanAttempt < 1) throw new TypeError('Audit export scanAttempt must be at least 1.')
-  const durableEventCount = requireCount(record.durableEventCount, 'durableEventCount')
-  if (durableEventCount > eventCount) {
-    throw new TypeError('Audit export job has more durable events than events.')
-  }
   const lastStepMessageId = record.lastStepMessageId === undefined
     ? undefined
     : requireString(record.lastStepMessageId, 'lastStepMessageId')
@@ -1299,7 +1303,7 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     throw new TypeError('Audit export job status does not match its pending continuation.')
   }
   // A queued job has not read anything yet; stored progress would be appended to a fresh scan.
-  if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0 || durableEventCount !== 0)) {
+  if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0)) {
     throw new TypeError('Queued audit export job already has progress.')
   }
   // The event limit is enforced from the job total, so it must account for every part.
@@ -1325,7 +1329,6 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     parts: parsedParts,
     ...(nextCursor === undefined ? {} : { nextCursor }),
     scanAttempt,
-    durableEventCount,
     ...(verification === undefined ? {} : { verification }),
     ...(lastStepMessageId === undefined ? {} : { lastStepMessageId }),
     ...(continuationPending ? { continuationPending: true } : {}),
