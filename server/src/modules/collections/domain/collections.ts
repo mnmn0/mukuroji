@@ -49,6 +49,22 @@ export type StoredCollection = WorkItemCollection & {
   createFingerprint: string
 }
 
+/** Durable record that a Collection was deleted. */
+export type CollectionDeletion = {
+  /** Fingerprint of the request that created the deleted Collection. */
+  createFingerprint: string
+}
+
+/**
+ * Checks that a value is a creation fingerprint: a lowercase SHA-256 hex digest.
+ *
+ * @param value - Persisted value.
+ * @returns Whether the value can match a creation request.
+ */
+export function isCollectionCreateFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
+}
+
 /** Pattern for server-generated Collection identifiers. */
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
 
@@ -171,7 +187,7 @@ export function isStoredCollection(value: unknown): value is StoredCollection {
     isStoredInstant(value.updatedAt) &&
     typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 1 &&
     // The create fingerprint is a lowercase SHA-256 hex digest; anything else cannot match a retry.
-    typeof value.createFingerprint === 'string' && /^[0-9a-f]{64}$/u.test(value.createFingerprint) &&
+    isCollectionCreateFingerprint(value.createFingerprint) &&
     Array.isArray(value.items) && value.items.length <= COLLECTION_ITEM_LIMIT && value.items.every(isStoredCollectionItem) &&
     hasUniqueReferences(value.items)
 }

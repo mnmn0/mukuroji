@@ -6,7 +6,7 @@ import {
   type WorkItemCollection,
   type WorkItemCollectionEntry,
 } from '@mukuroji/contracts'
-import { CollectionError, toPublicCollection, type StoredCollection } from '../domain/collections'
+import { CollectionError, toPublicCollection, type CollectionDeletion, type StoredCollection } from '../domain/collections'
 
 /** Persistence port for Workspace Collections.
  *
@@ -30,16 +30,17 @@ export interface CollectionsStore {
    */
   get(workspaceId: string, collectionId: string): Promise<StoredCollection | undefined>
   /**
-   * Checks whether a Collection was deleted.
+   * Reads the deletion marker of a Collection.
    *
    * Deletion leaves a permanent marker so that replaying the original creation request
-   * cannot bring the Collection back.
+   * cannot bring the Collection back, while reusing its key for another request still
+   * reports an idempotency conflict.
    *
    * @param workspaceId - Server-resolved Workspace.
    * @param collectionId - Collection identifier.
-   * @returns Whether the Collection was deleted.
+   * @returns The deletion record, or undefined when the Collection was never deleted.
    */
-  wasDeleted(workspaceId: string, collectionId: string): Promise<boolean>
+  readDeletion(workspaceId: string, collectionId: string): Promise<CollectionDeletion | undefined>
   /**
    * Writes a Collection when its stored revision still matches.
    *
@@ -56,8 +57,9 @@ export interface CollectionsStore {
    * @param workspaceId - Server-resolved Workspace.
    * @param collectionId - Collection identifier.
    * @param expectedRevision - Stored revision.
+   * @param deletion - Creation details kept in the deletion marker.
    */
-  delete(workspaceId: string, collectionId: string, expectedRevision: number): Promise<void>
+  delete(workspaceId: string, collectionId: string, expectedRevision: number, deletion: CollectionDeletion): Promise<void>
 }
 
 /** Caller and clock used by Collection mutations. */
@@ -124,7 +126,8 @@ export async function createCollection(
     .digest('hex')
   const existing = await store.get(context.workspaceId, collectionId)
   if (existing) return replayCreatedCollection(existing, context.actor, createFingerprint)
-  if (await store.wasDeleted(context.workspaceId, collectionId)) throw createdCollectionDeleted()
+  const deletion = await store.readDeletion(context.workspaceId, collectionId)
+  if (deletion) throw replayDeletedCollection(deletion, createFingerprint)
   const collection: StoredCollection = {
     collectionId,
     name: input.name,
@@ -143,9 +146,10 @@ export async function createCollection(
       ? await store.get(context.workspaceId, collectionId)
       : undefined
     if (raced) return replayCreatedCollection(raced, context.actor, createFingerprint)
-    if (error instanceof CollectionError && error.status === 409 && await store.wasDeleted(context.workspaceId, collectionId)) {
-      throw createdCollectionDeleted()
-    }
+    const racedDeletion = error instanceof CollectionError && error.status === 409
+      ? await store.readDeletion(context.workspaceId, collectionId)
+      : undefined
+    if (racedDeletion) throw replayDeletedCollection(racedDeletion, createFingerprint)
     throw error
   }
   return toPublicCollection(collection)
@@ -200,7 +204,7 @@ export async function deleteCollection(
 ): Promise<void> {
   const current = await requireCollection(store, workspaceId, collectionId)
   if (current.revision !== expectedRevision) throw conflict()
-  await store.delete(workspaceId, collectionId, expectedRevision)
+  await store.delete(workspaceId, collectionId, expectedRevision, { createFingerprint: current.createFingerprint })
 }
 
 /**
@@ -376,11 +380,16 @@ function replayCreatedCollection(existing: StoredCollection, actor: string, crea
 }
 
 /**
- * Creates the error returned when a creation is replayed after the Collection was deleted.
+ * Creates the error for a creation whose idempotency key belongs to a deleted Collection.
  *
- * @returns A 409 Collection error.
+ * @param deletion - Deletion marker of the Collection created with this key.
+ * @param createFingerprint - Fingerprint of the current request.
+ * @returns `CollectionDeleted` for a replay of the original request, otherwise an idempotency conflict.
  */
-function createdCollectionDeleted(): CollectionError {
+function replayDeletedCollection(deletion: CollectionDeletion, createFingerprint: string): CollectionError {
+  if (deletion.createFingerprint !== createFingerprint) {
+    return new CollectionError(409, 'CollectionIdempotencyConflict', 'The idempotency key was used for a different request.')
+  }
   return new CollectionError(409, 'CollectionDeleted', 'The Collection created by this request was deleted. Use a new idempotency key to create another.')
 }
 

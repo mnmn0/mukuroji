@@ -53,7 +53,7 @@ test('writes require caller checks and carry a revision condition', async () => 
   const store = unbound.withCallerAuthorization(checks)
   await store.put('w', collection, 0)
   await store.put('w', { ...collection, revision: 2 }, 1)
-  await store.delete('w', 'c1', 2)
+  await store.delete('w', 'c1', 2, { createFingerprint: 'f'.repeat(64) })
   expect(transactions).toEqual([
     [
       { Put: expect.objectContaining({ ConditionExpression: 'attribute_not_exists(recordKey)', Item: expect.objectContaining({ workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }) }) },
@@ -68,7 +68,7 @@ test('writes require caller checks and carry a revision condition', async () => 
     [
       { Delete: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION#c1' }, ExpressionAttributeValues: { ':revision': 2, ':entryType': 'work-item-collection' } }) },
       { Update: expect.objectContaining({ Key: { workspaceId: 'w', recordKey: 'COLLECTION_COUNT' }, ExpressionAttributeValues: expect.objectContaining({ ':delta': -1 }) }) },
-      { Put: { TableName: 'planning', Item: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1', entryType: 'work-item-collection-tombstone', collectionId: 'c1' } } },
+      { Put: { TableName: 'planning', Item: { workspaceId: 'w', recordKey: 'COLLECTION_DELETED#c1', entryType: 'work-item-collection-tombstone', collectionId: 'c1', createFingerprint: 'f'.repeat(64) } } },
       ...checks,
     ],
   ])
@@ -85,9 +85,16 @@ test('maps a failed counter condition on creation to the Workspace limit', async
 })
 
 test('reports a creation blocked by a deletion marker as a conflict and reads the marker', async () => {
+  const marker = {
+    workspaceId: 'w',
+    recordKey: 'COLLECTION_DELETED#c1',
+    entryType: 'work-item-collection-tombstone',
+    collectionId: 'c1',
+    createFingerprint: 'f'.repeat(64),
+  }
   const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
     if (command instanceof GetCommand) {
-      return command.input.Key?.recordKey === 'COLLECTION_DELETED#c1' ? { Item: { recordKey: 'COLLECTION_DELETED#c1' } } : {}
+      return command.input.Key?.recordKey === 'COLLECTION_DELETED#c1' ? { Item: marker } : {}
     }
     throw Object.assign(new Error('cancelled'), {
       name: 'TransactionCanceledException',
@@ -95,8 +102,28 @@ test('reports a creation blocked by a deletion marker as a conflict and reads th
     })
   }), checks)
   await expect(store.put('w', collection, 0)).rejects.toMatchObject({ status: 409, code: 'CollectionConflict' })
-  expect(await store.wasDeleted('w', 'c1')).toBe(true)
-  expect(await store.wasDeleted('w', 'c2')).toBe(false)
+  expect(await store.readDeletion('w', 'c1')).toEqual({ createFingerprint: 'f'.repeat(64) })
+  expect(await store.readDeletion('w', 'c2')).toBeUndefined()
+})
+
+test('fails closed on a malformed deletion marker instead of accepting it', async () => {
+  const valid = {
+    workspaceId: 'w',
+    recordKey: 'COLLECTION_DELETED#c1',
+    entryType: 'work-item-collection-tombstone',
+    collectionId: 'c1',
+    createFingerprint: 'f'.repeat(64),
+  }
+  for (const item of [
+    { recordKey: 'COLLECTION_DELETED#c1' },
+    { ...valid, workspaceId: 'other' },
+    { ...valid, entryType: 'work-item-collection' },
+    { ...valid, collectionId: 'c2' },
+    { ...valid, createFingerprint: 'not-a-digest' },
+  ]) {
+    const store = new DynamoDbCollectionsStore('planning', clientFor(async () => ({ Item: item })), checks)
+    await expect(store.readDeletion('w', 'c1')).rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+  }
 })
 
 test('maps a failed caller authorization check to 403 instead of a conflict', async () => {
