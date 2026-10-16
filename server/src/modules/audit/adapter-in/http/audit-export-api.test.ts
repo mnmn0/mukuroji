@@ -175,7 +175,7 @@ test('rejects malformed filters and unknown exports', async () => {
 
   const tooManyTypes = await app.request('/api/audit/exports', {
     method: 'POST',
-    headers: adminHeaders(),
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'too-many' },
     body: JSON.stringify({ filters: { eventTypes: Array.from({ length: 21 }, (_, index) => `event-${index}`) } }),
   })
   expect(tooManyTypes.status).toBe(400)
@@ -183,6 +183,76 @@ test('rejects malformed filters and unknown exports', async () => {
 
   const missing = await app.request(`/api/audit/exports/${'f'.repeat(32)}`, { headers: adminHeaders() })
   expect(missing.status).toBe(404)
+})
+
+test('requires an idempotency key and records the request before creating the job', async () => {
+  const { accessEvents, queued } = configureExports()
+  const body = JSON.stringify({ filters: { actorId: 'demo@example.com' } })
+
+  const keyless = await app.request('/api/audit/exports', { method: 'POST', headers: adminHeaders(), body })
+  expect(keyless.status).toBe(400)
+  expect(await keyless.json()).toMatchObject({ code: 'IdempotencyKeyRequired' })
+  expect(accessEvents).toEqual([])
+
+  const created = await app.request('/api/audit/exports', { method: 'POST', headers: { ...adminHeaders(), 'Idempotency-Key': 'export-a' }, body })
+  expect(created.status).toBe(202)
+  const reused = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'export-a' },
+    body: JSON.stringify({ filters: { actorId: 'someone-else@example.com' } }),
+  })
+  expect(reused.status).toBe(409)
+  expect(await reused.json()).toMatchObject({ code: 'AuditExportIdempotencyConflict' })
+  expect(accessEvents).toHaveLength(1)
+  expect(queued).toHaveLength(1)
+
+  // A failed audit write leaves no job behind; the retry with the same key creates it.
+  const failing = configureExports()
+  setTestAppDependencies({
+    auditEvents: {
+      async putEvent() { throw new Error('audit unavailable') },
+      async getEvent() { return undefined },
+      async query() { return { events: [] } },
+    },
+    auditExports: failing.service,
+  })
+  const blocked = await app.request('/api/audit/exports', { method: 'POST', headers: { ...adminHeaders(), 'Idempotency-Key': 'export-b' }, body })
+  expect(blocked.status).toBeGreaterThanOrEqual(500)
+  expect(await failing.service.listExports('user#demo@example.com')).toEqual([])
+  expect(failing.queued).toEqual([])
+})
+
+test('pages download links for exports with many parts', async () => {
+  const { accessEvents, service } = configureExports()
+  const created = await app.request('/api/audit/exports', {
+    method: 'POST',
+    headers: { ...adminHeaders(), 'Idempotency-Key': 'many-parts' },
+    body: JSON.stringify({ filters: {} }),
+  })
+  const { export: job } = await created.json()
+  const stored = await service.getExport('user#demo@example.com', job.exportId)
+  const parts = Array.from({ length: 150 }, (_, index) => ({
+    index: index + 1, key: `audit-exports/test/${job.exportId}/part-${index + 1}.ndjson`, eventCount: 1, byteLength: 10, sha256: 'digest',
+  }))
+  const completed = { ...stored, status: 'completed' as const, parts, eventCount: 150 }
+  const store = createMemoryStore()
+  await store.createJob(completed)
+  setTestAppDependencies({
+    auditEvents: { async putEvent(event: AuditEventV1) { accessEvents.push(event) }, async getEvent() { return undefined }, async query() { return { events: [] } } },
+    auditExports: createAuditExportService({ settleSeconds: 0, store, queue: { async enqueue() {} }, readEvents: async () => ({ events: [] }) }),
+  })
+
+  const first = await (await app.request(`/api/audit/exports/${job.exportId}/download`, { headers: adminHeaders() })).json()
+  expect(first.parts).toHaveLength(100)
+  expect(first.nextPart).toBe(100)
+  const second = await (await app.request(`/api/audit/exports/${job.exportId}/download?fromPart=100`, { headers: adminHeaders() })).json()
+  expect(second.parts.map((part: { index: number }) => part.index)).toEqual(Array.from({ length: 50 }, (_, index) => index + 101))
+  expect(second).not.toHaveProperty('nextPart')
+  for (const fromPart of ['-1', '150', 'abc']) {
+    const invalid = await app.request(`/api/audit/exports/${job.exportId}/download?fromPart=${fromPart}`, { headers: adminHeaders() })
+    expect(invalid.status).toBe(400)
+  }
+  expect(accessEvents.at(-1)).toMatchObject({ metadata: { exportId: job.exportId, fromPart: 100, partCount: 50 } })
 })
 
 test('reports asynchronous export as unavailable when it is not deployed', async () => {

@@ -29,6 +29,9 @@ export const AUDIT_EXPORT_RETENTION_DAYS = 7
 const AUDIT_EXPORT_QUERY_PAGE_SIZE = 100
 /** Longest accepted `Idempotency-Key` header. */
 const AUDIT_EXPORT_IDEMPOTENCY_KEY_MAX_LENGTH = 255
+
+/** Maximum number of part download links returned by one download request. */
+export const AUDIT_EXPORT_DOWNLOAD_LINKS_PER_PAGE = 100
 /** Shape of every export identifier. */
 const AUDIT_EXPORT_ID_PATTERN = /^[0-9a-f]{32}$/u
 
@@ -381,20 +384,14 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
       const filters = normalizeAuditExportFilters(request.filters)
       const requestedAt = now()
       const snapshotAt = requestedAt.toISOString()
-      const idempotencyKey = request.idempotencyKey?.trim()
-      if (idempotencyKey !== undefined && (!idempotencyKey || idempotencyKey.length > AUDIT_EXPORT_IDEMPOTENCY_KEY_MAX_LENGTH)) {
-        throw new AuditExportError(400, 'InvalidIdempotencyKey', 'Idempotency-Key must be 1 to 255 characters.')
-      }
+      const idempotencyKey = request.idempotencyKey === undefined ? undefined : requireIdempotencyKey(request.idempotencyKey)
       const exportId = idempotencyKey
-        ? createHash('sha256')
-          .update(`${request.workspaceId}\0${request.requestedBy.userKey}\0${idempotencyKey}`)
-          .digest('hex')
-          .slice(0, 32)
+        ? deriveAuditExportId(request.workspaceId, request.requestedBy.userKey, idempotencyKey)
         : createId()
       if (!AUDIT_EXPORT_ID_PATTERN.test(exportId)) {
         throw new TypeError('Audit export identifiers must be 32 lowercase hexadecimal digits.')
       }
-      const requestFingerprint = createHash('sha256').update(stableStringify(filters)).digest('hex')
+      const requestFingerprint = createRequestFingerprint(filters)
       const job: AuditExportJob = {
         schemaVersion: 1,
         workspaceId: request.workspaceId,
@@ -457,6 +454,34 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     },
 
     /**
+     * Validates a keyed export request without side effects.
+     *
+     * Resolves the export identifier the request will use and rejects a key that was
+     * already used for a different export, so callers can record the request first.
+     *
+     * @param request - Workspace, requester, filters, and idempotency key.
+     * @returns The export identifier and the normalized filters.
+     */
+    async prepareExport(request: AuditExportRequest & { readonly idempotencyKey: string }) {
+      const filters = normalizeAuditExportFilters(request.filters)
+      const idempotencyKey = requireIdempotencyKey(request.idempotencyKey)
+      const exportId = deriveAuditExportId(request.workspaceId, request.requestedBy.userKey, idempotencyKey)
+      const existing = await dependencies.store.readJob(request.workspaceId, exportId)
+      if (
+        existing &&
+        (existing.job.requestedBy.userKey !== request.requestedBy.userKey ||
+          existing.job.requestFingerprint !== createRequestFingerprint(filters))
+      ) {
+        throw new AuditExportError(
+          409,
+          'AuditExportIdempotencyConflict',
+          'Idempotency-Key was already used for a different audit export.',
+        )
+      }
+      return { exportId, filters }
+    },
+
+    /**
      * Lists the newest unexpired export jobs of a Workspace.
      *
      * @param workspaceId - Workspace that owns the jobs.
@@ -469,22 +494,28 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     },
 
     /**
-     * Creates download URLs for every part of a completed job.
+     * Creates download URLs for one page of parts of a completed job.
      *
      * @param job - Completed export job.
-     * @returns Part metadata with short-lived URLs.
+     * @param fromPart - Index of the first part to sign.
+     * @returns Part metadata with short-lived URLs, and the next page's first part when more remain.
      */
-    async createDownloadLinks(job: AuditExportJob) {
+    async createDownloadLinks(job: AuditExportJob, fromPart = 0) {
       if (job.status !== 'completed') {
         throw new AuditExportError(409, 'AuditExportNotReady', 'Audit export has not completed.')
       }
-      return await Promise.all(job.parts.map(async (part) => ({
+      if (!Number.isSafeInteger(fromPart) || fromPart < 0 || (fromPart > 0 && fromPart >= job.parts.length)) {
+        throw new AuditExportError(400, 'InvalidAuditExportPart', 'fromPart must be the index of an existing part.')
+      }
+      const end = fromPart + AUDIT_EXPORT_DOWNLOAD_LINKS_PER_PAGE
+      const parts = await Promise.all(job.parts.slice(fromPart, end).map(async (part) => ({
         index: part.index,
         eventCount: part.eventCount,
         byteLength: part.byteLength,
         sha256: part.sha256,
         url: await dependencies.store.createPartDownloadUrl(job.workspaceId, job.exportId, part),
       })))
+      return { parts, ...(end < job.parts.length ? { nextPart: end } : {}) }
     },
 
     /**
@@ -599,6 +630,45 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
     }
     return next.status === 'completed' ? 'completed' : 'failed'
   }
+}
+
+/**
+ * Derives the export identifier that a keyed request always uses.
+ *
+ * @param workspaceId - Workspace that owns the export.
+ * @param userKey - Member who requests the export.
+ * @param idempotencyKey - Client idempotency key.
+ * @returns 32 lowercase hexadecimal digits.
+ */
+function deriveAuditExportId(workspaceId: string, userKey: string, idempotencyKey: string): string {
+  return createHash('sha256')
+    .update(`${workspaceId}\0${userKey}\0${idempotencyKey}`)
+    .digest('hex')
+    .slice(0, 32)
+}
+
+/**
+ * Validates and trims a client idempotency key.
+ *
+ * @param value - Raw key.
+ * @returns The trimmed key.
+ */
+function requireIdempotencyKey(value: string): string {
+  const key = value.trim()
+  if (!key || key.length > AUDIT_EXPORT_IDEMPOTENCY_KEY_MAX_LENGTH) {
+    throw new AuditExportError(400, 'InvalidIdempotencyKey', 'Idempotency-Key must be 1 to 255 characters.')
+  }
+  return key
+}
+
+/**
+ * Fingerprints normalized filters so a reused key with different filters is detected.
+ *
+ * @param filters - Normalized filters.
+ * @returns Hex SHA-256 of the canonical filter JSON.
+ */
+function createRequestFingerprint(filters: AuditExportFilters): string {
+  return createHash('sha256').update(stableStringify(filters)).digest('hex')
 }
 
 /**

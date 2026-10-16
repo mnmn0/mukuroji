@@ -51,6 +51,7 @@ import {
   createCustomFieldErrorMessages,
   createVisibleCustomFieldValuePatch,
   resolveEditableWorkflowStatuses,
+  resolveWorkItemContributorOptions,
   resolveWorkItemPersonOptions,
   resolveWorkItemWorkflowStatusId,
 } from '../../work-items/model/workItemDisplay'
@@ -497,6 +498,7 @@ export function TaskDetailPane({
   const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
+  const contributorOptions = resolveWorkItemContributorOptions(workspaceMembers)
   const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
@@ -1056,7 +1058,7 @@ export function TaskDetailPane({
                 jobRoles={resolvedConfiguration?.jobRoles ?? []}
                 key={`contributors:${editorIdentity}`}
                 locale={locale}
-                memberOptions={assigneeOptions}
+                memberOptions={contributorOptions}
                 ownerUserId={(issue ?? currentTask).assigneeUserId}
                 readOnly={isReadOnly}
                 {...(contributorDraftError ? { submitError: contributorDraftError } : {})}

@@ -1328,8 +1328,10 @@ export type ListPublicWorkItemsRequest = {
 
 /**
  * Public Work Item create endpoint の request body です。
+ *
+ * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type CreatePublicWorkItemRequest = CreateWorkItemInput & {
+export type CreatePublicWorkItemRequest = Omit<CreateWorkItemInput, 'contributorAssignments'> & {
   /**
    * Work Item を所有する Team ID です。
    */
@@ -1338,8 +1340,10 @@ export type CreatePublicWorkItemRequest = CreateWorkItemInput & {
 
 /**
  * Public Work Item update endpoint の request body です。
+ *
+ * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type UpdatePublicWorkItemRequest = WorkItemPatch & {
+export type UpdatePublicWorkItemRequest = Omit<WorkItemPatch, 'contributorAssignments'> & {
   /**
    * 読み込み時点の Work Item revision です。
    */
