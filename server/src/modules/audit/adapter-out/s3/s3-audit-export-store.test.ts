@@ -132,6 +132,10 @@ describe('S3AuditExportStore', () => {
     const reordered = { ...job(exportId, '2026-07-18T00:00:00.000Z'), expiresAt: '2026-07-17T00:00:00.000Z' }
     objects.set(jobPath, { body: JSON.stringify(reordered), etag: '"w"' })
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('expires before it was created')
+    // The snapshot bounds the exported events, so it must be the time the request was recorded.
+    const laterSnapshot = { ...job(exportId, '2026-07-18T00:00:00.000Z'), snapshotAt: '2026-07-18T00:00:01.000Z' }
+    objects.set(jobPath, { body: JSON.stringify(laterSnapshot), etag: '"u"' })
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('snapshot does not match its creation time')
     // A fingerprint that no longer describes the stored filters would let a changed job run
     // under the original request's identity.
     const widened = { ...job(exportId, '2026-07-18T00:00:00.000Z'), filters: {} }

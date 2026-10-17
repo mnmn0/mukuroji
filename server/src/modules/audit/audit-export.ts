@@ -1283,6 +1283,12 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
     throw new TypeError('Audit export job expires before it was created.')
   }
+  const snapshotAt = requireInstant(record.snapshotAt, 'snapshotAt')
+  // Every writer takes the snapshot when it records the request; a later snapshot would export
+  // events created after the request, and a far-future one would defer the job until it expires.
+  if (snapshotAt !== createdAt) {
+    throw new TypeError('Audit export job snapshot does not match its creation time.')
+  }
   const eventCount = requireCount(record.eventCount, 'eventCount')
   const parsedParts = parts.map((entry: unknown, position: number) => {
     const part = requireObject(entry, 'Audit export part')
@@ -1341,7 +1347,7 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     status,
     filters: parsedFilters,
     requestFingerprint,
-    snapshotAt: requireInstant(record.snapshotAt, 'snapshotAt'),
+    snapshotAt,
     requestedBy: {
       userKey: requireString(requestedBy.userKey, 'requestedBy.userKey'),
       displayName: requireString(requestedBy.displayName, 'requestedBy.displayName'),
