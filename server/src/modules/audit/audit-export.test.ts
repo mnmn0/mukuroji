@@ -14,6 +14,7 @@ import {
   toAuditExportView,
   type AuditExportJob,
   type AuditExportPart,
+  type AuditExportQueueTarget,
   type AuditExportStore,
 } from './audit-export'
 
@@ -98,6 +99,8 @@ function createCounter(all: AuditEventV1[], calls: AuditEventCountQuery[] = []) 
 }
 
 const requester = { userKey: 'admin@example.com', displayName: 'Admin' }
+/** Correlation ID of the recorded export request in these tests. */
+const correlationId = 'corr-export-request'
 /**
  * Returns the fixed clock used by the export service tests.
  * @returns A constant test timestamp.
@@ -112,7 +115,7 @@ describe('audit export service', () => {
     const service = createAuditExportService({
       settleSeconds: 0,
       store,
-      queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
+      queue: { async enqueue({ exportId }) { queued.push(exportId) } },
       readEvents: createReader(events(250), calls),
       countEvents: createCounter(events(250)),
       now: fixedNow,
@@ -123,6 +126,7 @@ describe('audit export service', () => {
     const { job, created } = await service.requestExport({
       workspaceId: 'ws-1',
       requestedBy: requester,
+      correlationId,
       filters: { eventTypes: ['work-item.updated'], from: '2026-06-01T00:00:00.000Z' },
     })
     expect(created).toBe(true)
@@ -152,6 +156,30 @@ describe('audit export service', () => {
     expect(toAuditExportView(done)).not.toHaveProperty('nextCursor')
   })
 
+  test('stores the request correlation ID on the job and every queued step', async () => {
+    const store = createMemoryStore()
+    const targets: AuditExportQueueTarget[] = []
+    const service = createAuditExportService({
+      settleSeconds: 0,
+      store,
+      queue: { async enqueue(target) { targets.push(target) } },
+      readEvents: createReader(events(3)),
+      countEvents: createCounter(events(3)),
+      now: fixedNow,
+      createId: () => 'c'.repeat(32),
+      eventsPerPart: 2,
+    })
+
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
+    expect(job.correlationId).toBe(correlationId)
+    expect((await store.readJob('ws-1', job.exportId))?.job.correlationId).toBe(correlationId)
+    expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
+    expect(targets).toEqual([
+      expect.objectContaining({ workspaceId: 'ws-1', exportId: job.exportId, correlationId }),
+      expect.objectContaining({ workspaceId: 'ws-1', exportId: job.exportId, correlationId }),
+    ])
+  })
+
   test('completes an empty export without parts', async () => {
     const store = createMemoryStore()
     const service = createAuditExportService({
@@ -163,7 +191,7 @@ describe('audit export service', () => {
       now: fixedNow,
       createId: () => 'b'.repeat(32),
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
     expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
     expect((await service.getExport('ws-1', job.exportId)).parts).toEqual([])
@@ -185,7 +213,7 @@ describe('audit export service', () => {
       countEvents: createCounter([]),
       now: fixedNow,
     })
-    const request = { workspaceId: 'ws-1', requestedBy: requester, filters: { actorId: 'actor-1' }, idempotencyKey: 'key-1' }
+    const request = { workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: { actorId: 'actor-1' }, idempotencyKey: 'key-1' }
 
     await expect(service.requestExport(request)).rejects.toThrow('queue unavailable')
     const replay = await service.requestExport(request)
@@ -207,14 +235,14 @@ describe('audit export service', () => {
     const service = createAuditExportService({
       settleSeconds: 0,
       store,
-      queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
+      queue: { async enqueue({ exportId }) { queued.push(exportId) } },
       readEvents: createReader(events(30)),
       countEvents: createCounter(events(30)),
       now: fixedNow,
       createId: () => 'c'.repeat(32),
       eventsPerPart: 10,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     queued.length = 0
 
     const results = await Promise.all([
@@ -240,7 +268,7 @@ describe('audit export service', () => {
       eventsPerPart: 20,
       maxEvents: 25,
     })
-    const { job } = await tooLarge.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await tooLarge.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     expect(await tooLarge.processExport('ws-1', job.exportId)).toBe('advanced')
     expect(await tooLarge.processExport('ws-1', job.exportId)).toBe('failed')
     expect((await tooLarge.getExport('ws-1', job.exportId)).failure?.code).toBe('AuditExportTooLarge')
@@ -254,7 +282,7 @@ describe('audit export service', () => {
       now: fixedNow,
       createId: () => 'e'.repeat(32),
     })
-    const invalidJob = (await invalid.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })).job
+    const invalidJob = (await invalid.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })).job
     // A malformed persisted row with valid filters retries so the DLQ can surface it.
     await expect(invalid.processExport('ws-1', invalidJob.exportId)).rejects.toThrow('Audit event is malformed.')
     expect((await invalid.getExport('ws-1', invalidJob.exportId)).status).toBe('queued')
@@ -276,7 +304,7 @@ describe('audit export service', () => {
       eventsPerPart: 10,
       maxParts: 2,
     })
-    const partsJob = (await tooManyParts.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })).job
+    const partsJob = (await tooManyParts.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })).job
     expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('advanced')
     expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('advanced')
     expect(await tooManyParts.processExport('ws-1', partsJob.exportId)).toBe('failed')
@@ -298,7 +326,7 @@ describe('audit export service', () => {
       createId: () => '1'.repeat(32),
       eventsPerPart: 10,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     expect(await service.processExport('ws-1', job.exportId)).toBe('advanced')
     const beforeDeadline = await store.readJob('ws-1', job.exportId)
     // A worker that recovers days later must not rewrite job.json and restart bucket expiration.
@@ -331,7 +359,7 @@ describe('audit export service', () => {
       createId: () => '1'.repeat(32),
       eventsPerPart: 10,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     current = new Date('2026-07-18T23:59:00.000Z')
     const before = await store.readJob('ws-1', job.exportId)
     expect(await service.processExport('ws-1', job.exportId)).toBe('skipped')
@@ -349,7 +377,7 @@ describe('audit export service', () => {
       countEvents: createCounter([]),
       now: () => current,
     })
-    await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'old-key' })
+    await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {}, idempotencyKey: 'old-key' })
     current = new Date(fixedNow().getTime() + 8 * 86_400_000)
     await expect(service.prepareExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'old-key' }))
       .rejects.toMatchObject({ status: 409, code: 'AuditExportIdempotencyKeyExpired' })
@@ -366,13 +394,13 @@ describe('audit export service', () => {
     })
     const recordedAt = new Date(fixedNow().getTime() - 60_000).toISOString()
     const { job } = await service.requestExport({
-      workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'retry-key', requestedAt: recordedAt,
+      workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {}, idempotencyKey: 'retry-key', requestedAt: recordedAt,
     })
     expect(job.snapshotAt).toBe(recordedAt)
     expect(job.createdAt).toBe(recordedAt)
     // A time in the future is not a recorded request; the current time is used instead.
     const future = await service.requestExport({
-      workspaceId: 'ws-1', requestedBy: requester, filters: {}, idempotencyKey: 'other-key',
+      workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {}, idempotencyKey: 'other-key',
       requestedAt: new Date(fixedNow().getTime() + 60_000).toISOString(),
     })
     expect(future.job.snapshotAt).toBe(fixedNow().toISOString())
@@ -390,7 +418,7 @@ describe('audit export service', () => {
       now: () => current,
       createId: () => '3'.repeat(32),
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
     const completed = await service.getExport('ws-1', job.exportId)
     current = new Date(Date.parse(completed.expiresAt) - 42_000)
@@ -408,7 +436,7 @@ describe('audit export service', () => {
       now: fixedNow,
       createId: () => 'f'.repeat(32),
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
     await expect(service.processExport('ws-1', job.exportId)).rejects.toThrow('DynamoDB throttled')
     expect((await service.getExport('ws-1', job.exportId)).status).toBe('queued')
@@ -425,7 +453,7 @@ describe('audit export service', () => {
       now: () => current,
       createId: () => '1'.repeat(32),
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
     await expect(service.getExport('ws-2', job.exportId)).rejects.toMatchObject({ status: 404 })
     await expect(service.getExport('ws-1', '../job')).rejects.toBeInstanceOf(AuditExportError)
@@ -445,7 +473,7 @@ describe('audit export service', () => {
       now: fixedNow,
       createId: () => '2'.repeat(32),
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
     await expect(service.createDownloadLinks(job)).rejects.toMatchObject({ code: 'AuditExportNotReady' })
   })
@@ -469,7 +497,7 @@ describe('audit export step safety', () => {
       settleSeconds: 0,
       store,
       queue: {
-        async enqueue(_workspaceId, exportId, delaySeconds) {
+        async enqueue({ exportId }, delaySeconds) {
           queued.push({ exportId, ...(delaySeconds === undefined ? {} : { delaySeconds }) })
         },
       },
@@ -479,7 +507,7 @@ describe('audit export step safety', () => {
       createId: () => '7'.repeat(32),
       ...overrides,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     return { service, queued, store, job }
   }
 
@@ -569,7 +597,7 @@ describe('audit export step safety', () => {
       createId: () => '8'.repeat(32),
     })
 
-    await expect(service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} }))
+    await expect(service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} }))
       .rejects.toThrow('queue unavailable')
     expect(await service.getExport('ws-1', '8'.repeat(32))).toMatchObject({
       status: 'failed',
@@ -595,7 +623,7 @@ describe('audit export completeness barrier', () => {
       settleSeconds: 30,
       store,
       queue: {
-        async enqueue(_workspaceId, _exportId, delaySeconds) {
+        async enqueue(_target, delaySeconds) {
           queued.push(delaySeconds === undefined ? {} : { delaySeconds })
         },
       },
@@ -605,7 +633,7 @@ describe('audit export completeness barrier', () => {
       createId: () => '9'.repeat(32),
       ...overrides,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     // Steps run after the settle delay.
     clock += 60_000
     return { service, store, base, index, queued, job }
@@ -708,7 +736,7 @@ describe('audit export completeness barrier', () => {
       now: fixedNow,
       createId: () => '6'.repeat(32),
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
 
     expect(await service.processExport('ws-1', job.exportId)).toBe('completed')
     expect(await service.getExport('ws-1', job.exportId)).toMatchObject({ eventCount: 3 })
@@ -738,7 +766,7 @@ describe('audit export continuation recovery', () => {
       createId: () => '5'.repeat(32),
       eventsPerPart: 10,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     sends = 0
 
     // The step commits its part and cursor, then the continuation send fails.
@@ -773,7 +801,7 @@ describe('audit export continuation recovery', () => {
       settleSeconds: 0,
       store,
       queue: {
-        async enqueue(_workspaceId, exportId) {
+        async enqueue({ exportId }) {
           if (sendFails) throw new Error('SQS unavailable')
           queued.push(exportId)
         },
@@ -784,7 +812,7 @@ describe('audit export continuation recovery', () => {
       createId: () => '4'.repeat(32),
       eventsPerPart: 10,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     // The send outage outlasts every receive, so the message reaches the DLQ.
     sendFails = true
     await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
@@ -815,7 +843,7 @@ describe('audit export continuation recovery', () => {
       settleSeconds: 0,
       store,
       queue: {
-        async enqueue(_workspaceId, exportId) {
+        async enqueue({ exportId }) {
           if (sendFails) throw new Error('SQS unavailable')
           queued.push(exportId)
         },
@@ -826,7 +854,7 @@ describe('audit export continuation recovery', () => {
       createId: () => '2'.repeat(32),
       eventsPerPart: 10,
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     sendFails = true
     await expect(service.processExport('ws-1', job.exportId, 'message-1')).rejects.toThrow('SQS unavailable')
     queued.length = 0
@@ -861,13 +889,13 @@ describe('audit export continuation recovery', () => {
     const service = createAuditExportService({
       settleSeconds: 0,
       store,
-      queue: { async enqueue(_workspaceId, exportId) { queued.push(exportId) } },
+      queue: { async enqueue({ exportId }) { queued.push(exportId) } },
       readEvents: createReader([]),
       countEvents: createCounter([]),
       now: () => current,
       createId: () => '3'.repeat(32),
     })
-    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, filters: {} })
+    const { job } = await service.requestExport({ workspaceId: 'ws-1', requestedBy: requester, correlationId, filters: {} })
     queued.length = 0
     const before = await store.readJob('ws-1', job.exportId)
 
