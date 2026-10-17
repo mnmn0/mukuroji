@@ -47,7 +47,9 @@
    `web/AGENTS.md` では route component は `pages/` に置きます。
    このうち 4 file には隣接する `*.stories.tsx` があり、story も page を import するため、移動は story と一緒に行います。
 2. **領域直下に責務の分からない file がある。**
-   `analytics/liveQuery.ts`、`workload/api.ts` は、`api/`、`queries/`、`model/` のいずれかへ移せます。
+   次の 2 file は既存の layer へそのまま移せます。
+   - `analytics/liveQuery.ts` は `queryAnalytics` を直列化し、後続 request の開始時に前の request を中断する取得の調停だけを持つため、`analytics/queries/liveQuery.ts` へ移します。
+   - `workload/api.ts` は Workload API の `fetch` 関数と request 型だけを持つため、`workload/api/index.ts` へ移します。既存の `'../api'` からの import はそのまま解決されます。
    `automation/managementData.ts` は複数 endpoint の読み込みなので `queries/` が移動先ですが、`ui/AutomationManagementPanel` から `AutomationWorkflowTargetOption` 型を import しています。
    そのまま `queries/` へ移すと `queries` から `ui` への逆向きの依存が残るため、先にこの型を `model/` へ移す別 PR を行い、その後に移動します。
    次の file は既存の layer に当てはまらないため、置き場所を先に決めます。
