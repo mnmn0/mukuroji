@@ -47,7 +47,8 @@
    `web/AGENTS.md` では route component は `pages/` に置きます。
    このうち 4 file には隣接する `*.stories.tsx` があり、story も page を import するため、移動は story と一緒に行います。
 2. **領域直下に責務の分からない file がある。**
-   次の 2 file は既存の layer へそのまま移せます。
+   次の 3 file は既存の layer へそのまま移せます。
+   - `auth/enterpriseSessionErrors.ts` は Enterprise session の error を画面の操作に分類する純粋な処理で、`model/loginReturnPath` だけに依存するため、`auth/model/enterpriseSessionErrors.ts` へ移します。
    - `analytics/liveQuery.ts` は `queryAnalytics` を直列化し、後続 request の開始時に前の request を中断する取得の調停だけを持つため、`analytics/queries/liveQuery.ts` へ移します。
    - `workload/api.ts` は Workload API の `fetch` 関数と request 型だけを持つため、`workload/api/index.ts` へ移します。既存の `'../api'` からの import はそのまま解決されます。
    `automation/managementData.ts` は複数 endpoint の読み込みなので `queries/` が移動先ですが、`ui/AutomationManagementPanel` から `AutomationWorkflowTargetOption` 型を import しています。
@@ -109,6 +110,7 @@
 2. **領域直下の file を下位 layer へ移す。**
    差分 2 の file を、責務に応じて `api/`、`queries/`、`model/`、`shared/lib/` へ移します。
    `automation/managementData.ts` は、`AutomationWorkflowTargetOption` 型を `model/` へ移す別 PR の後に `queries/` へ移します。
+   `auth/enterpriseSessionErrors.ts` は `auth/model/` へ移します。
    `auth/session.ts` と `auth/enterpriseSso.ts` は、置き場所が `web/AGENTS.md` に追加されるまで移しません。
 3. **利用元が pages だけの領域を `features/` へ移す。**
    `analytics`、`automation`、`security`、`workload` は他の領域から import されないため、移動の影響が page と story に限られます。
@@ -132,6 +134,8 @@
    移す前に、差分 4 の feature への依存を解消します。
    feature の UI や処理を組み立てている部分は、`pages/` または対応する `features/` 側へ移すか、entity が受け取る props / callback に置き換えます。
    依存が解消された領域から順に、`files`、`notifications` の残り（受信箱と未読数、`entities/notification`）、`auth`、`projects`、`workspace` を移し、最後に `issues`、`tasks`、`work-items` を `entities/work-item` へ統合します。
+   `issues`、`tasks`、`work-items` はいずれも `api/index.ts` と `fixtures.ts` を持ち、`issues` と `work-items` は `api/errors.ts` も持つため、そのまま一つの `entities/work-item` へ移すと path が衝突します。
+   統合の前に、衝突する module を一つにまとめるか、領域名を付けた file（例: `api/issueErrors.ts`、`taskFixtures.ts`）へ分ける別 PR を行い、統合の PR は移動だけにします。
 
 ## 移動時の確認
 
