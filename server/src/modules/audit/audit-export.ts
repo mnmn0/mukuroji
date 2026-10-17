@@ -786,12 +786,11 @@ export function createAuditExportService(dependencies: AuditExportServiceDepende
         if (isPastProcessingDeadline(job, now()) || isExpired(job, now())) return 'skipped'
         if (events.length > 0) {
           const index = parts.length + 1
-          const part = await dependencies.store.putPart(
-            job.workspaceId,
-            job.exportId,
-            index,
-            await auditEventsToNdjson(events),
-          )
+          const body = await auditEventsToNdjson(events)
+          // Serializing a large page takes time too; an unreferenced part written past the deadline
+          // would restart its lifecycle clock, so check again immediately before the write.
+          if (isPastProcessingDeadline(job, now()) || isExpired(job, now())) return 'skipped'
+          const part = await dependencies.store.putPart(job.workspaceId, job.exportId, index, body)
           parts.push({ index, eventCount: events.length, ...part })
         }
         const { nextCursor: _previousCursor, ...withoutCursor } = job
@@ -1429,6 +1428,10 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   // A queued job has not read anything yet; stored progress would be appended to a fresh scan.
   if (status === 'queued' && (parts.length > 0 || record.eventCount !== 0)) {
     throw new TypeError('Queued audit export job already has progress.')
+  }
+  // The scan enforces these bounds before each write, so a larger stored job did not come from it.
+  if (eventCount > AUDIT_EXPORT_MAX_EVENTS || parsedParts.length > AUDIT_EXPORT_MAX_PARTS) {
+    throw new TypeError('Audit export job exceeds the export limits.')
   }
   // The event limit is enforced from the job total, so it must account for every part.
   if (parsedParts.reduce((total, part) => total + part.eventCount, 0) !== eventCount) {

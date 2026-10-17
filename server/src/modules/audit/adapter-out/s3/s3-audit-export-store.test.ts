@@ -6,6 +6,8 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3'
 import {
+  AUDIT_EXPORT_MAX_EVENTS,
+  AUDIT_EXPORT_MAX_PARTS,
   AUDIT_EXPORT_PROCESSING_HOURS,
   AUDIT_EXPORT_RETENTION_DAYS,
   createAuditExportRequestFingerprint,
@@ -134,6 +136,28 @@ describe('S3AuditExportStore', () => {
     }
     objects.set(jobPath, { body: JSON.stringify(job(exportId, createdAt)), etag: '"b"' })
     expect((await store.readJob('ws-1', exportId))?.job.expiresAt).toBe(new Date(retained).toISOString())
+  })
+
+  test('rejects stored jobs beyond the export event or part limits', async () => {
+    const { store, objects } = createStore()
+    const exportId = 'd'.repeat(32)
+    const jobPath = `${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`
+    const createdAt = '2026-07-18T00:00:00.000Z'
+    const part = (index: number, eventCount: number) => ({ index, key: 'k', eventCount, byteLength: 1, sha256: 'a'.repeat(64) })
+    const tooManyEvents = [part(1, AUDIT_EXPORT_MAX_EVENTS + 1)]
+    const tooManyParts = Array.from({ length: AUDIT_EXPORT_MAX_PARTS + 1 }, (_, position) => part(position + 1, 1))
+    for (const parts of [tooManyEvents, tooManyParts]) {
+      const eventCount = parts.reduce((total, entry) => total + entry.eventCount, 0)
+      const stored = { ...job(exportId, createdAt), status: 'completed', parts, eventCount }
+      objects.set(jobPath, { body: JSON.stringify(stored), etag: '"a"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow('exceeds the export limits')
+    }
+    const atLimit = [part(1, AUDIT_EXPORT_MAX_EVENTS)]
+    objects.set(jobPath, {
+      body: JSON.stringify({ ...job(exportId, createdAt), status: 'completed', parts: atLimit, eventCount: AUDIT_EXPORT_MAX_EVENTS }),
+      etag: '"b"',
+    })
+    expect((await store.readJob('ws-1', exportId))?.job.eventCount).toBe(AUDIT_EXPORT_MAX_EVENTS)
   })
 
   test('returns undefined for a missing job and rejects malformed stored jobs', async () => {
