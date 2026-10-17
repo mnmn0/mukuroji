@@ -1279,14 +1279,19 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
     throw new TypeError('Audit export job expires before it was created.')
   }
   const eventCount = requireCount(record.eventCount, 'eventCount')
-  const parsedParts = parts.map((entry: unknown) => {
+  const parsedParts = parts.map((entry: unknown, position: number) => {
     const part = requireObject(entry, 'Audit export part')
+    const index = requireCount(part.index, 'part.index')
+    // Parts are written in order from 1, so a gap, duplicate, or reordering means another writer.
+    if (index !== position + 1) throw new TypeError('Audit export parts must be numbered from 1 in order.')
+    const sha256 = requireString(part.sha256, 'part.sha256')
+    if (!/^[0-9a-f]{64}$/u.test(sha256)) throw new TypeError('Audit export part checksum must be a SHA-256 hex digest.')
     return {
-      index: requireCount(part.index, 'part.index'),
+      index,
       key: requireString(part.key, 'part.key'),
       eventCount: requireCount(part.eventCount, 'part.eventCount'),
       byteLength: requireCount(part.byteLength, 'part.byteLength'),
-      sha256: requireString(part.sha256, 'part.sha256'),
+      sha256,
     }
   })
   // Only a running job continues, either from a scan cursor or from a verification count,
