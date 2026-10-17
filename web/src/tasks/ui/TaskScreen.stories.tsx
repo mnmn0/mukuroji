@@ -668,7 +668,7 @@ function CommandProviderTaskScreen({
 
   return (
     <WorkspaceCommandMenuContext.Provider value={contextValue}>
-      <div className="flex items-center gap-2 border-b border-slate-200 bg-white p-2">
+      <div className="flex items-center gap-2 border-b border-slate-200 bg-surface p-2">
         <button
           className="rounded border border-slate-300 px-2 py-1 text-xs"
           data-testid="command-provider-rerender"

@@ -255,7 +255,7 @@ export function DocumentTree({
             <button
               aria-expanded={isCreateMenuOpen}
               aria-haspopup="menu"
-              className="grid h-9 w-9 place-items-center rounded-md text-xl text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+              className="grid h-9 w-9 place-items-center rounded-md text-xl text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
               onClick={() => setIsCreateMenuOpen((current) => !current)}
               title={t('documents.action.create')}
               type="button"
@@ -264,7 +264,7 @@ export function DocumentTree({
             </button>
             {isCreateMenuOpen ? (
               <div
-                className="absolute right-0 top-11 z-30 w-52 rounded-lg border border-[var(--workbench-border)] bg-white p-1.5 shadow-[0_16px_44px_rgba(23,32,29,0.16)]"
+                className="absolute right-0 top-11 z-30 w-52 rounded-lg border border-[var(--workbench-border)] bg-surface p-1.5 shadow-[0_16px_44px_rgba(23,32,29,0.16)]"
                 role="menu"
               >
                 {createKinds.map((kind) => (
@@ -307,7 +307,7 @@ export function DocumentTree({
             aria-current={filter === treeFilter ? 'page' : undefined}
             className={`flex h-9 items-center gap-3 rounded-md px-3 text-left text-sm font-semibold ${
               filter === treeFilter
-                ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+                ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
                 : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-text)]'
             }`}
             key={treeFilter}
@@ -321,7 +321,7 @@ export function DocumentTree({
       </nav>
       {moveErrorKey ? (
         <p
-          className="m-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold leading-5 text-red-800"
+          className="m-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold leading-5 text-fg-red-800"
           role="alert"
         >
           {t(moveErrorKey)}
@@ -399,7 +399,7 @@ export function DocumentTree({
         ) : null}
         {hasMore && onLoadMore ? (
           <button
-            className="mt-3 min-h-9 w-full rounded-md border border-[var(--workbench-border)] bg-white px-3 text-xs font-semibold text-[var(--workbench-primary)] hover:bg-[#f4fbfa] disabled:cursor-wait disabled:opacity-60"
+            className="mt-3 min-h-9 w-full rounded-md border border-[var(--workbench-border)] bg-surface px-3 text-xs font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-f4fbfa disabled:cursor-wait disabled:opacity-60"
             disabled={isLoadingMore}
             onClick={() => {
               setIsLoadingMore(true)
@@ -540,7 +540,7 @@ function DocumentScopeSection({
         {onCreateDocument ? (
           <button
             aria-label={t('documents.action.create')}
-            className="grid h-8 w-8 place-items-center rounded-md text-[var(--workbench-muted-soft)] opacity-0 hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] focus-visible:opacity-100 group-hover:opacity-100"
+            className="grid h-8 w-8 place-items-center rounded-md text-[var(--workbench-muted-soft)] opacity-0 hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] focus-visible:opacity-100 group-hover:opacity-100"
             onClick={() => onCreateDocument('page', scope)}
             type="button"
           >
@@ -634,7 +634,7 @@ function DocumentBranch({
           aria-level={level}
           className={`group flex h-9 w-full items-center gap-2 rounded-md pr-2 text-left text-sm font-medium ${
             selected
-              ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+              ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
               : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
           }`}
           draggable={Boolean(

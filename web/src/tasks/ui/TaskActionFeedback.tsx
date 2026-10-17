@@ -54,8 +54,8 @@ export function TaskActionFeedback({
     <div
       className={`mx-[clamp(20px,3vw,34px)] mt-4 flex flex-wrap items-center gap-3 rounded-md border px-4 py-3 text-sm font-semibold ${
         kind === 'error'
-          ? 'border-red-200 bg-red-50 text-red-700'
-          : 'border-[#99d7cf] bg-[#e5f7f4] text-[var(--workbench-primary)]'
+          ? 'border-red-200 bg-red-50 text-fg-red-700'
+          : 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
       }`}
       data-testid={testId}
       role={kind === 'error' ? 'alert' : undefined}

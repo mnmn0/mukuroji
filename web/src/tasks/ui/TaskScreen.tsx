@@ -3365,7 +3365,7 @@ export function TaskScreen({
 
         {isLoading ? (
           <div
-            className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-semibold text-[#5f6874]"
+            className="grid min-h-0 flex-1 place-items-center px-6 text-sm font-semibold text-fg-5f6874"
             role="status"
           >
             {t('tasks.loading')}
@@ -3379,7 +3379,7 @@ export function TaskScreen({
           >
             {configurationErrorMessage ? (
               <div
-                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-red-700"
+                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-5 py-4 text-sm font-semibold text-fg-red-700"
                 data-testid="project-configuration-error"
                 role="alert"
               >
@@ -3401,7 +3401,7 @@ export function TaskScreen({
                 data-testid="project-task-error"
               >
                 <button
-                  className="min-h-11 px-2 text-sm font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
+                  className="min-h-11 px-2 text-sm font-semibold text-[var(--workbench-primary-text)] underline underline-offset-2"
                   onClick={onRetryTasks}
                   type="button"
                 >
@@ -3418,7 +3418,7 @@ export function TaskScreen({
                 data-testid="project-planning-error"
                 role="alert"
               >
-                <span className="text-sm font-semibold text-red-700">{planningErrorMessage}</span>
+                <span className="text-sm font-semibold text-fg-red-700">{planningErrorMessage}</span>
                 {onRetryPlanning ? (
                   <button
                     className="workbench-button-secondary min-h-9 px-3"
@@ -3899,37 +3899,37 @@ function TaskScheduleUpdatePreview({
   const dialogRef = useModalFocus<HTMLDivElement>(onCancel)
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-[#101828]/40 p-4">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-tone-101828/40 p-4">
       <div
         aria-labelledby="task-schedule-update-preview-title"
         aria-modal="true"
-        className="w-full max-w-xl rounded-xl bg-white p-5 shadow-2xl"
+        className="w-full max-w-xl rounded-xl bg-surface p-5 shadow-2xl"
         data-testid="task-schedule-update-preview"
         ref={dialogRef}
         role="dialog"
         tabIndex={-1}
       >
-        <h2 className="text-lg font-bold text-[#101828]" id="task-schedule-update-preview-title">
+        <h2 className="text-lg font-bold text-fg-101828" id="task-schedule-update-preview-title">
           {t('bulk.preview.title')}
         </h2>
         <ul className="mt-4 grid gap-3">
           {pending.preview.impacts.map((impact) => (
-            <li className="rounded-lg border border-[#d0d5dd] p-3" key={`${impact.teamId}:${impact.workItemId}:${impact.kind}`}>
+            <li className="rounded-lg border border-tone-d0d5dd p-3" key={`${impact.teamId}:${impact.workItemId}:${impact.kind}`}>
               <div className="flex items-center justify-between gap-3">
-                <span className="font-mono text-xs font-semibold text-[#344054]">
+                <span className="font-mono text-xs font-semibold text-fg-344054">
                   {impact.teamId} / {impact.workItemId}
                 </span>
-                <span className="text-xs font-bold uppercase tracking-wide text-[#667085]">
+                <span className="text-xs font-bold uppercase tracking-wide text-fg-667085">
                   {impact.kind === 'direct'
                     ? t('tasks.schedule.impact.direct')
                     : t('tasks.schedule.impact.dependency')}
                 </span>
               </div>
-              <p className="mt-2 text-sm text-[#475467]">
+              <p className="mt-2 text-sm text-fg-475467">
                 <span className="font-semibold">{t('tasks.schedule.before')}: </span>
                 <span className="line-through">{describeTaskSchedule(impact.before, t)}</span>
               </p>
-              <p className="mt-1 text-sm font-semibold text-[#101828]">
+              <p className="mt-1 text-sm font-semibold text-fg-101828">
                 <span>{t('tasks.schedule.after')}: </span>
                 <span>{describeTaskSchedule(impact.after, t)}</span>
               </p>
@@ -3938,9 +3938,9 @@ function TaskScheduleUpdatePreview({
         </ul>
         <TaskSchedulePreviewMetadata preview={pending.preview} t={t} />
         {pending.preview.warnings.length > 0 ? (
-          <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
-            <p className="text-sm font-bold text-[#93370d]">{t('tasks.schedule.warnings')}</p>
-            <ul className="mt-1 list-disc pl-5 text-sm text-[#93370d]">
+          <div className="mt-4 rounded-lg border border-tone-f4d38b bg-tone-fffaeb p-3" role="status">
+            <p className="text-sm font-bold text-fg-93370d">{t('tasks.schedule.warnings')}</p>
+            <ul className="mt-1 list-disc pl-5 text-sm text-fg-93370d">
               {pending.preview.warnings.map((warning) => (
                 <li key={warning}>{resolveTaskScheduleWarning(warning, t)}</li>
               ))}
@@ -3949,7 +3949,7 @@ function TaskScheduleUpdatePreview({
         ) : null}
         <div className="mt-5 flex justify-end gap-2">
           <button
-            className="rounded-lg border border-[#d0d5dd] px-4 py-2 text-sm font-semibold text-[#344054] disabled:opacity-60"
+            className="rounded-lg border border-tone-d0d5dd px-4 py-2 text-sm font-semibold text-fg-344054 disabled:opacity-60"
             disabled={isApplying}
             onClick={onCancel}
             type="button"

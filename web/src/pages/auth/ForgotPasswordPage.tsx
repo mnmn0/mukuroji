@@ -131,7 +131,7 @@ export function ForgotPasswordPage({
                     className="relative pb-9 last:pb-0"
                     key={step.titleKey}
                   >
-                    <span className="absolute -left-[2.35rem] top-0 grid h-7 w-7 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-xs font-bold text-[var(--workbench-primary)] sm:-left-[2.65rem]">
+                    <span className="absolute -left-[2.35rem] top-0 grid h-7 w-7 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-xs font-bold text-[var(--workbench-primary-text)] sm:-left-[2.65rem]">
                       {index + 1}
                     </span>
                     <h2 className="m-0 text-base font-bold text-[var(--workbench-text)]">
@@ -203,7 +203,7 @@ export function ForgotPasswordPage({
                         : ''}
                 </p>
 
-                <div className="mt-6 rounded-lg border border-[#f4d6a6] bg-[#fffaf0] p-4 text-sm leading-6 text-[#7a4b0c]">
+                <div className="mt-6 rounded-lg border border-tone-f4d6a6 bg-tone-fffaf0 p-4 text-sm leading-6 text-fg-7a4b0c">
                   <strong className="block">{t('public.forgot.noSend.title')}</strong>
                   <span>{t('public.forgot.noSend.description')}</span>
                 </div>
@@ -245,7 +245,7 @@ export function ForgotPasswordPage({
                 ) : null}
 
                 <Link
-                  className="mt-7 inline-flex text-sm font-bold text-[var(--workbench-primary)] no-underline hover:underline"
+                  className="mt-7 inline-flex text-sm font-bold text-[var(--workbench-primary-text)] no-underline hover:underline"
                   to="/"
                 >
                   {t('public.backToLogin')}

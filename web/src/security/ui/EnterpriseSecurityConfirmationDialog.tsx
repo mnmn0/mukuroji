@@ -127,10 +127,10 @@ export function EnterpriseSecurityConfirmationDialog({
           </p>
           {errorMessage ? (
             <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3">
-              <p className="text-sm font-semibold text-red-700" role="alert">
+              <p className="text-sm font-semibold text-fg-red-700" role="alert">
                 {errorMessage}
               </p>
-              <p className="mt-1 text-xs font-medium leading-5 text-red-700">
+              <p className="mt-1 text-xs font-medium leading-5 text-fg-red-700">
                 {t('security.dialog.retryHint')}
               </p>
             </div>

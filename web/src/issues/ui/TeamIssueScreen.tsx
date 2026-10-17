@@ -1179,7 +1179,7 @@ export function TeamIssueScreen({
                   + {t('issues.action.new')}
                 </button>
               ) : null}
-              <div className="grid h-10 w-10 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">
+              <div className="grid h-10 w-10 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-sm font-semibold text-[var(--workbench-primary-text)]">
                 {userInitial}
               </div>
             </div>
@@ -1196,7 +1196,7 @@ export function TeamIssueScreen({
               <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
                 {configurationErrorMessage ? (
                   <p
-                    className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700"
+                    className="mb-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-fg-red-700"
                     role="alert"
                   >
                     {configurationErrorMessage}
@@ -1319,13 +1319,13 @@ export function TeamIssueScreen({
                   />
                 </div>
                 {issueErrorMessage ? (
-                  <p className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700">
+                  <p className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-fg-red-700">
                     {issueErrorMessage}
                   </p>
                 ) : null}
                 {planningErrorMessage ? (
                   <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
-                    <p className="text-sm font-bold text-red-700">{planningErrorMessage}</p>
+                    <p className="text-sm font-bold text-fg-red-700">{planningErrorMessage}</p>
                     {onRetryPlanning ? (
                       <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetryPlanning} type="button">
                         {t('planning.action.retry')}
@@ -1339,7 +1339,7 @@ export function TeamIssueScreen({
                 ) : null}
                 {taskActionErrorMessage ? (
                   <p
-                    className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700"
+                    className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-fg-red-700"
                     role="alert"
                   >
                     {taskActionErrorMessage}

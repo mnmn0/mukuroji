@@ -91,7 +91,7 @@ export function SecurityProvisioningTab({
     <div className="grid gap-5" data-testid="security-provisioning">
       {!canManage ? <EnterpriseSecurityReadOnlyNotice t={t} /> : null}
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           badge={t(`security.scim.status.${snapshot.scim.status}`)}
           description={t('security.provisioning.scimDescription')}
@@ -147,7 +147,7 @@ export function SecurityProvisioningTab({
         ) : null}
       </section>
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.provisioning.reconcileDescription')}
           title={t('security.provisioning.reconcileTitle')}
@@ -203,7 +203,7 @@ export function SecurityProvisioningTab({
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.provisioning.logsDescription')}
           title={t('security.provisioning.logsTitle')}
@@ -341,7 +341,7 @@ function ProvisioningImpactPreview({
           </p>
           {isExpired ? (
             <p
-              className="mt-2 text-xs font-semibold text-red-700"
+              className="mt-2 text-xs font-semibold text-fg-red-700"
               data-testid="security-provisioning-preview-expired"
               role="status"
             >
@@ -350,7 +350,7 @@ function ProvisioningImpactPreview({
           ) : null}
           {isBlocking ? (
             <p
-              className="mt-2 text-xs font-semibold text-red-700"
+              className="mt-2 text-xs font-semibold text-fg-red-700"
               data-testid="security-provisioning-preview-blocked"
               role="alert"
             >
@@ -374,7 +374,7 @@ function ProvisioningImpactPreview({
           )}
         </span>
       </div>
-      <dl className="grid grid-cols-3 border-y border-amber-200 bg-white/80 max-[760px]:grid-cols-2">
+      <dl className="grid grid-cols-3 border-y border-amber-200 bg-surface/80 max-[760px]:grid-cols-2">
         {countItems.map(([key, labelKey]) => (
           <div className="border-b border-r border-amber-100 px-3 py-3" key={key}>
             <dt className="text-xs font-semibold text-[var(--workbench-muted)]">
@@ -387,7 +387,7 @@ function ProvisioningImpactPreview({
         ))}
       </dl>
       {impact.warnings.length > 0 ? (
-        <p className="flex gap-2 px-4 py-4 text-sm font-semibold leading-6 text-amber-900">
+        <p className="flex gap-2 px-4 py-4 text-sm font-semibold leading-6 text-fg-amber-900">
           <span aria-hidden="true">!</span>
           <span>
             {t('security.provisioning.warningSummary').replace(
@@ -400,7 +400,7 @@ function ProvisioningImpactPreview({
       {canApply ? (
         <div className="flex justify-end border-t border-amber-200 px-4 py-4">
           <button
-            className="min-h-10 rounded-md border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-200 disabled:text-slate-600"
+            className="min-h-10 rounded-md border border-red-700 bg-red-700 px-4 text-sm font-semibold text-white transition hover:bg-red-800 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-200 disabled:text-fg-slate-600"
             data-testid="security-provisioning-apply"
             disabled={isBusy || isExpired || isBlocking}
             type="button"

@@ -134,7 +134,7 @@ export function ConnectorsSection({
             className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3"
             role="alert"
           >
-            <p className="text-sm font-semibold text-red-800">
+            <p className="text-sm font-semibold text-fg-red-800">
               {syncConflictsErrorMessage}
             </p>
             {onRetrySyncConflicts ? (
@@ -208,7 +208,7 @@ export function ConnectorsSection({
                   <div className="mt-4 grid gap-2">
                     {conflict.fields.map((field) => (
                       <div
-                        className="rounded-md border border-[var(--workbench-border)] bg-white p-3"
+                        className="rounded-md border border-[var(--workbench-border)] bg-surface p-3"
                         key={field.field}
                       >
                         <p className="font-mono text-xs font-semibold text-[var(--workbench-text)]">
@@ -243,8 +243,8 @@ export function ConnectorsSection({
                   </div>
 
                   {isOpen && resolution === 'merge' ? (
-                    <fieldset className="mt-4 grid gap-3 rounded-lg border border-[#99d7cf] bg-[#f4fbfa] p-3">
-                      <legend className="px-1 text-xs font-semibold text-[#116b63]">
+                    <fieldset className="mt-4 grid gap-3 rounded-lg border border-tone-99d7cf bg-tone-f4fbfa p-3">
+                      <legend className="px-1 text-xs font-semibold text-fg-116b63">
                         {labels.fields.mergedValues}
                       </legend>
                       <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
@@ -275,7 +275,7 @@ export function ConnectorsSection({
                         </label>
                       ))}
                       {conflictMergeErrors[conflict.id] ? (
-                        <p className="text-xs font-semibold text-red-700" role="alert">
+                        <p className="text-xs font-semibold text-fg-red-700" role="alert">
                           {conflictMergeErrors[conflict.id]}
                         </p>
                       ) : null}
@@ -333,7 +333,7 @@ export function ConnectorsSection({
                 className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3"
                 role="alert"
               >
-                <p className="text-sm font-semibold text-red-800">
+                <p className="text-sm font-semibold text-fg-red-800">
                   {syncConflictsLoadMoreErrorMessage}
                 </p>
                 {onRetrySyncConflicts ? (
@@ -438,7 +438,7 @@ export function ConnectorsSection({
 
                         return (
                           <div
-                            className="rounded-md border border-[var(--workbench-border)] bg-white p-3"
+                            className="rounded-md border border-[var(--workbench-border)] bg-surface p-3"
                             data-testid={`connector-installation-${connector.id}`}
                             key={connector.id}
                           >
@@ -465,13 +465,13 @@ export function ConnectorsSection({
                                 : labels.helpText.never}
                             </p>
                             {connector.lastError ? (
-                              <p className="mt-2 text-xs font-semibold text-amber-800">
+                              <p className="mt-2 text-xs font-semibold text-fg-amber-800">
                                 {connector.lastError.detail ??
                                   connector.lastError.title}
                               </p>
                             ) : null}
                             {hasConflict ? (
-                              <p className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs font-semibold text-amber-900">
+                              <p className="mt-3 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs font-semibold text-fg-amber-900">
                                 {labels.helpText.connectorConflict}
                               </p>
                             ) : null}

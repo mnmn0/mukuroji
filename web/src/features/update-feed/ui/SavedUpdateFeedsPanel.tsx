@@ -48,7 +48,7 @@ type Props = {
 }
 const healthValues: PlanningHealth[] = ['unknown', 'on-track', 'at-risk', 'off-track']
 const stateValues: PlanningUpdateState[] = ['not-configured', 'missing', 'current', 'overdue', 'stale']
-const control = 'min-h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-app-meta'
+const control = 'min-h-10 w-full rounded-md border border-slate-300 bg-surface px-3 py-2 text-app-meta'
 const button = 'min-h-10 rounded-md border border-slate-300 px-3 text-app-meta font-semibold disabled:opacity-50'
 
 /** Renders saved selection, bounded filter editing and explicit delete confirmation.
@@ -101,7 +101,7 @@ export function SavedUpdateFeedsPanel({ collection, selectedId, options, options
           <label className="text-app-meta font-semibold">{t('updates.saved.name')}<input autoFocus required maxLength={80} value={editor.feed.name} className={`${control} mt-1`} onChange={(event) => setEditor({ ...editor, feed: { ...editor.feed, name: event.target.value } })} /></label>
           <label className="text-app-meta font-semibold">{t('updates.saved.base')}<select className={`${control} mt-1`} value={editor.feed.view} onChange={(event) => { if (isUpdateFeedView(event.target.value)) setEditor({ ...editor, feed: { ...editor.feed, view: event.target.value } }) }}>{updateFeedViews.map((view) => <option key={view} value={view}>{t(`updates.view.${view}`)}</option>)}</select></label>
         </div>
-        <p className="text-app-meta text-slate-600">{t('updates.saved.rules')}</p>
+        <p className="text-app-meta text-fg-slate-600">{t('updates.saved.rules')}</p>
         {options ? <div className="grid gap-4 sm:grid-cols-2">
           <Dimension t={t} label={t('updates.saved.teams')} values={editor.feed.filters.teamIds} options={options.teams.map((item) => ({ value: item.id, label: item.name }))} onChange={(teamIds) => changeFilters({ teamIds })} />
           <Dimension t={t} label={t('updates.saved.projects')} values={editor.feed.filters.projects.map((item) => JSON.stringify([item.teamId, item.projectId]))} options={options.projects.map((item) => ({ value: JSON.stringify([item.teamId, item.projectId]), label: `${item.name} (${options.teams.find((team) => team.id === item.teamId)?.name ?? item.teamId})` }))} onChange={(values) => changeFilters({ projects: options.projects.filter((item) => values.includes(JSON.stringify([item.teamId, item.projectId]))).map(({ teamId, projectId }) => ({ teamId, projectId })) })} />
@@ -110,10 +110,10 @@ export function SavedUpdateFeedsPanel({ collection, selectedId, options, options
           <Dimension t={t} label={t('updates.saved.health')} values={editor.feed.filters.health} options={healthValues.map((value) => ({ value, label: t(`planning.health.${value}`) }))} onChange={(values) => changeFilters({ health: healthValues.filter((value) => values.includes(value)) })} />
           <Dimension t={t} label={t('updates.saved.status')} values={editor.feed.filters.updateStates} options={stateValues.map((value) => ({ value, label: t(`planning.updateState.${value}`) }))} onChange={(values) => changeFilters({ updateStates: stateValues.filter((value) => values.includes(value)) })} />
         </div> : <p role={optionsFailed ? 'alert' : 'status'}>{t(optionsFailed ? 'updates.saved.optionsError' : 'updates.loading')}</p>}
-        <p className="text-app-meta text-slate-500">{t('updates.saved.visibility')}</p>
+        <p className="text-app-meta text-fg-slate-500">{t('updates.saved.visibility')}</p>
       </>}
       {oversized ? <p role="alert">{t('updates.saved.limit')}</p> : null}
-      {error ? <p role="alert" className="text-app-meta text-amber-800">{t(conflict ? 'updates.saved.conflict' : 'updates.saveError')}</p> : null}
+      {error ? <p role="alert" className="text-app-meta text-fg-amber-800">{t(conflict ? 'updates.saved.conflict' : 'updates.saveError')}</p> : null}
       <div className="flex flex-wrap gap-2"><button type="submit" className={`${button} bg-teal-800 text-white`} disabled={pending || conflict || Boolean(oversized) || (!editor.deleting && (!options || optionsFailed || !editor.feed.name.trim()))}>{t(editor.deleting ? 'updates.saved.delete' : 'updates.saved.save')}</button><button type="button" className={button} disabled={pending} onClick={close}>{t('updates.saved.cancel')}</button></div>
     </form> : null}
   </section>
@@ -130,5 +130,5 @@ function Dimension({ t, label, values, options, onChange }: {
   const descriptionId = useId()
   const available = new Set(options.map((option) => option.value))
   const unavailableCount = values.filter((value) => !available.has(value)).length
-  return <div><label className="text-app-meta font-semibold">{label}<select multiple size={3} aria-describedby={unavailableCount ? descriptionId : undefined} className={`${control} mt-1`} value={values} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>{unavailableCount ? <p id={descriptionId} className="mt-1 text-app-meta text-slate-600">{t('updates.saved.unavailableConditions').replace('{count}', String(unavailableCount))}</p> : null}</div>
+  return <div><label className="text-app-meta font-semibold">{label}<select multiple size={3} aria-describedby={unavailableCount ? descriptionId : undefined} className={`${control} mt-1`} value={values} onChange={(event) => onChange(Array.from(event.target.selectedOptions, (option) => option.value))}>{options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>{unavailableCount ? <p id={descriptionId} className="mt-1 text-app-meta text-fg-slate-600">{t('updates.saved.unavailableConditions').replace('{count}', String(unavailableCount))}</p> : null}</div>
 }

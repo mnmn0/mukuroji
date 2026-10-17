@@ -171,7 +171,7 @@ export function AutomationInboundWebhooksPanel({
             const canRotate = endpoint.status === 'active' || endpoint.status === 'paused'
             return (
               <article
-                className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-white p-4"
+                className="grid gap-4 rounded-lg border border-[var(--workbench-border)] bg-surface p-4"
                 data-testid={`automation-webhook-${endpoint.id}`}
                 key={endpoint.id}
               >
@@ -231,7 +231,7 @@ export function AutomationInboundWebhooksPanel({
                       ) : null}
                       {endpoint.status !== 'revoked' && onRevoke ? (
                         <button
-                          className="workbench-button-secondary min-h-9 px-3 text-red-700 disabled:cursor-not-allowed disabled:opacity-55"
+                          className="workbench-button-secondary min-h-9 px-3 text-fg-red-700 disabled:cursor-not-allowed disabled:opacity-55"
                           data-testid={`automation-webhook-revoke-${endpoint.id}`}
                           disabled={isMutationBusy}
                           type="button"
@@ -245,7 +245,7 @@ export function AutomationInboundWebhooksPanel({
                 </div>
                 {endpoint.status === 'provisioning' ? (
                   <section
-                    className="rounded-lg border border-amber-400 bg-amber-50 px-3 py-3 text-amber-950"
+                    className="rounded-lg border border-amber-400 bg-amber-50 px-3 py-3 text-fg-amber-950"
                     data-testid={`automation-webhook-provisioning-warning-${endpoint.id}`}
                     role="status"
                   >
@@ -310,10 +310,10 @@ export function AutomationWebhookSecretNotice({
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-amber-950">
+          <h3 className="text-sm font-semibold text-fg-amber-950">
             {t('automation.webhook.secretTitle')} · {endpointName}
           </h3>
-          <p className="mt-1 text-xs font-medium leading-5 text-amber-900">
+          <p className="mt-1 text-xs font-medium leading-5 text-fg-amber-900">
             {t('automation.webhook.secretDescription')}
           </p>
         </div>
@@ -326,8 +326,8 @@ export function AutomationWebhookSecretNotice({
           {t('automation.webhook.secretDismiss')}
         </button>
       </div>
-      <div className="mt-3 grid gap-1 rounded-lg border border-amber-300 bg-white px-3 py-3">
-        <span className="text-xs font-semibold text-amber-900">
+      <div className="mt-3 grid gap-1 rounded-lg border border-amber-300 bg-surface px-3 py-3">
+        <span className="text-xs font-semibold text-fg-amber-900">
           {t('automation.webhook.secretLabel')}
         </span>
         <code className="break-all text-sm font-semibold text-[var(--workbench-text)]">

@@ -597,7 +597,7 @@ export function PlanningScreen({
       >
         {errorMessage ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
-            <p className="text-sm font-semibold text-red-800">{errorMessage || labels.error}</p>
+            <p className="text-sm font-semibold text-fg-red-800">{errorMessage || labels.error}</p>
             {onRetry ? (
               <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetry} type="button">
                 {labels.retry}
@@ -611,7 +611,7 @@ export function PlanningScreen({
             data-testid="planning-access-error"
             role="alert"
           >
-            <p className="max-w-[820px] text-sm font-semibold text-amber-900">
+            <p className="max-w-[820px] text-sm font-semibold text-fg-amber-900">
               {accessErrorMessage}
             </p>
             {onRetryAccess ? (
@@ -820,7 +820,7 @@ function TimelineView({
                 const updateView = resolvePlanningEntityUpdateView(entity, updateTargetDetails)
                 return (
                   <tr
-                    className={`border-b border-[var(--workbench-border)] ${critical ? 'bg-red-50/70' : 'bg-white'}`}
+                    className={`border-b border-[var(--workbench-border)] ${critical ? 'bg-red-50/70' : 'bg-surface'}`}
                     data-critical={critical ? 'true' : 'false'}
                     data-testid={`timeline-entity-${entity.id}`}
                     key={entity.id}
@@ -904,7 +904,7 @@ function TimelineView({
         <div className="mt-4 grid gap-2">
           {snapshot.dependencies.map((dependency) => (
             <div
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] p-3 target:border-[var(--workbench-primary)] target:bg-[#e5f7f4]"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] p-3 target:border-[var(--workbench-primary)] target:bg-tone-e5f7f4"
               id={createPlanningDependencyAnchorId(dependency.id)}
               key={dependency.id}
               tabIndex={-1}
@@ -1065,7 +1065,7 @@ function DependencyEditor({
       </label>
       <PlanningInput label={labels.workItemDependencyT('workItems.dependencies.constraint.date')} name="constraintDate" type="date" />
       {constraintValidationMessage ? (
-        <p className="text-sm font-semibold text-red-700" role="alert">
+        <p className="text-sm font-semibold text-fg-red-700" role="alert">
           {constraintValidationMessage}
         </p>
       ) : null}
@@ -1215,7 +1215,7 @@ function RoadmapView({
               const trace = resolveWorkItemStrategicTrace(snapshot, workItem)
               return (
                 <button
-                  className="rounded-lg border border-[var(--workbench-border)] bg-white p-3 text-left hover:border-[var(--workbench-primary)]"
+                  className="rounded-lg border border-[var(--workbench-border)] bg-surface p-3 text-left hover:border-[var(--workbench-primary)]"
                   disabled={isAiOperationPending}
                   key={`${workItem.teamId}:${workItem.id}`}
                   type="button"
@@ -1287,7 +1287,7 @@ function RoadmapNode({
     <div>
       <button
         aria-current={selectedEntityId === entity.id ? 'true' : undefined}
-        className={`grid w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(72px,auto)] items-center gap-2 rounded-lg border p-3 text-left min-[640px]:grid-cols-[minmax(0,1fr)_100px_110px] min-[640px]:gap-3 ${selectedEntityId === entity.id ? 'border-[#6fbfb4] bg-[#e5f7f4]' : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf]'}`}
+        className={`grid w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(72px,auto)] items-center gap-2 rounded-lg border p-3 text-left min-[640px]:grid-cols-[minmax(0,1fr)_100px_110px] min-[640px]:gap-3 ${selectedEntityId === entity.id ? 'border-tone-6fbfb4 bg-tone-e5f7f4' : 'border-[var(--workbench-border)] bg-surface hover:border-tone-99d7cf'}`}
         data-testid={`roadmap-entity-${entity.id}`}
         disabled={isAiOperationPending}
         style={{
@@ -1721,7 +1721,7 @@ function PortfolioView({
             {rows.map((entity) => {
               const updateView = resolvePlanningEntityUpdateView(entity, updateTargetDetails)
               return (
-                <tr className="border-b border-[var(--workbench-border)] bg-white" data-testid={`portfolio-entity-${entity.id}`} key={entity.id}>
+                <tr className="border-b border-[var(--workbench-border)] bg-surface" data-testid={`portfolio-entity-${entity.id}`} key={entity.id}>
                   <td className="w-full px-5 py-4">
                     <button className="min-w-0 max-w-full text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={isAiOperationPending} onClick={() => onSelectEntity(entity.id)} type="button">
                       <span className="block truncate text-sm font-semibold">{entity.title}</span>

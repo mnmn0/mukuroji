@@ -414,8 +414,8 @@ export function TaskDetailPane({
         <p
           className={`rounded-md border border-dashed px-4 py-8 text-center text-sm font-medium ${
             errorMessage && !isLoading
-              ? 'border-red-200 bg-red-50 text-red-700'
-              : 'border-[var(--workbench-border-strong)] bg-white text-[var(--workbench-muted)]'
+              ? 'border-red-200 bg-red-50 text-fg-red-700'
+              : 'border-[var(--workbench-border-strong)] bg-surface text-[var(--workbench-muted)]'
           }`}
           tabIndex={errorMessage && !isLoading ? -1 : undefined}
           role={errorMessage && !isLoading ? 'alert' : 'status'}
@@ -870,7 +870,7 @@ export function TaskDetailPane({
         ) : null}
       </label>
       {isWorkItemTypeChangeRequested ? (
-        <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-white p-3 text-sm" data-testid="task-detail-work-item-type-preview">
+        <div className="grid gap-2 rounded-md border border-[var(--workbench-border-strong)] bg-surface p-3 text-sm" data-testid="task-detail-work-item-type-preview">
           <p className="font-semibold text-[var(--workbench-text)]">
             {t('tasks.detail.typeChange.title')}
           </p>
@@ -937,16 +937,16 @@ export function TaskDetailPane({
                 </label>
               ) : null}
               {typeChangePreview.missingRequiredCustomFieldIds.length > 0 ? (
-                <p className="text-amber-700">
+                <p className="text-fg-amber-700">
                   {t('tasks.detail.typeChange.missingRequired')}
                 </p>
               ) : null}
             </>
           ) : activeTypeChangeState.errorMessage ? (
-            <p className="text-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
+            <p className="text-fg-red-700" role="alert">{activeTypeChangeState.errorMessage}</p>
           ) : null}
           {fieldErrors.typeChange ? (
-            <p className="font-semibold text-red-700" role="alert">{fieldErrors.typeChange}</p>
+            <p className="font-semibold text-fg-red-700" role="alert">{fieldErrors.typeChange}</p>
           ) : null}
         </div>
       ) : null}
@@ -1172,7 +1172,7 @@ export function TaskDetailPane({
                   : ''}
               </p>
               {fieldErrors.schedule ? (
-                <p className="text-sm font-semibold text-red-700" role="alert">
+                <p className="text-sm font-semibold text-fg-red-700" role="alert">
                   {fieldErrors.schedule}
                 </p>
               ) : null}
@@ -1190,7 +1190,7 @@ export function TaskDetailPane({
       case 'relations':
         return (
           <>
-            <div className="border-b border-[var(--workbench-border)] bg-white px-5 py-5">
+            <div className="border-b border-[var(--workbench-border)] bg-surface px-5 py-5">
               <WorkItemRelationsEditor
                 candidates={canonicalRelationCandidates.map((candidate) => ({
                   id: candidate.id,
@@ -1212,7 +1212,7 @@ export function TaskDetailPane({
                 relations={relations}
               />
             </div>
-            <div className="border-b border-[var(--workbench-border)] bg-white px-5 py-5">
+            <div className="border-b border-[var(--workbench-border)] bg-surface px-5 py-5">
               <WorkItemDependencyPanel
                 canManageEndpoint={canManageScheduleDependencyEndpoint}
                 currentEndpoint={{ teamId: task.teamId, workItemId: task.id }}
@@ -1287,7 +1287,7 @@ export function TaskDetailPane({
         onSubmit={submitEditorForm}
       />
       <div
-        className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
+        className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-surface px-5 py-4"
         onChange={() => {
           const nextDirtyState = { dirty: true, identity: editorIdentity }
           editorDirtyStateRef.current = nextDirtyState
@@ -1318,7 +1318,7 @@ export function TaskDetailPane({
             ) : null}
             {canAccessTriage && sourceTriageEntryId ? (
               <a
-                className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
                 data-testid="task-detail-triage-source"
                 href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, sourceTriageEntryId)}
                 aria-disabled={isWorkItemMutationPending || undefined}
@@ -1339,7 +1339,7 @@ export function TaskDetailPane({
                   {reverseTriageSources.map((entry) => (
                     <li key={entry.id}>
                       <a
-                        className="text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        className="text-xs font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
                         href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, entry.id)}
                         aria-disabled={isWorkItemMutationPending || undefined}
                         tabIndex={isWorkItemMutationPending ? -1 : undefined}
@@ -1350,7 +1350,7 @@ export function TaskDetailPane({
                   ))}
                 </ul>
                 {triageSourcesError ? (
-                  <p className="mt-2 text-xs text-red-700" role="alert">
+                  <p className="mt-2 text-xs text-fg-red-700" role="alert">
                     {t('tasks.detail.triageSources.error')}
                   </p>
                 ) : null}
@@ -1380,7 +1380,7 @@ export function TaskDetailPane({
                   {triageContextSnapshots.map((snapshot) => (
                     <li className="text-xs leading-5 text-[var(--workbench-muted)]" key={snapshot.triageEntryId}>
                       <a
-                        className="font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        className="font-semibold text-[var(--workbench-primary-text)] underline-offset-4 hover:underline"
                         href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
                         aria-disabled={isWorkItemMutationPending || undefined}
                         tabIndex={isWorkItemMutationPending ? -1 : undefined}
@@ -1469,7 +1469,7 @@ export function TaskDetailPane({
           </p>
         ) : null}
         {errorMessage ? (
-          <p className="text-sm font-semibold text-red-700" role="alert" tabIndex={-1}>{errorMessage}</p>
+          <p className="text-sm font-semibold text-fg-red-700" role="alert" tabIndex={-1}>{errorMessage}</p>
         ) : null}
       </div>
       <form

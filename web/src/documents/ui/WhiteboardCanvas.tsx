@@ -129,6 +129,18 @@ type WhiteboardTool = WhiteboardObject['type'] | 'frame'
 
 const whiteboardWidth = 1400
 const whiteboardHeight = 900
+/**
+ * Theme-aware colors for the canvas grid, frames, and connectors. The variables are defined for
+ * the light and dark themes in `index.css`; objects keep their fixed paper colors instead.
+ */
+const whiteboardSvgColors = {
+  connector: 'var(--workbench-whiteboard-connector)',
+  frameFill: 'var(--workbench-whiteboard-frame-fill)',
+  frameLabel: 'var(--workbench-whiteboard-frame-label)',
+  frameStroke: 'var(--workbench-whiteboard-frame-stroke)',
+  grid: 'var(--workbench-whiteboard-grid)',
+  selected: 'var(--workbench-whiteboard-selected)',
+}
 const whiteboardTools = [
   'note',
   'text',
@@ -348,7 +360,7 @@ export function WhiteboardCanvas({
 
   return (
     <div
-      className="relative h-full min-h-[560px] overflow-hidden bg-[#f8faf9]"
+      className="relative h-full min-h-[560px] overflow-hidden bg-tone-f8faf9"
       data-testid="whiteboard-canvas"
       onKeyDown={(event) => {
         if (
@@ -364,12 +376,12 @@ export function WhiteboardCanvas({
       {editable ? (
         <div
           aria-label={t('documents.whiteboard.toolbar')}
-          className="absolute left-1/2 top-4 z-20 flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-xl border border-[var(--workbench-border)] bg-white/95 p-1.5 shadow-[0_12px_36px_rgba(23,32,29,0.14)] backdrop-blur"
+          className="absolute left-1/2 top-4 z-20 flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-1 overflow-x-auto rounded-xl border border-[var(--workbench-border)] bg-surface/95 p-1.5 shadow-[0_12px_36px_rgba(23,32,29,0.14)] backdrop-blur"
           role="toolbar"
         >
           {whiteboardTools.map((type) => (
             <button
-              className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+              className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
               key={type}
               onClick={() => addElement(type)}
               title={t(`documents.whiteboard.${type}`)}
@@ -384,7 +396,7 @@ export function WhiteboardCanvas({
           <span className="mx-1 h-7 w-px flex-none bg-[var(--workbench-border)]" />
           <button
             aria-pressed={isMultiSelectEnabled}
-            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
+            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
             onClick={() =>
               setIsMultiSelectEnabled((current) => !current)
             }
@@ -397,7 +409,7 @@ export function WhiteboardCanvas({
             </span>
           </button>
           <button
-            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex h-10 flex-none items-center gap-2 rounded-lg px-3 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)] disabled:cursor-not-allowed disabled:opacity-40"
             disabled={selectedObjectIds.length < 2}
             onClick={createConnector}
             title={t('documents.whiteboard.connector')}
@@ -425,7 +437,7 @@ export function WhiteboardCanvas({
       ) : null}
       {editable && isWorkItemComposerOpen ? (
         <form
-          className="absolute left-1/2 top-20 z-30 grid w-[min(360px,calc(100%-32px))] -translate-x-1/2 gap-3 rounded-xl border border-[var(--workbench-border)] bg-white p-4 shadow-[0_16px_44px_rgba(23,32,29,0.18)]"
+          className="absolute left-1/2 top-20 z-30 grid w-[min(360px,calc(100%-32px))] -translate-x-1/2 gap-3 rounded-xl border border-[var(--workbench-border)] bg-surface p-4 shadow-[0_16px_44px_rgba(23,32,29,0.18)]"
           onSubmit={(event) => {
             event.preventDefault()
             createWorkItemObject()
@@ -565,7 +577,7 @@ export function WhiteboardCanvas({
         />
       ) : null}
 
-      <div className="absolute bottom-4 left-4 rounded-lg border border-[var(--workbench-border)] bg-white/90 px-3 py-2 text-xs font-semibold text-[var(--workbench-muted)] shadow-sm">
+      <div className="absolute bottom-4 left-4 rounded-lg border border-[var(--workbench-border)] bg-surface/90 px-3 py-2 text-xs font-semibold text-[var(--workbench-muted)] shadow-sm">
         {t('documents.whiteboard.hint')}
       </div>
     </div>
@@ -599,7 +611,7 @@ export function WhiteboardReadOnly({
   }
 
   return (
-    <div className="mx-auto aspect-[14/9] w-full max-w-[1120px] overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-[#f8faf9] shadow-sm">
+    <div className="mx-auto aspect-[14/9] w-full max-w-[1120px] overflow-hidden rounded-xl border border-[var(--workbench-border)] bg-tone-f8faf9 shadow-sm">
       <WhiteboardSvg
         connectors={normalizedContent.connectors}
         frames={normalizedContent.frames}
@@ -674,7 +686,7 @@ function WhiteboardSvg({
           patternUnits="userSpaceOnUse"
           width="24"
         >
-          <circle cx="1" cy="1" fill="#d9e1de" r="1" />
+          <circle cx="1" cy="1" r="1" style={{ fill: whiteboardSvgColors.grid }} />
         </pattern>
         <marker
           id="whiteboard-arrow"
@@ -684,7 +696,7 @@ function WhiteboardSvg({
           refX="7"
           refY="4"
         >
-          <path d="M0,0 L8,4 L0,8 z" fill="#65716d" />
+          <path d="M0,0 L8,4 L0,8 z" style={{ fill: whiteboardSvgColors.connector }} />
         </marker>
       </defs>
       <rect
@@ -711,22 +723,24 @@ function WhiteboardSvg({
           tabIndex={onSelectFrame ? 0 : undefined}
         >
           <rect
-            fill="#ffffff80"
             height={frame.bounds.height}
             rx="16"
-            stroke={
-              selectedFrameId === frame.id ? '#0f766e' : '#aab9b4'
-            }
             strokeDasharray="10 7"
             strokeWidth={selectedFrameId === frame.id ? 4 : 2}
+            style={{
+              fill: whiteboardSvgColors.frameFill,
+              stroke: selectedFrameId === frame.id
+                ? whiteboardSvgColors.selected
+                : whiteboardSvgColors.frameStroke,
+            }}
             width={frame.bounds.width}
             x={frame.bounds.x}
             y={frame.bounds.y}
           />
           <text
-            fill="#46524e"
             fontSize="18"
             fontWeight="700"
+            style={{ fill: whiteboardSvgColors.frameLabel }}
             x={frame.bounds.x + 16}
             y={frame.bounds.y + 28}
           >
@@ -773,11 +787,15 @@ function WhiteboardSvg({
             />
             <line
               markerEnd="url(#whiteboard-arrow)"
-              stroke={selected ? '#0f766e' : '#65716d'}
               strokeDasharray={
                 connector.lineStyle === 'dashed' ? '8 6' : undefined
               }
               strokeWidth={selected ? 4 : 2.5}
+              style={{
+                stroke: selected
+                  ? whiteboardSvgColors.selected
+                  : whiteboardSvgColors.connector,
+              }}
               x1={from.x}
               x2={to.x}
               y1={from.y}
@@ -785,9 +803,9 @@ function WhiteboardSvg({
             />
             {connector.label ? (
               <text
-                fill="#65716d"
                 fontSize="16"
                 fontWeight="600"
+                style={{ fill: whiteboardSvgColors.connector }}
                 textAnchor="middle"
                 x={(from.x + to.x) / 2}
                 y={(from.y + to.y) / 2 - 8}
@@ -936,15 +954,15 @@ function WhiteboardObjectNode({
       >
         <div className="flex h-full w-full flex-col justify-center overflow-hidden p-4 font-sans">
           {object.type === 'work-item' && workItemPath ? (
-            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-[#0f766e]">
+            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-paper-accent">
               {t('documents.whiteboard.work-item')}
             </span>
           ) : null}
-          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-[#17201d]">
+          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink">
             {text}
           </span>
           {object.type === 'work-item' ? (
-            <span className="mt-2 text-xs font-semibold text-[#65716d]">
+            <span className="mt-2 text-xs font-semibold text-paper-muted">
               {t('documents.whiteboard.openWorkItem')}
             </span>
           ) : null}
@@ -976,7 +994,7 @@ function WhiteboardInspector({
   t: (key: MessageKey) => string
 }) {
   return (
-    <aside className="absolute bottom-4 right-4 z-20 w-[min(290px,calc(100%-32px))] rounded-xl border border-[var(--workbench-border)] bg-white/95 p-4 shadow-[0_16px_44px_rgba(23,32,29,0.16)] backdrop-blur">
+    <aside className="absolute bottom-4 right-4 z-20 w-[min(290px,calc(100%-32px))] rounded-xl border border-[var(--workbench-border)] bg-surface/95 p-4 shadow-[0_16px_44px_rgba(23,32,29,0.16)] backdrop-blur">
       <p className="m-0 text-xs font-bold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
         {t('documents.whiteboard.inspector')}
       </p>
@@ -1019,7 +1037,7 @@ function WhiteboardInspector({
             ] as const).map(([key, deltaX, deltaY, glyph]) => (
               <button
                 aria-label={t(`documents.whiteboard.${key}`)}
-                className="grid h-10 place-items-center rounded-md border border-[var(--workbench-border)] bg-white text-sm font-bold text-[var(--workbench-muted)] hover:text-[var(--workbench-primary)]"
+                className="grid h-10 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface text-sm font-bold text-[var(--workbench-muted)] hover:text-[var(--workbench-primary-text)]"
                 key={key}
                 onClick={() => onMoveObject(deltaX, deltaY)}
                 type="button"
@@ -1044,7 +1062,7 @@ function WhiteboardInspector({
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('documents.whiteboard.color')}
             <input
-              className="h-10 w-full rounded-md border border-[var(--workbench-border)] bg-white"
+              className="h-10 w-full rounded-md border border-[var(--workbench-border)] bg-surface"
               onChange={(event) =>
                 onObjectChange({
                   ...object,

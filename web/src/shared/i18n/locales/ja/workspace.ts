@@ -373,13 +373,19 @@ export const workspaceMessages = {
     'このブラウザの表示言語と文字サイズ、ログイン中のアカウントを確認します。',
   'workspace.settings.displayTitle': '表示設定',
   'workspace.settings.displayDescription':
-    'このブラウザで使う文字サイズと表示言語を調整します。',
+    'このブラウザで使う文字サイズ、配色、表示言語を調整します。',
   'workspace.settings.fontSizeTitle': 'フォントサイズ',
   'workspace.settings.fontSizeDescription':
     'タスク一覧、サイドバー、設定画面などアプリ全体の文字サイズに反映されます。',
   'workspace.settings.fontSize.compact': '小さめ',
   'workspace.settings.fontSize.standard': '標準',
   'workspace.settings.fontSize.comfortable': '大きめ',
+  'workspace.settings.themeTitle': '配色',
+  'workspace.settings.themeDescription':
+    'アプリ全体の配色を切り替えます。「システム」は OS のライト／ダーク設定に合わせます。',
+  'workspace.settings.theme.light': 'ライト',
+  'workspace.settings.theme.dark': 'ダーク',
+  'workspace.settings.theme.system': 'システム',
   'workspace.settings.profileTitle': 'ログイン中のアカウント',
   'workspace.settings.profileDescription':
     '現在のセッションで使用しているアカウントです。',

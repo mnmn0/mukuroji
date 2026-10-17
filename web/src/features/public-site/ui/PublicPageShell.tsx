@@ -94,7 +94,7 @@ export function PublicPageShell({
 
   return (
     <div className="workbench-shell min-h-svh">
-      <header className="sticky top-0 z-30 border-b border-[var(--workbench-border)] bg-white/95 backdrop-blur-sm">
+      <header className="sticky top-0 z-30 border-b border-[var(--workbench-border)] bg-surface/95 backdrop-blur-sm">
         <div className="mx-auto flex min-h-16 w-full max-w-[1240px] items-center gap-4 px-5 py-2.5 sm:px-8">
           <Link
             aria-label="mukuroji"
@@ -158,7 +158,7 @@ export function PublicPageShell({
 
       <main>{children({ locale, t })}</main>
 
-      <footer className="border-t border-[var(--workbench-border)] bg-white">
+      <footer className="border-t border-[var(--workbench-border)] bg-surface">
         <div className="mx-auto grid w-full max-w-[1240px] gap-7 px-5 py-9 sm:px-8 md:grid-cols-[1fr_auto] md:items-end">
           <div className="max-w-[520px]">
             <div className="inline-flex items-center gap-2.5 font-bold text-[var(--workbench-text)]">
@@ -236,7 +236,7 @@ type PublicFooterLinkProps = {
 function PublicFooterLink({ children, to }: PublicFooterLinkProps) {
   return (
     <Link
-      className="text-sm font-semibold text-[var(--workbench-muted)] no-underline hover:text-[var(--workbench-primary)] hover:underline"
+      className="text-sm font-semibold text-[var(--workbench-muted)] no-underline hover:text-[var(--workbench-primary-text)] hover:underline"
       to={to}
     >
       {children}

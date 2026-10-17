@@ -83,7 +83,7 @@ export function ActionButtons(props: {
       ) : null}
       {onRevoke ? (
         <button
-          className="min-h-9 rounded-md border border-red-200 bg-white px-3 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:opacity-50"
+          className="min-h-9 rounded-md border border-red-200 bg-surface px-3 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:opacity-50"
           disabled={busy}
           onClick={() => {
             if (window.confirm(labels.helpText.revokeConfirm)) {

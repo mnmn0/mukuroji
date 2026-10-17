@@ -804,7 +804,7 @@ export function MyTasksPage() {
         />
         {taskActionErrorMessage ? (
           <p
-            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700"
+            className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-fg-red-700"
             role="alert"
           >
             {taskActionErrorMessage}

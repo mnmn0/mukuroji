@@ -50,14 +50,14 @@ export function TaskViewHeading({
   titleKey,
 }: TaskViewHeadingProps) {
   return (
-    <div className={`border-b border-[#e4e7ec] bg-white px-4 py-3 ${className}`}>
+    <div className={`border-b border-tone-e4e7ec bg-surface px-4 py-3 ${className}`}>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-        <h2 className="text-base font-semibold text-[#1c1d1f]">{t(titleKey)}</h2>
-        <p className="text-sm font-medium text-[#5f6874]">
+        <h2 className="text-base font-semibold text-fg-1c1d1f">{t(titleKey)}</h2>
+        <p className="text-sm font-medium text-fg-5f6874">
           {t('tasks.count').replace('{count}', String(count))}
         </p>
       </div>
-      {meta ? <p className="mt-1 text-sm font-medium text-[#5f6874]">{meta}</p> : null}
+      {meta ? <p className="mt-1 text-sm font-medium text-fg-5f6874">{meta}</p> : null}
     </div>
   )
 }

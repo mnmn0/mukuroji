@@ -321,7 +321,7 @@ export function RequestIntakePage() {
                 <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('workspace.user.label')}</p>
                 <p className="mt-1 max-w-[220px] truncate text-sm font-semibold text-[var(--workbench-text)]">{userLabel}</p>
               </div>
-              <div className="grid h-10 w-10 place-items-center rounded-full border border-[#99d7cf] bg-[#e5f7f4] text-sm font-semibold text-[var(--workbench-primary)]">{userInitial}</div>
+              <div className="grid h-10 w-10 place-items-center rounded-full border border-tone-99d7cf bg-tone-e5f7f4 text-sm font-semibold text-[var(--workbench-primary-text)]">{userInitial}</div>
               <button className="workbench-button-secondary min-h-10 px-4" onClick={() => {
                 clearAuthSession()
                 navigate('/', { replace: true })
@@ -335,7 +335,7 @@ export function RequestIntakePage() {
         ) : currentUserErrorAction?.kind === 'stay' ? (
           <div className="min-h-0 flex-1 px-[clamp(20px,3vw,34px)] py-5">
             <p
-              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
+              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
               role="alert"
             >
               {t('requests.loadError')}
@@ -393,7 +393,7 @@ export function RequestIntakePage() {
                       </button>
                     ))}
                   </div>
-                  {formsError instanceof Error ? <p className="m-3 text-sm font-semibold text-red-700" role="alert">{formsError.message}</p> : null}
+                  {formsError instanceof Error ? <p className="m-3 text-sm font-semibold text-fg-red-700" role="alert">{formsError.message}</p> : null}
                 </section>
 
                 {selectedFormId === 'new' || selectedForm ? (

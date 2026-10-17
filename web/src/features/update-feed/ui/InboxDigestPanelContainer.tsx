@@ -21,7 +21,7 @@ type Props = {
 export function InboxDigestPanelContainer(props: Props) {
   const [open, setOpen] = useState(false)
   const summary = useRef<HTMLElement>(null)
-  return <details className="mb-5" onToggle={(event) => setOpen(event.currentTarget.open)}><summary ref={summary} className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-teal-800">{createTranslator(props.locale)('updates.inbox.title')}</summary><Content {...props} open={open} restoreFocus={() => summary.current?.focus()} /></details>
+  return <details className="mb-5" onToggle={(event) => setOpen(event.currentTarget.open)}><summary ref={summary} className="min-h-11 cursor-pointer py-3 text-sm font-semibold text-fg-teal-800">{createTranslator(props.locale)('updates.inbox.title')}</summary><Content {...props} open={open} restoreFocus={() => summary.current?.focus()} /></details>
 }
 /** Maps transport failures into safe presentation categories. */
 function Content({ token, enabled, canEdit, locale, guard, restoreFocus, open }: Props & { /** Disclosure state separate from controller lifetime. */ open: boolean; /** Stable focus destination for removed controls. */ restoreFocus(): void }) {

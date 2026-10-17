@@ -354,7 +354,7 @@ function SearchTimeline({
               <time className="text-xs font-semibold text-[var(--workbench-muted)] max-[680px]:hidden">
                 {formatSearchDate(resolveResultDate(result), locale)}
               </time>
-              <span className="h-3 w-3 rounded-full border-2 border-white bg-[var(--workbench-primary)] ring-2 ring-[#99d7cf]" />
+              <span className="h-3 w-3 rounded-full border-2 border-surface bg-[var(--workbench-primary)] ring-2 ring-tone-99d7cf" />
               <span className="min-w-0">
                 <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">
                   <HighlightedField field="title" result={result} fallback={result.title} />
@@ -416,7 +416,7 @@ function SearchResultCard({
 
   return (
     <button
-      className={`rounded-lg border border-[var(--workbench-border)] bg-white text-left transition hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)] disabled:cursor-default ${compact ? 'p-3' : 'p-4'}`}
+      className={`rounded-lg border border-[var(--workbench-border)] bg-surface text-left transition hover:border-tone-99d7cf hover:bg-[var(--workbench-surface-muted)] disabled:cursor-default ${compact ? 'p-3' : 'p-4'}`}
       disabled={isAiOperationPending || !path}
       onClick={() => path && onNavigate(path)}
       type="button"

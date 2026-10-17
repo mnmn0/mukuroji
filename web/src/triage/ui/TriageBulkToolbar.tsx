@@ -87,7 +87,7 @@ export function TriageBulkToolbar({
   return (
     <section
       aria-label={t('triage.bulk.aria')}
-      className="border-b border-[var(--workbench-border)] bg-[#effaf8] px-4 py-3"
+      className="border-b border-[var(--workbench-border)] bg-tone-effaf8 px-4 py-3"
       data-testid="triage-bulk-toolbar"
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -129,7 +129,7 @@ export function TriageBulkToolbar({
       </div>
 
       {mode ? (
-        <form className="mt-3 grid gap-3 border-l-2 border-[var(--workbench-primary)] bg-white p-3" onSubmit={(event) => void submit(event)}>
+        <form className="mt-3 grid gap-3 border-l-2 border-[var(--workbench-primary)] bg-surface p-3" onSubmit={(event) => void submit(event)}>
           <p className="text-sm font-semibold text-[var(--workbench-text)]">
             {t('triage.bulk.review').replace('{count}', String(entries.length))}
           </p>
@@ -167,7 +167,7 @@ export function TriageBulkToolbar({
       ) : null}
 
       {errorMessage || localError || exceedsBulkLimit ? (
-        <p className="mt-3 text-sm font-semibold text-red-700" role="alert">
+        <p className="mt-3 text-sm font-semibold text-fg-red-700" role="alert">
           {errorMessage ?? (exceedsBulkLimit
             ? t('triage.bulk.limit').replace('{limit}', String(TRIAGE_BULK_ACTION_LIMIT))
             : t('triage.bulk.error'))}
@@ -181,7 +181,7 @@ export function TriageBulkToolbar({
           className="mt-3 grid gap-1 text-xs font-semibold"
         >
           {results.map((result) => (
-            <li className={result.status === 'succeeded' ? 'text-emerald-700' : 'text-red-700'} key={result.entryId}>
+            <li className={result.status === 'succeeded' ? 'text-fg-emerald-700' : 'text-fg-red-700'} key={result.entryId}>
               {result.entryId}: {t(result.status === 'succeeded'
                 ? 'triage.bulk.succeeded'
                 : result.status === 'conflict'

@@ -160,7 +160,7 @@ export function SecurityRecoveryPage({
 
   return (
     <div className="workbench-shell min-h-svh bg-[var(--workbench-page)]">
-      <header className="border-b border-[var(--workbench-border)] bg-white">
+      <header className="border-b border-[var(--workbench-border)] bg-surface">
         <div className="mx-auto flex min-h-16 w-full max-w-[1120px] items-center gap-4 px-5 py-2.5 sm:px-8">
           <Link
             aria-label="mukuroji"
@@ -175,7 +175,7 @@ export function SecurityRecoveryPage({
             {t('security.recovery.header')}
           </span>
 
-          <label className="ml-auto inline-flex min-h-10 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 text-app-meta font-semibold text-[var(--workbench-muted)] transition focus-within:border-[var(--workbench-focus)] focus-within:ring-3 focus-within:ring-[rgba(37,99,235,0.18)]">
+          <label className="ml-auto inline-flex min-h-10 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 text-app-meta font-semibold text-[var(--workbench-muted)] transition focus-within:border-[var(--workbench-focus)] focus-within:ring-3 focus-within:ring-[var(--workbench-focus-ring)]">
             <span className="sr-only">{t('language.aria')}</span>
             <GlobeIcon className="h-4 w-4 fill-none stroke-current stroke-[1.8]" />
             <select
@@ -196,7 +196,7 @@ export function SecurityRecoveryPage({
 
       <main className="mx-auto grid w-full max-w-[1120px] gap-9 px-5 py-10 sm:px-8 sm:py-14 lg:grid-cols-[minmax(0,1fr)_minmax(360px,0.82fr)] lg:items-start lg:gap-14 lg:py-20">
         <section aria-labelledby="recovery-access-title" className="min-w-0">
-          <span className="inline-flex rounded-full border border-[#f0c7bf] bg-[#fff2ef] px-3 py-1 text-xs font-bold tracking-[0.04em] text-[#a33b2b]">
+          <span className="inline-flex rounded-full border border-tone-f0c7bf bg-tone-fff2ef px-3 py-1 text-xs font-bold tracking-[0.04em] text-fg-a33b2b">
             {t('security.recovery.eyebrow')}
           </span>
           <h1
@@ -233,7 +233,7 @@ export function SecurityRecoveryPage({
           className="workbench-panel min-w-0 overflow-hidden"
         >
           <div className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-6 py-5 sm:px-7">
-            <p className="m-0 text-xs font-bold uppercase tracking-[0.08em] text-[#a33b2b]">
+            <p className="m-0 text-xs font-bold uppercase tracking-[0.08em] text-fg-a33b2b">
               {t('security.recovery.form.label')}
             </p>
             <h2
@@ -246,7 +246,7 @@ export function SecurityRecoveryPage({
 
           <form className="grid gap-6 p-6 sm:p-7" onSubmit={handleSubmit}>
             <div
-              className="rounded-lg border border-[#f0c7bf] bg-[#fff8f6] p-4 text-sm font-medium leading-6 text-[#7c3126]"
+              className="rounded-lg border border-tone-f0c7bf bg-tone-fff8f6 p-4 text-sm font-medium leading-6 text-fg-7c3126"
               role="note"
             >
               <strong className="block">{t('security.recovery.warning.title')}</strong>
@@ -292,10 +292,10 @@ export function SecurityRecoveryPage({
 
                   return (
                     <label
-                      className={`grid min-h-11 cursor-pointer place-items-center rounded-md border px-2 text-sm font-bold transition focus-within:outline focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-[rgba(37,99,235,0.22)] ${
+                      className={`grid min-h-11 cursor-pointer place-items-center rounded-md border px-2 text-sm font-bold transition focus-within:outline focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-[var(--workbench-focus)] ${
                         selected
-                          ? 'border-[var(--workbench-primary)] bg-[#e8f6f3] text-[var(--workbench-primary)]'
-                          : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)]'
+                          ? 'border-[var(--workbench-primary)] bg-tone-e8f6f3 text-[var(--workbench-primary-text)]'
+                          : 'border-[var(--workbench-border)] bg-surface text-[var(--workbench-muted)] hover:border-[var(--workbench-border-strong)]'
                       }`}
                       key={option.minutes}
                     >
@@ -322,7 +322,7 @@ export function SecurityRecoveryPage({
 
             {errorKey ? (
               <div
-                className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold leading-6 text-red-700"
+                className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm font-semibold leading-6 text-fg-red-700"
                 role="alert"
               >
                 {t(errorKey)}
@@ -379,7 +379,7 @@ function RecoveryStep({
 }) {
   return (
     <div className="grid grid-cols-[2.5rem_minmax(0,1fr)] gap-4 border-t border-[var(--workbench-border)] pt-5">
-      <span className="font-mono text-sm font-bold text-[var(--workbench-primary)]">
+      <span className="font-mono text-sm font-bold text-[var(--workbench-primary-text)]">
         {index}
       </span>
       <div>

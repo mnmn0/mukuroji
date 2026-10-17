@@ -206,12 +206,12 @@ export function WorkloadPlanningControls({
   return (
     <section className="workbench-panel grid min-w-0 gap-5 p-5" data-testid="workload-planning-controls">
       <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--workbench-primary)]">{t('workload.controls.eyebrow')}</p>
-        <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-[#0d1833]">{t('workload.controls.title')}</h2>
+        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--workbench-primary-text)]">{t('workload.controls.eyebrow')}</p>
+        <h2 className="mt-1 text-xl font-semibold tracking-[-0.02em] text-fg-0d1833">{t('workload.controls.title')}</h2>
         <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">{t('workload.controls.description')}</p>
       </div>
 
-      {error ? <p className="border border-[#f2c7c7] bg-[#fff7f7] px-4 py-3 text-sm font-semibold text-[#9f3f3f]" role="alert">{error.message}</p> : null}
+      {error ? <p className="border border-tone-f2c7c7 bg-tone-fff7f7 px-4 py-3 text-sm font-semibold text-fg-9f3f3f" role="alert">{error.message}</p> : null}
 
       <label className="grid max-w-md gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
         {t('workload.controls.member')}
@@ -261,7 +261,7 @@ export function WorkloadPlanningControls({
             <Field label={t('workload.controls.request.minutes')} value={requestMinutes} onChange={setRequestMinutes} type="number" min="0" />
             <Field label={t('workload.controls.request.role')} value={requestRole} onChange={setRequestRole} />
             <Field label={t('workload.controls.request.skills')} value={requestSkills} onChange={setRequestSkills} placeholder={t('workload.controls.profile.skillsPlaceholder')} />
-            <label className="flex items-center gap-2 text-sm font-semibold text-[#526381]"><input checked={requestConfidential} type="checkbox" onChange={(event) => setRequestConfidential(event.target.checked)} />{t('workload.controls.confidential')}</label>
+            <label className="flex items-center gap-2 text-sm font-semibold text-fg-526381"><input checked={requestConfidential} type="checkbox" onChange={(event) => setRequestConfidential(event.target.checked)} />{t('workload.controls.confidential')}</label>
             <button className={buttonClass} disabled={isSaving || requestTitle.trim().length === 0} type="button" onClick={createRequest}>{t('workload.controls.request.save')}</button>
           </div>
         </ControlCard>
@@ -282,7 +282,7 @@ export function WorkloadPlanningControls({
               <Field label={t('workload.controls.assignment.allocation')} value={assignmentAllocation} onChange={setAssignmentAllocation} type="number" min="0" />
               <Field label={t('workload.controls.assignment.planned')} value={assignmentPlanned} onChange={setAssignmentPlanned} type="number" min="0" />
             </div>
-            <label className="flex items-center gap-2 text-sm font-semibold text-[#526381]"><input checked={assignmentConfidential} type="checkbox" onChange={(event) => setAssignmentConfidential(event.target.checked)} />{t('workload.controls.confidential')}</label>
+            <label className="flex items-center gap-2 text-sm font-semibold text-fg-526381"><input checked={assignmentConfidential} type="checkbox" onChange={(event) => setAssignmentConfidential(event.target.checked)} />{t('workload.controls.confidential')}</label>
             <div className="flex flex-wrap gap-2">
               <button className={buttonClass} disabled={isSaving || profileRevision === 0} type="button" onClick={createAssignment}>{t('workload.controls.assignment.save')}</button>
               <button className={secondaryButtonClass} disabled={isSaving || !snapshot || profileRevision === 0} type="button" onClick={previewAssignment}>{t('workload.controls.assignment.preview')}</button>
@@ -385,7 +385,7 @@ function Field({ label, max, min, onChange, placeholder, step, type = 'text', va
 function PreviewSummary({ memberId, memberLabel, snapshot, t }: { memberId: string; memberLabel: string; snapshot: WorkloadSnapshot; t: (key: MessageKey) => string }) {
   const member = snapshot.members.find((candidate) => candidate.memberId === memberId)
   if (!member) return null
-  return <p className="border border-[#c9d8f0] bg-[#f5f8ff] px-3 py-2 text-xs font-semibold leading-5 text-[#526381]">{t('workload.controls.assignment.previewResult').replace('{member}', memberLabel).replace('{allocated}', formatHours(member.allocatedMinutes)).replace('{capacity}', formatHours(member.capacityMinutes))}</p>
+  return <p className="border border-tone-c9d8f0 bg-tone-f5f8ff px-3 py-2 text-xs font-semibold leading-5 text-fg-526381">{t('workload.controls.assignment.previewResult').replace('{member}', memberLabel).replace('{allocated}', formatHours(member.allocatedMinutes)).replace('{capacity}', formatHours(member.capacityMinutes))}</p>
 }
 
 /** Creates a weekday schedule from the submitted daily hours. */

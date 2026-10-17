@@ -231,6 +231,17 @@ export type AnalyticsWorkItemTypeOption = {
   label: string
 }
 
+/**
+ * Theme-aware chart colors. The variables are defined for the light and dark themes in
+ * `index.css`, so the grid stays secondary to the data series on either surface.
+ */
+const analyticsChartColors = {
+  grid: 'var(--workbench-chart-grid)',
+  missing: 'var(--workbench-chart-missing)',
+  pointFill: 'var(--workbench-chart-point-fill)',
+  series: 'var(--workbench-chart-series)',
+}
+
 const metricKeys = [
   'throughput',
   'cycle-time',
@@ -436,7 +447,7 @@ export function AnalyticsWorkbench({
 
   return (
     <div className="min-h-full bg-[var(--workbench-canvas)]">
-      <header className="border-b border-[var(--workbench-border)] bg-white px-[clamp(20px,3vw,34px)] pb-5 pt-6">
+      <header className="border-b border-[var(--workbench-border)] bg-surface px-[clamp(20px,3vw,34px)] pb-5 pt-6">
         <div className="flex min-w-0 flex-wrap items-start justify-between gap-5">
           <div className="min-w-0">
             <p className="workbench-eyebrow">{t('analytics.eyebrow')}</p>
@@ -588,7 +599,7 @@ export function AnalyticsWorkbench({
       />
 
       {errorMessage ? (
-        <div className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800" role="alert">
+        <div className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-800" role="alert">
           <span>{errorMessage}</span>
           {onRetry ? (
             <button className="underline underline-offset-2" type="button" onClick={onRetry}>
@@ -599,7 +610,7 @@ export function AnalyticsWorkbench({
       ) : null}
       {noticeMessage ? (
         <div
-          className="mx-[clamp(20px,3vw,34px)] mt-5 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800"
+          className="mx-[clamp(20px,3vw,34px)] mt-5 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-fg-emerald-800"
           role="status"
         >
           {noticeMessage}
@@ -710,9 +721,9 @@ export function AnalyticsWorkbench({
       ) : null}
 
       {selectedReport && builder && canManageReports ? (
-        <div className="border-t border-[var(--workbench-border)] bg-white px-[clamp(20px,3vw,34px)] py-4 text-right">
+        <div className="border-t border-[var(--workbench-border)] bg-surface px-[clamp(20px,3vw,34px)] py-4 text-right">
           <button
-            className="min-h-10 rounded-md border border-red-200 bg-white px-4 text-sm font-semibold text-red-700 transition hover:bg-red-50 disabled:opacity-50"
+            className="min-h-10 rounded-md border border-red-200 bg-surface px-4 text-sm font-semibold text-fg-red-700 transition hover:bg-red-50 disabled:opacity-50"
             disabled={!onDeleteReport || isDeleting}
             type="button"
             onClick={() => void deleteReport()}
@@ -737,8 +748,8 @@ function AnalyticsEmptyState({
   return (
     <div className="grid min-h-[calc(100svh-1px)] place-items-center bg-[var(--workbench-canvas)] px-6 py-16">
       <section className="workbench-panel w-full max-w-[760px] overflow-hidden text-center">
-        <div className="border-b border-[var(--workbench-border)] bg-white px-6 py-10">
-          <span className="mx-auto grid h-12 w-12 place-items-center rounded-lg bg-[var(--workbench-surface-muted)] text-2xl text-[var(--workbench-primary)]" aria-hidden="true">
+        <div className="border-b border-[var(--workbench-border)] bg-surface px-6 py-10">
+          <span className="mx-auto grid h-12 w-12 place-items-center rounded-lg bg-[var(--workbench-surface-muted)] text-2xl text-[var(--workbench-primary-text)]" aria-hidden="true">
             ↗
           </span>
           <p className="workbench-eyebrow mt-6">{t('analytics.empty.eyebrow')}</p>
@@ -761,7 +772,7 @@ function AnalyticsEmptyState({
             ['analytics.empty.feature.evidence', 'analytics.empty.feature.evidenceDescription'],
             ['analytics.empty.feature.delivery', 'analytics.empty.feature.deliveryDescription'],
           ].map(([titleKey, descriptionKey]) => (
-            <div className="bg-white p-5" key={titleKey}>
+            <div className="bg-surface p-5" key={titleKey}>
               <p className="text-sm font-semibold text-[var(--workbench-text)]">
                 {t(titleKey as MessageKey)}
               </p>
@@ -862,7 +873,7 @@ function AnalyticsFilterToolbar({
   )
 
   return (
-    <section className="relative z-20 border-b border-[var(--workbench-border)] bg-white px-[clamp(20px,3vw,34px)] py-3" data-testid="analytics-filter-toolbar">
+    <section className="relative z-20 border-b border-[var(--workbench-border)] bg-surface px-[clamp(20px,3vw,34px)] py-3" data-testid="analytics-filter-toolbar">
       <ResponsiveDisclosure
         label={t('workspace.filters.title')}
         summary={`${formatAnalyticsCalendarDate(filter.period.from, timeZone)} – ${formatAnalyticsCalendarDate(filter.period.to, timeZone)}`}
@@ -968,7 +979,7 @@ function AnalyticsFilterToolbar({
           />
         </div>
         <details className="mt-3">
-          <summary className="w-fit cursor-pointer text-xs font-semibold text-[var(--workbench-primary)]">
+          <summary className="w-fit cursor-pointer text-xs font-semibold text-[var(--workbench-primary-text)]">
             {t('analytics.filter.advanced')}
           </summary>
           <div className="mt-3 grid grid-cols-[repeat(4,minmax(170px,1fr))_auto] items-end gap-3 max-[1180px]:grid-cols-2 max-[760px]:grid-cols-1">
@@ -1045,7 +1056,7 @@ function AnalyticsFilterToolbar({
                 }}
               />
             </label>
-            <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-3 text-sm font-semibold text-[var(--workbench-text)]">
+            <label className="flex min-h-10 cursor-pointer items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface px-3 text-sm font-semibold text-[var(--workbench-text)]">
               <input
                 checked={filter.includeArchived ?? false}
                 className="h-4 w-4 accent-[var(--workbench-primary)]"
@@ -1100,7 +1111,7 @@ function AnalyticsMultiSelectFilter({
           aria-pressed={selectedValues === undefined}
           className={`mb-1 min-h-7 rounded px-2 py-1 text-left text-xs font-semibold transition ${
             selectedValues === undefined
-              ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+              ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'
               : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
           }`}
           data-testid={`${testId}-all`}
@@ -1380,7 +1391,7 @@ function AnalyticsCustomFieldFilterRow({
       </label>
       <button
         aria-label={t('analytics.filter.customFieldRemove')}
-        className="grid h-10 w-10 place-items-center rounded-md border border-red-200 bg-white text-lg font-semibold text-red-700"
+        className="grid h-10 w-10 place-items-center rounded-md border border-red-200 bg-surface text-lg font-semibold text-fg-red-700"
         type="button"
         onClick={onRemove}
       >
@@ -1578,9 +1589,9 @@ function AnalyticsWidgetEditor({
       <div className="flex items-center justify-between gap-2">
         <span className="workbench-badge">{t(widgetTypeLabelKeys[widget.type])}</span>
         <span className="flex items-center gap-1">
-          <button aria-label={t('analytics.builder.moveUp')} className="grid h-8 w-8 place-items-center rounded-md border border-[var(--workbench-border)] bg-white disabled:opacity-35" disabled={index === 0} type="button" onClick={() => onMove(-1)}>↑</button>
-          <button aria-label={t('analytics.builder.moveDown')} className="grid h-8 w-8 place-items-center rounded-md border border-[var(--workbench-border)] bg-white disabled:opacity-35" disabled={index === total - 1} type="button" onClick={() => onMove(1)}>↓</button>
-          <button aria-label={t('analytics.builder.remove')} className="grid h-8 w-8 place-items-center rounded-md border border-red-200 bg-white text-red-700" type="button" onClick={onRemove}>×</button>
+          <button aria-label={t('analytics.builder.moveUp')} className="grid h-8 w-8 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface disabled:opacity-35" disabled={index === 0} type="button" onClick={() => onMove(-1)}>↑</button>
+          <button aria-label={t('analytics.builder.moveDown')} className="grid h-8 w-8 place-items-center rounded-md border border-[var(--workbench-border)] bg-surface disabled:opacity-35" disabled={index === total - 1} type="button" onClick={() => onMove(1)}>↓</button>
+          <button aria-label={t('analytics.builder.remove')} className="grid h-8 w-8 place-items-center rounded-md border border-red-200 bg-surface text-fg-red-700" type="button" onClick={onRemove}>×</button>
         </span>
       </div>
       <label className="mt-3 grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
@@ -1727,12 +1738,12 @@ function AnalyticsMetricCard({
         {t(metricDescriptionKeys[result.metric])}
       </p>
       {result.warnings.length > 0 ? (
-        <p className="mt-3 text-xs font-semibold text-amber-700">
+        <p className="mt-3 text-xs font-semibold text-fg-amber-700">
           {formatAnalyticsWarning(result.warnings[0] ?? '', t)}
         </p>
       ) : null}
       <button
-        className="mt-4 text-xs font-semibold text-[var(--workbench-primary)] underline-offset-2 hover:underline disabled:text-[var(--workbench-muted-soft)]"
+        className="mt-4 text-xs font-semibold text-[var(--workbench-primary-text)] underline-offset-2 hover:underline disabled:text-[var(--workbench-muted-soft)]"
         disabled={!onOpenEvidence}
         type="button"
         onClick={() => onOpenEvidence?.(createEvidenceInput(result, snapshot, widget))}
@@ -1785,7 +1796,7 @@ function AnalyticsResultWidget({
           </p>
         </div>
         <button
-          className="text-xs font-semibold text-[var(--workbench-primary)] underline-offset-2 hover:underline disabled:text-[var(--workbench-muted-soft)]"
+          className="text-xs font-semibold text-[var(--workbench-primary-text)] underline-offset-2 hover:underline disabled:text-[var(--workbench-muted-soft)]"
           disabled={!onOpenEvidence}
           type="button"
           onClick={() => onOpenEvidence?.(createEvidenceInput(result, snapshot, widget))}
@@ -1795,7 +1806,7 @@ function AnalyticsResultWidget({
       </div>
       <div className="p-5">
         {result.warnings.length > 0 ? (
-          <p className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-800">
+          <p className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-fg-amber-800">
             {result.warnings
               .map((warning) => formatAnalyticsWarning(warning, t))
               .join(' ')}
@@ -1886,8 +1897,8 @@ function AccessibleChart({
           {[0, 0.5, 1].map((ratio) => (
             <line
               key={ratio}
-              stroke="#dde4e1"
               strokeDasharray="4 5"
+              style={{ stroke: analyticsChartColors.grid }}
               x1={padding}
               x2={width - padding}
               y1={padding + chartHeight * ratio}
@@ -1905,9 +1916,9 @@ function AccessibleChart({
                       aria-hidden="true"
                       data-testid={`analytics-bar-missing-${index}`}
                       key={`${point.label}-${index}`}
-                      stroke="#78837f"
                       strokeLinecap="round"
                       strokeWidth="2"
+                      style={{ stroke: analyticsChartColors.missing }}
                     >
                       <line
                         x1={point.x - markerRadius}
@@ -1928,10 +1939,10 @@ function AccessibleChart({
                 return (
                   <rect
                     data-testid={`analytics-bar-${index}`}
-                    fill="#0f766e"
                     height={barHeight}
                     key={`${point.label}-${index}`}
                     rx="4"
+                    style={{ fill: analyticsChartColors.series }}
                     width={barWidth}
                     x={point.x - barWidth / 2}
                     y={padding + chartHeight - barHeight}
@@ -1946,10 +1957,10 @@ function AccessibleChart({
                     data-testid={`analytics-line-segment-${index}`}
                     fill="none"
                     key={path}
-                    stroke="#0f766e"
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth="4"
+                    style={{ stroke: analyticsChartColors.series }}
                   />
                 ))}
                 {coordinates.map((point) => point.y === undefined ? null : (
@@ -1957,11 +1968,10 @@ function AccessibleChart({
                     cx={point.x}
                     cy={point.y}
                     data-testid={`analytics-line-point-${point.index}`}
-                    fill="#ffffff"
                     key={`${point.label}-${point.index}`}
                     r="5"
-                    stroke="#0f766e"
                     strokeWidth="3"
+                    style={{ fill: analyticsChartColors.pointFill, stroke: analyticsChartColors.series }}
                   />
                 ))}
               </>
@@ -1973,7 +1983,7 @@ function AccessibleChart({
         <span>{points.at(-1)?.label}</span>
       </div>
       <details className="mt-4">
-        <summary className="cursor-pointer text-xs font-semibold text-[var(--workbench-primary)]">
+        <summary className="cursor-pointer text-xs font-semibold text-[var(--workbench-primary-text)]">
           {t('analytics.chart.tableFallback')}
         </summary>
         <div className="mt-3 overflow-x-auto">
@@ -2160,7 +2170,7 @@ function AnalyticsEvidenceDrawer({
     <div className="fixed inset-0 z-50 bg-slate-950/30" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose?.()
     }}>
-      <aside ref={dialogRef} aria-label={t('analytics.evidence.title')} aria-modal="true" className="ml-auto flex h-full w-full max-w-[560px] flex-col border-l border-[var(--workbench-border)] bg-white shadow-2xl" role="dialog" tabIndex={-1}>
+      <aside ref={dialogRef} aria-label={t('analytics.evidence.title')} aria-modal="true" className="ml-auto flex h-full w-full max-w-[560px] flex-col border-l border-[var(--workbench-border)] bg-surface shadow-2xl" role="dialog" tabIndex={-1}>
         <header className="flex items-start justify-between gap-4 border-b border-[var(--workbench-border)] px-5 py-4">
           <div>
             <p className="workbench-eyebrow">{t('analytics.evidence.eyebrow')}</p>
@@ -2180,7 +2190,7 @@ function AnalyticsEvidenceDrawer({
             <div className="divide-y divide-[var(--workbench-border)]">
               {evidence.items.map((item) => (
                 <button
-                  className="grid w-full gap-2 px-5 py-4 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-white"
+                  className="grid w-full gap-2 px-5 py-4 text-left transition hover:bg-[var(--workbench-surface-muted)] disabled:hover:bg-surface"
                   disabled={!onOpenWorkItem}
                   key={item.id}
                   type="button"
@@ -2356,7 +2366,7 @@ function AnalyticsScheduleDialog({
             <textarea className="workbench-input min-h-20 p-3" defaultValue={initialSchedule?.recipientMemberKeys.join(', ') ?? ''} name="recipients" placeholder={t('analytics.schedule.recipientsPlaceholder')} required />
           </label>
           {validationMessage ? (
-            <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700" role="alert">
+            <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
               {validationMessage}
             </p>
           ) : null}
@@ -2367,7 +2377,7 @@ function AnalyticsScheduleDialog({
           ) : null}
           <div className="flex flex-wrap justify-between gap-3 border-t border-[var(--workbench-border)] pt-4">
             <button
-              className="text-sm font-semibold text-red-700 disabled:opacity-50"
+              className="text-sm font-semibold text-fg-red-700 disabled:opacity-50"
               disabled={isSaving || !initialSchedule}
               type="button"
               onClick={async () => {
@@ -2397,12 +2407,12 @@ function AnalyticsLoadingState({ t }: { t: ReturnType<typeof createTranslator> }
     <div aria-label={t('analytics.loading')} className="grid gap-5" role="status">
       <div className="grid grid-cols-4 gap-4 max-[680px]:grid-cols-1">
         {Array.from({ length: 4 }, (_, index) => (
-          <div className="h-28 animate-pulse rounded-lg border border-[var(--workbench-border)] bg-white" key={index} />
+          <div className="h-28 animate-pulse rounded-lg border border-[var(--workbench-border)] bg-surface" key={index} />
         ))}
       </div>
       <div className="grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
-        <div className="h-80 animate-pulse rounded-lg border border-[var(--workbench-border)] bg-white" />
-        <div className="h-80 animate-pulse rounded-lg border border-[var(--workbench-border)] bg-white" />
+        <div className="h-80 animate-pulse rounded-lg border border-[var(--workbench-border)] bg-surface" />
+        <div className="h-80 animate-pulse rounded-lg border border-[var(--workbench-border)] bg-surface" />
       </div>
     </div>
   )

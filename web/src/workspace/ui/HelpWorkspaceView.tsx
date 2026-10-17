@@ -58,7 +58,7 @@ export function HelpWorkspaceView({ t }: HelpWorkspaceViewProps) {
     >
       {helpDestinations.map((destination) => (
         <Link
-          className="group workbench-panel grid min-h-[168px] grid-cols-[1fr_auto] gap-5 p-5 no-underline transition-[border-color,background-color,transform] duration-150 hover:-translate-y-0.5 hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]"
+          className="group workbench-panel grid min-h-[168px] grid-cols-[1fr_auto] gap-5 p-5 no-underline transition-[border-color,background-color,transform] duration-150 hover:-translate-y-0.5 hover:border-tone-99d7cf hover:bg-[var(--workbench-surface-muted)]"
           key={destination.titleKey}
           to={destination.to}
         >
@@ -72,7 +72,7 @@ export function HelpWorkspaceView({ t }: HelpWorkspaceViewProps) {
           </span>
           <span
             aria-hidden="true"
-            className="grid h-10 w-10 place-items-center self-end rounded-full border border-[var(--workbench-border-strong)] bg-white text-lg text-[var(--workbench-primary)] transition-transform duration-150 group-hover:translate-x-0.5"
+            className="grid h-10 w-10 place-items-center self-end rounded-full border border-[var(--workbench-border-strong)] bg-surface text-lg text-[var(--workbench-primary-text)] transition-transform duration-150 group-hover:translate-x-0.5"
           >
             →
           </span>

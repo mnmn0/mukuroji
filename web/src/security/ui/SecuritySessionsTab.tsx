@@ -108,7 +108,7 @@ export function SecuritySessionsTab({
     >
       {!canManage ? <EnterpriseSecurityReadOnlyNotice t={t} /> : null}
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.sessions.authenticationDescription')}
           title={t('security.sessions.authenticationTitle')}
@@ -193,7 +193,7 @@ export function SecuritySessionsTab({
               {t('security.sessions.unitHelpDescription')}
             </p>
             {invalidSessionIntervals ? (
-              <p className="mt-3 text-xs font-semibold text-red-700" role="alert">
+              <p className="mt-3 text-xs font-semibold text-fg-red-700" role="alert">
                 {t('security.sessions.reauthenticationError')}
               </p>
             ) : null}
@@ -201,7 +201,7 @@ export function SecuritySessionsTab({
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.sessions.networkDescription')}
           title={t('security.sessions.networkTitle')}
@@ -228,7 +228,7 @@ export function SecuritySessionsTab({
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-white">
+      <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader
           description={t('security.sessions.guestsDescription')}
           title={t('security.sessions.guestsTitle')}

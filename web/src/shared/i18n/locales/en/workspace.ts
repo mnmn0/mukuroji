@@ -373,13 +373,19 @@ export const workspaceMessages = {
     'Manage this browser’s display language and text size, and review the signed-in account.',
   'workspace.settings.displayTitle': 'Display',
   'workspace.settings.displayDescription':
-    'Adjust text size and display language for this browser.',
+    'Adjust text size, theme, and display language for this browser.',
   'workspace.settings.fontSizeTitle': 'Font size',
   'workspace.settings.fontSizeDescription':
     'Applies to task lists, the sidebar, settings, and the rest of the app.',
   'workspace.settings.fontSize.compact': 'Compact',
   'workspace.settings.fontSize.standard': 'Standard',
   'workspace.settings.fontSize.comfortable': 'Comfortable',
+  'workspace.settings.themeTitle': 'Theme',
+  'workspace.settings.themeDescription':
+    "Changes the colors of the whole app. System follows your operating system's light or dark setting.",
+  'workspace.settings.theme.light': 'Light',
+  'workspace.settings.theme.dark': 'Dark',
+  'workspace.settings.theme.system': 'System',
   'workspace.settings.profileTitle': 'Signed-in account',
   'workspace.settings.profileDescription':
     'The account used by the current session.',

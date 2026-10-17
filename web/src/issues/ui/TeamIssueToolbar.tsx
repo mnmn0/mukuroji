@@ -114,7 +114,7 @@ export function IssueToolbar({
           ))}
         </select>
       </div>
-      <div className="inline-flex h-9 overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-white">
+      <div className="inline-flex h-9 overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface">
         {(['table', 'board'] as const).map((mode) => (
           <button
             aria-controls={issueViewPanelId}
