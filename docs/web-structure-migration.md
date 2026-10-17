@@ -50,7 +50,9 @@
    次の 3 file は既存の layer へそのまま移せます。
    - `auth/enterpriseSessionErrors.ts` は Enterprise session の error を画面の操作に分類する純粋な処理で、`model/loginReturnPath` だけに依存するため、`auth/model/enterpriseSessionErrors.ts` へ移します。
    - `analytics/liveQuery.ts` は `queryAnalytics` を直列化し、後続 request の開始時に前の request を中断する取得の調停だけを持つため、`analytics/queries/liveQuery.ts` へ移します。
-   - `workload/api.ts` は Workload API の `fetch` 関数と request 型だけを持つため、`workload/api/index.ts` へ移します。既存の `'../api'` からの import はそのまま解決されます。
+   - `workload/api.ts` は Workload API の `fetch` 関数と request 型だけを持つため `api/` に属しますが、team workload の取得、profile、time-off、resource request、assignment、what-if preview を 1 file（489 行）にまとめています。
+     そのまま `workload/api/index.ts` へ移すと公開用 barrel に実装が残るため、先に resource ごとの module（例: `api/teamWorkload.ts`、`api/profiles.ts`、`api/timeOff.ts`、`api/requests.ts`、`api/assignments.ts`、`api/whatIf.ts`）へ分ける別 PR を行います。
+     分割後の `workload/api/index.ts` は他の領域と同じく re-export だけを持ち、既存の `'../api'` からの import はそのまま解決されます。
    `automation/managementData.ts` は複数 endpoint の読み込みなので `queries/` が移動先ですが、`ui/AutomationManagementPanel` から `AutomationWorkflowTargetOption` 型を import しています。
    そのまま `queries/` へ移すと `queries` から `ui` への逆向きの依存が残るため、先にこの型を `model/` へ移す別 PR を行い、その後に移動します。
    次の file は既存の layer に当てはまらないため、置き場所を先に決めます。
@@ -90,11 +92,11 @@
 各 PR は `bun run dependencies:check` と `bun run knip:check` を通し、移動以外の変更を混ぜません。
 
 `web/AGENTS.md` の「移行方針」は、最初の移行対象を `getProjectDirectory` とその `useSWR` 呼び出しの `api/` / `queries/` への分離としています。
-この文書の手順はその後に行うフォルダ移動の順序であり、その分離を置き換えません。
+この分離は完了済みで、fetch は `projects/api/directory.ts`、`useSWR` は `projects/queries/useProjectDirectory.ts` にあります。
+この文書の手順はその後に行うフォルダ移動の順序です。
 
-0. **`getProjectDirectory` を分離する。**
-   `web/AGENTS.md` の「移行方針」に従い、fetch を `projects/api/`、`useSWR` と SWR key を `projects/queries/` へ移します。
-   取得処理の変更を含むため、フォルダ移動の PR とは分けます。
+0. **`getProjectDirectory` を分離する（完了済み）。**
+   `web/AGENTS.md` の「移行方針」の最初の対象で、fetch は `projects/api/directory.ts`、`useSWR` と SWR key は `projects/queries/useProjectDirectory.ts` へ分離済みです。新しい PR は不要です。
 1. **route component を `pages/` へ移す。**
    差分 1 の 5 file と隣接する story を、route の認証境界に合わせて既存の `pages/workspace/` と `pages/public/` へ移します。
 
@@ -110,6 +112,7 @@
 2. **領域直下の file を下位 layer へ移す。**
    差分 2 の file を、責務に応じて `api/`、`queries/`、`model/`、`shared/lib/` へ移します。
    `automation/managementData.ts` は、`AutomationWorkflowTargetOption` 型を `model/` へ移す別 PR の後に `queries/` へ移します。
+   `workload/api.ts` は、resource ごとの module へ分ける別 PR の後に `workload/api/` へ移します。
    `auth/enterpriseSessionErrors.ts` は `auth/model/` へ移します。
    `auth/session.ts` と `auth/enterpriseSso.ts` は、置き場所が `web/AGENTS.md` に追加されるまで移しません。
 3. **利用元が pages だけの領域を `features/` へ移す。**
