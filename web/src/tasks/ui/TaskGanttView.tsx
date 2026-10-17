@@ -762,7 +762,7 @@ export function TaskGanttView({
                   }}
                   role="gridcell"
                   style={{
-                    backgroundImage: `repeating-linear-gradient(to right, transparent 0, transparent ${GANTT_DAY_WIDTH - 1}px, #eef0f3 ${GANTT_DAY_WIDTH - 1}px, #eef0f3 ${GANTT_DAY_WIDTH}px)`,
+                    backgroundImage: `repeating-linear-gradient(to right, transparent 0, transparent ${GANTT_DAY_WIDTH - 1}px, var(--workbench-gantt-grid) ${GANTT_DAY_WIDTH - 1}px, var(--workbench-gantt-grid) ${GANTT_DAY_WIDTH}px)`,
                   }}
                 >
                   {bar ? (
