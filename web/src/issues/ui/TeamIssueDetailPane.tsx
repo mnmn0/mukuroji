@@ -45,6 +45,8 @@ import {
   resolveCreateWorkflowStatuses,
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
+  resolveWorkItemContributorDirectory,
+  resolveWorkItemContributorOptions,
   resolveWorkItemPersonOptions,
   resolveWorkItemTypeDefinition,
   resolveWorkItemTypeFormFields,
@@ -62,6 +64,11 @@ import {
   resolveIssueTitle,
 } from '../model/teamIssueDisplay'
 import { IssuePriorityBadge } from './TeamIssueBadges'
+import { readContributorDraftSubmission } from '../../work-items/model/contributorAssignments'
+import {
+  WorkItemContributorsEditor,
+} from '../../work-items/ui/WorkItemContributorsEditor'
+import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import {
   type CanManageWorkItemDependencyEndpoint,
   type TeamIssueScreenProps,
@@ -393,6 +400,9 @@ function IssueDetailContent({
     collaborationRoute?.onCollaborationTabChange,
   )
   const isIssueReadOnly = !onUpdateIssue
+  // A save in flight locks the editors, so a draft cannot change or be submitted twice
+  // before the refreshed issue remounts them.
+  const [isIssueUpdatePending, setIssueUpdatePending] = useState(false)
   const hasSelectedAssigneeOption = assigneeOptions.some((member) => member.id === issue.assigneeUserId)
   const currentWorkflowStatusId = resolveWorkItemWorkflowStatusId(issue)
   const selectedWorkItemTypeDefinition = resolveWorkItemTypeDefinition(
@@ -441,6 +451,8 @@ function IssueDetailContent({
   const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
+  const contributorOptions = resolveWorkItemContributorOptions(workspaceMembers)
+  const contributorDirectory = resolveWorkItemContributorDirectory(workspaceMembers)
   const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
@@ -527,12 +539,14 @@ function IssueDetailContent({
   }
   const editorFormId = useId()
   const editorIdentity = [issue.teamId, issue.id, issue.revision].join(':')
+  // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
+  const contributorDraftState = useContributorDraft(editorIdentity)
 
   /** Submits the visible Team Issue controls through the external editor form. */
   const submitEditorForm = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    if (!onUpdateIssue || isAiSummaryOperationPending) {
+    if (!onUpdateIssue || isAiSummaryOperationPending || isIssueUpdatePending) {
       return
     }
 
@@ -570,6 +584,13 @@ function IssueDetailContent({
       ))
       return
     }
+    const contributorSubmission = readContributorDraftSubmission(formData)
+    if (contributorSubmission && 'error' in contributorSubmission) {
+      contributorDraftState.setDraft((current) => ({ ...current, submitError: contributorSubmission }))
+      return
+    }
+    contributorDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
+    const contributorDraft = contributorSubmission
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
       const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
@@ -620,8 +641,14 @@ function IssueDetailContent({
     if (hasOverviewSection && assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
       nextIssueInput.assigneeUserId = selectedAssigneeUserId
     }
+    if (contributorDraft) {
+      nextIssueInput.contributorAssignments = contributorDraft.assignments
+    }
 
-    void onUpdateIssue(issue.id, nextIssueInput).catch(() => undefined)
+    setIssueUpdatePending(true)
+    void onUpdateIssue(issue.id, nextIssueInput)
+      .catch(() => undefined)
+      .finally(() => setIssueUpdatePending(false))
   }
 
   /** Renders the Work Item Type selector and any pending type-change resolution UI. */
@@ -631,7 +658,7 @@ function IssueDetailContent({
         {t('tasks.create.workItemType')}
         <select
           className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-          disabled={isIssueReadOnly || isAiSummaryOperationPending || activeTypeChangeState.isPreviewing}
+          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending || activeTypeChangeState.isPreviewing}
           form={editorFormId}
           name="workItemTypeId"
           onChange={handleWorkItemTypeChange}
@@ -735,6 +762,22 @@ function IssueDetailContent({
     </section>
   ) : null
 
+  /** Renders the Work Item-wide contributor editor; shown even when a type omits the overview section. */
+  const renderContributorsEditor = (): ReactNode => (
+    <WorkItemContributorsEditor
+      assignments={issue.contributorAssignments}
+      formId={editorFormId}
+      jobRoles={configuration?.jobRoles ?? []}
+      draftState={contributorDraftState}
+      key={editorIdentity + ':contributors'}
+      locale={locale}
+      memberDirectory={contributorDirectory}
+      memberOptions={contributorOptions}
+      ownerUserId={issue.assigneeUserId}
+      readOnly={isIssueReadOnly}
+    />
+  )
+
   /** Renders one configured Team Issue detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
     switch (section) {
@@ -742,7 +785,7 @@ function IssueDetailContent({
         return (
           <fieldset
             className="contents"
-            disabled={isIssueReadOnly || isAiSummaryOperationPending}
+            disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           >
             <section className="grid min-w-0 gap-3" data-testid="team-issue-detail-overview">
               {renderWorkItemTypeControl()}
@@ -778,9 +821,18 @@ function IssueDetailContent({
                     ))}
                   </select>
                 </label>
-                <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-                  {t('issues.create.assignee')}
+                <div className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+                  {/* The help sits outside the label so it describes the select without joining its name. */}
+                  <label htmlFor={`${editorFormId}-owner`}>{t('workItems.owner.label')}</label>
+                  <span
+                    className="text-xs font-normal text-[var(--workbench-muted)]"
+                    id={`${editorFormId}-owner-help`}
+                  >
+                    {t('workItems.owner.help')}
+                  </span>
                   <select
+                    aria-describedby={`${editorFormId}-owner-help`}
+                    id={`${editorFormId}-owner`}
                     className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                     defaultValue={issue.assigneeUserId}
                     form={editorFormId}
@@ -794,7 +846,7 @@ function IssueDetailContent({
                       <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
                     ))}
                   </select>
-                </label>
+                </div>
                 <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('tasks.column.priority')}
                   <select
@@ -810,6 +862,7 @@ function IssueDetailContent({
                   </select>
                 </label>
               </div>
+              {renderContributorsEditor()}
             </section>
           </fieldset>
         )
@@ -1007,13 +1060,19 @@ function IssueDetailContent({
           {renderedDetailSectionOrder.map((section) => (
             <Fragment key={section}>{renderDetailSection(section)}</Fragment>
           ))}
+          {!hasOverviewSection ? (
+          // Same mutation lock as the overview section, so a draft cannot change while it saves.
+          <fieldset className="contents" disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}>
+            {renderContributorsEditor()}
+          </fieldset>
+        ) : null}
           {!hasCustomFieldSection && hasCustomFields
             ? <Fragment>{renderDetailSection('custom-fields')}</Fragment>
             : null}
         </div>
         <button
           className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isIssueReadOnly || isAiSummaryOperationPending}
+          disabled={isIssueReadOnly || isAiSummaryOperationPending || isIssueUpdatePending}
           form={editorFormId}
           type="submit"
         >

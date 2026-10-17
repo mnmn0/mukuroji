@@ -622,6 +622,10 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
+  if (error.code === 'InvalidContributorAssignments') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
   if (error.code === 'InvalidWorkItemQuery') {
     return c.json({ code: error.code, message: error.message }, 400)
   }

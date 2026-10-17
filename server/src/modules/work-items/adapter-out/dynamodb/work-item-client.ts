@@ -36,6 +36,7 @@ import {
   isCanonicalWorkItemArchiveWindow,
   isCanonicalWorkItemRecord,
 } from '../../canonical-work-item'
+import { isStoredContributorAssignmentList } from '../../domain/contributor-assignments'
 import { createResourceId } from '../../domain/resource-id'
 import {
   deriveWorkItemScheduleDueDate,
@@ -81,6 +82,7 @@ import type {
   TriageEntryEvent,
   WorkflowStatusCategory,
   WorkItemPriority,
+  WorkItemContributorAssignment,
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemTriageContextEventSnapshot,
@@ -370,6 +372,50 @@ function createCallerAuthorizationConditionEntries(
 }
 
 /**
+ * Combines caller authorization checks with the adapter-built fences, one check per row.
+ *
+ * DynamoDB rejects a transaction that names one item twice. That happens when the actor
+ * adds themselves as a contributor while an authorization snapshot already fences their
+ * membership row. The snapshot check wins: it pins the membership version observed at
+ * authorization, so a membership change after that still fails the write. Because every
+ * membership change bumps the version, pinning it also keeps the status and role that
+ * the caller's check validated at that version.
+ *
+ * @param callerEntries - Checks supplied by the application caller, in transaction order.
+ * @param fenceEntries - Snapshot and Planning fences built by the adapter, in transaction order.
+ * @returns Caller checks for rows no fence covers, followed by every fence.
+ */
+function mergeAuthorizationConditionEntries(
+  callerEntries: readonly WorkItemAuthorizationConditionEntry[],
+  fenceEntries: readonly WorkItemAuthorizationConditionEntry[],
+): WorkItemAuthorizationConditionEntry[] {
+  const seen = new Set(fenceEntries.flatMap((entry) => {
+    const key = readConditionCheckRowKey(entry)
+    return key === undefined ? [] : [key]
+  }))
+  const keptCallerEntries = callerEntries.filter((entry) => {
+    const key = readConditionCheckRowKey(entry)
+    if (key === undefined) return true
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return [...keptCallerEntries, ...fenceEntries]
+}
+
+/**
+ * Identifies the row a ConditionCheck guards.
+ *
+ * @param entry - Named authorization check.
+ * @returns A stable table-and-key string, or undefined when the item is not a keyed ConditionCheck.
+ */
+function readConditionCheckRowKey(entry: WorkItemAuthorizationConditionEntry): string | undefined {
+  const condition = entry.transactWriteItem.ConditionCheck
+  if (!condition?.TableName || !condition.Key) return undefined
+  return JSON.stringify([condition.TableName, condition.Key])
+}
+
+/**
  * Raises a stable domain error for a failed named authorization transaction check.
  *
  * @param error - DynamoDB transaction failure candidate.
@@ -470,6 +516,8 @@ type TeamIssueItem = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId: string
+  /** Contributors carrying out the work, separate from the accountable owner; absent when none. */
+  contributorAssignments?: WorkItemContributorAssignment[]
   /**
    * Issue 作成者の Workspace member key です。
    */
@@ -740,6 +788,8 @@ export type CreateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
+  /** Contributor assignments already normalized by the API handler. */
+  contributorAssignments?: unknown
   /** Explicit canonical schedule required for every new Work Item. */
   schedule: unknown
   /**
@@ -892,6 +942,8 @@ export type PublicUpdateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
+  /** Complete replacement contributor list already normalized by the API handler. */
+  contributorAssignments?: unknown
   /** Complete replacement schedule shared by every task view. */
   schedule?: unknown
   /**
@@ -1619,6 +1671,9 @@ export class DynamoDbTeamIssuesClient {
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
+    const contributorAssignments = input.contributorAssignments === undefined
+      ? []
+      : readNormalizedContributorAssignments(input.contributorAssignments)
     const schedule = readWorkItemScheduleInput(input.schedule)
     const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readWorkItemPriority(input.priority)
@@ -1683,10 +1738,10 @@ export class DynamoDbTeamIssuesClient {
       ? readTriageAcceptanceInstant(triageAcceptance.occurredAt)
       : new Date().toISOString()
     const configurationConditionChecks = input.configurationConditionChecks ?? []
-    const authorizationConditionEntries = [
-      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
-      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
-    ]
+    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+      createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+    )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -1748,6 +1803,9 @@ export class DynamoDbTeamIssuesClient {
       if (description) {
         item.description = description
       }
+      if (contributorAssignments.length > 0) {
+        item.contributorAssignments = contributorAssignments
+      }
 
       if (assignedProjectId) {
         item.assignedProjectId = assignedProjectId
@@ -1780,6 +1838,7 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
+          'contributorAssignments',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -1917,6 +1976,7 @@ export class DynamoDbTeamIssuesClient {
             actorUserId,
             assigneeUserId,
             assignedProjectId,
+            contributorAssignments,
             customFieldValues,
             description,
             dueDate,
@@ -2265,11 +2325,13 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     const configurationConditionChecks = input.configurationConditionChecks ?? []
-    const authorizationConditionEntries = [
-      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
-      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
-      ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
-    ]
+    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+      createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      [
+        ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+        ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
+      ],
+    )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -2332,6 +2394,17 @@ export class DynamoDbTeamIssuesClient {
       expressionAttributeNames['#assigneeUserId'] = 'assigneeUserId'
       expressionAttributeValues[':assigneeUserId'] = readTeamIssueAssigneeUserId(input)
       setExpressions.push('#assigneeUserId = :assigneeUserId')
+    }
+
+    if ('contributorAssignments' in input) {
+      const contributorAssignments = readNormalizedContributorAssignments(input.contributorAssignments)
+      expressionAttributeNames['#contributorAssignments'] = 'contributorAssignments'
+      if (contributorAssignments.length > 0) {
+        expressionAttributeValues[':contributorAssignments'] = contributorAssignments
+        setExpressions.push('#contributorAssignments = :contributorAssignments')
+      } else {
+        removeExpressions.push('#contributorAssignments')
+      }
     }
 
     if ('workflowStatusId' in input) {
@@ -2517,6 +2590,7 @@ export class DynamoDbTeamIssuesClient {
           'description',
           'assignedProjectId',
           'assigneeUserId',
+          'contributorAssignments',
           'workflowStatusId',
           'statusCategory',
           'workItemTypeId',
@@ -3549,6 +3623,10 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.description = item.description
   }
 
+  if (item.contributorAssignments && item.contributorAssignments.length > 0) {
+    issue.contributorAssignments = item.contributorAssignments
+  }
+
   if (item.archivedAt) {
     issue.archivedAt = item.archivedAt
     issue.archivedBy = item.archivedBy
@@ -4094,12 +4172,20 @@ export function readIdempotencyResourceId(value: unknown) {
   return value
 }
 
+/**
+ * Checks whether an existing Work Item is the replay of the same idempotent create request.
+ *
+ * @param issue - Work Item already stored under the caller-selected resource ID.
+ * @param expected - Normalized fields of the create request being retried.
+ * @returns Whether every logical create field, including contributors, matches the stored Work Item.
+ */
 function isMatchingIdempotentWorkItemCreate(
   issue: TeamIssueResponseItem,
   expected: {
     actorUserId: string
     assigneeUserId: string
     assignedProjectId: string | null | undefined
+    contributorAssignments: WorkItemContributorAssignment[]
     customFieldValues: Record<string, CustomFieldValue>
     description: string | undefined
     dueDate: string
@@ -4115,6 +4201,10 @@ function isMatchingIdempotentWorkItemCreate(
   return issue.creatorMemberKey === expected.actorUserId &&
     issue.assigneeUserId === expected.assigneeUserId &&
     issue.assignedProjectId === (expected.assignedProjectId ?? undefined) &&
+    contributorAssignmentListsLogicallyEqual(
+      issue.contributorAssignments ?? [],
+      expected.contributorAssignments,
+    ) &&
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
     issue.dueDate === expected.dueDate &&
@@ -4125,6 +4215,38 @@ function isMatchingIdempotentWorkItemCreate(
     issue.workItemTypeId === expected.workItemTypeId &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares contributor lists by their logical content, ignoring server-generated assignment IDs and order.
+ *
+ * @param left - First contributor assignment list.
+ * @param right - Second contributor assignment list.
+ * @returns Whether both lists contain the same contributions.
+ */
+function contributorAssignmentListsLogicallyEqual(
+  left: readonly WorkItemContributorAssignment[],
+  right: readonly WorkItemContributorAssignment[],
+): boolean {
+  if (left.length !== right.length) return false
+  const leftKeys = left.map(toLogicalContributorAssignmentKey).sort()
+  const rightKeys = right.map(toLogicalContributorAssignmentKey).sort()
+  return leftKeys.every((key, index) => key === rightKeys[index])
+}
+
+/**
+ * Serializes the caller-controlled fields of one contributor assignment.
+ *
+ * @param assignment - Contributor assignment to serialize.
+ * @returns A deterministic key that excludes the server-generated assignment ID.
+ */
+function toLogicalContributorAssignmentKey(assignment: WorkItemContributorAssignment): string {
+  return JSON.stringify([
+    assignment.memberUserId?.toLowerCase() ?? null,
+    assignment.jobRoleId ?? null,
+    assignment.plannedEffortMinutes ?? null,
+    assignment.status,
+  ])
 }
 
 /**
@@ -4172,6 +4294,22 @@ export function readTeamIssueAssigneeUserId(input: CreateTeamIssueRequestBody | 
   }
 
   return normalizeCognitoUserId(value)
+}
+
+/**
+ * Reads contributor assignments that the API handler has already normalized.
+ *
+ * The adapter re-checks the stored shape so an unvalidated caller cannot persist a
+ * malformed list.
+ *
+ * @param value - Normalized contributor assignment list.
+ * @returns The list, unchanged.
+ */
+function readNormalizedContributorAssignments(value: unknown): WorkItemContributorAssignment[] {
+  if (!isStoredContributorAssignmentList(value)) {
+    throw new ProjectDataError(400, 'InvalidContributorAssignments', 'Contributor assignments are invalid.')
+  }
+  return value
 }
 
 /**

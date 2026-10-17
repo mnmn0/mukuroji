@@ -51,11 +51,18 @@ import {
   createCustomFieldErrorMessages,
   createVisibleCustomFieldValuePatch,
   resolveEditableWorkflowStatuses,
+  resolveWorkItemContributorDirectory,
+  resolveWorkItemContributorOptions,
   resolveWorkItemPersonOptions,
   resolveWorkItemWorkflowStatusId,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
+import { readContributorDraftSubmission } from '../../work-items/model/contributorAssignments'
+import {
+  WorkItemContributorsEditor,
+} from '../../work-items/ui/WorkItemContributorsEditor'
+import { useContributorDraft } from '../../work-items/ui/useContributorDraft'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import { WorkItemTypeIcon } from '../../work-items/ui/WorkItemTypeIcon'
 import {
@@ -402,6 +409,9 @@ export function TaskDetailPane({
     ? scheduleSelection.mode
     : resolvedSchedule?.mode ?? 'unscheduled'
 
+  // Held here so a Work Item Type change that moves the contributor editor keeps its draft.
+  // The identity matches the editor's, so a new Work Item or revision starts a fresh draft.
+  const contributorDraftState = useContributorDraft(scheduleSelectionIdentity)
   if (!task) {
     const statusMessage = isLoading
       ? t('tasks.detail.loading')
@@ -491,6 +501,8 @@ export function TaskDetailPane({
   const selectedTypeWorkflowStatusId = activeTypeChangeState.replacementWorkflowStatusId ??
     selectedTypeStatusFallback
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
+  const contributorOptions = resolveWorkItemContributorOptions(workspaceMembers)
+  const contributorDirectory = resolveWorkItemContributorDirectory(workspaceMembers)
   const hasCustomFields = customFieldEditorDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   )
@@ -788,6 +800,13 @@ export function TaskDetailPane({
       ))
       return
     }
+    const contributorSubmission = readContributorDraftSubmission(formData)
+    if (contributorSubmission && 'error' in contributorSubmission) {
+      contributorDraftState.setDraft((current) => ({ ...current, submitError: contributorSubmission }))
+      return
+    }
+    contributorDraftState.setDraft((current) => current.submitError ? { ...current, submitError: undefined } : current)
+    const contributorDraft = contributorSubmission
 
     if (isWorkItemTypeChangeRequested && typeChangePreview) {
       const acknowledgedIds = new Set(activeTypeChangeState.acknowledgedLostCustomFieldIds)
@@ -837,6 +856,9 @@ export function TaskDetailPane({
 
     if (hasOverviewSection && assigneeOptions.some((member) => member.id === selectedAssigneeUserId)) {
       nextIssueInput.assigneeUserId = selectedAssigneeUserId
+    }
+    if (contributorDraft) {
+      nextIssueInput.contributorAssignments = contributorDraft.assignments
     }
 
     void submitIssueUpdate(nextIssueInput)
@@ -953,6 +975,22 @@ export function TaskDetailPane({
     </section>
   ) : null
 
+  /** Renders the Work Item-wide contributor editor; shown even when a type omits the overview section. */
+  const renderContributorsEditor = (): ReactNode => (
+    <WorkItemContributorsEditor
+      assignments={(issue ?? currentTask).contributorAssignments}
+      formId={editorFormId}
+      jobRoles={resolvedConfiguration?.jobRoles ?? []}
+      draftState={contributorDraftState}
+      key={`contributors:${editorIdentity}`}
+      locale={locale}
+      memberDirectory={contributorDirectory}
+      memberOptions={contributorOptions}
+      ownerUserId={(issue ?? currentTask).assigneeUserId}
+      readOnly={isReadOnly}
+    />
+  )
+
   /** Renders one configured Work Item detail section in its persisted order. */
   const renderDetailSection = (section: WorkItemDetailSectionId): ReactNode => {
     switch (section) {
@@ -994,9 +1032,18 @@ export function TaskDetailPane({
                     ))}
                   </select>
                 </label>
-                <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
-                  {t('issues.create.assignee')}
+                <div className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+                  {/* The help sits outside the label so it describes the select without joining its name. */}
+                  <label htmlFor={`${editorFormId}-owner`}>{t('workItems.owner.label')}</label>
+                  <span
+                    className="text-xs font-normal text-[var(--workbench-muted)]"
+                    id={`${editorFormId}-owner-help`}
+                  >
+                    {t('workItems.owner.help')}
+                  </span>
                   <select
+                    aria-describedby={`${editorFormId}-owner-help`}
+                    id={`${editorFormId}-owner`}
                     className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                     defaultValue={assigneeUserId}
                     form={editorFormId}
@@ -1010,7 +1057,7 @@ export function TaskDetailPane({
                       <option key={member.id} value={member.id}>{formatProjectMemberOption(member)}</option>
                     ))}
                   </select>
-                </label>
+                </div>
                 <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('tasks.column.priority')}
                   <select
@@ -1026,6 +1073,7 @@ export function TaskDetailPane({
                   </select>
                 </label>
               </div>
+              {renderContributorsEditor()}
               {customerImpact ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
             </section>
           </fieldset>
@@ -1434,6 +1482,12 @@ export function TaskDetailPane({
         {renderedDetailSectionOrder.map((section) => (
           <Fragment key={section}>{renderDetailSection(section)}</Fragment>
         ))}
+        {!hasOverviewSection ? (
+          // Same mutation lock as the overview section, so a draft cannot change while it saves.
+          <fieldset className="contents" disabled={isReadOnly || isWorkItemMutationPending}>
+            {renderContributorsEditor()}
+          </fieldset>
+        ) : null}
         {!hasCustomFieldSection && hasCustomFields ? (
           <fieldset
             className="contents"

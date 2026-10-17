@@ -5,6 +5,7 @@ import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ApiProblem,
   type CanonicalWorkItem,
+  type PublicWorkItem,
   type CreateWorkItemInput,
   type PublicWorkItemTypeCatalog,
   type ResolvedWorkItemConfiguration,
@@ -481,7 +482,7 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
   'createdAt',
   'updatedAt',
   'source',
-] satisfies readonly (keyof CanonicalWorkItem)[]
+] satisfies readonly (keyof PublicWorkItem)[]
 
 /**
  * Projects one canonical Work Item onto the closed public response schema.
@@ -489,7 +490,7 @@ const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
  * @param workItem - Internal canonical Work Item containing optional server-only fields.
  * @returns Detached public response without causal, archive, intake, or approval state.
  */
-function projectPublicWorkItem(workItem: CanonicalWorkItem): CanonicalWorkItem {
+function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkItem {
   return {
     schemaVersion: workItem.schemaVersion,
     revision: workItem.revision,
