@@ -196,7 +196,7 @@ job と worker の動作は次のとおり。
 - job が消えた後に同じ `Idempotency-Key` で再送された場合、記録済みの `audit.export-requested` が処理期限（24 時間）より古ければ `409 AuditExportIdempotencyKeyExpired` で拒否し、実行されない job や新しい snapshot の export を作らない。同じ key の最初の要求が同時に届き、他方の audit event が先に記録された場合も、job の `snapshotAt` には記録済み event の時刻を使う。同じ key で filter が異なる場合は、audit writer が冪等 key の競合として返す `AuditEventIdempotencyConflictError` も含めて `409 AuditExportIdempotencyConflict` を返す。それ以外の audit 書き込み失敗は 409 にせず 5xx として返す。
 - S3 の条件付き書き込みは 412 だけを既存 / 変更済みとして扱い、409 `ConditionalRequestConflict` は再試行対象としてそのまま失敗させる。
 - 保存済み job の `requestFingerprint` が保存済み filter から計算した値と一致しない場合は、壊れた job として読み込みを拒否する。
-- 保存済み job の `createdAt` / `expiresAt` などの時刻が読めない場合や、`expiresAt` が `createdAt` 以前の場合、`updatedAt` が `createdAt` より前の場合は壊れた job として読み込みを拒否する。`queued` / `running` の job の `updatedAt` が処理期限（作成から 24 時間）より後の場合も拒否する。未来の更新時刻は、続きの message を失った job を古い job として再開させなくするため。worker は未完了状態の `updatedAt` を処理期限で頭打ちにし、`completed` / `failed` は実際の時刻を書く。
+- 保存済み job の `createdAt` / `expiresAt` などの時刻が読めない場合や、`expiresAt` が `createdAt` のちょうど 7 日（`AUDIT_EXPORT_RETENTION_DAYS`）後でない場合、`updatedAt` が `createdAt` より前の場合は壊れた job として読み込みを拒否する。`queued` / `running` の job の `updatedAt` が処理期限（作成から 24 時間）より後の場合も拒否する。未来の更新時刻は、続きの message を失った job を古い job として再開させなくするため。worker は未完了状態の `updatedAt` を処理期限で頭打ちにし、`completed` / `failed` は実際の時刻を書く。
 - 保存済み job の `correlationId` が空、前後に余白がある、または 256 文字を超える場合も壊れた job として読み込みを拒否する。
 - index marker は存在しない場合だけ作成し、再送で書き直して lifecycle の期限を延ばさない。
 - 保存済み job の filter に未知の key がある場合は壊れた job として読み込みを拒否し、未知の条件を黙って捨てた広い export を作らない。

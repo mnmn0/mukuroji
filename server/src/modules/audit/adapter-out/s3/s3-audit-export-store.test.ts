@@ -7,6 +7,7 @@ import {
 } from '@aws-sdk/client-s3'
 import {
   AUDIT_EXPORT_PROCESSING_HOURS,
+  AUDIT_EXPORT_RETENTION_DAYS,
   createAuditExportRequestFingerprint,
   createAuditExportWorkspacePrefix,
   type AuditExportJob,
@@ -74,7 +75,7 @@ function job(exportId: string, createdAt: string, workspaceId = 'ws-1'): AuditEx
     requestedBy: { userKey: 'admin@example.com', displayName: 'admin@example.com' },
     createdAt,
     updatedAt: createdAt,
-    expiresAt: '2099-01-01T00:00:00.000Z',
+    expiresAt: new Date(Date.parse(createdAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000).toISOString(),
     eventCount: 0,
     parts: [],
     scanAttempt: 1,
@@ -119,6 +120,22 @@ describe('S3AuditExportStore', () => {
     await expect(store.replaceJob(conflicted, '"etag-1"')).rejects.toMatchObject({ name: 'ConditionalRequestConflict' })
   })
 
+  test('rejects a stored expiration other than the retention period after creation', async () => {
+    const { store, objects } = createStore()
+    const exportId = 'c'.repeat(32)
+    const jobPath = `${createAuditExportWorkspacePrefix('ws-1')}${exportId}/job.json`
+    const createdAt = '2026-07-18T00:00:00.000Z'
+    const retained = Date.parse(createdAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000
+    // A later expiration would keep the export visible and downloadable past its lifetime.
+    for (const expiresAt of [retained + 1, retained - 1, Date.parse(createdAt)]) {
+      const stored = { ...job(exportId, createdAt), expiresAt: new Date(expiresAt).toISOString() }
+      objects.set(jobPath, { body: JSON.stringify(stored), etag: '"a"' })
+      await expect(store.readJob('ws-1', exportId)).rejects.toThrow(`must expire ${AUDIT_EXPORT_RETENTION_DAYS} days after`)
+    }
+    objects.set(jobPath, { body: JSON.stringify(job(exportId, createdAt)), etag: '"b"' })
+    expect((await store.readJob('ws-1', exportId))?.job.expiresAt).toBe(new Date(retained).toISOString())
+  })
+
   test('returns undefined for a missing job and rejects malformed stored jobs', async () => {
     const { store, objects } = createStore()
     const exportId = 'b'.repeat(32)
@@ -137,7 +154,7 @@ describe('S3AuditExportStore', () => {
     await expect(store.readJob('ws-1', exportId)).rejects.toThrow('createdAt must be an ISO timestamp.')
     const reordered = { ...job(exportId, '2026-07-18T00:00:00.000Z'), expiresAt: '2026-07-17T00:00:00.000Z' }
     objects.set(jobPath, { body: JSON.stringify(reordered), etag: '"w"' })
-    await expect(store.readJob('ws-1', exportId)).rejects.toThrow('expires before it was created')
+    await expect(store.readJob('ws-1', exportId)).rejects.toThrow(`must expire ${AUDIT_EXPORT_RETENTION_DAYS} days after`)
     // The snapshot bounds the exported events, so it must be the time the request was recorded.
     const laterSnapshot = { ...job(exportId, '2026-07-18T00:00:00.000Z'), snapshotAt: '2026-07-18T00:00:01.000Z' }
     objects.set(jobPath, { body: JSON.stringify(laterSnapshot), etag: '"u"' })

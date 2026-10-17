@@ -1359,8 +1359,10 @@ export function parseAuditExportJob(value: unknown): AuditExportJob {
   }
   const createdAt = requireInstant(record.createdAt, 'createdAt')
   const expiresAt = requireInstant(record.expiresAt, 'expiresAt')
-  if (Date.parse(expiresAt) <= Date.parse(createdAt)) {
-    throw new TypeError('Audit export job expires before it was created.')
+  // Every writer sets the expiration to exactly the retention period after creation; a later one
+  // would keep a finished export visible and downloadable past its documented lifetime.
+  if (Date.parse(expiresAt) !== Date.parse(createdAt) + AUDIT_EXPORT_RETENTION_DAYS * 86_400_000) {
+    throw new TypeError(`Audit export job must expire ${AUDIT_EXPORT_RETENTION_DAYS} days after it was created.`)
   }
   const updatedAt = requireInstant(record.updatedAt, 'updatedAt')
   if (Date.parse(updatedAt) < Date.parse(createdAt)) {
