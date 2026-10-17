@@ -284,7 +284,7 @@ function parseSearchCuratedContextItemEntityId(
 function readWorkspaceSearchFilters(value: string | undefined): WorkspaceSearchFilters {
   if (!value) return {}
   try {
-    const parsed = JSON.parse(value) as unknown
+    const parsed: unknown = JSON.parse(value)
     if (!isRecord(parsed)) throw new TypeError('Search filters must be an object.')
     return parsed as WorkspaceSearchFilters
   } catch (error) {

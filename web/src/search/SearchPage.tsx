@@ -78,6 +78,7 @@ import {
 import { SearchCountReport } from './ui/SearchCountReport'
 import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
 import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
+import { readRecord } from '../shared/api/jsonValidation'
 
 /**
  * Saved view作成フォームの入力stateです。
@@ -415,7 +416,7 @@ export function SearchPage() {
     if (isAiOperationPendingRef.current) return
     commitRouteState(updateSearchRouteState(routeState, {
       filters: {
-        ...asRecord(routeState.filters),
+        ...readRecord(routeState.filters),
         ...patch,
       } as WorkspaceSearchFilters,
     }))
@@ -425,7 +426,7 @@ export function SearchPage() {
     if (isAiOperationPendingRef.current) return
     commitRouteState(updateSearchRouteState(routeState, {
       layout: {
-        ...asRecord(routeState.layout),
+        ...readRecord(routeState.layout),
         ...patch,
       } as SearchViewLayout,
     }))
@@ -966,7 +967,7 @@ function SearchToolbar({
                     : event.target.value === 'dueDate'
                       ? 'dueDate'
                       : 'updatedAt'
-                  const currentDate = asRecord(asRecord(routeState.filters).date)
+                  const currentDate = readRecord(readRecord(routeState.filters).date)
                   setDateFieldOverride({ routeSignature, value: nextDateField })
                   if (currentDate.from || currentDate.to) {
                     onFiltersChange({ date: { ...currentDate, field: nextDateField } })
@@ -1395,7 +1396,7 @@ function DateInput({
       <input
         className="workbench-input min-h-10 px-3 normal-case tracking-normal"
         onChange={(event) => {
-          const currentDate = asRecord(asRecord(routeState.filters).date)
+          const currentDate = readRecord(readRecord(routeState.filters).date)
           const boundKey = filterKey === 'dateFrom' ? 'from' : 'to'
           const nextDate = {
             ...currentDate,
@@ -1527,10 +1528,6 @@ function toggleValue<TValue extends string>(values: readonly TValue[], value: TV
 
 function hasExplicitSearchState(searchParams: URLSearchParams) {
   return Array.from(searchParams.keys()).some((key) => key !== 'v' && key !== 'view')
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
 }
 
 function formatSavedViewMigrationWarnings(view: SavedWorkspaceView) {

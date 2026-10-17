@@ -1,6 +1,7 @@
 import type { AnalyticsQueryInput, AnalyticsSnapshotListResponse, AnalyticsSnapshotRecord } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { AnalyticsApiError } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 const analyticsApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_API_BASE_URL ?? '/api',
@@ -32,7 +33,7 @@ export async function getAnalyticsSnapshots(
     accessToken,
     { signal },
   )
-  const record = asRecord(response)
+  const record = readRecord(response)
 
   return {
     inspectedCount: typeof record.inspectedCount === 'number'
@@ -131,7 +132,7 @@ async function throwAnalyticsResponseError(response: Response): Promise<never> {
     body = undefined
   }
 
-  const record = asRecord(body)
+  const record = readRecord(body)
   throw new AnalyticsApiError(
     response.status,
     typeof record.message === 'string'
@@ -150,7 +151,7 @@ async function throwAnalyticsResponseError(response: Response): Promise<never> {
  * @throws AnalyticsApiError when the body does not wrap an object under the key.
  */
 function unwrapRecord<T>(value: unknown, key: string) {
-  const wrapped = asRecord(value)[key]
+  const wrapped = readRecord(value)[key]
   if (typeof wrapped !== 'object' || wrapped === null) {
     throw new AnalyticsApiError(
       502,
@@ -159,12 +160,6 @@ function unwrapRecord<T>(value: unknown, key: string) {
     )
   }
   return wrapped as T
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
-    : {}
 }
 
 function trimTrailingSlash(value: string) {

@@ -1714,7 +1714,7 @@ function decodeWebhookGrantCleanupCursor(
 
 function readPreparedWebhookEvent(payload: string): WebhookEventEnvelope {
   try {
-    const event = JSON.parse(payload) as unknown
+    const event: unknown = JSON.parse(payload)
     if (
       !isRecord(event) ||
       typeof event.id !== 'string' ||

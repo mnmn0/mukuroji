@@ -1,5 +1,6 @@
 import type { AnalyticsExportInput, AnalyticsQueryInput } from '@mukuroji/contracts'
 import { AnalyticsApiError } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Analytics export で生成できるファイル形式です。
@@ -87,7 +88,7 @@ async function throwAnalyticsResponseError(response: Response): Promise<never> {
     body = undefined
   }
 
-  const record = asRecord(body)
+  const record = readRecord(body)
   throw new AnalyticsApiError(
     response.status,
     typeof record.message === 'string'
@@ -112,12 +113,6 @@ function readDownloadFilename(contentDisposition: string | null) {
   }
 
   return contentDisposition.match(/filename="?([^";]+)"?/i)?.[1]
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
-    : {}
 }
 
 function trimTrailingSlash(value: string) {

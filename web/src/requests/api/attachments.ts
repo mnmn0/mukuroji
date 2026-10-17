@@ -2,6 +2,7 @@ import type { RequestAttachmentUploadSession, RequestAttachmentUploadInput } fro
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { FileVersionAccess } from '../../files/api'
 import { RequestIntakeApiError } from './errors'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 const requestsApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
 
@@ -114,7 +115,7 @@ async function requestJson<T>(url: string, options: RequestJsonOptions = {}) {
 }
 
 function readApiError(data: unknown) {
-  const record = asRecord(data)
+  const record = readRecord(data)
   const message = typeof record.message === 'string' && record.message.trim()
     ? record.message
     : defaultRequestApiErrorMessage
@@ -131,7 +132,8 @@ async function readJson(response: Response) {
   if (!text) return {}
 
   try {
-    return JSON.parse(text) as unknown
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
     return {}
   }
@@ -143,10 +145,6 @@ function readRetryAfterSeconds(value: string | null) {
   const seconds = Number(value)
 
   return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
 }
 
 function trimTrailingSlash(value: string) {

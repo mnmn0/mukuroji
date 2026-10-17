@@ -1,6 +1,7 @@
 import type { AuthSession } from '../session'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { ApiError } from './errors'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Cognito が初回パスワード変更を要求したときのログイン結果です。
@@ -305,10 +306,6 @@ function parseAuthSession(
     remember,
     tokenType: response.tokenType,
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function trimTrailingSlash(value: string) {

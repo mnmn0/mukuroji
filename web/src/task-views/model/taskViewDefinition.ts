@@ -26,6 +26,7 @@ import {
   type WorkItemPriority,
   type WorkspaceSearchDateFilter,
 } from '@mukuroji/contracts'
+import { isRecord } from '../../shared/api/jsonValidation'
 
 const taskViewLayoutModes: readonly TaskViewLayoutMode[] = [
   'table',
@@ -1388,12 +1389,3 @@ function isTaskViewSurface(value: unknown): value is TaskViewSurface {
   return isEnumValue(value, TASK_VIEW_SURFACES)
 }
 
-/**
- * Narrows an unknown object to a string-keyed record.
- *
- * @param value - Unknown candidate.
- * @returns Whether the candidate is a non-array object.
- */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}

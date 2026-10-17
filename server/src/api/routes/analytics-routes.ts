@@ -562,7 +562,10 @@ function stableAnalyticsApiStringify(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(stableAnalyticsApiStringify).join(',')}]`
   }
-  return `{${Object.entries(value as Record<string, unknown>)
+  if (!isRecord(value)) {
+    return JSON.stringify(value) ?? 'undefined'
+  }
+  return `{${Object.entries(value)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, entry]) =>
       `${JSON.stringify(key)}:${stableAnalyticsApiStringify(entry)}`

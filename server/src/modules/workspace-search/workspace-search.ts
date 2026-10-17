@@ -5585,8 +5585,8 @@ function encodeCursor(value: SearchCursor | SavedViewCursor | TaskViewCursor) {
 
 function decodeCursor(value: string) {
   try {
-    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Record<string, unknown>
-    if (parsed.version !== 1) throw new TypeError('Unsupported cursor version.')
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecordValue(parsed) || parsed.version !== 1) throw new TypeError('Unsupported cursor version.')
     return parsed
   } catch (error) {
     throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Cursor is invalid.', { cause: error })

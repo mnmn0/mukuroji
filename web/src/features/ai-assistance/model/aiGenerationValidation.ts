@@ -15,6 +15,7 @@ import type {
 } from '@mukuroji/contracts'
 import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
 import { isSearchFilterTransportWithinGetBudget } from '../../../search/model/searchFilterTransportBudget'
+import { isRecord } from '../../../shared/api/jsonValidation'
 
 const confidenceValues = ['high', 'medium', 'low'] as const
 const sourceTypeValues = [
@@ -935,11 +936,6 @@ function isStringArray(
 /** Validates membership in a fixed string set. */
 function isOneOf(value: unknown, allowed: readonly string[]): boolean {
   return typeof value === 'string' && allowed.includes(value)
-}
-
-/** Narrows an unknown value to a record. */
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /** Validates a string without imposing product-specific length constraints. */

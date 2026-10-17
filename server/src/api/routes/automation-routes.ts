@@ -1981,7 +1981,8 @@ function isAutomationPatchApplied(
   issue: TeamIssueResponseItem,
   patch: Record<string, AutomationValue>,
 ) {
-  const current = issue as unknown as Record<string, unknown>
+  const current: unknown = issue
+  if (!isRecord(current)) return false
   return Object.entries(patch)
     .filter(([field]) => field !== 'typeChangeResolution')
     .every(([field, expected]) => automationValuesEqual(current[field] ?? null, expected))

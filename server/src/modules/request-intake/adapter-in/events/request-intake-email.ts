@@ -4,6 +4,7 @@ import {
   RequestIntakeError,
   type RequestIntakeClient,
 } from '../../request-intake'
+import { isRecord } from '../../../../infrastructure/runtime/value-guards'
 
 /** Signed email adapter invocation の最大 clock skew 秒です。 */
 export const REQUEST_EMAIL_SIGNATURE_TOLERANCE_SECONDS = 300
@@ -74,8 +75,8 @@ export function validateSignedEmailEvent(
 
 function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
-  if (value && typeof value === 'object') {
-    return `{${Object.entries(value as Record<string, unknown>)
+  if (isRecord(value)) {
+    return `{${Object.entries(value)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
       .join(',')}}`

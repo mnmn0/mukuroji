@@ -39,6 +39,7 @@ import {
   analyticsCalendarDateBoundaryToInstant,
   formatAnalyticsCalendarDate,
 } from '../model/timeZone'
+import { readRecord } from '../../shared/api/jsonValidation'
 
 /**
  * Analytics workbench の表示と操作に必要な props です。
@@ -2463,7 +2464,7 @@ function resolveWidgetType(
 }
 
 function readWidgetSize(widget?: AnalyticsWidget) {
-  const size = asRecord(widget).size
+  const size = readRecord(widget).size
   return size === 'small' || size === 'medium' || size === 'large'
     ? size
     : widget?.type === 'metric'
@@ -2472,7 +2473,7 @@ function readWidgetSize(widget?: AnalyticsWidget) {
 }
 
 function readWidgetVisualization(widget?: AnalyticsWidget) {
-  return asRecord(widget).visualization === 'bar' ? 'bar' : 'line'
+  return readRecord(widget).visualization === 'bar' ? 'bar' : 'line'
 }
 
 function formatMetricValue(
@@ -2683,8 +2684,3 @@ function createAnalyticsClientId(prefix: string) {
   return `${prefix}-${suffix}`
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-    ? value as Record<string, unknown>
-    : {}
-}
