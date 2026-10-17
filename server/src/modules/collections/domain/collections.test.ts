@@ -56,3 +56,26 @@ test('rejects stored Collections with more references than the item limit', () =
   // Re-adding is a no-op, so a repeated (teamId, issueId) is corrupt state.
   expect(isStoredCollection({ ...stored, items: [item(1), item(2), item(1)] })).toBe(false)
 })
+
+test('rejects stored references that are not most recently added first', () => {
+  const item = (issueId: string, addedAt: string) => ({ teamId: 't', issueId, addedAt, addedBy: 'reader' })
+  const stored = {
+    collectionId: 'c1',
+    name: 'Launch',
+    createdBy: 'reader',
+    createdAt: '2026-10-16T00:00:00.000Z',
+    updatedAt: '2026-10-16T00:00:03.000Z',
+    revision: 4,
+    createFingerprint: 'f'.repeat(64),
+    items: [
+      item('c', '2026-10-16T00:00:03.000Z'),
+      item('b', '2026-10-16T00:00:02.000Z'),
+      item('a', '2026-10-16T00:00:01.000Z'),
+    ],
+  }
+  expect(isStoredCollection(stored)).toBe(true)
+  // References added within the same millisecond share addedAt; their stored position is their order.
+  expect(isStoredCollection({ ...stored, items: [item('c', '2026-10-16T00:00:03.000Z'), item('b', '2026-10-16T00:00:03.000Z')] })).toBe(true)
+  expect(isStoredCollection({ ...stored, items: [...stored.items].reverse() })).toBe(false)
+  expect(isStoredCollection({ ...stored, items: [item('c', '2026-10-16T00:00:03.000Z'), item('a', '2026-10-16T00:00:01.000Z'), item('b', '2026-10-16T00:00:02.000Z')] })).toBe(false)
+})
