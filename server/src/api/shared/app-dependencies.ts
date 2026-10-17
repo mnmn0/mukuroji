@@ -109,6 +109,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get savedUpdateFeeds() {
     return requireAppDependencies().workItems.savedUpdateFeeds
   },
+  get collections() {
+    return requireAppDependencies().workItems.collections
+  },
   get updateFeedDigest() {
     return requireAppDependencies().workItems.updateFeedDigest
   },

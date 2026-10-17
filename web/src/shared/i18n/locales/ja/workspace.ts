@@ -664,6 +664,7 @@ export const workspaceMessages = {
   'sidebar.nav.inbox': '受信箱',
   'sidebar.nav.requests': 'リクエスト',
   'sidebar.nav.customers': '顧客',
+  'sidebar.nav.collections': 'コレクション',
   'sidebar.nav.documents': 'ドキュメント',
   'sidebar.nav.dashboard': 'ダッシュボード',
   'sidebar.nav.planning': 'プランニング',

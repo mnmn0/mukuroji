@@ -44,6 +44,7 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { DynamoDbCollectionsStore, InMemoryCollectionsStore } from '../../modules/collections'
 import { DynamoDbInboxDigestStore, DynamoDbSavedUpdateFeedsStore, InMemorySavedUpdateFeedsStore, DynamoDbUpdateFeedReadStateStore, InMemoryUpdateFeedReadStateStore, DynamoDbUpdateFeedDigestStore, InMemoryUpdateFeedDigestStore } from '../../modules/update-feed'
 import {
   recordApiAccess,
@@ -559,6 +560,18 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
+    ),
+    collections: new DynamoDbCollectionsStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      [],
+      (workspaceId, fence) => createWorkItemRevisionConditionCheck(
+        loadServerConfig().environment.WORK_ITEMS_TABLE_NAME ?? 'mukuroji-team-issues-local',
+        workspaceId,
+        fence.teamId,
+        fence.issueId,
+        fence.revision,
+      ),
     ),
     updateFeedDigest: new DynamoDbUpdateFeedDigestStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
@@ -1725,6 +1738,7 @@ export function createTestAppDependencies(): AppDependencies {
       planning: new InMemoryPlanningClient(),
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
+      collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
       inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
       focusState: new InMemoryFocusStateClient(),
@@ -1844,6 +1858,7 @@ export function overrideAppDependencies(
       ...(overrides.planning ? { planning: overrides.planning } : {}),
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
+      ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
       ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),
       ...(overrides.requestIntake ? { requestIntake: overrides.requestIntake } : {}),

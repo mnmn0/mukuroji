@@ -46,6 +46,7 @@ import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
+import type { CollectionsPersistence } from '../../modules/collections'
 import type { SavedUpdateFeedsPersistence, UpdateFeedReadStatePersistence, UpdateFeedDigestPersistence } from '../../modules/update-feed'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
@@ -187,6 +188,8 @@ export interface WorkItemDependencies {
   updateFeedReadState: UpdateFeedReadStatePersistence
   /** Provides bounded member-owned saved feed definitions. */
   savedUpdateFeeds: SavedUpdateFeedsPersistence
+  /** Provides Workspace Collections that reference canonical Work Items. */
+  collections: CollectionsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */
   updateFeedDigest: UpdateFeedDigestPersistence
   /** Provides delivery opt-in metadata independently of manual previews. */
