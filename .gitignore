@@ -33,3 +33,4 @@ test-results/
 
 # Generated screenshots
 web-vite-react.png
+playwright-visual-report/

@@ -1,0 +1,13 @@
+{
+  "rules": [
+    { "name": "initial application JavaScript", "pattern": "^assets/main-[\\w-]+\\.js$", "maxGzipKiB": 800 },
+    { "name": "initial application CSS", "pattern": "^assets/main-[\\w-]+\\.css$", "maxGzipKiB": 30 },
+    { "name": "lazy PDF viewer runtime", "pattern": "^assets/pdfRuntime-[\\w-]+\\.js$", "maxGzipKiB": 130 },
+    { "name": "lazy PDF worker", "pattern": "^assets/pdf\\.worker\\.min-[\\w-]+\\.mjs$", "maxGzipKiB": 380 },
+    { "name": "service worker", "pattern": "^sw\\.js$", "maxGzipKiB": 4 },
+    { "name": "offline page script", "pattern": "^offline\\.js$", "maxGzipKiB": 2 },
+    { "name": "offline page style", "pattern": "^offline\\.css$", "maxGzipKiB": 2 },
+    { "name": "render-blocking theme bootstrap", "pattern": "^theme-bootstrap\\.js$", "maxGzipKiB": 1 }
+  ],
+  "totalJavaScriptAndCssGzipKiB": 1350
+}
