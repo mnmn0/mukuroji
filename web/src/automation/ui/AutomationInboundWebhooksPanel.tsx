@@ -5,6 +5,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
+import { buildInboundWebhookCreateInput } from '../model/webhookCreateInput'
 import { reduceAutomationWebhookSecret } from '../model/webhookSecretState'
 
 const webhookStatusLabelKeys: Record<AutomationInboundWebhookEndpoint['status'], MessageKey> = {
@@ -77,9 +78,7 @@ export function AutomationInboundWebhooksPanel({
     const normalizedName = name.trim()
     if (!normalizedName || !onCreate) return
     try {
-      const response = await onCreate(triageTeamId
-        ? { name: normalizedName, purpose: 'triage', triageRouting: { teamId: triageTeamId } }
-        : { name: normalizedName })
+      const response = await onCreate(buildInboundWebhookCreateInput(normalizedName, triageTeamId, teams))
       dispatchSecret({ readOnly: readOnlyRef.current, response, type: 'reveal' })
     } catch {
       return

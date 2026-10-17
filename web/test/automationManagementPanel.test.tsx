@@ -10,6 +10,7 @@ import {
   AutomationInboundWebhooksPanel,
   AutomationWebhookSecretNotice,
 } from '../src/automation/ui/AutomationInboundWebhooksPanel'
+import { buildInboundWebhookCreateInput } from '../src/automation/model/webhookCreateInput'
 import { reduceAutomationWebhookSecret } from '../src/automation/model/webhookSecretState'
 import {
   AutomationRuleEditor,
@@ -828,6 +829,18 @@ describe('AutomationManagementPanel', () => {
     expect(html).toContain('<option disabled="" value="新規チーム-2">Triage: 新規チーム (unsupported Team ID)</option>')
     expect(html).toContain('data-testid="automation-webhook-purpose-triage-hook"')
     expect(html).not.toContain(`data-testid="automation-webhook-purpose-${activeInboundWebhookEndpointFixture.id}"`)
+  })
+
+  test('creates a Triage endpoint only for a Team that is still offered', () => {
+    const teams = [{ id: 'support' }]
+    expect(buildInboundWebhookCreateInput('Status page', 'support', teams)).toEqual({
+      name: 'Status page',
+      purpose: 'triage',
+      triageRouting: { teamId: 'support' },
+    })
+    expect(buildInboundWebhookCreateInput('Status page', '', teams)).toEqual({ name: 'Status page' })
+    // The purpose selector disappears with the Teams, so a stale selection must not route to Triage.
+    expect(buildInboundWebhookCreateInput('Status page', 'support', [])).toEqual({ name: 'Status page' })
   })
 
   test('discards a one-time Webhook secret when access becomes read-only', () => {

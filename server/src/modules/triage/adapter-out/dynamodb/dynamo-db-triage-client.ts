@@ -1563,7 +1563,8 @@ export class DynamoDbTriageClient implements TriageClient {
     const existing = await this.readSourceClaim(workspaceId, sourceKind, sourceId)
     if (existing) return this.replaySourceClaim(existing, idempotency.fingerprint, teamId)
     // A delivery accepted earlier keeps its original received time, SLA, and retention start.
-    const now = request.receivedAt ? requireIsoInstant(request.receivedAt, 'Webhook received time') : this.now().toISOString()
+    const processedAt = this.now().toISOString()
+    const now = request.receivedAt ? requireIsoInstant(request.receivedAt, 'Webhook received time') : processedAt
     const baseEntry = request.createEntry(this.id(), now)
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const admission = await this.prepareEntryAdmission(baseEntry)
@@ -1586,7 +1587,8 @@ export class DynamoDbTriageClient implements TriageClient {
           entry,
           operation: request.operation,
           idempotency,
-          expiresAt: addDays(now, 90),
+          // The replay receipt lives from this admission, so an old delivery is not stored expired.
+          expiresAt: addDays(processedAt, 90),
         }),
         ...admissionItems,
       ])
